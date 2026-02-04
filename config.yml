@@ -1,0 +1,13 @@
+models:
+  high:
+    model: qwen3-max
+    baseurl: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+    apikey: sk-9c8a420de7374c329acba2fc7f60999e
+  middle:
+    model: deepseek-chat
+    baseurl: https://api.deepseek.com/chat/completions
+    apikey: sk-ca71ed0e3c214bb199212bf96b9d76ff
+  default:
+    model: glm-4.7
+    baseurl: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    apikey: 1aab7f45428f402f8708eec9b350edf2.PRti8esY1R9c1gQa
