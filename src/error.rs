@@ -73,6 +73,10 @@ pub enum AgentError {
     InitializationFailed(String),
     /// 执行被中断
     Interrupted,
+    /// 没有响应
+    NoResponse,
+    /// Token数量超出限制
+    TokenLimitExceeded,
 }
 
 /// 配置错误
@@ -153,6 +157,8 @@ impl fmt::Display for AgentError {
             AgentError::NoToolsAvailable => write!(f, "No tools available"),
             AgentError::InitializationFailed(msg) => write!(f, "Initialization failed: {}", msg),
             AgentError::Interrupted => write!(f, "Execution interrupted"),
+            AgentError::NoResponse => write!(f, "No response from LLM"),
+            AgentError::TokenLimitExceeded => write!(f, "Token limit from LLM"),
         }
     }
 }
@@ -198,7 +204,10 @@ impl From<reqwest::Error> for ReactError {
         if err.is_timeout() {
             ReactError::Llm(LlmError::NetworkError("Request timeout".to_string()))
         } else if err.is_connect() {
-            ReactError::Llm(LlmError::NetworkError(format!("Connection failed: {}", err)))
+            ReactError::Llm(LlmError::NetworkError(format!(
+                "Connection failed: {}",
+                err
+            )))
         } else {
             ReactError::Llm(LlmError::NetworkError(err.to_string()))
         }

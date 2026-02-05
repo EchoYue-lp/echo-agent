@@ -1,7 +1,7 @@
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Message {
     /// 角色：user, assistant, system, tool
     pub role: String,
@@ -21,6 +21,58 @@ pub struct Message {
     /// 工具调用ID（tool 角色使用，关联到对应的 tool_call）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+}
+
+impl Message {
+    pub fn system(content: String) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: Some(content),
+            tool_calls: None,
+            name: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn user(content: String) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: Some(content),
+            tool_calls: None,
+            name: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant(content: String) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: Some(content),
+            tool_calls: None,
+            name: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant_with_tools(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(tool_calls),
+            name: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool_result(tool_call_id: String, name: String, content: String) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: Some(content),
+            tool_calls: None,
+            name: Some(name),
+            tool_call_id: Some(tool_call_id),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -112,7 +164,7 @@ pub struct ChatCompletionResponse {
 pub struct Choice {
     pub message: Message,
     #[serde(default)]
-    finish_reason: Option<String>,
+    pub finish_reason: Option<String>,
     #[serde(default)]
     index: Option<u32>,
 }

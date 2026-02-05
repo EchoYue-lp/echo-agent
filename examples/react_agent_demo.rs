@@ -1,38 +1,43 @@
+use demo_react::agent::Agent;
+use demo_react::agent::react_agent::{ReactAgent, ReactConfig};
+use demo_react::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+
 /// ReAct 智能体完整演示
 ///
 /// 展示如何使用 ReAct 智能体完成任务
-use echo_ai::react::{ReactAgent, ReactAgentConfig};
-use echo_ai::tools::files::ReadFileTool;
-use echo_ai::tools::shell::ShellTool;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧠 ReAct 智能体完整演示\n");
 
-    // 1. 创建配置
-    let config = ReactAgentConfig {
-        max_iterations: 100,
-        model: "high".to_string(),
-        system_prompt: "You are a helpful coding assistant. \
-                        You can read files and execute safe shell commands."
-            .to_string(),
-        verbose: false, // 启用详细日志
-    };
+    let system_prompt = r#"你是一个使用 ReAct 框架的智能助手。
 
-    // 2. 创建智能体
+**核心规则：在调用任何操作工具之前，必须先调用 think 工具！**
+
+可用工具：
+- think: 记录你的推理过程（必须首先调用）
+- add/subtract/multiply/divide: 执行计算
+
+标准流程：
+1. 调用 think(reasoning="我的分析...") 记录思考
+2. 调用实际的操作工具
+3. 得到结果后，再次调用 think 分析结果
+4. 重复直到问题解决
+
+"#;
+
+    let config = ReactConfig::new("math_agent", "middle", system_prompt).verbose(true);
+
     let mut agent = ReactAgent::new(config);
 
-    // 3. 注册工具
-    agent.register_tool(Box::new(ReadFileTool));
-    agent.register_tool(Box::new(ShellTool::new()));
+    agent.add_tool(Box::new(AddTool));
+    agent.add_tool(Box::new(DivideTool));
+    agent.add_tool(Box::new(MultiplyTool));
+    agent.add_tool(Box::new(SubtractTool));
 
-    println!("✅ ReAct 智能体已创建");
-    println!("✅ 可用工具: {:?}\n", agent.available_tools());
-
-    // 4. 执行任务（示例）
-    // 注意：需要真实的 LLM API 才能运行
-
-    let result = agent.run("读取 README.md 文件并总结主要内容").await?;
+    let result = agent
+        .execute("计算 12 除以 3 + 2 +2 * 8 + 2 + 6 乘以 4 等于多少？")
+        .await?;
     println!("\n📋 最终结果:\n{}", result);
 
     Ok(())

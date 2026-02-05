@@ -1,8 +1,9 @@
 use crate::agent::Agent;
-use crate::error::ParseError::InvalidAction;
 use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::llm::chat;
-use crate::llm::types::{Message, ToolDefinition};
+use crate::llm::types::Message;
+use crate::tools::answer::FinalAnswerTool;
+use crate::tools::reasoning::ThinkTool;
 use crate::tools::{Tool, ToolManager, ToolParameters};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -79,11 +80,14 @@ impl ReactAgent {
         };
         let mut messages = Vec::new();
         messages.push(system_message);
+        let mut tool_manager = ToolManager::new();
+        tool_manager.register(Box::new(FinalAnswerTool));
+        tool_manager.register(Box::new(ThinkTool));
 
         Self {
             config,
             messages,
-            tool_manager: ToolManager::new(),
+            tool_manager,
             subagents: HashMap::new(),
             steps: Vec::new(),
         }
@@ -109,165 +113,103 @@ impl ReactAgent {
             }))
         }
     }
-    pub(crate) async fn think(&mut self) -> Result<String> {
-        let prompt = format!(
-            "{}
 
-        请你一步一步的认真仔细思考，然后决定如何进行下一步工作行动。
-        你可以：
-        1、认真的思考问题（请以 'Thought:' 开头）
-        2、使用工具（格式：'Action: tool_name {{\"param\": \"value\"}}'）
-        3、给出最后的运算结果(请以 'Final Answer:' 开头)
-",
-            self.messages.last().unwrap().content.clone().unwrap(),
-        );
+    pub(crate) async fn think(&mut self) -> Result<Vec<StepType>> {
+        let mut res = Vec::new();
 
-        if self.config.verbose {
-            println!("======== Think LLM prompt: {} ========", prompt);
-        }
-
-        self.messages.push(Message {
-            role: "user".to_string(),
-            content: Some(prompt),
-            tool_calls: None,
-            name: None,
-            tool_call_id: None,
-        });
-
-        let tools = self
-            .tool_manager
-            .list_tools()
-            .iter()
-            .map(|tool_name| {
-                let tool = self.tool_manager.get_tool(tool_name).unwrap();
-                ToolDefinition::from_tool(tool)
-            })
-            .collect();
+        // 第一步，构建 tools 定义
+        let tools = self.tool_manager.to_openai_tools();
 
         let response = chat(
             self.config.model_name.as_str(),
-            self.messages[..self.messages.len()].to_vec(),
+            self.messages.clone(),
             Some(0.7),
             Some(8192u32),
             Some(false),
-            Some(tools),
+            Some(tools), // 开启 Native Tool Calling
             None,
         )
         .await;
 
-        let content = response.unwrap().content;
-        let content = content.unwrap();
+        let message = response?.choices[0].message.clone();
 
-        if self.config.verbose {
-            println!("=======> Think LLM 响应: {} <=======", content);
-        }
+        if let Some(tool_calls) = &message.tool_calls {
+            self.messages.push(message.clone());
+            for call in tool_calls {
+                // 将 Assistant 消息存入历史（必须存，否则 API 会报错断连）
+                // self.messages.push(Message::from_assistant_tool(msg));
 
-        self.messages.push(Message {
-            role: "assistant".to_string(),
-            content: Some(content.clone()),
-            tool_calls: None,
-            name: None,
-            tool_call_id: None,
-        });
-
-        Ok(content)
-    }
-
-    pub(crate) fn parse_response(&self, response: &str, step_num: usize) -> Result<ReactStep> {
-        let response = response.trim();
-        if response.starts_with("Thought:") || response.starts_with("思考:") {
-            let thought = response
-                .strip_prefix("Thought:")
-                .or_else(|| response.strip_prefix("思考:"))
-                .unwrap_or(response)
-                .trim()
-                .to_string();
-            Ok(ReactStep {
-                step_type: StepType::Thought(thought),
-                step_number: step_num,
-            })
-        } else if response.starts_with("Action:") || response.starts_with("执行:") {
-            // 解析 Action: tool_name {"param": "value"}
-            let action_str = response
-                .strip_prefix("Action:")
-                .or_else(|| response.strip_prefix("执行:"))
-                .unwrap_or(response)
-                .trim();
-            // 分割字符串，最多返回指定的元素
-            let parts: Vec<&str> = action_str.splitn(2, ' ').collect();
-
-            if parts.len() == 2 {
-                let tool = parts[0].to_string();
-                let input: Value = serde_json::from_str(parts[1])
-                    .unwrap_or_else(|_| Value::String(parts[1].to_string()));
-                Ok(ReactStep {
-                    step_type: StepType::Action { tool, input },
-                    step_number: step_num,
-                })
-            } else {
-                return Err(ReactError::Parse(InvalidAction(
-                    "Invalid action".to_string(),
-                )));
+                res.push(StepType::Call {
+                    tool_call_id: call.id.clone(),
+                    function_name: call.function.name.clone(),
+                    arguments: serde_json::from_str(&call.function.arguments)?,
+                });
             }
-        } else if response.starts_with("Final Answer:") || response.starts_with("最终结果:") {
-            let final_answer = response
-                .strip_prefix("Final Answer:")
-                .or_else(|| response.strip_prefix("最终结果:"))
-                .unwrap_or(response)
-                .trim()
-                .to_string();
-            Ok(ReactStep {
-                step_type: StepType::FinalAnswer(final_answer),
-                step_number: step_num,
-            })
-        } else {
-            Ok(ReactStep {
-                step_type: StepType::Thought("".to_string()),
-                step_number: step_num,
-            })
+        } else if let Some(content) = &message.content {
+            // 没有工具调用，是纯文本响应（思考或最终答案）
+            self.messages.push(message.clone());
+            res.push(StepType::Thought(content.to_string()));
         }
+        Ok(res)
     }
 
-    /// 获取所有工具的定义（用于 LLM）
-    pub fn get_tool_definitions(&self) -> Result<Vec<Value>> {
-        let result = self
-            .tool_manager
-            .list_tools()
-            .iter()
-            .map(|tool| {
-                let tool = self.tool_manager.get_tool(tool).unwrap();
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name(),
-                        "description": tool.description(),
-                        "parameters": tool.parameters()
+    pub async fn execute_loop(&mut self) {
+        loop {
+            let steps = self.think().await.unwrap();
+
+            for step in steps {
+                match step {
+                    StepType::Call {
+                        tool_call_id,
+                        function_name,
+                        arguments,
+                    } => {
+                        println!("Calling tool: {}", function_name);
+                        let result = self.execute_tool(&function_name, &arguments).unwrap();
+                        let tool_msg = Message {
+                            role: "tool".to_string(),
+                            content: Option::from(result),
+                            tool_call_id: Some(tool_call_id),
+                            name: Option::from(function_name.clone()),
+                            ..Default::default()
+                        };
+                        self.messages.push(tool_msg);
                     }
-                })
-            })
-            .collect();
-        Ok(result)
+                    StepType::Thought(content) => {
+                        println!("Thought: {}", content);
+                        continue;
+                    }
+                    StepType::FinalAnswer(content) => {
+                        println!("Final Answer: {}", content);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
-/// ReAct (Reasoning + Acting) 是一种将推理和行动相结合的AI Agent架构模式。
-/// ReAct通过以下三个核心阶段形成闭环：
-///
-///  观察 (Observe): 感知当前环境状态和问题
-///  思考 (Think): 基于观察进行推理和策略制定
-///  行动 (Act): 执行具体的工具调用和决策
+// 现在的 StepType 更贴合 OpenAI/Llama3 的 API 结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StepType {
     // 对应 API 返回的 content 字段
     Thought(String),
-    /// 行动（调用工具）
-    Action {
-        tool: String,
-        input: Value,
+
+    // 对应 API 返回的 tool_calls 字段
+    // 注意：一次响应可能包含多个工具调用（并行调用），所以这里可能是一个列表
+    Call {
+        tool_call_id: String, // 重要：后续回传 observation 需要这个 ID
+        function_name: String,
+        arguments: Value,
     },
-    /// 观察（工具执行结果）
-    Observation(String),
-    /// 最终答案
+
+    // 对应 role: tool 的消息
+    Observation {
+        tool_call_id: String, // 必须匹配 Call 中的 ID
+        output: String,
+    },
+
     FinalAnswer(String),
 }
 
@@ -335,50 +277,61 @@ impl Agent for ReactAgent {
                 println!("--- 迭代 {} ---", iteration + 1);
             }
 
-            // 1. 思考（Reasoning）：调用 LLM 获取下一步行动
-            let response: String = self.think().await?;
+            // 调用 LLM 思考
+            let steps = self.think().await?;
 
-            if self.config.verbose {
-                println!("---------------->: {}", response);
+            // 如果没有返回任何步骤，说明LLM没有响应
+            if steps.is_empty() {
+                return Err(ReactError::from(AgentError::NoResponse));
             }
 
-            // 2. 解析响应，判断是思考、行动还是最终答案
-            let step: ReactStep = self.parse_response(&response, iteration)?;
+            // 处理每个步骤
+            let mut has_tool_call = false;
 
-            // 3.执行步骤
-            match &step.step_type {
-                StepType::Thought(thought) => {
-                    // 思考,LLM已经执行了 思考，因此这一步不需要再进行其他操作，仅作记录
-                    if self.config.verbose {
-                        println!("🤔 思考: {}", thought);
-                    }
-                }
-                StepType::Action { tool, input } => {
-                    if self.config.verbose {
-                        println!("🚀 执行工具: {}", tool);
-                        println!("🛠️ 工具输入: {}", input);
-                    }
+            for step in steps {
+                match step {
+                    StepType::Call {
+                        tool_call_id,
+                        function_name,
+                        arguments,
+                    } => {
+                        has_tool_call = true;
+                        if self.config.verbose {
+                            println!("🚀 调用工具: {}", function_name);
+                            println!("📥 参数: {}", arguments);
+                        }
 
-                    let tool_result = self.execute_tool(tool, input);
+                        let result = self.execute_tool(&function_name, &arguments)?;
 
-                    self.messages.push(Message {
-                        role: "assistant".to_string(),
-                        content: Option::from(format!("Observation: {:?}", tool_result)),
-                        tool_calls: None,
-                        name: Some(tool.clone()),
-                        tool_call_id: None,
-                    });
-                }
-                StepType::Observation(result) => {
-                    if self.config.verbose {
-                        println!("🤖 工具执行结果: {}", result);
+                        if self.config.verbose {
+                            println!("📤 结果: {}", result);
+                        }
+
+                        if function_name == "final_answer" {
+                            return Ok(result);
+                        }
+
+                        self.messages.push(Message {
+                            role: "tool".to_string(),
+                            content: Some(result),
+                            tool_calls: None,
+                            name: Some(function_name),
+                            tool_call_id: Some(tool_call_id),
+                        });
                     }
-                }
-                StepType::FinalAnswer(answer) => {
-                    return Ok(answer.clone());
+                    StepType::Thought(content) => {
+                        if self.config.verbose {
+                            println!("🤔 思考: {}", content);
+                        }
+
+                        // 如果没有工具调用且有内容，可能是最终答案
+                        if !has_tool_call && !content.is_empty() {
+                            return Ok(content);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            self.steps.push(step);
         }
 
         Err(ReactError::from(AgentError::MaxIterationsExceeded(

@@ -4,7 +4,7 @@ pub mod types;
 use crate::config::{Config, Model};
 use crate::error::{LlmError, Result};
 use crate::llm::client::post;
-use crate::llm::types::{ChatCompletionRequest, Message, ToolDefinition};
+use crate::llm::types::{ChatCompletionRequest, ChatCompletionResponse, Message, ToolDefinition};
 use reqwest::header::HeaderMap;
 use std::sync::OnceLock;
 
@@ -42,7 +42,7 @@ pub async fn chat(
     stream: Option<bool>,
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<String>,
-) -> Result<Message> {
+) -> Result<ChatCompletionResponse> {
     let model = get_model(model_name);
     let request_body = ChatCompletionRequest {
         model: model.model.clone(),
@@ -55,16 +55,5 @@ pub async fn chat(
     };
 
     let header_map = assemble_req_header(model_name);
-    let response = post(&request_body, header_map, model.baseurl.as_str()).await?;
-    
-    
-
-
-    // 返回第一个选择的消息
-    response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| choice.message)
-        .ok_or_else(|| LlmError::EmptyResponse.into())
+    post(&request_body, header_map, model.baseurl.as_str()).await
 }

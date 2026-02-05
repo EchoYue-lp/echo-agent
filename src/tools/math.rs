@@ -34,28 +34,19 @@ impl Tool for AddTool {
 
         println!("--------------------------> add called <--------------------------");
 
-        let a = parameters
+        let a_val = parameters
             .get("a")
-            .and_then(|a| a.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b = parameters
+        let b_val = parameters
             .get("b")
-            .and_then(|b| b.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        let a_val = a.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "a".to_string(),
-            message: format!("'{}' 不是有效的数字", a),
-        })?;
-        let b_val = b.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "b".to_string(),
-            message: format!("'{}' 不是有效的数字", b),
-        })?;
 
         Ok(ToolResult::success(format!(
             "{} + {} = {}",
-            a,
-            b,
+            a_val,
+            b_val,
             a_val + b_val
         )))
     }
@@ -92,28 +83,19 @@ impl Tool for SubtractTool {
     fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
         println!("--------------------------> subtract called <--------------------------");
 
-        let a = parameters
+        let a_val = parameters
             .get("a")
-            .and_then(|a| a.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b = parameters
+        let b_val = parameters
             .get("b")
-            .and_then(|b| b.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        let a_val = a.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "a".to_string(),
-            message: format!("'{}' 不是有效的数字", a),
-        })?;
-        let b_val = b.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "b".to_string(),
-            message: format!("'{}' 不是有效的数字", b),
-        })?;
 
         Ok(ToolResult::success(format!(
             "{} - {} = {}",
-            a,
-            b,
+            a_val,
+            b_val,
             a_val - b_val
         )))
     }
@@ -148,29 +130,21 @@ impl Tool for MultiplyTool {
     }
 
     fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        println!("--------------------------> multiply called <--------------------------");
-        let a = parameters
+        println!("--------------------------> multiply called parameters {:?} <--------------------------",parameters);
+        
+        let a_val = parameters
             .get("a")
-            .and_then(|a| a.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b = parameters
+        let b_val = parameters
             .get("b")
-            .and_then(|b| b.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        let a_val = a.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "a".to_string(),
-            message: format!("'{}' 不是有效的数字", a),
-        })?;
-        let b_val = b.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "b".to_string(),
-            message: format!("'{}' 不是有效的数字", b),
-        })?;
 
         Ok(ToolResult::success(format!(
             "{} * {} = {}",
-            a,
-            b,
+            a_val,
+            b_val,
             a_val * b_val
         )))
     }
@@ -206,23 +180,15 @@ impl Tool for DivideTool {
 
     fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
         println!("--------------------------> divide called <--------------------------");
-        let a = parameters
+        
+        let a_val = parameters
             .get("a")
-            .and_then(|a| a.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b = parameters
+        let b_val = parameters
             .get("b")
-            .and_then(|b| b.as_str())
+            .and_then(|v| v.as_f64())
             .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        let a_val = a.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "a".to_string(),
-            message: format!("'{}' 不是有效的数字", a),
-        })?;
-        let b_val = b.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "b".to_string(),
-            message: format!("'{}' 不是有效的数字", b),
-        })?;
 
         if b_val == 0.0 {
             return Err(ToolError::ExecutionFailed {
@@ -234,8 +200,8 @@ impl Tool for DivideTool {
 
         Ok(ToolResult::success(format!(
             "{} / {} = {}",
-            a,
-            b,
+            a_val,
+            b_val,
             a_val / b_val
         )))
     }

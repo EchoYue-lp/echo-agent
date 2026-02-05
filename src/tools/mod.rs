@@ -1,9 +1,12 @@
 pub mod math;
+pub(crate) mod reasoning;
+pub(crate) mod answer;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use serde_json::Value;
 
 /// 工具执行结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +57,15 @@ pub trait Tool: Send + Sync {
 
 pub struct ToolManager {
     tools: HashMap<String, Box<dyn Tool>>,
+}
+
+impl ToolManager {
+    pub(crate) fn to_openai_tools(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .map(|tool| ToolDefinition::from_tool(&**tool))
+            .collect()
+    }
 }
 
 impl ToolManager {
