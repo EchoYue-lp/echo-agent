@@ -1,6 +1,8 @@
 pub mod math;
 pub(crate) mod reasoning;
 pub(crate) mod answer;
+mod task;
+pub(crate) mod task_management;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;

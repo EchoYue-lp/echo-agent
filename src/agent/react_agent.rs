@@ -2,14 +2,17 @@ use crate::agent::Agent;
 use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::llm::chat;
 use crate::llm::types::Message;
+use crate::tasks::TaskManager;
 use crate::tools::answer::FinalAnswerTool;
 use crate::tools::reasoning::ThinkTool;
+use crate::tools::task_management::{CreateTaskTool, ListTasksTool, PlanTool, UpdateTaskTool};
 use crate::tools::{Tool, ToolManager, ToolParameters};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::option::Option;
+use std::sync::{Arc, RwLock};
 
 pub struct ReactConfig {
     /// 模型名称
@@ -67,6 +70,7 @@ pub struct ReactAgent {
     tool_manager: ToolManager,
     subagents: HashMap<String, Box<dyn Agent>>,
     steps: Vec<ReactStep>,
+    task_manager: Arc<RwLock<TaskManager>>,
 }
 
 impl ReactAgent {
@@ -84,12 +88,19 @@ impl ReactAgent {
         tool_manager.register(Box::new(FinalAnswerTool));
         tool_manager.register(Box::new(ThinkTool));
 
+        let task_manager = Arc::new(RwLock::new(TaskManager::default()));
+        tool_manager.register(Box::new(PlanTool));
+        tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
+        tool_manager.register(Box::new(ListTasksTool::new(task_manager.clone())));
+        tool_manager.register(Box::new(UpdateTaskTool::new(task_manager.clone())));
+
         Self {
             config,
             messages,
             tool_manager,
             subagents: HashMap::new(),
             steps: Vec::new(),
+            task_manager,
         }
     }
 
@@ -151,6 +162,100 @@ impl ReactAgent {
             res.push(StepType::Thought(content.to_string()));
         }
         Ok(res)
+    }
+
+    pub async fn execute_with_planning(&mut self, task: &str) -> Result<String> {
+        if self.config.verbose {
+            println!("\n🎯 启动任务规划模式");
+        }
+
+        // 第一阶段：让 Agent 制定计划
+        let planning_prompt = format!(
+            "{}\n\n请先使用 plan 工具分析问题，然后用 create_task 创建子任务列表。",
+            task
+        );
+
+        self.messages.push(Message::user(planning_prompt));
+
+        // 执行直到创建完任务
+        for _ in 0..3 {
+            // 最多3轮规划
+            let steps = self.think().await?;
+            for step in steps {
+                if let StepType::Call {
+                    tool_call_id,
+                    function_name,
+                    arguments,
+                } = step
+                {
+                    let result = self.execute_tool(&function_name, &arguments)?;
+                    self.messages
+                        .push(Message::tool_result(tool_call_id, function_name, result));
+                }
+            }
+
+            // 检查是否已创建任务
+            let manager = self.task_manager.read().unwrap();
+            if !manager.get_all_tasks().is_empty() {
+                break;
+            }
+        }
+
+        // 第二阶段：执行任务
+        loop {
+            let next_task = {
+                let manager = self.task_manager.read().unwrap();
+
+                // 检查是否全部完成
+                if manager.is_all_completed() {
+                    break;
+                }
+
+                manager.get_next_task().cloned()
+            };
+
+            if let Some(task) = next_task {
+                if self.config.verbose {
+                    println!("\n🔄 执行任务: [{}] {}", task.id, task.description);
+                }
+
+                // 提示 Agent 执行该任务
+                self.messages.push(Message::user(format!(
+                    "请执行任务 [{}]: {}。完成后使用 update_task 标记完成。",
+                    task.id, task.description
+                )));
+
+                // 执行任务
+                let steps = self.think().await?;
+                for step in steps {
+                    if let StepType::Call {
+                        tool_call_id,
+                        function_name,
+                        arguments,
+                    } = step
+                    {
+                        let result = self.execute_tool(&function_name, &arguments)?;
+                        self.messages.push(Message::tool_result(
+                            tool_call_id,
+                            function_name.clone(),
+                            result,
+                        ));
+                    }
+                }
+            } else {
+                // 没有可执行的任务，可能有依赖未满足
+                self.messages.push(Message::user(
+                    "没有可执行的任务。请检查任务状态并继续。".to_string(),
+                ));
+                self.think().await?;
+            }
+        }
+
+        // 第三阶段：总结结果
+        self.messages.push(Message::user(
+            "所有任务已完成，请使用 final_answer 给出最终答案。".to_string(),
+        ));
+        self.execute(task).await
     }
 
     pub async fn execute_loop(&mut self) {
