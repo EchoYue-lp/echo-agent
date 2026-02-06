@@ -11,3 +11,4 @@ serde_yaml = "0.9.33"
 serde = { version = "1.0.228", features = ["derive"] }
 lazy_static = "1.4.0"
 async-trait = "0.1.89"
+string = "0.3.1"

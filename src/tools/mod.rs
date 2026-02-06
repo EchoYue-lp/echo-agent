@@ -1,14 +1,15 @@
+pub(crate) mod answer;
 pub mod math;
 pub(crate) mod reasoning;
-pub(crate) mod answer;
-mod task;
 pub(crate) mod task_management;
+pub(crate) mod human_in_loop;
+pub mod weather;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// 工具执行结果
 #[derive(Debug, Clone, Serialize, Deserialize)]

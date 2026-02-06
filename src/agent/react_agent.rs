@@ -1,9 +1,11 @@
 use crate::agent::Agent;
 use crate::error::{AgentError, ReactError, Result, ToolError};
+use crate::human_loop::{ApprovalResult, HumanApprovalManager};
 use crate::llm::chat;
 use crate::llm::types::Message;
 use crate::tasks::TaskManager;
 use crate::tools::answer::FinalAnswerTool;
+use crate::tools::human_in_loop::HumanInLoop;
 use crate::tools::reasoning::ThinkTool;
 use crate::tools::task_management::{CreateTaskTool, ListTasksTool, PlanTool, UpdateTaskTool};
 use crate::tools::{Tool, ToolManager, ToolParameters};
@@ -71,6 +73,7 @@ pub struct ReactAgent {
     subagents: HashMap<String, Box<dyn Agent>>,
     steps: Vec<ReactStep>,
     task_manager: Arc<RwLock<TaskManager>>,
+    human_in_loop: Arc<RwLock<HumanApprovalManager>>,
 }
 
 impl ReactAgent {
@@ -87,12 +90,14 @@ impl ReactAgent {
         let mut tool_manager = ToolManager::new();
         tool_manager.register(Box::new(FinalAnswerTool));
         tool_manager.register(Box::new(ThinkTool));
+        tool_manager.register(Box::new(HumanInLoop));
 
         let task_manager = Arc::new(RwLock::new(TaskManager::default()));
         tool_manager.register(Box::new(PlanTool));
         tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
         tool_manager.register(Box::new(ListTasksTool::new(task_manager.clone())));
         tool_manager.register(Box::new(UpdateTaskTool::new(task_manager.clone())));
+        let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::new()));
 
         Self {
             config,
@@ -101,6 +106,7 @@ impl ReactAgent {
             subagents: HashMap::new(),
             steps: Vec::new(),
             task_manager,
+            human_in_loop,
         }
     }
 
@@ -112,6 +118,30 @@ impl ReactAgent {
         } else {
             HashMap::new()
         };
+
+        // 检查是否是需要人工确认的危险工具
+        let needs_approval = {
+            let approval_manager = self.human_in_loop.read().unwrap();
+            approval_manager.needs_approval(tool_name)
+        };
+
+        if needs_approval {
+            println!("\n⚠️  即将执行危险操作: {}", tool_name);
+            println!("   参数: {}", input);
+            println!("   是否批准该工具执行？(y/n): ");
+
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .expect("读取输入失败");
+
+            if input.trim() != "y" && input.trim() != "Y" {
+                // 拒绝 → 直接返回文字结果给 LLM，让它知道被拒绝了
+                return Ok(format!("用户已拒绝执行工具 {}", tool_name));
+            }
+            // 批准 → 继续往下正常执行
+            println!("用户已批准执行工具 {}", tool_name);
+        }
 
         let result = self.tool_manager.execute_tool(tool_name, params)?;
 
@@ -349,6 +379,17 @@ impl Agent for ReactAgent {
         self.tool_manager.register(tool)
     }
 
+    fn add_danger_tool(&mut self, tool: Box<dyn Tool>) {
+        let tool_name = tool.name().to_string();
+        // 工具照常注册，LLM 需要知道它的存在
+        self.tool_manager.register(tool);
+        // 同时标记为危险，执行时会触发 y/n 确认
+        self.human_in_loop
+            .write()
+            .unwrap()
+            .mark_dangerous(tool_name);
+    }
+
     fn list_tools(&self) -> Vec<&str> {
         self.tool_manager.list_tools()
     }
@@ -430,9 +471,10 @@ impl Agent for ReactAgent {
                         }
 
                         // 如果没有工具调用且有内容，可能是最终答案
-                        if !has_tool_call && !content.is_empty() {
-                            return Ok(content);
-                        }
+                        // Todo
+                        // if !has_tool_call && !content.is_empty() {
+                        //     return Ok(content);
+                        // }
                     }
                     _ => {}
                 }

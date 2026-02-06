@@ -1,6 +1,7 @@
 use demo_react::agent::Agent;
 use demo_react::agent::react_agent::{ReactAgent, ReactConfig};
 use demo_react::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+use demo_react::tools::weather::WeatherTool;
 
 /// ReAct 智能体完整演示
 ///
@@ -12,18 +13,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let system_prompt = r#"你是一个使用 ReAct 框架的智能助手。
 
-**核心规则：在调用任何操作工具之前，必须先调用 think 工具！**
-
-可用工具：
-- think: 记录你的推理过程（必须首先调用）
-- add/subtract/multiply/divide: 执行计算
+**核心规则：**
+1. 在调用任何操作工具之前，必须先调用 think 工具
+2. 当你需要向用户提问或确认信息时，必须使用 human_in_loop 工具，绝不要直接输出文字来提问
+3. 最终答案必须通过 final_answer 工具输出
 
 标准流程：
-1. 调用 think(reasoning="我的分析...") 记录思考
-2. 调用实际的操作工具
-3. 得到结果后，再次调用 think 分析结果
-4. 重复直到问题解决
-
+1. 调用 think 分析问题
+2. 如果信息不足 → 调用 human_in_loop 向用户提问
+3. 信息充足 → 调用操作工具
+4. 得到结果后调用 think 分析
+5. 完成后调用 final_answer 输出最终答案
 "#;
 
     let config = ReactConfig::new("math_agent", "middle", system_prompt).verbose(true);
@@ -34,10 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.add_tool(Box::new(DivideTool));
     agent.add_tool(Box::new(MultiplyTool));
     agent.add_tool(Box::new(SubtractTool));
+    agent.add_tool(Box::new(WeatherTool));
 
-    let result = agent
-        .execute("计算 12 除以 3 + 2 +2 * 8 + 2 + 6 乘以 4 等于多少？")
-        .await?;
+    agent.add_danger_tool(Box::new(DivideTool));
+
+    let result = agent.execute("后天天气如何？温度多少度？").await?;
     println!("\n📋 最终结果:\n{}", result);
 
     Ok(())
