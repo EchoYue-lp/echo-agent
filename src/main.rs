@@ -1,6 +1,6 @@
-use demo_react::agent::Agent;
-use demo_react::agent::react_agent::{ReactAgent, ReactConfig};
-use demo_react::tools::math::{AddTool, MultiplyTool, SubtractTool};
+use echo_agent::agent::Agent;
+use echo_agent::agent::react_agent::{ReactAgent, ReactConfig};
+use echo_agent::tools::math::{AddTool, MultiplyTool, SubtractTool};
 
 // examples/planning_agent_demo.rs
 #[tokio::main]

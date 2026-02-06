@@ -1,7 +1,7 @@
-use demo_react::agent::Agent;
-use demo_react::agent::react_agent::{ReactAgent, ReactConfig};
-use demo_react::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
-use demo_react::tools::weather::WeatherTool;
+use echo_agent::agent::Agent;
+use echo_agent::agent::react_agent::{ReactAgent, ReactConfig};
+use echo_agent::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+use echo_agent::tools::weather::WeatherTool;
 
 /// ReAct 智能体完整演示
 ///
