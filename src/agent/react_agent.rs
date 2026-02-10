@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::option::Option;
 use std::sync::Arc;
+use tracing::info;
 
 pub struct ReactConfig {
     /// 模型名称
@@ -124,7 +125,6 @@ impl ReactAgent {
 
         // 第一步，构建 tools 定义
         let tools = self.tool_manager.to_openai_tools();
-        
 
         let response = chat(
             self.client.clone(),
@@ -168,7 +168,7 @@ impl ReactAgent {
                         function_name,
                         arguments,
                     } => {
-                        println!("Calling tool: {}", function_name);
+                        info!("Calling tool: {}", function_name);
                         let result = self.execute_tool(&function_name, &arguments).unwrap();
                         let tool_msg = Message {
                             role: "tool".to_string(),
@@ -180,11 +180,11 @@ impl ReactAgent {
                         self.messages.push(tool_msg);
                     }
                     StepType::Thought(content) => {
-                        println!("Thought: {}", content);
+                        info!("Thought: {}", content);
                         continue;
                     }
                     StepType::FinalAnswer(content) => {
-                        println!("Final Answer: {}", content);
+                        info!("Final Answer: {}", content);
                         break;
                     }
                     _ => {}
@@ -262,10 +262,10 @@ impl Agent for ReactAgent {
 
     async fn execute(&mut self, task: &str) -> Result<String> {
         if self.config.verbose {
-            println!("\n🧠 ReAct Agent 开始执行任务");
-            println!("📋 任务: {}", task);
-            println!("🔧 可用工具: {:?}", self.list_tools());
-            println!("🔄 最大迭代次数: {}\n", self.config.max_iterations);
+            info!("\n🧠 ReAct Agent 开始执行任务");
+            info!("📋 任务: {}", task);
+            info!("🔧 可用工具: {:?}", self.list_tools());
+            info!("🔄 最大迭代次数: {}\n", self.config.max_iterations);
         }
         let user_message = Message {
             role: "user".to_string(),
@@ -278,7 +278,7 @@ impl Agent for ReactAgent {
 
         for iteration in 0..self.config.max_iterations {
             if self.config.verbose {
-                println!("--- 迭代 {} ---", iteration + 1);
+                info!("--- 迭代 {} ---", iteration + 1);
             }
 
             // 调用 LLM 思考
@@ -300,15 +300,11 @@ impl Agent for ReactAgent {
                         arguments,
                     } => {
                         has_tool_call = true;
-                        if self.config.verbose {
-                            println!("🚀 调用工具: {}", function_name);
-                            println!("📥 参数: {}", arguments);
-                        }
 
                         let result = self.execute_tool(&function_name, &arguments)?;
 
                         if self.config.verbose {
-                            println!("📤 结果: {}", result);
+                            info!("🚀 调用工具: {} ,📤 结果: {}", function_name, result);
                         }
 
                         if function_name == "final_answer" {
@@ -325,7 +321,7 @@ impl Agent for ReactAgent {
                     }
                     StepType::Thought(content) => {
                         if self.config.verbose {
-                            println!("🤔 思考: {}", content);
+                            info!("🤔 思考: {}", content);
                         }
 
                         // 如果没有工具调用且有内容，可能是最终答案

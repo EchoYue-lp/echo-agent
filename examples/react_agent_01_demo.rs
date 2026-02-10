@@ -8,6 +8,10 @@ use echo_agent::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
     println!("🧠 ReAct 智能体完整演示\n");
 
     let system_prompt = r#"你是一个使用 ReAct 框架的智能助手。

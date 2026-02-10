@@ -31,9 +31,6 @@ impl Tool for AddTool {
     }
 
     fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-
-        println!("--------------------------> add called <--------------------------");
-
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -81,8 +78,6 @@ impl Tool for SubtractTool {
     }
 
     fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        println!("--------------------------> subtract called <--------------------------");
-
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -130,8 +125,6 @@ impl Tool for MultiplyTool {
     }
 
     fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        println!("--------------------------> multiply called parameters {:?} <--------------------------",parameters);
-        
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -179,8 +172,6 @@ impl Tool for DivideTool {
     }
 
     fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        println!("--------------------------> divide called <--------------------------");
-        
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())

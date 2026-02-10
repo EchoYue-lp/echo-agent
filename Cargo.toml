@@ -12,3 +12,4 @@ async-trait = "0.1.89"
 dotenv = "0.15"
 log = "0.4.29"
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
