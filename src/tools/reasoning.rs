@@ -1,9 +1,10 @@
-use serde_json::Value;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
+use serde_json::Value;
 
 pub struct ThinkTool;
 
+#[async_trait::async_trait]
 impl Tool for ThinkTool {
     fn name(&self) -> &str {
         "think"
@@ -27,8 +28,8 @@ impl Tool for ThinkTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let reasoning = parameters
+    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
+        let _reasoning = parameters
             .get("reasoning")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;

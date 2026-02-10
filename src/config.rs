@@ -4,7 +4,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tracing::{debug, info, warn};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelConfig {

@@ -75,6 +75,8 @@ pub enum AgentError {
     Interrupted,
     /// 没有响应
     NoResponse,
+    /// Token数量超出限制
+    TokenLimitExceeded,
 }
 
 /// 配置错误
@@ -157,7 +159,8 @@ impl fmt::Display for AgentError {
             AgentError::NoToolsAvailable => write!(f, "No tools available"),
             AgentError::InitializationFailed(msg) => write!(f, "Initialization failed: {}", msg),
             AgentError::Interrupted => write!(f, "Execution interrupted"),
-            AgentError::NoResponse => write!(f, "No response"),
+            AgentError::NoResponse => write!(f, "No response from LLM"),
+            AgentError::TokenLimitExceeded => write!(f, "Token limit from LLM"),
         }
     }
 }
@@ -184,6 +187,7 @@ impl fmt::Display for ConfigError {
     }
 }
 
+impl std::error::Error for ReactError {}
 impl std::error::Error for LlmError {}
 impl std::error::Error for ToolError {}
 impl std::error::Error for ParseError {}

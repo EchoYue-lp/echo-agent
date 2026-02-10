@@ -1,12 +1,12 @@
+pub(crate) mod answer;
 pub mod math;
 pub(crate) mod reasoning;
-pub(crate) mod answer;
+pub(crate) mod task_management;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde_json::Value;
 
 /// 工具执行结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +41,7 @@ impl ToolResult {
 
 pub type ToolParameters = HashMap<String, serde_json::Value>;
 
+#[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     // 工具名称
     fn name(&self) -> &str;
@@ -52,7 +53,7 @@ pub trait Tool: Send + Sync {
     fn parameters(&self) -> serde_json::Value;
 
     // 执行工具
-    fn execute(&self, parameters: ToolParameters) -> Result<ToolResult>;
+    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult>;
 }
 
 pub struct ToolManager {
@@ -94,10 +95,14 @@ impl ToolManager {
             .collect()
     }
 
-    pub fn execute_tool(&self, tool_name: &str, parameters: ToolParameters) -> Result<ToolResult> {
+    pub async fn execute_tool(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+    ) -> Result<ToolResult> {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
-        tool.execute(parameters)
+        tool.execute(parameters).await
     }
 }

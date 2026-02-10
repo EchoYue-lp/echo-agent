@@ -2,17 +2,23 @@ use crate::agent::Agent;
 use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::llm::chat;
 use crate::llm::types::Message;
+use crate::tasks::{TaskManager, TaskStatus};
 use crate::tools::answer::FinalAnswerTool;
 use crate::tools::reasoning::ThinkTool;
+use crate::tools::task_management::{
+    CreateTaskTool, GetExecutionOrderTool, ListTasksTool, PlanTool, UpdateTaskTool,
+    VisualizeDependenciesTool,
+};
 use crate::tools::{Tool, ToolManager, ToolParameters};
 use async_trait::async_trait;
+use futures::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::option::Option;
-use std::sync::Arc;
-use tracing::info;
+use std::sync::{Arc, RwLock};
+use tracing::{debug, info};
 
 pub struct ReactConfig {
     /// 模型名称
@@ -71,6 +77,7 @@ pub struct ReactAgent {
     subagents: HashMap<String, Box<dyn Agent>>,
     steps: Vec<ReactStep>,
     client: Arc<Client>,
+    task_manager: Arc<RwLock<TaskManager>>,
 }
 
 impl ReactAgent {
@@ -89,6 +96,20 @@ impl ReactAgent {
         tool_manager.register(Box::new(ThinkTool));
         let client = reqwest::Client::new();
 
+        let task_manager = Arc::new(RwLock::new(TaskManager::default()));
+
+        // 注册基础任务管理工具
+        tool_manager.register(Box::new(PlanTool));
+        tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
+        tool_manager.register(Box::new(ListTasksTool::new(task_manager.clone())));
+        tool_manager.register(Box::new(UpdateTaskTool::new(task_manager.clone())));
+
+        // 注册新增的高级任务管理工具
+        tool_manager.register(Box::new(VisualizeDependenciesTool::new(
+            task_manager.clone(),
+        )));
+        tool_manager.register(Box::new(GetExecutionOrderTool::new(task_manager.clone())));
+
         Self {
             config,
             messages,
@@ -96,11 +117,12 @@ impl ReactAgent {
             subagents: HashMap::new(),
             steps: Vec::new(),
             client: Arc::new(client),
+            task_manager,
         }
     }
 
     /// 执行工具
-    fn execute_tool(&self, tool_name: &str, input: &Value) -> Result<String> {
+    async fn execute_tool(&self, tool_name: &str, input: &Value) -> Result<String> {
         // 将 JSON Value 转换为 ToolParameters
         let params: ToolParameters = if let Value::Object(map) = input {
             map.clone().into_iter().map(|(k, v)| (k, v)).collect()
@@ -108,7 +130,7 @@ impl ReactAgent {
             HashMap::new()
         };
 
-        let result = self.tool_manager.execute_tool(tool_name, params)?;
+        let result = self.tool_manager.execute_tool(tool_name, params).await?;
 
         if result.success {
             Ok(result.output)
@@ -138,7 +160,12 @@ impl ReactAgent {
         )
         .await;
 
-        let message = response?.choices[0].message.clone();
+        let message = response?
+            .choices
+            .first()
+            .ok_or(ReactError::Agent(AgentError::NoResponse))?
+            .message
+            .clone();
 
         if let Some(tool_calls) = &message.tool_calls {
             self.messages.push(message.clone());
@@ -154,12 +181,235 @@ impl ReactAgent {
             self.messages.push(message.clone());
             res.push(StepType::Thought(content.to_string()));
         }
+        debug!("think result: {:?}", res);
         Ok(res)
     }
 
-    pub async fn execute_loop(&mut self) {
+    /// 处理一轮思考产生的所有步骤（工具调用并行执行），返回 final_answer 结果（如有）
+    async fn process_steps(&mut self, steps: Vec<StepType>) -> Result<Option<String>> {
+        // 分离工具调用和其他步骤
+        let mut tool_calls = Vec::new();
+
+        for step in steps {
+            match step {
+                StepType::Call {
+                    tool_call_id,
+                    function_name,
+                    arguments,
+                } => {
+                    if self.config.verbose {
+                        info!("🚀 准备调用工具: {} , 参数: {}", function_name, arguments);
+                    }
+                    tool_calls.push((tool_call_id, function_name, arguments));
+                }
+                StepType::Thought(content) => {
+                    if self.config.verbose {
+                        info!("🤔 思考: {}", content);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if tool_calls.is_empty() {
+            return Ok(None);
+        }
+
+        if self.config.verbose && tool_calls.len() > 1 {
+            info!("⚡ 并行执行 {} 个工具调用", tool_calls.len());
+        }
+
+        // 并行执行所有工具调用
+        let futures: Vec<_> = tool_calls
+            .iter()
+            .map(|(_, name, args)| self.execute_tool(name, args))
+            .collect();
+        let results = join_all(futures).await;
+
+        // 收集结果并推入消息
+        for ((tool_call_id, function_name, _), result) in
+            tool_calls.into_iter().zip(results)
+        {
+            let result = result?;
+
+            if self.config.verbose {
+                info!("🚀 工具: {} 📤 结果: {}", function_name, result);
+            }
+
+            if function_name == "final_answer" {
+                return Ok(Some(result));
+            }
+
+            self.messages.push(Message::tool_result(
+                tool_call_id,
+                function_name,
+                result,
+            ));
+        }
+
+        Ok(None)
+    }
+
+    pub async fn execute_with_planning(&mut self, task: &str) -> Result<String> {
+        if self.config.verbose {
+            info!("🎯 启动任务规划模式");
+        }
+
+        // 第一阶段：让 Agent 制定计划
+        let planning_prompt = format!(
+            "{}\n\n\
+            请先使用 plan 工具分析问题，然后用 create_task 创建子任务列表。\n\n\
+            **重要：任务拆分规则**\n\
+            - 将问题拆分为尽可能细粒度的子任务，每个子任务只做一件事\n\
+            - 互相独立的子任务不要设置依赖关系，让它们可以并行执行\n\
+            - 只有当一个任务真正需要另一个任务的结果时，才设置 dependencies\n\
+            - 尽量构建宽而浅的 DAG（有向无环图），而非线性链\n\
+           请一次性创建所有子任务。",
+            task
+        );
+
+        self.messages.push(Message::user(planning_prompt));
+
+        // 执行直到创建完任务
+        for _ in 0..3 {
+            // 最多3轮规划
+            let steps = self.think().await?;
+
+            for step in steps {
+                if let StepType::Call {
+                    tool_call_id,
+                    function_name,
+                    arguments,
+                } = step
+                {
+                    let result = self.execute_tool(&function_name, &arguments).await?;
+                    self.messages.push(Message::tool_result(
+                        tool_call_id,
+                        function_name,
+                        result,
+                    ));
+                }
+            }
+
+            // 检查是否已创建任务
+            let manager = self
+                .task_manager
+                .read()
+                .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))?;
+            if !manager.get_all_tasks().is_empty() {
+                break;
+            }
+        }
+
+        // 第二阶段：并行执行就绪任务
         loop {
-            let steps = self.think().await.unwrap();
+            let ready_tasks = {
+                let manager = self
+                    .task_manager
+                    .read()
+                    .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))?;
+
+                // 检查是否全部完成
+                if manager.is_all_completed() {
+                    break;
+                }
+
+                // 获取所有依赖已满足的就绪任务
+                manager
+                    .get_ready_tasks()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+
+            if ready_tasks.is_empty() {
+                // 没有可执行的任务，可能有依赖未满足或需要等待
+                self.messages.push(Message::user(
+                    "没有可执行的任务。请检查任务状态并继续。".to_string(),
+                ));
+                self.think().await?;
+                continue;
+            }
+
+            // 构建批量执行提示：一次性告知 LLM 所有就绪任务
+            let task_list: Vec<String> = ready_tasks
+                .iter()
+                .map(|t| format!("  - [{}]: {}", t.id, t.description))
+                .collect();
+
+            let batch_ids: Vec<String> = ready_tasks.iter().map(|t| t.id.clone()).collect();
+
+            if self.config.verbose {
+                info!(
+                    "⚡ 并行执行 {} 个就绪任务: {:?}",
+                    ready_tasks.len(),
+                    batch_ids
+                );
+            }
+
+            if ready_tasks.len() == 1 {
+                self.messages.push(Message::user(format!(
+                    "请执行任务 [{}]: {}。完成后使用 update_task 标记完成。",
+                    ready_tasks[0].id, ready_tasks[0].description
+                )));
+            } else {
+                self.messages.push(Message::user(format!(
+                    "以下 {} 个任务的依赖已全部满足，请**同时**执行所有任务。\n\
+                    完成后分别使用 update_task 标记完成：\n{}",
+                    ready_tasks.len(),
+                    task_list.join("\n")
+                )));
+            }
+
+            // 多轮 think 直到本批任务全部完成
+            for _ in 0..self.config.max_iterations {
+                let steps = self.think().await?;
+                if let Some(answer) = self.process_steps(steps).await? {
+                    return Ok(answer);
+                }
+
+                // 检查本批任务是否全部完成
+                let manager = self
+                    .task_manager
+                    .read()
+                    .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))?;
+                let batch_done = batch_ids.iter().all(|id| {
+                    manager.get_all_tasks().iter().any(|t| {
+                        t.id == *id
+                            && matches!(
+                                t.status,
+                                TaskStatus::Completed
+                                    | TaskStatus::Cancelled
+                                    | TaskStatus::Failed(_)
+                            )
+                    })
+                });
+                if batch_done {
+                    break;
+                }
+            }
+        }
+
+        // 第三阶段：总结结果（直接进入 think 循环，不再调用 self.execute 避免重复推入 user message）
+        self.messages.push(Message::user(
+            "所有任务已完成，请使用 final_answer 给出最终答案。".to_string(),
+        ));
+
+        for _ in 0..self.config.max_iterations {
+            let steps = self.think().await?;
+            if let Some(answer) = self.process_steps(steps).await? {
+                return Ok(answer);
+            }
+        }
+
+        Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+            self.config.max_iterations,
+        )))
+    }
+
+    pub async fn execute_loop(&mut self) -> Result<()> {
+        loop {
+            let steps = self.think().await?;
 
             for step in steps {
                 match step {
@@ -169,7 +419,7 @@ impl ReactAgent {
                         arguments,
                     } => {
                         info!("Calling tool: {}", function_name);
-                        let result = self.execute_tool(&function_name, &arguments).unwrap();
+                        let result = self.execute_tool(&function_name, &arguments).await?;
                         let tool_msg = Message {
                             role: "tool".to_string(),
                             content: Option::from(result),
@@ -185,7 +435,7 @@ impl ReactAgent {
                     }
                     StepType::FinalAnswer(content) => {
                         info!("Final Answer: {}", content);
-                        break;
+                        return Ok(());
                     }
                     _ => {}
                 }
@@ -262,10 +512,10 @@ impl Agent for ReactAgent {
 
     async fn execute(&mut self, task: &str) -> Result<String> {
         if self.config.verbose {
-            info!("\n🧠 ReAct Agent 开始执行任务");
+            info!("🧠 ReAct Agent 开始执行任务");
             info!("📋 任务: {}", task);
             info!("🔧 可用工具: {:?}", self.list_tools());
-            info!("🔄 最大迭代次数: {}\n", self.config.max_iterations);
+            info!("🔄 最大迭代次数: {}", self.config.max_iterations);
         }
         let user_message = Message {
             role: "user".to_string(),
@@ -300,8 +550,11 @@ impl Agent for ReactAgent {
                         arguments,
                     } => {
                         has_tool_call = true;
+                        if self.config.verbose {
+                            info!("🚀 调用工具: {} , 参数: {}", function_name, arguments);
+                        }
 
-                        let result = self.execute_tool(&function_name, &arguments)?;
+                        let result = self.execute_tool(&function_name, &arguments).await?;
 
                         if self.config.verbose {
                             info!("🚀 调用工具: {} ,📤 结果: {}", function_name, result);

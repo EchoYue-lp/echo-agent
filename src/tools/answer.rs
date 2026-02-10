@@ -3,6 +3,7 @@ use crate::tools::{Tool, ToolParameters, ToolResult};
 
 pub struct FinalAnswerTool;
 
+#[async_trait::async_trait]
 impl Tool for FinalAnswerTool {
     fn name(&self) -> &str {
         "final_answer"
@@ -25,7 +26,7 @@ impl Tool for FinalAnswerTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
         let answer = parameters
             .get("answer")
             .and_then(|v| v.as_str())

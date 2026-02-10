@@ -4,6 +4,7 @@ use serde_json::Value;
 
 pub struct AddTool;
 
+#[async_trait::async_trait]
 impl Tool for AddTool {
     fn name(&self) -> &str {
         "add"
@@ -30,7 +31,7 @@ impl Tool for AddTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -51,6 +52,7 @@ impl Tool for AddTool {
 
 pub struct SubtractTool;
 
+#[async_trait::async_trait]
 impl Tool for SubtractTool {
     fn name(&self) -> &str {
         "subtract"
@@ -77,7 +79,7 @@ impl Tool for SubtractTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -98,6 +100,7 @@ impl Tool for SubtractTool {
 
 pub struct MultiplyTool;
 
+#[async_trait::async_trait]
 impl Tool for MultiplyTool {
     fn name(&self) -> &str {
         "multiply"
@@ -124,7 +127,7 @@ impl Tool for MultiplyTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -145,6 +148,7 @@ impl Tool for MultiplyTool {
 
 pub struct DivideTool;
 
+#[async_trait::async_trait]
 impl Tool for DivideTool {
     fn name(&self) -> &str {
         "divide"
@@ -171,7 +175,7 @@ impl Tool for DivideTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
