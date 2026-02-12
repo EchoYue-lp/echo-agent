@@ -21,6 +21,9 @@ pub trait Agent: Send + Sync {
 
     /// 添加工具
     fn add_tool(&mut self, tool: Box<dyn Tool>);
+    
+    /// 添加需要人工审批的 tool
+    fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>);
 
     /// 可调用的工具
     fn list_tools(&self) -> Vec<&str>;

@@ -2,6 +2,8 @@ pub(crate) mod answer;
 pub mod math;
 pub(crate) mod reasoning;
 pub(crate) mod task_management;
+pub(crate) mod human_in_loop;
+pub mod weather;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;
