@@ -1,5 +1,5 @@
 use echo_agent::agent::Agent;
-use echo_agent::agent::react_agent::{ReactAgent, ReactConfig};
+use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
 use echo_agent::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 
 #[tokio::main]
@@ -7,7 +7,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
-    let system_prompt = r#"你是一个具有规划能力的智能助手，擅长将复杂问题拆分为可并行执行的子任务。
+    let system_prompt = r#"你是一个具有规划能力的智能助手，本示例用于测试任务规划与任务状态流转。
 
 对于复杂任务，你应该：
 1. 使用 plan 工具分析问题，制定整体策略
@@ -19,23 +19,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 4. 完成后用 update_task 标记
 5. 所有任务完成后，用 final_answer 给出答案
 "#;
-    let model = "qwen3-max";
-    let agent_name = "my_math_agent";
-
-    let config = ReactConfig::new(model, agent_name, system_prompt)
+    let config = AgentConfig::new("qwen3-max", "planning_agent", system_prompt)
+        .enable_tool(true)
+        .enable_task(true)
+        .enable_human_in_loop(false)
+        .enable_subagent(false)
         .verbose(true)
         .max_iterations(30);
 
     let mut agent = ReactAgent::new(config);
 
-    // 添加领域工具
+    // 添加领域工具（保持纯数学，避免 human-in-loop/天气干扰）
     agent.add_tool(Box::new(AddTool));
     agent.add_tool(Box::new(MultiplyTool));
     agent.add_tool(Box::new(SubtractTool));
+    agent.add_tool(Box::new(DivideTool));
 
-    // 复杂任务示例
+    // 任务规划示例
     let result = agent
-        .execute_with_planning("我有1000元，买了10个15元的本子,16个8元的笔,2个98元的玩具，一个500快的衣服。商场决定单品价格满500打八折，总价满800打9折，还剩多少？")
+        .execute_with_planning(
+            "我有 1200 元。买了 8 个 18 元的本子、12 支 9 元的笔、3 个 120 元的玩具、1 件 400 元外套。\
+            先计算原价总和，再对总价打 95 折，最后算剩余金额。",
+        )
         .await;
 
     println!("\n✅ 最终结果:\n{:?}", result);

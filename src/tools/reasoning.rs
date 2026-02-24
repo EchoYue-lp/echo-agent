@@ -1,6 +1,7 @@
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
+use tracing::info;
 
 pub struct ThinkTool;
 
@@ -29,10 +30,12 @@ impl Tool for ThinkTool {
     }
 
     async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let _reasoning = parameters
+        let reasoning = parameters
             .get("reasoning")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;
+
+        info!("Thinking: {}", reasoning);
 
         // 思考工具总是成功，只是记录
         Ok(ToolResult::success(format!("✓ 已记录思考过程")))

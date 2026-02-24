@@ -1,8 +1,9 @@
+pub mod agent;
 pub(crate) mod answer;
+pub(crate) mod human_in_loop;
 pub mod math;
 pub(crate) mod reasoning;
 pub(crate) mod task_management;
-pub(crate) mod human_in_loop;
 pub mod weather;
 
 use crate::error::{Result, ToolError};
@@ -80,6 +81,12 @@ impl ToolManager {
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    pub fn register_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+        for tool in tools {
+            self.tools.insert(tool.name().to_string(), tool);
+        }
     }
 
     pub fn list_tools(&self) -> Vec<&str> {

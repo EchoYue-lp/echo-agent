@@ -47,6 +47,12 @@ AGENT_MODEL_DS_APIKEY=sk-xxxxxxx
 let system_prompt = r#"系统提示词"#;
 let model = "qwen3-max";
 let agent_name = "my_math_agent";
+
+let config = AgentConfig::new(model, agent_name, system_prompt)
+    .enable_tool(true)
+    .enable_task(false)
+    .enable_human_in_loop(false)
+    .enable_subagent(false);
 ```
 
 3、运行
@@ -74,7 +80,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = "qwen3-max";
     let agent_name = "my_math_agent";
 
-    let config = ReactConfig::new(model, agent_name, system_prompt).verbose(true);
+    let config = AgentConfig::new(model, agent_name, system_prompt)
+        .enable_tool(true)
+        .enable_task(false)
+        .enable_human_in_loop(false)
+        .enable_subagent(false)
+        .verbose(true);
 
     let mut agent = ReactAgent::new(config);
 
@@ -91,3 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## 示例分层（建议先从 examples 跑起）
+
+- `cargo run --example demo01`：测试工具调用
+- `cargo run --example demo02`：测试任务规划
+- `cargo run --example demo03`：测试 human-in-loop
+- `cargo run --example demo04`：测试 subagent 编排

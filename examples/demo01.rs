@@ -1,10 +1,8 @@
 use echo_agent::agent::Agent;
-use echo_agent::agent::react_agent::{ReactAgent, ReactConfig};
+use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
 use echo_agent::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 
-/// ReAct 智能体完整演示
-///
-/// 展示如何使用 ReAct 智能体完成任务
+/// demo01: 工具调用能力演示（不包含规划 / human-in-loop / subagent）
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,9 +10,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    println!("🧠 ReAct 智能体完整演示\n");
+    println!("🧪 demo01 - 工具调用演示\n");
 
-    let system_prompt = r#"你是一个使用 ReAct 框架的智能助手。
+    let system_prompt = r#"你是一个计算助手，本示例只用于测试工具调用。
 
 **核心规则：在调用任何操作工具之前，必须先调用 think 工具！**
 
@@ -22,17 +20,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - think: 记录你的推理过程（必须首先调用）
 - add/subtract/multiply/divide: 执行计算
 
-标准流程：
+标准流程（本 demo 仅验证工具链路）：
 1. 调用 think(reasoning="我的分析...") 记录思考
 2. 调用实际的操作工具
 3. 得到结果后，再次调用 think 分析结果
 4. 重复直到问题解决
 
 "#;
-    let model = "qwen3-max";
-    let agent_name = "my_math_agent";
-
-    let config = ReactConfig::new(model, agent_name, system_prompt).verbose(true);
+    let config = AgentConfig::new("qwen3-max", "my_math_agent", system_prompt)
+        .enable_tool(true)
+        .enable_task(false)
+        .enable_human_in_loop(false)
+        .enable_subagent(false)
+        .verbose(true);
 
     let mut agent = ReactAgent::new(config);
 
@@ -41,9 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.add_tool(Box::new(MultiplyTool));
     agent.add_tool(Box::new(SubtractTool));
 
-    let result = agent
-        .execute("计算 12 除以 3 + 2 +2 * 8 + 2 + 6 乘以 4 等于多少？")
-        .await;
+    let result = agent.execute("计算 (12 / 3) + (2 * 8) + (6 * 4) + 2").await;
     println!("\n📋 最终结果:\n{:?}", result);
 
     Ok(())

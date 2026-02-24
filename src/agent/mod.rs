@@ -21,7 +21,10 @@ pub trait Agent: Send + Sync {
 
     /// 添加工具
     fn add_tool(&mut self, tool: Box<dyn Tool>);
-    
+
+    /// 添加多个工具
+    fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>);
+
     /// 添加需要人工审批的 tool
     fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>);
 
@@ -31,8 +34,11 @@ pub trait Agent: Send + Sync {
     /// 添加subagent
     fn register_agent(&mut self, agent: Box<dyn Agent>);
 
+    /// 添加多个subagent
+    fn register_agents(&mut self, agents: Vec<Box<dyn Agent>>);
+
     /// 列出所有的子agent
-    fn list_subagent(&self) -> Vec<&str>;
+    fn list_subagent(&self) -> Vec<String>;
 
     /// 核心执行方法
     async fn execute(&mut self, task: &str) -> Result<String>;
