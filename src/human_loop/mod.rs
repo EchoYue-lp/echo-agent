@@ -14,7 +14,15 @@ impl HumanApprovalManager {
             need_approval_tools: HashSet::new(),
         }
     }
+}
 
+impl Default for HumanApprovalManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HumanApprovalManager {
     pub fn mark_need_approval(&mut self, tool_name: String) {
         self.need_approval_tools.insert(tool_name);
     }

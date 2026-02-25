@@ -3,6 +3,19 @@ use crate::error::ToolError;
 use crate::prelude::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
 
+/// 从参数 map 中提取 a、b 两个 f64 操作数，统一处理缺失参数错误
+fn extract_operands(parameters: &ToolParameters) -> error::Result<(f64, f64)> {
+    let a = parameters
+        .get("a")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
+    let b = parameters
+        .get("b")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
+    Ok((a, b))
+}
+
 pub struct AddTool;
 
 #[async_trait::async_trait]
@@ -19,35 +32,16 @@ impl Tool for AddTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "a": {
-                    "type": "number",
-                    "description": "第一个数"
-                },
-                "b": {
-                    "type": "number",
-                    "description": "第二个数"
-                }
+                "a": { "type": "number", "description": "第一个数" },
+                "b": { "type": "number", "description": "第二个数" }
             },
             "required": ["a", "b"]
         })
     }
 
     async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let a_val = parameters
-            .get("a")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b_val = parameters
-            .get("b")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        Ok(ToolResult::success(format!(
-            "{} + {} = {}",
-            a_val,
-            b_val,
-            a_val + b_val
-        )))
+        let (a, b) = extract_operands(&parameters)?;
+        Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
     }
 }
 
@@ -67,35 +61,16 @@ impl Tool for SubtractTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "a": {
-                    "type": "number",
-                    "description": "被减数"
-                },
-                "b": {
-                    "type": "number",
-                    "description": "减数"
-                }
+                "a": { "type": "number", "description": "被减数" },
+                "b": { "type": "number", "description": "减数" }
             },
             "required": ["a", "b"]
         })
     }
 
     async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let a_val = parameters
-            .get("a")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b_val = parameters
-            .get("b")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        Ok(ToolResult::success(format!(
-            "{} - {} = {}",
-            a_val,
-            b_val,
-            a_val - b_val
-        )))
+        let (a, b) = extract_operands(&parameters)?;
+        Ok(ToolResult::success(format!("{} - {} = {}", a, b, a - b)))
     }
 }
 
@@ -115,35 +90,16 @@ impl Tool for MultiplyTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "a": {
-                    "type": "number",
-                    "description": "第一个乘数"
-                },
-                "b": {
-                    "type": "number",
-                    "description": "第二个乘数"
-                }
+                "a": { "type": "number", "description": "第一个乘数" },
+                "b": { "type": "number", "description": "第二个乘数" }
             },
             "required": ["a", "b"]
         })
     }
 
     async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let a_val = parameters
-            .get("a")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b_val = parameters
-            .get("b")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        Ok(ToolResult::success(format!(
-            "{} * {} = {}",
-            a_val,
-            b_val,
-            a_val * b_val
-        )))
+        let (a, b) = extract_operands(&parameters)?;
+        Ok(ToolResult::success(format!("{} * {} = {}", a, b, a * b)))
     }
 }
 
@@ -163,42 +119,22 @@ impl Tool for DivideTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "a": {
-                    "type": "number",
-                    "description": "被除数"
-                },
-                "b": {
-                    "type": "number",
-                    "description": "除数"
-                }
+                "a": { "type": "number", "description": "被除数" },
+                "b": { "type": "number", "description": "除数" }
             },
             "required": ["a", "b"]
         })
     }
 
     async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let a_val = parameters
-            .get("a")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("a".to_string()))?;
-        let b_val = parameters
-            .get("b")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::MissingParameter("b".to_string()))?;
-
-        if b_val == 0.0 {
+        let (a, b) = extract_operands(&parameters)?;
+        if b == 0.0 {
             return Err(ToolError::ExecutionFailed {
                 tool: "divide".to_string(),
                 message: "除数不能为 0".to_string(),
             }
             .into());
         }
-
-        Ok(ToolResult::success(format!(
-            "{} / {} = {}",
-            a_val,
-            b_val,
-            a_val / b_val
-        )))
+        Ok(ToolResult::success(format!("{} / {} = {}", a, b, a / b)))
     }
 }

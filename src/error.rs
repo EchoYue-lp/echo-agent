@@ -75,7 +75,7 @@ pub enum AgentError {
     Interrupted,
     /// 没有响应
     NoResponse,
-    /// Token数量超出限制
+    /// Token 数量超出限制
     TokenLimitExceeded,
 }
 
@@ -90,11 +90,12 @@ pub enum ConfigError {
     EnvFormatError(String),
     /// 无效的配置项
     UnMatchConfigError(String, String),
-    /// 不存在该Model Config
+    /// 不存在该 Model Config
     NotFindModelError(String),
 }
 
-// 实现 Display trait
+// ── Display impls ────────────────────────────────────────────────────────────
+
 impl fmt::Display for ReactError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -160,7 +161,7 @@ impl fmt::Display for AgentError {
             AgentError::InitializationFailed(msg) => write!(f, "Initialization failed: {}", msg),
             AgentError::Interrupted => write!(f, "Execution interrupted"),
             AgentError::NoResponse => write!(f, "No response from LLM"),
-            AgentError::TokenLimitExceeded => write!(f, "Token limit from LLM"),
+            AgentError::TokenLimitExceeded => write!(f, "Token limit exceeded"),
         }
     }
 }
@@ -169,32 +170,48 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::EnvParseError(env_config) => {
-                write!(f, "环境变量解析失败: {0}", env_config)
+                write!(f, "环境变量解析失败: {}", env_config)
             }
             ConfigError::MissingConfig(model, param) => {
-                write!(f, "模型 {0} 缺少必要配置项: {1}", model, param)
+                write!(f, "模型 {} 缺少必要配置项: {}", model, param)
             }
             ConfigError::EnvFormatError(env_config) => {
-                write!(f, "环境变量格式错误: {0}", env_config)
+                write!(f, "环境变量格式错误: {}", env_config)
             }
             ConfigError::UnMatchConfigError(model, param) => {
-                write!(f, "模型 {0} 不匹配的配置项错误: {1}", model, param)
+                write!(f, "模型 {} 不匹配的配置项错误: {}", model, param)
             }
             ConfigError::NotFindModelError(model) => {
-                write!(f, "未找到该模型配置: {0}", model)
+                write!(f, "未找到该模型配置: {}", model)
             }
         }
     }
 }
 
-impl std::error::Error for ReactError {}
+// ── std::error::Error impls with source() chain ──────────────────────────────
+
+impl std::error::Error for ReactError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReactError::Llm(e) => Some(e),
+            ReactError::Tool(e) => Some(e),
+            ReactError::Parse(e) => Some(e),
+            ReactError::Agent(e) => Some(e),
+            ReactError::Config(e) => Some(e),
+            ReactError::Io(e) => Some(e),
+            ReactError::Other(_) => None,
+        }
+    }
+}
+
 impl std::error::Error for LlmError {}
 impl std::error::Error for ToolError {}
 impl std::error::Error for ParseError {}
 impl std::error::Error for AgentError {}
 impl std::error::Error for ConfigError {}
 
-// From 转换实现
+// ── From 转换实现 ─────────────────────────────────────────────────────────────
+
 impl From<std::io::Error> for ReactError {
     fn from(err: std::io::Error) -> Self {
         ReactError::Io(err)
@@ -252,5 +269,5 @@ impl From<AgentError> for ReactError {
     }
 }
 
-// 便捷的 Result 类型别名
+/// 便捷的 Result 类型别名
 pub type Result<T> = std::result::Result<T, ReactError>;

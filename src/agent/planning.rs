@@ -11,9 +11,11 @@ impl ReactAgent {
 
         // 重置消息历史和任务管理器，确保每次规划都是干净的 session
         self.reset_messages();
-        if let Ok(mut manager) = self.task_manager.write() {
-            *manager = TaskManager::default();
-        }
+        *self
+            .task_manager
+            .write()
+            .map_err(|e| ReactError::Other(format!("task_manager lock poisoned: {}", e)))? =
+            TaskManager::default();
 
         info!(agent = %agent, "🎯 启动任务规划模式");
         info!(agent = %agent, task = %task, "📋 用户任务");
@@ -42,7 +44,7 @@ impl ReactAgent {
             task
         );
 
-        self.messages.push(Message::user(planning_prompt));
+        self.context.push(Message::user(planning_prompt));
 
         // 执行直到所有子任务创建完毕（LLM 停止调用 create_task 时视为规划结束）
         let planning_max_rounds = self.config.max_iterations;
@@ -68,7 +70,7 @@ impl ReactAgent {
                         info!(agent = %agent, "🏁 规划阶段已生成最终答案");
                         return Ok(result);
                     }
-                    self.messages
+                    self.context
                         .push(Message::tool_result(tool_call_id, function_name, result));
                 }
             }
@@ -135,7 +137,7 @@ impl ReactAgent {
 
             if ready_tasks.is_empty() {
                 warn!(agent = %agent, "⏳ 没有可执行的任务，等待依赖完成");
-                self.messages.push(Message::user(
+                self.context.push(Message::user(
                     "没有可执行的任务。请检查任务状态并继续。".to_string(),
                 ));
                 self.think().await?;
@@ -182,12 +184,12 @@ impl ReactAgent {
             };
 
             if ready_tasks.len() == 1 {
-                self.messages.push(Message::user(format!(
+                self.context.push(Message::user(format!(
                     "请执行任务 [{}]: {}{}",
                     ready_tasks[0].id, ready_tasks[0].description, dispatch_hint
                 )));
             } else {
-                self.messages.push(Message::user(format!(
+                self.context.push(Message::user(format!(
                     "以下 {} 个任务的依赖已全部满足，请**同时**执行所有任务：\n{}{}",
                     ready_tasks.len(),
                     task_list.join("\n"),
@@ -208,21 +210,24 @@ impl ReactAgent {
                     return Ok(answer);
                 }
 
-                // 检查本批任务是否全部完成
+                // 检查本批任务是否全部完成（通过 HashMap::get 避免 O(n²)）
                 let manager = self
                     .task_manager
                     .read()
                     .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))?;
                 let batch_done = batch_ids.iter().all(|id| {
-                    manager.get_all_tasks().iter().any(|t| {
-                        t.id == *id
-                            && matches!(
+                    manager
+                        .tasks
+                        .get(id)
+                        .map(|t| {
+                            matches!(
                                 t.status,
                                 TaskStatus::Completed
                                     | TaskStatus::Cancelled
                                     | TaskStatus::Failed(_)
                             )
-                    })
+                        })
+                        .unwrap_or(false)
                 });
                 if batch_done {
                     info!(agent = %agent, tasks = ?batch_ids, "✅ 任务批次执行完成");
@@ -254,7 +259,7 @@ impl ReactAgent {
                 .join("\n")
         };
 
-        self.messages.push(Message::user(format!(
+        self.context.push(Message::user(format!(
             "所有任务已完成。以下是各任务的执行结果：\n{}\n\n\
             请根据以上结果，使用 final_answer 工具给出最终答案。\n\
             **注意**：不要再创建新任务或执行其他操作，直接给出最终答案。",

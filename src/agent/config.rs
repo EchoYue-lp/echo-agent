@@ -36,6 +36,8 @@ pub struct AgentConfig {
     pub(crate) enable_human_in_loop: bool,
     /// 是否启用 subagent 调度能力（agent_tool）
     pub(crate) enable_subagent: bool,
+    /// 上下文 token 上限，超过时触发压缩（`usize::MAX` 表示不限制）
+    pub(crate) token_limit: usize,
 }
 
 impl AgentConfig {
@@ -52,6 +54,7 @@ impl AgentConfig {
             enable_task: false,
             enable_human_in_loop: false,
             enable_subagent: false,
+            token_limit: usize::MAX,
         }
     }
 
@@ -85,7 +88,7 @@ impl AgentConfig {
         self
     }
 
-    pub fn get_allowed_tools(&self) -> &Vec<String> {
+    pub fn get_allowed_tools(&self) -> &[String] {
         &self.allowed_tools
     }
 
@@ -127,6 +130,13 @@ impl AgentConfig {
 
     pub fn system_prompt(mut self, system_prompt: &str) -> Self {
         self.system_prompt = system_prompt.to_string();
+        self
+    }
+
+    /// 设置上下文 token 上限，超出后 `ReactAgent` 在每次 LLM 调用前自动触发压缩。
+    /// 需配合 `ReactAgent::set_compressor` 一起使用，否则仅估算不压缩。
+    pub fn token_limit(mut self, limit: usize) -> Self {
+        self.token_limit = limit;
         self
     }
 }

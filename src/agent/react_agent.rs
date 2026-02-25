@@ -1,5 +1,6 @@
 use crate::agent::Agent;
 pub use crate::agent::config::{AgentConfig, AgentRole};
+use crate::compression::{ContextCompressor, ContextManager};
 use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::human_loop::HumanApprovalManager;
 use crate::llm::chat;
@@ -21,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 // 内置工具名常量，统一定义避免魔法字符串散落各处
@@ -31,9 +33,10 @@ pub(crate) const TOOL_UPDATE_TASK: &str = "update_task";
 
 pub struct ReactAgent {
     pub(crate) config: AgentConfig,
-    pub(crate) messages: Vec<Message>,
+    /// 上下文管理器：维护对话历史，并在 token 超限时自动触发压缩
+    pub(crate) context: ContextManager,
     tool_manager: ToolManager,
-    pub(crate) subagents: Arc<RwLock<HashMap<String, Box<dyn Agent>>>>,
+    pub(crate) subagents: Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>,
     client: Arc<Client>,
     pub(crate) task_manager: Arc<RwLock<TaskManager>>,
     human_in_loop: Arc<RwLock<HumanApprovalManager>>,
@@ -48,7 +51,10 @@ impl ReactAgent {
     }
 
     pub fn new(config: AgentConfig) -> Self {
-        let messages = vec![Message::system(config.system_prompt.clone())];
+        let context = ContextManager::builder(config.token_limit)
+            .with_system(config.system_prompt.clone())
+            .build();
+
         let mut tool_manager = ToolManager::new();
         let client = reqwest::Client::new();
 
@@ -60,7 +66,7 @@ impl ReactAgent {
         }
 
         let task_manager = Arc::new(RwLock::new(TaskManager::default()));
-        let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::new()));
+        let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::default()));
         let subagents = Arc::new(RwLock::new(HashMap::new()));
 
         if config.enable_task {
@@ -79,7 +85,7 @@ impl ReactAgent {
 
         Self {
             config,
-            messages,
+            context,
             tool_manager,
             subagents,
             client: Arc::new(client),
@@ -90,7 +96,9 @@ impl ReactAgent {
 
     /// 重置消息历史，仅保留 system prompt，确保每次执行互不干扰
     pub(crate) fn reset_messages(&mut self) {
-        self.messages = vec![Message::system(self.config.system_prompt.clone())];
+        self.context.clear();
+        self.context
+            .push(Message::system(self.config.system_prompt.clone()));
     }
 
     /// 执行工具，保留工具返回的真实错误信息
@@ -113,9 +121,7 @@ impl ReactAgent {
         if needs_approval {
             warn!(agent = %agent, tool = %tool_name, "⚠️ 工具需要人工审批，是否批准？(y/n)");
             let mut user_input = String::new();
-            std::io::stdin()
-                .read_line(&mut user_input)
-                .expect("读取输入失败");
+            std::io::stdin().read_line(&mut user_input)?;
             if user_input.trim() != "y" && user_input.trim() != "Y" {
                 warn!(agent = %agent, tool = %tool_name, "❌ 用户拒绝执行工具");
                 return Ok(format!("用户已拒绝执行工具 {}", tool_name));
@@ -139,18 +145,24 @@ impl ReactAgent {
         }
     }
 
-    /// 调用 LLM 推理，返回本轮的步骤列表
+    /// 调用 LLM 推理，返回本轮的步骤列表。
+    ///
+    /// 每次调用前先通过 `ContextManager::prepare` 自动压缩超限的历史消息，
+    /// 再将压缩后的消息列表传给 LLM；LLM 的响应追加回 context。
     pub(crate) async fn think(&mut self) -> Result<Vec<StepType>> {
         let agent = self.config.agent_name.clone();
         let mut res = Vec::new();
 
         debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM 思考中...");
 
+        // 自动压缩：超过 token_limit 时触发配置好的压缩器
+        let messages = self.context.prepare(None).await?;
+
         let tools = self.tool_manager.to_openai_tools();
         let response = chat(
             self.client.clone(),
             self.config.model_name.as_str(),
-            self.messages.clone(),
+            messages,
             Some(0.7),
             Some(8192u32),
             Some(false),
@@ -167,7 +179,7 @@ impl ReactAgent {
             .clone();
 
         if let Some(tool_calls) = &message.tool_calls {
-            self.messages.push(message.clone());
+            self.context.push(message.clone());
             let tool_names: Vec<&str> = tool_calls
                 .iter()
                 .map(|c| c.function.name.as_str())
@@ -186,7 +198,7 @@ impl ReactAgent {
                 });
             }
         } else if let Some(content) = &message.content {
-            self.messages.push(message.clone());
+            self.context.push(message.clone());
             debug!(agent = %agent, "🧠 LLM 返回文本响应");
             res.push(StepType::Thought(content.to_string()));
         }
@@ -249,7 +261,7 @@ impl ReactAgent {
                     info!(agent = %agent, "🏁 最终答案已生成");
                     return Ok(Some(result));
                 }
-                self.messages
+                self.context
                     .push(Message::tool_result(tool_call_id, function_name, result));
             }
         } else {
@@ -265,7 +277,7 @@ impl ReactAgent {
                     info!(agent = %agent, "🏁 最终答案已生成");
                     return Ok(Some(result));
                 }
-                self.messages
+                self.context
                     .push(Message::tool_result(tool_call_id, function_name, result));
             }
         }
@@ -287,7 +299,7 @@ impl ReactAgent {
             "执行详情"
         );
 
-        self.messages.push(Message::user(task.to_string()));
+        self.context.push(Message::user(task.to_string()));
 
         for iteration in 0..self.config.max_iterations {
             debug!(agent = %agent, iteration = iteration + 1, "--- 迭代 ---");
@@ -406,8 +418,36 @@ impl ReactAgent {
         self.tool_manager.register(tool);
         self.human_in_loop
             .write()
-            .unwrap()
-            .mark_need_approval(tool_name);
+            .map_err(|e| {
+                warn!("human_in_loop lock poisoned: {}", e);
+            })
+            .map(|mut guard| guard.mark_need_approval(tool_name))
+            .ok();
+    }
+
+    /// 设置上下文压缩器。
+    ///
+    /// 配合 `AgentConfig::token_limit` 使用：token 超限时自动在 `think()` 前压缩消息历史。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::compression::compressor::{SlidingWindowCompressor, SummaryCompressor, DefaultSummaryPrompt};
+    /// use echo_agent::llm::DefaultLlmClient;
+    /// use reqwest::Client;
+    /// use std::sync::Arc;
+    ///
+    /// # fn example(agent: &mut echo_agent::agent::react_agent::ReactAgent) {
+    /// // 纯滑动窗口（无需 LLM）
+    /// agent.set_compressor(SlidingWindowCompressor::new(20));
+    ///
+    /// // 或摘要压缩（需要 LLM 调用）
+    /// let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen3-max"));
+    /// agent.set_compressor(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8));
+    /// # }
+    /// ```
+    pub fn set_compressor(&mut self, compressor: impl ContextCompressor + 'static) {
+        self.context.set_compressor(compressor);
     }
 
     pub fn list_tools(&self) -> Vec<&str> {
@@ -423,10 +463,20 @@ impl ReactAgent {
             );
             return;
         }
-        self.subagents
-            .write()
-            .unwrap()
-            .insert(agent.name().to_string(), agent);
+        let name = agent.name().to_string();
+        match self.subagents.write() {
+            Ok(mut agents) => {
+                agents.insert(name, Arc::new(AsyncMutex::new(agent)));
+            }
+            Err(e) => {
+                warn!(
+                    agent = %self.config.agent_name,
+                    subagent = %name,
+                    "⚠️ subagents lock poisoned，无法注册子 agent: {}",
+                    e
+                );
+            }
+        }
     }
 
     pub fn register_agents(&mut self, agents: Vec<Box<dyn Agent>>) {

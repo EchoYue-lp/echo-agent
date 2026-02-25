@@ -101,10 +101,12 @@ impl Tool for CreateTaskTool {
             })
             .unwrap_or_default();
 
-        let priority = parameters
+        let priority = (parameters
             .get("priority")
             .and_then(|v| v.as_f64())
-            .unwrap_or(5.0) as u8;
+            .unwrap_or(5.0)
+            .clamp(0.0, 10.0) as u8)
+            .min(10);
 
         let now = now_secs();
         let task = Task {
@@ -112,7 +114,7 @@ impl Tool for CreateTaskTool {
             description: description.to_string(),
             status: TaskStatus::Pending,
             dependencies,
-            priority: priority.min(10),
+            priority,
             result: None,
             reasoning: Some(reasoning.to_string()),
             parent_id: None,

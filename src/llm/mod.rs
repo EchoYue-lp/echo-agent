@@ -6,6 +6,7 @@ use crate::error::{ReactError, Result};
 use crate::llm::client::post;
 use crate::llm::config::{Config, ModelConfig};
 use crate::llm::types::{ChatCompletionRequest, ChatCompletionResponse, Message, ToolDefinition};
+use async_trait::async_trait;
 use reqwest::Client;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
@@ -51,4 +52,50 @@ pub async fn chat(
 
     let header_map = assemble_req_header(&model)?;
     post(client, &request_body, header_map, model.baseurl.as_str()).await
+}
+
+/// 为压缩模块等内部组件提供的轻量 LLM 调用接口
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    /// 发起一次简单的无工具对话，返回模型的文本内容
+    async fn chat_simple(&self, messages: Vec<Message>) -> Result<String>;
+}
+
+/// 基于现有 `chat` 函数的默认实现
+pub struct DefaultLlmClient {
+    client: Arc<Client>,
+    model_name: String,
+}
+
+impl DefaultLlmClient {
+    pub fn new(client: Arc<Client>, model_name: impl Into<String>) -> Self {
+        Self {
+            client,
+            model_name: model_name.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for DefaultLlmClient {
+    async fn chat_simple(&self, messages: Vec<Message>) -> Result<String> {
+        let response = chat(
+            self.client.clone(),
+            &self.model_name,
+            messages,
+            Some(0.3),
+            Some(2048),
+            Some(false),
+            None,
+            None,
+        )
+        .await?;
+
+        response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .ok_or_else(|| ReactError::Other("LLM 返回空内容".to_string()))
+    }
 }

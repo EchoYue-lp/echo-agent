@@ -4,14 +4,15 @@ use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 pub struct AgentDispatchTool {
-    subagents: Arc<RwLock<HashMap<String, Box<dyn Agent>>>>,
+    subagents: Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>,
 }
 
 impl AgentDispatchTool {
-    pub fn new(subagents: Arc<RwLock<HashMap<String, Box<dyn Agent>>>>) -> Self {
+    pub fn new(subagents: Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>) -> Self {
         Self { subagents }
     }
 }
@@ -64,22 +65,23 @@ impl Tool for AgentDispatchTool {
                 message: "task is required".to_string(),
             })?;
 
-        // 从 map 中取出 agent，立即释放写锁，避免跨 await 持有锁
-        let mut agent = {
-            let mut agents = self
+        // 只克隆 Arc 指针（不持有读锁跨越 await），并发同名调用会在 mutex 处自动排队
+        let agent_arc = {
+            let agents = self
                 .subagents
-                .write()
+                .read()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "agent_tool".to_string(),
                     message: format!("Lock poisoned: {}", e),
                 })?;
             agents
-                .remove(agent_name)
+                .get(agent_name)
                 .ok_or_else(|| ToolError::ExecutionFailed {
                     tool: "agent_tool".to_string(),
                     message: format!("SubAgent '{}' not found", agent_name),
                 })?
-        }; // 写锁在此释放
+                .clone()
+        };
 
         info!(
             target_agent = %agent_name,
@@ -87,7 +89,8 @@ impl Tool for AgentDispatchTool {
             "📡 分派任务到子 Agent"
         );
 
-        // 在锁外执行 agent（安全地跨 await）
+        // 对同一 agent 的并发调用会在此处排队，不会丢失 agent
+        let mut agent = agent_arc.lock().await;
         let result = agent
             .execute(task)
             .await
@@ -96,7 +99,6 @@ impl Tool for AgentDispatchTool {
                 message: format!("SubAgent execution failed: {}", e),
             });
 
-        // 记录子 agent 执行结果
         match &result {
             Ok(answer) => {
                 info!(target_agent = %agent_name, "✅ 子 Agent 执行完成");
@@ -105,18 +107,6 @@ impl Tool for AgentDispatchTool {
             Err(e) => {
                 warn!(target_agent = %agent_name, error = %e, "💥 子 Agent 执行失败");
             }
-        }
-
-        // 无论成功失败，都将 agent 放回 map
-        {
-            let mut agents = self
-                .subagents
-                .write()
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "agent_tool".to_string(),
-                    message: format!("Lock poisoned: {}", e),
-                })?;
-            agents.insert(agent_name.to_string(), agent);
         }
 
         Ok(ToolResult::success(result?))

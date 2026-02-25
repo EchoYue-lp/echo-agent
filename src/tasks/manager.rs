@@ -16,10 +16,6 @@ impl TaskManager {
         self.tasks.insert(task.id.clone(), task);
     }
 
-    fn get_task(&self, id: &str) -> Option<&Task> {
-        self.tasks.get(id)
-    }
-
     pub(crate) fn update_task(&mut self, id: &str, status: TaskStatus) {
         if let Some(task) = self.tasks.get_mut(id) {
             task.status = status;
@@ -59,20 +55,6 @@ impl TaskManager {
             .collect()
     }
 
-    fn get_cancelled_tasks(&self) -> Vec<&Task> {
-        self.tasks
-            .values()
-            .filter(|t| t.status == TaskStatus::Cancelled)
-            .collect()
-    }
-
-    fn get_failed_tasks(&self) -> Vec<&Task> {
-        self.tasks
-            .values()
-            .filter(|t| matches!(t.status, TaskStatus::Failed(_)))
-            .collect()
-    }
-
     /// 获取所有可执行的任务（依赖已满足）
     pub fn get_ready_tasks(&self) -> Vec<&Task> {
         self.tasks
@@ -107,11 +89,14 @@ impl TaskManager {
         ready.first().copied()
     }
 
-    /// 新增：检查是否所有任务都完成
+    /// 检查是否所有任务都已终结（完成、取消或失败均视为终结）
     pub fn is_all_completed(&self) -> bool {
-        self.tasks
-            .values()
-            .all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled))
+        self.tasks.values().all(|t| {
+            matches!(
+                t.status,
+                TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed(_)
+            )
+        })
     }
 
     /// 新增：生成任务摘要（给 LLM 看的）
@@ -150,7 +135,7 @@ impl TaskManager {
                         Some(VisitState::Visited) => {
                             // 已经访问过，跳过
                         }
-                        Some(VisitState::Unvisited) | None => {
+                        None => {
                             // 未访问过，继续递归
                             self.dfs_detect_cycle(dep_id, visited, path, cycles);
                         }
@@ -192,7 +177,6 @@ impl TaskManager {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum VisitState {
-    Unvisited,
     Visiting,
     Visited,
 }
