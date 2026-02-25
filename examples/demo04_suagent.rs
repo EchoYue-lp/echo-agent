@@ -1,8 +1,8 @@
 use echo_agent::agent::Agent;
 use echo_agent::agent::react_agent::{AgentConfig, AgentRole, ReactAgent};
-use echo_agent::tools::Tool;
-use echo_agent::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
-use echo_agent::tools::weather::WeatherTool;
+use echo_agent::prelude::Tool;
+use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+use echo_agent::tools::others::weather::WeatherTool;
 
 /// demo04: SubAgent 编排演示（Orchestrator + Worker）
 fn create_all_tools() -> Vec<Box<dyn Tool>> {
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 第四步：执行任务
     let result = main_agent
-        .execute_with_planning(
+        .execute(
             "我有1000元，我准备去商场购物。\
             我需要买10个15元的本子，16个8元的笔，2个98元的玩具，一个500元的衣服。\
             商场决定单品价格满500打八折，总价满800打9折。\

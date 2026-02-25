@@ -1,6 +1,6 @@
 use echo_agent::agent::Agent;
 use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
-use echo_agent::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 任务规划示例
     let result = agent
-        .execute_with_planning(
+        .execute(
             "我有 1200 元。买了 8 个 18 元的本子、12 支 9 元的笔、3 个 120 元的玩具、1 件 400 元外套。\
             先计算原价总和，再对总价打 95 折，最后算剩余金额。",
         )

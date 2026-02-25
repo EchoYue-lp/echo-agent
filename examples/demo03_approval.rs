@@ -1,6 +1,6 @@
 use echo_agent::agent::Agent;
 use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
-use echo_agent::tools::weather::WeatherTool;
+use echo_agent::tools::others::weather::WeatherTool;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,9 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.add_tool(Box::new(WeatherTool));
 
     // human-in-loop 示例：用户故意不给完整参数，要求 agent 主动追问
-    let result = agent
-        .execute("帮我查天气，并告诉我要不要带伞。")
-        .await;
+    let result = agent.execute("帮我查天气，并告诉我要不要带伞。").await;
 
     println!("\n✅ 最终结果:\n{:?}", result);
     Ok(())

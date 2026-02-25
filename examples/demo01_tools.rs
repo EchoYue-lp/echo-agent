@@ -1,6 +1,6 @@
 use echo_agent::agent::Agent;
 use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
-use echo_agent::tools::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 
 /// demo01: 工具调用能力演示（不包含规划 / human-in-loop / subagent）
 

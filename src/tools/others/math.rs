@@ -1,5 +1,6 @@
-use crate::error::{Result, ToolError};
-use crate::tools::{Tool, ToolParameters, ToolResult};
+use crate::error;
+use crate::error::ToolError;
+use crate::prelude::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
 
 pub struct AddTool;
@@ -31,7 +32,7 @@ impl Tool for AddTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -79,7 +80,7 @@ impl Tool for SubtractTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -127,7 +128,7 @@ impl Tool for MultiplyTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())
@@ -175,7 +176,7 @@ impl Tool for DivideTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
         let a_val = parameters
             .get("a")
             .and_then(|v| v.as_f64())

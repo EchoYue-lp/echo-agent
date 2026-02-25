@@ -1,10 +1,6 @@
-pub mod agent;
-pub(crate) mod answer;
-pub(crate) mod human_in_loop;
-pub mod math;
-pub(crate) mod reasoning;
-pub(crate) mod task_management;
-pub mod weather;
+pub(crate) mod builtin;
+pub mod files;
+pub mod others;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;

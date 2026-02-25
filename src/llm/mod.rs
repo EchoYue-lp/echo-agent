@@ -1,9 +1,10 @@
 mod client;
+pub mod config;
 pub mod types;
 
-use crate::config::{Config, ModelConfig};
 use crate::error::{ReactError, Result};
 use crate::llm::client::post;
+use crate::llm::config::{Config, ModelConfig};
 use crate::llm::types::{ChatCompletionRequest, ChatCompletionResponse, Message, ToolDefinition};
 use reqwest::Client;
 use reqwest::header::HeaderMap;

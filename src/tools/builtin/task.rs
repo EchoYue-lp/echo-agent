@@ -1,4 +1,4 @@
-use crate::error::{ReactError, Result, ToolError};
+use crate::error::{ReactError, ToolError};
 use crate::tasks::{Task, TaskManager, TaskStatus};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
@@ -14,18 +14,17 @@ fn now_secs() -> u64 {
 }
 
 /// 安全读取 RwLock，将 poisoned lock 转为 ReactError
-fn read_lock<T>(lock: &RwLock<T>) -> Result<std::sync::RwLockReadGuard<'_, T>> {
+fn read_lock<T>(lock: &RwLock<T>) -> crate::error::Result<std::sync::RwLockReadGuard<'_, T>> {
     lock.read()
         .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))
 }
 
 /// 安全写入 RwLock，将 poisoned lock 转为 ReactError
-fn write_lock<T>(lock: &RwLock<T>) -> Result<std::sync::RwLockWriteGuard<'_, T>> {
+fn write_lock<T>(lock: &RwLock<T>) -> crate::error::Result<std::sync::RwLockWriteGuard<'_, T>> {
     lock.write()
         .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))
 }
 
-// 1. 创建任务工具
 pub struct CreateTaskTool {
     task_manager: Arc<RwLock<TaskManager>>,
 }
@@ -76,7 +75,7 @@ impl Tool for CreateTaskTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
         let task_id = parameters
             .get("task_id")
             .and_then(|v| v.as_str())
@@ -172,87 +171,6 @@ impl Tool for CreateTaskTool {
     }
 }
 
-// 2. 查看任务列表工具
-pub struct ListTasksTool {
-    task_manager: Arc<RwLock<TaskManager>>,
-}
-
-impl ListTasksTool {
-    pub fn new(task_manager: Arc<RwLock<TaskManager>>) -> Self {
-        Self { task_manager }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ListTasksTool {
-    fn name(&self) -> &str {
-        "list_tasks"
-    }
-
-    fn description(&self) -> &str {
-        "查看当前所有任务的状态和进度"
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "filter": {
-                    "type": "string",
-                    "enum": ["all", "pending", "in_progress", "completed", "ready"],
-                    "description": "筛选条件：all-所有, pending-待处理, ready-可立即执行"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        let filter = parameters
-            .get("filter")
-            .and_then(|v| v.as_str())
-            .unwrap_or("all");
-
-        let manager = read_lock(&self.task_manager)?;
-
-        let tasks = match filter {
-            "pending" => manager.get_pending_tasks(),
-            "in_progress" => manager.get_in_progress_tasks(),
-            "completed" => manager.get_completed_tasks(),
-            "ready" => manager.get_ready_tasks(),
-            _ => manager.get_all_tasks(),
-        };
-
-        let summary = manager.get_summary();
-
-        let task_list = tasks
-            .iter()
-            .map(|t| {
-                format!(
-                    "taskid:[{}] ,task status:{:?}  ,task description: {} (任务优先级: {}, 任务依赖: {:?})",
-                    t.id, t.status, t.description, t.priority, t.dependencies
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let list = format!(
-            "{}\n\n任务列表:\n{}",
-            summary,
-            if task_list.is_empty() {
-                "无任务"
-            } else {
-                &task_list
-            }
-        );
-
-        debug!("Task list parameters:{:?} ", parameters);
-        info!("Task list:{}", list);
-
-        Ok(ToolResult::success(list))
-    }
-}
-
-// 3. 更新任务状态工具
 pub struct UpdateTaskTool {
     task_manager: Arc<RwLock<TaskManager>>,
 }
@@ -299,7 +217,7 @@ impl Tool for UpdateTaskTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
         let task_id = parameters
             .get("task_id")
             .and_then(|v| v.as_str())
@@ -351,56 +269,82 @@ impl Tool for UpdateTaskTool {
     }
 }
 
-// 4. 制定计划工具（高级）
-pub struct PlanTool;
+pub struct ListTasksTool {
+    task_manager: Arc<RwLock<TaskManager>>,
+}
+
+impl ListTasksTool {
+    pub fn new(task_manager: Arc<RwLock<TaskManager>>) -> Self {
+        Self { task_manager }
+    }
+}
 
 #[async_trait::async_trait]
-impl Tool for PlanTool {
+impl Tool for ListTasksTool {
     fn name(&self) -> &str {
-        "plan"
+        "list_tasks"
     }
 
     fn description(&self) -> &str {
-        "分析复杂问题并制定详细的执行计划。将大任务拆解为多个有序的子任务。"
+        "查看当前所有任务的状态和进度"
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "analysis": {
+                "filter": {
                     "type": "string",
-                    "description": "对问题的深入分析：难点、需要的信息、可能的方法"
-                },
-                "strategy": {
-                    "type": "string",
-                    "description": "解决策略：说明如何一步步解决这个问题"
+                    "enum": ["all", "pending", "in_progress", "completed", "ready"],
+                    "description": "筛选条件：all-所有, pending-待处理, ready-可立即执行"
                 }
-            },
-            "required": ["analysis", "strategy"]
+            }
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        let analysis = parameters
-            .get("analysis")
+    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
+        let filter = parameters
+            .get("filter")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("analysis".to_string()))?;
+            .unwrap_or("all");
 
-        let strategy = parameters
-            .get("strategy")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("strategy".to_string()))?;
+        let manager = read_lock(&self.task_manager)?;
 
-        let plan = format!(
-            "📋 计划已制定\n\n分析:\n{}\n\n策略:\n{}\n\n请使用 create_task 创建具体的子任务",
-            analysis, strategy
+        let tasks = match filter {
+            "pending" => manager.get_pending_tasks(),
+            "in_progress" => manager.get_in_progress_tasks(),
+            "completed" => manager.get_completed_tasks(),
+            "ready" => manager.get_ready_tasks(),
+            _ => manager.get_all_tasks(),
+        };
+
+        let summary = manager.get_summary();
+
+        let task_list = tasks
+            .iter()
+            .map(|t| {
+                format!(
+                    "taskid:[{}] ,task status:{:?}  ,task description: {} (任务优先级: {}, 任务依赖: {:?})",
+                    t.id, t.status, t.description, t.priority, t.dependencies
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let list = format!(
+            "{}\n\n任务列表:\n{}",
+            summary,
+            if task_list.is_empty() {
+                "无任务"
+            } else {
+                &task_list
+            }
         );
 
-        debug!("Task plan parameters:{:?} ", parameters);
-        info!("Task plan:{}", plan);
+        debug!("Task list parameters:{:?} ", parameters);
+        info!("Task list:{}", list);
 
-        Ok(ToolResult::success(plan))
+        Ok(ToolResult::success(list))
     }
 }
 
@@ -432,7 +376,7 @@ impl Tool for VisualizeDependenciesTool {
         })
     }
 
-    async fn execute(&self, _parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, _parameters: ToolParameters) -> crate::error::Result<ToolResult> {
         let manager = read_lock(&self.task_manager)?;
         let mermaid = manager.visualize_dependencies();
         Ok(ToolResult::success(mermaid))
@@ -467,7 +411,7 @@ impl Tool for GetExecutionOrderTool {
         })
     }
 
-    async fn execute(&self, _parameters: ToolParameters) -> Result<ToolResult> {
+    async fn execute(&self, _parameters: ToolParameters) -> crate::error::Result<ToolResult> {
         let manager = read_lock(&self.task_manager)?;
         match manager.get_topological_order() {
             Ok(order) => {
