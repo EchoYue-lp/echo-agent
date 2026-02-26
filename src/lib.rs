@@ -23,6 +23,7 @@ pub mod prelude {
     pub use crate::skills::{
         Skill, SkillInfo, SkillManager,
         builtin::{CalculatorSkill, FileSystemSkill, WeatherSkill},
+        external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
     };
     pub use crate::tools::{Tool, ToolParameters, ToolResult};
 }

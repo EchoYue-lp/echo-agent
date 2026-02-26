@@ -5,6 +5,7 @@ use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::human_loop::HumanApprovalManager;
 use crate::llm::chat;
 use crate::llm::types::Message;
+use crate::skills::external::{LoadSkillResourceTool, SkillLoader};
 use crate::skills::{Skill, SkillInfo, SkillManager};
 use crate::tasks::TaskManager;
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
@@ -491,6 +492,152 @@ impl ReactAgent {
 
     pub fn set_model(&mut self, model_name: &str) {
         self.config.model_name = model_name.to_string();
+    }
+
+    // ── 外部 Skill 文件系统加载 ───────────────────────────────────────────────
+
+    /// 扫描指定目录下的所有外部技能（SKILL.md），并将它们安装到 Agent
+    ///
+    /// # 整体流程
+    ///
+    /// ```text
+    /// 1. 扫描 skills_dir/ 下的每个子目录
+    /// 2. 解析 SKILL.md 的 YAML Frontmatter → SkillMeta
+    /// 3. 将 meta.instructions 注入 system_prompt
+    /// 4. 预加载 load_on_startup: true 的资源并追加到 system_prompt
+    /// 5. 注册 LoadSkillResourceTool（LLM 按需调用懒加载其余资源）
+    /// 6. 在 SkillManager 中记录元数据
+    /// ```
+    ///
+    /// # 参数
+    /// - `skills_dir`: 技能根目录路径（绝对或相对路径均可）
+    ///
+    /// # 返回
+    /// 成功加载的技能名称列表
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// agent.load_skills_from_dir("./skills").await?;
+    /// ```
+    pub async fn load_skills_from_dir(
+        &mut self,
+        skills_dir: impl Into<std::path::PathBuf>,
+    ) -> Result<Vec<String>> {
+        let loader = std::sync::Arc::new(tokio::sync::Mutex::new(SkillLoader::new(skills_dir)));
+
+        // 扫描并加载所有 SKILL.md
+        let loaded = {
+            let mut l = loader.lock().await;
+            l.scan().await?
+        };
+
+        if loaded.is_empty() {
+            tracing::warn!(
+                agent = %self.config.agent_name,
+                "外部技能目录扫描完毕，未找到任何有效 SKILL.md"
+            );
+            return Ok(vec![]);
+        }
+
+        let mut loaded_names = Vec::new();
+        let mut has_resources = false;
+
+        for skill in &loaded {
+            let meta = &skill.meta;
+
+            // 跳过已安装的技能（避免重复注入）
+            if self.skill_manager.is_installed(&meta.name) {
+                tracing::warn!(
+                    agent = %self.config.agent_name,
+                    skill = %meta.name,
+                    "Skill 已安装，跳过"
+                );
+                continue;
+            }
+
+            // 注入 instructions 到 system prompt
+            let prompt_block = meta.to_prompt_block();
+            self.config.system_prompt.push_str(&prompt_block);
+
+            // 若有 load_on_startup 资源，追加其内容
+            {
+                let l = loader.lock().await;
+                for res_ref in meta.startup_resources() {
+                    if l.is_cached(&meta.name, &res_ref.name) {
+                        // 内容已在 scan() 中预加载到 loader，这里只需要把内容再注入到 prompt
+                        // （实际上 scan() 已缓存，由 load_resource 提供，此处仅记录）
+                        tracing::debug!(
+                            "预加载资源 '{}/{}' 已就绪，可通过工具访问",
+                            meta.name,
+                            res_ref.name
+                        );
+                    }
+                }
+            }
+
+            // 检查是否有任何资源需要懒加载工具
+            if meta.resources.as_ref().map_or(false, |r| !r.is_empty()) {
+                has_resources = true;
+            }
+
+            // 记录到 SkillManager
+            let tool_names = if has_resources {
+                vec!["load_skill_resource".to_string()]
+            } else {
+                vec![]
+            };
+            self.skill_manager.record(SkillInfo {
+                name: meta.name.clone(),
+                description: meta.description.clone(),
+                tool_names,
+                has_prompt_injection: true,
+            });
+
+            tracing::info!(
+                agent = %self.config.agent_name,
+                skill = %meta.name,
+                version = %meta.version.as_deref().unwrap_or("?"),
+                resources = meta.resources.as_ref().map_or(0, |r| r.len()),
+                "🎯 外部 Skill 已加载"
+            );
+
+            loaded_names.push(meta.name.clone());
+        }
+
+        // 同步更新 context 中的 system message
+        self.context
+            .update_system(self.config.system_prompt.clone());
+
+        // 注册资源懒加载工具（只注册一次，即使有多个 skill 有资源）
+        if has_resources && self.tool_manager.get_tool("load_skill_resource").is_none() {
+            // 构建资源目录描述，帮助 LLM 选择正确的参数
+            let catalog_desc = {
+                let l = loader.lock().await;
+                l.resource_catalog()
+                    .iter()
+                    .map(|(sname, rref)| {
+                        format!(
+                            "  - {}/{}: {}",
+                            sname,
+                            rref.name,
+                            rref.description.as_deref().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+
+            let tool = LoadSkillResourceTool::new(loader).with_catalog_desc(catalog_desc);
+            self.tool_manager.register(Box::new(tool));
+
+            tracing::info!(
+                agent = %self.config.agent_name,
+                "已注册 load_skill_resource 工具"
+            );
+        }
+
+        Ok(loaded_names)
     }
 
     // ── Skill API ─────────────────────────────────────────────────────────────

@@ -13,4 +13,4 @@ dotenv = "0.15"
 futures = "0.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
+serde_yaml = "0.9"
