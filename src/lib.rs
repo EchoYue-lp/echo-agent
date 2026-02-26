@@ -3,6 +3,7 @@ pub mod compression;
 pub mod error;
 pub mod human_loop;
 pub mod llm;
+pub mod mcp;
 pub mod tasks;
 pub mod tools;
 
@@ -17,5 +18,6 @@ pub mod prelude {
         CompressionInput, CompressionOutput, ContextCompressor, ContextManager,
     };
     pub use crate::error::Result;
+    pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
     pub use crate::tools::{Tool, ToolParameters, ToolResult};
 }

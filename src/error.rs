@@ -13,6 +13,8 @@ pub enum ReactError {
     Agent(AgentError),
     /// 配置错误
     Config(ConfigError),
+    /// MCP 相关错误
+    Mcp(McpError),
     /// IO 错误
     Io(std::io::Error),
     /// 其他错误
@@ -79,6 +81,21 @@ pub enum AgentError {
     TokenLimitExceeded,
 }
 
+/// MCP 相关错误
+#[derive(Debug)]
+pub enum McpError {
+    /// 连接服务端失败
+    ConnectionFailed(String),
+    /// 初始化握手失败
+    InitializationFailed(String),
+    /// 协议层错误（JSON-RPC 序列化/反序列化等）
+    ProtocolError(String),
+    /// 工具调用失败
+    ToolCallFailed(String),
+    /// 传输层已关闭
+    TransportClosed,
+}
+
 /// 配置错误
 #[derive(Debug)]
 pub enum ConfigError {
@@ -104,8 +121,21 @@ impl fmt::Display for ReactError {
             ReactError::Parse(e) => write!(f, "Parse Error: {}", e),
             ReactError::Agent(e) => write!(f, "Agent Error: {}", e),
             ReactError::Config(e) => write!(f, "Config Error: {}", e),
+            ReactError::Mcp(e) => write!(f, "MCP Error: {}", e),
             ReactError::Io(e) => write!(f, "IO Error: {}", e),
             ReactError::Other(msg) => write!(f, "Error: {}", msg),
+        }
+    }
+}
+
+impl fmt::Display for McpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            McpError::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
+            McpError::InitializationFailed(msg) => write!(f, "Initialization failed: {}", msg),
+            McpError::ProtocolError(msg) => write!(f, "Protocol error: {}", msg),
+            McpError::ToolCallFailed(msg) => write!(f, "Tool call failed: {}", msg),
+            McpError::TransportClosed => write!(f, "MCP transport closed unexpectedly"),
         }
     }
 }
@@ -198,6 +228,7 @@ impl std::error::Error for ReactError {
             ReactError::Parse(e) => Some(e),
             ReactError::Agent(e) => Some(e),
             ReactError::Config(e) => Some(e),
+            ReactError::Mcp(e) => Some(e),
             ReactError::Io(e) => Some(e),
             ReactError::Other(_) => None,
         }
@@ -209,6 +240,7 @@ impl std::error::Error for ToolError {}
 impl std::error::Error for ParseError {}
 impl std::error::Error for AgentError {}
 impl std::error::Error for ConfigError {}
+impl std::error::Error for McpError {}
 
 // ── From 转换实现 ─────────────────────────────────────────────────────────────
 
@@ -266,6 +298,12 @@ impl From<ParseError> for ReactError {
 impl From<AgentError> for ReactError {
     fn from(err: AgentError) -> Self {
         ReactError::Agent(err)
+    }
+}
+
+impl From<McpError> for ReactError {
+    fn from(err: McpError) -> Self {
+        ReactError::Mcp(err)
     }
 }
 
