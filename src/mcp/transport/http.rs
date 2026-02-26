@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -49,10 +49,7 @@ impl McpTransport for HttpTransport {
         }
 
         let response = builder.send().await.map_err(|e| {
-            ReactError::Mcp(McpError::ConnectionFailed(format!(
-                "HTTP 请求失败: {}",
-                e
-            )))
+            ReactError::Mcp(McpError::ConnectionFailed(format!("HTTP 请求失败: {}", e)))
         })?;
 
         if !response.status().is_success() {

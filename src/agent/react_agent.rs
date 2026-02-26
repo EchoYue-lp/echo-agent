@@ -5,6 +5,7 @@ use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::human_loop::HumanApprovalManager;
 use crate::llm::chat;
 use crate::llm::types::Message;
+use crate::skills::{Skill, SkillInfo, SkillManager};
 use crate::tasks::TaskManager;
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
@@ -40,6 +41,8 @@ pub struct ReactAgent {
     client: Arc<Client>,
     pub(crate) task_manager: Arc<RwLock<TaskManager>>,
     human_in_loop: Arc<RwLock<HumanApprovalManager>>,
+    /// Skill 管理器：记录已安装的所有 Skill 元数据
+    skill_manager: SkillManager,
 }
 
 impl ReactAgent {
@@ -91,6 +94,7 @@ impl ReactAgent {
             client: Arc::new(client),
             task_manager,
             human_in_loop,
+            skill_manager: SkillManager::new(),
         }
     }
 
@@ -487,5 +491,87 @@ impl ReactAgent {
 
     pub fn set_model(&mut self, model_name: &str) {
         self.config.model_name = model_name.to_string();
+    }
+
+    // ── Skill API ─────────────────────────────────────────────────────────────
+
+    /// 为 Agent 安装一个 Skill
+    ///
+    /// 安装过程：
+    /// 1. 将 Skill 提供的所有工具注册到 ToolManager
+    /// 2. 若 Skill 有 system_prompt_injection，追加到 system_prompt
+    /// 3. 记录 Skill 元数据到 SkillManager
+    ///
+    /// # 示例
+    /// ```rust
+    /// agent.add_skill(Box::new(CalculatorSkill));
+    /// agent.add_skill(Box::new(FileSystemSkill::with_base_dir("/workspace")));
+    /// ```
+    pub fn add_skill(&mut self, skill: Box<dyn Skill>) {
+        let name = skill.name().to_string();
+
+        if self.skill_manager.is_installed(&name) {
+            warn!(
+                agent = %self.config.agent_name,
+                skill = %name,
+                "⚠️ Skill 已安装，跳过重复注册"
+            );
+            return;
+        }
+
+        // Step 1: 收集 Skill 工具信息（在 move 之前）
+        let tools = skill.tools();
+        let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+
+        // Step 2: 注册工具
+        for tool in tools {
+            self.tool_manager.register(tool);
+        }
+
+        // Step 3: 注入系统提示词
+        let has_injection = skill.system_prompt_injection().is_some();
+        if let Some(injection) = skill.system_prompt_injection() {
+            self.config.system_prompt.push_str(&injection);
+            // 同步更新 context 中的 system 消息
+            self.context
+                .update_system(self.config.system_prompt.clone());
+        }
+
+        // Step 4: 记录元数据
+        self.skill_manager.record(SkillInfo {
+            name: name.clone(),
+            description: skill.description().to_string(),
+            tool_names,
+            has_prompt_injection: has_injection,
+        });
+
+        info!(
+            agent = %self.config.agent_name,
+            skill = %name,
+            description = %skill.description(),
+            "🎯 Skill 已安装"
+        );
+    }
+
+    /// 批量安装多个 Skill
+    pub fn add_skills(&mut self, skills: Vec<Box<dyn Skill>>) {
+        for skill in skills {
+            self.add_skill(skill);
+        }
+    }
+
+    /// 列出所有已安装的 Skill 元数据
+    pub fn list_skills(&self) -> Vec<&SkillInfo> {
+        self.skill_manager.list()
+    }
+
+    /// 查询某个 Skill 是否已安装
+    pub fn has_skill(&self, name: &str) -> bool {
+        self.skill_manager.is_installed(name)
+    }
+
+    /// 已安装的 Skill 数量
+    pub fn skill_count(&self) -> usize {
+        self.skill_manager.count()
     }
 }

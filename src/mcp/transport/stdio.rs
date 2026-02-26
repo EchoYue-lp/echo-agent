@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 use crate::error::{McpError, ReactError, Result};
 use crate::mcp::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
@@ -158,10 +158,7 @@ impl McpTransport for StdioTransport {
         {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                ReactError::Mcp(McpError::ProtocolError(format!(
-                    "写入 stdin 失败: {}",
-                    e
-                )))
+                ReactError::Mcp(McpError::ProtocolError(format!("写入 stdin 失败: {}", e)))
             })?;
             stdin.flush().await.map_err(|e| {
                 ReactError::Mcp(McpError::ProtocolError(format!("flush stdin 失败: {}", e)))

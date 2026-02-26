@@ -4,9 +4,9 @@ use serde_json::Value;
 
 use crate::error::{McpError, ReactError, Result};
 use crate::mcp::server_config::{McpServerConfig, TransportConfig};
+use crate::mcp::transport::McpTransport;
 use crate::mcp::transport::http::HttpTransport;
 use crate::mcp::transport::stdio::StdioTransport;
-use crate::mcp::transport::McpTransport;
 use crate::mcp::types::{
     ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, JsonRpcNotification,
     JsonRpcRequest, McpContent, McpTool, McpToolCallParams, McpToolCallResult, McpToolsListResult,
@@ -46,10 +46,7 @@ impl McpClient {
             },
         };
 
-        let init_req = JsonRpcRequest::new(
-            "initialize",
-            Some(serde_json::to_value(init_params)?),
-        );
+        let init_req = JsonRpcRequest::new("initialize", Some(serde_json::to_value(init_params)?));
 
         let init_resp = transport.send(init_req).await?;
 
@@ -57,15 +54,12 @@ impl McpClient {
             return Err(ReactError::Mcp(McpError::InitializationFailed(err.message)));
         }
 
-        let init_result: InitializeResult = serde_json::from_value(
-            init_resp
-                .result
-                .ok_or_else(|| {
-                    ReactError::Mcp(McpError::InitializationFailed(
-                        "initialize 响应为空".to_string(),
-                    ))
-                })?,
-        )?;
+        let init_result: InitializeResult =
+            serde_json::from_value(init_resp.result.ok_or_else(|| {
+                ReactError::Mcp(McpError::InitializationFailed(
+                    "initialize 响应为空".to_string(),
+                ))
+            })?)?;
 
         tracing::info!(
             "MCP: 已连接 '{}' (协议版本: {})",
@@ -83,11 +77,7 @@ impl McpClient {
 
         // ── Step 3: 发现工具 ─────────────────────────────────────────────────
         let tools = Self::fetch_tools(&transport, &config.name).await?;
-        tracing::info!(
-            "MCP: 从 '{}' 发现 {} 个工具",
-            config.name,
-            tools.len()
-        );
+        tracing::info!("MCP: 从 '{}' 发现 {} 个工具", config.name, tools.len());
         for tool in &tools {
             tracing::debug!(
                 "MCP:   工具 '{}' - {}",
@@ -112,9 +102,7 @@ impl McpClient {
         let mut cursor: Option<String> = None;
 
         loop {
-            let params = cursor
-                .as_ref()
-                .map(|c| serde_json::json!({ "cursor": c }));
+            let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
 
             let req = JsonRpcRequest::new("tools/list", params);
             let resp = transport.send(req).await?;
@@ -161,8 +149,7 @@ impl McpClient {
             ))));
         }
 
-        let result: McpToolCallResult =
-            serde_json::from_value(resp.result.unwrap_or(Value::Null))?;
+        let result: McpToolCallResult = serde_json::from_value(resp.result.unwrap_or(Value::Null))?;
 
         Ok(result)
     }

@@ -4,6 +4,7 @@ pub mod error;
 pub mod human_loop;
 pub mod llm;
 pub mod mcp;
+pub mod skills;
 pub mod tasks;
 pub mod tools;
 
@@ -19,5 +20,9 @@ pub mod prelude {
     };
     pub use crate::error::Result;
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
+    pub use crate::skills::{
+        Skill, SkillInfo, SkillManager,
+        builtin::{CalculatorSkill, FileSystemSkill, WeatherSkill},
+    };
     pub use crate::tools::{Tool, ToolParameters, ToolResult};
 }

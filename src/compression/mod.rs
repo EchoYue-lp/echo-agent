@@ -126,6 +126,19 @@ impl ContextManager {
         self.compressor = None;
     }
 
+    /// 更新 system 消息内容
+    ///
+    /// 通常在 `add_skill()` 注入额外系统提示时调用：
+    /// 找到第一条 role == "system" 的消息并替换其内容；
+    /// 若不存在 system 消息，则在队列头部插入一条。
+    pub fn update_system(&mut self, new_system_prompt: String) {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.role == "system") {
+            msg.content = Some(new_system_prompt);
+        } else {
+            self.messages.insert(0, Message::system(new_system_prompt));
+        }
+    }
+
     /// 准备发送给 LLM 的消息列表。
     ///
     /// 当估算 token 超过 `token_limit` 且已配置压缩器时，自动触发压缩并更新内部缓冲区。

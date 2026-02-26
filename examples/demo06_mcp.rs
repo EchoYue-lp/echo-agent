@@ -75,11 +75,7 @@ async fn demo_raw_mcp_call() -> echo_agent::error::Result<()> {
     let config = McpServerConfig::stdio(
         "filesystem",
         "npx",
-        vec![
-            "-y",
-            "@modelcontextprotocol/server-filesystem",
-            "/tmp",
-        ],
+        vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
     );
 
     println!("正在启动 MCP 文件系统服务端...");
@@ -95,10 +91,7 @@ async fn demo_raw_mcp_call() -> echo_agent::error::Result<()> {
         println!("\n调用 list_directory 工具列出 /tmp 目录...");
 
         let result = client
-            .call_tool(
-                "list_directory",
-                serde_json::json!({ "path": "/tmp" }),
-            )
+            .call_tool("list_directory", serde_json::json!({ "path": "/tmp" }))
             .await;
 
         match result {
@@ -135,11 +128,7 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
         .connect(McpServerConfig::stdio(
             "filesystem",
             "npx",
-            vec![
-                "-y",
-                "@modelcontextprotocol/server-filesystem",
-                "/tmp",
-            ],
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
         ))
         .await?;
 
