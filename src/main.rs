@@ -10,24 +10,42 @@
 //! cargo run -- --skills-dir ./skills
 //! ```
 //!
+//! # MCP 服务端接入
+//! ```bash
+//! # 从 YAML 配置文件加载
+//! cargo run -- --mcp mcp.yaml
+//!
+//! # 内联 stdio 模式（格式: "名称 命令 参数..."）
+//! cargo run -- --mcp-stdio "fs npx -y @modelcontextprotocol/server-filesystem /tmp"
+//!
+//! # 内联 HTTP 模式（格式: "名称 URL [Header=Value...]"）
+//! cargo run -- --mcp-http "api http://localhost:3000 Authorization=Bearer token"
+//!
+//! # 混合使用
+//! cargo run -- --mcp mcp.yaml --mcp-stdio "extra npx -y @mcp/extra" --tools shell
+//! ```
+//!
+//! # mcp.yaml 配置文件格式
+//! ```yaml
+//! servers:
+//!   - name: filesystem
+//!     stdio:
+//!       command: npx
+//!       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+//!       env:              # 可选，额外环境变量
+//!         NODE_ENV: production
+//!
+//!   - name: my-api
+//!     http:
+//!       url: "http://localhost:3000"
+//!       headers:          # 可选，自定义请求头
+//!         Authorization: "Bearer mytoken"
+//! ```
+//!
 //! # 单次查询 / 管道模式（stdin 非 TTY 时自动切换）
 //! ```bash
 //! cargo run -- -q "帮我计算 1+1" --tools math
 //! echo "列出当前目录" | cargo run -- --tools files
-//! ```
-//!
-//! # 交互中的命令
-//! ```text
-//! /help              帮助
-//! /tools             列出已注册工具
-//! /skills            列出已安装技能
-//! /system            查看当前系统提示词
-//! /ctx               查看上下文消息数和 token 估算
-//! /model             查看/切换模型（/model qwen3-max）
-//! /reset             重置对话上下文
-//! /compress [策略 [N]] 手动触发压缩
-//! /clear             清屏
-//! /quit              退出
 //! ```
 
 use clap::Parser;
@@ -39,10 +57,14 @@ use echo_agent::compression::compressor::{
 };
 use echo_agent::error::ReactError;
 use echo_agent::llm::DefaultLlmClient;
+use echo_agent::mcp::{McpManager, McpServerConfig, TransportConfig};
 use echo_agent::skills::builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill};
+use echo_agent::tools::Tool;
 use futures::StreamExt;
 use reqwest::Client;
 use rustyline::DefaultEditor;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;
 
@@ -69,7 +91,7 @@ struct Cli {
     #[arg(short, long)]
     system: Option<String>,
 
-    /// 启用的工具集，逗号分隔（可选: math, weather, files, shell）
+    /// 启用的内置工具集，逗号分隔（可选: math, weather, files, shell）
     #[arg(short, long)]
     tools: Option<String>,
 
@@ -80,6 +102,40 @@ struct Cli {
     /// 从指定目录加载外部技能（包含 SKILL.md 的子目录）
     #[arg(long)]
     skills_dir: Option<String>,
+
+    // ── MCP 配置 ────────────────────────────────────────────────────────────
+
+    /// MCP 服务端配置文件路径（YAML 格式）
+    ///
+    /// 配置文件格式:
+    ///   servers:
+    ///     - name: filesystem
+    ///       stdio:
+    ///         command: npx
+    ///         args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    ///     - name: my-api
+    ///       http:
+    ///         url: "http://localhost:3000"
+    ///         headers:
+    ///           Authorization: "Bearer token"
+    #[arg(long, value_name = "FILE")]
+    mcp: Option<String>,
+
+    /// 添加 stdio 模式的 MCP 服务端（可多次指定）
+    ///
+    /// 格式: "名称 命令 [参数...]"
+    /// 示例: --mcp-stdio "fs npx -y @modelcontextprotocol/server-filesystem /tmp"
+    #[arg(long, value_name = "SPEC")]
+    mcp_stdio: Vec<String>,
+
+    /// 添加 HTTP 模式的 MCP 服务端（可多次指定）
+    ///
+    /// 格式: "名称 URL [Header=Value ...]"
+    /// 示例: --mcp-http "api http://localhost:3000 Authorization=Bearer_token"
+    #[arg(long, value_name = "SPEC")]
+    mcp_http: Vec<String>,
+
+    // ── 运行时配置 ───────────────────────────────────────────────────────────
 
     /// 日志级别（trace, debug, info, warn, error）
     #[arg(long, default_value = "warn")]
@@ -97,27 +153,57 @@ struct Cli {
     #[arg(long)]
     human_loop: bool,
 
-    /// 上下文压缩策略，作为 /compress 默认值，并在启用 --token-limit 时自动触发
+    /// 上下文压缩策略（summary[:N] / sliding[:N] / hybrid[:N] / none）
     ///
-    /// 可选值：
-    ///   summary[:N]   摘要压缩，保留最近 N 条（默认 N=6）  [默认]
-    ///   sliding[:N]   滑动窗口，保留最近 N 条（默认 N=20）
-    ///   hybrid[:N]    混合压缩（滑动窗口+摘要），窗口大小 N（默认 N=10）
-    ///   none          不设置压缩器
-    ///
+    /// 作为 /compress 命令的默认策略，并在设置 --token-limit 后自动触发。
     /// 示例: --compressor summary:4  --compressor sliding:20
     #[arg(long, default_value = "summary")]
     compressor: String,
 
     /// 上下文 token 上限，超过后在每次 LLM 调用前自动触发压缩
-    ///
-    /// 示例: --token-limit 4000
     #[arg(long)]
     token_limit: Option<usize>,
 
     /// 每轮对话结束后显示上下文统计信息（消息数 / 估算 token 数）
     #[arg(long)]
     ctx_stats: bool,
+}
+
+// ── MCP 配置文件结构体 ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct McpConfigFile {
+    servers: Vec<McpServerYaml>,
+}
+
+#[derive(Deserialize)]
+struct McpServerYaml {
+    name: String,
+    #[serde(flatten)]
+    transport: McpTransportYaml,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum McpTransportYaml {
+    Stdio(McpStdioYaml),
+    Http(McpHttpYaml),
+}
+
+#[derive(Deserialize)]
+struct McpStdioYaml {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct McpHttpYaml {
+    url: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 // ── 入口 ──────────────────────────────────────────────────────────────────────
@@ -144,8 +230,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
+    // 是否存在 MCP 配置（影响 enable_tool 默认值）
+    let has_mcp_config = cli.mcp.is_some()
+        || !cli.mcp_stdio.is_empty()
+        || !cli.mcp_http.is_empty();
+
     let http = Arc::new(Client::new());
-    let mut agent = build_agent(&cli, &enabled_tools, &http);
+    let mut agent = build_agent(&cli, &enabled_tools, &http, has_mcp_config);
 
     // 加载外部技能
     if let Some(ref dir) = cli.skills_dir {
@@ -158,25 +249,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 连接 MCP 服务端
+    let (mcp_manager, mcp_tools) = connect_mcp(&cli).await;
+    if !mcp_tools.is_empty() {
+        agent.add_tools(mcp_tools);
+    }
+
     if let Some(query) = &cli.query {
-        // 明确指定 -q 时：单次查询
         run_single_query(&mut agent, query, cli.no_stream).await?;
     } else if !io::stdin().is_terminal() {
-        // stdin 为管道时：读取每行作为独立查询
         run_pipe_mode(&mut agent, cli.no_stream).await?;
     } else {
-        // 交互模式
-        print_banner(&cli, &enabled_tools);
-        run_interactive(&mut agent, &cli, &http).await?;
+        print_banner(&cli, &enabled_tools, &mcp_manager);
+        run_interactive(&mut agent, &cli, &http, &mcp_manager).await?;
     }
+
+    // 程序退出前关闭所有 MCP 连接
+    mcp_manager.close_all().await;
 
     Ok(())
 }
 
 // ── Agent 构建 ────────────────────────────────────────────────────────────────
 
-fn build_agent(cli: &Cli, tools: &[&str], http: &Arc<Client>) -> ReactAgent {
-    let has_tools = !tools.is_empty();
+fn build_agent(cli: &Cli, tools: &[&str], http: &Arc<Client>, has_mcp: bool) -> ReactAgent {
+    let has_tools = !tools.is_empty() || has_mcp;
 
     let default_system = if has_tools {
         "你是一个能力全面的 AI 助手，可以使用工具来完成任务。\n\
@@ -213,7 +310,6 @@ fn build_agent(cli: &Cli, tools: &[&str], http: &Arc<Client>) -> ReactAgent {
         }
     }
 
-    // 安装压缩器（若 token_limit 有值则触发自动压缩，否则仅供 /compress 使用）
     if cli.compressor != "none" {
         let (kind, n) = parse_compressor_spec(&cli.compressor);
         if let Some(c) = build_compressor(kind, n, &cli.model, http) {
@@ -224,16 +320,180 @@ fn build_agent(cli: &Cli, tools: &[&str], http: &Arc<Client>) -> ReactAgent {
     agent
 }
 
-// ── 压缩器工厂（统一入口） ────────────────────────────────────────────────────
+// ── MCP 连接 ──────────────────────────────────────────────────────────────────
 
-/// 根据策略名称和可选参数构建压缩器。
-///
-/// | spec            | 效果                                          |
-/// |-----------------|-----------------------------------------------|
-/// | `summary[:N]`   | `SummaryCompressor`，keep_recent=N（默认 6）  |
-/// | `sliding[:N]`   | `SlidingWindowCompressor`，window=N（默认 20）|
-/// | `hybrid[:N]`    | `HybridCompressor`，滑动窗口 N（默认 10）     |
-/// | `none` / `""`   | `None`                                        |
+/// 根据 CLI 参数连接所有 MCP 服务端，返回管理器和工具列表。
+async fn connect_mcp(cli: &Cli) -> (McpManager, Vec<Box<dyn Tool>>) {
+    let mut manager = McpManager::new();
+    let mut all_tools: Vec<Box<dyn Tool>> = Vec::new();
+
+    let configs = collect_mcp_configs(cli);
+    if configs.is_empty() {
+        return (manager, all_tools);
+    }
+
+    println!("正在连接 MCP 服务端...");
+
+    for config in configs {
+        let name = config.name.clone();
+        let transport_desc = describe_transport(&config.transport);
+
+        match manager.connect(config).await {
+            Ok(tools) => {
+                println!(
+                    "  ✓ {} ({})  —  {} 个工具",
+                    name,
+                    transport_desc,
+                    tools.len()
+                );
+                all_tools.extend(tools);
+            }
+            Err(e) => {
+                eprintln!("  ✗ {} 连接失败: {}", name, e);
+            }
+        }
+    }
+
+    if !all_tools.is_empty() {
+        println!("MCP 就绪，共注册 {} 个工具\n", all_tools.len());
+    }
+
+    (manager, all_tools)
+}
+
+/// 收集所有来源（配置文件 + 命令行内联）的 MCP 服务端配置。
+fn collect_mcp_configs(cli: &Cli) -> Vec<McpServerConfig> {
+    let mut configs = Vec::new();
+
+    // 从 YAML 文件加载
+    if let Some(ref path) = cli.mcp {
+        match load_mcp_config_file(path) {
+            Ok(file_configs) => configs.extend(file_configs),
+            Err(e) => eprintln!("警告: 读取 MCP 配置文件 '{path}' 失败: {e}"),
+        }
+    }
+
+    // 内联 stdio 服务端
+    for spec in &cli.mcp_stdio {
+        match parse_mcp_stdio_spec(spec) {
+            Some(config) => configs.push(config),
+            None => eprintln!(
+                "警告: --mcp-stdio 格式错误 '{spec}'（格式: 名称 命令 [参数...]）"
+            ),
+        }
+    }
+
+    // 内联 HTTP 服务端
+    for spec in &cli.mcp_http {
+        match parse_mcp_http_spec(spec) {
+            Some(config) => configs.push(config),
+            None => eprintln!(
+                "警告: --mcp-http 格式错误 '{spec}'（格式: 名称 URL [Header=Value ...]）"
+            ),
+        }
+    }
+
+    configs
+}
+
+/// 解析 YAML 配置文件，返回 McpServerConfig 列表。
+fn load_mcp_config_file(path: &str) -> Result<Vec<McpServerConfig>, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    let file: McpConfigFile = serde_yaml::from_str(&content)?;
+
+    let configs = file
+        .servers
+        .into_iter()
+        .map(|def| match def.transport {
+            McpTransportYaml::Stdio(s) => McpServerConfig {
+                name: def.name,
+                transport: TransportConfig::Stdio {
+                    command: s.command,
+                    args: s.args,
+                    env: s.env.into_iter().collect(),
+                },
+            },
+            McpTransportYaml::Http(h) => McpServerConfig {
+                name: def.name,
+                transport: TransportConfig::Http {
+                    base_url: h.url,
+                    headers: h.headers,
+                },
+            },
+        })
+        .collect();
+
+    Ok(configs)
+}
+
+/// 解析 stdio 内联格式："名称 命令 [参数...]"
+fn parse_mcp_stdio_spec(spec: &str) -> Option<McpServerConfig> {
+    let mut parts = spec.splitn(3, ' ').map(str::trim);
+    let name = parts.next().filter(|s| !s.is_empty())?;
+    let command = parts.next().filter(|s| !s.is_empty())?;
+    // 剩余部分按空格分割为参数
+    let args: Vec<String> = parts
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+
+    Some(McpServerConfig {
+        name: name.to_string(),
+        transport: TransportConfig::Stdio {
+            command: command.to_string(),
+            args,
+            env: vec![],
+        },
+    })
+}
+
+/// 解析 HTTP 内联格式："名称 URL [Key=Value ...]"
+fn parse_mcp_http_spec(spec: &str) -> Option<McpServerConfig> {
+    let mut parts = spec.splitn(3, ' ').map(str::trim);
+    let name = parts.next().filter(|s| !s.is_empty())?;
+    let url = parts.next().filter(|s| !s.is_empty())?;
+
+    // 额外的 Key=Value 解析为请求头
+    let headers: HashMap<String, String> = parts
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .filter_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            // 支持 Bearer_token 格式（下划线替换为空格）
+            Some((k.to_string(), v.replace('_', " ")))
+        })
+        .collect();
+
+    Some(McpServerConfig {
+        name: name.to_string(),
+        transport: TransportConfig::Http {
+            base_url: url.to_string(),
+            headers,
+        },
+    })
+}
+
+fn describe_transport(transport: &TransportConfig) -> String {
+    match transport {
+        TransportConfig::Stdio { command, .. } => format!("stdio: {command}"),
+        TransportConfig::Http { base_url, .. } => {
+            // 只取 host:port 部分，避免太长
+            let short = base_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or(base_url);
+            format!("http: {short}")
+        }
+    }
+}
+
+// ── 压缩器工厂 ────────────────────────────────────────────────────────────────
+
 fn build_compressor(
     kind: &str,
     n: Option<usize>,
@@ -296,7 +556,6 @@ async fn run_single_query(
 
 // ── 管道模式 ──────────────────────────────────────────────────────────────────
 
-/// stdin 非 TTY 时进入管道模式：每行作为一次查询，结果输出到 stdout。
 async fn run_pipe_mode(
     agent: &mut ReactAgent,
     no_stream: bool,
@@ -329,6 +588,7 @@ async fn run_interactive(
     agent: &mut ReactAgent,
     cli: &Cli,
     http: &Arc<Client>,
+    mcp: &McpManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut rl = DefaultEditor::new()?;
     let history_path = home_dir().map(|h| h.join(".echo_agent_history"));
@@ -347,7 +607,7 @@ async fn run_interactive(
                     continue;
                 }
 
-                // 解析命令名和参数（命令以 / 开头）
+                // 解析命令名和参数
                 let (cmd, arg) = if input.starts_with('/') {
                     match input.splitn(2, ' ').collect::<Vec<_>>().as_slice() {
                         [c, a] => (*c, a.trim()),
@@ -360,23 +620,19 @@ async fn run_interactive(
                 };
 
                 match cmd {
-                    // ── 退出 ────────────────────────────────────────────────
                     "/quit" | "/exit" | "/q" => {
                         println!("\n再见！");
                         break;
                     }
-                    // ── 帮助 ────────────────────────────────────────────────
                     "/help" | "/h" => {
                         print_help();
                         continue;
                     }
-                    // ── 清屏 ────────────────────────────────────────────────
                     "/clear" | "/cls" => {
                         print!("\x1B[2J\x1B[1;1H");
                         io::stdout().flush().ok();
                         continue;
                     }
-                    // ── 模型查看/切换 ──────────────────────────────────────
                     "/model" => {
                         if arg.is_empty() {
                             println!("当前模型: {}\n", agent.model_name());
@@ -386,18 +642,15 @@ async fn run_interactive(
                         }
                         continue;
                     }
-                    // ── 系统提示词 ─────────────────────────────────────────
                     "/system" => {
                         println!("系统提示词:\n{}\n", agent.system_prompt());
                         continue;
                     }
-                    // ── 上下文统计 ─────────────────────────────────────────
                     "/ctx" | "/context" => {
                         let (count, tokens) = agent.context_stats();
                         println!("上下文: {} 条消息  /  ~{} tokens\n", count, tokens);
                         continue;
                     }
-                    // ── 列出工具 ───────────────────────────────────────────
                     "/tools" => {
                         let tools = agent.list_tools();
                         if tools.is_empty() {
@@ -411,7 +664,6 @@ async fn run_interactive(
                         }
                         continue;
                     }
-                    // ── 列出技能 ───────────────────────────────────────────
                     "/skills" => {
                         let skills = agent.list_skills();
                         if skills.is_empty() {
@@ -428,26 +680,33 @@ async fn run_interactive(
                         }
                         continue;
                     }
-                    // ── 重置上下文 ─────────────────────────────────────────
+                    "/mcp" => {
+                        print_mcp_status(mcp);
+                        continue;
+                    }
                     "/reset" => {
                         agent.reset();
                         println!("上下文已重置，仅保留系统提示词。\n");
                         continue;
                     }
-                    // ── 压缩（需要 async，在 match 外处理） ───────────────
                     "/compress" => {
                         let (strategy, keep_n) = parse_compress_args(arg);
-                        run_compress(agent, &strategy, keep_n, &cli.compressor, &cli.model, http)
-                            .await;
+                        run_compress(
+                            agent,
+                            &strategy,
+                            keep_n,
+                            &cli.compressor,
+                            &cli.model,
+                            http,
+                        )
+                        .await;
                         println!();
                         continue;
                     }
-                    // ── 未知命令 ───────────────────────────────────────────
                     c if c.starts_with('/') => {
                         println!("未知命令: {c}（输入 /help 查看帮助）\n");
                         continue;
                     }
-                    // ── 普通对话 ───────────────────────────────────────────
                     _ => {}
                 }
 
@@ -495,6 +754,37 @@ async fn run_interactive(
     Ok(())
 }
 
+// ── /mcp 命令 ─────────────────────────────────────────────────────────────────
+
+fn print_mcp_status(mcp: &McpManager) {
+    let names = mcp.server_names();
+    if names.is_empty() {
+        println!("未连接任何 MCP 服务端。");
+        println!("启动时使用 --mcp 或 --mcp-stdio / --mcp-http 接入服务端。\n");
+        return;
+    }
+
+    println!("已连接 MCP 服务端 ({}):", names.len());
+    for name in &names {
+        if let Some(client) = mcp.get_client(name) {
+            let tools = client.tools();
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            println!("  • {}  —  {} 个工具", name, tools.len());
+            if !tool_names.is_empty() {
+                // 最多展示 8 个工具名，超出显示省略
+                let preview: Vec<&str> = tool_names.iter().copied().take(8).collect();
+                let suffix = if tool_names.len() > 8 {
+                    format!("… (+{})", tool_names.len() - 8)
+                } else {
+                    String::new()
+                };
+                println!("    工具: {}{}", preview.join(", "), suffix);
+            }
+        }
+    }
+    println!();
+}
+
 // ── /compress 命令处理 ────────────────────────────────────────────────────────
 
 fn parse_compress_args(arg: &str) -> (String, Option<usize>) {
@@ -519,7 +809,6 @@ async fn run_compress(
         return;
     }
 
-    // 解析策略：无参数时使用 CLI 默认值
     let (kind, n) = if strategy.is_empty() {
         parse_compressor_spec(default_compressor)
     } else {
@@ -530,9 +819,7 @@ async fn run_compress(
     println!(
         "正在压缩… (策略: {}{}，压缩前: {} 条 / ~{} tokens)",
         kind,
-        effective_n
-            .map(|n| format!(":{n}"))
-            .unwrap_or_default(),
+        effective_n.map(|n| format!(":{n}")).unwrap_or_default(),
         before_count,
         before_tokens
     );
@@ -571,7 +858,6 @@ async fn stream_execute(
     task: &str,
     show_ctx_stats: bool,
 ) -> Result<(), ReactError> {
-    // 先消费完 stream（持有 agent 的可变借用），再在 stream 丢弃后读 stats
     let result = stream_run(agent, task).await;
     if show_ctx_stats {
         let (count, tokens) = agent.context_stats();
@@ -625,7 +911,7 @@ async fn stream_run(agent: &mut ReactAgent, task: &str) -> Result<(), ReactError
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
-fn print_banner(cli: &Cli, tools: &[&str]) {
+fn print_banner(cli: &Cli, tools: &[&str], mcp: &McpManager) {
     let tools_str = if tools.is_empty() {
         "无（纯对话模式）".to_string()
     } else {
@@ -639,12 +925,34 @@ fn print_banner(cli: &Cli, tools: &[&str]) {
             None => format!("{}（仅手动 /compress 触发）", cli.compressor),
         }
     };
+
+    // MCP 摘要
+    let mcp_names = mcp.server_names();
+    let mcp_str: Option<String> = if mcp_names.is_empty() {
+        None
+    } else {
+        let parts: Vec<String> = mcp_names
+            .iter()
+            .map(|name| {
+                let count = mcp
+                    .get_client(name)
+                    .map(|c| c.tools().len())
+                    .unwrap_or(0);
+                format!("{name}({count})")
+            })
+            .collect();
+        Some(parts.join(", "))
+    };
+
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║              Echo Agent  ——  交互式 AI 终端              ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
     println!("  模型    : {}", cli.model);
     println!("  工具    : {}", tools_str);
+    if let Some(ref mcp_info) = mcp_str {
+        println!("  MCP     : {}", mcp_info);
+    }
     println!("  压缩    : {}", compress_str);
     if cli.skills_dir.is_some() {
         println!("  技能目录: {}", cli.skills_dir.as_deref().unwrap_or(""));
@@ -660,13 +968,14 @@ fn print_help() {
     println!("    /model [名称]          查看或切换模型（如 /model qwen3-max）");
     println!("    /tools                 列出已注册的工具");
     println!("    /skills                列出已安装的技能");
+    println!("    /mcp                   查看已连接的 MCP 服务端和工具");
     println!("    /ctx                   显示上下文消息数与 token 估算");
     println!("    /reset                 重置对话（清空历史，保留系统提示词）");
     println!("    /clear  /cls           清屏");
     println!("    /quit  /exit           退出程序");
     println!();
     println!("  压缩命令:");
-    println!("    /compress              使用默认策略（summary）压缩上下文");
+    println!("    /compress              使用默认策略压缩上下文");
     println!("    /compress summary [N]  摘要压缩，保留最近 N 条（默认 6）");
     println!("    /compress sliding [N]  滑动窗口，保留最近 N 条（默认 20）");
     println!("    /compress hybrid  [N]  混合压缩（滑动+摘要），窗口 N（默认 10）");
