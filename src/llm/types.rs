@@ -178,3 +178,55 @@ pub struct Usage {
     #[serde(default)]
     total_tokens: Option<u32>,
 }
+
+// ── 流式响应类型 ──────────────────────────────────────────────────────────────
+
+/// SSE 流式响应的单个 chunk
+#[derive(Debug, Deserialize, Clone)]
+pub struct ChatCompletionChunk {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub choices: Vec<ChunkChoice>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ChunkChoice {
+    pub delta: DeltaMessage,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+    #[serde(default)]
+    pub index: u32,
+}
+
+/// 流式响应中的增量消息体
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DeltaMessage {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+/// 流式工具调用的增量片段
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeltaToolCall {
+    pub index: u32,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(rename = "type", default)]
+    pub call_type: Option<String>,
+    #[serde(default)]
+    pub function: Option<DeltaFunctionCall>,
+}
+
+/// 流式函数调用的增量片段（name 和 arguments 逐步追加）
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DeltaFunctionCall {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
+}

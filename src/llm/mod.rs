@@ -3,10 +3,13 @@ pub mod config;
 pub mod types;
 
 use crate::error::{ReactError, Result};
-use crate::llm::client::post;
+use crate::llm::client::{post, stream_post};
 use crate::llm::config::{Config, ModelConfig};
-use crate::llm::types::{ChatCompletionRequest, ChatCompletionResponse, Message, ToolDefinition};
+use crate::llm::types::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message, ToolDefinition,
+};
 use async_trait::async_trait;
+use futures::Stream;
 use reqwest::Client;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
@@ -52,6 +55,32 @@ pub async fn chat(
 
     let header_map = assemble_req_header(&model)?;
     post(client, &request_body, header_map, model.baseurl.as_str()).await
+}
+
+/// 流式 chat 入口，返回 SSE chunk 流
+pub async fn stream_chat(
+    client: Arc<Client>,
+    model_name: &str,
+    messages: Vec<Message>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    tools: Option<Vec<ToolDefinition>>,
+    tool_choice: Option<String>,
+) -> Result<impl Stream<Item = Result<ChatCompletionChunk>>> {
+    let model = Config::get_model(model_name)?;
+    let request_body = ChatCompletionRequest {
+        model: model.model.clone(),
+        messages,
+        temperature,
+        max_tokens,
+        stream: Some(true),
+        tools,
+        tool_choice,
+    };
+
+    let header_map = assemble_req_header(&model)?;
+    let url = model.baseurl.clone();
+    stream_post(client, request_body, header_map, url).await
 }
 
 /// 为压缩模块等内部组件提供的轻量 LLM 调用接口

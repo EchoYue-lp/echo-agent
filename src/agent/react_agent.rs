@@ -1,10 +1,10 @@
-use crate::agent::Agent;
 pub use crate::agent::config::{AgentConfig, AgentRole};
+use crate::agent::{Agent, AgentEvent};
 use crate::compression::{ContextCompressor, ContextManager};
 use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::human_loop::HumanApprovalManager;
-use crate::llm::chat;
-use crate::llm::types::Message;
+use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
+use crate::llm::{chat, stream_chat};
 use crate::skills::external::{LoadSkillResourceTool, SkillLoader};
 use crate::skills::{Skill, SkillInfo, SkillManager};
 use crate::tasks::TaskManager;
@@ -18,7 +18,9 @@ use crate::tools::builtin::task::{
 use crate::tools::builtin::think::ThinkTool;
 use crate::tools::{Tool, ToolManager, ToolParameters};
 use async_trait::async_trait;
+use futures::StreamExt;
 use futures::future::join_all;
+use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -364,6 +366,155 @@ impl Agent for ReactAgent {
         } else {
             self.run_direct(task).await
         }
+    }
+
+    async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+        let task = task.to_string();
+        let stream = async_stream::try_stream! {
+            let agent = self.config.agent_name.clone();
+            self.reset_messages();
+            self.context.push(Message::user(task));
+
+            info!(agent = %agent, "🌊 Agent 开始流式执行任务");
+
+            for iteration in 0..self.config.max_iterations {
+                debug!(agent = %agent, iteration = iteration + 1, "--- 流式迭代 ---");
+
+                let messages = self.context.prepare(None).await?;
+                let tools = self.tool_manager.to_openai_tools();
+
+                let mut llm_stream = Box::pin(
+                    stream_chat(
+                        self.client.clone(),
+                        &self.config.model_name,
+                        messages,
+                        Some(0.7),
+                        Some(8192u32),
+                        Some(tools),
+                        None,
+                    )
+                    .await?,
+                );
+
+                // 累积本轮 LLM 响应
+                let mut content_buffer = String::new();
+                // index -> (id, name, accumulated_arguments)
+                let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
+                let mut has_tool_calls = false;
+
+                while let Some(chunk_result) = llm_stream.next().await {
+                    let chunk = chunk_result?;
+
+                    if let Some(choice) = chunk.choices.first() {
+                        // 文本 token 增量
+                        if let Some(content) = &choice.delta.content {
+                            if !content.is_empty() {
+                                content_buffer.push_str(content);
+                                yield AgentEvent::Token(content.clone());
+                            }
+                        }
+
+                        // 工具调用增量（逐 chunk 拼接 arguments）
+                        if let Some(delta_calls) = &choice.delta.tool_calls {
+                            has_tool_calls = true;
+                            for dc in delta_calls {
+                                let entry = tool_call_map
+                                    .entry(dc.index)
+                                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                if let Some(id) = &dc.id {
+                                    if !id.is_empty() {
+                                        entry.0 = id.clone();
+                                    }
+                                }
+                                if let Some(f) = &dc.function {
+                                    if let Some(name) = &f.name {
+                                        // 某些 API 在后续 chunk 里会重复发 name=""，跳过空值避免覆盖
+                                        if !name.is_empty() {
+                                            entry.1 = name.clone();
+                                        }
+                                    }
+                                    if let Some(args) = &f.arguments {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── 处理本轮结果 ──────────────────────────────────────────
+
+                if has_tool_calls {
+                    // 按 index 排序，保持工具调用顺序一致
+                    let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
+                    sorted_indices.sort();
+
+                    let mut msg_tool_calls: Vec<LlmToolCall> = Vec::new();
+                    let mut steps: Vec<(String, String, Value)> = Vec::new(); // (id, name, args)
+
+                    for idx in &sorted_indices {
+                        let (id, name, args_str) = &tool_call_map[idx];
+                        let args: Value =
+                            serde_json::from_str(args_str).unwrap_or(Value::Object(Default::default()));
+
+                        yield AgentEvent::ToolCall {
+                            name: name.clone(),
+                            args: args.clone(),
+                        };
+
+                        msg_tool_calls.push(LlmToolCall {
+                            id: id.clone(),
+                            call_type: "function".to_string(),
+                            function: FunctionCall {
+                                name: name.clone(),
+                                arguments: args_str.clone(),
+                            },
+                        });
+                        steps.push((id.clone(), name.clone(), args));
+                    }
+
+                    // 将 assistant 的工具调用消息写入上下文
+                    self.context.push(Message::assistant_with_tools(msg_tool_calls));
+
+                    let mut done = false;
+                    for (tool_call_id, function_name, arguments) in steps {
+                        let result = self.execute_tool(&function_name, &arguments).await?;
+
+                        yield AgentEvent::ToolResult {
+                            name: function_name.clone(),
+                            output: result.clone(),
+                        };
+
+                        if function_name == TOOL_FINAL_ANSWER {
+                            info!(agent = %agent, "🏁 流式 Agent 执行完毕");
+                            yield AgentEvent::FinalAnswer(result);
+                            done = true;
+                            break;
+                        }
+
+                        self.context
+                            .push(Message::tool_result(tool_call_id, function_name, result));
+                    }
+
+                    if done {
+                        return;
+                    }
+                } else if !content_buffer.is_empty() {
+                    // 纯文本响应视为最终答案
+                    self.context.push(Message::assistant(content_buffer.clone()));
+                    yield AgentEvent::FinalAnswer(content_buffer);
+                    return;
+                } else {
+                    Err(ReactError::Agent(AgentError::NoResponse))?;
+                }
+            }
+
+            Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+                self.config.max_iterations,
+            )))?;
+        };
+
+        Ok(Box::pin(stream))
     }
 }
 
