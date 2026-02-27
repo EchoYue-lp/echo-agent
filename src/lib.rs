@@ -22,7 +22,7 @@ pub mod prelude {
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
     pub use crate::skills::{
         Skill, SkillInfo, SkillManager,
-        builtin::{CalculatorSkill, FileSystemSkill, WeatherSkill},
+        builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
         external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
     };
     pub use crate::tools::{Tool, ToolParameters, ToolResult};

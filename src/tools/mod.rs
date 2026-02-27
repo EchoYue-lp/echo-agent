@@ -1,6 +1,7 @@
 pub(crate) mod builtin;
 pub mod files;
 pub mod others;
+pub mod shell;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;

@@ -1,0 +1,6 @@
+/target
+/.idea
+/.vscode
+/.classpath
+.env
+/Cargo.lock
