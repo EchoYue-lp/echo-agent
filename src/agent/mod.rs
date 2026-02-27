@@ -1,4 +1,6 @@
-use crate::error::Result;
+use crate::agent::react_agent::StepType;
+use crate::error::{ReactError, Result};
+use crate::llm::types::Message;
 use async_trait::async_trait;
 pub use config::{AgentConfig, AgentRole};
 use futures::stream::BoxStream;
@@ -32,4 +34,15 @@ pub trait Agent: Send + Sync {
 
     /// 流式执行方法
     async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>;
+}
+
+#[async_trait]
+pub trait AgentCallback: Send + Sync {
+    async fn on_think_start(&self, _agent: &str, _messages: &[Message]) {}
+    async fn on_think_end(&self, _agent: &str, _steps: &[StepType]) {}
+    async fn on_tool_start(&self, _agent: &str, _tool: &str, _args: &Value) {}
+    async fn on_tool_end(&self, _agent: &str, _tool: &str, _result: &str) {}
+    async fn on_tool_error(&self, _agent: &str, _tool: &str, _err: &ReactError) {}
+    async fn on_final_answer(&self, _agent: &str, _answer: &str) {}
+    async fn on_iteration(&self, _agent: &str, _iteration: usize) {}
 }

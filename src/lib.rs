@@ -10,7 +10,7 @@ pub mod tools;
 
 pub mod prelude {
     pub use crate::agent::react_agent::ReactAgent;
-    pub use crate::agent::{Agent, AgentConfig, AgentRole};
+    pub use crate::agent::{Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole};
     pub use crate::compression::compressor::{
         DefaultSummaryPrompt, FnSummaryPrompt, HybridCompressor, SlidingWindowCompressor,
         SummaryCompressor, SummaryPromptBuilder,

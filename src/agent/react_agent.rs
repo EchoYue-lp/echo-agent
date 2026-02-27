@@ -111,11 +111,17 @@ impl ReactAgent {
     /// 执行工具，保留工具返回的真实错误信息
     pub(crate) async fn execute_tool(&self, tool_name: &str, input: &Value) -> Result<String> {
         let agent = &self.config.agent_name;
+        let callbacks = self.config.callbacks.clone();
         let params: ToolParameters = if let Value::Object(map) = input {
             map.clone().into_iter().collect()
         } else {
             HashMap::new()
         };
+
+        // 触发 on_tool_start 回调
+        for cb in &callbacks {
+            cb.on_tool_start(agent, tool_name, input).await;
+        }
 
         info!(agent = %agent, tool = %tool_name, "🔧 开始执行工具");
         debug!(agent = %agent, tool = %tool_name, params = %input, "工具参数详情");
@@ -141,14 +147,23 @@ impl ReactAgent {
         if result.success {
             info!(agent = %agent, tool = %tool_name, "📤 工具执行成功");
             debug!(agent = %agent, tool = %tool_name, output = %result.output, "工具返回详情");
+            // 触发 on_tool_end 回调
+            for cb in &callbacks {
+                cb.on_tool_end(agent, tool_name, &result.output).await;
+            }
             Ok(result.output)
         } else {
             let error_msg = result.error.unwrap_or_else(|| "工具执行失败".to_string());
             warn!(agent = %agent, tool = %tool_name, error = %error_msg, "💥 工具执行失败");
-            Err(ReactError::from(ToolError::ExecutionFailed {
+            let err = ReactError::from(ToolError::ExecutionFailed {
                 tool: tool_name.to_string(),
                 message: error_msg,
-            }))
+            });
+            // 触发 on_tool_error 回调
+            for cb in &callbacks {
+                cb.on_tool_error(agent, tool_name, &err).await;
+            }
+            Err(err)
         }
     }
 
@@ -158,12 +173,18 @@ impl ReactAgent {
     /// 再将压缩后的消息列表传给 LLM；LLM 的响应追加回 context。
     pub(crate) async fn think(&mut self) -> Result<Vec<StepType>> {
         let agent = self.config.agent_name.clone();
+        let callbacks = self.config.callbacks.clone();
         let mut res = Vec::new();
 
         debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM 思考中...");
 
         // 自动压缩：超过 token_limit 时触发配置好的压缩器
         let messages = self.context.prepare(None).await?;
+
+        // 触发 on_think_start 回调
+        for cb in &callbacks {
+            cb.on_think_start(&agent, &messages).await;
+        }
 
         let tools = self.tool_manager.to_openai_tools();
         let response = chat(
@@ -208,6 +229,11 @@ impl ReactAgent {
             self.context.push(message.clone());
             debug!(agent = %agent, "🧠 LLM 返回文本响应");
             res.push(StepType::Thought(content.to_string()));
+        }
+
+        // 触发 on_think_end 回调
+        for cb in &callbacks {
+            cb.on_think_end(&agent, &res).await;
         }
 
         Ok(res)
@@ -295,6 +321,7 @@ impl ReactAgent {
     /// 直接执行模式（无规划），复用 `process_steps` 以获得并行工具调用能力
     pub(crate) async fn run_direct(&mut self, task: &str) -> Result<String> {
         let agent = self.config.agent_name.clone();
+        let callbacks = self.config.callbacks.clone();
         self.reset_messages();
 
         info!(agent = %agent, "🧠 Agent 开始执行任务");
@@ -309,6 +336,11 @@ impl ReactAgent {
         self.context.push(Message::user(task.to_string()));
 
         for iteration in 0..self.config.max_iterations {
+            // 触发 on_iteration 回调
+            for cb in &callbacks {
+                cb.on_iteration(&agent, iteration).await;
+            }
+
             debug!(agent = %agent, iteration = iteration + 1, "--- 迭代 ---");
 
             let steps = self.think().await?;
@@ -318,6 +350,10 @@ impl ReactAgent {
             }
 
             if let Some(answer) = self.process_steps(steps).await? {
+                // 触发 on_final_answer 回调
+                for cb in &callbacks {
+                    cb.on_final_answer(&agent, &answer).await;
+                }
                 info!(agent = %agent, "🏁 Agent 执行完毕");
                 return Ok(answer);
             }
@@ -372,15 +408,27 @@ impl Agent for ReactAgent {
         let task = task.to_string();
         let stream = async_stream::try_stream! {
             let agent = self.config.agent_name.clone();
+            let callbacks = self.config.callbacks.clone();
             self.reset_messages();
             self.context.push(Message::user(task));
 
             info!(agent = %agent, "🌊 Agent 开始流式执行任务");
 
             for iteration in 0..self.config.max_iterations {
+                // 触发 on_iteration 回调
+                for cb in &callbacks {
+                    cb.on_iteration(&agent, iteration).await;
+                }
+
                 debug!(agent = %agent, iteration = iteration + 1, "--- 流式迭代 ---");
 
                 let messages = self.context.prepare(None).await?;
+
+                // 触发 on_think_start 回调
+                for cb in &callbacks {
+                    cb.on_think_start(&agent, &messages).await;
+                }
+
                 let tools = self.tool_manager.to_openai_tools();
 
                 let mut llm_stream = Box::pin(
@@ -473,6 +521,20 @@ impl Agent for ReactAgent {
                         steps.push((id.clone(), name.clone(), args));
                     }
 
+                    // 触发 on_think_end 回调（工具调用路径）
+                    {
+                        let think_steps: Vec<StepType> = steps.iter().map(|(id, name, args)| {
+                            StepType::Call {
+                                tool_call_id: id.clone(),
+                                function_name: name.clone(),
+                                arguments: args.clone(),
+                            }
+                        }).collect();
+                        for cb in &callbacks {
+                            cb.on_think_end(&agent, &think_steps).await;
+                        }
+                    }
+
                     // 将 assistant 的工具调用消息写入上下文
                     self.context.push(Message::assistant_with_tools(msg_tool_calls));
 
@@ -486,6 +548,10 @@ impl Agent for ReactAgent {
                         };
 
                         if function_name == TOOL_FINAL_ANSWER {
+                            // 触发 on_final_answer 回调
+                            for cb in &callbacks {
+                                cb.on_final_answer(&agent, &result).await;
+                            }
                             info!(agent = %agent, "🏁 流式 Agent 执行完毕");
                             yield AgentEvent::FinalAnswer(result);
                             done = true;
@@ -501,6 +567,15 @@ impl Agent for ReactAgent {
                     }
                 } else if !content_buffer.is_empty() {
                     // 纯文本响应视为最终答案
+                    // 触发 on_think_end 回调（纯文本路径）
+                    let think_steps = vec![StepType::Thought(content_buffer.clone())];
+                    for cb in &callbacks {
+                        cb.on_think_end(&agent, &think_steps).await;
+                    }
+                    // 触发 on_final_answer 回调
+                    for cb in &callbacks {
+                        cb.on_final_answer(&agent, &content_buffer).await;
+                    }
                     self.context.push(Message::assistant(content_buffer.clone()));
                     yield AgentEvent::FinalAnswer(content_buffer);
                     return;
@@ -664,6 +739,11 @@ impl ReactAgent {
 
     pub fn set_model(&mut self, model_name: &str) {
         self.config.model_name = model_name.to_string();
+    }
+
+    /// 运行时注册事件回调
+    pub fn add_callback(&mut self, callback: std::sync::Arc<dyn crate::agent::AgentCallback>) {
+        self.config.callbacks.push(callback);
     }
 
     // ── 外部 Skill 文件系统加载 ───────────────────────────────────────────────

@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use crate::agent::AgentCallback;
+
 /// Agent 角色：区分编排者和执行者
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentRole {
@@ -38,6 +41,8 @@ pub struct AgentConfig {
     pub(crate) enable_subagent: bool,
     /// 上下文 token 上限，超过时触发压缩（`usize::MAX` 表示不限制）
     pub(crate) token_limit: usize,
+    /// 事件回调系统
+    pub callbacks: Vec<Arc<dyn AgentCallback>>,
 }
 
 impl AgentConfig {
@@ -55,6 +60,7 @@ impl AgentConfig {
             enable_human_in_loop: false,
             enable_subagent: false,
             token_limit: usize::MAX,
+            callbacks: Vec::new(),
         }
     }
 
@@ -137,6 +143,12 @@ impl AgentConfig {
     /// 需配合 `ReactAgent::set_compressor` 一起使用，否则仅估算不压缩。
     pub fn token_limit(mut self, limit: usize) -> Self {
         self.token_limit = limit;
+        self
+    }
+
+    /// 注册一个事件回调，支持链式调用
+    pub fn with_callback(mut self, callback: Arc<dyn AgentCallback>) -> Self {
+        self.callbacks.push(callback);
         self
     }
 }
