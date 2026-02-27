@@ -606,6 +606,27 @@ impl ReactAgent {
         self.context.set_compressor(compressor);
     }
 
+    /// 重置对话上下文，仅保留系统提示词，开启新一轮对话
+    pub fn reset(&mut self) {
+        self.reset_messages();
+    }
+
+    /// 返回当前上下文的（消息条数，估算 token 数）
+    pub fn context_stats(&self) -> (usize, usize) {
+        (
+            self.context.messages().len(),
+            self.context.token_estimate(),
+        )
+    }
+
+    /// 使用指定压缩器强制压缩上下文（不影响已安装的默认压缩器）
+    pub async fn force_compress_with(
+        &mut self,
+        compressor: &dyn crate::compression::ContextCompressor,
+    ) -> crate::error::Result<crate::compression::ForceCompressStats> {
+        self.context.force_compress_with(compressor).await
+    }
+
     pub fn list_tools(&self) -> Vec<&str> {
         self.tool_manager.list_tools()
     }

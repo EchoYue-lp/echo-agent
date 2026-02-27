@@ -16,7 +16,7 @@ pub mod prelude {
         SummaryCompressor, SummaryPromptBuilder,
     };
     pub use crate::compression::{
-        CompressionInput, CompressionOutput, ContextCompressor, ContextManager,
+        CompressionInput, CompressionOutput, ContextCompressor, ContextManager, ForceCompressStats,
     };
     pub use crate::error::Result;
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};

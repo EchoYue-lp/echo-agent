@@ -1,5 +1,6 @@
 pub mod compressor;
 
+use crate::compression::compressor::SlidingWindowCompressor;
 use crate::error::Result;
 use crate::llm::types::Message;
 use async_trait::async_trait;
@@ -30,6 +31,29 @@ pub struct CompressionOutput {
 #[async_trait]
 pub trait ContextCompressor: Send + Sync {
     async fn compress(&self, input: CompressionInput) -> Result<CompressionOutput>;
+}
+
+/// 允许将 `Box<dyn ContextCompressor>` 直接传给任何接受 `impl ContextCompressor` 的函数，
+/// 无需引入额外的包装枚举。
+#[async_trait]
+impl ContextCompressor for Box<dyn ContextCompressor> {
+    async fn compress(&self, input: CompressionInput) -> Result<CompressionOutput> {
+        (**self).compress(input).await
+    }
+}
+
+/// `force_compress()` 返回的压缩统计信息
+pub struct ForceCompressStats {
+    /// 压缩前消息总数
+    pub before_count: usize,
+    /// 压缩后消息总数
+    pub after_count: usize,
+    /// 被裁剪掉的消息数
+    pub evicted: usize,
+    /// 压缩前估算 token 数
+    pub before_tokens: usize,
+    /// 压缩后估算 token 数
+    pub after_tokens: usize,
 }
 
 /// 上下文管理器：维护完整对话历史，并在 token 超限时自动触发压缩。
@@ -124,6 +148,77 @@ impl ContextManager {
     /// 移除压缩器，恢复为无限制模式
     pub fn remove_compressor(&mut self) {
         self.compressor = None;
+    }
+
+    /// 是否已配置压缩器
+    pub fn has_compressor(&self) -> bool {
+        self.compressor.is_some()
+    }
+
+    /// 强制压缩上下文，无视当前 token 用量是否超限。
+    ///
+    /// - 若已配置压缩器，使用当前压缩器执行；
+    /// - 若未配置，则临时使用 `SlidingWindowCompressor::new(fallback_window)` 执行。
+    pub async fn force_compress(&mut self, fallback_window: usize) -> Result<ForceCompressStats> {
+        let before_count = self.messages.len();
+        let before_tokens = self.token_estimate();
+
+        // 先判断是否有压缩器，分两条路径，避免 borrow 冲突
+        let output = if self.compressor.is_some() {
+            let input = CompressionInput {
+                messages: self.messages.clone(),
+                token_limit: self.token_limit,
+                current_query: None,
+            };
+            self.compressor.as_ref().unwrap().compress(input).await?
+        } else {
+            SlidingWindowCompressor::new(fallback_window)
+                .compress(CompressionInput {
+                    messages: self.messages.clone(),
+                    token_limit: self.token_limit,
+                    current_query: None,
+                })
+                .await?
+        };
+
+        let evicted = output.evicted.len();
+        self.messages = output.messages;
+        Ok(ForceCompressStats {
+            before_count,
+            after_count: self.messages.len(),
+            evicted,
+            before_tokens,
+            after_tokens: self.token_estimate(),
+        })
+    }
+
+    /// 强制使用**指定压缩器**压缩上下文，不影响已安装的压缩器配置。
+    ///
+    /// 适合 `/compress sliding 10` 这类临时覆盖策略的场景。
+    pub async fn force_compress_with(
+        &mut self,
+        compressor: &dyn ContextCompressor,
+    ) -> Result<ForceCompressStats> {
+        let before_count = self.messages.len();
+        let before_tokens = self.token_estimate();
+
+        let output = compressor
+            .compress(CompressionInput {
+                messages: self.messages.clone(),
+                token_limit: self.token_limit,
+                current_query: None,
+            })
+            .await?;
+
+        let evicted = output.evicted.len();
+        self.messages = output.messages;
+        Ok(ForceCompressStats {
+            before_count,
+            after_count: self.messages.len(),
+            evicted,
+            before_tokens,
+            after_tokens: self.token_estimate(),
+        })
     }
 
     /// 更新 system 消息内容
