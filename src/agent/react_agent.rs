@@ -17,7 +17,6 @@ use crate::tools::builtin::plan::PlanTool;
 use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
 };
-use crate::tools::builtin::think::ThinkTool;
 use crate::tools::{Tool, ToolManager, ToolParameters};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -69,9 +68,26 @@ impl ReactAgent {
                 .all(|name| self.tool_manager.get_tool(name).is_some())
     }
 
+    /// 工具调用场景下自动注入的思维链引导语。
+    ///
+    /// 替代原来的 `think` 工具——让模型以文本形式在 content 字段输出推理过程，
+    /// 从而天然产生流式 Token 事件，同时推理内容也进入对话上下文。
+    const COT_INSTRUCTION: &'static str = "在调用工具之前，先用文字简述你的分析思路和执行计划。";
+
     pub fn new(config: AgentConfig) -> Self {
+        // 当工具调用可用且 enable_cot=true 时，自动追加 CoT 引导语
+        let system_prompt = if config.enable_tool && config.enable_cot {
+            format!(
+                "{}\n\n{}",
+                config.system_prompt.trim_end(),
+                Self::COT_INSTRUCTION,
+            )
+        } else {
+            config.system_prompt.clone()
+        };
+
         let context = ContextManager::builder(config.token_limit)
-            .with_system(config.system_prompt.clone())
+            .with_system(system_prompt)
             .build();
 
         let mut tool_manager = ToolManager::new();
@@ -79,7 +95,6 @@ impl ReactAgent {
 
         // 基础工具：所有 agent 共享
         tool_manager.register(Box::new(FinalAnswerTool));
-        tool_manager.register(Box::new(ThinkTool));
 
         let task_manager = Arc::new(RwLock::new(TaskManager::default()));
         let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::default()));
@@ -540,21 +555,12 @@ impl Agent for ReactAgent {
 
                 // 流式模式下的工具列表构建策略：
                 //
-                // 1. enable_tool=false：不传工具，LLM 走纯文本路径，每个 token 都会产生
-                //    AgentEvent::Token 事件，实现真正的流式输出。
                 //
-                // 2. enable_tool=true：传工具但剔除 think。
-                //    think 工具会让 LLM 把推理内容写入工具调用参数（tool_call delta）
-                //    而非 content 字段，导致推理阶段没有 Token 事件。
-                //    去掉 think 后，LLM 以文本流输出推理过程（Token 事件），
-                //    再调用业务工具（ToolCall/ToolResult 事件），流式体验完整。
+                // enable_tool=false：不传工具，LLM 走纯文本路径，Token 事件正常流式。
+                // enable_tool=true：传业务工具（不含 think），LLM 先文本推理（Token 事件）
+                //                   再调用工具（ToolCall/ToolResult 事件）。
                 let tools_for_stream: Option<Vec<_>> = if self.config.enable_tool {
-                    let tools: Vec<_> = self
-                        .tool_manager
-                        .to_openai_tools()
-                        .into_iter()
-                        .filter(|t| t.function.name != "think")
-                        .collect();
+                    let tools = self.tool_manager.to_openai_tools();
                     if tools.is_empty() { None } else { Some(tools) }
                 } else {
                     None

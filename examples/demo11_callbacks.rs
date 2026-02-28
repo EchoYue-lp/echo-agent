@@ -303,8 +303,7 @@ impl AgentCallback for MetricsCallback {
 // ══════════════════════════════════════════════════════════════════════════════
 
 async fn demo_log_callback() -> echo_agent::error::Result<()> {
-    let system = r#"你是一个计算助手，必须通过工具完成所有计算。
-规则：先用 think 梳理步骤，再依次调用工具，最后用 final_answer 报告结果。"#;
+    let system = "你是一个计算助手，必须通过工具完成所有计算，最后用 final_answer 报告结果。";
 
     let config = AgentConfig::new("qwen3-max", "log_agent", system)
         .enable_tool(true)
@@ -332,8 +331,7 @@ async fn demo_log_callback() -> echo_agent::error::Result<()> {
 // ══════════════════════════════════════════════════════════════════════════════
 
 async fn demo_metrics_callback() -> echo_agent::error::Result<()> {
-    let system = r#"你是一个计算助手，必须通过工具完成所有计算。
-规则：先用 think 梳理步骤，再依次调用工具，最后用 final_answer 报告结果。"#;
+    let system = "你是一个计算助手，必须通过工具完成所有计算，最后用 final_answer 报告结果。";
 
     let metrics = MetricsCallback::new();
 
@@ -366,8 +364,7 @@ async fn demo_metrics_callback() -> echo_agent::error::Result<()> {
 async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
     println!("  同时挂载 LogCallback + MetricsCallback，通过 execute_stream 执行\n");
 
-    let system = r#"你是一个计算助手，必须通过工具完成所有计算。
-规则：先用 think 梳理步骤，再依次调用工具，最后用 final_answer 报告结果。"#;
+    let system = "你是一个计算助手，必须通过工具完成所有计算，最后用 final_answer 报告结果。";
 
     let metrics = MetricsCallback::new();
 

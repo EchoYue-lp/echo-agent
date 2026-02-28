@@ -1,6 +1,6 @@
 pub mod client;
 pub mod server_config;
-pub mod tool_adapter;
+pub(crate) mod tool_adapter;
 pub mod transport;
 pub mod types;
 

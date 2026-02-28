@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let system_prompt = r#"你是一个出差费用核算助手，需要综合运用以下所有能力完成任务。
 
 **工作流程**：
-1. 先用 think 分析费用结构，再用 plan + create_task 将各费用类别拆成并行子任务
+1. 先分析费用结构，再用 plan + create_task 将各费用类别拆成并行子任务
 2. 独立的费用计算任务不设依赖，可以并行执行；汇总类任务依赖所有费用任务
 3. 使用 add / subtract / multiply 工具完成计算，用 update_task 记录结果
 4. 所有费用算出后，使用 divide 工具计算人均分摊金额

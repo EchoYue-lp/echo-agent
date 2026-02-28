@@ -49,6 +49,12 @@ pub struct AgentConfig {
     pub(crate) llm_retry_delay_ms: u64,
     /// 工具执行失败时将错误信息回传给 LLM，而非直接让 Agent 失败（默认 true）
     pub(crate) tool_error_feedback: bool,
+    /// 启用思维链（CoT）系统提示注入（默认 true）。
+    ///
+    /// 当 `enable_tool=true` 且本字段为 `true` 时，框架自动在系统提示末尾追加一行
+    /// 引导模型先推理再行动的指令，无需在每个 Agent 的 system_prompt 中手写。
+    /// 设为 `false` 可完全由调用方自行控制推理引导。
+    pub(crate) enable_cot: bool,
 }
 
 impl AgentConfig {
@@ -70,6 +76,7 @@ impl AgentConfig {
             llm_max_retries: 3,
             llm_retry_delay_ms: 500,
             tool_error_feedback: true,
+            enable_cot: true,
         }
     }
 
@@ -192,5 +199,13 @@ impl AgentConfig {
     /// 读取工具错误回传开关状态
     pub fn get_tool_error_feedback(&self) -> bool {
         self.tool_error_feedback
+    }
+
+    /// 启用/禁用思维链（CoT）系统提示自动注入（默认 true）。
+    ///
+    /// 禁用后，框架不会追加任何推理引导，完全由 system_prompt 控制。
+    pub fn enable_cot(mut self, enabled: bool) -> Self {
+        self.enable_cot = enabled;
+        self
     }
 }

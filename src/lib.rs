@@ -29,5 +29,6 @@ pub mod prelude {
         builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
         external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
     };
+    pub use crate::tools::builtin::think::ThinkTool;
     pub use crate::tools::{Tool, ToolParameters, ToolResult};
 }

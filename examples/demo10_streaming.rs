@@ -196,9 +196,8 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
     let system_prompt = r#"你是一个计算助手，必须通过工具完成所有计算。
 
 规则：
-1. 先用 think 工具梳理解题步骤
-2. 按顺序调用 add/subtract/multiply/divide 执行计算
-3. 所有步骤完成后，用 final_answer 报告完整计算过程和最终结果
+1. 按顺序调用 add/subtract/multiply/divide 执行计算
+2. 所有步骤完成后，用 final_answer 报告完整计算过程和最终结果
 "#;
 
     let config = AgentConfig::new("qwen3-max", "stream_math_agent", system_prompt)

@@ -10,9 +10,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let system_prompt = r#"你是一个天气助手，本示例用于测试 human-in-loop 交互流程。
 
 核心规则：
-1. 在调用任何操作工具之前，必须先调用 think 工具。
-2. 在本示例中，必须先调用 human_in_loop 向用户确认城市和日期，再调用 query_weather。
-3. 最终答案必须通过 final_answer 工具输出
+1. 先调用 human_in_loop 向用户确认城市和日期，再调用 query_weather。
+2. 最终答案必须通过 final_answer 工具输出。
 "#;
     let config = AgentConfig::new("deepseek-chat", "human_loop_agent", system_prompt)
         .enable_tool(true)

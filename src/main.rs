@@ -272,8 +272,7 @@ fn build_agent(cli: &Cli, tools: &[&str], http: &Arc<Client>, has_mcp: bool) -> 
     let has_tools = !tools.is_empty() || has_mcp;
 
     let default_system = if has_tools {
-        "你是一个能力全面的 AI 助手，可以使用工具来完成任务。\n\
-         在执行操作前，先用 think 工具整理思路；\n\
+        "你是一个能力全面的 AI 助手，可以使用工具来完成任务。\
          完成后用 final_answer 给出完整的结论。"
     } else {
         "你是一个知识渊博的 AI 助手，用中文简洁、准确地回答用户的问题。"

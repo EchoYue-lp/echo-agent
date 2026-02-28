@@ -14,18 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let system_prompt = r#"你是一个计算助手，本示例只用于测试工具调用。
 
-**核心规则：在调用任何操作工具之前，必须先调用 think 工具！**
+可用工具：add / subtract / multiply / divide - 执行数学计算
 
-可用工具：
-- think: 记录你的推理过程（必须首先调用）
-- add/subtract/multiply/divide: 执行计算
-
-标准流程（本 demo 仅验证工具链路）：
-1. 调用 think(reasoning="我的分析...") 记录思考
-2. 调用实际的操作工具
-3. 得到结果后，再次调用 think 分析结果
-4. 重复直到问题解决
-
+完成后通过 final_answer 报告结果。
 "#;
     let config = AgentConfig::new("qwen3-max", "my_math_agent", system_prompt)
         .enable_tool(true)

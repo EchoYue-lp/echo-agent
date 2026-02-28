@@ -136,7 +136,7 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
 
     // 创建 ReAct Agent 并注册 MCP 工具
     let system_prompt = "你是一个文件操作助手，可以使用 MCP 文件系统工具完成文件读写任务。\
-                         在执行操作前先用 think 工具分析步骤。";
+                         在执行操作前先分析步骤，再依次执行。";
     let config = AgentConfig::new("qwen3-max", "file-agent", system_prompt)
         .enable_tool(true)
         .enable_task(false)

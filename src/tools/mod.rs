@@ -1,4 +1,4 @@
-pub(crate) mod builtin;
+pub mod builtin;
 pub mod files;
 pub mod others;
 pub mod shell;
