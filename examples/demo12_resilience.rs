@@ -27,16 +27,16 @@
 //! ```
 
 use async_trait::async_trait;
-use echo_agent::agent::{Agent, AgentCallback, AgentConfig};
 use echo_agent::agent::react_agent::ReactAgent;
+use echo_agent::agent::react_agent::StepType;
+use echo_agent::agent::{Agent, AgentCallback, AgentConfig};
 use echo_agent::error::ReactError;
 use echo_agent::llm::types::Message;
-use echo_agent::agent::react_agent::StepType;
 use echo_agent::tools::others::math::AddTool;
 use echo_agent::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ── 入口 ──────────────────────────────────────────────────────────────────────
 
@@ -85,7 +85,9 @@ struct BrokenTool;
 
 #[async_trait]
 impl Tool for BrokenTool {
-    fn name(&self) -> &str { "broken_tool" }
+    fn name(&self) -> &str {
+        "broken_tool"
+    }
     fn description(&self) -> &str {
         "模拟损坏的工具，总是返回失败，用于测试错误处理路径"
     }
@@ -127,7 +129,9 @@ impl FlakyTool {
 
 #[async_trait]
 impl Tool for FlakyTool {
-    fn name(&self) -> &str { "weather_api" }
+    fn name(&self) -> &str {
+        "weather_api"
+    }
     fn description(&self) -> &str {
         "查询城市实时天气。服务偶有故障，遇到错误请稍后重试。"
     }
@@ -141,7 +145,8 @@ impl Tool for FlakyTool {
         })
     }
     async fn execute(&self, params: ToolParameters) -> echo_agent::error::Result<ToolResult> {
-        let city = params.get("city")
+        let city = params
+            .get("city")
             .and_then(|v| v.as_str())
             .unwrap_or("未知城市");
 
@@ -150,9 +155,7 @@ impl Tool for FlakyTool {
 
         if remaining > 0 {
             self.fail_remaining.fetch_sub(1, Ordering::Relaxed);
-            println!(
-                "    [FlakyTool] 第 {call_idx} 次调用（city={city}）→ 模拟瞬时故障"
-            );
+            println!("    [FlakyTool] 第 {call_idx} 次调用（city={city}）→ 模拟瞬时故障");
             Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -161,9 +164,7 @@ impl Tool for FlakyTool {
                 )),
             })
         } else {
-            println!(
-                "    [FlakyTool] 第 {call_idx} 次调用（city={city}）→ 成功返回数据"
-            );
+            println!("    [FlakyTool] 第 {call_idx} 次调用（city={city}）→ 成功返回数据");
             Ok(ToolResult {
                 success: true,
                 output: format!("{city}：晴，26°C，东南风 3 级"),
@@ -177,7 +178,9 @@ impl Tool for FlakyTool {
 // 简易日志回调（用于所有 Part）
 // ══════════════════════════════════════════════════════════════════════════════
 
-struct SimpleLog { label: &'static str }
+struct SimpleLog {
+    label: &'static str,
+}
 
 #[async_trait]
 impl AgentCallback for SimpleLog {
@@ -185,20 +188,33 @@ impl AgentCallback for SimpleLog {
         println!("  [{}] 🔄 迭代 {}", self.label, iteration + 1);
     }
     async fn on_tool_start(&self, _agent: &str, tool: &str, args: &Value) {
-        println!("  [{}] 🔧 调用工具: {}  args={}", self.label, tool, compact(args));
+        println!(
+            "  [{}] 🔧 调用工具: {}  args={}",
+            self.label,
+            tool,
+            compact(args)
+        );
     }
     async fn on_tool_end(&self, _agent: &str, tool: &str, result: &str) {
-        println!("  [{}] ✅ 工具成功: {}  result=\"{}\"", self.label, tool, trunc(result, 60));
+        println!(
+            "  [{}] ✅ 工具成功: {}  result=\"{}\"",
+            self.label,
+            tool,
+            trunc(result, 60)
+        );
     }
     async fn on_tool_error(&self, _agent: &str, tool: &str, err: &ReactError) {
         println!("  [{}] ❌ 工具错误: {}  err={}", self.label, tool, err);
     }
     async fn on_think_start(&self, _agent: &str, _messages: &[Message]) {}
     async fn on_think_end(&self, _agent: &str, steps: &[StepType]) {
-        let names: Vec<String> = steps.iter().map(|s| match s {
-            StepType::Thought(_) => "Thought".into(),
-            StepType::Call { function_name, .. } => format!("Call({function_name})"),
-        }).collect();
+        let names: Vec<String> = steps
+            .iter()
+            .map(|s| match s {
+                StepType::Thought(_) => "Thought".into(),
+                StepType::Call { function_name, .. } => format!("Call({function_name})"),
+            })
+            .collect();
         println!("  [{}] 💡 LLM 决策: [{}]", self.label, names.join(", "));
     }
     async fn on_final_answer(&self, _agent: &str, answer: &str) {
@@ -219,7 +235,7 @@ async fn demo_feedback_off() {
     let config = AgentConfig::new("qwen3-max", "agent_no_feedback", system)
         .enable_tool(true)
         .max_iterations(4)
-        .tool_error_feedback(false)                          // ← 关闭
+        .tool_error_feedback(false) // ← 关闭
         .with_callback(Arc::new(SimpleLog { label: "NO-FB" }));
 
     let mut agent = ReactAgent::new(config);
@@ -227,7 +243,10 @@ async fn demo_feedback_off() {
 
     println!("  任务：调用 broken_tool 并报告\n");
 
-    match agent.execute("请调用 broken_tool（input=\"test\"）并报告结果。").await {
+    match agent
+        .execute("请调用 broken_tool（input=\"test\"）并报告结果。")
+        .await
+    {
         Ok(answer) => {
             // 通常不会走到这里
             println!("\n  ⚠️  意外成功（不应发生）: {answer}");
@@ -256,7 +275,7 @@ async fn demo_feedback_on() -> echo_agent::error::Result<()> {
     let config = AgentConfig::new("qwen3-max", "agent_with_feedback", system)
         .enable_tool(true)
         .max_iterations(6)
-        .tool_error_feedback(true)                           // ← 开启（默认值）
+        .tool_error_feedback(true) // ← 开启（默认值）
         .with_callback(Arc::new(SimpleLog { label: "FB-ON" }));
 
     let mut agent = ReactAgent::new(config);
@@ -265,9 +284,9 @@ async fn demo_feedback_on() -> echo_agent::error::Result<()> {
 
     println!("  任务：先调用 broken_tool，失败后换用 add\n");
 
-    let answer = agent.execute(
-        "先调用 broken_tool（input=\"test\"），失败后换用 add 计算 3+4，报告完整过程。"
-    ).await?;
+    let answer = agent
+        .execute("先调用 broken_tool（input=\"test\"），失败后换用 add 计算 3+4，报告完整过程。")
+        .await?;
 
     println!("\n  ✅ 任务成功完成:");
     for line in answer.lines().take(6) {
@@ -296,7 +315,7 @@ async fn demo_flaky_tool() -> echo_agent::error::Result<()> {
     let config = AgentConfig::new("qwen3-max", "agent_flaky", system)
         .enable_tool(true)
         .max_iterations(8)
-        .tool_error_feedback(true)                           // ← 必须开启才能重试
+        .tool_error_feedback(true) // ← 必须开启才能重试
         .with_callback(Arc::new(SimpleLog { label: "FLAKY" }));
 
     let mut agent = ReactAgent::new(config);
@@ -306,7 +325,10 @@ async fn demo_flaky_tool() -> echo_agent::error::Result<()> {
 
     let answer = agent.execute("查询北京的实时天气。").await?;
 
-    println!("\n  ✅ 任务成功完成（共调用工具 {} 次）:", call_count.load(Ordering::Relaxed));
+    println!(
+        "\n  ✅ 任务成功完成（共调用工具 {} 次）:",
+        call_count.load(Ordering::Relaxed)
+    );
     println!("     {answer}");
     Ok(())
 }
@@ -329,12 +351,11 @@ fn demo_llm_retry_config() {
     println!("  JSON 解析失败                ❌ 否");
     println!();
 
-    let config_off = AgentConfig::new("qwen3-max", "retry_off", "")
-        .llm_max_retries(0);   // 不重试
+    let config_off = AgentConfig::new("qwen3-max", "retry_off", "").llm_max_retries(0); // 不重试
 
     let config_on = AgentConfig::new("qwen3-max", "retry_on", "")
-        .llm_max_retries(3)              // 最多重试 3 次
-        .llm_retry_delay_ms(500);        // 首次延迟 500ms，后续指数翻倍
+        .llm_max_retries(3) // 最多重试 3 次
+        .llm_retry_delay_ms(500); // 首次延迟 500ms，后续指数翻倍
 
     println!("  ── llm_max_retries = 0（关闭重试）──");
     println!("     LLM 调用失败 → 立即返回 Err，不等待");
@@ -347,7 +368,10 @@ fn demo_llm_retry_config() {
     println!("     再失败  → 等 2000ms → 重试 3");
     println!("     仍失败  → 返回 Err");
     println!("     max_retries = {}", config_on.get_llm_max_retries());
-    println!("     retry_delay = {}ms", config_on.get_llm_retry_delay_ms());
+    println!(
+        "     retry_delay = {}ms",
+        config_on.get_llm_retry_delay_ms()
+    );
     println!();
     println!("  （实际触发需要遇到网络故障 / 限流等可重试错误）");
 }
@@ -359,17 +383,28 @@ fn demo_llm_retry_config() {
 fn trunc(s: &str, max: usize) -> String {
     let mut chars = s.chars();
     let out: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() { format!("{out}…") } else { out }
+    if chars.next().is_some() {
+        format!("{out}…")
+    } else {
+        out
+    }
 }
 
 fn compact(v: &Value) -> String {
     match v {
-        Value::Object(map) => map.iter()
-            .map(|(k, v)| format!("{k}={}", match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }))
-            .collect::<Vec<_>>().join(", "),
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{k}={}",
+                    match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
         other => other.to_string(),
     }
 }

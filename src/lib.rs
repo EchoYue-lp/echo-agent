@@ -19,6 +19,10 @@ pub mod prelude {
         CompressionInput, CompressionOutput, ContextCompressor, ContextManager, ForceCompressStats,
     };
     pub use crate::error::Result;
+    pub use crate::human_loop::{
+        ConsoleHumanLoopProvider, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
+        WebSocketHumanLoopProvider, WebhookHumanLoopProvider,
+    };
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
     pub use crate::skills::{
         Skill, SkillInfo, SkillManager,

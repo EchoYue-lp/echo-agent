@@ -24,9 +24,9 @@
 //! ```
 
 use async_trait::async_trait;
+use echo_agent::agent::react_agent::ReactAgent;
 use echo_agent::agent::react_agent::StepType;
 use echo_agent::agent::{Agent, AgentCallback, AgentConfig, AgentEvent};
-use echo_agent::agent::react_agent::ReactAgent;
 use echo_agent::error::ReactError;
 use echo_agent::llm::types::Message;
 use echo_agent::tools::others::math::{AddTool, MultiplyTool, SubtractTool};
@@ -93,7 +93,9 @@ struct LogCallback {
 
 impl LogCallback {
     fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into() }
+        Self {
+            label: label.into(),
+        }
     }
 
     fn tag(&self) -> String {
@@ -137,31 +139,31 @@ impl AgentCallback for LogCallback {
     async fn on_tool_start(&self, agent: &str, tool: &str, args: &Value) {
         let args_str = compact_args(args);
         println!(
-            "  {} 🔧 on_tool_start  agent={agent}  tool={tool}  args={args_str}"
-            , self.tag()
+            "  {} 🔧 on_tool_start  agent={agent}  tool={tool}  args={args_str}",
+            self.tag()
         );
     }
 
     async fn on_tool_end(&self, agent: &str, tool: &str, result: &str) {
         let preview = truncate(result, 60);
         println!(
-            "  {} ✅ on_tool_end    agent={agent}  tool={tool}  result=\"{preview}\""
-            , self.tag()
+            "  {} ✅ on_tool_end    agent={agent}  tool={tool}  result=\"{preview}\"",
+            self.tag()
         );
     }
 
     async fn on_tool_error(&self, agent: &str, tool: &str, err: &ReactError) {
         println!(
-            "  {} ❌ on_tool_error  agent={agent}  tool={tool}  err={err}"
-            , self.tag()
+            "  {} ❌ on_tool_error  agent={agent}  tool={tool}  err={err}",
+            self.tag()
         );
     }
 
     async fn on_final_answer(&self, agent: &str, answer: &str) {
         let preview = truncate(answer, 80);
         println!(
-            "  {} 🏁 on_final_answer agent={agent}  answer=\"{preview}\""
-            , self.tag()
+            "  {} 🏁 on_final_answer agent={agent}  answer=\"{preview}\"",
+            self.tag()
         );
     }
 }
@@ -170,13 +172,13 @@ impl AgentCallback for LogCallback {
 
 /// 无侵入地采集 Agent 运行指标，线程安全，可在执行完毕后读取
 struct MetricsCallback {
-    iterations:  AtomicUsize,
-    llm_calls:   AtomicUsize,
-    tool_calls:  AtomicUsize,
+    iterations: AtomicUsize,
+    llm_calls: AtomicUsize,
+    tool_calls: AtomicUsize,
     tool_errors: AtomicUsize,
     /// 用原子 u64 存储 Unix 毫秒时间戳
-    start_ms:    AtomicU64,
-    end_ms:      AtomicU64,
+    start_ms: AtomicU64,
+    end_ms: AtomicU64,
     /// 记录每次工具调用的耗时（毫秒）
     tool_timings: Mutex<Vec<(String, u128)>>,
     /// 每次工具调用的开始时刻
@@ -187,12 +189,12 @@ struct MetricsCallback {
 impl MetricsCallback {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            iterations:  AtomicUsize::new(0),
-            llm_calls:   AtomicUsize::new(0),
-            tool_calls:  AtomicUsize::new(0),
+            iterations: AtomicUsize::new(0),
+            llm_calls: AtomicUsize::new(0),
+            tool_calls: AtomicUsize::new(0),
             tool_errors: AtomicUsize::new(0),
-            start_ms:    AtomicU64::new(0),
-            end_ms:      AtomicU64::new(0),
+            start_ms: AtomicU64::new(0),
+            end_ms: AtomicU64::new(0),
             tool_timings: Mutex::new(Vec::new()),
             tool_start_time: Mutex::new(None),
             tool_start_name: Mutex::new(String::new()),
@@ -202,18 +204,37 @@ impl MetricsCallback {
     fn total_elapsed(&self) -> Duration {
         let s = self.start_ms.load(Ordering::Relaxed);
         let e = self.end_ms.load(Ordering::Relaxed);
-        if s == 0 || e == 0 { Duration::ZERO } else { Duration::from_millis(e - s) }
+        if s == 0 || e == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(e - s)
+        }
     }
 
     fn print_report(&self) {
         println!("  ┌─────────────────────────────────────────┐");
         println!("  │           Metrics Report                │");
         println!("  ├─────────────────────────────────────────┤");
-        println!("  │ 总迭代次数     : {:>5}                   │", self.iterations.load(Ordering::Relaxed));
-        println!("  │ LLM 推理次数   : {:>5}                   │", self.llm_calls.load(Ordering::Relaxed));
-        println!("  │ 工具调用次数   : {:>5}                   │", self.tool_calls.load(Ordering::Relaxed));
-        println!("  │ 工具错误次数   : {:>5}                   │", self.tool_errors.load(Ordering::Relaxed));
-        println!("  │ 总耗时         : {:>5} ms                │", self.total_elapsed().as_millis());
+        println!(
+            "  │ 总迭代次数     : {:>5}                   │",
+            self.iterations.load(Ordering::Relaxed)
+        );
+        println!(
+            "  │ LLM 推理次数   : {:>5}                   │",
+            self.llm_calls.load(Ordering::Relaxed)
+        );
+        println!(
+            "  │ 工具调用次数   : {:>5}                   │",
+            self.tool_calls.load(Ordering::Relaxed)
+        );
+        println!(
+            "  │ 工具错误次数   : {:>5}                   │",
+            self.tool_errors.load(Ordering::Relaxed)
+        );
+        println!(
+            "  │ 总耗时         : {:>5} ms                │",
+            self.total_elapsed().as_millis()
+        );
         println!("  ├─────────────────────────────────────────┤");
         println!("  │ 工具耗时明细：                           │");
         let timings = self.tool_timings.lock().unwrap();
@@ -381,15 +402,30 @@ async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
                 std::io::stdout().flush().ok();
             }
             AgentEvent::ToolCall { name, args } => {
-                if in_token { println!(); in_token = false; }
-                println!("  [AgentEvent] ToolCall   ▶ {name}({})", compact_args(&args));
+                if in_token {
+                    println!();
+                    in_token = false;
+                }
+                println!(
+                    "  [AgentEvent] ToolCall   ▶ {name}({})",
+                    compact_args(&args)
+                );
             }
             AgentEvent::ToolResult { name, output } => {
-                if in_token { println!(); in_token = false; }
-                println!("  [AgentEvent] ToolResult ▶ [{name}] {}", truncate(&output, 60));
+                if in_token {
+                    println!();
+                    in_token = false;
+                }
+                println!(
+                    "  [AgentEvent] ToolResult ▶ [{name}] {}",
+                    truncate(&output, 60)
+                );
             }
             AgentEvent::FinalAnswer(ans) => {
-                if in_token { println!(); in_token = false; }
+                if in_token {
+                    println!();
+                    in_token = false;
+                }
                 println!("\n  [AgentEvent] FinalAnswer ▶ {}", truncate(&ans, 80));
             }
         }
@@ -411,8 +447,12 @@ struct BrokenTool;
 
 #[async_trait::async_trait]
 impl echo_agent::tools::Tool for BrokenTool {
-    fn name(&self) -> &str { "broken_tool" }
-    fn description(&self) -> &str { "这个工具总是失败，用于测试错误回调" }
+    fn name(&self) -> &str {
+        "broken_tool"
+    }
+    fn description(&self) -> &str {
+        "这个工具总是失败，用于测试错误回调"
+    }
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -502,7 +542,11 @@ async fn demo_error_callback() -> echo_agent::error::Result<()> {
 fn truncate(s: &str, max: usize) -> String {
     let mut chars = s.chars();
     let out: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() { format!("{out}…") } else { out }
+    if chars.next().is_some() {
+        format!("{out}…")
+    } else {
+        out
+    }
 }
 
 fn compact_args(args: &Value) -> String {

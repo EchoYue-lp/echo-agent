@@ -20,8 +20,8 @@
 //! cargo run --example demo10_streaming
 //! ```
 
-use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
+use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::llm::stream_chat;
 use echo_agent::llm::types::Message;
 use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
@@ -82,8 +82,7 @@ async fn demo_raw_stream() -> echo_agent::error::Result<()> {
     let messages = vec![
         Message::system("你是一个助手，请用中文简洁作答。".to_string()),
         Message::user(
-            "用三句话解释什么是流式输出（streaming output），以及它对用户体验的好处。"
-                .to_string(),
+            "用三句话解释什么是流式输出（streaming output），以及它对用户体验的好处。".to_string(),
         ),
     ];
 

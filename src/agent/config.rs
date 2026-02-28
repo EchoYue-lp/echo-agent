@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crate::agent::AgentCallback;
+use std::sync::Arc;
 
 /// Agent 角色：区分编排者和执行者
 #[derive(Debug, Clone, PartialEq)]

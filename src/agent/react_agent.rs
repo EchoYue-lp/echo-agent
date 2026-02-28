@@ -2,7 +2,9 @@ pub use crate::agent::config::{AgentConfig, AgentRole};
 use crate::agent::{Agent, AgentEvent};
 use crate::compression::{ContextCompressor, ContextManager};
 use crate::error::{AgentError, LlmError, ReactError, Result, ToolError};
-use crate::human_loop::HumanApprovalManager;
+use crate::human_loop::{
+    HumanApprovalManager, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
+};
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
 use crate::llm::{chat, stream_chat};
 use crate::skills::external::{LoadSkillResourceTool, SkillLoader};
@@ -39,9 +41,7 @@ pub(crate) const TOOL_UPDATE_TASK: &str = "update_task";
 fn is_retryable_llm_error(err: &ReactError) -> bool {
     match err {
         ReactError::Llm(LlmError::NetworkError(_)) => true,
-        ReactError::Llm(LlmError::ApiError { status, .. }) => {
-            *status == 429 || *status >= 500
-        }
+        ReactError::Llm(LlmError::ApiError { status, .. }) => *status == 429 || *status >= 500,
         _ => false,
     }
 }
@@ -55,6 +55,8 @@ pub struct ReactAgent {
     client: Arc<Client>,
     pub(crate) task_manager: Arc<RwLock<TaskManager>>,
     human_in_loop: Arc<RwLock<HumanApprovalManager>>,
+    /// 人工介入 Provider：支持命令行、HTTP Webhook、WebSocket 等多种渠道
+    approval_provider: Arc<dyn HumanLoopProvider>,
     /// Skill 管理器：记录已安装的所有 Skill 元数据
     skill_manager: SkillManager,
 }
@@ -78,13 +80,15 @@ impl ReactAgent {
         // 基础工具：所有 agent 共享
         tool_manager.register(Box::new(FinalAnswerTool));
         tool_manager.register(Box::new(ThinkTool));
-        if config.enable_human_in_loop {
-            tool_manager.register(Box::new(HumanInLoop));
-        }
 
         let task_manager = Arc::new(RwLock::new(TaskManager::default()));
         let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::default()));
         let subagents = Arc::new(RwLock::new(HashMap::new()));
+        let approval_provider = crate::human_loop::default_provider();
+
+        if config.enable_human_in_loop {
+            tool_manager.register(Box::new(HumanInLoop::new(approval_provider.clone())));
+        }
 
         if config.enable_task {
             tool_manager.register(Box::new(PlanTool));
@@ -108,8 +112,26 @@ impl ReactAgent {
             client: Arc::new(client),
             task_manager,
             human_in_loop,
+            approval_provider,
             skill_manager: SkillManager::new(),
         }
+    }
+
+    /// 替换审批 Provider，支持在运行时切换审批渠道。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::human_loop::WebhookApprovalProvider;
+    /// use echo_agent::prelude::ReactAgent;
+    ///
+    /// let mut agent = ReactAgent::new(config);
+    /// agent.set_approval_provider(std::sync::Arc::new(
+    ///     WebhookApprovalProvider::new("https://your-approval-server/approve"),
+    /// ));
+    /// ```
+    pub fn set_approval_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
+        self.approval_provider = provider;
     }
 
     /// 重置消息历史，仅保留 system prompt，确保每次执行互不干扰
@@ -143,14 +165,30 @@ impl ReactAgent {
         };
 
         if needs_approval {
-            warn!(agent = %agent, tool = %tool_name, "⚠️ 工具需要人工审批，是否批准？(y/n)");
-            let mut user_input = String::new();
-            std::io::stdin().read_line(&mut user_input)?;
-            if user_input.trim() != "y" && user_input.trim() != "Y" {
-                warn!(agent = %agent, tool = %tool_name, "❌ 用户拒绝执行工具");
-                return Ok(format!("用户已拒绝执行工具 {}", tool_name));
+            warn!(agent = %agent, tool = %tool_name, "⚠️ 工具需要人工审批");
+            let req = HumanLoopRequest::approval(tool_name, input.clone());
+            match self.approval_provider.request(req).await? {
+                HumanLoopResponse::Approved => {
+                    info!(agent = %agent, tool = %tool_name, "✅ 用户批准执行工具");
+                }
+                HumanLoopResponse::Rejected { reason } => {
+                    warn!(agent = %agent, tool = %tool_name, reason = ?reason, "❌ 用户拒绝执行工具");
+                    return Ok(format!(
+                        "用户已拒绝执行工具 {}{}",
+                        tool_name,
+                        reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                    ));
+                }
+                HumanLoopResponse::Timeout => {
+                    warn!(agent = %agent, tool = %tool_name, "⏰ 审批超时，工具未执行");
+                    return Ok(format!("工具 {tool_name} 审批超时，已跳过执行"));
+                }
+                HumanLoopResponse::Text(_) => {
+                    // 审批请求不应收到 Text 响应，视为拒绝
+                    warn!(agent = %agent, tool = %tool_name, "⚠️ 审批请求收到意外的 Text 响应，视为拒绝");
+                    return Ok(format!("工具 {tool_name} 审批异常，已跳过执行"));
+                }
             }
-            info!(agent = %agent, tool = %tool_name, "✅ 用户批准执行工具");
         }
 
         let result = self.tool_manager.execute_tool(tool_name, params).await?;
@@ -229,8 +267,7 @@ impl ReactAgent {
         let retry_delay = self.config.llm_retry_delay_ms;
 
         // 指数退避重试：只对可重试错误（网络/限流/5xx）进行重试
-        let mut response_result: Result<_> =
-            Err(ReactError::Agent(AgentError::NoResponse));
+        let mut response_result: Result<_> = Err(ReactError::Agent(AgentError::NoResponse));
         for attempt in 0..=max_retries {
             if attempt > 0 {
                 // 延迟 = delay * 2^(attempt-1)，最多放大到 2^5 = 32 倍
@@ -359,7 +396,9 @@ impl ReactAgent {
         if has_approval_tools {
             info!(agent = %agent, "⚠️ 检测到需人工审批工具，切换为串行执行");
             for (tool_call_id, function_name, arguments) in tool_calls {
-                let result = self.execute_tool_feedback(&function_name, &arguments).await?;
+                let result = self
+                    .execute_tool_feedback(&function_name, &arguments)
+                    .await?;
                 if function_name == TOOL_FINAL_ANSWER {
                     info!(agent = %agent, "🏁 最终答案已生成");
                     return Ok(Some(result));
@@ -499,7 +538,28 @@ impl Agent for ReactAgent {
                     cb.on_think_start(&agent, &messages).await;
                 }
 
-                let tools = self.tool_manager.to_openai_tools();
+                // 流式模式下的工具列表构建策略：
+                //
+                // 1. enable_tool=false：不传工具，LLM 走纯文本路径，每个 token 都会产生
+                //    AgentEvent::Token 事件，实现真正的流式输出。
+                //
+                // 2. enable_tool=true：传工具但剔除 think。
+                //    think 工具会让 LLM 把推理内容写入工具调用参数（tool_call delta）
+                //    而非 content 字段，导致推理阶段没有 Token 事件。
+                //    去掉 think 后，LLM 以文本流输出推理过程（Token 事件），
+                //    再调用业务工具（ToolCall/ToolResult 事件），流式体验完整。
+                let tools_for_stream: Option<Vec<_>> = if self.config.enable_tool {
+                    let tools: Vec<_> = self
+                        .tool_manager
+                        .to_openai_tools()
+                        .into_iter()
+                        .filter(|t| t.function.name != "think")
+                        .collect();
+                    if tools.is_empty() { None } else { Some(tools) }
+                } else {
+                    None
+                };
+
                 let max_retries = self.config.llm_max_retries;
                 let retry_delay = self.config.llm_retry_delay_ms;
 
@@ -524,7 +584,7 @@ impl Agent for ReactAgent {
                         messages.clone(),
                         Some(0.7),
                         Some(8192u32),
-                        Some(tools.clone()),
+                        tools_for_stream.clone(),
                         None,
                     )
                     .await;
@@ -787,10 +847,7 @@ impl ReactAgent {
 
     /// 返回当前上下文的（消息条数，估算 token 数）
     pub fn context_stats(&self) -> (usize, usize) {
-        (
-            self.context.messages().len(),
-            self.context.token_estimate(),
-        )
+        (self.context.messages().len(), self.context.token_estimate())
     }
 
     /// 使用指定压缩器强制压缩上下文（不影响已安装的默认压缩器）

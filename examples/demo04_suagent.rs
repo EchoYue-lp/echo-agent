@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .enable_tool(true)
         .enable_task(false)
-        .enable_human_in_loop(false)
+        .enable_human_in_loop(true)
         .enable_subagent(false)
         .allowed_tools(vec![WeatherTool.name().to_string()]),
         AgentConfig::new(

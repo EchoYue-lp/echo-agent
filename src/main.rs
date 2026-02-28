@@ -49,8 +49,8 @@
 //! ```
 
 use clap::Parser;
-use echo_agent::agent::{Agent, AgentConfig, AgentEvent};
 use echo_agent::agent::react_agent::ReactAgent;
+use echo_agent::agent::{Agent, AgentConfig, AgentEvent};
 use echo_agent::compression::ContextCompressor;
 use echo_agent::compression::compressor::{
     DefaultSummaryPrompt, HybridCompressor, SlidingWindowCompressor, SummaryCompressor,
@@ -104,7 +104,6 @@ struct Cli {
     skills_dir: Option<String>,
 
     // ── MCP 配置 ────────────────────────────────────────────────────────────
-
     /// MCP 服务端配置文件路径（YAML 格式）
     ///
     /// 配置文件格式:
@@ -136,7 +135,6 @@ struct Cli {
     mcp_http: Vec<String>,
 
     // ── 运行时配置 ───────────────────────────────────────────────────────────
-
     /// 日志级别（trace, debug, info, warn, error）
     #[arg(long, default_value = "warn")]
     log_level: String,
@@ -231,9 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // 是否存在 MCP 配置（影响 enable_tool 默认值）
-    let has_mcp_config = cli.mcp.is_some()
-        || !cli.mcp_stdio.is_empty()
-        || !cli.mcp_http.is_empty();
+    let has_mcp_config = cli.mcp.is_some() || !cli.mcp_stdio.is_empty() || !cli.mcp_http.is_empty();
 
     let http = Arc::new(Client::new());
     let mut agent = build_agent(&cli, &enabled_tools, &http, has_mcp_config);
@@ -304,9 +300,9 @@ fn build_agent(cli: &Cli, tools: &[&str], http: &Arc<Client>, has_mcp: bool) -> 
             "weather" => agent.add_skill(Box::new(WeatherSkill)),
             "files" => agent.add_skill(Box::new(FileSystemSkill::new())),
             "shell" => agent.add_skill(Box::new(ShellSkill::new())),
-            other => eprintln!(
-                "警告: 未知工具 '{other}'，已跳过（可选: math, weather, files, shell）"
-            ),
+            other => {
+                eprintln!("警告: 未知工具 '{other}'，已跳过（可选: math, weather, files, shell）")
+            }
         }
     }
 
@@ -377,9 +373,7 @@ fn collect_mcp_configs(cli: &Cli) -> Vec<McpServerConfig> {
     for spec in &cli.mcp_stdio {
         match parse_mcp_stdio_spec(spec) {
             Some(config) => configs.push(config),
-            None => eprintln!(
-                "警告: --mcp-stdio 格式错误 '{spec}'（格式: 名称 命令 [参数...]）"
-            ),
+            None => eprintln!("警告: --mcp-stdio 格式错误 '{spec}'（格式: 名称 命令 [参数...]）"),
         }
     }
 
@@ -387,9 +381,9 @@ fn collect_mcp_configs(cli: &Cli) -> Vec<McpServerConfig> {
     for spec in &cli.mcp_http {
         match parse_mcp_http_spec(spec) {
             Some(config) => configs.push(config),
-            None => eprintln!(
-                "警告: --mcp-http 格式错误 '{spec}'（格式: 名称 URL [Header=Value ...]）"
-            ),
+            None => {
+                eprintln!("警告: --mcp-http 格式错误 '{spec}'（格式: 名称 URL [Header=Value ...]）")
+            }
         }
     }
 
@@ -504,7 +498,11 @@ fn build_compressor(
         "summary" | "sum" => {
             let keep = n.unwrap_or(6);
             let llm = Arc::new(DefaultLlmClient::new(http.clone(), model));
-            Some(Box::new(SummaryCompressor::new(llm, DefaultSummaryPrompt, keep)))
+            Some(Box::new(SummaryCompressor::new(
+                llm,
+                DefaultSummaryPrompt,
+                keep,
+            )))
         }
         "sliding" | "slide" | "window" => {
             let window = n.unwrap_or(20);
@@ -691,15 +689,8 @@ async fn run_interactive(
                     }
                     "/compress" => {
                         let (strategy, keep_n) = parse_compress_args(arg);
-                        run_compress(
-                            agent,
-                            &strategy,
-                            keep_n,
-                            &cli.compressor,
-                            &cli.model,
-                            http,
-                        )
-                        .await;
+                        run_compress(agent, &strategy, keep_n, &cli.compressor, &cli.model, http)
+                            .await;
                         println!();
                         continue;
                     }
@@ -934,10 +925,7 @@ fn print_banner(cli: &Cli, tools: &[&str], mcp: &McpManager) {
         let parts: Vec<String> = mcp_names
             .iter()
             .map(|name| {
-                let count = mcp
-                    .get_client(name)
-                    .map(|c| c.tools().len())
-                    .unwrap_or(0);
+                let count = mcp.get_client(name).map(|c| c.tools().len()).unwrap_or(0);
                 format!("{name}({count})")
             })
             .collect();
