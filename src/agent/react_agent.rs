@@ -1,7 +1,7 @@
 pub use crate::agent::config::{AgentConfig, AgentRole};
 use crate::agent::{Agent, AgentEvent};
 use crate::compression::{ContextCompressor, ContextManager};
-use crate::error::{AgentError, ReactError, Result, ToolError};
+use crate::error::{AgentError, LlmError, ReactError, Result, ToolError};
 use crate::human_loop::HumanApprovalManager;
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
 use crate::llm::{chat, stream_chat};
@@ -34,6 +34,17 @@ pub(crate) const TOOL_FINAL_ANSWER: &str = "final_answer";
 pub(crate) const TOOL_CREATE_TASK: &str = "create_task";
 pub(crate) const TOOL_PLAN: &str = "plan";
 pub(crate) const TOOL_UPDATE_TASK: &str = "update_task";
+
+/// 判断 LLM 错误是否值得重试（网络/超时/限流/服务端 5xx）
+fn is_retryable_llm_error(err: &ReactError) -> bool {
+    match err {
+        ReactError::Llm(LlmError::NetworkError(_)) => true,
+        ReactError::Llm(LlmError::ApiError { status, .. }) => {
+            *status == 429 || *status >= 500
+        }
+        _ => false,
+    }
+}
 
 pub struct ReactAgent {
     pub(crate) config: AgentConfig,
@@ -167,6 +178,33 @@ impl ReactAgent {
         }
     }
 
+    /// 执行工具，并根据 `tool_error_feedback` 配置决定失败时的行为：
+    /// - `true`（默认）：将错误信息转换为工具观测值回传给 LLM，让模型自行纠错
+    /// - `false`：直接向上抛出 `Err`，与旧行为一致
+    ///
+    /// `final_answer` 工具始终保持原始错误语义，不会被软化。
+    pub(crate) async fn execute_tool_feedback(
+        &self,
+        tool_name: &str,
+        input: &Value,
+    ) -> Result<String> {
+        match self.execute_tool(tool_name, input).await {
+            Ok(result) => Ok(result),
+            Err(e) if self.config.tool_error_feedback && tool_name != TOOL_FINAL_ANSWER => {
+                warn!(
+                    agent = %self.config.agent_name,
+                    tool = %tool_name,
+                    error = %e,
+                    "⚠️ 工具错误已转为观测值回传 LLM"
+                );
+                Ok(format!(
+                    "[工具执行失败] {e}\n提示：请根据错误信息调整参数后重试，或换用其他工具。"
+                ))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// 调用 LLM 推理，返回本轮的步骤列表。
     ///
     /// 每次调用前先通过 `ContextManager::prepare` 自动压缩超限的历史消息，
@@ -187,19 +225,51 @@ impl ReactAgent {
         }
 
         let tools = self.tool_manager.to_openai_tools();
-        let response = chat(
-            self.client.clone(),
-            self.config.model_name.as_str(),
-            messages,
-            Some(0.7),
-            Some(8192u32),
-            Some(false),
-            Some(tools),
-            None,
-        )
-        .await;
+        let max_retries = self.config.llm_max_retries;
+        let retry_delay = self.config.llm_retry_delay_ms;
 
-        let message = response?
+        // 指数退避重试：只对可重试错误（网络/限流/5xx）进行重试
+        let mut response_result: Result<_> =
+            Err(ReactError::Agent(AgentError::NoResponse));
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                // 延迟 = delay * 2^(attempt-1)，最多放大到 2^5 = 32 倍
+                let delay_ms = retry_delay * (1u64 << (attempt - 1).min(5));
+                warn!(
+                    agent = %agent,
+                    attempt = attempt,
+                    max = max_retries,
+                    delay_ms = delay_ms,
+                    "⚠️ LLM 请求失败，{delay_ms}ms 后重试（{attempt}/{max_retries}）"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+            response_result = chat(
+                self.client.clone(),
+                self.config.model_name.as_str(),
+                messages.clone(),
+                Some(0.7),
+                Some(8192u32),
+                Some(false),
+                Some(tools.clone()),
+                None,
+            )
+            .await;
+            match &response_result {
+                Ok(_) => {
+                    if attempt > 0 {
+                        info!(agent = %agent, attempt, "✅ LLM 重试成功");
+                    }
+                    break;
+                }
+                Err(e) if attempt < max_retries && is_retryable_llm_error(e) => {
+                    warn!(agent = %agent, error = %e, "LLM 可重试错误");
+                }
+                Err(_) => break,
+            }
+        }
+
+        let message = response_result?
             .choices
             .first()
             .ok_or(ReactError::Agent(AgentError::NoResponse))?
@@ -289,7 +359,7 @@ impl ReactAgent {
         if has_approval_tools {
             info!(agent = %agent, "⚠️ 检测到需人工审批工具，切换为串行执行");
             for (tool_call_id, function_name, arguments) in tool_calls {
-                let result = self.execute_tool(&function_name, &arguments).await?;
+                let result = self.execute_tool_feedback(&function_name, &arguments).await?;
                 if function_name == TOOL_FINAL_ANSWER {
                     info!(agent = %agent, "🏁 最终答案已生成");
                     return Ok(Some(result));
@@ -300,7 +370,7 @@ impl ReactAgent {
         } else {
             let futures: Vec<_> = tool_calls
                 .iter()
-                .map(|(_, name, args)| self.execute_tool(name, args))
+                .map(|(_, name, args)| self.execute_tool_feedback(name, args))
                 .collect();
             let results = join_all(futures).await;
 
@@ -430,19 +500,48 @@ impl Agent for ReactAgent {
                 }
 
                 let tools = self.tool_manager.to_openai_tools();
+                let max_retries = self.config.llm_max_retries;
+                let retry_delay = self.config.llm_retry_delay_ms;
 
-                let mut llm_stream = Box::pin(
-                    stream_chat(
+                // 流式连接阶段的指数退避重试（仅覆盖连接建立失败）
+                let mut stream_result: Result<_> =
+                    Err(ReactError::Agent(AgentError::NoResponse));
+                for attempt in 0..=max_retries {
+                    if attempt > 0 {
+                        let delay_ms = retry_delay * (1u64 << (attempt - 1).min(5));
+                        warn!(
+                            agent = %agent,
+                            attempt,
+                            max = max_retries,
+                            delay_ms,
+                            "⚠️ 流式 LLM 请求失败，{delay_ms}ms 后重试（{attempt}/{max_retries}）"
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    stream_result = stream_chat(
                         self.client.clone(),
                         &self.config.model_name,
-                        messages,
+                        messages.clone(),
                         Some(0.7),
                         Some(8192u32),
-                        Some(tools),
+                        Some(tools.clone()),
                         None,
                     )
-                    .await?,
-                );
+                    .await;
+                    match &stream_result {
+                        Ok(_) => {
+                            if attempt > 0 {
+                                info!(agent = %agent, attempt, "✅ 流式 LLM 重试成功");
+                            }
+                            break;
+                        }
+                        Err(e) if attempt < max_retries && is_retryable_llm_error(e) => {
+                            warn!(agent = %agent, error = %e, "流式 LLM 可重试错误");
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let mut llm_stream = Box::pin(stream_result?);
 
                 // 累积本轮 LLM 响应
                 let mut content_buffer = String::new();
@@ -540,7 +639,7 @@ impl Agent for ReactAgent {
 
                     let mut done = false;
                     for (tool_call_id, function_name, arguments) in steps {
-                        let result = self.execute_tool(&function_name, &arguments).await?;
+                        let result = self.execute_tool_feedback(&function_name, &arguments).await?;
 
                         yield AgentEvent::ToolResult {
                             name: function_name.clone(),

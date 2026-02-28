@@ -43,6 +43,12 @@ pub struct AgentConfig {
     pub(crate) token_limit: usize,
     /// 事件回调系统
     pub callbacks: Vec<Arc<dyn AgentCallback>>,
+    /// LLM 调用失败后的最大重试次数（0 表示不重试，默认 3）
+    pub(crate) llm_max_retries: usize,
+    /// LLM 重试的初始等待时间（毫秒），每次翻倍指数退避（默认 500）
+    pub(crate) llm_retry_delay_ms: u64,
+    /// 工具执行失败时将错误信息回传给 LLM，而非直接让 Agent 失败（默认 true）
+    pub(crate) tool_error_feedback: bool,
 }
 
 impl AgentConfig {
@@ -61,6 +67,9 @@ impl AgentConfig {
             enable_subagent: false,
             token_limit: usize::MAX,
             callbacks: Vec::new(),
+            llm_max_retries: 3,
+            llm_retry_delay_ms: 500,
+            tool_error_feedback: true,
         }
     }
 
@@ -150,5 +159,38 @@ impl AgentConfig {
     pub fn with_callback(mut self, callback: Arc<dyn AgentCallback>) -> Self {
         self.callbacks.push(callback);
         self
+    }
+
+    /// LLM 调用失败后的最大重试次数（0 = 不重试）
+    pub fn llm_max_retries(mut self, retries: usize) -> Self {
+        self.llm_max_retries = retries;
+        self
+    }
+
+    /// LLM 首次重试前等待的毫秒数，后续每次翻倍（指数退避）
+    pub fn llm_retry_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.llm_retry_delay_ms = delay_ms;
+        self
+    }
+
+    /// 工具失败时是否将错误信息回传 LLM（true = 让 LLM 自行纠错，false = 直接抛出异常）
+    pub fn tool_error_feedback(mut self, enabled: bool) -> Self {
+        self.tool_error_feedback = enabled;
+        self
+    }
+
+    /// 读取当前配置的 LLM 最大重试次数
+    pub fn get_llm_max_retries(&self) -> usize {
+        self.llm_max_retries
+    }
+
+    /// 读取当前配置的 LLM 首次重试延迟（毫秒）
+    pub fn get_llm_retry_delay_ms(&self) -> u64 {
+        self.llm_retry_delay_ms
+    }
+
+    /// 读取工具错误回传开关状态
+    pub fn get_tool_error_feedback(&self) -> bool {
+        self.tool_error_feedback
     }
 }
