@@ -41,11 +41,27 @@ pub trait Agent: Send + Sync {
     fn model_name(&self) -> &str;
     fn system_prompt(&self) -> &str;
 
-    /// 阻塞执行，返回最终答案文本
+    /// 阻塞执行，每次调用重置上下文（单轮模式）。连续对话请用 [`chat`](Agent::chat)。
     async fn execute(&mut self, task: &str) -> Result<String>;
 
-    /// 流式执行，返回 [`AgentEvent`] 事件流
+    /// 流式执行，每次调用重置上下文（单轮模式）。连续对话请用 [`chat_stream`](Agent::chat_stream)。
     async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>;
+
+    /// 多轮对话（阻塞）。追加到现有上下文，历史跨轮保留。
+    /// 用 [`reset`](Agent::reset) 开启新会话；默认回退到 `execute()`。
+    async fn chat(&mut self, message: &str) -> Result<String> {
+        self.execute(message).await
+    }
+
+    /// 多轮对话（流式）。追加到现有上下文，历史跨轮保留。
+    /// 用 [`reset`](Agent::reset) 开启新会话；默认回退到 `execute_stream()`。
+    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+        self.execute_stream(message).await
+    }
+
+    /// 清除对话历史，开启新会话。不影响 `execute()`（它自行重置）。
+    /// 默认 no-op；维护对话状态的实现类应覆盖此方法。
+    fn reset(&mut self) {}
 }
 
 /// Agent 生命周期回调接口

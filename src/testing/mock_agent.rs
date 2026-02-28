@@ -34,11 +34,13 @@ use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+// ── MockAgent ─────────────────────────────────────────────────────────────────
+
 /// 可脚本化的 Mock Agent。
 ///
 /// 按顺序返回预设的响应；队列耗尽后每次调用都返回 `"mock agent response"`。
-/// 所有 `execute()` 调用的任务字符串都被记录，可通过
-/// [`calls()`](MockAgent::calls) 检查。
+/// `execute()` 和 `chat()` 的消息均被记录，可通过 [`calls()`](MockAgent::calls) 检查。
+/// `reset()` 清空调用历史，模拟真实 Agent 的对话重置语义。
 pub struct MockAgent {
     name: String,
     model_name: String,
@@ -104,6 +106,8 @@ impl MockAgent {
     }
 
     /// 清空调用历史（响应队列不受影响）
+    ///
+    /// 仅用于测试断言重置，不等同于 `Agent::reset()`。
     pub fn reset_calls(&self) {
         self.calls.lock().unwrap().clear();
     }
@@ -140,6 +144,24 @@ impl Agent for MockAgent {
         let answer = self.execute(task).await?;
         let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
         Ok(Box::pin(event_stream))
+    }
+
+    /// `chat()` 同样记录调用，并消费预设响应队列。
+    /// 注意：MockAgent 不维护真实的对话上下文，这里仅满足调用合约。
+    async fn chat(&mut self, message: &str) -> Result<String> {
+        self.calls.lock().unwrap().push(message.to_string());
+        Ok(self.next_response())
+    }
+
+    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+        let answer = self.chat(message).await?;
+        let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
+        Ok(Box::pin(event_stream))
+    }
+
+    /// 清空调用历史，模拟真实 Agent 的重置语义。
+    fn reset(&mut self) {
+        self.calls.lock().unwrap().clear();
     }
 }
 
@@ -190,5 +212,13 @@ impl Agent for FailingMockAgent {
         let err = self.execute(task).await.unwrap_err();
         let event_stream = stream::once(async move { Err(err) });
         Ok(Box::pin(event_stream))
+    }
+
+    async fn chat(&mut self, message: &str) -> Result<String> {
+        self.execute(message).await
+    }
+
+    fn reset(&mut self) {
+        self.calls.lock().unwrap().clear();
     }
 }

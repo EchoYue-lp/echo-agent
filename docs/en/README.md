@@ -22,10 +22,13 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [10 - Streaming Output](./10-streaming.md) | Streaming | execute_stream, AgentEvent, SSE, TTFT |
 | [11 - Structured Output](./11-structured-output.md) | Structured Output | ResponseFormat, JsonSchema, extract(), extract_json() |
 | [12 - Mock Testing Utilities](./12-mock.md) | Testing | MockLlmClient, MockTool, MockAgent, InMemoryStore |
+| [13 - Multi-Turn Chat](./13-chat.md) | Chat | chat(), chat_stream(), cross-turn memory, reset() |
 
 ---
 
 ## Quick Start
+
+### Single-task mode (`execute`)
 
 ```rust
 use echo_agent::prelude::*;
@@ -40,6 +43,30 @@ async fn main() -> Result<()> {
 }
 ```
 
+### Multi-turn chat mode (`chat`)
+
+`chat()` preserves conversation history across calls, enabling natural multi-turn dialogue.
+`execute()` resets context on every call and is suited for independent single-turn tasks.
+
+```rust
+use echo_agent::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant");
+    let mut agent = ReactAgent::new(config);
+
+    let r1 = agent.chat("Hi, I'm Alice and I'm a Rust developer.").await?;
+    println!("Agent: {r1}");
+
+    let r2 = agent.chat("Do you remember my name?").await?;
+    println!("Agent: {r2}"); // Agent remembers "Alice" from the prior turn
+
+    agent.reset(); // clear history, start a new session
+    Ok(())
+}
+```
+
 ---
 
 ## Architecture Overview
@@ -48,7 +75,8 @@ async fn main() -> Result<()> {
 ┌─────────────────────────────────────────────────────────┐
 │                   User / Application                     │
 └────────────────────────┬────────────────────────────────┘
-                         │ execute() / execute_stream()
+                         │ execute() / execute_stream()   (single-task, resets context)
+                         │ chat()    / chat_stream()      (multi-turn, preserves context)
 ┌────────────────────────▼────────────────────────────────┐
 │                    ReactAgent                            │
 │                                                         │
@@ -79,8 +107,10 @@ async fn main() -> Result<()> {
 
 ## Feature Matrix
 
-| Feature | Config Field | Default |
-|---------|-------------|---------|
+| Feature | API / Config Field | Default |
+|---------|-------------------|---------|
+| Single-task execution | `execute()` / `execute_stream()` | — |
+| **Multi-turn chat** | **`chat()` / `chat_stream()`** | — |
 | Tool calling | `enable_tool` | `true` |
 | DAG task planning | `enable_task` | `false` |
 | SubAgent orchestration | `enable_subagent` | `false` |
@@ -112,3 +142,4 @@ async fn main() -> Result<()> {
 | `examples/demo14_memory_isolation.rs` | Memory and context isolation |
 | `examples/demo15_structured_output.rs` | Structured output (extract / JSON Schema) |
 | `examples/demo16_testing.rs` | Mock testing infrastructure (zero real LLM calls) |
+| `examples/demo17_chat.rs` | Multi-turn chat (chat / chat_stream / reset) |

@@ -504,12 +504,16 @@ impl ReactAgent {
                 let result = self
                     .execute_tool_feedback(&function_name, &arguments)
                     .await?;
+                // 先推入 tool_result，确保上下文完整性
+                self.context.push(Message::tool_result(
+                    tool_call_id,
+                    function_name.clone(),
+                    result.clone(),
+                ));
                 if function_name == TOOL_FINAL_ANSWER {
                     info!(agent = %agent, "🏁 最终答案已生成");
                     return Ok(Some(result));
                 }
-                self.context
-                    .push(Message::tool_result(tool_call_id, function_name, result));
             }
         } else {
             let futures: Vec<_> = tool_calls
@@ -518,24 +522,31 @@ impl ReactAgent {
                 .collect();
             let results = join_all(futures).await;
 
+            let mut final_answer: Option<String> = None;
             for ((tool_call_id, function_name, _), result) in tool_calls.into_iter().zip(results) {
                 let result = result?;
+                // 先推入 tool_result，确保上下文完整性
+                self.context.push(Message::tool_result(
+                    tool_call_id,
+                    function_name.clone(),
+                    result.clone(),
+                ));
                 if function_name == TOOL_FINAL_ANSWER {
                     info!(agent = %agent, "🏁 最终答案已生成");
-                    return Ok(Some(result));
+                    final_answer = Some(result);
                 }
-                self.context
-                    .push(Message::tool_result(tool_call_id, function_name, result));
+            }
+            if final_answer.is_some() {
+                return Ok(final_answer);
             }
         }
 
         Ok(None)
     }
 
-    /// 直接执行模式（无规划），复用 `process_steps` 以获得并行工具调用能力
+    /// 直接执行（无规划）：重置/恢复上下文，然后进入 ReAct 循环
     pub(crate) async fn run_direct(&mut self, task: &str) -> Result<String> {
         let agent = self.config.agent_name.clone();
-        let callbacks = self.config.callbacks.clone();
 
         // 有 session_id 时尝试从 Checkpointer 恢复上次会话
         if let (Some(cp), Some(tid)) = (&self.checkpointer, &self.config.session_id) {
@@ -569,11 +580,36 @@ impl ReactAgent {
             "执行详情"
         );
 
-        // 搜索 Store 中与当前任务相关的长期记忆，前置注入到对话上下文
+        self.run_react_loop(task).await
+    }
+
+    /// 多轮对话：不重置上下文，直接追加消息后进入 ReAct 循环
+    pub(crate) async fn run_chat_direct(&mut self, message: &str) -> Result<String> {
+        let agent = self.config.agent_name.clone();
+
+        info!(agent = %agent, "💬 Agent 多轮对话中");
+        debug!(
+            agent = %agent,
+            message = %message,
+            tools = ?self.tool_manager.list_tools(),
+            max_iterations = self.config.max_iterations,
+            "对话详情"
+        );
+
+        self.run_react_loop(message).await
+    }
+
+    /// 核心 ReAct 循环（注入记忆 → 追加消息 → think/act 迭代）。
+    /// `run_direct` 和 `run_chat_direct` 共享此实现。
+    async fn run_react_loop(&mut self, message: &str) -> Result<String> {
+        let agent = self.config.agent_name.clone();
+        let callbacks = self.config.callbacks.clone();
+
+        // 搜索 Store 中与当前消息相关的长期记忆，前置注入到对话上下文
         if let Some(store) = &self.store {
             let agent_name = self.config.agent_name.clone();
             let ns = vec![agent_name.as_str(), "memories"];
-            match store.search(&ns, task, 5).await {
+            match store.search(&ns, message, 5).await {
                 Ok(items) if !items.is_empty() => {
                     debug!(agent = %agent, count = items.len(), "📚 注入相关长期记忆");
                     let mut lines = vec!["[相关历史记忆]".to_string()];
@@ -596,7 +632,7 @@ impl ReactAgent {
             }
         }
 
-        self.context.push(Message::user(task.to_string()));
+        self.context.push(Message::user(message.to_string()));
 
         for iteration in 0..self.config.max_iterations {
             for cb in &callbacks {
@@ -615,7 +651,7 @@ impl ReactAgent {
                 for cb in &callbacks {
                     cb.on_final_answer(&agent, &answer).await;
                 }
-                info!(agent = %agent, "🏁 Agent 执行完毕");
+                info!(agent = %agent, "🏁 执行完毕");
 
                 if let (Some(cp), Some(tid)) = (&self.checkpointer, self.config.session_id.clone())
                 {
@@ -885,6 +921,13 @@ impl Agent for ReactAgent {
                             output: result.clone(),
                         };
 
+                        // 先推入 tool_result，确保上下文完整性
+                        self.context.push(Message::tool_result(
+                            tool_call_id,
+                            function_name.clone(),
+                            result.clone(),
+                        ));
+
                         if function_name == TOOL_FINAL_ANSWER {
                             for cb in &callbacks {
                                 cb.on_final_answer(&agent, &result).await;
@@ -894,9 +937,6 @@ impl Agent for ReactAgent {
                             done = true;
                             break;
                         }
-
-                        self.context
-                            .push(Message::tool_result(tool_call_id, function_name, result));
                     }
 
                     if done {
@@ -925,6 +965,257 @@ impl Agent for ReactAgent {
         };
 
         Ok(Box::pin(stream))
+    }
+
+    async fn chat(&mut self, message: &str) -> Result<String> {
+        self.run_chat_direct(message).await
+    }
+
+    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+        let message = message.to_string();
+        let stream = async_stream::try_stream! {
+            let agent = self.config.agent_name.clone();
+            let callbacks = self.config.callbacks.clone();
+
+            if let Some(store) = &self.store {
+                let agent_name = self.config.agent_name.clone();
+                let ns = vec![agent_name.as_str(), "memories"];
+                if let Ok(items) = store.search(&ns, &message, 5).await &&
+                     !items.is_empty() {
+                        let mut lines = vec!["[相关历史记忆]".to_string()];
+                        for (i, item) in items.iter().enumerate() {
+                            let content_str = item.value.get("content")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| item.value.to_string());
+                            lines.push(format!("{}. {}", i + 1, content_str));
+                        }
+                        lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+                        self.context.push(Message::user(lines.join("\n")));
+                }
+            }
+
+            self.context.push(Message::user(message.clone()));
+
+            info!(agent = %agent, "🌊 Agent 开始流式多轮对话");
+
+            for iteration in 0..self.config.max_iterations {
+                for cb in &callbacks {
+                    cb.on_iteration(&agent, iteration).await;
+                }
+
+                debug!(agent = %agent, iteration = iteration + 1, "--- 流式对话迭代 ---");
+
+                let messages = self.context.prepare(None).await?;
+
+                for cb in &callbacks {
+                    cb.on_think_start(&agent, &messages).await;
+                }
+
+                let tools_for_stream: Option<Vec<_>> = if self.config.enable_tool {
+                    let tools = self.tool_manager.to_openai_tools();
+                    if tools.is_empty() { None } else { Some(tools) }
+                } else {
+                    None
+                };
+
+                let max_retries = self.config.llm_max_retries;
+                let retry_delay = self.config.llm_retry_delay_ms;
+
+                let mut stream_result: Result<_> =
+                    Err(ReactError::Agent(AgentError::NoResponse));
+                for attempt in 0..=max_retries {
+                    if attempt > 0 {
+                        let delay_ms = retry_delay * (1u64 << (attempt - 1).min(5));
+                        warn!(
+                            agent = %agent,
+                            attempt,
+                            max = max_retries,
+                            delay_ms,
+                            "⚠️ 流式 LLM 请求失败，{delay_ms}ms 后重试（{attempt}/{max_retries}）"
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    stream_result = stream_chat(
+                        self.client.clone(),
+                        &self.config.model_name,
+                        messages.clone(),
+                        Some(0.7),
+                        Some(8192u32),
+                        tools_for_stream.clone(),
+                        None,
+                        self.config.response_format.clone(),
+                    )
+                    .await;
+                    match &stream_result {
+                        Ok(_) => {
+                            if attempt > 0 {
+                                info!(agent = %agent, attempt, "✅ 流式 LLM 重试成功");
+                            }
+                            break;
+                        }
+                        Err(e) if attempt < max_retries && is_retryable_llm_error(e) => {
+                            warn!(agent = %agent, error = %e, "流式 LLM 可重试错误");
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let mut llm_stream = Box::pin(stream_result?);
+
+                let mut content_buffer = String::new();
+                let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
+                let mut has_tool_calls = false;
+
+                while let Some(chunk_result) = llm_stream.next().await {
+                    let chunk = chunk_result?;
+
+                    if let Some(choice) = chunk.choices.first() {
+                        if let Some(content) = &choice.delta.content &&
+                             !content.is_empty() {
+                                content_buffer.push_str(content);
+                                yield AgentEvent::Token(content.clone());
+                        }
+
+                        if let Some(delta_calls) = &choice.delta.tool_calls {
+                            has_tool_calls = true;
+                            for dc in delta_calls {
+                                let entry = tool_call_map
+                                    .entry(dc.index)
+                                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                if let Some(id) = &dc.id &&
+                                     !id.is_empty() {
+                                        entry.0 = id.clone();
+                                }
+                                if let Some(f) = &dc.function {
+                                    if let Some(name) = &f.name {
+                                        if !name.is_empty() {
+                                            entry.1 = name.clone();
+                                        }
+                                    }
+                                    if let Some(args) = &f.arguments {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if has_tool_calls {
+                    let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
+                    sorted_indices.sort();
+
+                    let mut msg_tool_calls: Vec<LlmToolCall> = Vec::new();
+                    let mut steps: Vec<(String, String, Value)> = Vec::new();
+
+                    for idx in &sorted_indices {
+                        let (id, name, args_str) = &tool_call_map[idx];
+                        let args: Value =
+                            serde_json::from_str(args_str).unwrap_or(Value::Object(Default::default()));
+
+                        yield AgentEvent::ToolCall {
+                            name: name.clone(),
+                            args: args.clone(),
+                        };
+
+                        msg_tool_calls.push(LlmToolCall {
+                            id: id.clone(),
+                            call_type: "function".to_string(),
+                            function: FunctionCall {
+                                name: name.clone(),
+                                arguments: args_str.clone(),
+                            },
+                        });
+                        steps.push((id.clone(), name.clone(), args));
+                    }
+
+                    {
+                        let think_steps: Vec<StepType> = steps.iter().map(|(id, name, args)| {
+                            StepType::Call {
+                                tool_call_id: id.clone(),
+                                function_name: name.clone(),
+                                arguments: args.clone(),
+                            }
+                        }).collect();
+                        for cb in &callbacks {
+                            cb.on_think_end(&agent, &think_steps).await;
+                        }
+                    }
+
+                    self.context.push(Message::assistant_with_tools(msg_tool_calls));
+
+                    let mut done = false;
+                    for (tool_call_id, function_name, arguments) in steps {
+                        let result = self.execute_tool_feedback(&function_name, &arguments).await?;
+
+                        yield AgentEvent::ToolResult {
+                            name: function_name.clone(),
+                            output: result.clone(),
+                        };
+
+                        // 先推入 tool_result，确保上下文完整性
+                        self.context.push(Message::tool_result(
+                            tool_call_id,
+                            function_name.clone(),
+                            result.clone(),
+                        ));
+
+                        if function_name == TOOL_FINAL_ANSWER {
+                            for cb in &callbacks {
+                                cb.on_final_answer(&agent, &result).await;
+                            }
+                            info!(agent = %agent, "✅ 流式对话轮次完成");
+                            if let (Some(cp), Some(tid)) =
+                                (&self.checkpointer, self.config.session_id.clone())
+                            {
+                                let messages = self.context.messages().to_vec();
+                                if let Err(e) = cp.put(&tid, messages).await {
+                                    tracing::warn!(agent = %agent, error = %e, "⚠️ Checkpoint 保存失败");
+                                }
+                            }
+                            yield AgentEvent::FinalAnswer(result);
+                            done = true;
+                            break;
+                        }
+                    }
+
+                    if done {
+                        return;
+                    }
+                } else if !content_buffer.is_empty() {
+                    let think_steps = vec![StepType::Thought(content_buffer.clone())];
+                    for cb in &callbacks {
+                        cb.on_think_end(&agent, &think_steps).await;
+                    }
+                    for cb in &callbacks {
+                        cb.on_final_answer(&agent, &content_buffer).await;
+                    }
+                    self.context.push(Message::assistant(content_buffer.clone()));
+                    if let (Some(cp), Some(tid)) =
+                        (&self.checkpointer, self.config.session_id.clone())
+                    {
+                        let messages = self.context.messages().to_vec();
+                        if let Err(e) = cp.put(&tid, messages).await {
+                            tracing::warn!(agent = %agent, error = %e, "⚠️ Checkpoint 保存失败");
+                        }
+                    }
+                    yield AgentEvent::FinalAnswer(content_buffer);
+                    return;
+                } else {
+                    Err(ReactError::Agent(AgentError::NoResponse))?;
+                }
+            }
+
+            Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+                self.config.max_iterations,
+            )))?;
+        };
+
+        Ok(Box::pin(stream))
+    }
+
+    fn reset(&mut self) {
+        self.reset_messages();
     }
 }
 
@@ -1014,11 +1305,6 @@ impl ReactAgent {
     /// ```
     pub fn set_compressor(&mut self, compressor: impl ContextCompressor + 'static) {
         self.context.set_compressor(compressor);
-    }
-
-    /// 重置对话上下文，仅保留系统提示词，开启新一轮对话
-    pub fn reset(&mut self) {
-        self.reset_messages();
     }
 
     /// 返回当前上下文的（消息条数，估算 token 数）
@@ -1413,5 +1699,197 @@ impl ReactAgent {
     {
         let value = self.extract_json(prompt, schema).await?;
         serde_json::from_value(value).map_err(|e| ReactError::Other(format!("反序列化失败: {e}")))
+    }
+}
+
+// ── 单元测试 ──────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::Agent;
+    use crate::llm::types::Message;
+    use crate::testing::{FailingMockAgent, MockAgent};
+
+    // ── ReactAgent::reset() ───────────────────────────────────────────────────
+
+    /// reset() 应清除所有消息，仅保留 system prompt（1 条）
+    #[test]
+    fn react_agent_reset_clears_to_system_only() {
+        let config = AgentConfig::new("test-model", "test_agent", "你是测试助手");
+        let mut agent = ReactAgent::new(config);
+
+        // 初始只有 system prompt
+        let (count, _) = agent.context_stats();
+        assert_eq!(count, 1, "初始应只有 1 条 system 消息");
+
+        // 手动追加几条消息
+        agent.context.push(Message::user("你好".to_string()));
+        agent.context.push(Message::assistant("你好！".to_string()));
+        agent.context.push(Message::user("再见".to_string()));
+        let (count_after_push, _) = agent.context_stats();
+        assert_eq!(count_after_push, 4, "追加后应有 4 条消息");
+
+        // reset() 后回到只有 system prompt
+        agent.reset();
+        let (count_after_reset, _) = agent.context_stats();
+        assert_eq!(count_after_reset, 1, "reset() 后应只剩 1 条 system 消息");
+    }
+
+    /// 连续 reset() 多次应幂等，不产生重复的 system prompt
+    #[test]
+    fn react_agent_reset_is_idempotent() {
+        let config = AgentConfig::new("test-model", "test_agent", "系统提示词");
+        let mut agent = ReactAgent::new(config);
+
+        agent.reset();
+        agent.reset();
+        agent.reset();
+
+        let (count, _) = agent.context_stats();
+        assert_eq!(count, 1, "多次 reset() 后应仍只有 1 条 system 消息");
+    }
+
+    /// reset() 后 system prompt 内容应保持不变
+    #[test]
+    fn react_agent_reset_preserves_system_prompt() {
+        let system = "这是一个自定义的系统提示词";
+        let config = AgentConfig::new("test-model", "agent", system);
+        let mut agent = ReactAgent::new(config);
+
+        agent
+            .context
+            .push(Message::user("随便什么消息".to_string()));
+        agent.reset();
+
+        let messages = agent.context.messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content.as_deref().unwrap_or(""), system);
+    }
+
+    // ── Agent trait 合约 ──────────────────────────────────────────────────────
+
+    /// reset() 可通过 &mut dyn Agent 调用（trait 对象安全性验证）
+    #[tokio::test]
+    async fn trait_reset_callable_via_dyn_agent() {
+        let mut agent: Box<dyn Agent> = Box::new(
+            MockAgent::new("mock")
+                .with_response("r1")
+                .with_response("r2"),
+        );
+
+        let r1 = agent.chat("msg1").await.unwrap();
+        assert_eq!(r1, "r1");
+
+        agent.reset(); // 通过 dyn Agent 调用 reset()
+
+        let r2 = agent.chat("msg2").await.unwrap();
+        assert_eq!(r2, "r2");
+    }
+
+    // ── MockAgent 合约 ────────────────────────────────────────────────────────
+
+    /// chat() 应记录调用，并消费预设响应队列
+    #[tokio::test]
+    async fn mock_agent_chat_records_calls_and_consumes_responses() {
+        let mut agent = MockAgent::new("test")
+            .with_response("回复1")
+            .with_response("回复2")
+            .with_response("回复3");
+
+        let r1 = agent.chat("消息1").await.unwrap();
+        let r2 = agent.chat("消息2").await.unwrap();
+        let r3 = agent.chat("消息3").await.unwrap();
+
+        assert_eq!(r1, "回复1");
+        assert_eq!(r2, "回复2");
+        assert_eq!(r3, "回复3");
+        assert_eq!(agent.call_count(), 3);
+        assert_eq!(agent.calls(), vec!["消息1", "消息2", "消息3"]);
+    }
+
+    /// reset() 应清空 MockAgent 的调用历史（模拟对话重置语义）
+    #[tokio::test]
+    async fn mock_agent_reset_clears_call_history() {
+        let mut agent = MockAgent::new("test")
+            .with_response("r1")
+            .with_response("r2")
+            .with_response("r3");
+
+        agent.chat("第一轮消息1").await.unwrap();
+        agent.chat("第一轮消息2").await.unwrap();
+        assert_eq!(agent.call_count(), 2, "reset 前应有 2 条记录");
+
+        agent.reset();
+        assert_eq!(agent.call_count(), 0, "reset 后调用历史应清空");
+
+        agent.chat("第二轮消息1").await.unwrap();
+        assert_eq!(agent.call_count(), 1, "reset 后第二轮应从 1 开始计数");
+        assert_eq!(agent.calls(), vec!["第二轮消息1"]);
+    }
+
+    /// execute() 和 chat() 共享同一个响应队列
+    #[tokio::test]
+    async fn mock_agent_execute_and_chat_share_response_queue() {
+        let mut agent = MockAgent::new("test")
+            .with_response("execute回复")
+            .with_response("chat回复");
+
+        let r1 = agent.execute("任务").await.unwrap();
+        let r2 = agent.chat("对话").await.unwrap();
+
+        assert_eq!(r1, "execute回复");
+        assert_eq!(r2, "chat回复");
+        assert_eq!(agent.call_count(), 2);
+    }
+
+    /// 响应队列耗尽后，chat() 应返回默认响应
+    #[tokio::test]
+    async fn mock_agent_chat_falls_back_to_default_when_queue_empty() {
+        let mut agent = MockAgent::new("test"); // 无预设响应
+
+        let r = agent.chat("任意消息").await.unwrap();
+        assert_eq!(r, "mock agent response", "队列空时应返回默认响应");
+    }
+
+    /// FailingMockAgent::reset() 清空调用历史
+    #[tokio::test]
+    async fn failing_mock_agent_reset_clears_calls() {
+        let mut agent = FailingMockAgent::new("failing", "总是失败");
+
+        agent.execute("任务1").await.unwrap_err();
+        agent.chat("任务2").await.unwrap_err();
+        assert_eq!(agent.call_count(), 2);
+
+        agent.reset();
+        assert_eq!(agent.call_count(), 0, "reset 后应清空调用记录");
+    }
+
+    // ── chat + reset 完整生命周期 ─────────────────────────────────────────────
+
+    /// 模拟典型多轮对话生命周期：chat → reset → chat
+    #[tokio::test]
+    async fn mock_agent_full_chat_lifecycle() {
+        let mut agent = MockAgent::new("assistant").with_responses([
+            "轮1回复1",
+            "轮1回复2",
+            "轮2回复1",
+            "轮2回复2",
+        ]);
+
+        // 第一轮对话
+        agent.chat("第1轮：问题A").await.unwrap();
+        agent.chat("第1轮：问题B").await.unwrap();
+        assert_eq!(agent.call_count(), 2);
+
+        // 重置，开启第二轮
+        agent.reset();
+        assert_eq!(agent.call_count(), 0);
+
+        // 第二轮对话
+        agent.chat("第2轮：问题C").await.unwrap();
+        agent.chat("第2轮：问题D").await.unwrap();
+        assert_eq!(agent.call_count(), 2);
+        assert_eq!(agent.calls(), vec!["第2轮：问题C", "第2轮：问题D"]);
     }
 }

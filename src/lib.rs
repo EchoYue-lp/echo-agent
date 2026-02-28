@@ -17,6 +17,8 @@
 //!
 //! # 快速上手
 //!
+//! ## 单轮任务模式（`execute`）
+//!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
 //!
@@ -25,8 +27,32 @@
 //!     .enable_tool(true);
 //!
 //! let mut agent = ReactAgent::new(config);
-//! let answer = agent.execute("你好").await?;
+//! let answer = agent.execute("帮我总结一下 Rust 的所有权机制").await?;
 //! println!("{answer}");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## 多轮对话模式（`chat`）
+//!
+//! `chat()` 在现有上下文上追加消息，天然支持多轮连续对话；
+//! `execute()` 每次都会重置上下文，适合独立的单轮任务。
+//!
+//! ```rust,no_run
+//! use echo_agent::prelude::*;
+//!
+//! # async fn run() -> echo_agent::error::Result<()> {
+//! let config = AgentConfig::new("gpt-4o", "assistant", "你是一个有帮助的助手");
+//! let mut agent = ReactAgent::new(config);
+//!
+//! let r1 = agent.chat("你好，我叫小明").await?;
+//! println!("Agent: {r1}");
+//!
+//! let r2 = agent.chat("你还记得我叫什么名字吗？").await?;
+//! println!("Agent: {r2}"); // Agent 能记住上下文中的 "小明"
+//!
+//! // 结束本轮对话，清除历史，开启下一轮
+//! agent.reset();
 //! # Ok(())
 //! # }
 //! ```

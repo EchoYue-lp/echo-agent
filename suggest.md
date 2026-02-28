@@ -160,47 +160,40 @@ async fn test_react_calls_tool_and_returns_answer() {
 
 ---
 
-## 三、多轮对话模式（`chat()` 接口）— 🟡 中等优先级
+## 三、多轮对话模式（`chat()` 接口）— ✅ 已完成
 
-### 现状
+> **实现时间**：2026-02-28
+> **相关文件**：`src/agent/mod.rs`、`src/agent/react_agent.rs`
+> **文档**：`docs/zh/13-chat.md`、`docs/en/13-chat.md`
+> **示例**：`examples/demo17_chat.rs`
 
-`execute()` 内部每次都调用 `reset_messages()` 重置上下文，是"单次任务"语义。
-虽然 `session_id + Checkpointer` 可以跨进程续接，但在**同一进程内**无法做"连续聊天"——
-每轮对话都从空白开始，适合任务 Agent 但不适合对话 Agent（Chatbot）场景。
+### 实现内容
 
-### 建议
+在 `Agent` trait 和 `ReactAgent` 中新增了 `chat()` / `chat_stream()` 方法：
 
-在 `Agent` trait 和 `ReactAgent` 中新增 `chat()` 方法，不重置历史、持续累积上下文：
+- **`Agent` trait**：新增 `chat()` 和 `chat_stream()` 方法，带默认实现（回退到 `execute`），对所有现有实现者无破坏性
+- **`ReactAgent`**：新增内部方法 `run_chat_direct()`，覆盖 `chat()` / `chat_stream()`
+  - 跳过每次调用时的上下文重置，直接追加用户消息
+  - 完整支持工具调用、长期记忆（Store）注入、Checkpoint 自动保存
+  - `chat_stream()` 在每轮答案生成后也会保存 Checkpoint（同步修复了 `execute_stream` 中缺失 Checkpoint 保存的问题）
 
-```rust
-// agent/mod.rs
-#[async_trait]
-pub trait Agent: Send + Sync {
-    async fn execute(&mut self, task: &str) -> Result<String>; // 已有：单次任务，内部重置
-    async fn chat(&mut self, message: &str) -> Result<String>; // 新增：多轮对话，保留历史
-    async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>; // 已有
-    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>; // 新增
-}
-
-// react_agent.rs 实现
-async fn chat(&mut self, message: &str) -> Result<String> {
-    // 不调用 reset_messages()，直接追加用户消息
-    self.context.push(Message::user(message.to_string()));
-    self.run_react_loop().await
-}
-```
-
-使用场景对比：
+### 使用对比
 
 ```rust
-// 任务 Agent（当前 execute 语义，每次独立）
+// 任务 Agent（execute 语义，每次独立）
 agent.execute("帮我分析这份报告").await?;
 agent.execute("帮我生成代码").await?; // 上一轮的报告内容不在上下文中
 
-// 对话 Agent（新 chat 语义，持续累积）
+// 对话 Agent（chat 语义，持续累积）
 agent.chat("你好，我叫张三").await?;
 agent.chat("帮我分析这份报告").await?;
 agent.chat("把分析结果用英文重写").await?; // 上轮分析结果在上下文中
+
+// 流式多轮对话
+let mut stream = agent.chat_stream("下一条消息").await?;
+
+// 重置对话历史
+agent.reset();
 ```
 
 ---
