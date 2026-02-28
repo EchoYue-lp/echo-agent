@@ -234,6 +234,7 @@ println!("{} owes ${:.2}", invoice.vendor, invoice.amount);
 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | Tool execution configuration |
 | [`demo14_memory_isolation`](examples/demo14_memory_isolation.rs) | Memory + context isolation demo |
 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | Structured output with JSON Schema |
+| [`demo16_testing`](examples/demo16_testing.rs) | Mock testing infrastructure — zero real LLM calls |
 
 ---
 
@@ -252,6 +253,7 @@ Full documentation lives in [`docs/en/`](./docs/en/README.md):
 - [DAG Task Planning](docs/en/09-tasks.md)
 - [Streaming Output](docs/en/10-streaming.md)
 - [Structured Output](docs/en/11-structured-output.md)
+- [Mock Testing Utilities](docs/en/12-mock.md)
 
 
 ---

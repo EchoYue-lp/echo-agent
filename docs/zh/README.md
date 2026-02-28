@@ -19,6 +19,7 @@
 | [09 - 任务规划](09-tasks.md) | Tasks / DAG | 有向无环图、拓扑排序、循环依赖检测、Mermaid 可视化 |
 | [10 - 流式输出](10-streaming.md) | Streaming | execute_stream、AgentEvent、SSE、TTFT |
 | [11 - 结构化输出](11-structured-output.md) | Structured Output | ResponseFormat、JsonSchema、extract()、extract_json() |
+| [12 - Mock 测试工具](12-mock.md) | Testing | MockLlmClient、MockTool、MockAgent、InMemoryStore |
 
 ---
 
@@ -90,3 +91,4 @@ async fn main() -> Result<()> {
 | `examples/demo13_tool_execution.rs` | 工具执行配置 |
 | `examples/demo14_memory_isolation.rs` | 记忆隔离与上下文隔离 |
 | `examples/demo15_structured_output.rs` | 结构化输出（extract / JSON Schema） |
+| `examples/demo16_testing.rs` | Mock 测试基础设施（零真实 LLM 调用） |

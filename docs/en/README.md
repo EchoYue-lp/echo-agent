@@ -21,6 +21,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [09 - Task Planning](./09-tasks.md) | Tasks / DAG | DAG, topological sort, cycle detection, Mermaid visualization |
 | [10 - Streaming Output](./10-streaming.md) | Streaming | execute_stream, AgentEvent, SSE, TTFT |
 | [11 - Structured Output](./11-structured-output.md) | Structured Output | ResponseFormat, JsonSchema, extract(), extract_json() |
+| [12 - Mock Testing Utilities](./12-mock.md) | Testing | MockLlmClient, MockTool, MockAgent, InMemoryStore |
 
 ---
 
@@ -110,3 +111,4 @@ async fn main() -> Result<()> {
 | `examples/demo13_tool_execution.rs` | Tool execution configuration |
 | `examples/demo14_memory_isolation.rs` | Memory and context isolation |
 | `examples/demo15_structured_output.rs` | Structured output (extract / JSON Schema) |
+| `examples/demo16_testing.rs` | Mock testing infrastructure (zero real LLM calls) |

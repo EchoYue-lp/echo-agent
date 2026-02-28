@@ -233,6 +233,7 @@ println!("{} 应付 ¥{:.2}", invoice.vendor, invoice.amount);
 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | 工具执行配置 |
 | [`demo14_memory_isolation`](examples/demo14_memory_isolation.rs) | 记忆与上下文隔离 |
 | [`demo15_structured_output`](examples/demo15_structured_output.rs) | 结构化输出（JSON Schema） |
+| [`demo16_testing`](examples/demo16_testing.rs) | Mock 测试基础设施（零真实 LLM 调用） |
 
 ---
 
@@ -253,6 +254,7 @@ println!("{} 应付 ¥{:.2}", invoice.vendor, invoice.amount);
 - [DAG 任务规划](docs/zh/09-tasks.md)
 - [流式输出](docs/zh/10-streaming.md)
 - [结构化输出](docs/zh/11-structured-output.md)
+- [Mock 测试工具](docs/zh/12-mock.md)
 
 **English**（[`docs/en/`](./docs/en/README.md)）：所有文档的英文版本。
 

@@ -40,6 +40,7 @@ pub mod mcp;
 pub mod memory;
 pub mod skills;
 pub mod tasks;
+pub mod testing;
 pub mod tools;
 
 pub mod prelude {
@@ -66,6 +67,7 @@ pub mod prelude {
         builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
         external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
     };
+    pub use crate::testing::{FailingMockAgent, MockAgent, MockLlmClient, MockTool};
     pub use crate::tools::builtin::think::ThinkTool;
     pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
 }
