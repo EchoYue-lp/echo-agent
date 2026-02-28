@@ -14,6 +14,7 @@ use crate::llm::config::{Config, ModelConfig};
 use crate::llm::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message, ToolDefinition,
 };
+pub use crate::llm::types::{JsonSchemaSpec, ResponseFormat};
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
@@ -38,6 +39,7 @@ pub fn assemble_req_header(model: &ModelConfig) -> Result<HeaderMap> {
     Ok(header_map)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn chat(
     client: Arc<Client>,
     model_name: &str,
@@ -47,6 +49,7 @@ pub async fn chat(
     stream: Option<bool>,
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<String>,
+    response_format: Option<ResponseFormat>,
 ) -> Result<ChatCompletionResponse> {
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
@@ -57,6 +60,7 @@ pub async fn chat(
         stream,
         tools,
         tool_choice,
+        response_format,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -64,6 +68,7 @@ pub async fn chat(
 }
 
 /// 流式 chat 入口，返回 SSE chunk 流
+#[allow(clippy::too_many_arguments)]
 pub async fn stream_chat(
     client: Arc<Client>,
     model_name: &str,
@@ -72,6 +77,7 @@ pub async fn stream_chat(
     max_tokens: Option<u32>,
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<String>,
+    response_format: Option<ResponseFormat>,
 ) -> Result<impl Stream<Item = Result<ChatCompletionChunk>>> {
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
@@ -82,6 +88,7 @@ pub async fn stream_chat(
         stream: Some(true),
         tools,
         tool_choice,
+        response_format,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -121,6 +128,7 @@ impl LlmClient for DefaultLlmClient {
             Some(0.3),
             Some(2048),
             Some(false),
+            None,
             None,
             None,
         )

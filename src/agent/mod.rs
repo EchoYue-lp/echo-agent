@@ -10,6 +10,12 @@ use async_trait::async_trait;
 pub use config::{AgentConfig, AgentRole};
 use futures::stream::BoxStream;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use tokio::sync::Mutex as AsyncMutex;
+
+/// SubAgent 注册表类型别名
+pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
 
 mod config;
 mod planning;

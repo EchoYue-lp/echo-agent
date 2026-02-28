@@ -169,13 +169,13 @@ impl ContextManager {
         let before_tokens = self.token_estimate();
 
         // 分两条路径借用，避免同时持有 `self.compressor` 和 `self.messages` 的可变引用
-        let output = if self.compressor.is_some() {
+        let output = if let Some(compressor) = &self.compressor {
             let input = CompressionInput {
                 messages: self.messages.clone(),
                 token_limit: self.token_limit,
                 current_query: None,
             };
-            self.compressor.as_ref().unwrap().compress(input).await?
+            compressor.compress(input).await?
         } else {
             SlidingWindowCompressor::new(fallback_window)
                 .compress(CompressionInput {
@@ -246,17 +246,17 @@ impl ContextManager {
     ///
     /// `current_query` 为保留字段，传 `None` 即可。
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<Vec<Message>> {
-        if let Some(compressor) = &self.compressor {
-            if Self::estimate_tokens(&self.messages) > self.token_limit {
-                let output = compressor
-                    .compress(CompressionInput {
-                        messages: self.messages.clone(),
-                        token_limit: self.token_limit,
-                        current_query: current_query.map(String::from),
-                    })
-                    .await?;
-                self.messages = output.messages;
-            }
+        if let Some(compressor) = &self.compressor
+            && Self::estimate_tokens(&self.messages) > self.token_limit
+        {
+            let output = compressor
+                .compress(CompressionInput {
+                    messages: self.messages.clone(),
+                    token_limit: self.token_limit,
+                    current_query: current_query.map(String::from),
+                })
+                .await?;
+            self.messages = output.messages;
         }
         Ok(self.messages.clone())
     }

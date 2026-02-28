@@ -1,12 +1,12 @@
 pub use crate::agent::config::{AgentConfig, AgentRole};
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, SubAgentMap};
 use crate::compression::{ContextCompressor, ContextManager};
 use crate::error::{AgentError, LlmError, ReactError, Result, ToolError};
 use crate::human_loop::{
     HumanApprovalManager, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
 };
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
-use crate::llm::{chat, stream_chat};
+use crate::llm::{ResponseFormat, chat, stream_chat};
 use crate::memory::checkpointer::{Checkpointer, FileCheckpointer};
 use crate::memory::store::{FileStore, Store};
 use crate::skills::external::{LoadSkillResourceTool, SkillLoader};
@@ -54,7 +54,7 @@ pub struct ReactAgent {
     /// 上下文管理器：维护对话历史，并在 token 超限时自动触发压缩
     pub(crate) context: ContextManager,
     tool_manager: ToolManager,
-    pub(crate) subagents: Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>,
+    pub(crate) subagents: SubAgentMap,
     client: Arc<Client>,
     pub(crate) task_manager: Arc<RwLock<TaskManager>>,
     human_in_loop: Arc<RwLock<HumanApprovalManager>>,
@@ -393,6 +393,7 @@ impl ReactAgent {
                 Some(false),
                 Some(tools.clone()),
                 None,
+                self.config.response_format.clone(),
             )
             .await;
             match &response_result {
@@ -704,8 +705,8 @@ impl Agent for ReactAgent {
             if let Some(store) = &self.store {
                 let agent_name = self.config.agent_name.clone();
                 let ns = vec![agent_name.as_str(), "memories"];
-                if let Ok(items) = store.search(&ns, &task, 5).await {
-                    if !items.is_empty() {
+                if let Ok(items) = store.search(&ns, &task, 5).await &&
+                     !items.is_empty() {
                         let mut lines = vec!["[相关历史记忆]".to_string()];
                         for (i, item) in items.iter().enumerate() {
                             let content_str = item.value.get("content")
@@ -716,7 +717,6 @@ impl Agent for ReactAgent {
                         }
                         lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
                         self.context.push(Message::user(lines.join("\n")));
-                    }
                 }
             }
 
@@ -772,6 +772,7 @@ impl Agent for ReactAgent {
                         Some(8192u32),
                         tools_for_stream.clone(),
                         None,
+                        self.config.response_format.clone(),
                     )
                     .await;
                     match &stream_result {
@@ -799,11 +800,10 @@ impl Agent for ReactAgent {
 
                     if let Some(choice) = chunk.choices.first() {
                         // 文本 token 增量
-                        if let Some(content) = &choice.delta.content {
-                            if !content.is_empty() {
+                        if let Some(content) = &choice.delta.content &&
+                             !content.is_empty() {
                                 content_buffer.push_str(content);
                                 yield AgentEvent::Token(content.clone());
-                            }
                         }
 
                         // 工具调用增量（逐 chunk 拼接 arguments）
@@ -813,10 +813,9 @@ impl Agent for ReactAgent {
                                 let entry = tool_call_map
                                     .entry(dc.index)
                                     .or_insert_with(|| (String::new(), String::new(), String::new()));
-                                if let Some(id) = &dc.id {
-                                    if !id.is_empty() {
+                                if let Some(id) = &dc.id &&
+                                     !id.is_empty() {
                                         entry.0 = id.clone();
-                                    }
                                 }
                                 if let Some(f) = &dc.function {
                                     if let Some(name) = &f.name {
@@ -1162,7 +1161,7 @@ impl ReactAgent {
             }
 
             // 检查是否有任何资源需要懒加载工具
-            if meta.resources.as_ref().map_or(false, |r| !r.is_empty()) {
+            if meta.resources.as_ref().is_some_and(|r| !r.is_empty()) {
                 has_resources = true;
             }
 
@@ -1305,5 +1304,114 @@ impl ReactAgent {
     /// 已安装的 Skill 数量
     pub fn skill_count(&self) -> usize {
         self.skill_manager.count()
+    }
+
+    /// 一次性结构化 JSON 提取，不走 ReAct 循环。
+    ///
+    /// 直接向 LLM 发一次请求，要求按 `schema` 返回 JSON，
+    /// 返回解析后的 [`serde_json::Value`]。
+    ///
+    /// 适合"提取 / 分类 / 格式转换"等不需要工具调用的场景。
+    ///
+    /// # 参数
+    /// - `prompt`：用户输入或待处理文本
+    /// - `schema`：目标 JSON Schema（`ResponseFormat::json_schema(name, schema)` 快速构建）
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::llm::ResponseFormat;
+    /// use serde_json::json;
+    ///
+    /// # async fn run() -> echo_agent::error::Result<()> {
+    /// # use echo_agent::prelude::*;
+    /// # let config = AgentConfig::new("gpt-4o", "extractor", "你是一个提取助手");
+    /// # let agent = ReactAgent::new(config);
+    /// let result = agent.extract_json(
+    ///     "从文本中提取人名和年龄：张三，28岁",
+    ///     ResponseFormat::json_schema(
+    ///         "person",
+    ///         json!({ "type": "object",
+    ///                 "properties": { "name": { "type": "string" }, "age": { "type": "integer" } },
+    ///                 "required": ["name", "age"],
+    ///                 "additionalProperties": false }),
+    ///     ),
+    /// ).await?;
+    /// println!("{}", result["name"]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn extract_json(
+        &self,
+        prompt: &str,
+        schema: ResponseFormat,
+    ) -> Result<serde_json::Value> {
+        let messages = vec![
+            Message::system(self.config.system_prompt.clone()),
+            Message::user(prompt.to_string()),
+        ];
+
+        let response = chat(
+            self.client.clone(),
+            &self.config.model_name,
+            messages,
+            Some(0.0),
+            Some(4096),
+            Some(false),
+            None,
+            None,
+            Some(schema),
+        )
+        .await?;
+
+        let text = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .ok_or_else(|| ReactError::Other("LLM 返回空内容".to_string()))?;
+
+        serde_json::from_str(&text)
+            .map_err(|e| ReactError::Other(format!("JSON 解析失败: {e}\n原始响应: {text}")))
+    }
+
+    /// 一次性结构化提取，自动将 JSON 结果反序列化为指定类型 `T`。
+    ///
+    /// 与 [`extract_json`](Self::extract_json) 相同，但额外执行 `serde` 反序列化。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::llm::ResponseFormat;
+    /// use serde::{Deserialize, Serialize};
+    /// use serde_json::json;
+    ///
+    /// #[derive(Debug, Deserialize)]
+    /// struct Person { name: String, age: u32 }
+    ///
+    /// # async fn run() -> echo_agent::error::Result<()> {
+    /// # use echo_agent::prelude::*;
+    /// # let config = AgentConfig::new("gpt-4o", "extractor", "你是一个提取助手");
+    /// # let agent = ReactAgent::new(config);
+    /// let person: Person = agent.extract(
+    ///     "张三，28岁",
+    ///     ResponseFormat::json_schema(
+    ///         "person",
+    ///         json!({ "type": "object",
+    ///                 "properties": { "name": { "type": "string" }, "age": { "type": "integer" } },
+    ///                 "required": ["name", "age"],
+    ///                 "additionalProperties": false }),
+    ///     ),
+    /// ).await?;
+    /// println!("姓名: {}, 年龄: {}", person.name, person.age);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn extract<T>(&self, prompt: &str, schema: ResponseFormat) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let value = self.extract_json(prompt, schema).await?;
+        serde_json::from_value(value).map_err(|e| ReactError::Other(format!("反序列化失败: {e}")))
     }
 }

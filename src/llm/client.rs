@@ -121,14 +121,12 @@ pub async fn stream_post(
 
         // 处理末尾残留数据（某些服务不以 \n\n 结尾）
         for line in buffer.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data.trim() != "[DONE]" {
-                    if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
+            if let Some(data) = line.strip_prefix("data: ") &&
+                 data.trim() != "[DONE]" &&
+                     let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
                         yield chunk;
                     }
-                }
             }
-        }
     };
 
     Ok(stream)

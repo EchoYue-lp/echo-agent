@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 pub(crate) mod files;
 
 use std::path::{Component, Path, PathBuf};

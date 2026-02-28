@@ -18,6 +18,7 @@
 | [08 - MCP 协议](08-mcp.md) | MCP | stdio/HTTP 传输、工具适配、多服务端管理 |
 | [09 - 任务规划](09-tasks.md) | Tasks / DAG | 有向无环图、拓扑排序、循环依赖检测、Mermaid 可视化 |
 | [10 - 流式输出](10-streaming.md) | Streaming | execute_stream、AgentEvent、SSE、TTFT |
+| [11 - 结构化输出](11-structured-output.md) | Structured Output | ResponseFormat、JsonSchema、extract()、extract_json() |
 
 ---
 
@@ -88,3 +89,4 @@ async fn main() -> Result<()> {
 | `examples/demo12_resilience.rs` | 容错与重试 |
 | `examples/demo13_tool_execution.rs` | 工具执行配置 |
 | `examples/demo14_memory_isolation.rs` | 记忆隔离与上下文隔离 |
+| `examples/demo15_structured_output.rs` | 结构化输出（extract / JSON Schema） |

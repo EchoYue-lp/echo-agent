@@ -97,6 +97,12 @@ impl ToolManager {
     }
 }
 
+impl Default for ToolManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolManager {
     pub fn new() -> Self {
         Self {
@@ -133,7 +139,7 @@ impl ToolManager {
     }
 
     pub fn list_tools(&self) -> Vec<&str> {
-        self.tools.iter().map(|(name, _)| name.as_str()).collect()
+        self.tools.keys().map(|name| name.as_str()).collect()
     }
 
     pub fn get_tool(&self, tool_name: &str) -> Option<&dyn Tool> {

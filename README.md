@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
 | 🔌 **MCP Protocol** | Connect any MCP-compliant tool server (stdio or HTTP SSE) |
 | 📊 **DAG Task Planning** | Planner role with topological scheduling and cycle detection |
 | 📡 **Streaming Output** | `execute_stream()` returns `AgentEvent` stream with real-time Token/ToolCall events |
+| 📐 **Structured Output** | `extract::<T>()` / `extract_json()` — LLM output directly deserialized into Rust types via JSON Schema |
 | 🎣 **Lifecycle Callbacks** | Hook into every phase: think, tool call, final answer, iteration |
 | 🛡️ **Resilience** | Per-tool timeout, exponential backoff retry, concurrency limits |
 
@@ -190,6 +191,28 @@ let tools = mcp.connect(McpServerConfig::stdio(
 agent.add_tools(tools); // MCP tools look identical to native tools
 ```
 
+### 6. Structured Output — LLM responses as typed Rust structs
+
+```rust
+#[derive(Debug, Deserialize)]
+struct Invoice { vendor: String, amount: f64, date: String }
+
+let invoice: Invoice = agent.extract(
+    "Invoice from Acme Corp, $1,250.00, dated 2025-03-15",
+    ResponseFormat::json_schema("invoice", json!({
+        "type": "object",
+        "properties": {
+            "vendor": { "type": "string" },
+            "amount": { "type": "number" },
+            "date":   { "type": "string" }
+        },
+        "required": ["vendor", "amount", "date"],
+        "additionalProperties": false
+    })),
+).await?;
+println!("{} owes ${:.2}", invoice.vendor, invoice.amount);
+```
+
 ---
 
 ## Examples
@@ -210,6 +233,7 @@ agent.add_tools(tools); // MCP tools look identical to native tools
 | [`demo12_resilience`](examples/demo12_resilience.rs) | Retry, timeout, fault tolerance |
 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | Tool execution configuration |
 | [`demo14_memory_isolation`](examples/demo14_memory_isolation.rs) | Memory + context isolation demo |
+| [`demo15_structured_output`](examples/demo15_structured_output.rs) | Structured output with JSON Schema |
 
 ---
 
@@ -227,6 +251,8 @@ Full documentation lives in [`docs/en/`](./docs/en/README.md):
 - [MCP Protocol Integration](docs/en/08-mcp.md)
 - [DAG Task Planning](docs/en/09-tasks.md)
 - [Streaming Output](docs/en/10-streaming.md)
+- [Structured Output](docs/en/11-structured-output.md)
+
 
 ---
 

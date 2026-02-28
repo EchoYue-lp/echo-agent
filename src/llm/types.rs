@@ -91,6 +91,56 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
+/// 结构化输出的 JSON Schema 规格
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct JsonSchemaSpec {
+    /// Schema 名称，用于模型识别（字母数字下划线）
+    pub name: String,
+    /// 标准 JSON Schema 对象
+    pub schema: serde_json::Value,
+    /// 是否强制严格遵守 schema（默认 true，推荐开启）
+    #[serde(default = "default_true")]
+    pub strict: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 响应格式控制，对应 OpenAI `response_format` 字段
+///
+/// - `Text`：默认，自由文本
+/// - `JsonObject`：强制输出合法 JSON，不校验结构
+/// - `JsonSchema`：按指定 JSON Schema 严格输出（需要模型支持 Structured Outputs）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// 默认文本格式
+    Text,
+    /// 强制输出合法 JSON 对象（不校验 schema）
+    JsonObject,
+    /// 按指定 JSON Schema 严格输出
+    JsonSchema { json_schema: JsonSchemaSpec },
+}
+
+impl ResponseFormat {
+    /// 快速创建 `JsonSchema` 格式
+    pub fn json_schema(name: impl Into<String>, schema: serde_json::Value) -> Self {
+        Self::JsonSchema {
+            json_schema: JsonSchemaSpec {
+                name: name.into(),
+                schema,
+                strict: true,
+            },
+        }
+    }
+
+    /// 是否为 JSON 输出格式（JsonObject 或 JsonSchema）
+    pub fn is_json(&self) -> bool {
+        matches!(self, Self::JsonObject | Self::JsonSchema { .. })
+    }
+}
+
 /// OpenAI `/chat/completions` 请求体
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionRequest {
@@ -107,6 +157,9 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// 结构化输出格式（None = 默认文本）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 /// 发送给 LLM 的工具定义（对应 OpenAI tools 数组元素）

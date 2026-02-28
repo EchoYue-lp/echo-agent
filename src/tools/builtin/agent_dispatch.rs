@@ -1,18 +1,15 @@
-use crate::agent::Agent;
+use crate::agent::SubAgentMap;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 pub struct AgentDispatchTool {
-    subagents: Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>,
+    subagents: SubAgentMap,
 }
 
 impl AgentDispatchTool {
-    pub fn new(subagents: Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>) -> Self {
+    pub fn new(subagents: SubAgentMap) -> Self {
         Self { subagents }
     }
 }

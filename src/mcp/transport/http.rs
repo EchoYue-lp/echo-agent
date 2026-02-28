@@ -43,7 +43,7 @@ impl McpTransport for HttpTransport {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         request.id = Some(Value::Number(id.into()));
 
-        let mut builder = self.client.post(&self.endpoint()).json(&request);
+        let mut builder = self.client.post(self.endpoint()).json(&request);
         for (k, v) in &self.headers {
             builder = builder.header(k, v);
         }
@@ -72,7 +72,7 @@ impl McpTransport for HttpTransport {
     }
 
     async fn notify(&self, notification: JsonRpcNotification) -> Result<()> {
-        let mut builder = self.client.post(&self.endpoint()).json(&notification);
+        let mut builder = self.client.post(self.endpoint()).json(&notification);
         for (k, v) in &self.headers {
             builder = builder.header(k, v);
         }

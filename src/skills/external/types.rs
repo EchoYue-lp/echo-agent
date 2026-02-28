@@ -84,13 +84,13 @@ impl SkillMeta {
         }
 
         // 若有资源，告知 LLM 可以按需加载
-        if let Some(resources) = &self.resources {
-            if !resources.is_empty() {
-                block.push_str("\n\n**可用参考资源**（需要时调用 `load_skill_resource` 加载）：");
-                for res in resources {
-                    let desc = res.description.as_deref().unwrap_or("");
-                    block.push_str(&format!("\n- `{}/{}`: {}", self.name, res.name, desc));
-                }
+        if let Some(resources) = &self.resources
+            && !resources.is_empty()
+        {
+            block.push_str("\n\n**可用参考资源**（需要时调用 `load_skill_resource` 加载）：");
+            for res in resources {
+                let desc = res.description.as_deref().unwrap_or("");
+                block.push_str(&format!("\n- `{}/{}`: {}", self.name, res.name, desc));
             }
         }
 

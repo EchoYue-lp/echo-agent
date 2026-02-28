@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
 | 🔌 **MCP 协议** | 接入任意符合 MCP 规范的工具服务（stdio 或 HTTP SSE） |
 | 📊 **DAG 任务规划** | Planner 角色 + 拓扑调度 + 循环依赖检测 |
 | 📡 **流式输出** | `execute_stream()` 返回 `AgentEvent` 流，实时推送 Token / 工具调用 |
+| 📐 **结构化输出** | `extract::<T>()` / `extract_json()` —— 通过 JSON Schema 将 LLM 输出直接反序列化为 Rust 类型 |
 | 🎣 **生命周期回调** | 监听每个执行阶段：推理、工具调用、最终答案、迭代轮次 |
 | 🛡️ **容错与韧性** | 工具级超时、指数退避重试、并发数限流 |
 
@@ -189,6 +190,28 @@ let tools = mcp.connect(McpServerConfig::stdio(
 agent.add_tools(tools); // MCP 工具与本地工具完全一致
 ```
 
+### 6. 结构化输出 —— LLM 响应直接反序列化为 Rust 结构体
+
+```rust
+#[derive(Debug, Deserialize)]
+struct Invoice { vendor: String, amount: f64, date: String }
+
+let invoice: Invoice = agent.extract(
+    "收到 Acme 公司发票，金额 1250 元，日期 2025-03-15",
+    ResponseFormat::json_schema("invoice", json!({
+        "type": "object",
+        "properties": {
+            "vendor": { "type": "string" },
+            "amount": { "type": "number" },
+            "date":   { "type": "string" }
+        },
+        "required": ["vendor", "amount", "date"],
+        "additionalProperties": false
+    })),
+).await?;
+println!("{} 应付 ¥{:.2}", invoice.vendor, invoice.amount);
+```
+
 ---
 
 ## 示例文件
@@ -209,6 +232,7 @@ agent.add_tools(tools); // MCP 工具与本地工具完全一致
 | [`demo12_resilience`](examples/demo12_resilience.rs) | 重试、超时、容错 |
 | [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | 工具执行配置 |
 | [`demo14_memory_isolation`](examples/demo14_memory_isolation.rs) | 记忆与上下文隔离 |
+| [`demo15_structured_output`](examples/demo15_structured_output.rs) | 结构化输出（JSON Schema） |
 
 ---
 
@@ -228,6 +252,7 @@ agent.add_tools(tools); // MCP 工具与本地工具完全一致
 - [MCP 协议集成](docs/zh/08-mcp.md)
 - [DAG 任务规划](docs/zh/09-tasks.md)
 - [流式输出](docs/zh/10-streaming.md)
+- [结构化输出](docs/zh/11-structured-output.md)
 
 **English**（[`docs/en/`](./docs/en/README.md)）：所有文档的英文版本。
 

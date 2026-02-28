@@ -20,6 +20,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [08 - MCP Integration](./08-mcp.md) | MCP | stdio/HTTP transport, tool adaptation, multi-server management |
 | [09 - Task Planning](./09-tasks.md) | Tasks / DAG | DAG, topological sort, cycle detection, Mermaid visualization |
 | [10 - Streaming Output](./10-streaming.md) | Streaming | execute_stream, AgentEvent, SSE, TTFT |
+| [11 - Structured Output](./11-structured-output.md) | Structured Output | ResponseFormat, JsonSchema, extract(), extract_json() |
 
 ---
 
@@ -108,3 +109,4 @@ async fn main() -> Result<()> {
 | `examples/demo12_resilience.rs` | Fault tolerance and retries |
 | `examples/demo13_tool_execution.rs` | Tool execution configuration |
 | `examples/demo14_memory_isolation.rs` | Memory and context isolation |
+| `examples/demo15_structured_output.rs` | Structured output (extract / JSON Schema) |

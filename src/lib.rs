@@ -57,6 +57,7 @@ pub mod prelude {
         ConsoleHumanLoopProvider, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
         WebSocketHumanLoopProvider, WebhookHumanLoopProvider,
     };
+    pub use crate::llm::{JsonSchemaSpec, ResponseFormat};
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
     pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
     pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};

@@ -95,6 +95,7 @@ async fn demo_raw_stream() -> echo_agent::error::Result<()> {
             Some(512),
             None,
             None,
+            None,
         )
         .await?,
     );

@@ -260,16 +260,7 @@ impl Tool for ForgetTool {
         let ns: Vec<&str> = self.ns_refs();
 
         // 先尝试精确匹配，如失败则按前缀搜索全 key
-        let full_key = self
-            .store
-            .get(&ns, id_prefix)
-            .await?
-            .map(|item| item.key)
-            .or_else(|| {
-                // 如果 id_prefix 是8位前缀，通过搜索找到完整 key
-                // 这里我们无法直接列出所有 key，因此使用 search 来找
-                None
-            });
+        let full_key = self.store.get(&ns, id_prefix).await?.map(|item| item.key);
 
         // 尝试直接删除（用户可能传入了完整 key）
         let deleted = if let Some(key) = &full_key {

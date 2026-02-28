@@ -1,467 +1,445 @@
 # Echo Agent 优化改进建议
 
 > 基于 LangChain、AutoGen、CrewAI、LlamaIndex 等主流框架对比分析
-> 更新时间：2026-02-26
+> 更新时间：2026-02-28
 
 ---
 
 ## 整体评价
 
-框架架构扎实，模块边界清晰，trait 抽象合理：
+框架架构扎实，模块边界清晰，核心能力已达主流框架水准：
 
-- ✅ ReAct 循环（think → action → observation）
-- ✅ 工具系统（内置 + MCP + 自定义 + Skill）
-- ✅ 任务规划与 DAG 执行
-- ✅ 人工审批机制
-- ✅ 子 Agent 编排
-- ✅ 上下文压缩（滑动窗口 + 摘要 + 混合）
-- ✅ Skill 系统（内置 + 外部文件加载）
-- ✅ MCP 协议集成
-- ✅ 异步工具执行（async trait）
+- ✅ ReAct 循环（Thought → Action → Observation）+ Chain-of-Thought
+- ✅ 工具系统（内置 + MCP + Skill + 自定义）+ 超时 / 重试 / 并发限流
+- ✅ 并行工具调用（`join_all`）
+- ✅ 流式输出（`execute_stream` + `AgentEvent`）
+- ✅ 生命周期回调（`AgentCallback`）
+- ✅ 任务规划与 DAG 执行（Planner 角色 + 拓扑调度 + Mermaid 可视化）
+- ✅ 人工介入（审批 / 文本输入，支持 Console / Webhook / WebSocket）
+- ✅ SubAgent 编排（Orchestrator / Worker / Planner 三种角色）
+- ✅ 双层记忆（Store 长期 KV + Checkpointer 会话持久化）
+- ✅ 上下文压缩（滑动窗口 + LLM 摘要 + 混合管道）
+- ✅ Skill 系统（内置 + 外部 SKILL.md 加载）
+- ✅ MCP 协议客户端（stdio + HTTP SSE）
+- ✅ LLM 调用重试（网络错误 / 429 指数退避）
+- ✅ 工具错误回传 LLM（`tool_error_feedback`，LLM 自主纠错）
 - ✅ 结构化日志（tracing）
-- ✅ 并行工具调用
 
 ---
 
-## 一、流式输出（Streaming）— 🔴 高优先级
+## 一、结构化输出（Structured Output）— 🔴 高优先级
 
-这是目前最明显的缺失。主流框架（LangChain、LlamaIndex）都把 streaming 作为核心 API。
-当前 `chat()` 是一次性等待完整响应，用户需要等待整个推理过程结束才能看到结果。
+### 现状
 
-**建议：** 在 `llm/client.rs` 中增加 `chat_stream()` 接口，通过解析 Server-Sent Events 按 delta 推送：
+当前 LLM 调用不支持 `response_format`，只能依赖 function calling 获取结构化数据。
+OpenAI / Qwen / DeepSeek 均已支持 `response_format: { type: "json_schema", schema: {...}, strict: true }`，
+可强制 LLM 按指定 schema 输出，对任务规划阶段的子任务解析、记忆提取等场景非常有价值。
 
-```rust
-// LLM 层新增流式接口
-pub async fn chat_stream(
-    client: Arc<Client>,
-    model: &str,
-    messages: Vec<Message>,
-    options: ChatOptions,
-) -> Result<impl Stream<Item = Result<String>>> {
-    // 解析 SSE，逐 token 推送
-}
-```
+### 建议
 
-`Agent` trait 增加流式执行入口：
+在 `llm/types.rs` 新增 `ResponseFormat` 枚举，并在 `chat()` 参数中携带：
 
 ```rust
-#[async_trait]
-pub trait Agent: Send + Sync {
-    async fn execute(&mut self, task: &str) -> Result<String>;
-
-    // 新增：流式执行，逐事件推送
-    async fn execute_stream(
-        &mut self,
-        task: &str,
-    ) -> Result<BoxStream<'_, Result<AgentEvent>>>;
+// llm/types.rs
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    Text,
+    JsonObject,
+    JsonSchema {
+        json_schema: JsonSchemaSpec,
+    },
 }
 
-pub enum AgentEvent {
-    Token(String),            // LLM 推理 token
-    ToolCall { name: String, args: Value },
-    ToolResult { name: String, output: String },
-    FinalAnswer(String),
-}
-```
-
----
-
-## 二、事件回调系统（Callbacks / Hooks）— 🔴 高优先级
-
-LangChain 的 Callbacks 是最常被开发者使用的可扩展点。目前框架只有 `tracing` 日志，
-外部代码无法感知 Agent 的内部事件，无法做实时 UI 进度展示、接入 LangSmith 类监控平台。
-
-**建议：** 新增 `AgentCallback` trait，在 `AgentConfig` 中注册：
-
-```rust
-#[async_trait]
-pub trait AgentCallback: Send + Sync {
-    async fn on_think_start(&self, agent: &str, messages: &[Message]) {}
-    async fn on_think_end(&self, agent: &str, steps: &[StepType]) {}
-    async fn on_tool_start(&self, agent: &str, tool: &str, args: &Value) {}
-    async fn on_tool_end(&self, agent: &str, tool: &str, result: &str) {}
-    async fn on_tool_error(&self, agent: &str, tool: &str, err: &ReactError) {}
-    async fn on_final_answer(&self, agent: &str, answer: &str) {}
-    async fn on_iteration(&self, agent: &str, iteration: usize) {}
+#[derive(Debug, Serialize)]
+pub struct JsonSchemaSpec {
+    pub name: String,
+    pub schema: Value,
+    pub strict: bool,
 }
 
-// AgentConfig 中注册
-pub struct AgentConfig {
+// ChatCompletionRequest 新增字段
+pub struct ChatCompletionRequest {
     // ...现有字段...
-    pub callbacks: Vec<Arc<dyn AgentCallback>>,
+    pub response_format: Option<ResponseFormat>,
 }
 ```
 
-使用示例：
+典型使用场景：Planner 规划子任务时强制返回标准 JSON，避免自然语言解析失败：
 
 ```rust
-// 自定义进度打印回调
-struct ProgressCallback;
-
-#[async_trait]
-impl AgentCallback for ProgressCallback {
-    async fn on_tool_start(&self, agent: &str, tool: &str, _args: &Value) {
-        println!("[{}] 正在调用工具: {}", agent, tool);
-    }
-    async fn on_final_answer(&self, agent: &str, answer: &str) {
-        println!("[{}] 完成: {}", agent, answer);
-    }
-}
-```
-
----
-
-## 三、LLM 调用重试 + 工具错误回传 LLM — 🔴 高优先级
-
-### 3.1 LLM 调用缺少重试逻辑
-
-Rate limit（429）、临时网络抖动会直接导致任务失败。建议在 `llm/client.rs` 增加带指数退避的重试：
-
-```rust
-pub struct RetryConfig {
-    pub max_attempts: u32,          // 默认 3
-    pub initial_delay_ms: u64,      // 默认 1000
-    pub max_delay_ms: u64,          // 默认 30_000
-    pub retryable_status: Vec<u16>, // [429, 502, 503, 504]
-}
-```
-
-### 3.2 工具执行失败应回传给 LLM，而不是直接报错
-
-当前 `react_agent.rs` 中工具执行失败会直接向上传播错误，导致整个 Agent 中断。
-主流框架（LangChain、AutoGen）的做法是将错误作为 observation 告知 LLM，让它决策下一步：
-
-```rust
-// 当前行为：工具失败 → Agent 直接报错
-let result = self.execute_tool(&function_name, &arguments).await?; // ← 直接 ? 传播
-
-// 建议改为：工具失败 → 封装为错误观察，让 LLM 自主恢复
-let result = match self.execute_tool(&function_name, &arguments).await {
-    Ok(output) => output,
-    Err(e) => format!("工具执行失败: {}。请尝试其他方案或换一个工具。", e),
+let format = ResponseFormat::JsonSchema {
+    json_schema: JsonSchemaSpec {
+        name: "task_plan".into(),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/Task" }
+                }
+            }
+        }),
+        strict: true,
+    },
 };
-self.context.push(Message::tool_result(tool_call_id, function_name, result));
 ```
 
 ---
 
-## 四、异步化人工审批 — 🟡 中等优先级
+## 二、Mock LLM / 测试基础设施 — 🔴 高优先级
 
-`execute_tool` 中直接调用 `std::io::stdin().read_line()`，这是同步阻塞调用，
-**会占用整个 tokio 工作线程**，在高并发场景下会导致运行时饥饿。
+### 现状
 
-```rust
-// 当前问题代码（react_agent.rs）
-std::io::stdin().read_line(&mut user_input)?; // ← 阻塞 tokio 线程！
-```
+`LlmClient` trait 已存在（用于 `SummaryCompressor`），但没有 Mock 实现。
+所有测试均依赖真实 LLM API 调用，无法做 CI 自动化，ReAct 循环逻辑缺乏单元测试覆盖。
 
-**短期修复：** 用 `tokio::io` 替换：
+### 建议
 
-```rust
-use tokio::io::{AsyncBufReadExt, BufReader};
-
-let stdin = tokio::io::stdin();
-let mut reader = BufReader::new(stdin);
-let mut user_input = String::new();
-reader.read_line(&mut user_input).await?;
-```
-
-**长期方案：** 抽象为 `ApprovalProvider` trait，支持 WebSocket 推送、HTTP 回调等多种审批渠道：
+新增 `MockLlmClient`，预设响应序列：
 
 ```rust
+// llm/mock.rs（新文件）
+pub struct MockLlmClient {
+    responses: Mutex<VecDeque<ChatCompletionResponse>>,
+    call_count: AtomicUsize,
+}
+
+impl MockLlmClient {
+    /// 预设工具调用序列后跟最终答案
+    pub fn with_sequence(responses: Vec<ChatCompletionResponse>) -> Self { ... }
+
+    /// 快捷构造：单次工具调用
+    pub fn tool_then_answer(tool: &str, args: Value, answer: &str) -> Self {
+        Self::with_sequence(vec![
+            ChatCompletionResponse::tool_call(tool, args),
+            ChatCompletionResponse::final_answer(answer),
+        ])
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
 #[async_trait]
-pub trait ApprovalProvider: Send + Sync {
-    async fn request_approval(
-        &self,
-        tool_name: &str,
-        args: &Value,
-    ) -> Result<ApprovalDecision>;
+impl LlmClient for MockLlmClient {
+    async fn chat(&self, _req: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.responses.lock().await
+            .pop_front()
+            .ok_or_else(|| ReactError::Llm(LlmError::EmptyResponse))
+    }
 }
-
-pub enum ApprovalDecision {
-    Approved,
-    Rejected { reason: Option<String> },
-    Timeout,
-}
-
-// 内置实现
-pub struct ConsoleApproval;   // 当前行为：控制台 y/n
-pub struct WebhookApproval { pub url: String }  // HTTP 回调
 ```
+
+对应单元测试示例：
+
+```rust
+#[tokio::test]
+async fn test_react_calls_tool_and_returns_answer() {
+    let mock = Arc::new(MockLlmClient::tool_then_answer(
+        "add",
+        json!({"a": 3, "b": 4}),
+        "3 + 4 = 7",
+    ));
+
+    let mut agent = ReactAgent::new_with_llm(
+        AgentConfig::new("mock", "test", ""),
+        mock.clone(),
+    );
+    agent.add_tool(Box::new(AddTool));
+
+    let result = agent.execute("3 加 4 等于多少？").await.unwrap();
+    assert_eq!(result, "3 + 4 = 7");
+    assert_eq!(mock.call_count(), 2); // 第一次返回工具调用，第二次返回答案
+}
+```
+
+`ReactAgent::new_with_llm(config, llm)` 构造函数仅需暴露为 `pub(crate)` 或 `#[cfg(test)]` 可用。
 
 ---
 
-## 五、工具超时控制 — 🟡 中等优先级
+## 三、多轮对话模式（`chat()` 接口）— 🟡 中等优先级
 
-工具执行目前没有超时机制，MCP 工具或网络工具挂起会导致整个 Agent 无限期等待。
+### 现状
 
-**建议：** 在 `ToolManager::execute_tool` 中统一加 timeout：
+`execute()` 内部每次都调用 `reset_messages()` 重置上下文，是"单次任务"语义。
+虽然 `session_id + Checkpointer` 可以跨进程续接，但在**同一进程内**无法做"连续聊天"——
+每轮对话都从空白开始，适合任务 Agent 但不适合对话 Agent（Chatbot）场景。
 
-```rust
-// tools/mod.rs 新增配置
-pub struct ToolExecutionConfig {
-    pub timeout_ms: u64,    // 默认 30_000
-    pub retry_on_fail: bool,
-    pub max_retries: u32,
-}
+### 建议
 
-// 执行时包裹 tokio::time::timeout
-tokio::time::timeout(
-    Duration::from_millis(config.timeout_ms),
-    tool.execute(params),
-)
-.await
-.map_err(|_| ToolError::Timeout(tool_name.to_string()))?
-```
-
-同时 `ToolError` 增加 `Timeout` 变体：
+在 `Agent` trait 和 `ReactAgent` 中新增 `chat()` 方法，不重置历史、持续累积上下文：
 
 ```rust
-pub enum ToolError {
-    // ...现有变体...
-    Timeout(String),  // 工具执行超时
-}
-```
-
----
-
-## 六、多轮对话支持 — 🟡 中等优先级
-
-目前 `run_direct()` 每次都调用 `reset_messages()`，导致每次 `execute()` 都是全新对话，
-无法支持连续多轮交互（如 Chat Agent 场景）。
-
-**建议：** 在 `Agent` trait 增加多轮对话接口：
-
-```rust
+// agent/mod.rs
 #[async_trait]
 pub trait Agent: Send + Sync {
-    // 单次任务执行（当前行为，内部重置历史）
-    async fn execute(&mut self, task: &str) -> Result<String>;
-
-    // 多轮对话：不重置历史，保留上下文（新增）
-    async fn chat(&mut self, message: &str) -> Result<String>;
-
-    // 显式清除历史（新增）
-    fn clear_history(&mut self);
+    async fn execute(&mut self, task: &str) -> Result<String>; // 已有：单次任务，内部重置
+    async fn chat(&mut self, message: &str) -> Result<String>; // 新增：多轮对话，保留历史
+    async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>; // 已有
+    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>; // 新增
 }
-```
 
-`ReactAgent` 对应实现：
-
-```rust
+// react_agent.rs 实现
 async fn chat(&mut self, message: &str) -> Result<String> {
-    // 不调用 reset_messages()，直接追加消息
+    // 不调用 reset_messages()，直接追加用户消息
     self.context.push(Message::user(message.to_string()));
     self.run_react_loop().await
 }
 ```
 
----
-
-## 七、结构化输出支持 — 🟡 中等优先级
-
-当前 LLM 只支持 function calling，但主流 API 都支持 `response_format: json_schema`，
-可强制 LLM 按指定 schema 返回，对任务规划阶段的结构化数据提取非常有价值。
-
-**建议：** 在 `chat()` 接口增加 `response_format` 参数：
+使用场景对比：
 
 ```rust
-pub enum ResponseFormat {
-    Text,
-    JsonObject,
-    JsonSchema {
-        name: String,
-        schema: Value,
-        strict: bool,
-    },
-}
+// 任务 Agent（当前 execute 语义，每次独立）
+agent.execute("帮我分析这份报告").await?;
+agent.execute("帮我生成代码").await?; // 上一轮的报告内容不在上下文中
 
-pub async fn chat(
-    client: Arc<Client>,
-    model: &str,
-    messages: Vec<Message>,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    stream: Option<bool>,
-    tools: Option<Vec<Value>>,
-    tool_choice: Option<Value>,
-    response_format: Option<ResponseFormat>, // 新增
-) -> Result<ChatCompletionResponse>
+// 对话 Agent（新 chat 语义，持续累积）
+agent.chat("你好，我叫张三").await?;
+agent.chat("帮我分析这份报告").await?;
+agent.chat("把分析结果用英文重写").await?; // 上轮分析结果在上下文中
 ```
 
 ---
 
-## 八、Mock LLM / 测试基础设施 — 🟡 中等优先级
+## 四、Store 语义搜索（向量检索）— 🟡 中等优先级
 
-目前没有任何单元测试基础设施，所有测试都依赖真实 LLM API 调用，无法做 CI 自动化。
-LangChain、LlamaIndex 都提供 FakeLLM 用于测试。
+### 现状
 
-**建议：** 将 LLM 调用抽象为 trait，提供 Mock 实现：
+`Store::search()` 实现是关键词匹配（字符串包含 + 词频评分），对于语义相似但用词不同的查询效果差：
+
+```
+存储：{"content": "用户喜好：古典音乐"}
+查询：recall("music preference")  ← 英文查询，中文内容，命中为 0
+```
+
+### 建议
+
+**方案 A（短期，无外部依赖）**：
+扩展现有关键词匹配，加入简单的双语 / 归一化处理（Unicode 标准化、停用词过滤、ngram 索引）。
+
+**方案 B（中期，可选功能）**：
+为 `Store` trait 新增可选的 embedding 接口，配合本地嵌入模型（如 `fastembed-rs`）或远程 API：
 
 ```rust
-// llm/mod.rs：新增 LlmClient trait
+// memory/store.rs
 #[async_trait]
-pub trait LlmClient: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse>;
-}
+pub trait Store: Send + Sync {
+    // ...现有方法...
 
-// 生产实现（当前逻辑）
-pub struct OpenAiClient { client: Arc<reqwest::Client>, model: String }
+    /// 是否支持语义搜索（默认 false，关键词搜索）
+    fn supports_semantic_search(&self) -> bool { false }
 
-// 测试用 Mock 实现
-pub struct MockLlmClient {
-    responses: Mutex<VecDeque<ChatResponse>>,
-}
-
-impl MockLlmClient {
-    // 预设工具调用响应
-    pub fn with_tool_call(tool: &str, args: Value) -> Self { ... }
-    // 预设最终答案响应
-    pub fn with_final_answer(answer: &str) -> Self { ... }
-    // 预设响应序列
-    pub fn with_sequence(responses: Vec<ChatResponse>) -> Self { ... }
-}
-```
-
-这样可以对 ReAct 循环逻辑做不依赖网络的单元测试：
-
-```rust
-#[tokio::test]
-async fn test_react_loop_calls_tool_then_answers() {
-    let mock_llm = MockLlmClient::with_sequence(vec![
-        ChatResponse::tool_call("weather", json!({"city": "Beijing"})),
-        ChatResponse::final_answer("北京今天晴，25°C"),
-    ]);
-
-    let mut agent = ReactAgent::new_with_llm(config, Arc::new(mock_llm));
-    agent.add_tool(Box::new(WeatherTool));
-
-    let result = agent.execute("北京天气如何？").await.unwrap();
-    assert_eq!(result, "北京今天晴，25°C");
-}
-```
-
----
-
-## 九、用 `thiserror` 简化错误代码 — 🟢 低优先级
-
-`error.rs` 有 312 行，包含大量样板代码（手写 `Display` + `From` 实现）。
-使用 `thiserror` 可大幅简化，且语义更清晰：
-
-**当前写法（每个变体需要手写多个 impl）：**
-
-```rust
-impl fmt::Display for LlmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LlmError::NetworkError(msg) => write!(f, "Network error: {}", msg),
-            // ... 逐一手写
-        }
+    /// 语义搜索（仅在 supports_semantic_search() == true 时有效）
+    async fn semantic_search(
+        &self,
+        namespace: &[&str],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<StoreItem>> {
+        // 默认 fallback 到关键词搜索
+        self.search(namespace, query, limit).await
     }
 }
-impl std::error::Error for LlmError {}
+
+// 新增：向量 Store 实现
+pub struct VectorStore {
+    inner: FileStore,
+    embedder: Arc<dyn Embedder>,
+    index: Arc<RwLock<VectorIndex>>,
+}
 ```
 
-**改用 `thiserror` 后（一个 derive 搞定）：**
+---
+
+## 五、Agent 编排模式扩展 — 🟡 中等优先级
+
+### 现状
+
+当前仅支持 Orchestrator-Worker 模式（一对多分派）。复杂业务中还需要：
+
+- **Pipeline（流水线）**：A 的输出作为 B 的输入，顺序处理
+- **FanOut-FanIn（扇出聚合）**：将同一任务并发分配给多个 Worker，聚合结果
+- **Race（竞争执行）**：多个 Agent 并发执行同一任务，取最快/质量最好的结果
+
+### 建议
+
+新增 `AgentPipeline` 工具类（不修改现有代码，作为上层封装）：
 
 ```rust
-// Cargo.toml 新增：thiserror = "1"
+// agent/pipeline.rs（新文件）
+pub struct AgentPipeline;
 
+impl AgentPipeline {
+    /// 顺序管道：前一个 Agent 的输出作为下一个的输入
+    pub async fn sequential(
+        agents: &mut [Box<dyn Agent>],
+        initial_input: &str,
+    ) -> Result<String> {
+        let mut input = initial_input.to_string();
+        for agent in agents.iter_mut() {
+            input = agent.execute(&input).await?;
+        }
+        Ok(input)
+    }
+
+    /// 并行扇出 + 聚合：所有 Agent 并行执行同一任务
+    pub async fn fan_out(
+        agents: &mut [Box<dyn Agent>],
+        task: &str,
+    ) -> Result<Vec<String>> {
+        // 无法同时持有多个 &mut，需要 Arc<AsyncMutex>
+        todo!("需要 agents: Vec<Arc<AsyncMutex<Box<dyn Agent>>>>")
+    }
+
+    /// 竞争执行：取第一个成功完成的结果
+    pub async fn race(
+        agents: Vec<Arc<AsyncMutex<Box<dyn Agent>>>>,
+        task: &str,
+    ) -> Result<String> { ... }
+}
+```
+
+---
+
+## 六、`thiserror` 重构错误类型 — 🟢 低优先级
+
+### 现状
+
+`error.rs` 约 354 行，包含大量手写的 `Display` 实现和 `From` 转换样板代码。
+
+### 建议
+
+使用 `thiserror` crate 消除样板：
+
+```toml
+# Cargo.toml
+[dependencies]
+thiserror = "2"
+```
+
+```rust
+// 改造前（手写 ~20 行）：
+impl fmt::Display for LlmError { ... }
+impl std::error::Error for LlmError {}
+impl From<LlmError> for ReactError { ... }
+
+// 改造后（3 行）：
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    #[error("Network error: {0}")]
+    #[error("网络请求失败: {0}")]
     NetworkError(String),
 
-    #[error("API error (status {status}): {message}")]
+    #[error("API 错误 (状态码 {status}): {message}")]
     ApiError { status: u16, message: String },
 
-    #[error("Invalid response: {0}")]
+    #[error("响应格式无效: {0}")]
     InvalidResponse(String),
 
-    #[error("Empty response from LLM")]
+    #[error("LLM 返回空响应")]
     EmptyResponse,
-
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReactError {
-    #[error("LLM Error: {0}")]
-    Llm(#[from] LlmError),  // #[from] 自动生成 From impl
+    #[error(transparent)]
+    Llm(#[from] LlmError),   // 自动生成 From<LlmError> for ReactError
 
-    #[error("Tool Error: {0}")]
+    #[error(transparent)]
     Tool(#[from] ToolError),
-
     // ...
 }
 ```
 
-预计可将 `error.rs` 从 312 行压缩到约 100 行。
+预计可将 `error.rs` 从 354 行压缩到约 120 行，且语义更清晰。
 
 ---
 
-## 十、功能性扩展建议
+## 七、工具结果缓存 — 🟢 低优先级
 
-### 10.1 记忆分层（Memory Hierarchy）
+### 现状
 
-目前 `ContextManager` 只是短期记忆（当前对话历史）。建议增加：
+每次调用幂等工具（天气查询、搜索、文件读取）都会重新执行，同一任务循环内可能重复调用相同参数的工具。
 
-| 层级 | 名称 | 描述 | 实现方案 |
-|------|------|------|----------|
-| L1 | 工作记忆 | 当前对话历史 | 已有 `ContextManager` |
-| L2 | 语义记忆 | 跨对话的 key-value 知识 | `sled` 或内存 `HashMap` |
-| L3 | 向量记忆 | 长期知识检索（RAG） | `qdrant-client` / `lancedb` |
+### 建议
 
-### 10.2 Agent 编排模式扩展
-
-目前 `enable_subagent` 只支持 Orchestrator-Worker 模式，可以补充：
-
-```rust
-pub enum OrchestrationPattern {
-    // 当前已有：Orchestrator 调度
-    Orchestrator,
-    // 新增：顺序管道（A 输出 → B 输入）
-    Pipeline(Vec<Box<dyn Agent>>),
-    // 新增：并行扇出 + 汇总
-    FanOutFanIn {
-        workers: Vec<Box<dyn Agent>>,
-        reducer: Box<dyn Agent>,
-    },
-    // 新增：竞争执行，取最快结果
-    Race(Vec<Box<dyn Agent>>),
-}
-```
-
-### 10.3 工具执行结果缓存
-
-对于幂等工具（如天气查询、搜索），可以缓存结果避免重复调用：
+在 `Tool` trait 新增可选的缓存声明，`ToolManager` 自动缓存结果：
 
 ```rust
 pub trait Tool: Send + Sync {
-    // 新增：声明工具是否幂等（可缓存）
-    fn is_idempotent(&self) -> bool { false }
+    // ...现有方法...
+
+    /// 是否对相同参数的调用结果进行缓存（默认 false）
     fn cache_ttl(&self) -> Option<Duration> { None }
-    // ...
 }
+
+// ToolManager 内部维护缓存
+struct CacheEntry {
+    result: String,
+    expires_at: Instant,
+}
+
+// 执行前检查缓存 key = (tool_name, params_hash)
 ```
 
 ---
 
-## 优先级汇总
+## 八、可观测性增强（Tracing / Span）— 🟢 低优先级
 
-| # | 改进项 | 优先级 | 实现复杂度 | 预期收益 |
-|---|--------|:------:|:--------:|--------|
-| 1 | 流式输出 | 🔴 高 | 中 | 大幅提升用户体验 |
-| 2 | 事件回调系统 | 🔴 高 | 低 | 可观测性、监控集成 |
-| 3 | LLM 重试 + 工具错误回传 LLM | 🔴 高 | 低 | 大幅提升鲁棒性 |
-| 4 | 人工审批异步化 | 🟡 中 | 低 | 修复运行时阻塞问题 |
-| 5 | 工具超时控制 | 🟡 中 | 低 | 防止挂起 |
-| 6 | 多轮对话支持 | 🟡 中 | 低 | 支持 Chat 场景 |
-| 7 | 结构化输出 | 🟡 中 | 低 | 提升 Planning 可靠性 |
-| 8 | Mock LLM / 测试基础设施 | 🟡 中 | 中 | 支持 CI / 单元测试 |
-| 9 | `thiserror` 重构 | 🟢 低 | 低 | 代码量减少 ~60% |
-| 10 | 记忆分层 / RAG | 🟢 低 | 高 | 长期知识积累 |
-| 11 | Agent 编排模式扩展 | 🟢 低 | 高 | 更复杂的协作场景 |
+### 现状
 
-**建议优先攻坚前三项**：流式输出、回调系统、工具失败错误回传 LLM——这三项对用户体验和 Agent 鲁棒性影响最大，且实现成本相对较低。
+已有 `tracing` 结构化日志，但日志是"扁平"的，无法形成调用链。
+对于多 Agent 编排场景，无法追踪"主 Agent → SubAgent A → 工具 X"这条完整的执行路径。
+
+### 建议
+
+为每次 `execute()` 创建一个 `tracing::Span`，工具调用和 SubAgent 分派作为子 Span：
+
+```rust
+// react_agent.rs
+pub async fn execute(&mut self, task: &str) -> Result<String> {
+    let span = tracing::info_span!(
+        "agent.execute",
+        agent = %self.config.agent_name,
+        task = %task,
+    );
+    let _guard = span.enter();
+    // ...现有逻辑...
+}
+```
+
+这样接入 Jaeger / Zipkin / OTLP 后即可看到完整的多 Agent 调用树。
+
+---
+
+## 优先级汇总（截至 2026-02-28）
+
+| # | 改进项 | 优先级 | 复杂度 | 预期收益 |
+|---|--------|:------:|:------:|--------|
+| 1 | 结构化输出（`response_format`） | 🔴 高 | 低 | 提升 Planner / 数据提取可靠性 |
+| 2 | Mock LLM / 测试基础设施 | 🔴 高 | 中 | 支持 CI / 单元测试 |
+| 3 | 多轮对话模式（`chat()` 接口） | 🟡 中 | 低 | 支持 Chatbot 场景 |
+| 4 | Store 语义搜索（向量检索） | 🟡 中 | 高 | 长期记忆质量大幅提升 |
+| 5 | Agent 编排模式扩展 | 🟡 中 | 中 | Pipeline / FanOut / Race 场景 |
+| 6 | `thiserror` 重构 | 🟢 低 | 低 | error.rs 代码量减少 ~65% |
+| 7 | 工具结果缓存 | 🟢 低 | 低 | 减少重复工具调用 |
+| 8 | Tracing Span 调用链 | 🟢 低 | 低 | 多 Agent 可观测性 |
+
+---
+
+## 已完成项（自 2026-02-26 起）
+
+以下建议均已实现，记录以供参考：
+
+| 原建议 | 完成状态 |
+|--------|---------|
+| 流式输出 | ✅ `execute_stream()` + `AgentEvent` |
+| 事件回调系统 | ✅ `AgentCallback` trait（on_think/on_tool/on_final_answer 等） |
+| LLM 调用重试 | ✅ `is_retryable_llm_error` + 指数退避，可配 `llm_retry_delay_ms` |
+| 工具错误回传 LLM | ✅ `tool_error_feedback` 配置（默认开启） |
+| 人工审批异步化 | ✅ `HumanLoopProvider` trait + Console / Webhook / WebSocket |
+| 工具超时控制 | ✅ `ToolExecutionConfig`（timeout/retry/concurrency） |
+| 记忆分层（L1 + L2） | ✅ `ContextManager`（工作记忆）+ `Store`（语义记忆）+ `Checkpointer`（会话历史） |

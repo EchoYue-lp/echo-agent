@@ -1,22 +1,18 @@
 //! Agent 配置
 
 use crate::agent::AgentCallback;
+use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
 use std::sync::Arc;
 
 /// Agent 角色，决定其在多 Agent 系统中的职责
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub enum AgentRole {
     /// 编排者：负责任务规划、分配和协调子 agent，不持有具体业务工具
     Orchestrator,
     /// 执行者：专注于具体任务执行，只携带业务工具，不持有任务管理/子 agent 调度能力
+    #[default]
     Worker,
-}
-
-impl Default for AgentRole {
-    fn default() -> Self {
-        AgentRole::Worker
-    }
 }
 
 /// Agent 运行时配置
@@ -68,6 +64,12 @@ pub struct AgentConfig {
     pub(crate) session_id: Option<String>,
     /// Checkpointer 文件路径（默认 `~/.echo-agent/checkpoints.json`）
     pub(crate) checkpointer_path: String,
+    /// 结构化输出格式（None = 默认文本）。
+    ///
+    /// 设置后，所有 LLM 调用都会携带该格式约束。
+    /// 推荐对"纯提取/分类"场景使用 [`ResponseFormat::JsonSchema`]；
+    /// 对带工具的 Agent 仅建议使用 [`ResponseFormat::JsonObject`]。
+    pub(crate) response_format: Option<ResponseFormat>,
 }
 
 impl AgentConfig {
@@ -95,6 +97,7 @@ impl AgentConfig {
             memory_path: "~/.echo-agent/store.json".to_string(),
             session_id: None,
             checkpointer_path: "~/.echo-agent/checkpoints.json".to_string(),
+            response_format: None,
         }
     }
 
@@ -282,6 +285,36 @@ impl AgentConfig {
     /// ```
     pub fn tool_execution(mut self, config: ToolExecutionConfig) -> Self {
         self.tool_execution = config;
+        self
+    }
+
+    /// 设置结构化输出格式。
+    ///
+    /// 启用后，所有 LLM 调用都会携带 `response_format` 约束。
+    ///
+    /// # 示例
+    ///
+    /// ```rust
+    /// use echo_agent::agent::react_agent::AgentConfig;
+    /// use echo_agent::llm::ResponseFormat;
+    /// use serde_json::json;
+    ///
+    /// let config = AgentConfig::new("gpt-4o", "extractor", "你是一个信息提取助手")
+    ///     .response_format(ResponseFormat::json_schema(
+    ///         "person",
+    ///         json!({
+    ///             "type": "object",
+    ///             "properties": {
+    ///                 "name": { "type": "string" },
+    ///                 "age":  { "type": "integer" }
+    ///             },
+    ///             "required": ["name", "age"],
+    ///             "additionalProperties": false
+    ///         }),
+    ///     ));
+    /// ```
+    pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
+        self.response_format = Some(fmt);
         self
     }
 }

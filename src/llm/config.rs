@@ -58,7 +58,7 @@ impl Config {
                 }
                 model_configs
                     .entry(model_id.clone())
-                    .or_insert_with(HashMap::new)
+                    .or_default()
                     .insert(config_key, value);
             }
         }

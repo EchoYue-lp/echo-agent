@@ -274,13 +274,12 @@ fn new_checkpoint_id() -> String {
 
 fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
-    if s.starts_with("~/") {
-        if let Some(home) = std::env::var("HOME")
+    if s.starts_with("~/")
+        && let Some(home) = std::env::var("HOME")
             .ok()
             .or_else(|| std::env::var("USERPROFILE").ok())
-        {
-            return PathBuf::from(home).join(&s[2..]);
-        }
+    {
+        return PathBuf::from(home).join(&s[2..]);
     }
     path.to_path_buf()
 }

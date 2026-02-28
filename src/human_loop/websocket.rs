@@ -157,7 +157,7 @@ async fn handle_connection(
 
     let write_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = write.send(Message::Text(msg.into())).await {
+            if let Err(e) = write.send(Message::Text(msg)).await {
                 warn!("WS 消息发送失败: {e}");
                 break;
             }
