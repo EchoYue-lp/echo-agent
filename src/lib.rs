@@ -30,5 +30,5 @@ pub mod prelude {
         external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
     };
     pub use crate::tools::builtin::think::ThinkTool;
-    pub use crate::tools::{Tool, ToolParameters, ToolResult};
+    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
 }

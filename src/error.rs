@@ -47,6 +47,8 @@ pub enum ToolError {
     InvalidParameter { name: String, message: String },
     /// 工具执行失败
     ExecutionFailed { tool: String, message: String },
+    /// 工具执行超时
+    Timeout(String),
 }
 
 /// 解析错误
@@ -165,6 +167,7 @@ impl fmt::Display for ToolError {
             ToolError::ExecutionFailed { tool, message } => {
                 write!(f, "Tool '{}' execution failed: {}", tool, message)
             }
+            ToolError::Timeout(name) => write!(f, "Tool '{}' execution timed out", name),
         }
     }
 }

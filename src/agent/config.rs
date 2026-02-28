@@ -1,4 +1,5 @@
 use crate::agent::AgentCallback;
+use crate::tools::ToolExecutionConfig;
 use std::sync::Arc;
 
 /// Agent 角色：区分编排者和执行者
@@ -55,6 +56,8 @@ pub struct AgentConfig {
     /// 引导模型先推理再行动的指令，无需在每个 Agent 的 system_prompt 中手写。
     /// 设为 `false` 可完全由调用方自行控制推理引导。
     pub(crate) enable_cot: bool,
+    /// 工具执行配置：超时、重试策略、并行并发度
+    pub(crate) tool_execution: ToolExecutionConfig,
 }
 
 impl AgentConfig {
@@ -77,6 +80,7 @@ impl AgentConfig {
             llm_retry_delay_ms: 500,
             tool_error_feedback: true,
             enable_cot: true,
+            tool_execution: ToolExecutionConfig::default(),
         }
     }
 
@@ -206,6 +210,29 @@ impl AgentConfig {
     /// 禁用后，框架不会追加任何推理引导，完全由 system_prompt 控制。
     pub fn enable_cot(mut self, enabled: bool) -> Self {
         self.enable_cot = enabled;
+        self
+    }
+
+    /// 设置工具执行配置（超时、重试、并发度）。
+    ///
+    /// # 示例
+    ///
+    /// ```rust
+    /// use echo_agent::agent::react_agent::AgentConfig;
+    /// use echo_agent::tools::ToolExecutionConfig;
+    ///
+    /// let config = AgentConfig::new("qwen3-max", "my-agent", "你是一个助手")
+    ///     .enable_tool(true)
+    ///     .tool_execution(ToolExecutionConfig {
+    ///         timeout_ms: 10_000,   // 10 秒超时
+    ///         retry_on_fail: true,
+    ///         max_retries: 2,
+    ///         retry_delay_ms: 300,
+    ///         max_concurrency: Some(3), // 最多 3 个工具并发
+    ///     });
+    /// ```
+    pub fn tool_execution(mut self, config: ToolExecutionConfig) -> Self {
+        self.tool_execution = config;
         self
     }
 }

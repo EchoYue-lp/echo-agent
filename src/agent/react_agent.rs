@@ -90,7 +90,7 @@ impl ReactAgent {
             .with_system(system_prompt)
             .build();
 
-        let mut tool_manager = ToolManager::new();
+        let mut tool_manager = ToolManager::new_with_config(config.tool_execution.clone());
         let client = reqwest::Client::new();
 
         // 基础工具：所有 agent 共享
@@ -392,10 +392,12 @@ impl ReactAgent {
 
         if tool_calls.len() > 1 {
             let tool_names: Vec<&str> = tool_calls.iter().map(|(_, n, _)| n.as_str()).collect();
+            let max_concurrency = self.tool_manager.max_concurrency();
             info!(
                 agent = %agent,
                 tools = ?tool_names,
-                "⚡ 并行执行 {} 个工具调用",
+                max_concurrency = ?max_concurrency,
+                "⚡ 并发执行 {} 个工具调用",
                 tool_calls.len()
             );
         }
