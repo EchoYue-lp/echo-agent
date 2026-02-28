@@ -1,6 +1,10 @@
+//! 统一错误类型
+//!
+//! 所有公共 API 返回 [`Result<T>`]，底层错误通过 `From` 自动转换为 [`ReactError`]。
+
 use std::fmt;
 
-/// ReAct Agent 项目的统一错误类型
+/// 框架顶层错误，聚合所有子系统错误
 #[derive(Debug)]
 pub enum ReactError {
     /// LLM 相关错误
@@ -15,10 +19,25 @@ pub enum ReactError {
     Config(ConfigError),
     /// MCP 相关错误
     Mcp(McpError),
+    /// 记忆系统错误
+    Memory(MemoryError),
     /// IO 错误
     Io(std::io::Error),
     /// 其他错误
     Other(String),
+}
+
+/// 记忆系统错误
+#[derive(Debug)]
+pub enum MemoryError {
+    /// IO 操作失败（读写文件等）
+    IoError(String),
+    /// 序列化/反序列化失败
+    SerializationError(String),
+    /// 记忆条目未找到
+    NotFound(String),
+    /// 后端不支持该操作
+    Unsupported(String),
 }
 
 /// LLM 相关错误
@@ -101,15 +120,15 @@ pub enum McpError {
 /// 配置错误
 #[derive(Debug)]
 pub enum ConfigError {
-    /// 环境变量解析失败
+    /// 环境变量值无法解析为目标类型
     EnvParseError(String),
-    /// 缺少必要配置项
+    /// 缺少必要配置项（model, param）
     MissingConfig(String, String),
-    /// 环境变量格式错误
+    /// 环境变量格式不符合预期
     EnvFormatError(String),
-    /// 无效的配置项
+    /// 配置项取值不在合法范围内（model, param）
     UnMatchConfigError(String, String),
-    /// 不存在该 Model Config
+    /// 未找到该 model 的配置
     NotFindModelError(String),
 }
 
@@ -124,8 +143,20 @@ impl fmt::Display for ReactError {
             ReactError::Agent(e) => write!(f, "Agent Error: {}", e),
             ReactError::Config(e) => write!(f, "Config Error: {}", e),
             ReactError::Mcp(e) => write!(f, "MCP Error: {}", e),
+            ReactError::Memory(e) => write!(f, "Memory Error: {}", e),
             ReactError::Io(e) => write!(f, "IO Error: {}", e),
             ReactError::Other(msg) => write!(f, "Error: {}", msg),
+        }
+    }
+}
+
+impl fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemoryError::IoError(msg) => write!(f, "IO error: {}", msg),
+            MemoryError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+            MemoryError::NotFound(id) => write!(f, "Memory '{}' not found", id),
+            MemoryError::Unsupported(op) => write!(f, "Unsupported operation: {}", op),
         }
     }
 }
@@ -232,6 +263,7 @@ impl std::error::Error for ReactError {
             ReactError::Agent(e) => Some(e),
             ReactError::Config(e) => Some(e),
             ReactError::Mcp(e) => Some(e),
+            ReactError::Memory(e) => Some(e),
             ReactError::Io(e) => Some(e),
             ReactError::Other(_) => None,
         }
@@ -244,6 +276,7 @@ impl std::error::Error for ParseError {}
 impl std::error::Error for AgentError {}
 impl std::error::Error for ConfigError {}
 impl std::error::Error for McpError {}
+impl std::error::Error for MemoryError {}
 
 // ── From 转换实现 ─────────────────────────────────────────────────────────────
 
@@ -310,5 +343,11 @@ impl From<McpError> for ReactError {
     }
 }
 
-/// 便捷的 Result 类型别名
+impl From<MemoryError> for ReactError {
+    fn from(err: MemoryError) -> Self {
+        ReactError::Memory(err)
+    }
+}
+
+/// 便捷 Result 别名，错误类型固定为 [`ReactError`]
 pub type Result<T> = std::result::Result<T, ReactError>;

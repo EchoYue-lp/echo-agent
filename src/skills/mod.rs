@@ -1,3 +1,8 @@
+//! Skill 系统
+//!
+//! Skill 是比 Tool 更高层次的能力单元，将一组相关 Tool 与系统提示词注入片段打包，
+//! 通过 [`crate::agent::react_agent::ReactAgent::add_skill`] 一次性安装到 Agent。
+
 pub mod builtin;
 pub mod external;
 

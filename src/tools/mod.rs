@@ -1,3 +1,8 @@
+//! 工具系统
+//!
+//! 定义 [`Tool`] trait 和 [`ToolManager`]（注册、执行、并发限流、超时重试）。
+//! 内置工具位于 [`builtin`]，扩展工具位于 [`files`]、[`others`]、[`shell`]。
+
 pub mod builtin;
 pub mod files;
 pub mod others;
@@ -14,11 +19,8 @@ use tokio::sync::Semaphore;
 /// 工具执行结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// 是否成功
     pub success: bool,
-    /// 输出内容
     pub output: String,
-    /// 错误信息
     pub error: Option<String>,
 }
 
@@ -50,7 +52,6 @@ impl Default for ToolExecutionConfig {
 }
 
 impl ToolResult {
-    /// 创建成功结果
     pub fn success(output: String) -> Self {
         Self {
             success: true,
@@ -59,7 +60,6 @@ impl ToolResult {
         }
     }
 
-    /// 创建失败结果
     pub fn error(error: String) -> Self {
         Self {
             success: false,
@@ -71,18 +71,13 @@ impl ToolResult {
 
 pub type ToolParameters = HashMap<String, serde_json::Value>;
 
+/// 工具接口，所有内置和外部工具均实现此 trait
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    // 工具名称
     fn name(&self) -> &str;
-
-    // 工具描述
     fn description(&self) -> &str;
-
-    // 工具参数，参数模式（JSON Schema）
+    /// 工具参数的 JSON Schema 定义
     fn parameters(&self) -> serde_json::Value;
-
-    // 执行工具
     async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult>;
 }
 
@@ -161,7 +156,6 @@ impl ToolManager {
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
 
-        // 并发限流：持有 permit 期间才能进行实际执行
         let _permit = if let Some(sem) = &self.semaphore {
             Some(sem.acquire().await.unwrap())
         } else {

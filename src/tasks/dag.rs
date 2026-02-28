@@ -1,3 +1,5 @@
+//! DAG 依赖分析（循环检测、拓扑排序、依赖链查询、Mermaid 可视化）
+
 use crate::tasks::TaskManager;
 use std::collections::HashMap;
 
@@ -31,17 +33,15 @@ impl TaskManager {
             ));
         }
 
-        // 使用 Kahn 算法进行拓扑排序
+        // Kahn 算法拓扑排序
         let mut in_degree: HashMap<String, usize> = HashMap::new();
         let mut adj_list: HashMap<String, Vec<String>> = HashMap::new();
 
-        // 初始化入度和邻接表
         for task_id in self.tasks.keys() {
             in_degree.insert(task_id.clone(), 0);
             adj_list.insert(task_id.clone(), Vec::new());
         }
 
-        // 构建依赖图
         for (task_id, task) in &self.tasks {
             for dep_id in &task.dependencies {
                 if let Some(adj) = adj_list.get_mut(dep_id) {
@@ -53,7 +53,6 @@ impl TaskManager {
             }
         }
 
-        // 找到所有入度为 0 的节点
         let mut queue: Vec<String> = in_degree
             .iter()
             .filter(|&(_, &deg)| deg == 0)

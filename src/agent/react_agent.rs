@@ -7,12 +7,16 @@ use crate::human_loop::{
 };
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
 use crate::llm::{chat, stream_chat};
+use crate::memory::checkpointer::{Checkpointer, FileCheckpointer};
+use crate::memory::store::{FileStore, Store};
 use crate::skills::external::{LoadSkillResourceTool, SkillLoader};
 use crate::skills::{Skill, SkillInfo, SkillManager};
 use crate::tasks::TaskManager;
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
 use crate::tools::builtin::human_in_loop::HumanInLoop;
+use crate::tools::builtin::memory::{ForgetTool, RecallTool, RememberTool};
+
 use crate::tools::builtin::plan::PlanTool;
 use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
@@ -30,7 +34,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
-// 内置工具名常量，统一定义避免魔法字符串散落各处
+// 内置工具名常量
 pub(crate) const TOOL_FINAL_ANSWER: &str = "final_answer";
 pub(crate) const TOOL_CREATE_TASK: &str = "create_task";
 pub(crate) const TOOL_PLAN: &str = "plan";
@@ -58,6 +62,10 @@ pub struct ReactAgent {
     approval_provider: Arc<dyn HumanLoopProvider>,
     /// Skill 管理器：记录已安装的所有 Skill 元数据
     skill_manager: SkillManager,
+    /// 长期记忆 Store，通过 `remember`/`recall`/`forget` 工具访问
+    store: Option<Arc<dyn Store>>,
+    /// 短期会话 Checkpointer，按 session_id 持久化对话历史
+    checkpointer: Option<Arc<dyn Checkpointer>>,
 }
 
 impl ReactAgent {
@@ -93,7 +101,6 @@ impl ReactAgent {
         let mut tool_manager = ToolManager::new_with_config(config.tool_execution.clone());
         let client = reqwest::Client::new();
 
-        // 基础工具：所有 agent 共享
         tool_manager.register(Box::new(FinalAnswerTool));
 
         let task_manager = Arc::new(RwLock::new(TaskManager::default()));
@@ -119,6 +126,42 @@ impl ReactAgent {
             tool_manager.register(Box::new(AgentDispatchTool::new(subagents.clone())));
         }
 
+        let store: Option<Arc<dyn Store>> = if config.enable_memory {
+            match FileStore::new(&config.memory_path) {
+                Ok(s) => {
+                    let store = Arc::new(s) as Arc<dyn Store>;
+                    let agent_name = config.agent_name.clone();
+                    let namespace = vec![agent_name, "memories".to_string()];
+                    tool_manager.register(Box::new(RememberTool::new(
+                        store.clone(),
+                        namespace.clone(),
+                    )));
+                    tool_manager
+                        .register(Box::new(RecallTool::new(store.clone(), namespace.clone())));
+                    tool_manager.register(Box::new(ForgetTool::new(store.clone(), namespace)));
+                    Some(store)
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ 长期记忆 Store 初始化失败，记忆功能已禁用: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let checkpointer: Option<Arc<dyn Checkpointer>> = if config.session_id.is_some() {
+            match FileCheckpointer::new(&config.checkpointer_path) {
+                Ok(cp) => Some(Arc::new(cp)),
+                Err(e) => {
+                    tracing::warn!("⚠️ Checkpointer 初始化失败，会话恢复功能已禁用: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             context,
@@ -129,7 +172,57 @@ impl ReactAgent {
             human_in_loop,
             approval_provider,
             skill_manager: SkillManager::new(),
+            store,
+            checkpointer,
         }
+    }
+
+    /// 获取 AgentConfig 的只读引用
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
+    /// 注入自定义长期记忆 Store（替换 `enable_memory` 自动创建的 FileStore）
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::memory::store::{FileStore, Store};
+    /// use echo_agent::prelude::ReactAgent;
+    /// use std::sync::Arc;
+    ///
+    /// let mut agent = ReactAgent::new(config);
+    /// let store = FileStore::new("/tmp/my_store.json").unwrap();
+    /// agent.set_store(Arc::new(store));
+    /// ```
+    pub fn set_store(&mut self, store: Arc<dyn Store>) {
+        self.store = Some(store);
+    }
+
+    /// 获取当前长期记忆 Store 的只读引用
+    pub fn store(&self) -> Option<&Arc<dyn Store>> {
+        self.store.as_ref()
+    }
+
+    /// 注入 Checkpointer 并绑定 session_id，启用跨进程会话恢复
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::memory::checkpointer::{FileCheckpointer, Checkpointer};
+    /// use echo_agent::prelude::ReactAgent;
+    /// use std::sync::Arc;
+    ///
+    /// let mut agent = ReactAgent::new(config);
+    /// let cp = FileCheckpointer::new("~/.echo-agent/checkpoints.json").unwrap();
+    /// agent.set_checkpointer(Arc::new(cp), "alice-session-1".to_string());
+    /// ```
+    pub fn set_checkpointer(&mut self, checkpointer: Arc<dyn Checkpointer>, session_id: String) {
+        self.checkpointer = Some(checkpointer);
+        self.config.session_id = Some(session_id);
+    }
+
+    /// 获取当前 Checkpointer 的只读引用
+    pub fn checkpointer(&self) -> Option<&Arc<dyn Checkpointer>> {
+        self.checkpointer.as_ref()
     }
 
     /// 替换审批 Provider，支持在运行时切换审批渠道。
@@ -166,7 +259,6 @@ impl ReactAgent {
             HashMap::new()
         };
 
-        // 触发 on_tool_start 回调
         for cb in &callbacks {
             cb.on_tool_start(agent, tool_name, input).await;
         }
@@ -199,7 +291,7 @@ impl ReactAgent {
                     return Ok(format!("工具 {tool_name} 审批超时，已跳过执行"));
                 }
                 HumanLoopResponse::Text(_) => {
-                    // 审批请求不应收到 Text 响应，视为拒绝
+                    // Approval 请求不应收到 Text 响应，视为拒绝
                     warn!(agent = %agent, tool = %tool_name, "⚠️ 审批请求收到意外的 Text 响应，视为拒绝");
                     return Ok(format!("工具 {tool_name} 审批异常，已跳过执行"));
                 }
@@ -211,7 +303,6 @@ impl ReactAgent {
         if result.success {
             info!(agent = %agent, tool = %tool_name, "📤 工具执行成功");
             debug!(agent = %agent, tool = %tool_name, output = %result.output, "工具返回详情");
-            // 触发 on_tool_end 回调
             for cb in &callbacks {
                 cb.on_tool_end(agent, tool_name, &result.output).await;
             }
@@ -223,7 +314,6 @@ impl ReactAgent {
                 tool: tool_name.to_string(),
                 message: error_msg,
             });
-            // 触发 on_tool_error 回调
             for cb in &callbacks {
                 cb.on_tool_error(agent, tool_name, &err).await;
             }
@@ -269,10 +359,8 @@ impl ReactAgent {
 
         debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM 思考中...");
 
-        // 自动压缩：超过 token_limit 时触发配置好的压缩器
         let messages = self.context.prepare(None).await?;
 
-        // 触发 on_think_start 回调
         for cb in &callbacks {
             cb.on_think_start(&agent, &messages).await;
         }
@@ -353,7 +441,6 @@ impl ReactAgent {
             res.push(StepType::Thought(content.to_string()));
         }
 
-        // 触发 on_think_end 回调
         for cb in &callbacks {
             cb.on_think_end(&agent, &res).await;
         }
@@ -448,7 +535,29 @@ impl ReactAgent {
     pub(crate) async fn run_direct(&mut self, task: &str) -> Result<String> {
         let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
-        self.reset_messages();
+
+        // 有 session_id 时尝试从 Checkpointer 恢复上次会话
+        if let (Some(cp), Some(tid)) = (&self.checkpointer, &self.config.session_id) {
+            match cp.get(tid).await {
+                Ok(Some(checkpoint)) => {
+                    info!(agent = %agent, session_id = %tid, checkpoint_id = %checkpoint.checkpoint_id, "🔄 从 Checkpoint 恢复会话");
+                    self.context.clear();
+                    for msg in checkpoint.messages {
+                        self.context.push(msg);
+                    }
+                }
+                Ok(None) => {
+                    debug!(agent = %agent, session_id = %tid, "新会话，从空上下文开始");
+                    self.reset_messages();
+                }
+                Err(e) => {
+                    tracing::warn!(agent = %agent, error = %e, "⚠️ Checkpoint 加载失败，从空上下文开始");
+                    self.reset_messages();
+                }
+            }
+        } else {
+            self.reset_messages();
+        }
 
         info!(agent = %agent, "🧠 Agent 开始执行任务");
         debug!(
@@ -459,10 +568,36 @@ impl ReactAgent {
             "执行详情"
         );
 
+        // 搜索 Store 中与当前任务相关的长期记忆，前置注入到对话上下文
+        if let Some(store) = &self.store {
+            let agent_name = self.config.agent_name.clone();
+            let ns = vec![agent_name.as_str(), "memories"];
+            match store.search(&ns, task, 5).await {
+                Ok(items) if !items.is_empty() => {
+                    debug!(agent = %agent, count = items.len(), "📚 注入相关长期记忆");
+                    let mut lines = vec!["[相关历史记忆]".to_string()];
+                    for (i, item) in items.iter().enumerate() {
+                        let content_str = item
+                            .value
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| item.value.to_string());
+                        lines.push(format!("{}. {}", i + 1, content_str));
+                    }
+                    lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+                    self.context.push(Message::user(lines.join("\n")));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(agent = %agent, error = %e, "⚠️ 长期记忆检索失败，跳过注入");
+                }
+            }
+        }
+
         self.context.push(Message::user(task.to_string()));
 
         for iteration in 0..self.config.max_iterations {
-            // 触发 on_iteration 回调
             for cb in &callbacks {
                 cb.on_iteration(&agent, iteration).await;
             }
@@ -476,11 +611,24 @@ impl ReactAgent {
             }
 
             if let Some(answer) = self.process_steps(steps).await? {
-                // 触发 on_final_answer 回调
                 for cb in &callbacks {
                     cb.on_final_answer(&agent, &answer).await;
                 }
                 info!(agent = %agent, "🏁 Agent 执行完毕");
+
+                if let (Some(cp), Some(tid)) = (&self.checkpointer, self.config.session_id.clone())
+                {
+                    let messages = self.context.messages().to_vec();
+                    match cp.put(&tid, messages).await {
+                        Ok(cid) => {
+                            debug!(agent = %agent, session_id = %tid, checkpoint_id = %cid, "🔖 Checkpoint 已保存")
+                        }
+                        Err(e) => {
+                            tracing::warn!(agent = %agent, error = %e, "⚠️ Checkpoint 保存失败")
+                        }
+                    }
+                }
+
                 return Ok(answer);
             }
         }
@@ -536,12 +684,47 @@ impl Agent for ReactAgent {
             let agent = self.config.agent_name.clone();
             let callbacks = self.config.callbacks.clone();
             self.reset_messages();
+
+            if let (Some(cp), Some(tid)) = (&self.checkpointer, &self.config.session_id) {
+                match cp.get(tid).await {
+                    Ok(Some(checkpoint)) => {
+                        info!(agent = %agent, session_id = %tid, "🔄 从 Checkpoint 恢复会话（流式）");
+                        self.context.clear();
+                        for msg in checkpoint.messages {
+                            self.context.push(msg);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(agent = %agent, error = %e, "⚠️ Checkpoint 加载失败");
+                    }
+                }
+            }
+
+            if let Some(store) = &self.store {
+                let agent_name = self.config.agent_name.clone();
+                let ns = vec![agent_name.as_str(), "memories"];
+                if let Ok(items) = store.search(&ns, &task, 5).await {
+                    if !items.is_empty() {
+                        let mut lines = vec!["[相关历史记忆]".to_string()];
+                        for (i, item) in items.iter().enumerate() {
+                            let content_str = item.value.get("content")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| item.value.to_string());
+                            lines.push(format!("{}. {}", i + 1, content_str));
+                        }
+                        lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+                        self.context.push(Message::user(lines.join("\n")));
+                    }
+                }
+            }
+
             self.context.push(Message::user(task));
 
             info!(agent = %agent, "🌊 Agent 开始流式执行任务");
 
             for iteration in 0..self.config.max_iterations {
-                // 触发 on_iteration 回调
                 for cb in &callbacks {
                     cb.on_iteration(&agent, iteration).await;
                 }
@@ -550,17 +733,12 @@ impl Agent for ReactAgent {
 
                 let messages = self.context.prepare(None).await?;
 
-                // 触发 on_think_start 回调
                 for cb in &callbacks {
                     cb.on_think_start(&agent, &messages).await;
                 }
 
-                // 流式模式下的工具列表构建策略：
-                //
-                //
-                // enable_tool=false：不传工具，LLM 走纯文本路径，Token 事件正常流式。
-                // enable_tool=true：传业务工具（不含 think），LLM 先文本推理（Token 事件）
-                //                   再调用工具（ToolCall/ToolResult 事件）。
+                // enable_tool=false 时不传工具，LLM 走纯文本路径；
+                // enable_tool=true 时先输出文本推理（Token 事件），再调用工具
                 let tools_for_stream: Option<Vec<_>> = if self.config.enable_tool {
                     let tools = self.tool_manager.to_openai_tools();
                     if tools.is_empty() { None } else { Some(tools) }
@@ -611,9 +789,8 @@ impl Agent for ReactAgent {
                 }
                 let mut llm_stream = Box::pin(stream_result?);
 
-                // 累积本轮 LLM 响应
                 let mut content_buffer = String::new();
-                // index -> (id, name, accumulated_arguments)
+                // index → (id, name, arguments 拼接缓冲)
                 let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
                 let mut has_tool_calls = false;
 
@@ -657,15 +834,12 @@ impl Agent for ReactAgent {
                     }
                 }
 
-                // ── 处理本轮结果 ──────────────────────────────────────────
-
                 if has_tool_calls {
-                    // 按 index 排序，保持工具调用顺序一致
                     let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
                     sorted_indices.sort();
 
                     let mut msg_tool_calls: Vec<LlmToolCall> = Vec::new();
-                    let mut steps: Vec<(String, String, Value)> = Vec::new(); // (id, name, args)
+                    let mut steps: Vec<(String, String, Value)> = Vec::new();
 
                     for idx in &sorted_indices {
                         let (id, name, args_str) = &tool_call_map[idx];
@@ -688,7 +862,6 @@ impl Agent for ReactAgent {
                         steps.push((id.clone(), name.clone(), args));
                     }
 
-                    // 触发 on_think_end 回调（工具调用路径）
                     {
                         let think_steps: Vec<StepType> = steps.iter().map(|(id, name, args)| {
                             StepType::Call {
@@ -702,7 +875,6 @@ impl Agent for ReactAgent {
                         }
                     }
 
-                    // 将 assistant 的工具调用消息写入上下文
                     self.context.push(Message::assistant_with_tools(msg_tool_calls));
 
                     let mut done = false;
@@ -715,7 +887,6 @@ impl Agent for ReactAgent {
                         };
 
                         if function_name == TOOL_FINAL_ANSWER {
-                            // 触发 on_final_answer 回调
                             for cb in &callbacks {
                                 cb.on_final_answer(&agent, &result).await;
                             }
@@ -733,13 +904,11 @@ impl Agent for ReactAgent {
                         return;
                     }
                 } else if !content_buffer.is_empty() {
-                    // 纯文本响应视为最终答案
-                    // 触发 on_think_end 回调（纯文本路径）
+                    // 无工具调用时纯文本响应视为最终答案
                     let think_steps = vec![StepType::Thought(content_buffer.clone())];
                     for cb in &callbacks {
                         cb.on_think_end(&agent, &think_steps).await;
                     }
-                    // 触发 on_final_answer 回调
                     for cb in &callbacks {
                         cb.on_final_answer(&agent, &content_buffer).await;
                     }

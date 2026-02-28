@@ -1,3 +1,13 @@
+//! LLM 配置加载
+//!
+//! 从环境变量读取模型配置，格式：
+//! ```text
+//! AGENT_MODEL_<ID>_MODEL=gpt-4o
+//! AGENT_MODEL_<ID>_BASEURL=https://api.openai.com/v1/chat/completions
+//! AGENT_MODEL_<ID>_APIKEY=sk-...
+//! ```
+//! `<ID>` 为自定义标识（如 `GPT4O`、`QWEN`），不区分大小写。
+
 use crate::error::{ConfigError, ReactError, Result};
 use dotenv::dotenv;
 use serde::Deserialize;
@@ -5,13 +15,17 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+/// 单个模型的连接配置
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelConfig {
+    /// LLM 接口中使用的模型名（如 `gpt-4o`）
     pub model: String,
+    /// Chat Completions 接口完整 URL
     pub baseurl: String,
     pub apikey: String,
 }
 
+/// 全局配置，持有所有已加载的模型配置表（key = model 字段值）
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub models: HashMap<String, ModelConfig>,
@@ -50,7 +64,6 @@ impl Config {
         }
         let mut models = HashMap::new();
         for (model_id, config_map) in model_configs {
-            // 检查必要配置项是否齐全
             let model = config_map
                 .get("model")
                 .ok_or_else(|| ConfigError::MissingConfig(model_id.clone(), "model".to_string()))?

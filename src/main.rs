@@ -165,6 +165,28 @@ struct Cli {
     /// 每轮对话结束后显示上下文统计信息（消息数 / 估算 token 数）
     #[arg(long)]
     ctx_stats: bool,
+
+    /// 启用持久化记忆（跨会话保留重要信息）
+    ///
+    /// 启用后 Agent 自动获得 remember/recall/forget 三个工具，
+    /// 并在每次执行前将相关历史记忆注入上下文。
+    #[arg(long)]
+    memory: bool,
+
+    /// 长期记忆 Store 文件路径（默认 ~/.echo-agent/store.json）
+    #[arg(long, value_name = "PATH")]
+    memory_path: Option<String>,
+
+    /// 设置会话标识，启用跨进程对话恢复（Checkpointer）
+    ///
+    /// 相同的 session_id 在进程重启后可自动恢复到上次对话。
+    /// 示例: --session-id alice-session-1
+    #[arg(long, value_name = "ID")]
+    session_id: Option<String>,
+
+    /// Checkpointer 文件路径（默认 ~/.echo-agent/checkpoints.json）
+    #[arg(long, value_name = "PATH")]
+    checkpointer_path: Option<String>,
 }
 
 // ── MCP 配置文件结构体 ────────────────────────────────────────────────────────
@@ -281,14 +303,24 @@ fn build_agent(cli: &Cli, tools: &[&str], http: &Arc<Client>, has_mcp: bool) -> 
     let system_prompt = cli.system.as_deref().unwrap_or(default_system);
 
     let mut config = AgentConfig::new(&cli.model, "echo-agent", system_prompt)
-        .enable_tool(has_tools)
+        .enable_tool(has_tools || cli.memory)
         .enable_task(false)
         .enable_human_in_loop(cli.human_loop)
         .enable_subagent(false)
+        .enable_memory(cli.memory)
         .max_iterations(cli.max_iter);
 
     if let Some(limit) = cli.token_limit {
         config = config.token_limit(limit);
+    }
+    if let Some(ref path) = cli.memory_path {
+        config = config.memory_path(path);
+    }
+    if let Some(ref tid) = cli.session_id {
+        config = config.session_id(tid);
+    }
+    if let Some(ref path) = cli.checkpointer_path {
+        config = config.checkpointer_path(path);
     }
 
     let mut agent = ReactAgent::new(config);
@@ -693,6 +725,35 @@ async fn run_interactive(
                         println!();
                         continue;
                     }
+                    "/memory" => {
+                        run_memory_cmd(agent, arg).await;
+                        continue;
+                    }
+                    "/session" => {
+                        if let Some(cp) = agent.checkpointer() {
+                            let tid = agent.config().get_session_id().unwrap_or("(未设置)");
+                            match cp.list(tid).await {
+                                Ok(checkpoints) => {
+                                    println!("session_id: {tid}");
+                                    println!("历史 checkpoint 数: {}", checkpoints.len());
+                                    if let Some(latest) = checkpoints.first() {
+                                        println!(
+                                            "最新 checkpoint: {} ({} 条消息)",
+                                            &latest.checkpoint_id[..8],
+                                            latest.messages.len()
+                                        );
+                                    }
+                                    println!();
+                                }
+                                Err(e) => eprintln!("获取 checkpoint 失败: {e}\n"),
+                            }
+                        } else {
+                            println!(
+                                "会话恢复未启用。使用 --session-id <ID> 启动以开启跨进程对话恢复。\n"
+                            );
+                        }
+                        continue;
+                    }
                     c if c.starts_with('/') => {
                         println!("未知命令: {c}（输入 /help 查看帮助）\n");
                         continue;
@@ -773,6 +834,107 @@ fn print_mcp_status(mcp: &McpManager) {
         }
     }
     println!();
+}
+
+// ── /memory 命令处理 ──────────────────────────────────────────────────────────
+
+async fn run_memory_cmd(agent: &ReactAgent, arg: &str) {
+    let store = match agent.store() {
+        Some(s) => s,
+        None => {
+            println!("长期记忆功能未启用。使用 --memory 标志启动以开启持久记忆。\n");
+            return;
+        }
+    };
+
+    let agent_name = agent.name();
+    let ns: Vec<&str> = vec![agent_name, "memories"];
+    let arg = arg.trim();
+
+    if arg.starts_with("search ") {
+        let query = arg.trim_start_matches("search ").trim();
+        match store.search(&ns, query, 10).await {
+            Ok(items) if items.is_empty() => {
+                println!("未找到与「{query}」相关的记忆。\n");
+            }
+            Ok(items) => {
+                println!("找到 {} 条相关记忆：", items.len());
+                for (i, item) in items.iter().enumerate() {
+                    println!(
+                        "  {}. [ID:{}] {}",
+                        i + 1,
+                        &item.key[..8],
+                        format_memory_item(item)
+                    );
+                }
+                println!();
+            }
+            Err(e) => eprintln!("记忆检索失败: {e}\n"),
+        }
+    } else if arg == "clear" {
+        // 通过搜索空字符串拿到所有条目再逐条删除
+        match store.search(&ns, "", 1000).await {
+            Ok(items) => {
+                let count = items.len();
+                for item in &items {
+                    let _ = store.delete(&ns, &item.key).await;
+                }
+                println!("已清空 {count} 条记忆。\n");
+            }
+            Err(e) => eprintln!("清空记忆失败: {e}\n"),
+        }
+    } else {
+        // 默认：搜索空字符串返回全部（取最近 10 条，store 会按得分排序返回）
+        match store.search(&ns, "", 10).await {
+            Ok(items) if items.is_empty() => {
+                println!("记忆库为空。\n提示: 在对话中让 agent 执行 remember 工具来存储信息。\n");
+            }
+            Ok(items) => {
+                println!("最近 {} 条记忆：", items.len());
+                for (i, item) in items.iter().enumerate() {
+                    println!(
+                        "  {}. [ID:{}] {}",
+                        i + 1,
+                        &item.key[..8],
+                        format_memory_item(item)
+                    );
+                }
+                println!();
+            }
+            Err(e) => eprintln!("获取记忆失败: {e}\n"),
+        }
+    }
+}
+
+fn format_memory_item(item: &echo_agent::memory::store::StoreItem) -> String {
+    match &item.value {
+        serde_json::Value::Object(map) => {
+            let content = map
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(无内容)");
+            let importance = map.get("importance").and_then(|v| v.as_u64());
+            let tags = map
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|s| !s.is_empty());
+            let mut parts = vec![content.to_string()];
+            if let Some(imp) = importance {
+                parts.push(format!("[★{}]", imp));
+            }
+            if let Some(t) = tags {
+                parts.push(format!("[{}]", t));
+            }
+            parts.join(" ")
+        }
+        other => other.to_string(),
+    }
 }
 
 // ── /compress 命令处理 ────────────────────────────────────────────────────────
@@ -941,6 +1103,20 @@ fn print_banner(cli: &Cli, tools: &[&str], mcp: &McpManager) {
         println!("  MCP     : {}", mcp_info);
     }
     println!("  压缩    : {}", compress_str);
+    if cli.memory {
+        let mem_path = cli
+            .memory_path
+            .as_deref()
+            .unwrap_or("~/.echo-agent/store.json");
+        println!("  长期记忆: 已启用（{}）", mem_path);
+    }
+    if let Some(ref tid) = cli.session_id {
+        let cp_path = cli
+            .checkpointer_path
+            .as_deref()
+            .unwrap_or("~/.echo-agent/checkpoints.json");
+        println!("  会话恢复: session_id={tid}（{}）", cp_path);
+    }
     if cli.skills_dir.is_some() {
         println!("  技能目录: {}", cli.skills_dir.as_deref().unwrap_or(""));
     }
@@ -966,6 +1142,14 @@ fn print_help() {
     println!("    /compress summary [N]  摘要压缩，保留最近 N 条（默认 6）");
     println!("    /compress sliding [N]  滑动窗口，保留最近 N 条（默认 20）");
     println!("    /compress hybrid  [N]  混合压缩（滑动+摘要），窗口 N（默认 10）");
+    println!();
+    println!("  长期记忆命令（需 --memory 启用）:");
+    println!("    /memory                列出最近 10 条记忆");
+    println!("    /memory search <词>    搜索相关记忆");
+    println!("    /memory clear          清空所有记忆");
+    println!();
+    println!("  会话恢复命令（需 --session-id 启用）:");
+    println!("    /session                显示当前 session_id");
     println!();
     println!("  快捷键:");
     println!("    ↑ / ↓                  浏览历史输入");

@@ -1,3 +1,8 @@
+//! 人工介入（Human-in-the-Loop）
+//!
+//! 在工具执行前拦截，向外部请求审批或文本输入。
+//! 实现 [`HumanLoopProvider`] trait 可接入任意审批渠道。
+
 mod console;
 mod webhook;
 mod websocket;

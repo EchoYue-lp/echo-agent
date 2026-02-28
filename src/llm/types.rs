@@ -1,24 +1,23 @@
+//! OpenAI Chat Completions API 类型定义
+
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
 
+/// 对话消息，对应 OpenAI messages 数组中的单条记录
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Message {
-    /// 角色：user, assistant, system, tool
+    /// 角色：`user` / `assistant` / `system` / `tool`
     pub role: String,
-
-    /// 消息内容（可选，因为调用工具时可能没有文本）
+    /// 文本内容（工具调用消息可能为 None）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-
-    /// 工具调用列表（assistant 角色使用）
+    /// 工具调用列表（`assistant` 角色发起工具调用时携带）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
-
-    /// 工具名称（tool 角色使用，标识是哪个工具的返回值）
+    /// 工具名称（`tool` 角色使用）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-
-    /// 工具调用ID（tool 角色使用，关联到对应的 tool_call）
+    /// 工具调用 ID，关联到对应的 `tool_call`（`tool` 角色使用）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
@@ -75,41 +74,33 @@ impl Message {
     }
 }
 
+/// LLM 发起的单次工具调用
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolCall {
-    /// 工具调用的唯一ID
     pub id: String,
-
-    /// 类型，通常是 "function"
     #[serde(rename = "type")]
     pub call_type: String,
-
-    /// 函数调用详情
     pub function: FunctionCall,
 }
 
+/// 工具调用的函数信息
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FunctionCall {
-    /// 函数名称
     pub name: String,
-
-    /// JSON 格式的参数
+    /// JSON 序列化的参数字符串
     pub arguments: String,
 }
 
+/// OpenAI `/chat/completions` 请求体
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<Message>,
-
-    /// 可用的工具列表
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
-
-    /// 工具选择策略："auto", "none", 或指定工具
+    /// 工具选择策略：`"auto"` / `"none"` / 指定工具名
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<String>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,13 +109,15 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
 }
 
+/// 发送给 LLM 的工具定义（对应 OpenAI tools 数组元素）
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
-    pub tool_type: String, // "function"
+    pub tool_type: String,
     pub function: FunctionSpec,
 }
 
+/// 工具的函数声明（name、描述和 JSON Schema 参数定义）
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FunctionSpec {
     pub name: String,

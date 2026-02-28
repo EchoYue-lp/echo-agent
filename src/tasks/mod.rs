@@ -1,3 +1,7 @@
+//! DAG 任务规划系统
+//!
+//! 由规划模式（[`crate::agent::planning`]）使用，支持并行执行互不依赖的子任务。
+
 mod dag;
 mod manager;
 mod task;

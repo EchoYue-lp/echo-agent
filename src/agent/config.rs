@@ -1,8 +1,10 @@
+//! Agent 配置
+
 use crate::agent::AgentCallback;
 use crate::tools::ToolExecutionConfig;
 use std::sync::Arc;
 
-/// Agent 角色：区分编排者和执行者
+/// Agent 角色，决定其在多 Agent 系统中的职责
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentRole {
     /// 编排者：负责任务规划、分配和协调子 agent，不持有具体业务工具
@@ -17,36 +19,33 @@ impl Default for AgentRole {
     }
 }
 
+/// Agent 运行时配置
+///
+/// 通过构建器链式调用设置各项参数，再传入 [`ReactAgent::new`]。
 pub struct AgentConfig {
-    /// 模型名称
     pub(crate) model_name: String,
-    /// 系统提示词
     pub(crate) system_prompt: String,
-    /// 是否启用详细日志
     verbose: bool,
-    /// agent 名称
     pub(crate) agent_name: String,
-    /// 最大迭代次数
+    /// 最大迭代轮次，防止死循环
     pub(crate) max_iterations: usize,
-    /// 可使用的工具（为空表示不限制）
+    /// 工具白名单（空 = 不限制，可调用所有已注册工具）
     pub(crate) allowed_tools: Vec<String>,
-    /// agent 角色
     pub(crate) role: AgentRole,
     /// 是否允许注册并调用业务工具（如数学、天气等）
     pub(crate) enable_tool: bool,
-    /// 是否启用任务能力（plan/create_task/update_task）
+    /// 是否启用任务规划能力（plan/create_task/update_task 工具）
     pub(crate) enable_task: bool,
     /// 是否启用 human-in-loop 工具
     pub(crate) enable_human_in_loop: bool,
-    /// 是否启用 subagent 调度能力（agent_tool）
+    /// 是否启用 subagent 调度工具（agent_tool）
     pub(crate) enable_subagent: bool,
-    /// 上下文 token 上限，超过时触发压缩（`usize::MAX` 表示不限制）
+    /// 上下文 token 上限，超过时自动触发压缩（`usize::MAX` 表示不限制）
     pub(crate) token_limit: usize,
-    /// 事件回调系统
     pub callbacks: Vec<Arc<dyn AgentCallback>>,
-    /// LLM 调用失败后的最大重试次数（0 表示不重试，默认 3）
+    /// LLM 调用失败后最大重试次数（0 = 不重试，默认 3）
     pub(crate) llm_max_retries: usize,
-    /// LLM 重试的初始等待时间（毫秒），每次翻倍指数退避（默认 500）
+    /// LLM 重试初始等待（毫秒），指数退避翻倍（默认 500）
     pub(crate) llm_retry_delay_ms: u64,
     /// 工具执行失败时将错误信息回传给 LLM，而非直接让 Agent 失败（默认 true）
     pub(crate) tool_error_feedback: bool,
@@ -58,6 +57,17 @@ pub struct AgentConfig {
     pub(crate) enable_cot: bool,
     /// 工具执行配置：超时、重试策略、并行并发度
     pub(crate) tool_execution: ToolExecutionConfig,
+    /// 是否启用长期记忆 Store（remember/recall/forget 工具 + 上下文自动注入）
+    pub(crate) enable_memory: bool,
+    /// 长期记忆 Store 文件路径（默认 `~/.echo-agent/store.json`）
+    pub(crate) memory_path: String,
+    /// 会话标识，用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文。
+    ///
+    /// 设置后，每次 `execute()` 调用前会自动加载该会话的最新快照，
+    /// 结束后自动将本轮消息写入快照。
+    pub(crate) session_id: Option<String>,
+    /// Checkpointer 文件路径（默认 `~/.echo-agent/checkpoints.json`）
+    pub(crate) checkpointer_path: String,
 }
 
 impl AgentConfig {
@@ -81,6 +91,10 @@ impl AgentConfig {
             tool_error_feedback: true,
             enable_cot: true,
             tool_execution: ToolExecutionConfig::default(),
+            enable_memory: false,
+            memory_path: "~/.echo-agent/store.json".to_string(),
+            session_id: None,
+            checkpointer_path: "~/.echo-agent/checkpoints.json".to_string(),
         }
     }
 
@@ -190,6 +204,11 @@ impl AgentConfig {
         self
     }
 
+    /// 读取当前配置的 session_id
+    pub fn get_session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     /// 读取当前配置的 LLM 最大重试次数
     pub fn get_llm_max_retries(&self) -> usize {
         self.llm_max_retries
@@ -210,6 +229,36 @@ impl AgentConfig {
     /// 禁用后，框架不会追加任何推理引导，完全由 system_prompt 控制。
     pub fn enable_cot(mut self, enabled: bool) -> Self {
         self.enable_cot = enabled;
+        self
+    }
+
+    /// 启用/禁用长期记忆 Store（默认 false）。
+    ///
+    /// 启用后 Agent 自动注册 `remember`/`recall`/`forget` 三个工具，
+    /// 并在每轮执行前将相关历史记忆注入上下文。
+    pub fn enable_memory(mut self, enabled: bool) -> Self {
+        self.enable_memory = enabled;
+        self
+    }
+
+    /// 自定义长期记忆 Store 文件路径（默认 `~/.echo-agent/store.json`）
+    pub fn memory_path(mut self, path: &str) -> Self {
+        self.memory_path = path.to_string();
+        self
+    }
+
+    /// 设置会话标识，启用 Checkpointer 跨进程对话恢复。
+    ///
+    /// 相同的 `session_id` 在不同进程/重启后都能恢复到同一对话历史。
+    /// 若未同时配置 Checkpointer 文件路径，可通过 `ReactAgent::set_checkpointer` 注入自定义后端。
+    pub fn session_id(mut self, id: &str) -> Self {
+        self.session_id = Some(id.to_string());
+        self
+    }
+
+    /// 自定义 Checkpointer 文件路径（默认 `~/.echo-agent/checkpoints.json`）
+    pub fn checkpointer_path(mut self, path: &str) -> Self {
+        self.checkpointer_path = path.to_string();
         self
     }
 

@@ -46,7 +46,7 @@ impl ReactAgent {
 
         self.context.push(Message::user(planning_prompt));
 
-        // 执行直到所有子任务创建完毕（LLM 停止调用 create_task 时视为规划结束）
+        // LLM 停止调用 create_task 时视为规划阶段结束
         let planning_max_rounds = self.config.max_iterations;
         let mut has_created_tasks = false;
 
@@ -79,7 +79,6 @@ impl ReactAgent {
                 has_created_tasks = true;
             }
 
-            // 已经创建过任务，但本轮没有继续创建 → 规划完成
             if has_created_tasks && !created_task_this_round {
                 let manager = self
                     .task_manager
@@ -121,13 +120,11 @@ impl ReactAgent {
                     .read()
                     .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))?;
 
-                // 检查是否全部完成
                 if manager.is_all_completed() {
                     info!(agent = %agent, "✅ 所有子任务已完成");
                     break;
                 }
 
-                // 获取所有依赖已满足的就绪任务
                 manager
                     .get_ready_tasks()
                     .into_iter()
@@ -144,7 +141,6 @@ impl ReactAgent {
                 continue;
             }
 
-            // 构建批量执行提示：一次性告知 LLM 所有就绪任务
             let task_list: Vec<String> = ready_tasks
                 .iter()
                 .map(|t| format!("  - [{}]: {}", t.id, t.description))
@@ -159,7 +155,7 @@ impl ReactAgent {
                 ready_tasks.len()
             );
 
-            // 构建 SubAgent 分派提示（仅编排模式且启用 subagent 能力）
+            // 编排模式下提示 LLM 将任务分派给 SubAgent，而非自己执行
             let dispatch_hint = if self.config.role == AgentRole::Orchestrator
                 && self.config.enable_subagent
             {
@@ -197,7 +193,6 @@ impl ReactAgent {
                 )));
             }
 
-            // 多轮 think 直到本批任务全部完成
             for iteration in 0..self.config.max_iterations {
                 debug!(
                     agent = %agent,
@@ -210,7 +205,6 @@ impl ReactAgent {
                     return Ok(answer);
                 }
 
-                // 检查本批任务是否全部完成（通过 HashMap::get 避免 O(n²)）
                 let manager = self
                     .task_manager
                     .read()
@@ -239,7 +233,6 @@ impl ReactAgent {
         // ── 第三阶段：总结结果 ──────────────────────────────
         info!(agent = %agent, phase = "summary", "📝 阶段3: 生成最终答案");
 
-        // 收集所有任务的执行结果，便于 LLM 生成准确的最终答案
         let task_results_summary = {
             let manager = self
                 .task_manager

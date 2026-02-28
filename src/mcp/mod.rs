@@ -1,3 +1,9 @@
+//! MCP（Model Context Protocol）客户端
+//!
+//! 连接外部 MCP 服务端（stdio / HTTP SSE），获取其暴露的工具并适配为框架 [`crate::tools::Tool`]。
+//!
+//! 通过 [`McpManager`] 统一管理多个服务端连接。
+
 pub mod client;
 pub mod server_config;
 pub(crate) mod tool_adapter;
@@ -15,22 +21,21 @@ pub use types::{McpContent, McpTool, McpToolCallResult};
 use crate::error::Result;
 use crate::tools::Tool;
 
-/// MCP 管理器
+/// 多 MCP 服务端连接管理器
 ///
-/// 统一管理多个 MCP 服务端的连接生命周期。
-/// 典型用法：
-/// ```
+/// 按需连接服务端，获取工具列表后注册到 Agent：
+/// ```rust,no_run
+/// # async fn example() -> echo_agent::error::Result<()> {
+/// # let mut agent = unimplemented!();
 /// let mut manager = McpManager::new();
-///
-/// // 连接文件系统服务端，获取它提供的工具
 /// let tools = manager.connect(McpServerConfig::stdio(
 ///     "filesystem",
 ///     "npx",
 ///     vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
 /// )).await?;
-///
-/// // 将工具注册到 Agent
 /// agent.register_tools(tools);
+/// # Ok(())
+/// # }
 /// ```
 pub struct McpManager {
     clients: HashMap<String, Arc<McpClient>>,

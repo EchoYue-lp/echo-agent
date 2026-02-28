@@ -1,6 +1,9 @@
+//! 任务管理器
+
 use crate::tasks::task::{Task, TaskStatus};
 use std::collections::HashMap;
 
+/// DAG 任务集合管理器，负责任务的增删改查和依赖调度
 pub struct TaskManager {
     pub(crate) tasks: HashMap<String, Task>,
 }
@@ -99,7 +102,7 @@ impl TaskManager {
         })
     }
 
-    /// 新增：生成任务摘要（给 LLM 看的）
+    /// 生成适合注入 LLM 上下文的任务进度摘要
     pub fn get_summary(&self) -> String {
         let (completed, total) = self.get_progress();
         let pending = self.get_pending_tasks().len();
@@ -127,16 +130,11 @@ impl TaskManager {
                 if let Some(_dep_task) = self.tasks.get(dep_id) {
                     match visited.get(dep_id).copied() {
                         Some(VisitState::Visiting) => {
-                            // 找到循环，提取循环路径
                             let cycle_start = path.iter().position(|id| id == dep_id).unwrap();
-                            let cycle: Vec<String> = path[cycle_start..].to_vec();
-                            cycles.push(cycle);
+                            cycles.push(path[cycle_start..].to_vec());
                         }
-                        Some(VisitState::Visited) => {
-                            // 已经访问过，跳过
-                        }
+                        Some(VisitState::Visited) => {}
                         None => {
-                            // 未访问过，继续递归
                             self.dfs_detect_cycle(dep_id, visited, path, cycles);
                         }
                     }

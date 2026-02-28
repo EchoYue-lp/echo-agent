@@ -1,3 +1,9 @@
+//! LLM 客户端
+//!
+//! 封装 OpenAI Chat Completions API（兼容任意 OpenAI 格式的服务端）。
+//! 外部通过 [`chat`] 和 [`stream_chat`] 发起请求；
+//! 框架内部（压缩器等）通过 [`LlmClient`] trait 调用。
+
 mod client;
 pub mod config;
 pub mod types;
@@ -83,14 +89,14 @@ pub async fn stream_chat(
     stream_post(client, request_body, header_map, url).await
 }
 
-/// 为压缩模块等内部组件提供的轻量 LLM 调用接口
+/// 轻量 LLM 调用接口，供框架内部（压缩器等）使用
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    /// 发起一次简单的无工具对话，返回模型的文本内容
+    /// 无工具的单次对话，返回模型文本
     async fn chat_simple(&self, messages: Vec<Message>) -> Result<String>;
 }
 
-/// 基于现有 `chat` 函数的默认实现
+/// 基于 [`chat`] 函数的默认 [`LlmClient`] 实现
 pub struct DefaultLlmClient {
     client: Arc<Client>,
     model_name: String,

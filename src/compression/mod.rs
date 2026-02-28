@@ -1,13 +1,18 @@
+//! 上下文压缩
+//!
+//! 维护对话历史并在 token 超限时自动压缩，由 [`ContextManager`] 统一管理。
+//!
+//! 内置压缩策略（均实现 [`ContextCompressor`] trait）：
+//! - [`compressor::SlidingWindowCompressor`]：滑动窗口，丢弃最早的 N 条消息
+//! - [`compressor::SummaryCompressor`]：LLM 摘要，将旧消息压缩为 system 摘要消息
+//! - [`compressor::HybridCompressor`]：多策略串联管道
+
 pub mod compressor;
 
 use crate::compression::compressor::SlidingWindowCompressor;
 use crate::error::Result;
 use crate::llm::types::Message;
 use async_trait::async_trait;
-
-// ──────────────────────────────────────────────
-// 核心 trait 与数据结构
-// ──────────────────────────────────────────────
 
 /// 压缩管道的输入
 pub struct CompressionInput {
@@ -163,7 +168,7 @@ impl ContextManager {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
 
-        // 先判断是否有压缩器，分两条路径，避免 borrow 冲突
+        // 分两条路径借用，避免同时持有 `self.compressor` 和 `self.messages` 的可变引用
         let output = if self.compressor.is_some() {
             let input = CompressionInput {
                 messages: self.messages.clone(),
