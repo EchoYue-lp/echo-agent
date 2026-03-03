@@ -182,18 +182,46 @@ impl ReactAgent {
         &self.config
     }
 
-    /// 注入自定义长期记忆 Store（替换 `enable_memory` 自动创建的 FileStore）
+    /// 注入自定义长期记忆 Store（仅替换自动注入通道，不重注册工具）
+    ///
+    /// 若需要同时让 `remember`/`recall`/`forget` 工具也使用新 Store，请改用
+    /// [`set_memory_store`](ReactAgent::set_memory_store)。
+    pub fn set_store(&mut self, store: Arc<dyn Store>) {
+        self.store = Some(store);
+    }
+
+    /// 替换长期记忆 Store，并重新注册 `remember` / `recall` / `forget` 工具
+    ///
+    /// 适用于在 `ReactAgent::new()` 之后切换为 [`EmbeddingStore`](crate::memory::EmbeddingStore)
+    /// 或其他自定义 Store 实现。
     ///
     /// ```rust,no_run
-    /// use echo_agent::memory::store::{FileStore, Store};
+    /// use echo_agent::memory::{EmbeddingStore, FileStore, HttpEmbedder};
     /// use echo_agent::prelude::ReactAgent;
     /// use std::sync::Arc;
     ///
+    /// # fn main() -> echo_agent::error::Result<()> {
+    /// # let config = unimplemented!();
+    /// let inner = Arc::new(FileStore::new("~/.echo-agent/store.json")?);
+    /// let embedder = Arc::new(HttpEmbedder::from_env());
+    /// let store = Arc::new(
+    ///     EmbeddingStore::with_persistence(inner, embedder, "~/.echo-agent/store.vecs.json")?
+    /// );
+    ///
     /// let mut agent = ReactAgent::new(config);
-    /// let store = FileStore::new("/tmp/my_store.json").unwrap();
-    /// agent.set_store(Arc::new(store));
+    /// agent.set_memory_store(store);
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn set_store(&mut self, store: Arc<dyn Store>) {
+    pub fn set_memory_store(&mut self, store: Arc<dyn Store>) {
+        let ns = vec![self.config.agent_name.clone(), "memories".to_string()];
+        // HashMap::insert 会覆盖同名工具，直接重注册即可
+        self.tool_manager
+            .register(Box::new(RememberTool::new(store.clone(), ns.clone())));
+        self.tool_manager
+            .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
+        self.tool_manager
+            .register(Box::new(ForgetTool::new(store.clone(), ns)));
         self.store = Some(store);
     }
 
@@ -609,7 +637,7 @@ impl ReactAgent {
         if let Some(store) = &self.store {
             let agent_name = self.config.agent_name.clone();
             let ns = vec![agent_name.as_str(), "memories"];
-            match store.search(&ns, message, 5).await {
+            match store.semantic_search(&ns, message, 5).await {
                 Ok(items) if !items.is_empty() => {
                     debug!(agent = %agent, count = items.len(), "📚 注入相关长期记忆");
                     let mut lines = vec!["[相关历史记忆]".to_string()];
@@ -741,7 +769,7 @@ impl Agent for ReactAgent {
             if let Some(store) = &self.store {
                 let agent_name = self.config.agent_name.clone();
                 let ns = vec![agent_name.as_str(), "memories"];
-                if let Ok(items) = store.search(&ns, &task, 5).await &&
+                if let Ok(items) = store.semantic_search(&ns, &task, 5).await &&
                      !items.is_empty() {
                         let mut lines = vec!["[相关历史记忆]".to_string()];
                         for (i, item) in items.iter().enumerate() {
@@ -980,7 +1008,7 @@ impl Agent for ReactAgent {
             if let Some(store) = &self.store {
                 let agent_name = self.config.agent_name.clone();
                 let ns = vec![agent_name.as_str(), "memories"];
-                if let Ok(items) = store.search(&ns, &message, 5).await &&
+                if let Ok(items) = store.semantic_search(&ns, &message, 5).await &&
                      !items.is_empty() {
                         let mut lines = vec!["[相关历史记忆]".to_string()];
                         for (i, item) in items.iter().enumerate() {
@@ -1087,10 +1115,10 @@ impl Agent for ReactAgent {
                                         entry.0 = id.clone();
                                 }
                                 if let Some(f) = &dc.function {
-                                    if let Some(name) = &f.name {
-                                        if !name.is_empty() {
-                                            entry.1 = name.clone();
-                                        }
+                                    if let Some(name) = &f.name
+                                        && !name.is_empty()
+                                    {
+                                        entry.1 = name.clone();
                                     }
                                     if let Some(args) = &f.arguments {
                                         entry.2.push_str(args);

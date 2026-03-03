@@ -198,52 +198,49 @@ agent.reset();
 
 ---
 
-## 四、Store 语义搜索（向量检索）— 🟡 中等优先级
+## 四、Store 语义搜索（向量检索）— ✅ 已完成
 
-### 现状
+> **实现时间**：2026-02-28
+> **相关文件**：`src/memory/embedder.rs`、`src/memory/embedding_store.rs`、`src/memory/store.rs`
+> **文档**：`docs/zh/14-semantic-search.md`、`docs/en/14-semantic-search.md`
+> **示例**：`examples/demo18_semantic_memory.rs`
 
-`Store::search()` 实现是关键词匹配（字符串包含 + 词频评分），对于语义相似但用词不同的查询效果差：
+### 实现内容
+
+在 `Store` trait 新增两个默认方法（无破坏性变更）：
+
+- `supports_semantic_search() -> bool`：默认 false，`EmbeddingStore` 返回 true
+- `semantic_search(namespace, query, limit)`：默认回退到关键词 `search()`，`EmbeddingStore` 执行余弦相似度检索
+
+新增 `Embedder` trait 和 `HttpEmbedder`（OpenAI / Qwen 兼容接口），以及 `EmbeddingStore`（包装任意 `Store` + 向量索引，支持持久化到 JSON 文件）。
+
+`ReactAgent` 所有记忆注入点（`run_react_loop`、`execute_stream`、`chat_stream`）均已升级为调用 `semantic_search()`，透明支持向量检索。新增 `set_memory_store()` 方法同时替换 Store 并重注册记忆工具。
+
+### 架构
 
 ```
-存储：{"content": "用户喜好：古典音乐"}
-查询：recall("music preference")  ← 英文查询，中文内容，命中为 0
+EmbeddingStore
+├── inner: Arc<dyn Store>      ← KV 持久化（FileStore / InMemoryStore）
+├── embedder: Arc<dyn Embedder> ← 文本嵌入（HttpEmbedder / MockEmbedder）
+└── VecIndex                   ← 内存向量索引（可选持久化 .vecs.json）
 ```
 
-### 建议
-
-**方案 A（短期，无外部依赖）**：
-扩展现有关键词匹配，加入简单的双语 / 归一化处理（Unicode 标准化、停用词过滤、ngram 索引）。
-
-**方案 B（中期，可选功能）**：
-为 `Store` trait 新增可选的 embedding 接口，配合本地嵌入模型（如 `fastembed-rs`）或远程 API：
+### 使用对比
 
 ```rust
-// memory/store.rs
-#[async_trait]
-pub trait Store: Send + Sync {
-    // ...现有方法...
+// 默认关键词检索（FileStore）—— 跨语言查询命中率低
+store.search(&["alice", "memories"], "music preference", 5).await?;
 
-    /// 是否支持语义搜索（默认 false，关键词搜索）
-    fn supports_semantic_search(&self) -> bool { false }
+// 语义检索（EmbeddingStore）—— 跨语言、同义词均可命中
+store.semantic_search(&["alice", "memories"], "music preference", 5).await?;
 
-    /// 语义搜索（仅在 supports_semantic_search() == true 时有效）
-    async fn semantic_search(
-        &self,
-        namespace: &[&str],
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<StoreItem>> {
-        // 默认 fallback 到关键词搜索
-        self.search(namespace, query, limit).await
-    }
-}
+// Agent 集成（自动使用语义检索）
+let inner = Arc::new(FileStore::new("~/.echo-agent/store.json")?);
+let embedder = Arc::new(HttpEmbedder::from_env());
+let store = Arc::new(EmbeddingStore::with_persistence(inner, embedder, "~/.echo-agent/store.vecs.json")?);
 
-// 新增：向量 Store 实现
-pub struct VectorStore {
-    inner: FileStore,
-    embedder: Arc<dyn Embedder>,
-    index: Arc<RwLock<VectorIndex>>,
-}
+let mut agent = ReactAgent::new(config);
+agent.set_memory_store(store); // 替换 Store + 重注册工具
 ```
 
 ---
@@ -415,7 +412,7 @@ pub async fn execute(&mut self, task: &str) -> Result<String> {
 | 1 | 结构化输出（`response_format`） | 🔴 高 | 低 | 提升 Planner / 数据提取可靠性 |
 | 2 | Mock LLM / 测试基础设施 | 🔴 高 | 中 | 支持 CI / 单元测试 |
 | 3 | 多轮对话模式（`chat()` 接口） | 🟡 中 | 低 | 支持 Chatbot 场景 |
-| 4 | Store 语义搜索（向量检索） | 🟡 中 | 高 | 长期记忆质量大幅提升 |
+| 4 | Store 语义搜索（向量检索） | ✅ 完成 | 高 | 长期记忆质量大幅提升 |
 | 5 | Agent 编排模式扩展 | 🟡 中 | 中 | Pipeline / FanOut / Race 场景 |
 | 6 | `thiserror` 重构 | 🟢 低 | 低 | error.rs 代码量减少 ~65% |
 | 7 | 工具结果缓存 | 🟢 低 | 低 | 减少重复工具调用 |

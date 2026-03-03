@@ -87,13 +87,15 @@ pub mod prelude {
     pub use crate::llm::{JsonSchemaSpec, ResponseFormat};
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
     pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
+    pub use crate::memory::embedder::{Embedder, HttpEmbedder};
+    pub use crate::memory::embedding_store::EmbeddingStore;
     pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};
     pub use crate::skills::{
         Skill, SkillInfo, SkillManager,
         builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
         external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
     };
-    pub use crate::testing::{FailingMockAgent, MockAgent, MockLlmClient, MockTool};
+    pub use crate::testing::{FailingMockAgent, MockAgent, MockEmbedder, MockLlmClient, MockTool};
     pub use crate::tools::builtin::think::ThinkTool;
     pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
 }

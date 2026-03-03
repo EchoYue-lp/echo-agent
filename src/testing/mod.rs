@@ -94,9 +94,11 @@
 //! ```
 
 mod mock_agent;
+mod mock_embedder;
 mod mock_llm;
 mod mock_tool;
 
 pub use mock_agent::{FailingMockAgent, MockAgent};
+pub use mock_embedder::MockEmbedder;
 pub use mock_llm::MockLlmClient;
 pub use mock_tool::MockTool;

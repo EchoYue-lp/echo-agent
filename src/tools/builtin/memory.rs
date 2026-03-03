@@ -113,7 +113,7 @@ impl Tool for RememberTool {
 
         Ok(ToolResult::success(format!(
             "✅ 已记住（ID: {}，重要程度: {}）：\"{}\"{tag_str}",
-            &key[..8],
+            key.get(..8).unwrap_or(&key),
             importance,
             content,
         )))
@@ -199,7 +199,7 @@ impl Tool for RecallTool {
             lines.push(format!(
                 "{}. [ID:{}] {}",
                 i + 1,
-                &item.key[..8],
+                item.key.get(..8).unwrap_or(&item.key),
                 format_store_item(item),
             ));
         }

@@ -21,6 +21,7 @@
 | [11 - 结构化输出](11-structured-output.md) | Structured Output | ResponseFormat、JsonSchema、extract()、extract_json() |
 | [12 - Mock 测试工具](12-mock.md) | Testing | MockLlmClient、MockTool、MockAgent、InMemoryStore |
 | [13 - 多轮对话](13-chat.md) | Chat | chat()、chat_stream()、跨轮记忆、reset() |
+| [14 - 语义搜索](14-semantic-search.md) | Semantic Search | EmbeddingStore、Embedder、向量索引、余弦相似度 |
 
 ---
 
@@ -121,3 +122,4 @@ async fn main() -> Result<()> {
 | `examples/demo15_structured_output.rs` | 结构化输出（extract / JSON Schema） |
 | `examples/demo16_testing.rs` | Mock 测试基础设施（零真实 LLM 调用） |
 | `examples/demo17_chat.rs` | 多轮对话（chat / chat_stream / reset） |
+| `examples/demo18_semantic_memory.rs` | Store 语义搜索（EmbeddingStore / 向量检索） |

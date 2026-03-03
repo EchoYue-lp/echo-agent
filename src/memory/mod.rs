@@ -42,7 +42,11 @@
 //! ```
 
 pub mod checkpointer;
+pub mod embedder;
+pub mod embedding_store;
 pub mod store;
 
 pub use checkpointer::{Checkpoint, Checkpointer, FileCheckpointer, InMemoryCheckpointer};
+pub use embedder::{Embedder, HttpEmbedder};
+pub use embedding_store::EmbeddingStore;
 pub use store::{FileStore, InMemoryStore, Store, StoreItem};

@@ -23,6 +23,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [11 - Structured Output](./11-structured-output.md) | Structured Output | ResponseFormat, JsonSchema, extract(), extract_json() |
 | [12 - Mock Testing Utilities](./12-mock.md) | Testing | MockLlmClient, MockTool, MockAgent, InMemoryStore |
 | [13 - Multi-Turn Chat](./13-chat.md) | Chat | chat(), chat_stream(), cross-turn memory, reset() |
+| [14 - Semantic Search](./14-semantic-search.md) | Semantic Search | EmbeddingStore, Embedder, vector index, cosine similarity |
 
 ---
 
@@ -143,3 +144,4 @@ async fn main() -> Result<()> {
 | `examples/demo15_structured_output.rs` | Structured output (extract / JSON Schema) |
 | `examples/demo16_testing.rs` | Mock testing infrastructure (zero real LLM calls) |
 | `examples/demo17_chat.rs` | Multi-turn chat (chat / chat_stream / reset) |
+| `examples/demo18_semantic_memory.rs` | Store semantic search (EmbeddingStore / vector retrieval) |

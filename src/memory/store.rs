@@ -91,6 +91,21 @@ pub trait Store: Send + Sync {
 
     /// 列举满足 `prefix` 前缀的所有命名空间
     async fn list_namespaces(&self, prefix: Option<&[&str]>) -> Result<Vec<Vec<String>>>;
+
+    /// 是否支持语义（向量）搜索。[`EmbeddingStore`](super::EmbeddingStore) 返回 `true`，其余返回 `false`。
+    fn supports_semantic_search(&self) -> bool {
+        false
+    }
+
+    /// 语义检索：若实现类支持向量搜索则执行余弦相似度检索，否则回退到关键词 [`search`](Store::search)。
+    async fn semantic_search(
+        &self,
+        namespace: &[&str],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<StoreItem>> {
+        self.search(namespace, query, limit).await
+    }
 }
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
