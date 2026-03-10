@@ -1,4 +1,4 @@
-//! # demo05 - 综合能力演示
+//! demo05 - 综合能力演示
 //!
 //! 本示例将框架的四项核心能力整合到一个真实场景中：
 //!
@@ -6,15 +6,13 @@
 //! - **任务规划**：将复杂费用计算拆分为并行子任务
 //! - **Human-in-Loop**：每人分摊金额（divide）执行前需人工确认
 //! - **上下文压缩**：滑动窗口自动管理长对话的 token 用量
-//!
 
-use echo_agent::agent::Agent;
-use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
 use echo_agent::compression::compressor::SlidingWindowCompressor;
+use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -36,17 +34,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - 报告中需包含：各类总额、费用总计、人均分摊、与预算的差额
 "#;
 
-    let config = AgentConfig::new("qwen3-max", "expense_agent", system_prompt)
-        .enable_tool(true)
-        .enable_task(true)
-        .enable_human_in_loop(true)
-        .enable_subagent(false)
-        // 上下文超过 3000 token 时自动触发滑动窗口压缩
+    // 使用 AgentBuilder 创建 Agent（全功能配置）
+    let mut agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .name("expense_agent")
+        .system_prompt(system_prompt)
+        .enable_tools()
+        .enable_planning()
+        .enable_human_in_loop()
         .token_limit(3000)
-        .verbose(true)
-        .max_iterations(40);
-
-    let mut agent = ReactAgent::new(config);
+        .max_iterations(40)
+        .build()?;
 
     // 普通数学工具（无需审批）
     agent.add_tool(Box::new(AddTool));
@@ -54,10 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.add_tool(Box::new(MultiplyTool));
 
     // divide 工具标记为"需要人工审批"：每次调用前终端会弹出 y/n 确认
-    // 用于模拟"人均分摊"这类涉及资金分配的敏感操作
     agent.add_need_appeal_tool(Box::new(DivideTool));
 
-    // 滑动窗口压缩：超限后保留最近 20 条消息，避免长任务规划把 context 撑爆
+    // 滑动窗口压缩：超限后保留最近 20 条消息
     agent.set_compressor(SlidingWindowCompressor::new(20));
 
     let task = r#"我们团队 5 人去北京出差 3 天，请帮我核算本次出差费用：

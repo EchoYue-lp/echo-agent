@@ -25,7 +25,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut agent = ReactAgent::new(
-        AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant")
+        AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant")
             .enable_tool(true)
     );
     agent.add_skill(Box::new(CalculatorSkill));
@@ -158,7 +158,7 @@ let config = AgentConfig::new(...)
 
 ```rust
 let mut orchestrator = ReactAgent::new(
-    AgentConfig::new("gpt-4o", "boss", "Delegate tasks to the right specialist")
+    AgentConfig::new("qwen3-max", "boss", "Delegate tasks to the right specialist")
         .role(AgentRole::Orchestrator)
         .enable_subagent(true),
 );

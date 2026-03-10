@@ -1,12 +1,12 @@
-use echo_agent::agent::Agent;
-use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
+use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
+
     let system_prompt = r#"你是一个具有规划能力的智能助手，本示例用于测试任务规划与任务状态流转。
 
 对于复杂任务，你应该：
@@ -19,17 +19,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 4. 完成后用 update_task 标记
 5. 所有任务完成后，用 final_answer 给出答案
 "#;
-    let config = AgentConfig::new("qwen3-max", "planning_agent", system_prompt)
-        .enable_tool(true)
-        .enable_task(true)
-        .enable_human_in_loop(false)
-        .enable_subagent(false)
-        .verbose(true)
-        .max_iterations(30);
 
-    let mut agent = ReactAgent::new(config);
+    // 使用 AgentBuilder 创建 Agent（启用任务规划）
+    let mut agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .name("planning_agent")
+        .system_prompt(system_prompt)
+        .enable_tools()
+        .enable_planning()
+        .max_iterations(30)
+        .build()?;
 
-    // 添加领域工具（保持纯数学，避免 human-in-loop/天气干扰）
+    // 添加领域工具
     agent.add_tool(Box::new(AddTool));
     agent.add_tool(Box::new(MultiplyTool));
     agent.add_tool(Box::new(SubtractTool));
