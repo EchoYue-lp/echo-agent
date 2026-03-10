@@ -191,8 +191,9 @@ impl ToolDefinition {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ChatCompletionResponse {
+    #[serde(default)]
     id: String,
     #[serde(default)]
     pub(crate) choices: Vec<Choice>,
@@ -202,6 +203,7 @@ pub struct ChatCompletionResponse {
     model: Option<String>,
     #[serde(default)]
     usage: Option<Usage>,
+    #[serde(default)]
     #[serde(flatten)]
     extra: serde_json::Value,
 }

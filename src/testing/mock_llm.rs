@@ -28,9 +28,10 @@
 //! ```
 
 use crate::error::{LlmError, ReactError, Result};
-use crate::llm::LlmClient;
-use crate::llm::types::Message;
+use crate::llm::types::{DeltaMessage, Message};
+use crate::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -46,6 +47,7 @@ enum MockLlmResponse {
 /// 所有调用都被记录，可通过 [`call_count`](MockLlmClient::call_count) /
 /// [`last_messages`](MockLlmClient::last_messages) 等方法检查。
 pub struct MockLlmClient {
+    model_name: String,
     responses: Arc<Mutex<VecDeque<MockLlmResponse>>>,
     /// 每次调用时收到的 messages 列表，按顺序记录
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
@@ -61,9 +63,16 @@ impl MockLlmClient {
     /// 创建空 Mock，尚未设置任何响应
     pub fn new() -> Self {
         Self {
+            model_name: "mock-model".to_string(),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// 设置模型名称
+    pub fn with_model_name(mut self, name: impl Into<String>) -> Self {
+        self.model_name = name.into();
+        self
     }
 
     /// 追加一条成功响应文本
@@ -132,19 +141,54 @@ impl MockLlmClient {
     pub fn reset_calls(&self) {
         self.calls.lock().unwrap().clear();
     }
-}
 
-#[async_trait]
-impl LlmClient for MockLlmClient {
-    async fn chat_simple(&self, messages: Vec<Message>) -> Result<String> {
-        // 记录本次调用
-        self.calls.lock().unwrap().push(messages);
-
-        // 返回下一个预设响应
+    /// 取出下一个响应
+    fn pop_response(&self) -> Result<String> {
         match self.responses.lock().unwrap().pop_front() {
             Some(MockLlmResponse::Content(text)) => Ok(text),
             Some(MockLlmResponse::Err(e)) => Err(e),
             None => Err(ReactError::Llm(LlmError::EmptyResponse)),
         }
+    }
+}
+
+#[async_trait]
+impl LlmClient for MockLlmClient {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        // 记录本次调用
+        self.calls.lock().unwrap().push(request.messages);
+
+        let text = self.pop_response()?;
+
+        Ok(ChatResponse {
+            message: Message::assistant(text),
+            finish_reason: Some("stop".to_string()),
+            raw: crate::llm::types::ChatCompletionResponse::default(),
+        })
+    }
+
+    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'_, Result<ChatChunk>>> {
+        // 记录本次调用
+        self.calls.lock().unwrap().push(request.messages);
+
+        let text = self.pop_response()?;
+
+        // 创建一个简单的流，一次性返回整个内容
+        let stream = futures::stream::once(async move {
+            Ok(ChatChunk {
+                delta: DeltaMessage {
+                    role: Some("assistant".to_string()),
+                    content: Some(text),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            })
+        });
+
+        Ok(Box::pin(stream))
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model_name
     }
 }
