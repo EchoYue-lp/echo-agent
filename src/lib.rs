@@ -17,13 +17,45 @@
 //!
 //! # 快速上手
 //!
+//! ## 极简 API（推荐新手）
+//!
+//! ```rust,no_run
+//! use echo_agent::{agent, chat};
+//!
+//! # async fn run() -> echo_agent::error::Result<()> {
+//! // 一行创建简单对话 Agent
+//! let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
+//! let answer = chat!(agent, "你好").await?;
+//! println!("{answer}");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## AgentBuilder 模式（推荐）
+//!
+//! ```rust,no_run
+//! use echo_agent::prelude::*;
+//!
+//! # async fn run() -> echo_agent::error::Result<()> {
+//! let mut agent = AgentBuilder::new()
+//!     .model("qwen3-max")
+//!     .system_prompt("你是一个有帮助的助手")
+//!     .enable_tools()
+//!     .build()?;
+//!
+//! let answer = agent.execute("帮我总结一下 Rust 的所有权机制").await?;
+//! println!("{answer}");
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## 单轮任务模式（`execute`）
 //!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
 //!
 //! # async fn run() -> echo_agent::error::Result<()> {
-//! let config = AgentConfig::new("gpt-4o", "assistant", "你是一个有帮助的助手")
+//! let config = AgentConfig::new("qwen3-max", "assistant", "你是一个有帮助的助手")
 //!     .enable_tool(true);
 //!
 //! let mut agent = ReactAgent::new(config);
@@ -42,7 +74,7 @@
 //! use echo_agent::prelude::*;
 //!
 //! # async fn run() -> echo_agent::error::Result<()> {
-//! let config = AgentConfig::new("gpt-4o", "assistant", "你是一个有帮助的助手");
+//! let config = AgentConfig::new("qwen3-max", "assistant", "你是一个有帮助的助手");
 //! let mut agent = ReactAgent::new(config);
 //!
 //! let r1 = agent.chat("你好，我叫小明").await?;
@@ -69,9 +101,114 @@ pub mod tasks;
 pub mod testing;
 pub mod tools;
 
+// ── 极简 API 宏 ────────────────────────────────────────────────────────────────
+
+/// 一行创建简单对话 Agent
+///
+/// # 示例
+///
+/// ```rust,no_run
+/// use echo_agent::agent;
+///
+/// # async fn run() -> echo_agent::error::Result<()> {
+/// let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
+/// let answer = agent.execute("你好").await?;
+/// # Ok(())
+/// # }
+/// ```
+#[macro_export]
+macro_rules! agent {
+    ($model:expr, $prompt:expr) => {
+        $crate::agent::AgentBuilder::simple($model, $prompt)
+    };
+}
+
+/// 一行创建标准 Agent（启用工具）
+///
+/// # 示例
+///
+/// ```rust,no_run
+/// use echo_agent::agent_with_tools;
+///
+/// # async fn run() -> echo_agent::error::Result<()> {
+/// let mut agent = agent_with_tools!("qwen3-max", "assistant", "你是一个有帮助的助手")?;
+/// # Ok(())
+/// # }
+/// ```
+#[macro_export]
+macro_rules! agent_with_tools {
+    ($model:expr, $name:expr, $prompt:expr) => {
+        $crate::agent::AgentBuilder::standard($model, $name, $prompt)
+    };
+}
+
+/// 一行创建完整功能 Agent（工具、记忆、规划）
+///
+/// # 示例
+///
+/// ```rust,no_run
+/// use echo_agent::agent_full;
+///
+/// # async fn run() -> echo_agent::error::Result<()> {
+/// let mut agent = agent_full!("qwen3-max", "assistant", "你是一个自主助手")?;
+/// # Ok(())
+/// # }
+/// ```
+#[macro_export]
+macro_rules! agent_full {
+    ($model:expr, $name:expr, $prompt:expr) => {
+        $crate::agent::AgentBuilder::full_featured($model, $name, $prompt)
+    };
+}
+
+/// 快速执行单轮对话
+///
+/// # 示例
+///
+/// ```rust,no_run
+/// use echo_agent::{agent, chat};
+///
+/// # async fn run() -> echo_agent::error::Result<()> {
+/// let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
+/// let answer = chat!(agent, "你好").await?;
+/// println!("{answer}");
+/// # Ok(())
+/// # }
+/// ```
+#[macro_export]
+macro_rules! chat {
+    ($agent:expr, $message:expr) => {
+        $agent.chat($message).await
+    };
+}
+
+/// 快速执行单轮任务
+///
+/// # 示例
+///
+/// ```rust,no_run
+/// use echo_agent::{agent, execute};
+///
+/// # async fn run() -> echo_agent::error::Result<()> {
+/// let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
+/// let answer = execute!(agent, "解释 Rust 的所有权").await?;
+/// println!("{answer}");
+/// # Ok(())
+/// # }
+/// ```
+#[macro_export]
+macro_rules! execute {
+    ($agent:expr, $task:expr) => {
+        $agent.execute($task).await
+    };
+}
+
 pub mod prelude {
     pub use crate::agent::react_agent::ReactAgent;
-    pub use crate::agent::{Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole};
+    pub use crate::agent::{
+        Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
+        ReactAgentBuilder,
+    };
     pub use crate::compression::compressor::{
         DefaultSummaryPrompt, FnSummaryPrompt, HybridCompressor, SlidingWindowCompressor,
         SummaryCompressor, SummaryPromptBuilder,
@@ -84,7 +221,7 @@ pub mod prelude {
         ConsoleHumanLoopProvider, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
         WebSocketHumanLoopProvider, WebhookHumanLoopProvider,
     };
-    pub use crate::llm::{JsonSchemaSpec, ResponseFormat};
+    pub use crate::llm::{JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
     pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
     pub use crate::memory::embedder::{Embedder, HttpEmbedder};

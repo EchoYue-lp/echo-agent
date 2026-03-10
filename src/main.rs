@@ -514,6 +514,15 @@ fn describe_transport(transport: &TransportConfig) -> String {
                 .unwrap_or(base_url);
             format!("http: {short}")
         }
+        TransportConfig::Sse { base_url, .. } => {
+            let short = base_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or(base_url);
+            format!("sse: {short}")
+        }
     }
 }
 
@@ -1055,6 +1064,12 @@ async fn stream_run(agent: &mut ReactAgent, task: &str) -> Result<(), ReactError
                 if iter > 1 {
                     println!("\n  (共 {} 轮推理)", iter);
                 }
+            }
+            AgentEvent::Cancelled => {
+                if in_token {
+                    println!();
+                }
+                println!("\n  [执行已取消]");
             }
         }
     }

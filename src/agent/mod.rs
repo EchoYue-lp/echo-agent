@@ -6,6 +6,7 @@
 use crate::agent::react_agent::StepType;
 use crate::error::{ReactError, Result};
 use crate::llm::types::Message;
+use crate::tools::Tool;
 use async_trait::async_trait;
 pub use config::{AgentConfig, AgentRole};
 use futures::stream::BoxStream;
@@ -13,6 +14,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
+pub use tokio_util::sync::CancellationToken;
 
 /// SubAgent 注册表类型别名
 pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
@@ -20,6 +22,8 @@ pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn 
 mod config;
 mod planning;
 pub mod react_agent;
+
+pub use react_agent::builder::ReactAgentBuilder;
 
 /// Agent 执行过程中产生的事件流元素
 #[derive(Debug)]
@@ -32,6 +36,8 @@ pub enum AgentEvent {
     ToolResult { name: String, output: String },
     /// 最终答案已生成
     FinalAnswer(String),
+    /// 执行被取消
+    Cancelled,
 }
 
 /// Agent 的统一执行接口
@@ -40,12 +46,35 @@ pub trait Agent: Send + Sync {
     fn name(&self) -> &str;
     fn model_name(&self) -> &str;
     fn system_prompt(&self) -> &str;
+    fn tool_names(&self) -> Vec<String> {
+        vec![]
+    }
+    fn skill_names(&self) -> Vec<String> {
+        vec![]
+    }
+    fn mcp_server_names(&self) -> Vec<String> {
+        vec![]
+    }
+    async fn close(&mut self) {}
 
     /// 阻塞执行，每次调用重置上下文（单轮模式）。连续对话请用 [`chat`](Agent::chat)。
     async fn execute(&mut self, task: &str) -> Result<String>;
 
     /// 流式执行，每次调用重置上下文（单轮模式）。连续对话请用 [`chat_stream`](Agent::chat_stream)。
     async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>;
+
+    /// 流式执行（支持取消）。
+    ///
+    /// 当 `cancel` 被触发时，流将提前终止并返回 `AgentEvent::Cancelled`。
+    async fn execute_stream_with_cancel(
+        &mut self,
+        task: &str,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+        // 默认实现：忽略取消令牌
+        let _ = cancel;
+        self.execute_stream(task).await
+    }
 
     /// 多轮对话（阻塞）。追加到现有上下文，历史跨轮保留。
     /// 用 [`reset`](Agent::reset) 开启新会话；默认回退到 `execute()`。
@@ -57,6 +86,16 @@ pub trait Agent: Send + Sync {
     /// 用 [`reset`](Agent::reset) 开启新会话；默认回退到 `execute_stream()`。
     async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
         self.execute_stream(message).await
+    }
+
+    /// 多轮对话（流式，支持取消）。
+    async fn chat_stream_with_cancel(
+        &mut self,
+        message: &str,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+        let _ = cancel;
+        self.chat_stream(message).await
     }
 
     /// 清除对话历史，开启新会话。不影响 `execute()`（它自行重置）。
