@@ -1,10 +1,20 @@
 //! MCP（Model Context Protocol）客户端
 //!
-//! 连接外部 MCP 服务端（stdio / HTTP SSE），获取其暴露的工具并适配为框架 [`crate::tools::Tool`]。
+//! 完整实现 MCP 协议，支持：
+//! - **Tools**: 工具发现与调用
+//! - **Resources**: 资源列表与读取
+//! - **Prompts**: 提示词列表与获取
+//!
+//! 支持的传输层：
+//! - **STDIO**: 本地子进程通信
+//! - **HTTP**: Streamable HTTP（基本）
+//! - **StreamableHttp**: Streamable HTTP（完整，支持会话管理）
+//! - **SSE**: 旧版 HTTP+SSE
 //!
 //! 通过 [`McpManager`] 统一管理多个服务端连接。
 
 pub mod client;
+pub mod config_loader;
 pub mod server_config;
 pub(crate) mod tool_adapter;
 pub mod transport;
@@ -14,9 +24,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use client::McpClient;
+pub use config_loader::{McpConfigFile, McpServerEntry};
 pub use server_config::{McpServerConfig, TransportConfig};
 pub use tool_adapter::McpToolAdapter;
-pub use types::{McpContent, McpTool, McpToolCallResult};
+pub use types::{
+    McpContent, McpPrompt, McpPromptGetResult, McpResource, McpResourceReadResult, McpTool,
+    McpToolCallResult, ServerCapabilities,
+};
 
 use crate::error::Result;
 use crate::tools::Tool;
@@ -66,6 +80,32 @@ impl McpManager {
 
         self.clients.insert(name, client);
         Ok(tools)
+    }
+
+    /// 从配置文件连接多个服务端
+    ///
+    /// # 示例
+    /// ```rust,no_run
+    /// # async fn example() -> echo_agent::error::Result<()> {
+    /// # let mut agent = unimplemented!();
+    /// let mut manager = McpManager::new();
+    /// let config = McpConfigFile::from_file("mcp.json")?;
+    /// let all_tools = manager.connect_from_config(&config).await?;
+    /// agent.register_tools(all_tools);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_from_config(
+        &mut self,
+        config: &McpConfigFile,
+    ) -> Result<Vec<Box<dyn Tool>>> {
+        let configs = config.to_server_configs()?;
+        let mut all_tools = Vec::new();
+        for cfg in configs {
+            let tools = self.connect(cfg).await?;
+            all_tools.extend(tools);
+        }
+        Ok(all_tools)
     }
 
     /// 获取所有已连接服务端的全部工具
