@@ -50,7 +50,7 @@ A Skill packages "tools + usage instructions" into a reusable capability unit. O
 ```rust
 use echo_agent::prelude::*;
 
-let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant")
+let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant")
     .enable_tool(true);
 
 let mut agent = ReactAgent::new(config);

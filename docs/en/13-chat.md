@@ -50,7 +50,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant");
+    let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
     let mut agent = ReactAgent::new(config);
 
     // Turn 1
@@ -81,7 +81,7 @@ use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant");
+    let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
     let mut agent = ReactAgent::new(config);
 
     let messages = [
@@ -126,7 +126,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = AgentConfig::new(
-        "gpt-4o",
+        "qwen3-max",
         "math_agent",
         "You are a calculator assistant. Use tools for all calculations and remember results.",
     )
@@ -201,7 +201,7 @@ As turns accumulate, the context grows continuously. Configure auto-compression 
 ```rust
 use echo_agent::prelude::*;
 
-let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant")
+let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant")
     .token_limit(8192); // compression triggers when this limit is approached
 
 let mut agent = ReactAgent::new(config);

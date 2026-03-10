@@ -63,7 +63,7 @@ Provides:
 use echo_agent::prelude::*;
 
 let config = AgentConfig::new(
-    "gpt-4o",
+    "qwen3-max",
     "planner",
     "You are a task planning expert. For complex tasks:
      1. Use the plan tool to declare your planning intent

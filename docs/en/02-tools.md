@@ -95,7 +95,7 @@ impl Tool for TranslateTool {
 ```rust
 use echo_agent::prelude::*;
 
-let config = AgentConfig::new("gpt-4o", "agent", "You are a translation assistant")
+let config = AgentConfig::new("qwen3-max", "agent", "You are a translation assistant")
     .enable_tool(true);
 
 let mut agent = ReactAgent::new(config);
@@ -122,7 +122,7 @@ let exec_config = ToolExecutionConfig {
     max_concurrency: Some(3), // max 3 concurrent tool calls
 };
 
-let config = AgentConfig::new("gpt-4o", "agent", "...")
+let config = AgentConfig::new("qwen3-max", "agent", "...")
     .tool_execution(exec_config);
 ```
 
@@ -137,7 +137,7 @@ Use `allowed_tools` to limit which tools a given Agent can call. Commonly used t
 ```rust
 use echo_agent::tools::others::math::{AddTool, SubtractTool};
 
-let config = AgentConfig::new("gpt-4o", "math_only", "Only do addition and subtraction")
+let config = AgentConfig::new("qwen3-max", "math_only", "Only do addition and subtraction")
     .allowed_tools(vec!["add".to_string(), "subtract".to_string()]);
 
 let mut agent = ReactAgent::new(config);

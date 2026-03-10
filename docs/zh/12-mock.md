@@ -194,7 +194,7 @@ let math = MockAgent::new("math_agent").with_response("结果是 42");
 let writer = MockAgent::new("writer_agent").with_response("报告已生成");
 
 // 注入到真实编排 Agent
-let config = AgentConfig::new("gpt-4o", "orchestrator", "...")
+let config = AgentConfig::new("qwen3-max", "orchestrator", "...")
     .role(AgentRole::Orchestrator)
     .enable_subagent(true);
 

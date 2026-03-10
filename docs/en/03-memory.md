@@ -47,7 +47,7 @@ checkpoints.json:
 use echo_agent::prelude::*;
 
 // Option 1: Auto-managed via AgentConfig (recommended)
-let config = AgentConfig::new("gpt-4o", "assistant", "You are an assistant")
+let config = AgentConfig::new("qwen3-max", "assistant", "You are an assistant")
     .session_id("user-alice-session-1")       // specify session ID
     .checkpointer_path("./checkpoints.json"); // persistence file path
 
@@ -123,7 +123,7 @@ LLM needs to retrieve:
 use echo_agent::prelude::*;
 
 // Option 1: Via AgentConfig — auto-registers remember/recall/forget tools
-let config = AgentConfig::new("gpt-4o", "my_agent", "You are an assistant")
+let config = AgentConfig::new("qwen3-max", "my_agent", "You are an assistant")
     .enable_memory(true)
     .memory_path("./store.json");
 
