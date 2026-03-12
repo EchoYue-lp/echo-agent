@@ -7,6 +7,7 @@ edition = "2024"
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 serde_json = "1.0.143"
 serde = { version = "1.0.228", features = ["derive"] }
 async-trait = "0.1.89"

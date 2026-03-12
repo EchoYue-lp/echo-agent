@@ -15,6 +15,10 @@ use crate::mcp::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use super::McpTransport;
 
 /// 等待响应的发送端 Map：请求 ID → oneshot channel
+///  为什么使用oneshot::channel？
+///  一对一通信：每个请求恰好需要一个响应，oneshot 通道天然支持一次性的消息传递，完美匹配 JSON-RPC 的请求-响应模型。
+///  异步等待：rx.await 提供了一种简洁的异步等待方式，让调用方可以挂起直到响应到达，而不需要手动轮询或回调。
+///  自动清理：如果 tx 在发送前被丢弃（例如后台任务崩溃），rx.await 会立即返回错误，调用方可以感知到连接问题。
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>;
 
 /// stdio 传输层
@@ -190,5 +194,9 @@ impl McpTransport for StdioTransport {
         if let Err(e) = child.kill().await {
             tracing::warn!("MCP stdio: 终止服务端进程失败: {}", e);
         }
+    }
+
+    fn notification_rx(&self) -> Option<Arc<dyn crate::mcp::types::JsonRpcNotificationReceiver>> {
+        None
     }
 }

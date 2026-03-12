@@ -9,11 +9,19 @@ use async_trait::async_trait;
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,no_run
+/// use echo_agent::compression::compressor::{
+///     HybridCompressor, SlidingWindowCompressor, SummaryCompressor, DefaultSummaryPrompt,
+/// };
+/// use echo_agent::llm::LlmClient;
+/// use std::sync::Arc;
+///
+/// # async fn example(llm: Arc<dyn LlmClient>) {
 /// let compressor = HybridCompressor::builder()
 ///     .stage(SlidingWindowCompressor::new(20))
 ///     .stage(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8))
 ///     .build();
+/// # }
 /// ```
 pub struct HybridCompressor {
     stages: Vec<Box<dyn ContextCompressor>>,

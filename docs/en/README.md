@@ -36,7 +36,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant");
+    let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
     let mut agent = ReactAgent::new(config);
     let answer = agent.execute("Explain the concept of ownership in Rust").await?;
     println!("{}", answer);
@@ -54,7 +54,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant");
+    let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
     let mut agent = ReactAgent::new(config);
 
     let r1 = agent.chat("Hi, I'm Alice and I'm a Rust developer.").await?;

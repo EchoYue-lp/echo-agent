@@ -11,7 +11,6 @@ pub use task::{Task, TaskStatus};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::tasks::manager::TaskManager;
     use crate::tasks::task::{Task, TaskStatus};
 

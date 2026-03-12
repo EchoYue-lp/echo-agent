@@ -96,7 +96,7 @@ Best when you need dynamic field access or don't want to define a Rust struct:
 use echo_agent::prelude::*;
 use serde_json::json;
 
-let config = AgentConfig::new("gpt-4o", "extractor", "You are a precise information extractor")
+let config = AgentConfig::new("qwen3-max", "extractor", "You are a precise information extractor")
     .enable_cot(false);  // no reasoning chain needed for pure extraction
 let agent = ReactAgent::new(config);
 
@@ -167,7 +167,7 @@ println!("Keywords:    {:?}", result.keywords);
 Forces every LLM call made by this Agent to use the specified format. Best for a dedicated "extraction agent":
 
 ```rust
-let config = AgentConfig::new("gpt-4o", "translator", "You are a translation assistant")
+let config = AgentConfig::new("qwen3-max", "translator", "You are a translation assistant")
     .response_format(ResponseFormat::json_schema(
         "translation_result",
         json!({

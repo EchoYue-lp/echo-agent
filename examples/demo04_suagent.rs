@@ -1,6 +1,4 @@
-use echo_agent::agent::Agent;
-use echo_agent::agent::react_agent::{AgentConfig, AgentRole, ReactAgent};
-use echo_agent::prelude::Tool;
+use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
 use echo_agent::tools::others::weather::WeatherTool;
 
@@ -16,7 +14,7 @@ fn create_all_tools() -> Vec<Box<dyn Tool>> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -67,11 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    // 第三步：构建 Orchestrator main agent
-    let main_config = AgentConfig::new(
-        "qwen3-max",
-        "main_agent",
-        r#"你是一个智能助手，负责协调和分配任务。
+    // 第三步：使用 AgentBuilder 构建 Orchestrator main agent
+    let mut main_agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .name("main_agent")
+        .system_prompt(
+            r#"你是一个智能助手，负责协调和分配任务。
 
 你的职责：
 1. 理解用户需求
@@ -84,16 +83,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - weather-agent: 获取天气相关信息
 
 当任务涉及天气查询或数学计算时，优先通过 agent_tool 调度对应 SubAgent，不要自己直接计算。"#,
-    )
-    .role(AgentRole::Orchestrator)
-    .enable_tool(false)
-    .enable_task(true)
-    .enable_human_in_loop(false)
-    .enable_subagent(true)
-    .verbose(true)
-    .max_iterations(50);
+        )
+        .role(AgentRole::Orchestrator)
+        .enable_subagent()
+        .enable_planning()
+        .max_iterations(50)
+        .build()?;
 
-    let mut main_agent = ReactAgent::new(main_config);
     main_agent.register_agents(sub_agents);
 
     // 第四步：执行任务

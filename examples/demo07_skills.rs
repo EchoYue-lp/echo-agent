@@ -6,27 +6,12 @@
 //! - 自动注入 System Prompt 指引片段（告诉 LLM 何时怎么用这组工具）
 //! - 技能元数据查询（list_skills / has_skill）
 //!
-//! # Skills 架构
-//!
-//! ```text
-//! agent.add_skill(Box::new(CalculatorSkill))
-//!          │
-//!          ├── 注册工具: add / subtract / multiply / divide
-//!          └── 注入提示: "使用 add/subtract/... 做精确计算"
-//!
-//! agent.add_skill(Box::new(FileSystemSkill::with_base_dir("/tmp")))
-//!          │
-//!          ├── 注册工具: read_file / write_file / append_file / list_dir
-//!          └── 注入提示: "操作限制在 /tmp 目录下..."
-//! ```
-//!
 //! # 运行
 //! ```bash
 //! cargo run --example demo07_skills
 //! ```
 
-use echo_agent::agent::Agent;
-use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
+use echo_agent::prelude::*;
 use echo_agent::skills::Skill;
 use echo_agent::skills::builtin::{CalculatorSkill, FileSystemSkill, WeatherSkill};
 use echo_agent::tools::{Tool, ToolParameters, ToolResult};
@@ -92,35 +77,26 @@ impl Tool for ToLowerTool {
     }
 }
 
-/// 实现 Skill trait —— 这就是自定义 Skill 的全部工作
+/// 实现 Skill trait
 impl Skill for TextProcessingSkill {
     fn name(&self) -> &str {
         "text_processing"
     }
-
     fn description(&self) -> &str {
         "文本大小写转换能力"
     }
-
     fn tools(&self) -> Vec<Box<dyn Tool>> {
         vec![Box::new(ToUpperTool), Box::new(ToLowerTool)]
     }
-
     fn system_prompt_injection(&self) -> Option<String> {
-        Some(
-            "\n\n## 文本处理能力（TextProcessing Skill）\n\
-             你可以对文本进行大小写转换：\n\
-             - `to_upper(text)`：将文本转为全大写\n\
-             - `to_lower(text)`：将文本转为全小写"
-                .to_string(),
-        )
+        Some("\n\n## 文本处理能力\n你可以对文本进行大小写转换：\n- `to_upper(text)`：将文本转为全大写\n- `to_lower(text)`：将文本转为全小写".to_string())
     }
 }
 
 // ── 主程序 ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() -> echo_agent::error::Result<()> {
+async fn main() -> Result<()> {
     dotenv::dotenv().ok();
 
     tracing_subscriber::fmt()
@@ -134,13 +110,13 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("          Echo Agent × Skills 系统演示");
     println!("═══════════════════════════════════════════════════════\n");
 
-    // ── Part 1: 展示 Skill 基础元数据（不需要 LLM）────────────────────────
+    // Part 1: 展示 Skill 基础元数据（不需要 LLM）
     demo_skill_metadata();
 
-    // ── Part 2: 安装并查询 Skills（不需要 LLM）──────────────────────────────
+    // Part 2: 安装并查询 Skills（不需要 LLM）
     demo_skill_installation();
 
-    // ── Part 3: 通过 Skill 驱动 Agent 执行真实任务（需要 LLM 配置）──────────
+    // Part 3: 通过 Skill 驱动 Agent 执行真实任务（需要 LLM 配置）
     demo_agent_with_skills().await?;
 
     Ok(())
@@ -172,11 +148,6 @@ fn demo_skill_metadata() {
                 "✗ 无"
             }
         );
-        if let Some(injection) = skill.system_prompt_injection() {
-            // 只显示第一行
-            let first_line = injection.trim().lines().next().unwrap_or("");
-            println!("    注入预览: \"{}...\"", first_line);
-        }
         println!();
     }
 }
@@ -186,10 +157,14 @@ fn demo_skill_installation() {
     println!("{}", "─".repeat(55));
     println!("Part 2: 安装 Skills 到 Agent，查询状态\n");
 
-    let config =
-        AgentConfig::new("qwen3-max", "demo-agent", "你是一个多功能助手。").enable_tool(true);
-
-    let mut agent = ReactAgent::new(config);
+    // 使用 ReactAgentBuilder 创建 ReactAgent（具体类型，可调用 add_skill 等方法）
+    let mut agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .name("demo-agent")
+        .system_prompt("你是一个多功能助手。")
+        .enable_tools()
+        .build()
+        .unwrap();
 
     println!("安装前：");
     println!("  已安装 Skill 数量: {}", agent.skill_count());
@@ -199,12 +174,7 @@ fn demo_skill_installation() {
     agent.add_skill(Box::new(CalculatorSkill));
     agent.add_skill(Box::new(FileSystemSkill::with_base_dir("/tmp")));
     agent.add_skill(Box::new(WeatherSkill));
-
-    // 安装自定义 Skill
     agent.add_skill(Box::new(TextProcessingSkill));
-
-    // 重复安装同名 Skill 会被自动跳过
-    agent.add_skill(Box::new(CalculatorSkill));
 
     println!("\n安装后：");
     println!("  已安装 Skill 数量: {}", agent.skill_count());
@@ -227,8 +197,6 @@ fn demo_skill_installation() {
             info.tool_names.join(", ")
         );
     }
-
-    println!("\n  已注册工具: {:?}", agent.list_tools());
     println!();
 }
 
@@ -248,15 +216,16 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
     // ── 场景 A: Calculator Skill ───────────────────────────────────────────
     println!("场景 A: Calculator Skill —— 多步骤精确计算\n");
     {
-        let config = AgentConfig::new("qwen3-max", "calc-agent", system_prompt)
-            .enable_tool(true)
-            .enable_task(false);
-        let mut agent = ReactAgent::new(config);
+        let mut agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .name("calc-agent")
+            .system_prompt(system_prompt)
+            .enable_tools()
+            .build()?;
         agent.add_skill(Box::new(CalculatorSkill));
 
         let task = "计算: (15 * 8 + 36 / 4) - (100 / 5 * 3)，分步给出每一步的结果";
         println!("任务: {}", task);
-
         match agent.execute(task).await {
             Ok(result) => println!("✓ 结果: {}\n", result),
             Err(e) => println!("✗ 失败: {}\n", e),
@@ -266,16 +235,16 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
     // ── 场景 B: FileSystem Skill ───────────────────────────────────────────
     println!("场景 B: FileSystem Skill —— 文件读写操作\n");
     {
-        let config = AgentConfig::new("qwen3-max", "file-agent", system_prompt)
-            .enable_tool(true)
-            .enable_task(false);
-        let mut agent = ReactAgent::new(config);
+        let mut agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .name("file-agent")
+            .system_prompt(system_prompt)
+            .enable_tools()
+            .build()?;
         agent.add_skill(Box::new(FileSystemSkill::with_base_dir("/tmp")));
 
-        let task = "在 /tmp/skills_demo.txt 写入内容 'Hello from echo-agent Skills!'，\
-                    然后读取它并确认内容正确";
+        let task = "在 /tmp/skills_demo.txt 写入内容 'Hello from echo-agent Skills!'，然后读取它并确认内容正确";
         println!("任务: {}", task);
-
         match agent.execute(task).await {
             Ok(result) => println!("✓ 结果: {}\n", result),
             Err(e) => println!("✗ 失败: {}\n", e),
@@ -285,10 +254,12 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
     // ── 场景 C: 多 Skill 组合 ─────────────────────────────────────────────
     println!("场景 C: 多 Skill 组合 —— 计算结果写入文件\n");
     {
-        let config = AgentConfig::new("qwen3-max", "multi-skill-agent", system_prompt)
-            .enable_tool(true)
-            .enable_task(false);
-        let mut agent = ReactAgent::new(config);
+        let mut agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .name("multi-skill-agent")
+            .system_prompt(system_prompt)
+            .enable_tools()
+            .build()?;
         agent.add_skills(vec![
             Box::new(CalculatorSkill),
             Box::new(FileSystemSkill::with_base_dir("/tmp")),
@@ -296,7 +267,6 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
 
         let task = "计算 123 * 456 的结果，然后把算式和结果写入 /tmp/calc_result.txt";
         println!("任务: {}", task);
-
         match agent.execute(task).await {
             Ok(result) => println!("✓ 结果: {}\n", result),
             Err(e) => println!("✗ 失败: {}\n", e),

@@ -38,7 +38,7 @@ pub struct AgentConfig {
     pub(crate) enable_subagent: bool,
     /// 上下文 token 上限，超过时自动触发压缩（`usize::MAX` 表示不限制）
     pub(crate) token_limit: usize,
-    pub callbacks: Vec<Arc<dyn AgentCallback>>,
+    pub(crate) callbacks: Vec<Arc<dyn AgentCallback>>,
     /// LLM 调用失败后最大重试次数（0 = 不重试，默认 3）
     pub(crate) llm_max_retries: usize,
     /// LLM 重试初始等待（毫秒），指数退避翻倍（默认 500）
@@ -46,10 +46,6 @@ pub struct AgentConfig {
     /// 工具执行失败时将错误信息回传给 LLM，而非直接让 Agent 失败（默认 true）
     pub(crate) tool_error_feedback: bool,
     /// 启用思维链（CoT）系统提示注入（默认 true）。
-    ///
-    /// 当 `enable_tool=true` 且本字段为 `true` 时，框架自动在系统提示末尾追加一行
-    /// 引导模型先推理再行动的指令，无需在每个 Agent 的 system_prompt 中手写。
-    /// 设为 `false` 可完全由调用方自行控制推理引导。
     pub(crate) enable_cot: bool,
     /// 工具执行配置：超时、重试策略、并行并发度
     pub(crate) tool_execution: ToolExecutionConfig,
@@ -58,17 +54,10 @@ pub struct AgentConfig {
     /// 长期记忆 Store 文件路径（默认 `~/.echo-agent/store.json`）
     pub(crate) memory_path: String,
     /// 会话标识，用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文。
-    ///
-    /// 设置后，每次 `execute()` 调用前会自动加载该会话的最新快照，
-    /// 结束后自动将本轮消息写入快照。
     pub(crate) session_id: Option<String>,
     /// Checkpointer 文件路径（默认 `~/.echo-agent/checkpoints.json`）
     pub(crate) checkpointer_path: String,
-    /// 结构化输出格式（None = 默认文本）。
-    ///
-    /// 设置后，所有 LLM 调用都会携带该格式约束。
-    /// 推荐对"纯提取/分类"场景使用 [`ResponseFormat::JsonSchema`]；
-    /// 对带工具的 Agent 仅建议使用 [`ResponseFormat::JsonObject`]。
+    /// 结构化输出格式（None = 默认文本）
     pub(crate) response_format: Option<ResponseFormat>,
 }
 
@@ -100,6 +89,56 @@ impl AgentConfig {
             response_format: None,
         }
     }
+
+    // ── 预设配置（易用性优化）──────────────────────────────────────────────────────
+
+    /// 创建最小配置的 Agent（无工具、无记忆）
+    ///
+    /// 适用于简单的对话场景。
+    pub fn minimal(model_name: &str, system_prompt: &str) -> Self {
+        Self::new(model_name, "assistant", system_prompt)
+            .enable_tool(false)
+            .enable_memory(false)
+            .enable_cot(false)
+    }
+
+    /// 创建标准配置的 Agent（启用工具、思维链）
+    ///
+    /// 适用于大多数 Agent 场景。
+    pub fn standard(model_name: &str, agent_name: &str, system_prompt: &str) -> Self {
+        Self::new(model_name, agent_name, system_prompt)
+            .enable_tool(true)
+            .enable_cot(true)
+    }
+
+    /// 创建完整功能的 Agent（工具、记忆、规划）
+    ///
+    /// 适用于复杂的自主 Agent 场景。
+    pub fn full_featured(model_name: &str, agent_name: &str, system_prompt: &str) -> Self {
+        Self::new(model_name, agent_name, system_prompt)
+            .enable_tool(true)
+            .enable_memory(true)
+            .enable_task(true)
+            .enable_cot(true)
+    }
+
+    /// 启用所有功能（工具、记忆、规划）- Builder 链式调用版本
+    pub fn with_full_features(mut self) -> Self {
+        self.enable_tool = true;
+        self.enable_memory = true;
+        self.enable_task = true;
+        self.enable_cot = true;
+        self
+    }
+
+    /// 启用基本工具功能（工具 + 思维链）- Builder 链式调用版本
+    pub fn with_tools(mut self) -> Self {
+        self.enable_tool = true;
+        self.enable_cot = true;
+        self
+    }
+
+    // ── 原有 Builder 方法 ──────────────────────────────────────────────────────────
 
     pub fn role(mut self, role: AgentRole) -> Self {
         self.role = role;
@@ -171,150 +210,289 @@ impl AgentConfig {
         self
     }
 
+    /// 运行时设置模型名称（可变引用版本）
+    pub fn set_model_name(&mut self, model_name: &str) {
+        self.model_name = model_name.to_string();
+    }
+
     pub fn system_prompt(mut self, system_prompt: &str) -> Self {
         self.system_prompt = system_prompt.to_string();
         self
     }
 
-    /// 设置上下文 token 上限，超出后 `ReactAgent` 在每次 LLM 调用前自动触发压缩。
-    /// 需配合 `ReactAgent::set_compressor` 一起使用，否则仅估算不压缩。
     pub fn token_limit(mut self, limit: usize) -> Self {
         self.token_limit = limit;
         self
     }
 
-    /// 注册一个事件回调，支持链式调用
     pub fn with_callback(mut self, callback: Arc<dyn AgentCallback>) -> Self {
         self.callbacks.push(callback);
         self
     }
 
-    /// LLM 调用失败后的最大重试次数（0 = 不重试）
     pub fn llm_max_retries(mut self, retries: usize) -> Self {
         self.llm_max_retries = retries;
         self
     }
 
-    /// LLM 首次重试前等待的毫秒数，后续每次翻倍（指数退避）
     pub fn llm_retry_delay_ms(mut self, delay_ms: u64) -> Self {
         self.llm_retry_delay_ms = delay_ms;
         self
     }
 
-    /// 工具失败时是否将错误信息回传 LLM（true = 让 LLM 自行纠错，false = 直接抛出异常）
     pub fn tool_error_feedback(mut self, enabled: bool) -> Self {
         self.tool_error_feedback = enabled;
         self
     }
 
-    /// 读取当前配置的 session_id
     pub fn get_session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
 
-    /// 读取当前配置的 LLM 最大重试次数
     pub fn get_llm_max_retries(&self) -> usize {
         self.llm_max_retries
     }
 
-    /// 读取当前配置的 LLM 首次重试延迟（毫秒）
     pub fn get_llm_retry_delay_ms(&self) -> u64 {
         self.llm_retry_delay_ms
     }
 
-    /// 读取工具错误回传开关状态
     pub fn get_tool_error_feedback(&self) -> bool {
         self.tool_error_feedback
     }
 
-    /// 启用/禁用思维链（CoT）系统提示自动注入（默认 true）。
-    ///
-    /// 禁用后，框架不会追加任何推理引导，完全由 system_prompt 控制。
+    pub fn get_max_iterations(&self) -> usize {
+        self.max_iterations
+    }
+
+    pub fn get_token_limit(&self) -> usize {
+        self.token_limit
+    }
+
+    pub fn is_cot_enabled(&self) -> bool {
+        self.enable_cot
+    }
+
+    pub fn is_memory_enabled(&self) -> bool {
+        self.enable_memory
+    }
+
+    pub fn get_memory_path(&self) -> &str {
+        &self.memory_path
+    }
+
+    pub fn get_checkpointer_path(&self) -> &str {
+        &self.checkpointer_path
+    }
+
+    pub fn get_tool_execution(&self) -> &crate::tools::ToolExecutionConfig {
+        &self.tool_execution
+    }
+
+    pub fn get_response_format(&self) -> Option<&crate::llm::ResponseFormat> {
+        self.response_format.as_ref()
+    }
+
+    pub fn get_model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    pub fn get_system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    pub fn get_agent_name(&self) -> &str {
+        &self.agent_name
+    }
+
+    pub fn is_verbose(&self) -> bool {
+        self.verbose
+    }
+
     pub fn enable_cot(mut self, enabled: bool) -> Self {
         self.enable_cot = enabled;
         self
     }
 
-    /// 启用/禁用长期记忆 Store（默认 false）。
-    ///
-    /// 启用后 Agent 自动注册 `remember`/`recall`/`forget` 三个工具，
-    /// 并在每轮执行前将相关历史记忆注入上下文。
     pub fn enable_memory(mut self, enabled: bool) -> Self {
         self.enable_memory = enabled;
         self
     }
 
-    /// 自定义长期记忆 Store 文件路径（默认 `~/.echo-agent/store.json`）
     pub fn memory_path(mut self, path: &str) -> Self {
         self.memory_path = path.to_string();
         self
     }
 
-    /// 设置会话标识，启用 Checkpointer 跨进程对话恢复。
-    ///
-    /// 相同的 `session_id` 在不同进程/重启后都能恢复到同一对话历史。
-    /// 若未同时配置 Checkpointer 文件路径，可通过 `ReactAgent::set_checkpointer` 注入自定义后端。
     pub fn session_id(mut self, id: &str) -> Self {
         self.session_id = Some(id.to_string());
         self
     }
 
-    /// 自定义 Checkpointer 文件路径（默认 `~/.echo-agent/checkpoints.json`）
     pub fn checkpointer_path(mut self, path: &str) -> Self {
         self.checkpointer_path = path.to_string();
         self
     }
 
-    /// 设置工具执行配置（超时、重试、并发度）。
-    ///
-    /// # 示例
-    ///
-    /// ```rust
-    /// use echo_agent::agent::react_agent::AgentConfig;
-    /// use echo_agent::tools::ToolExecutionConfig;
-    ///
-    /// let config = AgentConfig::new("qwen3-max", "my-agent", "你是一个助手")
-    ///     .enable_tool(true)
-    ///     .tool_execution(ToolExecutionConfig {
-    ///         timeout_ms: 10_000,   // 10 秒超时
-    ///         retry_on_fail: true,
-    ///         max_retries: 2,
-    ///         retry_delay_ms: 300,
-    ///         max_concurrency: Some(3), // 最多 3 个工具并发
-    ///     });
-    /// ```
     pub fn tool_execution(mut self, config: ToolExecutionConfig) -> Self {
         self.tool_execution = config;
         self
     }
 
-    /// 设置结构化输出格式。
-    ///
-    /// 启用后，所有 LLM 调用都会携带 `response_format` 约束。
-    ///
-    /// # 示例
-    ///
-    /// ```rust
-    /// use echo_agent::agent::react_agent::AgentConfig;
-    /// use echo_agent::llm::ResponseFormat;
-    /// use serde_json::json;
-    ///
-    /// let config = AgentConfig::new("gpt-4o", "extractor", "你是一个信息提取助手")
-    ///     .response_format(ResponseFormat::json_schema(
-    ///         "person",
-    ///         json!({
-    ///             "type": "object",
-    ///             "properties": {
-    ///                 "name": { "type": "string" },
-    ///                 "age":  { "type": "integer" }
-    ///             },
-    ///             "required": ["name", "age"],
-    ///             "additionalProperties": false
-    ///         }),
-    ///     ));
-    /// ```
     pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
         self.response_format = Some(fmt);
         self
+    }
+}
+
+// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_config_new() {
+        let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
+
+        assert_eq!(config.get_model_name(), "qwen3-max");
+        assert_eq!(config.get_agent_name(), "assistant");
+        assert_eq!(config.get_system_prompt(), "You are a helpful assistant");
+        assert_eq!(config.get_max_iterations(), 10);
+        assert_eq!(config.get_token_limit(), usize::MAX);
+        assert!(!config.is_tool_enabled());
+        assert!(!config.is_task_enabled());
+        assert!(!config.is_human_in_loop_enabled());
+        assert!(!config.is_subagent_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_minimal() {
+        let config = AgentConfig::minimal("qwen3-max", "Be helpful");
+
+        assert_eq!(config.get_model_name(), "qwen3-max");
+        assert!(!config.is_tool_enabled());
+        assert!(!config.is_memory_enabled());
+        assert!(!config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_standard() {
+        let config = AgentConfig::standard("qwen3-max", "agent1", "You are helpful");
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_full_featured() {
+        let config = AgentConfig::full_featured("qwen3-max", "agent1", "You are helpful");
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_memory_enabled());
+        assert!(config.is_task_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_builder_chain() {
+        let config = AgentConfig::new("model", "agent", "prompt")
+            .max_iterations(20)
+            .token_limit(8000)
+            .enable_tool(true)
+            .enable_task(true)
+            .enable_human_in_loop(true)
+            .enable_subagent(true)
+            .enable_memory(true)
+            .enable_cot(false)
+            .llm_max_retries(5)
+            .llm_retry_delay_ms(1000)
+            .tool_error_feedback(false)
+            .verbose(true);
+
+        assert_eq!(config.get_max_iterations(), 20);
+        assert_eq!(config.get_token_limit(), 8000);
+        assert!(config.is_tool_enabled());
+        assert!(config.is_task_enabled());
+        assert!(config.is_human_in_loop_enabled());
+        assert!(config.is_subagent_enabled());
+        assert!(config.is_memory_enabled());
+        assert!(!config.is_cot_enabled());
+        assert_eq!(config.get_llm_max_retries(), 5);
+        assert_eq!(config.get_llm_retry_delay_ms(), 1000);
+        assert!(!config.get_tool_error_feedback());
+        assert!(config.is_verbose());
+    }
+
+    #[test]
+    fn test_agent_config_allowed_tools() {
+        let config = AgentConfig::new("model", "agent", "prompt")
+            .allowed_tools(vec!["tool1".to_string(), "tool2".to_string()]);
+
+        assert_eq!(config.get_allowed_tools(), &["tool1", "tool2"]);
+    }
+
+    #[test]
+    fn test_agent_config_session_id() {
+        let config = AgentConfig::new("model", "agent", "prompt").session_id("session-123");
+
+        assert_eq!(config.get_session_id(), Some("session-123"));
+    }
+
+    #[test]
+    fn test_agent_config_role() {
+        let config = AgentConfig::new("model", "agent", "prompt").role(AgentRole::Orchestrator);
+
+        assert_eq!(config.role, AgentRole::Orchestrator);
+    }
+
+    #[test]
+    fn test_agent_config_model_name_mutation() {
+        let mut config = AgentConfig::new("model1", "agent", "prompt");
+
+        config.set_model_name("model2");
+        assert_eq!(config.get_model_name(), "model2");
+    }
+
+    #[test]
+    fn test_agent_config_with_full_features() {
+        let config = AgentConfig::new("model", "agent", "prompt").with_full_features();
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_memory_enabled());
+        assert!(config.is_task_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_with_tools() {
+        let config = AgentConfig::new("model", "agent", "prompt").with_tools();
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_memory_path() {
+        let config =
+            AgentConfig::new("model", "agent", "prompt").memory_path("/custom/path/store.json");
+
+        assert_eq!(config.get_memory_path(), "/custom/path/store.json");
+    }
+
+    #[test]
+    fn test_agent_config_checkpointer_path() {
+        let config = AgentConfig::new("model", "agent", "prompt")
+            .checkpointer_path("/custom/path/checkpoints.json");
+
+        assert_eq!(
+            config.get_checkpointer_path(),
+            "/custom/path/checkpoints.json"
+        );
+    }
+
+    #[test]
+    fn test_agent_role_default() {
+        assert_eq!(AgentRole::default(), AgentRole::Worker);
     }
 }

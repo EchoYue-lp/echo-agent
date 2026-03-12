@@ -189,7 +189,7 @@ use echo_agent::testing::MockAgent;
 let math  = MockAgent::new("math_agent").with_response("The answer is 42");
 let writer = MockAgent::new("writer_agent").with_response("Report generated");
 
-let config = AgentConfig::new("gpt-4o", "orchestrator", "Delegate to specialists")
+let config = AgentConfig::new("qwen3-max", "orchestrator", "Delegate to specialists")
     .role(AgentRole::Orchestrator)
     .enable_subagent(true);
 

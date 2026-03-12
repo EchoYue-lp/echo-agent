@@ -6,34 +6,32 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::{McpError, ReactError, Result};
-use crate::mcp::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use crate::mcp::types::{
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION,
+};
 
 use super::McpTransport;
 
-/// HTTP 传输层
+/// HTTP 传输层（MCP Streamable HTTP）
 ///
 /// 通过 HTTP POST 发送 JSON-RPC 请求，适用于远程 MCP 服务端。
-/// 默认端点：`{base_url}/message`（符合 MCP Streamable HTTP 规范）。
+/// 符合 MCP Streamable HTTP 规范：直接 POST 到端点 URL。
 pub struct HttpTransport {
     client: reqwest::Client,
-    base_url: String,
+    /// MCP 服务端端点 URL
+    endpoint: String,
     headers: HashMap<String, String>,
     next_id: Arc<AtomicU64>,
 }
 
 impl HttpTransport {
-    pub fn new(base_url: String, headers: HashMap<String, String>) -> Self {
+    pub fn new(endpoint: String, headers: HashMap<String, String>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url,
+            endpoint: endpoint.trim_end_matches('/').to_string(),
             headers,
             next_id: Arc::new(AtomicU64::new(1)),
         }
-    }
-
-    fn endpoint(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        format!("{}/message", base)
     }
 }
 
@@ -43,7 +41,12 @@ impl McpTransport for HttpTransport {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         request.id = Some(Value::Number(id.into()));
 
-        let mut builder = self.client.post(self.endpoint()).json(&request);
+        let mut builder = self
+            .client
+            .post(&self.endpoint)
+            .header("Content-Type", "application/json")
+            .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+            .json(&request);
         for (k, v) in &self.headers {
             builder = builder.header(k, v);
         }
@@ -72,7 +75,12 @@ impl McpTransport for HttpTransport {
     }
 
     async fn notify(&self, notification: JsonRpcNotification) -> Result<()> {
-        let mut builder = self.client.post(self.endpoint()).json(&notification);
+        let mut builder = self
+            .client
+            .post(&self.endpoint)
+            .header("Content-Type", "application/json")
+            .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+            .json(&notification);
         for (k, v) in &self.headers {
             builder = builder.header(k, v);
         }
@@ -83,5 +91,9 @@ impl McpTransport for HttpTransport {
 
     async fn close(&self) {
         // HTTP 是无状态连接，无需显式关闭
+    }
+
+    fn notification_rx(&self) -> Option<Arc<dyn crate::mcp::types::JsonRpcNotificationReceiver>> {
+        None
     }
 }

@@ -11,6 +11,10 @@ use crate::tools::shell::ShellTool;
 ///
 /// # 使用方式
 /// ```rust
+/// use echo_agent::prelude::{ShellSkill, AgentConfig, ReactAgent};
+///
+/// let config = AgentConfig::new("qwen3-max", "shell", "You are a shell assistant");
+/// let mut agent = ReactAgent::new(config);
 /// // 严格模式（默认）：只允许白名单命令
 /// agent.add_skill(Box::new(ShellSkill::new()));
 ///

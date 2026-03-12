@@ -73,7 +73,7 @@ execute(task)
 ## Key Configuration
 
 ```rust
-AgentConfig::new("gpt-4o", "my_agent", "You are a helpful assistant")
+AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
     .enable_tool(true)          // enable tool calling (default: true)
     .enable_task(true)          // enable DAG task planning (Planner mode)
     .enable_subagent(true)      // enable SubAgent dispatch (Orchestrator mode)
@@ -128,7 +128,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AgentConfig::new("gpt-4o", "assistant", "You are a helpful assistant");
+    let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
     let mut agent = ReactAgent::new(config);
 
     let answer = agent.execute("What is 1 + 1?").await?;
@@ -161,7 +161,7 @@ impl AgentCallback for LogCallback {
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = AgentConfig::new(
-        "gpt-4o",
+        "qwen3-max",
         "math_agent",
         "You are a math assistant. Use tools to calculate.",
     )

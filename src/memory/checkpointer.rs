@@ -13,11 +13,12 @@
 //!
 //! ```rust,no_run
 //! use echo_agent::memory::checkpointer::{FileCheckpointer, Checkpointer};
-//! use echo_agent::prelude::ReactAgent;
+//! use echo_agent::prelude::{ReactAgent, AgentConfig};
 //! use std::sync::Arc;
 //!
 //! # async fn example() -> echo_agent::error::Result<()> {
 //! let cp = Arc::new(FileCheckpointer::new("~/.echo-agent/checkpoints.json")?);
+//! let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
 //! let mut agent = ReactAgent::new(config);
 //! agent.set_checkpointer(cp, "alice-session-1".to_string());
 //! // execute() 自动恢复上次对话，结束后自动保存
@@ -282,4 +283,123 @@ fn expand_tilde(path: &Path) -> PathBuf {
         return PathBuf::from(home).join(&s[2..]);
     }
     path.to_path_buf()
+}
+
+// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_in_memory_checkpointer_put_and_get() {
+        let checkpointer = InMemoryCheckpointer::new();
+
+        let messages = vec![
+            Message::system("You are a helper".to_string()),
+            Message::user("Hello".to_string()),
+        ];
+
+        let checkpoint_id = checkpointer
+            .put("session1", messages.clone())
+            .await
+            .unwrap();
+        assert!(!checkpoint_id.is_empty());
+
+        let checkpoint = checkpointer.get("session1").await.unwrap();
+        assert!(checkpoint.is_some());
+        let cp = checkpoint.unwrap();
+        assert_eq!(cp.messages.len(), 2);
+        assert_eq!(cp.session_id, "session1");
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_checkpointer_get_nonexistent() {
+        let checkpointer = InMemoryCheckpointer::new();
+
+        let checkpoint = checkpointer.get("nonexistent").await.unwrap();
+        assert!(checkpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_checkpointer_list() {
+        let checkpointer = InMemoryCheckpointer::new();
+
+        checkpointer
+            .put("session1", vec![Message::user("m1".to_string())])
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        checkpointer
+            .put("session1", vec![Message::user("m2".to_string())])
+            .await
+            .unwrap();
+
+        let checkpoints = checkpointer.list("session1").await.unwrap();
+        assert_eq!(checkpoints.len(), 2);
+        // 应该是倒序（最新的在前）
+        assert_eq!(checkpoints[0].messages[0].content, Some("m2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_checkpointer_delete_session() {
+        let checkpointer = InMemoryCheckpointer::new();
+
+        checkpointer
+            .put("session1", vec![Message::user("msg".to_string())])
+            .await
+            .unwrap();
+        checkpointer.delete_session("session1").await.unwrap();
+
+        let checkpoint = checkpointer.get("session1").await.unwrap();
+        assert!(checkpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_checkpointer_list_sessions() {
+        let checkpointer = InMemoryCheckpointer::new();
+
+        checkpointer.put("session1", vec![]).await.unwrap();
+        checkpointer.put("session2", vec![]).await.unwrap();
+        checkpointer.put("session3", vec![]).await.unwrap();
+
+        let sessions = checkpointer.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions.contains(&"session1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_checkpointer_multiple_sessions() {
+        let checkpointer = InMemoryCheckpointer::new();
+
+        checkpointer
+            .put("session1", vec![Message::user("s1-msg".to_string())])
+            .await
+            .unwrap();
+        checkpointer
+            .put("session2", vec![Message::user("s2-msg".to_string())])
+            .await
+            .unwrap();
+
+        let cp1 = checkpointer.get("session1").await.unwrap().unwrap();
+        let cp2 = checkpointer.get("session2").await.unwrap().unwrap();
+
+        assert_eq!(cp1.messages[0].content, Some("s1-msg".to_string()));
+        assert_eq!(cp2.messages[0].content, Some("s2-msg".to_string()));
+    }
+
+    #[test]
+    fn test_checkpoint_structure() {
+        let checkpoint = Checkpoint {
+            session_id: "test-session".to_string(),
+            checkpoint_id: "cp-123".to_string(),
+            messages: vec![Message::user("test".to_string())],
+            created_at: 1234567890,
+        };
+
+        assert_eq!(checkpoint.session_id, "test-session");
+        assert_eq!(checkpoint.checkpoint_id, "cp-123");
+        assert_eq!(checkpoint.messages.len(), 1);
+        assert_eq!(checkpoint.created_at, 1234567890);
+    }
 }

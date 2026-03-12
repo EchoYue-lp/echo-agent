@@ -56,6 +56,9 @@ use echo_agent::compression::compressor::{
     DefaultSummaryPrompt, HybridCompressor, SlidingWindowCompressor, SummaryCompressor,
 };
 use echo_agent::error::ReactError;
+use echo_agent::human_loop::{
+    ApprovalDecision, HumanLoopEvent, HumanLoopHandler, HumanLoopManager, dispatch_event,
+};
 use echo_agent::llm::DefaultLlmClient;
 use echo_agent::mcp::{McpManager, McpServerConfig, TransportConfig};
 use echo_agent::skills::builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill};
@@ -67,6 +70,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;
+use tokio::io::AsyncBufReadExt as _;
 
 // ── CLI 参数定义 ──────────────────────────────────────────────────────────────
 
@@ -514,6 +518,15 @@ fn describe_transport(transport: &TransportConfig) -> String {
                 .unwrap_or(base_url);
             format!("http: {short}")
         }
+        TransportConfig::Sse { base_url, .. } => {
+            let short = base_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or(base_url);
+            format!("sse: {short}")
+        }
     }
 }
 
@@ -577,7 +590,8 @@ async fn run_single_query(
     if no_stream {
         println!("{}", agent.execute(query).await?);
     } else {
-        stream_execute(agent, query, false).await?;
+        // 单次查询使用默认的 ConsoleHumanLoopProvider，无需 manager
+        stream_execute(agent, query, false, None).await?;
         println!();
     }
     Ok(())
@@ -602,7 +616,7 @@ async fn run_pipe_mode(
                 Err(e) => eprintln!("错误: {e:?}"),
             }
         } else {
-            if let Err(e) = stream_execute(agent, &query, false).await {
+            if let Err(e) = stream_execute(agent, &query, false, None).await {
                 eprintln!("错误: {e:?}");
             }
             println!();
@@ -619,6 +633,11 @@ async fn run_interactive(
     http: &Arc<Client>,
     mcp: &McpManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 创建统一的 HumanLoopManager：用户与 agent 的所有交互（工具审批、输入请求）
+    // 均通过下方主循环的同一个 "you > " 提示符完成，与正常对话入口保持一致。
+    let manager = Arc::new(HumanLoopManager::new());
+    agent.set_human_loop_provider(manager.clone());
+
     let mut rl = DefaultEditor::new()?;
     let history_path = home_dir().map(|h| h.join(".echo_agent_history"));
     if let Some(ref path) = history_path {
@@ -766,15 +785,24 @@ async fn run_interactive(
                 io::stdout().flush().ok();
 
                 let res: Result<(), ReactError> = if cli.no_stream {
-                    match agent.execute(&input).await {
+                    // 非流式：后台任务通过 CliHumanLoopHandler 处理 human-loop 事件，
+                    // 主线程等待 execute 完成。替换其他 UI 时只需换 handler。
+                    let mgr = manager.clone();
+                    let hl_task = tokio::spawn(async move {
+                        let handler = CliHumanLoopHandler; // 在 async block 内构造，避免生命周期泄漏
+                        mgr.serve(&handler).await;
+                    });
+                    let result = match agent.execute(&input).await {
                         Ok(answer) => {
                             println!("{}", answer);
                             Ok(())
                         }
                         Err(e) => Err(e),
-                    }
+                    };
+                    hl_task.abort();
+                    result
                 } else {
-                    stream_execute(agent, &input, cli.ctx_stats).await
+                    stream_execute(agent, &input, cli.ctx_stats, Some(&manager)).await
                 };
 
                 println!();
@@ -1009,8 +1037,9 @@ async fn stream_execute(
     agent: &mut ReactAgent,
     task: &str,
     show_ctx_stats: bool,
+    manager: Option<&HumanLoopManager>,
 ) -> Result<(), ReactError> {
-    let result = stream_run(agent, task).await;
+    let result = stream_run(agent, task, manager).await;
     if show_ctx_stats {
         let (count, tokens) = agent.context_stats();
         println!("\n  (上下文: {} 条 / ~{} tokens)", count, tokens);
@@ -1018,47 +1047,161 @@ async fn stream_execute(
     result
 }
 
-async fn stream_run(agent: &mut ReactAgent, task: &str) -> Result<(), ReactError> {
+/// 驱动 agent 流式执行，同时通过 `tokio::select!` 监听 human-loop 事件。
+///
+/// 当 agent 等待用户审批或输入时，`event_stream.next()` 会挂起，
+/// `manager.recv_event()` 则会 ready——select! 捕获后，通过与正常对话
+/// 相同的 "you > " 提示符获取用户响应，再由 responder 传回 agent，
+/// 实现"用户介入入口"与"主交互入口"的统一。
+async fn stream_run(
+    agent: &mut ReactAgent,
+    task: &str,
+    manager: Option<&HumanLoopManager>,
+) -> Result<(), ReactError> {
     let mut event_stream = agent.execute_stream(task).await?;
     let mut in_token = false;
     let mut iter = 0usize;
 
-    while let Some(event_result) = event_stream.next().await {
-        match event_result? {
-            AgentEvent::Token(token) => {
-                if !in_token {
-                    iter += 1;
-                    in_token = true;
-                }
-                print!("{}", token);
-                io::stdout().flush().ok();
-            }
-            AgentEvent::ToolCall { name, args } => {
-                if in_token {
-                    println!();
-                    in_token = false;
-                }
-                println!("\n  [工具调用] {}({})", name, fmt_args(&args));
-            }
-            AgentEvent::ToolResult { name, output } => {
-                println!("  [工具结果] {} → {}", name, truncate_chars(&output, 120));
-                print!("\nagent > ");
-                io::stdout().flush().ok();
-            }
-            AgentEvent::FinalAnswer(answer) => {
-                if in_token {
-                    println!();
-                    in_token = false;
-                } else {
-                    println!("{}", answer);
-                }
-                if iter > 1 {
-                    println!("\n  (共 {} 轮推理)", iter);
+    loop {
+        // 用 select! 同时等待 agent 流事件和 human-loop 事件
+        let agent_event = if let Some(mgr) = manager {
+            tokio::select! {
+                chunk = event_stream.next() => chunk,
+                Some(hl_event) = mgr.recv_event() => {
+                    // agent 正在等待用户响应，stream 处于挂起状态
+                    if in_token {
+                        println!();
+                        in_token = false;
+                    }
+                    handle_human_loop_event(hl_event).await;
+                    // 响应完成后恢复 agent 提示符，继续循环
+                    print!("\nagent > ");
+                    io::stdout().flush().ok();
+                    continue;
                 }
             }
+        } else {
+            event_stream.next().await
+        };
+
+        match agent_event {
+            None => break,
+            Some(Err(e)) => return Err(e),
+            Some(Ok(event)) => match event {
+                AgentEvent::Token(token) => {
+                    if !in_token {
+                        iter += 1;
+                        in_token = true;
+                    }
+                    print!("{}", token);
+                    io::stdout().flush().ok();
+                }
+                AgentEvent::ToolCall { name, args } => {
+                    if in_token {
+                        println!();
+                        in_token = false;
+                    }
+                    println!("\n  [工具调用] {}({})", name, fmt_args(&args));
+                }
+                AgentEvent::ToolResult { name, output } => {
+                    println!("  [工具结果] {} → {}", name, truncate_chars(&output, 120));
+                    print!("\nagent > ");
+                    io::stdout().flush().ok();
+                }
+                AgentEvent::FinalAnswer(answer) => {
+                    if in_token {
+                        println!();
+                        in_token = false;
+                    } else {
+                        println!("{}", answer);
+                    }
+                    if iter > 1 {
+                        println!("\n  (共 {} 轮推理)", iter);
+                    }
+                }
+                AgentEvent::Cancelled => {
+                    if in_token {
+                        println!();
+                    }
+                    println!("\n  [执行已取消]");
+                }
+            },
         }
     }
     Ok(())
+}
+
+// ── Human-in-Loop CLI 处理 ────────────────────────────────────────────────────
+
+/// 基于 CLI stdin 的人工介入处理器
+///
+/// 通过统一的 `you > ` 提示符收集用户输入，与正常对话入口保持一致。
+///
+/// **扩展指南**：接入 Web CLI、WebSocket 或其他界面时，
+/// 只需为对应的结构体实现 [`HumanLoopHandler`] trait，
+/// 然后将其传给 [`dispatch_event`] 或 [`HumanLoopManager::serve`] 即可，
+/// agent 内部逻辑无需任何改动。
+struct CliHumanLoopHandler;
+
+#[async_trait::async_trait]
+impl HumanLoopHandler for CliHumanLoopHandler {
+    async fn on_approval(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        _prompt: &str,
+    ) -> ApprovalDecision {
+        println!();
+        println!("  ┌── 需要您的确认 ──────────────────────────────────────────");
+        println!("  │  工具  : {}", tool_name);
+        if *args != serde_json::Value::Null {
+            let args_str = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+            for line in args_str.lines().take(8) {
+                println!("  │  参数  : {}", truncate_chars(line, 80));
+            }
+        }
+        println!("  │");
+        println!("  │  y = 批准    其他输入 = 拒绝（可附带原因）");
+        println!("  └─────────────────────────────────────────────────────────");
+
+        let input = read_human_loop_input().await;
+        let trimmed = input.trim();
+        if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
+            println!("  [✓ 已批准]");
+            ApprovalDecision::Approved
+        } else {
+            let reason = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            println!("  [✗ 已拒绝]");
+            ApprovalDecision::Rejected { reason }
+        }
+    }
+
+    async fn on_input(&self, prompt: &str) -> String {
+        println!();
+        println!("  {}", prompt);
+        read_human_loop_input().await.trim().to_string()
+    }
+}
+
+/// 将 human-loop 事件分发给 [`CliHumanLoopHandler`] 处理。
+///
+/// 替换其他 UI 时只需将 `&CliHumanLoopHandler` 换成对应的 handler 实现。
+async fn handle_human_loop_event(event: HumanLoopEvent) {
+    dispatch_event(event, &CliHumanLoopHandler).await;
+}
+
+/// 异步读取一行用户输入，使用与主循环相同的 `you > ` 提示符。
+async fn read_human_loop_input() -> String {
+    print!("you > ");
+    io::stdout().flush().ok();
+    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut buf = String::new();
+    let _ = reader.read_line(&mut buf).await;
+    buf
 }
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────

@@ -87,13 +87,14 @@ pub struct ForceCompressStats {
 /// # 混合管道示例
 ///
 /// ```rust,no_run
-/// use echo_agent::compression::ContextManager;
+/// use echo_agent::compression::{ContextManager, ContextCompressor};
 /// use echo_agent::compression::compressor::{
 ///     HybridCompressor, SlidingWindowCompressor, SummaryCompressor, DefaultSummaryPrompt,
 /// };
+/// use echo_agent::llm::LlmClient;
 /// use std::sync::Arc;
 ///
-/// # async fn example() -> echo_agent::error::Result<()> {
+/// # async fn example(llm: Arc<dyn LlmClient>) -> echo_agent::error::Result<()> {
 /// let compressor = HybridCompressor::builder()
 ///     .stage(SlidingWindowCompressor::new(30))
 ///     .stage(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8))

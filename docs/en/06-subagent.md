@@ -71,7 +71,7 @@ use echo_agent::tools::others::weather::WeatherTool;
 
 // 1. Create specialized SubAgents
 let math_agent = {
-    let config = AgentConfig::new("gpt-4o", "math_agent", "You are a math expert")
+    let config = AgentConfig::new("qwen3-max", "math_agent", "You are a math expert")
         .enable_tool(true)
         .allowed_tools(vec!["add".into(), "multiply".into()]); // enforce tool boundaries
     let mut agent = ReactAgent::new(config);
@@ -80,7 +80,7 @@ let math_agent = {
 };
 
 let weather_agent = {
-    let config = AgentConfig::new("gpt-4o", "weather_agent", "You are a weather expert")
+    let config = AgentConfig::new("qwen3-max", "weather_agent", "You are a weather expert")
         .enable_tool(true)
         .allowed_tools(vec!["get_weather".into()]);
     let mut agent = ReactAgent::new(config);
@@ -90,7 +90,7 @@ let weather_agent = {
 
 // 2. Create the main Orchestrator Agent
 let main_config = AgentConfig::new(
-    "gpt-4o",
+    "qwen3-max",
     "orchestrator",
     "You are the main orchestrator. Use agent_tool to delegate:
      - math_agent: math calculations
@@ -153,7 +153,7 @@ Concurrent calls to the **same SubAgent** are serialized by `AsyncMutex` to main
 
 ```rust
 // SubAgent with its own session and memory, fully isolated from the main Agent
-let sub_config = AgentConfig::new("gpt-4o", "sub_a", "...")
+let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
     .session_id("sub-a-session-001")
     .checkpointer_path("./checkpoints.json") // same file, unique session_id
     .enable_memory(true)

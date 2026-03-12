@@ -9,7 +9,7 @@
 //! ReactAgent
 //!    │ register_tools()
 //!    ▼
-//! McpToolAdapter  ──→  McpClient  ──→  [stdio Transport]  ──→  MCP Server Process
+//! McpToolAdapter──→McpClient──→[stdio Transport]──→MCP Server Process
 //!  (Tool trait)         (Arc)           stdin/stdout              npx @mcp/server-*
 //! ```
 //!
@@ -26,7 +26,6 @@
 //! cargo run --example demo06_mcp
 //! ```
 
-use echo_agent::agent::react_agent::{AgentConfig, ReactAgent};
 use echo_agent::mcp::{McpManager, McpServerConfig};
 use echo_agent::prelude::*;
 
@@ -71,7 +70,6 @@ async fn demo_raw_mcp_call() -> echo_agent::error::Result<()> {
     let mut manager = McpManager::new();
 
     // 连接文件系统 MCP 服务端
-    // 服务端会访问 /tmp 目录（可按需修改路径）
     let config = McpServerConfig::stdio(
         "filesystem",
         "npx",
@@ -134,16 +132,14 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
 
     println!("MCP 工具已准备好，共 {} 个", mcp_tools.len());
 
-    // 创建 ReAct Agent 并注册 MCP 工具
-    let system_prompt = "你是一个文件操作助手，可以使用 MCP 文件系统工具完成文件读写任务。\
-                         在执行操作前先分析步骤，再依次执行。";
-    let config = AgentConfig::new("qwen3-max", "file-agent", system_prompt)
-        .enable_tool(true)
-        .enable_task(false)
-        .enable_human_in_loop(false)
-        .enable_subagent(false);
+    // 使用 AgentBuilder 创建 ReAct Agent
+    let mut agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .name("file-agent")
+        .system_prompt("你是一个文件操作助手，可以使用 MCP 文件系统工具完成文件读写任务。在执行操作前先分析步骤，再依次执行。")
+        .enable_tools()
+        .build()?;
 
-    let mut agent = ReactAgent::new(config);
     agent.add_tools(mcp_tools);
 
     // 执行任务

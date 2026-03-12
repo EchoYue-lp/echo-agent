@@ -51,7 +51,7 @@ use echo_agent::llm::DefaultLlmClient;
 use reqwest::Client;
 use std::sync::Arc;
 
-let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "gpt-4o-mini"));
+let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen-turbo"));
 
 // Built-in summary prompt
 SummaryCompressor::new(llm.clone(), DefaultSummaryPrompt, 6)
@@ -94,7 +94,7 @@ let compressor = HybridCompressor::builder()
 Set `AgentConfig::token_limit` and install a compressor — the framework automatically checks and compresses before every LLM call:
 
 ```rust
-let config = AgentConfig::new("gpt-4o", "agent", "You are an assistant")
+let config = AgentConfig::new("qwen3-max", "agent", "You are an assistant")
     .token_limit(4096); // compress when estimated tokens exceed 4096
 
 let mut agent = ReactAgent::new(config);

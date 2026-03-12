@@ -12,11 +12,12 @@
 //!
 //! ```rust,no_run
 //! use echo_agent::memory::checkpointer::{FileCheckpointer, Checkpointer};
-//! use echo_agent::prelude::ReactAgent;
+//! use echo_agent::prelude::{ReactAgent, AgentConfig};
 //! use std::sync::Arc;
 //!
 //! # async fn example() -> echo_agent::error::Result<()> {
 //! let cp = Arc::new(FileCheckpointer::new("~/.echo-agent/checkpoints.json")?);
+//! let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
 //! let mut agent = ReactAgent::new(config);
 //! agent.set_checkpointer(cp, "alice-session-1".to_string());
 //! // execute() 自动恢复上次对话，结束后自动保存快照

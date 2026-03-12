@@ -1,10 +1,12 @@
 pub mod http;
+pub mod sse;
 pub mod stdio;
 
 use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::mcp::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use std::sync::Arc;
 
 /// MCP 传输层抽象
 ///
@@ -20,4 +22,8 @@ pub trait McpTransport: Send + Sync {
 
     /// 关闭传输层连接
     async fn close(&self);
+
+    /// 获取通知接收通道（用于接收服务端推送的通知）
+    /// 返回 None 表示该传输层不支持通知接收
+    fn notification_rx(&self) -> Option<Arc<dyn crate::mcp::types::JsonRpcNotificationReceiver>>;
 }

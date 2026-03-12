@@ -75,7 +75,7 @@ Mark a tool as "requires approval" — a human confirmation gate fires before ex
 use echo_agent::prelude::*;
 use echo_agent::tools::shell::ShellTool;
 
-let config = AgentConfig::new("gpt-4o", "agent", "You are a system administration assistant")
+let config = AgentConfig::new("qwen3-max", "agent", "You are a system administration assistant")
     .enable_tool(true)
     .enable_human_in_loop(true);
 
@@ -97,7 +97,7 @@ When the Agent needs more information, it proactively requests user input. The `
 let system = "When you need additional information to complete a task, \
               use the human_in_loop tool to ask the user.";
 
-let config = AgentConfig::new("gpt-4o", "agent", system)
+let config = AgentConfig::new("qwen3-max", "agent", system)
     .enable_tool(true)
     .enable_human_in_loop(true);
 
