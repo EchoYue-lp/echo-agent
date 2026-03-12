@@ -25,6 +25,10 @@ use crate::tools::files::files::{
 ///
 /// # 使用方式
 /// ```rust
+/// use echo_agent::prelude::{FileSystemSkill, AgentConfig, ReactAgent};
+///
+/// let config = AgentConfig::new("qwen3-max", "filesystem", "You are a file manager");
+/// let mut agent = ReactAgent::new(config);
 /// // 不限制路径（谨慎使用）
 /// agent.add_skill(Box::new(FileSystemSkill::new()));
 ///

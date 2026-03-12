@@ -22,7 +22,7 @@
 //!
 //! ```rust,no_run
 //! use echo_agent::testing::MockLlmClient;
-//! use echo_agent::compression::{ContextManager, CompressionInput};
+//! use echo_agent::compression::{ContextManager, CompressionInput, ContextCompressor};
 //! use echo_agent::compression::compressor::{SummaryCompressor, DefaultSummaryPrompt};
 //! use echo_agent::llm::types::Message;
 //! use std::sync::Arc;

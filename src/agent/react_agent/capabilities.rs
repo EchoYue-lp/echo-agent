@@ -173,7 +173,13 @@ impl ReactAgent {
     /// # 示例
     ///
     /// ```rust,no_run
+    /// # async fn example() -> echo_agent::error::Result<()> {
+    /// use echo_agent::prelude::*;
+    ///
+    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
     /// agent.load_skills_from_dir("./skills").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn load_skills_from_dir(
         &mut self,
@@ -292,9 +298,15 @@ impl ReactAgent {
     /// 3. 记录 Skill 元数据到 SkillManager
     ///
     /// # 示例
-    /// ```rust
+    /// ```rust,no_run
+    /// # async fn example() -> echo_agent::error::Result<()> {
+    /// use echo_agent::prelude::*;
+    ///
+    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
     /// agent.add_skill(Box::new(CalculatorSkill));
     /// agent.add_skill(Box::new(FileSystemSkill::with_base_dir("/workspace")));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn add_skill(&mut self, skill: Box<dyn Skill>) {
         let name = skill.name().to_string();
@@ -383,12 +395,9 @@ impl ReactAgent {
     ///     ])
     /// ).await?;
     ///
-    /// // 将工具注入到多个 Agent
-    /// let mut agent1 = ReactAgent::new(AgentConfig::standard("qwen3-max", "a1", "助手"));
-    /// let mut agent2 = ReactAgent::new(AgentConfig::standard("qwen3-max", "a2", "助手"));
-    ///
-    /// agent1.register_mcp_tools(tools.clone());
-    /// agent2.register_mcp_tools(tools);
+    /// // 将工具注入到 Agent
+    /// let mut agent = ReactAgent::new(AgentConfig::standard("qwen3-max", "a1", "助手"));
+    /// agent.register_mcp_tools(tools);
     ///
     /// // MCP 连接由应用层管理，可在 Agent 生命周期外关闭
     /// // mcp_manager.close_all().await;
@@ -408,12 +417,9 @@ impl ReactAgent {
     ///
     /// ```rust,no_run
     /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::agent::react_agent::ReactAgent;
-    /// use echo_agent::agent::config::AgentConfig;
-    /// use echo_agent::mcp::McpServerConfig;
-    /// use echo_agent::mcp::server_config::TransportConfig;
+    /// use echo_agent::prelude::*;
     ///
-    /// let mut agent = ReactAgent::new(AgentConfig::default());
+    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
     /// let client = agent.connect_mcp_from_config(McpServerConfig {
     ///     name: "my-server".to_string(),
     ///     transport: TransportConfig::Stdio {
@@ -459,14 +465,11 @@ impl ReactAgent {
     ///
     /// ```rust,no_run
     /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::agent::react_agent::ReactAgent;
-    /// use echo_agent::agent::config::AgentConfig;
-    /// use echo_agent::mcp::McpServerConfig;
-    /// use echo_agent::mcp::server_config::TransportConfig;
+    /// use echo_agent::prelude::*;
     ///
     /// let name = "json_str";
     ///
-    ///  let config = r#"{
+    /// let config = r#"{
     ///       "command": "npx",
     ///       "args": ["-y", "@modelcontextprotocol/server-github"],
     ///       "env": {
@@ -475,9 +478,9 @@ impl ReactAgent {
     ///       "disabled": true
     ///     }"#;
     ///
-    /// let mut agent = ReactAgent::new(AgentConfig::default());
-    /// let client = agent.connect_mcp_from_json(name,config).await?;
-    /// #Ok(())
+    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
+    /// let client = agent.connect_mcp_from_json(name, config).await?;
+    /// # Ok(())
     /// # }
     /// ```
     pub async fn connect_mcp_from_json(
@@ -498,10 +501,9 @@ impl ReactAgent {
     ///
     /// ```rust,no_run
     /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::agent::react_agent::ReactAgent;
-    /// use echo_agent::agent::config::AgentConfig;
+    /// use echo_agent::prelude::*;
     ///
-    /// let mut agent = ReactAgent::new(AgentConfig::default());
+    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
     /// let clients = agent.load_mcp_from_file("examples/mcp1.json").await?;
     /// println!("已连接 {} 个 MCP 服务端", clients.len());
     /// # Ok(())
@@ -539,5 +541,28 @@ impl ReactAgent {
     /// 列出所有已连接的 MCP 服务端名称
     pub fn list_mcp_servers(&self) -> Vec<&str> {
         self.mcp_manager.server_names()
+    }
+
+    /// 断开指定的 MCP 服务端连接
+    ///
+    /// 关闭连接并从管理器中移除。成功返回 true，服务端不存在返回 false。
+    pub async fn disconnect_mcp(&mut self, name: &str) -> bool {
+        self.mcp_manager.disconnect(name).await
+    }
+
+    // ── System Prompt 热更新 ─────────────────────────────────────────────────────
+
+    /// 运行时更新系统提示词
+    ///
+    /// 同时更新配置和上下文中的 system 消息
+    pub fn set_system_prompt(&mut self, prompt: String) {
+        // 更新配置
+        self.config.system_prompt = prompt.clone();
+        // 更新上下文中的 system 消息
+        self.context.update_system(prompt);
+        tracing::info!(
+            agent = %self.config.agent_name,
+            "📝 系统提示词已更新"
+        );
     }
 }

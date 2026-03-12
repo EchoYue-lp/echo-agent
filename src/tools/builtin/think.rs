@@ -14,7 +14,10 @@
 ///
 /// ```rust,no_run
 /// use echo_agent::tools::builtin::think::ThinkTool;
+/// use echo_agent::prelude::{AgentConfig, ReactAgent};
 ///
+/// let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
+/// let mut agent = ReactAgent::new(config);
 /// agent.add_tool(Box::new(ThinkTool));
 /// ```
 ///

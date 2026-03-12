@@ -140,6 +140,7 @@ impl SseTransport {
     ///
     /// `last_event_id` / `retry_ms` 跨重连共享，每次调用可能被服务端下发的
     /// `id:` / `retry:` 字段更新（2025-11-25 changelog minor #6 #7）。
+    #[allow(clippy::too_many_arguments)]
     async fn run_sse_loop(
         client: &reqwest::Client,
         sse_url: &str,
@@ -225,13 +226,13 @@ impl SseTransport {
                 // 处理 endpoint 事件：服务端告知客户端 POST 端点 URI
                 if event_type == Some("endpoint") {
                     let data = data_lines.join("\n");
-                    if let Ok(endpoint_value) = serde_json::from_str::<Value>(&data) {
-                        if let Some(uri) = endpoint_value.get("uri").and_then(|v| v.as_str()) {
-                            let mut endpoint_guard = message_endpoint.lock().await;
-                            *endpoint_guard = Some(uri.to_string());
-                            tracing::info!("SSE: 获取到 POST 端点 URI: {}", uri);
-                            continue; // endpoint 事件不是 JSON-RPC 消息，跳过
-                        }
+                    if let Ok(endpoint_value) = serde_json::from_str::<Value>(&data)
+                        && let Some(uri) = endpoint_value.get("uri").and_then(|v| v.as_str())
+                    {
+                        let mut endpoint_guard = message_endpoint.lock().await;
+                        *endpoint_guard = Some(uri.to_string());
+                        tracing::info!("SSE: 获取到 POST 端点 URI: {}", uri);
+                        continue; // endpoint 事件不是 JSON-RPC 消息，跳过
                     }
                 }
 

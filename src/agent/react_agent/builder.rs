@@ -1,6 +1,6 @@
 //! Agent 构建器
 
-use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole};
+use crate::agent::{AgentCallback, AgentConfig, AgentRole};
 use crate::error::Result;
 use crate::human_loop::HumanLoopProvider;
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient};

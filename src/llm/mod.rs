@@ -1,26 +1,57 @@
 //! LLM 客户端
 //!
-//! 统一的 LLM 抽象层，支持：
-//! - OpenAI 兼容 API（默认实现）
-//! - 自定义 LLM 实现（依赖注入）
-//! - Mock 测试客户端
+//! 统一的 LLM 抽象层，支持 OpenAI 兼容 API、自定义实现和 Mock 测试。
 //!
-//! # 快速上手
+//! # 核心类型
+//!
+//! - [`LlmClient`]: LLM 客户端 trait
+//! - [`OpenAiClient`]: OpenAI 兼容客户端
+//! - [`ChatRequest`]: 聊天请求
+//! - [`ChatResponse`]: 聊天响应
+//! - [`ChatChunk`]: 流式响应块
+//!
+//! # 示例：简单对话
 //!
 //! ```rust,no_run
-//! use echo_agent::llm::{LlmClient, OpenAiClient, ChatRequest};
+//! use echo_agent::prelude::*;
 //!
-//! # async fn example() -> echo_agent::error::Result<()> {
-//! // 使用环境变量配置
+//! # #[tokio::main]
+//! # async fn main() -> echo_agent::error::Result<()> {
+//! // 从环境变量创建客户端
+//! // 需要 OPENAI_API_KEY 和 OPENAI_BASE_URL 环境变量
 //! let client = OpenAiClient::from_env("qwen3-max")?;
 //!
 //! // 发送请求
 //! let response = client.chat(ChatRequest {
-//!     messages: vec![echo_agent::llm::Message::user("你好".to_string())],
+//!     messages: vec![Message::user("你好".to_string())],
 //!     ..Default::default()
 //! }).await?;
 //!
 //! println!("{}", response.content().unwrap_or_default());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # 示例：流式对话
+//!
+//! ```rust,no_run
+//! use echo_agent::prelude::*;
+//! use futures::StreamExt;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> echo_agent::error::Result<()> {
+//! let client = OpenAiClient::from_env("qwen3-max")?;
+//!
+//! let mut stream = client.chat_stream(ChatRequest {
+//!     messages: vec![Message::user("讲个笑话".to_string())],
+//!     ..Default::default()
+//! }).await?;
+//!
+//! while let Some(chunk) = stream.next().await {
+//!     if let Some(content) = chunk?.delta.content {
+//!         print!("{}", content);
+//!     }
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -31,10 +62,12 @@ pub mod types;
 
 use crate::error::Result;
 pub use crate::llm::config::LlmConfig;
-use crate::llm::types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message, ToolDefinition,
+pub(crate) use crate::llm::types::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message,
 };
-pub use crate::llm::types::{JsonSchemaSpec, Message as LlmMessage, ResponseFormat};
+pub use crate::llm::types::{
+    JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition,
+};
 use async_trait::async_trait;
 use futures::Stream;
 use std::sync::Arc;
@@ -43,8 +76,28 @@ use std::sync::Arc;
 
 /// LLM 客户端统一接口
 ///
-/// 所有 LLM 实现（OpenAI、本地模型、Mock）都应实现此 trait。
-/// 通过 `ReactAgent::with_llm()` 注入到 Agent 中。
+/// 所有 LLM 实现（OpenAI、本地模型、Mock）都必须实现此 trait。
+///
+/// # 示例：使用 Mock 客户端测试
+///
+/// ```
+/// use echo_agent::prelude::*;
+/// use echo_agent::testing::MockLlmClient;
+///
+/// # #[tokio::main]
+/// # async fn main() -> echo_agent::error::Result<()> {
+/// let mock = MockLlmClient::new()
+///     .with_response("Hello, world!");
+///
+/// let response = mock.chat(ChatRequest {
+///     messages: vec![Message::user("Hi".to_string())],
+///     ..Default::default()
+/// }).await?;
+///
+/// assert_eq!(response.content(), Some("Hello, world!"));
+/// # Ok(())
+/// # }
+/// ```
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// 同步聊天请求（阻塞直到完整响应）
@@ -71,24 +124,40 @@ pub trait LlmClient: Send + Sync {
 }
 
 /// 聊天请求参数
+///
+/// # 示例
+///
+/// ```
+/// use echo_agent::prelude::*;
+///
+/// let request = ChatRequest {
+///     messages: vec![
+///         Message::system("你是助手".to_string()),
+///         Message::user("你好".to_string()),
+///     ],
+///     temperature: Some(0.7),
+///     max_tokens: Some(1024),
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     /// 消息列表
     pub messages: Vec<Message>,
-    /// 温度参数（0.0-2.0）
+    /// 温度参数（0.0-2.0），越高越随机
     pub temperature: Option<f32>,
     /// 最大生成 token 数
     pub max_tokens: Option<u32>,
     /// 工具定义列表
     pub tools: Option<Vec<ToolDefinition>>,
-    /// 工具选择策略
+    /// 工具选择策略："auto" | "none" | "required"
     pub tool_choice: Option<String>,
-    /// 响应格式
+    /// 响应格式（JSON Schema 等）
     pub response_format: Option<ResponseFormat>,
 }
 
 impl ChatRequest {
-    /// 创建新的请求（仅消息）
+    /// 创建新请求（仅消息）
     pub fn new(messages: Vec<Message>) -> Self {
         Self {
             messages,
@@ -104,13 +173,33 @@ impl ChatRequest {
 }
 
 /// 聊天响应
+///
+/// # 示例
+///
+/// ```
+/// use echo_agent::prelude::*;
+///
+/// # fn example(response: ChatResponse) {
+/// // 获取文本内容
+/// if let Some(text) = response.content() {
+///     println!("Response: {}", text);
+/// }
+///
+/// // 检查是否有工具调用
+/// if response.has_tool_calls() {
+///     for call in response.tool_calls().unwrap() {
+///         println!("Tool: {}({:?})", call.function.name, call.function.arguments);
+///     }
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
-    /// 消息内容
+    /// 响应消息
     pub message: Message,
-    /// 完成原因
+    /// 完成原因："stop" | "tool_calls" | "length"
     pub finish_reason: Option<String>,
-    /// 原始响应（保留完整信息）
+    /// 原始响应
     pub raw: ChatCompletionResponse,
 }
 
@@ -137,7 +226,7 @@ impl ChatResponse {
 /// 流式响应块
 #[derive(Debug, Clone)]
 pub struct ChatChunk {
-    /// 增量消息
+    /// 增量消息内容
     pub delta: types::DeltaMessage,
     /// 完成原因
     pub finish_reason: Option<String>,
@@ -301,7 +390,7 @@ impl LlmClient for OpenAiClient {
         let choice = raw
             .choices
             .first()
-            .ok_or_else(|| crate::error::LlmError::EmptyResponse)?;
+            .ok_or(crate::error::LlmError::EmptyResponse)?;
 
         Ok(ChatResponse {
             message: choice.message.clone(),
@@ -347,8 +436,6 @@ impl LlmClient for OpenAiClient {
     }
 }
 
-// ── 默认客户端（向后兼容）───────────────────────────────────────────────────────
-
 /// 基于 [`chat`] 函数的默认 [`LlmClient`] 实现
 pub struct DefaultLlmClient {
     client: Arc<Client>,
@@ -383,7 +470,7 @@ impl LlmClient for DefaultLlmClient {
         let choice = raw
             .choices
             .first()
-            .ok_or_else(|| crate::error::LlmError::EmptyResponse)?;
+            .ok_or(crate::error::LlmError::EmptyResponse)?;
 
         Ok(ChatResponse {
             message: choice.message.clone(),

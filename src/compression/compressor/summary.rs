@@ -89,7 +89,10 @@ impl SummaryPromptBuilder for DefaultSummaryPrompt {
 /// # 示例
 ///
 /// ```rust
-/// let prompt = FnSummaryPrompt(|msgs| {
+/// use echo_agent::compression::compressor::summary::FnSummaryPrompt;
+/// use echo_agent::llm::types::Message;
+///
+/// let prompt = FnSummaryPrompt(|msgs: &[Message]| {
 ///     format!("用一段话总结以下对话：\n{:?}", msgs)
 /// });
 /// ```
@@ -109,7 +112,7 @@ where
 /// 摘要压缩：用 LLM 将较早的对话历史压缩成一条摘要 system 消息，保留最近 `keep_recent` 条不变。
 ///
 /// 压缩后的消息结构：
-/// ```
+/// ```text
 /// [原有 system 消息]
 /// [system] [对话历史摘要] <-- 新插入
 /// [最近 keep_recent 条对话消息]

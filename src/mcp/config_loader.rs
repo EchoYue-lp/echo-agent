@@ -155,7 +155,7 @@ impl McpServerEntry {
 
 impl McpConfigFile {
     /// 从 JSON 字符串解析配置
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         serde_json::from_str(s).map_err(|e| {
             ReactError::Mcp(McpError::ProtocolError(format!(
                 "mcp.json 格式解析失败: {}",
@@ -183,7 +183,7 @@ impl McpConfigFile {
                 e
             )))
         })?;
-        Self::from_str(&content)
+        Self::parse(&content)
     }
 
     /// 将所有**启用**的服务端转换为 [`McpServerConfig`] 列表

@@ -1,93 +1,69 @@
-//! echo-agent：可组合的 Rust Agent 开发框架
+//! # echo-agent
 //!
-//! # 核心能力
+//! 一个通用、易用、高性能的 Rust AI Agent 开发框架。
 //!
-//! | 模块 | 能力 |
-//! |------|------|
-//! | [`agent`] | ReAct Agent 执行引擎（工具调用、规划、流式输出） |
-//! | [`llm`] | LLM 客户端，支持 OpenAI 兼容 API |
-//! | [`tools`] | 工具系统（Tool trait、执行管理、并发限流、超时重试） |
-//! | [`memory`] | 双层记忆（Checkpointer 会话持久化 + Store 长期 KV） |
-//! | [`compression`] | 上下文压缩（滑动窗口 / LLM 摘要 / 混合管道） |
-//! | [`human_loop`] | 人工介入（审批 guard / 文本输入，支持命令行、Webhook、WebSocket） |
-//! | [`skills`] | Skill 系统（Tool 集合 + Prompt 注入的能力包） |
-//! | [`mcp`] | MCP 协议客户端，接入外部工具服务端 |
-//! | [`tasks`] | DAG 任务管理（规划模式专用） |
-//! | [`error`] | 统一错误类型树 |
+//! ## 核心特性
 //!
-//! # 快速上手
+//! - **ReAct 执行引擎**: 自动工具调用、多轮推理、流式输出
+//! - **工具系统**: 内置工具 + MCP 协议 + 自定义扩展
+//! - **双层记忆**: 会话持久化 + 长期 KV 存储
+//! - **上下文压缩**: 滑动窗口 / LLM 摘要 / 混合管道
+//! - **人工介入**: 审批 guard / 文本输入，支持多渠道
 //!
-//! ## 极简 API（推荐新手）
-//!
-//! ```rust,no_run
-//! use echo_agent::{agent, chat};
-//!
-//! # async fn run() -> echo_agent::error::Result<()> {
-//! // 一行创建简单对话 Agent
-//! let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
-//! let answer = chat!(agent, "你好").await?;
-//! println!("{answer}");
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## AgentBuilder 模式（推荐）
+//! ## 快速开始
 //!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
 //!
-//! # async fn run() -> echo_agent::error::Result<()> {
-//! let mut agent = AgentBuilder::new()
-//!     .model("qwen3-max")
-//!     .system_prompt("你是一个有帮助的助手")
-//!     .enable_tools()
-//!     .build()?;
+//! # #[tokio::main]
+//! # async fn main() -> echo_agent::error::Result<()> {
+//! // 创建 Agent
+//! let mut agent = ReactAgentBuilder::simple("qwen3-max", "你是一个有帮助的助手")?;
 //!
-//! let answer = agent.execute("帮我总结一下 Rust 的所有权机制").await?;
-//! println!("{answer}");
-//! # Ok(())
-//! # }
-//! ```
+//! // 执行对话
+//! let answer = agent.chat("你好！").await?;
+//! println!("Agent: {}", answer);
 //!
-//! ## 单轮任务模式（`execute`）
-//!
-//! ```rust,no_run
-//! use echo_agent::prelude::*;
-//!
-//! # async fn run() -> echo_agent::error::Result<()> {
-//! let config = AgentConfig::new("qwen3-max", "assistant", "你是一个有帮助的助手")
-//!     .enable_tool(true);
-//!
-//! let mut agent = ReactAgent::new(config);
-//! let answer = agent.execute("帮我总结一下 Rust 的所有权机制").await?;
-//! println!("{answer}");
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## 多轮对话模式（`chat`）
-//!
-//! `chat()` 在现有上下文上追加消息，天然支持多轮连续对话；
-//! `execute()` 每次都会重置上下文，适合独立的单轮任务。
-//!
-//! ```rust,no_run
-//! use echo_agent::prelude::*;
-//!
-//! # async fn run() -> echo_agent::error::Result<()> {
-//! let config = AgentConfig::new("qwen3-max", "assistant", "你是一个有帮助的助手");
-//! let mut agent = ReactAgent::new(config);
-//!
-//! let r1 = agent.chat("你好，我叫小明").await?;
-//! println!("Agent: {r1}");
-//!
-//! let r2 = agent.chat("你还记得我叫什么名字吗？").await?;
-//! println!("Agent: {r2}"); // Agent 能记住上下文中的 "小明"
-//!
-//! // 结束本轮对话，清除历史，开启下一轮
+//! // 重置对话
 //! agent.reset();
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## 带工具的 Agent
+//!
+//! ```rust,no_run
+//! use echo_agent::prelude::*;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> echo_agent::error::Result<()> {
+//! let mut agent = ReactAgentBuilder::new()
+//!     .model("qwen3-max")
+//!     .system_prompt("你是一个助手，可以使用工具完成任务")
+//!     .enable_tools()
+//!     .build()?;
+//!
+//! // agent 会自动使用 final_answer 工具返回结果
+//! let answer = agent.chat("今天天气如何？").await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## 模块概览
+//!
+//! | 模块 | 能力 |
+//! |------|------|
+//! | [`agent`] | ReAct Agent 执行引擎 |
+//! | [`llm`] | LLM 客户端（OpenAI 兼容） |
+//! | [`tools`] | 工具系统（Tool trait、并发限流、超时重试） |
+//! | [`memory`] | 双层记忆（Checkpointer + Store） |
+//! | [`compression`] | 上下文压缩 |
+//! | [`human_loop`] | 人工介入（审批/输入） |
+//! | [`skills`] | Skill 系统（Tool + Prompt 包） |
+//! | [`mcp`] | MCP 协议客户端 |
+//! | [`tasks`] | DAG 任务管理 |
+//! | [`error`] | 统一错误类型 |
+//!
 
 pub mod agent;
 pub mod compression;
@@ -101,112 +77,14 @@ pub mod tasks;
 pub mod testing;
 pub mod tools;
 
-// ── 极简 API 宏 ────────────────────────────────────────────────────────────────
-
-/// 一行创建简单对话 Agent
+/// 常用类型导出
 ///
-/// # 示例
-///
-/// ```rust,no_run
-/// use echo_agent::agent;
-///
-/// # async fn run() -> echo_agent::error::Result<()> {
-/// let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
-/// let answer = agent.execute("你好").await?;
-/// # Ok(())
-/// # }
-/// ```
-#[macro_export]
-macro_rules! agent {
-    ($model:expr, $prompt:expr) => {
-        $crate::agent::AgentBuilder::simple($model, $prompt)
-    };
-}
-
-/// 一行创建标准 Agent（启用工具）
-///
-/// # 示例
-///
-/// ```rust,no_run
-/// use echo_agent::agent_with_tools;
-///
-/// # async fn run() -> echo_agent::error::Result<()> {
-/// let mut agent = agent_with_tools!("qwen3-max", "assistant", "你是一个有帮助的助手")?;
-/// # Ok(())
-/// # }
-/// ```
-#[macro_export]
-macro_rules! agent_with_tools {
-    ($model:expr, $name:expr, $prompt:expr) => {
-        $crate::agent::AgentBuilder::standard($model, $name, $prompt)
-    };
-}
-
-/// 一行创建完整功能 Agent（工具、记忆、规划）
-///
-/// # 示例
-///
-/// ```rust,no_run
-/// use echo_agent::agent_full;
-///
-/// # async fn run() -> echo_agent::error::Result<()> {
-/// let mut agent = agent_full!("qwen3-max", "assistant", "你是一个自主助手")?;
-/// # Ok(())
-/// # }
-/// ```
-#[macro_export]
-macro_rules! agent_full {
-    ($model:expr, $name:expr, $prompt:expr) => {
-        $crate::agent::AgentBuilder::full_featured($model, $name, $prompt)
-    };
-}
-
-/// 快速执行单轮对话
-///
-/// # 示例
-///
-/// ```rust,no_run
-/// use echo_agent::{agent, chat};
-///
-/// # async fn run() -> echo_agent::error::Result<()> {
-/// let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
-/// let answer = chat!(agent, "你好").await?;
-/// println!("{answer}");
-/// # Ok(())
-/// # }
-/// ```
-#[macro_export]
-macro_rules! chat {
-    ($agent:expr, $message:expr) => {
-        $agent.chat($message).await
-    };
-}
-
-/// 快速执行单轮任务
-///
-/// # 示例
-///
-/// ```rust,no_run
-/// use echo_agent::{agent, execute};
-///
-/// # async fn run() -> echo_agent::error::Result<()> {
-/// let mut agent = agent!("qwen3-max", "你是一个有帮助的助手")?;
-/// let answer = execute!(agent, "解释 Rust 的所有权").await?;
-/// println!("{answer}");
-/// # Ok(())
-/// # }
-/// ```
-#[macro_export]
-macro_rules! execute {
-    ($agent:expr, $task:expr) => {
-        $agent.execute($task).await
-    };
-}
-
+/// 包含最常用的类型，通过 `use echo_agent::prelude::*` 导入。
 pub mod prelude {
     pub use crate::agent::react_agent::ReactAgent;
+    pub use crate::agent::react_agent::StepType;
     pub use crate::agent::{
-        Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
+        Agent, AgentBuilder, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
         ReactAgentBuilder,
     };
     pub use crate::compression::compressor::{
@@ -218,10 +96,16 @@ pub mod prelude {
     };
     pub use crate::error::Result;
     pub use crate::human_loop::{
-        ConsoleHumanLoopProvider, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
-        WebSocketHumanLoopProvider, WebhookHumanLoopProvider,
+        ApprovalDecision, ApprovalResponder, ConsoleHumanLoopProvider, HumanLoopEvent,
+        HumanLoopHandler, HumanLoopManager, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
+        InputResponder, WebSocketHumanLoopProvider, WebhookHumanLoopProvider, dispatch_event,
     };
-    pub use crate::llm::{JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
+    pub use crate::llm::types::{Message, ToolCall};
+    pub use crate::llm::{
+        ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient,
+        ResponseFormat, ToolDefinition,
+    };
+    pub use crate::mcp::types::McpTool;
     pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
     pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
     pub use crate::memory::embedder::{Embedder, HttpEmbedder};

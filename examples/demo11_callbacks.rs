@@ -70,7 +70,7 @@ impl AgentCallback for LogCallback {
         );
     }
 
-    async fn on_tool_start(&self, agent: &str, tool: &str, args: &Value) {
+    async fn on_tool_start(&self, _agent: &str, tool: &str, args: &Value) {
         println!(
             "  [{}] 🔧 工具调用: {} args={}",
             self.label,
@@ -79,7 +79,7 @@ impl AgentCallback for LogCallback {
         );
     }
 
-    async fn on_tool_end(&self, agent: &str, tool: &str, result: &str) {
+    async fn on_tool_end(&self, _agent: &str, tool: &str, result: &str) {
         println!(
             "  [{}] ✅ 工具成功: {} result=\"{}\"",
             self.label,
@@ -88,11 +88,11 @@ impl AgentCallback for LogCallback {
         );
     }
 
-    async fn on_tool_error(&self, agent: &str, tool: &str, err: &ReactError) {
+    async fn on_tool_error(&self, _agent: &str, tool: &str, err: &ReactError) {
         println!("  [{}] ❌ 工具错误: {} err={}", self.label, tool, err);
     }
 
-    async fn on_final_answer(&self, agent: &str, answer: &str) {
+    async fn on_final_answer(&self, _agent: &str, answer: &str) {
         println!(
             "  [{}] 🏁 最终答案: \"{}\"",
             self.label,

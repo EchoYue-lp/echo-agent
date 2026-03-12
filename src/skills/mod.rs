@@ -131,3 +131,179 @@ impl Default for SkillManager {
         Self::new()
     }
 }
+
+// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_skill_manager_new() {
+        let manager = SkillManager::new();
+        assert_eq!(manager.count(), 0);
+        assert!(manager.list().is_empty());
+    }
+
+    #[test]
+    fn test_skill_manager_record() {
+        let mut manager = SkillManager::new();
+
+        let info = SkillInfo {
+            name: "test_skill".to_string(),
+            description: "A test skill".to_string(),
+            tool_names: vec!["tool1".to_string(), "tool2".to_string()],
+            has_prompt_injection: true,
+        };
+
+        manager.record(info);
+
+        assert_eq!(manager.count(), 1);
+        assert!(manager.is_installed("test_skill"));
+    }
+
+    #[test]
+    fn test_skill_manager_multiple_skills() {
+        let mut manager = SkillManager::new();
+
+        manager.record(SkillInfo {
+            name: "skill1".to_string(),
+            description: "First skill".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: false,
+        });
+
+        manager.record(SkillInfo {
+            name: "skill2".to_string(),
+            description: "Second skill".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: true,
+        });
+
+        manager.record(SkillInfo {
+            name: "skill3".to_string(),
+            description: "Third skill".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: false,
+        });
+
+        assert_eq!(manager.count(), 3);
+        assert!(manager.is_installed("skill1"));
+        assert!(manager.is_installed("skill2"));
+        assert!(manager.is_installed("skill3"));
+        assert!(!manager.is_installed("skill4"));
+    }
+
+    #[test]
+    fn test_skill_manager_get() {
+        let mut manager = SkillManager::new();
+
+        manager.record(SkillInfo {
+            name: "test_skill".to_string(),
+            description: "Test description".to_string(),
+            tool_names: vec!["tool1".to_string()],
+            has_prompt_injection: true,
+        });
+
+        let info = manager.get("test_skill");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.name, "test_skill");
+        assert_eq!(info.description, "Test description");
+        assert_eq!(info.tool_names, vec!["tool1"]);
+        assert!(info.has_prompt_injection);
+
+        let missing = manager.get("missing");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_skill_manager_list_sorted() {
+        let mut manager = SkillManager::new();
+
+        manager.record(SkillInfo {
+            name: "zebra".to_string(),
+            description: "Z".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: false,
+        });
+
+        manager.record(SkillInfo {
+            name: "alpha".to_string(),
+            description: "A".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: false,
+        });
+
+        manager.record(SkillInfo {
+            name: "middle".to_string(),
+            description: "M".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: false,
+        });
+
+        let list = manager.list();
+        assert_eq!(list.len(), 3);
+        // 应该按名称排序
+        assert_eq!(list[0].name, "alpha");
+        assert_eq!(list[1].name, "middle");
+        assert_eq!(list[2].name, "zebra");
+    }
+
+    #[test]
+    fn test_skill_manager_is_installed() {
+        let manager = SkillManager::new();
+
+        assert!(!manager.is_installed("nonexistent"));
+
+        let mut manager = SkillManager::new();
+        manager.record(SkillInfo {
+            name: "existing".to_string(),
+            description: "".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: false,
+        });
+
+        assert!(manager.is_installed("existing"));
+        assert!(!manager.is_installed("other"));
+    }
+
+    #[test]
+    fn test_skill_info_structure() {
+        let info = SkillInfo {
+            name: "calculator".to_string(),
+            description: "Performs calculations".to_string(),
+            tool_names: vec!["add".to_string(), "subtract".to_string()],
+            has_prompt_injection: true,
+        };
+
+        assert_eq!(info.name, "calculator");
+        assert_eq!(info.description, "Performs calculations");
+        assert_eq!(info.tool_names.len(), 2);
+        assert!(info.has_prompt_injection);
+    }
+
+    #[test]
+    fn test_skill_manager_record_overwrite() {
+        let mut manager = SkillManager::new();
+
+        manager.record(SkillInfo {
+            name: "skill".to_string(),
+            description: "Original".to_string(),
+            tool_names: vec![],
+            has_prompt_injection: false,
+        });
+
+        manager.record(SkillInfo {
+            name: "skill".to_string(),
+            description: "Updated".to_string(),
+            tool_names: vec!["new_tool".to_string()],
+            has_prompt_injection: true,
+        });
+
+        assert_eq!(manager.count(), 1);
+        let info = manager.get("skill").unwrap();
+        assert_eq!(info.description, "Updated");
+        assert_eq!(info.tool_names, vec!["new_tool"]);
+    }
+}

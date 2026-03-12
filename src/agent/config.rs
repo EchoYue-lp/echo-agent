@@ -38,7 +38,7 @@ pub struct AgentConfig {
     pub(crate) enable_subagent: bool,
     /// 上下文 token 上限，超过时自动触发压缩（`usize::MAX` 表示不限制）
     pub(crate) token_limit: usize,
-    pub callbacks: Vec<Arc<dyn AgentCallback>>,
+    pub(crate) callbacks: Vec<Arc<dyn AgentCallback>>,
     /// LLM 调用失败后最大重试次数（0 = 不重试，默认 3）
     pub(crate) llm_max_retries: usize,
     /// LLM 重试初始等待（毫秒），指数退避翻倍（默认 500）
@@ -210,6 +210,11 @@ impl AgentConfig {
         self
     }
 
+    /// 运行时设置模型名称（可变引用版本）
+    pub fn set_model_name(&mut self, model_name: &str) {
+        self.model_name = model_name.to_string();
+    }
+
     pub fn system_prompt(mut self, system_prompt: &str) -> Self {
         self.system_prompt = system_prompt.to_string();
         self
@@ -256,6 +261,54 @@ impl AgentConfig {
         self.tool_error_feedback
     }
 
+    pub fn get_max_iterations(&self) -> usize {
+        self.max_iterations
+    }
+
+    pub fn get_token_limit(&self) -> usize {
+        self.token_limit
+    }
+
+    pub fn is_cot_enabled(&self) -> bool {
+        self.enable_cot
+    }
+
+    pub fn is_memory_enabled(&self) -> bool {
+        self.enable_memory
+    }
+
+    pub fn get_memory_path(&self) -> &str {
+        &self.memory_path
+    }
+
+    pub fn get_checkpointer_path(&self) -> &str {
+        &self.checkpointer_path
+    }
+
+    pub fn get_tool_execution(&self) -> &crate::tools::ToolExecutionConfig {
+        &self.tool_execution
+    }
+
+    pub fn get_response_format(&self) -> Option<&crate::llm::ResponseFormat> {
+        self.response_format.as_ref()
+    }
+
+    pub fn get_model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    pub fn get_system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    pub fn get_agent_name(&self) -> &str {
+        &self.agent_name
+    }
+
+    pub fn is_verbose(&self) -> bool {
+        self.verbose
+    }
+
     pub fn enable_cot(mut self, enabled: bool) -> Self {
         self.enable_cot = enabled;
         self
@@ -289,5 +342,157 @@ impl AgentConfig {
     pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
         self.response_format = Some(fmt);
         self
+    }
+}
+
+// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_config_new() {
+        let config = AgentConfig::new("qwen3-max", "assistant", "You are a helpful assistant");
+
+        assert_eq!(config.get_model_name(), "qwen3-max");
+        assert_eq!(config.get_agent_name(), "assistant");
+        assert_eq!(config.get_system_prompt(), "You are a helpful assistant");
+        assert_eq!(config.get_max_iterations(), 10);
+        assert_eq!(config.get_token_limit(), usize::MAX);
+        assert!(!config.is_tool_enabled());
+        assert!(!config.is_task_enabled());
+        assert!(!config.is_human_in_loop_enabled());
+        assert!(!config.is_subagent_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_minimal() {
+        let config = AgentConfig::minimal("qwen3-max", "Be helpful");
+
+        assert_eq!(config.get_model_name(), "qwen3-max");
+        assert!(!config.is_tool_enabled());
+        assert!(!config.is_memory_enabled());
+        assert!(!config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_standard() {
+        let config = AgentConfig::standard("qwen3-max", "agent1", "You are helpful");
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_full_featured() {
+        let config = AgentConfig::full_featured("qwen3-max", "agent1", "You are helpful");
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_memory_enabled());
+        assert!(config.is_task_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_builder_chain() {
+        let config = AgentConfig::new("model", "agent", "prompt")
+            .max_iterations(20)
+            .token_limit(8000)
+            .enable_tool(true)
+            .enable_task(true)
+            .enable_human_in_loop(true)
+            .enable_subagent(true)
+            .enable_memory(true)
+            .enable_cot(false)
+            .llm_max_retries(5)
+            .llm_retry_delay_ms(1000)
+            .tool_error_feedback(false)
+            .verbose(true);
+
+        assert_eq!(config.get_max_iterations(), 20);
+        assert_eq!(config.get_token_limit(), 8000);
+        assert!(config.is_tool_enabled());
+        assert!(config.is_task_enabled());
+        assert!(config.is_human_in_loop_enabled());
+        assert!(config.is_subagent_enabled());
+        assert!(config.is_memory_enabled());
+        assert!(!config.is_cot_enabled());
+        assert_eq!(config.get_llm_max_retries(), 5);
+        assert_eq!(config.get_llm_retry_delay_ms(), 1000);
+        assert!(!config.get_tool_error_feedback());
+        assert!(config.is_verbose());
+    }
+
+    #[test]
+    fn test_agent_config_allowed_tools() {
+        let config = AgentConfig::new("model", "agent", "prompt")
+            .allowed_tools(vec!["tool1".to_string(), "tool2".to_string()]);
+
+        assert_eq!(config.get_allowed_tools(), &["tool1", "tool2"]);
+    }
+
+    #[test]
+    fn test_agent_config_session_id() {
+        let config = AgentConfig::new("model", "agent", "prompt").session_id("session-123");
+
+        assert_eq!(config.get_session_id(), Some("session-123"));
+    }
+
+    #[test]
+    fn test_agent_config_role() {
+        let config = AgentConfig::new("model", "agent", "prompt").role(AgentRole::Orchestrator);
+
+        assert_eq!(config.role, AgentRole::Orchestrator);
+    }
+
+    #[test]
+    fn test_agent_config_model_name_mutation() {
+        let mut config = AgentConfig::new("model1", "agent", "prompt");
+
+        config.set_model_name("model2");
+        assert_eq!(config.get_model_name(), "model2");
+    }
+
+    #[test]
+    fn test_agent_config_with_full_features() {
+        let config = AgentConfig::new("model", "agent", "prompt").with_full_features();
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_memory_enabled());
+        assert!(config.is_task_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_with_tools() {
+        let config = AgentConfig::new("model", "agent", "prompt").with_tools();
+
+        assert!(config.is_tool_enabled());
+        assert!(config.is_cot_enabled());
+    }
+
+    #[test]
+    fn test_agent_config_memory_path() {
+        let config =
+            AgentConfig::new("model", "agent", "prompt").memory_path("/custom/path/store.json");
+
+        assert_eq!(config.get_memory_path(), "/custom/path/store.json");
+    }
+
+    #[test]
+    fn test_agent_config_checkpointer_path() {
+        let config = AgentConfig::new("model", "agent", "prompt")
+            .checkpointer_path("/custom/path/checkpoints.json");
+
+        assert_eq!(
+            config.get_checkpointer_path(),
+            "/custom/path/checkpoints.json"
+        );
+    }
+
+    #[test]
+    fn test_agent_role_default() {
+        assert_eq!(AgentRole::default(), AgentRole::Worker);
     }
 }

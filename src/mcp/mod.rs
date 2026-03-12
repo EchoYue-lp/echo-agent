@@ -40,14 +40,18 @@ use crate::tools::Tool;
 /// 按需连接服务端，获取工具列表后注册到 Agent：
 /// ```rust,no_run
 /// # async fn example() -> echo_agent::error::Result<()> {
-/// # let mut agent = unimplemented!();
+/// use echo_agent::prelude::*;
+///
 /// let mut manager = McpManager::new();
 /// let tools = manager.connect(McpServerConfig::stdio(
 ///     "filesystem",
 ///     "npx",
 ///     vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
 /// )).await?;
-/// agent.register_tools(tools);
+///
+/// // 将工具注册到 Agent
+/// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
+/// agent.add_tools(tools);
 /// # Ok(())
 /// # }
 /// ```
@@ -87,11 +91,16 @@ impl McpManager {
     /// # 示例
     /// ```rust,no_run
     /// # async fn example() -> echo_agent::error::Result<()> {
-    /// # let mut agent = unimplemented!();
+    /// use echo_agent::mcp::{McpManager, McpConfigFile};
+    /// use echo_agent::prelude::*;
+    ///
     /// let mut manager = McpManager::new();
     /// let config = McpConfigFile::from_file("mcp.json")?;
     /// let all_tools = manager.connect_from_config(&config).await?;
-    /// agent.register_tools(all_tools);
+    ///
+    /// // 将工具注册到 Agent
+    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
+    /// agent.add_tools(all_tools);
     /// # Ok(())
     /// # }
     /// ```
@@ -135,6 +144,19 @@ impl McpManager {
         for (name, client) in &self.clients {
             tracing::info!("MCP: 关闭服务端 '{}'", name);
             client.close().await;
+        }
+    }
+
+    /// 断开指定服务端连接
+    ///
+    /// 关闭连接并从管理器中移除。成功返回 true，服务端不存在返回 false。
+    pub async fn disconnect(&mut self, name: &str) -> bool {
+        if let Some(client) = self.clients.remove(name) {
+            tracing::info!("MCP: 断开服务端 '{}'", name);
+            client.close().await;
+            true
+        } else {
+            false
         }
     }
 }

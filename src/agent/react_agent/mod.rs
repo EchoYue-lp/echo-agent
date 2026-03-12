@@ -18,7 +18,6 @@ use crate::llm::config::LlmConfig;
 use crate::mcp::McpManager;
 use crate::memory::checkpointer::{Checkpointer, FileCheckpointer};
 use crate::memory::store::{FileStore, Store};
-use crate::prelude::Tool;
 use crate::skills::SkillManager;
 use crate::tasks::TaskManager;
 use crate::tools::ToolManager;
@@ -293,9 +292,68 @@ impl ReactAgent {
         self.checkpointer.as_ref()
     }
 
+    /// 获取当前对话历史消息（只读）
+    pub fn get_messages(&self) -> &[crate::llm::types::Message] {
+        self.context.messages()
+    }
+
+    /// 获取已注册的工具名称列表
+    pub fn tool_names(&self) -> Vec<&str> {
+        self.tool_manager.list_tools()
+    }
+
+    /// 获取已注册的 Skill 名称列表
+    pub fn skill_names(&self) -> Vec<&str> {
+        self.skill_manager
+            .list()
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    /// 获取已连接的 MCP 服务端名称列表
+    pub fn mcp_server_names(&self) -> Vec<&str> {
+        self.mcp_manager.server_names()
+    }
+
     /// 替换审批 Provider，支持在运行时切换审批渠道。
+    ///
+    /// 等同于 [`set_human_loop_provider`]，两者均会同步更新 `human_in_loop` 工具。
     pub fn set_approval_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
-        self.approval_provider = provider;
+        self.set_human_loop_provider(provider);
+    }
+
+    /// 设置人工介入 Provider（`set_approval_provider` 的别名）
+    ///
+    /// 同时更新 `approval_provider`（工具审批 guard）和 `human_in_loop` 内置工具（LLM
+    /// 主动触发），保证两者始终指向同一个 provider，避免"新旧 provider 割裂"的问题。
+    ///
+    /// 推荐使用 [`HumanLoopManager`] 作为 provider，支持事件驱动模式：
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::human_loop::{HumanLoopManager, HumanLoopEvent, ApprovalDecision};
+    /// use echo_agent::prelude::*;
+    /// use std::sync::Arc;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> echo_agent::error::Result<()> {
+    /// let manager = Arc::new(HumanLoopManager::new());
+    ///
+    /// let config = AgentConfig::standard("qwen3-max", "assistant", "你是一个助手")
+    ///     .enable_human_in_loop(true);
+    /// let mut agent = ReactAgent::new(config);
+    /// // 调用后，HumanInLoop 工具与 approval_provider 均指向 manager
+    /// agent.set_human_loop_provider(manager);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_human_loop_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
+        self.approval_provider = provider.clone();
+        // 若 human_in_loop 工具已注册，用新 provider 重新注册，保持同步
+        if self.tool_manager.get_tool("human_in_loop").is_some() {
+            self.tool_manager
+                .register(Box::new(HumanInLoop::new(provider)));
+        }
     }
 }
 
@@ -363,6 +421,15 @@ impl Agent for ReactAgent {
             .into_iter()
             .filter(|n| *n != TOOL_FINAL_ANSWER)
             .map(|n| n.to_string())
+            .collect()
+    }
+
+    /// 获取工具定义列表（包含名称、描述、参数 Schema）
+    fn tool_definitions(&self) -> Vec<crate::llm::types::ToolDefinition> {
+        self.tool_manager
+            .get_tool_definitions()
+            .into_iter()
+            .filter(|d| d.function.name != TOOL_FINAL_ANSWER)
             .collect()
     }
 

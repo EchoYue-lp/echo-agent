@@ -1,36 +1,16 @@
-//! LLM 配置
+//! LLM 配置加载
 //!
-//! 支持两种配置方式：
-//! 1. **依赖注入**（推荐）：直接创建 `LlmConfig` 并注入到 Agent
-//! 2. **环境变量**：从 `AGENT_MODEL_*` 环境变量加载
-//!
-//! ## 依赖注入示例
-//!
-//! ```rust
-//! use echo_agent::llm::LlmConfig;
-//! use echo_agent::prelude::*;
-//!
-//! let llm_config = LlmConfig::new(
-//!     "https://api.openai.com/v1/chat/completions",
-//!     "sk-...",
-//!     "qwen3-max",
-//! );
-//!
-//! let agent = ReactAgent::new(
-//!     AgentConfig::standard("qwen3-max", "assistant", "你是一个助手")
-//! ).with_llm_config(llm_config);
-//! ```
-//!
-//! ## 环境变量格式
-//!
+//! 从环境变量读取模型配置，格式：
 //! ```text
-//! AGENT_MODEL_<ID>_MODEL=qwen3-max
+//! AGENT_MODEL_<ID>_MODEL=gpt-4o
 //! AGENT_MODEL_<ID>_BASEURL=https://api.openai.com/v1/chat/completions
 //! AGENT_MODEL_<ID>_APIKEY=sk-...
 //! ```
+//! `<ID>` 为自定义标识（如 `GPT4O`、`QWEN`），不区分大小写。
 
 use crate::error::{ConfigError, ReactError, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -122,7 +102,6 @@ pub struct Config {
 static MODEL_CONFIG: OnceLock<Config> = OnceLock::new();
 
 impl Config {
-    /// 从环境变量加载配置
     pub fn from_env() -> Result<Self> {
         dotenv::dotenv().ok();
 
@@ -179,7 +158,6 @@ impl Config {
         Ok(Self { models })
     }
 
-    /// 获取模型配置（使用全局缓存）
     pub fn get_model(model: &str) -> Result<ModelConfig> {
         let config =
             MODEL_CONFIG.get_or_init(|| Config::from_env().expect("Failed to load config"));

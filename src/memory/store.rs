@@ -446,3 +446,169 @@ fn expand_tilde(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
+
+// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn test_in_memory_store_put_and_get() {
+        let store = InMemoryStore::new();
+        let ns = &["user", "memories"];
+
+        store
+            .put(ns, "key1", json!({"data": "value1"}))
+            .await
+            .unwrap();
+        store
+            .put(ns, "key2", json!({"data": "value2"}))
+            .await
+            .unwrap();
+
+        let item1 = store.get(ns, "key1").await.unwrap();
+        assert!(item1.is_some());
+        assert_eq!(item1.unwrap().value["data"], "value1");
+
+        let item2 = store.get(ns, "key2").await.unwrap();
+        assert!(item2.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_store_get_nonexistent() {
+        let store = InMemoryStore::new();
+        let ns = &["user", "memories"];
+
+        let item = store.get(ns, "nonexistent").await.unwrap();
+        assert!(item.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_store_delete() {
+        let store = InMemoryStore::new();
+        let ns = &["user", "memories"];
+
+        store
+            .put(ns, "key1", json!({"data": "value1"}))
+            .await
+            .unwrap();
+
+        let deleted = store.delete(ns, "key1").await.unwrap();
+        assert!(deleted);
+
+        let item = store.get(ns, "key1").await.unwrap();
+        assert!(item.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_store_delete_nonexistent() {
+        let store = InMemoryStore::new();
+        let ns = &["user", "memories"];
+
+        let deleted = store.delete(ns, "nonexistent").await.unwrap();
+        assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_store_search() {
+        let store = InMemoryStore::new();
+        let ns = &["user", "memories"];
+
+        store
+            .put(ns, "k1", json!({"content": "Rust 编程语言"}))
+            .await
+            .unwrap();
+        store
+            .put(ns, "k2", json!({"content": "Python 机器学习"}))
+            .await
+            .unwrap();
+        store
+            .put(ns, "k3", json!({"content": "JavaScript 前端开发"}))
+            .await
+            .unwrap();
+
+        let results = store.search(ns, "Rust", 5).await.unwrap();
+        assert!(!results.is_empty());
+        assert!(results[0].score.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_store_list_namespaces() {
+        let store = InMemoryStore::new();
+
+        store
+            .put(&["user1", "memories"], "k1", json!({}))
+            .await
+            .unwrap();
+        store
+            .put(&["user2", "memories"], "k2", json!({}))
+            .await
+            .unwrap();
+        store
+            .put(&["user1", "settings"], "k3", json!({}))
+            .await
+            .unwrap();
+
+        let namespaces = store.list_namespaces(None).await.unwrap();
+        assert_eq!(namespaces.len(), 3);
+
+        let user1_ns = store.list_namespaces(Some(&["user1"])).await.unwrap();
+        assert_eq!(user1_ns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_store_upsert() {
+        let store = InMemoryStore::new();
+        let ns = &["user", "memories"];
+
+        store.put(ns, "key1", json!({"count": 1})).await.unwrap();
+        store.put(ns, "key1", json!({"count": 2})).await.unwrap(); // 更新
+
+        let item = store.get(ns, "key1").await.unwrap().unwrap();
+        assert_eq!(item.value["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_store_namespace_isolation() {
+        let store = InMemoryStore::new();
+
+        store
+            .put(&["ns1"], "key", json!({"value": "ns1"}))
+            .await
+            .unwrap();
+        store
+            .put(&["ns2"], "key", json!({"value": "ns2"}))
+            .await
+            .unwrap();
+
+        let item1 = store.get(&["ns1"], "key").await.unwrap().unwrap();
+        let item2 = store.get(&["ns2"], "key").await.unwrap().unwrap();
+
+        assert_eq!(item1.value["value"], "ns1");
+        assert_eq!(item2.value["value"], "ns2");
+    }
+
+    #[test]
+    fn test_store_item_new() {
+        let item = StoreItem::new(
+            vec!["user".to_string(), "memories".to_string()],
+            "key1".to_string(),
+            json!({"data": "value"}),
+        );
+
+        assert_eq!(item.namespace, vec!["user", "memories"]);
+        assert_eq!(item.key, "key1");
+        assert_eq!(item.value["data"], "value");
+        assert!(item.score.is_none());
+        assert!(item.created_at > 0);
+        assert_eq!(item.created_at, item.updated_at);
+    }
+
+    #[test]
+    fn test_store_supports_semantic_search_default() {
+        let store = InMemoryStore::new();
+        assert!(!store.supports_semantic_search());
+    }
+}

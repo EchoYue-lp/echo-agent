@@ -148,7 +148,7 @@ async fn demo_config_level() -> echo_agent::error::Result<()> {
     println!("\n══════════════════════════════════════════════════════");
     println!("  演示 4：AgentBuilder 全局设置 response_format");
 
-    let schema = ResponseFormat::json_schema(
+    let _schema = ResponseFormat::json_schema(
         "translation_result",
         json!({
             "type": "object",

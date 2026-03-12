@@ -52,7 +52,7 @@ impl McpServerConfig {
     ///
     /// # 示例
     /// ```
-    /// // 连接文件系统 MCP 服务端
+    /// use echo_agent::mcp::McpServerConfig;
     /// McpServerConfig::stdio("filesystem", "npx", vec![
     ///     "-y", "@modelcontextprotocol/server-filesystem", "/tmp"
     /// ]);
@@ -93,6 +93,7 @@ impl McpServerConfig {
     ///
     /// # 示例
     /// ```
+    /// use echo_agent::mcp::McpServerConfig;
     /// McpServerConfig::http("my-api", "http://localhost:3000/mcp");
     /// ```
     pub fn http(name: impl Into<String>, base_url: impl Into<String>) -> Self {
@@ -110,6 +111,7 @@ impl McpServerConfig {
     /// # 示例
     /// ```
     /// use std::collections::HashMap;
+    /// use echo_agent::mcp::McpServerConfig;
     /// let mut headers = HashMap::new();
     /// headers.insert("Authorization".to_string(), "Bearer token".to_string());
     /// McpServerConfig::http_with_headers("secure-api", "https://api.example.com/mcp", headers);
@@ -132,6 +134,7 @@ impl McpServerConfig {
     ///
     /// # 示例
     /// ```
+    /// use echo_agent::mcp::McpServerConfig;
     /// McpServerConfig::sse("legacy-api", "http://localhost:8080");
     /// ```
     pub fn sse(name: impl Into<String>, base_url: impl Into<String>) -> Self {

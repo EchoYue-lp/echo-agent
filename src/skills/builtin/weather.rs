@@ -8,6 +8,10 @@ use crate::tools::others::weather::WeatherTool;
 ///
 /// # 使用方式
 /// ```rust
+/// use echo_agent::prelude::{WeatherSkill, AgentConfig, ReactAgent};
+///
+/// let config = AgentConfig::new("qwen3-max", "weather", "You are a weather assistant");
+/// let mut agent = ReactAgent::new(config);
 /// agent.add_skill(Box::new(WeatherSkill));
 /// ```
 pub struct WeatherSkill;

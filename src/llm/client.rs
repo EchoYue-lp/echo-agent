@@ -6,7 +6,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info};
 
 pub async fn post(
     client: Arc<Client>,
@@ -61,6 +61,10 @@ pub async fn stream_post(
     header_map: HeaderMap,
     url: String,
 ) -> Result<impl Stream<Item = Result<ChatCompletionChunk>>> {
+    info!(
+        "🌊 Stream completion: model={}, url={}",
+        request_body.model, url
+    );
     debug!(
         "Stream completion request_body: {}",
         serde_json::to_string(&request_body)

@@ -33,6 +33,21 @@ pub(crate) enum StreamMode {
 }
 
 impl ReactAgent {
+    /// 统一的 RwLock 中毒处理：获取 human_in_loop 的读锁
+    ///
+    /// 当锁中毒时，统一返回 `AgentError::InitializationFailed` 错误。
+    /// 这确保了并发安全问题的一致处理。
+    fn get_approval_manager(
+        &self,
+    ) -> Result<std::sync::RwLockReadGuard<'_, crate::human_loop::HumanApprovalManager>> {
+        self.human_in_loop.read().map_err(|e| {
+            tracing::error!("Human approval system lock poisoned: {}", e);
+            ReactError::Agent(AgentError::InitializationFailed(
+                "Human approval system unavailable due to internal error".to_string(),
+            ))
+        })
+    }
+
     /// 重置消息历史，仅保留 system prompt，确保每次执行互不干扰
     pub(crate) fn reset_messages(&mut self) {
         self.context.clear();
@@ -58,23 +73,9 @@ impl ReactAgent {
         debug!(agent = %agent, tool = %tool_name, params = %input, "工具参数详情");
 
         // 获取人工审批状态
-        // 保守策略：读取失败时默认需要审批（安全优先）
+        // 保守策略：读取失败时返回错误（安全优先）
         let needs_approval = {
-            let approval_manager = match self.human_in_loop.read() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    tracing::error!(
-                        "Human in loop lock poisoned, defaulting to require approval: {}",
-                        e
-                    );
-                    return Err(crate::error::ReactError::Agent(
-                        crate::error::AgentError::InitializationFailed(
-                            "Human approval system unavailable".to_string(),
-                        ),
-                    )
-                    .into());
-                }
-            };
+            let approval_manager = self.get_approval_manager()?;
             approval_manager.needs_approval(tool_name)
         };
 
@@ -174,7 +175,7 @@ impl ReactAgent {
             cb.on_think_start(&agent, &messages).await;
         }
 
-        let tools = self.tool_manager.to_openai_tools();
+        let tools = self.tool_manager.get_openai_tools();
         let max_retries = self.config.llm_max_retries;
         let retry_delay = self.config.llm_retry_delay_ms;
         // 在循环外克隆一次，避免重复克隆
@@ -301,26 +302,9 @@ impl ReactAgent {
         }
 
         // 检查是否有需要人工审批的工具
-        // 保守策略：读取失败时默认有审批工具（串行执行，更安全）
+        // 统一错误处理：RwLock 中毒时返回错误
         let has_approval_tools = {
-            let approval_manager = match self.human_in_loop.read() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    tracing::error!(
-                        "Human in loop lock poisoned at tool check, defaulting to serial: {}",
-                        e
-                    );
-                    // 回退为串行执行
-                    return Ok(Some(format!(
-                        "[系统错误：人工审批系统不可用，工具 {} 被跳过]",
-                        tool_calls
-                            .iter()
-                            .map(|(_, n, _)| n.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
-                }
-            };
+            let approval_manager = self.get_approval_manager()?;
             tool_calls
                 .iter()
                 .any(|(_, name, _)| approval_manager.needs_approval(name))
@@ -573,7 +557,7 @@ impl ReactAgent {
     ) -> Result<BoxStream<'static, Result<crate::llm::types::ChatCompletionChunk>>> {
         let agent = &self.config.agent_name;
         let tools_for_stream: Option<Vec<_>> = if self.config.enable_tool {
-            let tools = self.tool_manager.to_openai_tools();
+            let tools = self.tool_manager.get_openai_tools();
             if tools.is_empty() { None } else { Some(tools) }
         } else {
             None
@@ -584,6 +568,8 @@ impl ReactAgent {
         let client = self.client.clone();
         let model_name = self.config.model_name.clone();
         let response_format = self.config.response_format.clone();
+
+        info!(agent = %agent, model = %model_name, "📡 创建 LLM 流式请求");
 
         let mut stream_result: Result<_> = Err(ReactError::Agent(AgentError::NoResponse));
         for attempt in 0..=max_retries {
@@ -656,10 +642,10 @@ impl ReactAgent {
                         entry.0 = id.clone();
                     }
                     if let Some(f) = &dc.function {
-                        if let Some(name) = &f.name {
-                            if !name.is_empty() {
-                                entry.1 = name.clone();
-                            }
+                        if let Some(name) = &f.name
+                            && !name.is_empty()
+                        {
+                            entry.1 = name.clone();
                         }
                         if let Some(args) = &f.arguments {
                             entry.2.push_str(args);

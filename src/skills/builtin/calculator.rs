@@ -6,12 +6,16 @@ use crate::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool
 ///
 /// 为 Agent 提供精确的四则运算能力，包括：
 /// - `add`：两数相加
-/// - `subtract`：两数相减  
+/// - `subtract`：两数相减
 /// - `multiply`：两数相乘
 /// - `divide`：两数相除（含除零保护）
 ///
 /// # 使用方式
 /// ```rust
+/// use echo_agent::prelude::{CalculatorSkill, AgentConfig, ReactAgent};
+///
+/// let config = AgentConfig::new("qwen3-max", "calculator", "You are a calculator");
+/// let mut agent = ReactAgent::new(config);
 /// agent.add_skill(Box::new(CalculatorSkill));
 /// ```
 pub struct CalculatorSkill;
