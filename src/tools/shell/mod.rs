@@ -4,7 +4,6 @@
 
 use super::{Tool, ToolParameters, ToolResult};
 use crate::error::{Result, ToolError};
-use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -228,7 +227,8 @@ impl ShellTool {
     }
 }
 
-#[async_trait]
+
+#[async_trait::async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
         "shell"
@@ -257,11 +257,8 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::MissingParameter("command".to_string()))?;
 
-        // 安全检查
         match self.check_command_safety(command) {
-            CommandSafety::Safe => {
-                // 继续执行
-            }
+            CommandSafety::Safe => {}
             CommandSafety::RequiresApproval(reason) => {
                 return Ok(ToolResult::error(format!(
                     "⚠️  需要人工确认：{}\n命令：{}\n\n请使用 human_loop 模块进行确认后再执行。",

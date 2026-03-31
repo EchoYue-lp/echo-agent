@@ -1,0 +1,68 @@
+# echo-agent 模型配置文件
+#
+# 使用方式（按优先级查找）：
+#   1. 设置环境变量 ECHO_AGENT_CONFIG 指向此文件
+#   2. 复制到项目根目录并重命名为 echo-agent.yaml
+#   3. 复制到 ~/.echo-agent/config.yaml
+#
+# 语法说明：
+#   - ${VAR_NAME} 会被解析为对应的环境变量值
+#   - provider 字段可替代 base_url，自动填充已知厂商的默认地址
+#   - model 字段可选，默认使用配置的 key 名称
+#   - 支持的 provider: openai, anthropic, deepseek, dashscope/qwen/aliyun,
+#                       moonshot/kimi, zhipu/glm, ollama
+
+models:
+  # ── 阿里云百炼（DashScope）──────────────────────────────────────────────
+  qwen3-max:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+    api_key: ${DASHSCOPE_API_KEY}
+
+  # 使用 provider 快捷方式（等效于上面手动填 base_url）
+  # qwen3-plus:
+  #   provider: dashscope
+  #   api_key: ${DASHSCOPE_API_KEY}
+
+  # ── DeepSeek ────────────────────────────────────────────────────────────
+  deepseek-chat:
+    provider: deepseek
+    api_key: ${DEEPSEEK_API_KEY}
+
+  # deepseek-reasoner:
+  #   provider: deepseek
+  #   api_key: ${DEEPSEEK_API_KEY}
+
+  # ── OpenAI ──────────────────────────────────────────────────────────────
+  # gpt-4o:
+  #   provider: openai
+  #   api_key: ${OPENAI_API_KEY}
+
+  # gpt-4o-mini:
+  #   provider: openai
+  #   api_key: ${OPENAI_API_KEY}
+
+  # ── Anthropic ───────────────────────────────────────────────────────────
+  # claude-sonnet-4-6-20250514:
+  #   provider: anthropic
+  #   api_key: ${ANTHROPIC_API_KEY}
+
+  # ── Moonshot / Kimi ─────────────────────────────────────────────────────
+  # moonshot-v1-auto:
+  #   provider: moonshot
+  #   api_key: ${MOONSHOT_API_KEY}
+
+  # ── 智谱 GLM ────────────────────────────────────────────────────────────
+  # glm-4-plus:
+  #   provider: zhipu
+  #   api_key: ${ZHIPU_API_KEY}
+
+  # ── Ollama（本地）───────────────────────────────────────────────────────
+  # qwen3:
+  #   provider: ollama
+  #   api_key: ollama
+
+  # ── 自定义端点 ──────────────────────────────────────────────────────────
+  # my-custom-model:
+  #   base_url: https://my-proxy.example.com/v1/chat/completions
+  #   api_key: ${MY_API_KEY}
+  #   model: gpt-4o          # 实际发送给 API 的模型名（默认使用 key）

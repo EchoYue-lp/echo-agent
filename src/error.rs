@@ -130,6 +130,8 @@ pub enum ConfigError {
     UnMatchConfigError(String, String),
     /// 未找到该 model 的配置
     NotFindModelError(String),
+    /// 配置文件读取或解析失败
+    ConfigFileError(String),
 }
 
 // ── Display impls ────────────────────────────────────────────────────────────
@@ -247,6 +249,9 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::NotFindModelError(model) => {
                 write!(f, "未找到该模型配置: {}", model)
+            }
+            ConfigError::ConfigFileError(msg) => {
+                write!(f, "配置文件错误: {}", msg)
             }
         }
     }
