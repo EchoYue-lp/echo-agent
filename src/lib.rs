@@ -63,22 +63,30 @@
 //! | [`mcp`] | MCP 协议客户端 |
 //! | [`tasks`] | DAG 任务管理 |
 //! | [`error`] | 统一错误类型 |
+//! | [`handoff`] | Agent 间 Handoff（控制权转移 + 上下文传递） |
+//! | [`plan_execute`] | Plan-and-Execute 引擎（Planner + Executor 分离） |
+//! | [`a2a`] | A2A 协议（Agent Card 发布 / 跨框架协作） |
+//! | [`topology`] | Agent 拓扑可视化（运行时调用关系图） |
 //!
 
+pub mod a2a;
 pub mod agent;
 pub mod audit;
 pub mod compression;
 pub mod error;
 pub mod guard;
+pub mod handoff;
 pub mod human_loop;
 pub mod llm;
 pub mod mcp;
 pub mod memory;
+pub mod plan_execute;
 pub mod skills;
 pub mod tasks;
 pub mod telemetry;
 pub mod testing;
 pub mod tools;
+pub mod topology;
 
 pub use echo_agent_macros::tool;
 
@@ -142,4 +150,26 @@ pub mod prelude {
 
     // Telemetry
     pub use crate::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};
+
+    // Handoff
+    pub use crate::handoff::{
+        HandoffContext, HandoffManager, HandoffResult, HandoffTarget, HandoffTool,
+    };
+
+    // Plan-and-Execute
+    pub use crate::plan_execute::{
+        Executor, LlmPlanner, Plan, PlanExecuteAgent, PlanStep, Planner, ReactExecutor, StepResult,
+        StepStatus,
+    };
+
+    // A2A 协议
+    pub use crate::a2a::{
+        A2AClient, A2AServer, AgentCapabilities, AgentCard, AgentProvider, AgentSkill,
+    };
+
+    // 拓扑可视化
+    pub use crate::topology::{
+        NodeType, TopologyCallback, TopologyData, TopologyEdge, TopologyNode, TopologyStats,
+        TopologyTracker,
+    };
 }
