@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::{Mutex, broadcast, oneshot};
 
@@ -304,102 +304,108 @@ impl SseTransport {
     }
 }
 
-#[async_trait]
 impl McpTransport for SseTransport {
-    async fn send(&self, mut request: JsonRpcRequest) -> Result<JsonRpcResponse> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        request.id = Some(Value::Number(id.into()));
+    fn send(&self, request: JsonRpcRequest) -> BoxFuture<'_, Result<JsonRpcResponse>> {
+        Box::pin(async move {
+            let mut request = request;
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            request.id = Some(Value::Number(id.into()));
 
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
-        }
+            let (tx, rx) = oneshot::channel();
+            {
+                let mut pending = self.pending.lock().await;
+                pending.insert(id, tx);
+            }
 
-        // 获取动态端点 URI（从服务器的 endpoint event 获取）
-        let endpoint_uri = {
-            let guard = self.message_endpoint.lock().await;
-            guard.clone().ok_or_else(|| {
-                ReactError::Mcp(McpError::ProtocolError(
-                    "SSE: 尚未获取到 POST 端点 URI，请等待连接建立".to_string(),
-                ))
-            })?
-        };
+            // 获取动态端点 URI（从服务器的 endpoint event 获取）
+            let endpoint_uri = {
+                let guard = self.message_endpoint.lock().await;
+                guard.clone().ok_or_else(|| {
+                    ReactError::Mcp(McpError::ProtocolError(
+                        "SSE: 尚未获取到 POST 端点 URI，请等待连接建立".to_string(),
+                    ))
+                })?
+            };
 
-        // POST 请求到动态端点
-        let mut builder = self
-            .client
-            .post(&endpoint_uri)
-            .header("Content-Type", "application/json")
-            .json(&request);
-        for (k, v) in &self.headers {
-            builder = builder.header(k, v);
-        }
+            // POST 请求到动态端点
+            let mut builder = self
+                .client
+                .post(&endpoint_uri)
+                .header("Content-Type", "application/json")
+                .json(&request);
+            for (k, v) in &self.headers {
+                builder = builder.header(k, v);
+            }
 
-        let post_resp = builder.send().await.map_err(|e| {
-            ReactError::Mcp(McpError::ConnectionFailed(format!(
-                "POST {} 失败: {}",
-                endpoint_uri, e
-            )))
-        })?;
-
-        // 202 Accepted 是正常的，5xx 才算错误
-        if post_resp.status().is_server_error() {
-            let status = post_resp.status().as_u16();
-            let body = post_resp.text().await.unwrap_or_default();
-            self.pending.lock().await.remove(&id);
-            return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
-                "POST {} 返回服务器错误 {}: {}",
-                endpoint_uri, status, body
-            ))));
-        }
-
-        tracing::debug!("SSE: POST /message 成功（id={}），等待 SSE 响应…", id);
-
-        // 通过 SSE 等待服务端推送响应（30 秒超时）
-        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .await
-            .map_err(|_| {
-                ReactError::Mcp(McpError::ProtocolError(format!(
-                    "等待 SSE 响应超时（id={}）",
-                    id
+            let post_resp = builder.send().await.map_err(|e| {
+                ReactError::Mcp(McpError::ConnectionFailed(format!(
+                    "POST {} 失败: {}",
+                    endpoint_uri, e
                 )))
-            })?
-            .map_err(|_| {
-                ReactError::Mcp(McpError::ProtocolError("响应 channel 已关闭".to_string()))
             })?;
 
-        Ok(response)
-    }
-
-    async fn notify(&self, notification: JsonRpcNotification) -> Result<()> {
-        // 获取动态端点 URI
-        let endpoint_uri = {
-            let guard = self.message_endpoint.lock().await;
-            match guard.clone() {
-                Some(uri) => uri,
-                None => {
-                    tracing::warn!("SSE: 尚未获取到 POST 端点 URI，跳过通知发送");
-                    return Ok(());
-                }
+            // 202 Accepted 是正常的，5xx 才算错误
+            if post_resp.status().is_server_error() {
+                let status = post_resp.status().as_u16();
+                let body = post_resp.text().await.unwrap_or_default();
+                self.pending.lock().await.remove(&id);
+                return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+                    "POST {} 返回服务器错误 {}: {}",
+                    endpoint_uri, status, body
+                ))));
             }
-        };
 
-        let mut builder = self
-            .client
-            .post(&endpoint_uri)
-            .header("Content-Type", "application/json")
-            .json(&notification);
-        for (k, v) in &self.headers {
-            builder = builder.header(k, v);
-        }
-        // fire-and-forget，忽略错误
-        let _ = builder.send().await;
-        Ok(())
+            tracing::debug!("SSE: POST /message 成功（id={}），等待 SSE 响应…", id);
+
+            // 通过 SSE 等待服务端推送响应（30 秒超时）
+            let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+                .await
+                .map_err(|_| {
+                    ReactError::Mcp(McpError::ProtocolError(format!(
+                        "等待 SSE 响应超时（id={}）",
+                        id
+                    )))
+                })?
+                .map_err(|_| {
+                    ReactError::Mcp(McpError::ProtocolError("响应 channel 已关闭".to_string()))
+                })?;
+
+            Ok(response)
+        })
     }
 
-    async fn close(&self) {
-        // _sse_task 随 SseTransport drop 时自动取消
+    fn notify(&self, notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            // 获取动态端点 URI
+            let endpoint_uri = {
+                let guard = self.message_endpoint.lock().await;
+                match guard.clone() {
+                    Some(uri) => uri,
+                    None => {
+                        tracing::warn!("SSE: 尚未获取到 POST 端点 URI，跳过通知发送");
+                        return Ok(());
+                    }
+                }
+            };
+
+            let mut builder = self
+                .client
+                .post(&endpoint_uri)
+                .header("Content-Type", "application/json")
+                .json(&notification);
+            for (k, v) in &self.headers {
+                builder = builder.header(k, v);
+            }
+            // fire-and-forget，忽略错误
+            let _ = builder.send().await;
+            Ok(())
+        })
+    }
+
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            // _sse_task 随 SseTransport drop 时自动取消
+        })
     }
 
     fn notification_rx(&self) -> Option<Arc<dyn crate::mcp::types::JsonRpcNotificationReceiver>> {

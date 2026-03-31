@@ -30,7 +30,7 @@
 use crate::error::{LlmError, ReactError, Result};
 use crate::llm::types::{DeltaMessage, Message};
 use crate::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -152,40 +152,46 @@ impl MockLlmClient {
     }
 }
 
-#[async_trait]
 impl LlmClient for MockLlmClient {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        // 记录本次调用
-        self.calls.lock().unwrap().push(request.messages);
+    fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+        Box::pin(async move {
+            // 记录本次调用
+            self.calls.lock().unwrap().push(request.messages);
 
-        let text = self.pop_response()?;
+            let text = self.pop_response()?;
 
-        Ok(ChatResponse {
-            message: Message::assistant(text),
-            finish_reason: Some("stop".to_string()),
-            raw: crate::llm::types::ChatCompletionResponse::default(),
+            Ok(ChatResponse {
+                message: Message::assistant(text),
+                finish_reason: Some("stop".to_string()),
+                raw: crate::llm::types::ChatCompletionResponse::default(),
+            })
         })
     }
 
-    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'_, Result<ChatChunk>>> {
-        // 记录本次调用
-        self.calls.lock().unwrap().push(request.messages);
+    fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
+        Box::pin(async move {
+            // 记录本次调用
+            self.calls.lock().unwrap().push(request.messages);
 
-        let text = self.pop_response()?;
+            let text = self.pop_response()?;
 
-        // 创建一个简单的流，一次性返回整个内容
-        let stream = futures::stream::once(async move {
-            Ok(ChatChunk {
-                delta: DeltaMessage {
-                    role: Some("assistant".to_string()),
-                    content: Some(text),
-                    tool_calls: None,
-                },
-                finish_reason: Some("stop".to_string()),
-            })
-        });
+            // 创建一个简单的流，一次性返回整个内容
+            let stream = futures::stream::once(async move {
+                Ok(ChatChunk {
+                    delta: DeltaMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(text),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                })
+            });
 
-        Ok(Box::pin(stream))
+            Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
+        })
     }
 
     fn model_name(&self) -> &str {

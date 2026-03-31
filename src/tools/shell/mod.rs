@@ -4,6 +4,7 @@
 
 use super::{Tool, ToolParameters, ToolResult};
 use crate::error::{Result, ToolError};
+use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -227,8 +228,6 @@ impl ShellTool {
     }
 }
 
-
-#[async_trait::async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
         "shell"
@@ -251,56 +250,58 @@ impl Tool for ShellTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        let command = parameters
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("command".to_string()))?;
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let command = parameters
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("command".to_string()))?;
 
-        match self.check_command_safety(command) {
-            CommandSafety::Safe => {}
-            CommandSafety::RequiresApproval(reason) => {
-                return Ok(ToolResult::error(format!(
-                    "⚠️  需要人工确认：{}\n命令：{}\n\n请使用 human_loop 模块进行确认后再执行。",
-                    reason, command
-                )));
-            }
-            CommandSafety::Dangerous(reason) => {
-                return Ok(ToolResult::error(format!(
-                    "🚫 安全拒绝：{}\n命令：{}\n\n如需执行此类操作，请手动在终端中执行。",
-                    reason, command
-                )));
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        let (shell, shell_arg) = ("cmd", "/C");
-        #[cfg(not(target_os = "windows"))]
-        let (shell, shell_arg) = ("sh", "-c");
-
-        match Command::new(shell)
-            .arg(shell_arg)
-            .arg(command)
-            .output()
-            .await
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                if output.status.success() {
-                    Ok(ToolResult::success(stdout))
-                } else {
-                    Ok(ToolResult::error(format!(
-                        "命令执行失败，退出码: {:?}\n标准输出: {}\n错误输出: {}",
-                        output.status.code(),
-                        stdout,
-                        stderr
-                    )))
+            match self.check_command_safety(command) {
+                CommandSafety::Safe => {}
+                CommandSafety::RequiresApproval(reason) => {
+                    return Ok(ToolResult::error(format!(
+                        "⚠️  需要人工确认：{}\n命令：{}\n\n请使用 human_loop 模块进行确认后再执行。",
+                        reason, command
+                    )));
+                }
+                CommandSafety::Dangerous(reason) => {
+                    return Ok(ToolResult::error(format!(
+                        "🚫 安全拒绝：{}\n命令：{}\n\n如需执行此类操作，请手动在终端中执行。",
+                        reason, command
+                    )));
                 }
             }
-            Err(e) => Ok(ToolResult::error(format!("无法执行命令: {}", e))),
-        }
+
+            #[cfg(target_os = "windows")]
+            let (shell, shell_arg) = ("cmd", "/C");
+            #[cfg(not(target_os = "windows"))]
+            let (shell, shell_arg) = ("sh", "-c");
+
+            match Command::new(shell)
+                .arg(shell_arg)
+                .arg(command)
+                .output()
+                .await
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                    if output.status.success() {
+                        Ok(ToolResult::success(stdout))
+                    } else {
+                        Ok(ToolResult::error(format!(
+                            "命令执行失败，退出码: {:?}\n标准输出: {}\n错误输出: {}",
+                            output.status.code(),
+                            stdout,
+                            stderr
+                        )))
+                    }
+                }
+                Err(e) => Ok(ToolResult::error(format!("无法执行命令: {}", e))),
+            }
+        })
     }
 }
 

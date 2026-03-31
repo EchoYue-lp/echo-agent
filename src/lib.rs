@@ -77,6 +77,8 @@ pub mod tasks;
 pub mod testing;
 pub mod tools;
 
+pub use echo_agent_macros::tool;
+
 /// 常用类型导出
 ///
 /// 包含最常用的类型，通过 `use echo_agent::prelude::*` 导入。
@@ -100,6 +102,8 @@ pub mod prelude {
         HumanLoopHandler, HumanLoopManager, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
         InputResponder, WebSocketHumanLoopProvider, WebhookHumanLoopProvider, dispatch_event,
     };
+    pub use crate::llm::config::LlmProvider;
+    pub use crate::llm::providers::{AnthropicClient, OllamaClient};
     pub use crate::llm::types::{Message, ToolCall};
     pub use crate::llm::{
         ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient,
@@ -118,5 +122,5 @@ pub mod prelude {
     };
     pub use crate::testing::{FailingMockAgent, MockAgent, MockEmbedder, MockLlmClient, MockTool};
     pub use crate::tools::builtin::think::ThinkTool;
-    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
+    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, TypedTool};
 }

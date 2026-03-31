@@ -1,6 +1,6 @@
 use crate::compression::{CompressionInput, CompressionOutput, ContextCompressor};
 use crate::error::Result;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 /// 滑动窗口压缩：保留最近 `window_size` 条非 system 消息，裁掉更早的部分。
 ///
@@ -16,28 +16,29 @@ impl SlidingWindowCompressor {
     }
 }
 
-#[async_trait]
 impl ContextCompressor for SlidingWindowCompressor {
-    async fn compress(&self, input: CompressionInput) -> Result<CompressionOutput> {
-        let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) =
-            input.messages.into_iter().partition(|m| m.role == "system");
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+        Box::pin(async move {
+            let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) =
+                input.messages.into_iter().partition(|m| m.role == "system");
 
-        if conv_msgs.len() <= self.window_size {
+            if conv_msgs.len() <= self.window_size {
+                let mut messages = system_msgs;
+                messages.extend(conv_msgs);
+                return Ok(CompressionOutput {
+                    messages,
+                    evicted: vec![],
+                });
+            }
+
+            let split_at = conv_msgs.len() - self.window_size;
+            let evicted = conv_msgs[..split_at].to_vec();
+            let kept = conv_msgs[split_at..].to_vec();
+
             let mut messages = system_msgs;
-            messages.extend(conv_msgs);
-            return Ok(CompressionOutput {
-                messages,
-                evicted: vec![],
-            });
-        }
+            messages.extend(kept);
 
-        let split_at = conv_msgs.len() - self.window_size;
-        let evicted = conv_msgs[..split_at].to_vec();
-        let kept = conv_msgs[split_at..].to_vec();
-
-        let mut messages = system_msgs;
-        messages.extend(kept);
-
-        Ok(CompressionOutput { messages, evicted })
+            Ok(CompressionOutput { messages, evicted })
+        })
     }
 }

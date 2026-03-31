@@ -8,6 +8,8 @@
 //! | `recall`   | `store.search(namespace, query, limit)`      |
 //! | `forget`   | `store.delete(namespace, key)`              |
 
+use futures::future::BoxFuture;
+
 use crate::error::ToolError;
 use crate::memory::store::{Store, StoreItem};
 use crate::tools::{Tool, ToolParameters, ToolResult};
@@ -36,7 +38,6 @@ impl RememberTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for RememberTool {
     fn name(&self) -> &str {
         "remember"
@@ -71,52 +72,57 @@ impl Tool for RememberTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let content = parameters
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let content = parameters
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
 
-        let tags: Vec<String> = parameters
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|t| t.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+            let tags: Vec<String> = parameters
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
 
-        let importance = parameters
-            .get("importance")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.clamp(1, 10))
-            .unwrap_or(5);
+            let importance = parameters
+                .get("importance")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 10))
+                .unwrap_or(5);
 
-        let key = uuid::Uuid::new_v4().to_string();
-        let value = json!({
-            "content": content,
-            "importance": importance,
-            "tags": tags,
-        });
+            let key = uuid::Uuid::new_v4().to_string();
+            let value = json!({
+                "content": content,
+                "importance": importance,
+                "tags": tags,
+            });
 
-        debug!(key = %key, importance = importance, "💡 remember 工具写入 Store");
+            debug!(key = %key, importance = importance, "💡 remember 工具写入 Store");
 
-        let ns: Vec<&str> = self.ns_refs();
-        self.store.put(&ns, &key, value).await?;
+            let ns: Vec<&str> = self.ns_refs();
+            self.store.put(&ns, &key, value).await?;
 
-        let tag_str = if tags.is_empty() {
-            String::new()
-        } else {
-            format!("（标签：{}）", tags.join(", "))
-        };
+            let tag_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!("（标签：{}）", tags.join(", "))
+            };
 
-        Ok(ToolResult::success(format!(
-            "✅ 已记住（ID: {}，重要程度: {}）：\"{}\"{tag_str}",
-            key.get(..8).unwrap_or(&key),
-            importance,
-            content,
-        )))
+            Ok(ToolResult::success(format!(
+                "✅ 已记住（ID: {}，重要程度: {}）：\"{}\"{tag_str}",
+                key.get(..8).unwrap_or(&key),
+                importance,
+                content,
+            )))
+        })
     }
 }
 
@@ -140,7 +146,6 @@ impl RecallTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for RecallTool {
     fn name(&self) -> &str {
         "recall"
@@ -170,41 +175,46 @@ impl Tool for RecallTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let query = parameters
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let query = parameters
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
-        let limit = parameters
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.clamp(1, 20) as usize)
-            .unwrap_or(5);
+            let limit = parameters
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 20) as usize)
+                .unwrap_or(5);
 
-        debug!(query = %query, limit = limit, "🔍 recall 工具查询 Store");
+            debug!(query = %query, limit = limit, "🔍 recall 工具查询 Store");
 
-        let ns: Vec<&str> = self.ns_refs();
-        let items = self.store.search(&ns, query, limit).await?;
+            let ns: Vec<&str> = self.ns_refs();
+            let items = self.store.search(&ns, query, limit).await?;
 
-        if items.is_empty() {
-            return Ok(ToolResult::success(format!(
-                "未找到与「{}」相关的记忆。",
-                query
-            )));
-        }
+            if items.is_empty() {
+                return Ok(ToolResult::success(format!(
+                    "未找到与「{}」相关的记忆。",
+                    query
+                )));
+            }
 
-        let mut lines = vec![format!("找到 {} 条相关记忆：", items.len())];
-        for (i, item) in items.iter().enumerate() {
-            lines.push(format!(
-                "{}. [ID:{}] {}",
-                i + 1,
-                item.key.get(..8).unwrap_or(&item.key),
-                format_store_item(item),
-            ));
-        }
+            let mut lines = vec![format!("找到 {} 条相关记忆：", items.len())];
+            for (i, item) in items.iter().enumerate() {
+                lines.push(format!(
+                    "{}. [ID:{}] {}",
+                    i + 1,
+                    item.key.get(..8).unwrap_or(&item.key),
+                    format_store_item(item),
+                ));
+            }
 
-        Ok(ToolResult::success(lines.join("\n")))
+            Ok(ToolResult::success(lines.join("\n")))
+        })
     }
 }
 
@@ -228,7 +238,6 @@ impl ForgetTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for ForgetTool {
     fn name(&self) -> &str {
         "forget"
@@ -251,36 +260,41 @@ impl Tool for ForgetTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let id_prefix = parameters
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("id".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let id_prefix = parameters
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("id".to_string()))?;
 
-        let ns: Vec<&str> = self.ns_refs();
+            let ns: Vec<&str> = self.ns_refs();
 
-        // 先尝试精确匹配，如失败则按前缀搜索全 key
-        let full_key = self.store.get(&ns, id_prefix).await?.map(|item| item.key);
+            // 先尝试精确匹配，如失败则按前缀搜索全 key
+            let full_key = self.store.get(&ns, id_prefix).await?.map(|item| item.key);
 
-        // 尝试直接删除（用户可能传入了完整 key）
-        let deleted = if let Some(key) = &full_key {
-            self.store.delete(&ns, key).await?
-        } else {
-            // 假设用户传入的就是完整 key（UUID 格式）
-            self.store.delete(&ns, id_prefix).await?
-        };
+            // 尝试直接删除（用户可能传入了完整 key）
+            let deleted = if let Some(key) = &full_key {
+                self.store.delete(&ns, key).await?
+            } else {
+                // 假设用户传入的就是完整 key（UUID 格式）
+                self.store.delete(&ns, id_prefix).await?
+            };
 
-        if deleted {
-            Ok(ToolResult::success(format!(
-                "🗑️ 已删除记忆 ID: {}",
-                id_prefix
-            )))
-        } else {
-            Ok(ToolResult::success(format!(
-                "未找到 ID 为「{}」的记忆条目，无需删除。\n提示：请通过 recall 工具查找正确的 ID。",
-                id_prefix
-            )))
-        }
+            if deleted {
+                Ok(ToolResult::success(format!(
+                    "🗑️ 已删除记忆 ID: {}",
+                    id_prefix
+                )))
+            } else {
+                Ok(ToolResult::success(format!(
+                    "未找到 ID 为「{}」的记忆条目，无需删除。\n提示：请通过 recall 工具查找正确的 ID。",
+                    id_prefix
+                )))
+            }
+        })
     }
 }
 

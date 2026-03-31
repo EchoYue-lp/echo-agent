@@ -25,8 +25,8 @@
 use crate::agent::react_agent::StepType;
 use crate::error::{ReactError, Result};
 use crate::llm::types::Message;
-use async_trait::async_trait;
 pub use config::{AgentConfig, AgentRole};
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -133,7 +133,6 @@ pub enum AgentEvent {
 /// # Ok(())
 /// # }
 /// ```
-#[async_trait]
 pub trait Agent: Send + Sync {
     /// 返回 Agent 名称
     fn name(&self) -> &str;
@@ -165,52 +164,60 @@ pub trait Agent: Send + Sync {
     }
 
     /// 关闭 Agent，释放资源
-    async fn close(&mut self) {}
+    fn close(&mut self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 
     /// 单轮执行（阻塞）。每次调用重置上下文。
     ///
     /// 适用于独立任务，不保留历史。连续对话请用 [`chat`](Agent::chat)。
-    async fn execute(&mut self, task: &str) -> Result<String>;
+    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>>;
 
     /// 单轮执行（流式）。每次调用重置上下文。
     ///
     /// 适用于独立任务，不保留历史。连续对话请用 [`chat_stream`](Agent::chat_stream)。
-    async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>>;
+    fn execute_stream<'a>(
+        &'a mut self,
+        task: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>>;
 
     /// 单轮执行（流式，支持取消）。
     ///
     /// 当 `cancel` 被触发时，流将提前终止并返回 `AgentEvent::Cancelled`。
-    async fn execute_stream_with_cancel(
-        &mut self,
-        task: &str,
+    fn execute_stream_with_cancel<'a>(
+        &'a mut self,
+        task: &'a str,
         cancel: CancellationToken,
-    ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let _ = cancel;
-        self.execute_stream(task).await
+        self.execute_stream(task)
     }
 
     /// 多轮对话（阻塞）。上下文跨轮保留。
     ///
     /// 用 [`reset`](Agent::reset) 开启新会话。
-    async fn chat(&mut self, message: &str) -> Result<String> {
-        self.execute(message).await
+    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+        self.execute(message)
     }
 
     /// 多轮对话（流式）。上下文跨轮保留。
     ///
     /// 用 [`reset`](Agent::reset) 开启新会话。
-    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
-        self.execute_stream(message).await
+    fn chat_stream<'a>(
+        &'a mut self,
+        message: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.execute_stream(message)
     }
 
     /// 多轮对话（流式，支持取消）。
-    async fn chat_stream_with_cancel(
-        &mut self,
-        message: &str,
+    fn chat_stream_with_cancel<'a>(
+        &'a mut self,
+        message: &'a str,
         cancel: CancellationToken,
-    ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         let _ = cancel;
-        self.chat_stream(message).await
+        self.chat_stream(message)
     }
 
     /// 清除对话历史，开启新会话。
@@ -225,21 +232,24 @@ pub trait Agent: Send + Sync {
 ///
 /// ```rust,no_run
 /// use echo_agent::prelude::*;
-/// use async_trait::async_trait;
+/// use futures::future::BoxFuture;
 /// use std::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// struct ToolCounter {
 ///     count: AtomicUsize,
 /// }
 ///
-/// #[async_trait]
 /// impl AgentCallback for ToolCounter {
-///     async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
-///         println!("调用工具: {}", tool);
+///     fn on_tool_start<'a>(&'a self, _agent: &'a str, tool: &'a str, _args: &'a serde_json::Value) -> BoxFuture<'a, ()> {
+///         Box::pin(async move {
+///             println!("调用工具: {}", tool);
+///         })
 ///     }
 ///
-///     async fn on_tool_end(&self, _agent: &str, tool: &str, result: &str) {
-///         println!("工具 {} 返回: {}", tool, result);
+///     fn on_tool_end<'a>(&'a self, _agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
+///         Box::pin(async move {
+///             println!("工具 {} 返回: {}", tool, result);
+///         })
 ///     }
 /// }
 ///
@@ -248,20 +258,52 @@ pub trait Agent: Send + Sync {
 /// // agent.add_callback(callback);
 /// # }
 /// ```
-#[async_trait]
 pub trait AgentCallback: Send + Sync {
     /// LLM 推理开始前触发
-    async fn on_think_start(&self, _agent: &str, _messages: &[Message]) {}
+    fn on_think_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        _messages: &'a [Message],
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
     /// LLM 推理结束后触发
-    async fn on_think_end(&self, _agent: &str, _steps: &[StepType]) {}
+    fn on_think_end<'a>(&'a self, _agent: &'a str, _steps: &'a [StepType]) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
     /// 工具执行开始前触发
-    async fn on_tool_start(&self, _agent: &str, _tool: &str, _args: &Value) {}
+    fn on_tool_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _args: &'a Value,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
     /// 工具执行成功后触发
-    async fn on_tool_end(&self, _agent: &str, _tool: &str, _result: &str) {}
+    fn on_tool_end<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _result: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
     /// 工具执行失败后触发
-    async fn on_tool_error(&self, _agent: &str, _tool: &str, _err: &ReactError) {}
+    fn on_tool_error<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _err: &'a ReactError,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
     /// 最终答案生成后触发
-    async fn on_final_answer(&self, _agent: &str, _answer: &str) {}
+    fn on_final_answer<'a>(&'a self, _agent: &'a str, _answer: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
     /// 每轮迭代开始前触发，`iteration` 从 0 计数
-    async fn on_iteration(&self, _agent: &str, _iteration: usize) {}
+    fn on_iteration<'a>(&'a self, _agent: &'a str, _iteration: usize) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
 }

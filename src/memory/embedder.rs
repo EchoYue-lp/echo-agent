@@ -3,17 +3,16 @@
 //! 将文本映射为稠密浮点向量，供 [`EmbeddingStore`](super::EmbeddingStore) 做语义检索。
 
 use crate::error::{MemoryError, Result};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 // ── Embedder trait ────────────────────────────────────────────────────────────
 
 /// 文本嵌入接口：将文本映射为稠密浮点向量
-#[async_trait]
 pub trait Embedder: Send + Sync {
     /// 计算文本的嵌入向量
-    async fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>>;
 }
 
 // ── HTTP 嵌入客户端（OpenAI 兼容接口）────────────────────────────────────────
@@ -155,38 +154,39 @@ impl HttpEmbedder {
     }
 }
 
-#[async_trait]
 impl Embedder for HttpEmbedder {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        debug!(model = %self.model, chars = text.len(), "🔢 计算文本嵌入");
-        let req = EmbedRequest {
-            model: &self.model,
-            input: text,
-        };
-        let resp = self
-            .client
-            .post(&self.url)
-            .bearer_auth(&self.api_key)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| MemoryError::IoError(format!("嵌入请求失败: {e}")))?;
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>> {
+        Box::pin(async move {
+            debug!(model = %self.model, chars = text.len(), "🔢 计算文本嵌入");
+            let req = EmbedRequest {
+                model: &self.model,
+                input: text,
+            };
+            let resp = self
+                .client
+                .post(&self.url)
+                .bearer_auth(&self.api_key)
+                .json(&req)
+                .send()
+                .await
+                .map_err(|e| MemoryError::IoError(format!("嵌入请求失败: {e}")))?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(MemoryError::IoError(format!("嵌入 API 错误 {status}: {body}")).into());
-        }
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(MemoryError::IoError(format!("嵌入 API 错误 {status}: {body}")).into());
+            }
 
-        let body: EmbedResponse = resp
-            .json()
-            .await
-            .map_err(|e| MemoryError::SerializationError(format!("嵌入响应解析失败: {e}")))?;
+            let body: EmbedResponse = resp
+                .json()
+                .await
+                .map_err(|e| MemoryError::SerializationError(format!("嵌入响应解析失败: {e}")))?;
 
-        body.data
-            .into_iter()
-            .next()
-            .map(|d| d.embedding)
-            .ok_or_else(|| MemoryError::IoError("嵌入 API 返回空结果".to_string()).into())
+            body.data
+                .into_iter()
+                .next()
+                .map(|d| d.embedding)
+                .ok_or_else(|| MemoryError::IoError("嵌入 API 返回空结果".to_string()).into())
+        })
     }
 }

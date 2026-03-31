@@ -58,6 +58,7 @@
 
 mod client;
 pub mod config;
+pub mod providers;
 pub mod types;
 
 use crate::error::Result;
@@ -68,8 +69,8 @@ pub(crate) use crate::llm::types::{
 pub use crate::llm::types::{
     JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition,
 };
-use async_trait::async_trait;
 use futures::Stream;
+use futures::future::BoxFuture;
 use std::sync::Arc;
 
 // ── 统一的 LLM 客户端 Trait ────────────────────────────────────────────────────
@@ -98,25 +99,29 @@ use std::sync::Arc;
 /// # Ok(())
 /// # }
 /// ```
-#[async_trait]
 pub trait LlmClient: Send + Sync {
     /// 同步聊天请求（阻塞直到完整响应）
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse>;
+    fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>>;
 
     /// 流式聊天请求（返回 SSE chunk 流）
-    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'_, Result<ChatChunk>>>;
+    fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>>;
 
     /// 简单对话（无工具，返回文本）
-    async fn chat_simple(&self, messages: Vec<Message>) -> Result<String> {
-        let response = self
-            .chat(ChatRequest {
-                messages,
-                temperature: Some(0.7),
-                max_tokens: Some(2048),
-                ..Default::default()
-            })
-            .await?;
-        Ok(response.content().unwrap_or_default().to_string())
+    fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let response = self
+                .chat(ChatRequest {
+                    messages,
+                    temperature: Some(0.7),
+                    max_tokens: Some(2048),
+                    ..Default::default()
+                })
+                .await?;
+            Ok(response.content().unwrap_or_default().to_string())
+        })
     }
 
     /// 获取模型名称
@@ -365,70 +370,75 @@ impl OpenAiClient {
     }
 }
 
-#[async_trait]
 impl LlmClient for OpenAiClient {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let req = ChatCompletionRequest {
-            model: self.config.model.clone(),
-            messages: request.messages,
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: None,
-            tools: request.tools,
-            tool_choice: request.tool_choice,
-            response_format: request.response_format,
-        };
+    fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+        Box::pin(async move {
+            let req = ChatCompletionRequest {
+                model: self.config.model.clone(),
+                messages: request.messages,
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                stream: None,
+                tools: request.tools,
+                tool_choice: request.tool_choice,
+                response_format: request.response_format,
+            };
 
-        let raw = post(
-            self.client.clone(),
-            &req,
-            self.header_map.clone(),
-            &self.config.baseurl,
-        )
-        .await?;
+            let raw = post(
+                self.client.clone(),
+                &req,
+                self.header_map.clone(),
+                &self.config.baseurl,
+            )
+            .await?;
 
-        let choice = raw
-            .choices
-            .first()
-            .ok_or(crate::error::LlmError::EmptyResponse)?;
+            let choice = raw
+                .choices
+                .first()
+                .ok_or(crate::error::LlmError::EmptyResponse)?;
 
-        Ok(ChatResponse {
-            message: choice.message.clone(),
-            finish_reason: choice.finish_reason.clone(),
-            raw,
+            Ok(ChatResponse {
+                message: choice.message.clone(),
+                finish_reason: choice.finish_reason.clone(),
+                raw,
+            })
         })
     }
 
-    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'_, Result<ChatChunk>>> {
-        let req = ChatCompletionRequest {
-            model: self.config.model.clone(),
-            messages: request.messages,
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            stream: Some(true),
-            tools: request.tools,
-            tool_choice: request.tool_choice,
-            response_format: request.response_format,
-        };
+    fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
+        Box::pin(async move {
+            let req = ChatCompletionRequest {
+                model: self.config.model.clone(),
+                messages: request.messages,
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                stream: Some(true),
+                tools: request.tools,
+                tool_choice: request.tool_choice,
+                response_format: request.response_format,
+            };
 
-        let stream = stream_post(
-            self.client.clone(),
-            req,
-            self.header_map.clone(),
-            self.config.baseurl.clone(),
-        )
-        .await?;
+            let stream = stream_post(
+                self.client.clone(),
+                req,
+                self.header_map.clone(),
+                self.config.baseurl.clone(),
+            )
+            .await?;
 
-        // 转换为 ChatChunk 流
-        Ok(Box::pin(futures::StreamExt::map(stream, |result| {
-            result.map(|chunk| {
-                let choice = chunk.choices.first();
-                ChatChunk {
-                    delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
-                    finish_reason: choice.and_then(|c| c.finish_reason.clone()),
-                }
-            })
-        })))
+            Ok(Box::pin(futures::StreamExt::map(stream, |result| {
+                result.map(|chunk| {
+                    let choice = chunk.choices.first();
+                    ChatChunk {
+                        delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
+                        finish_reason: choice.and_then(|c| c.finish_reason.clone()),
+                    }
+                })
+            })) as BoxStream<'_, Result<ChatChunk>>)
+        })
     }
 
     fn model_name(&self) -> &str {
@@ -451,78 +461,86 @@ impl DefaultLlmClient {
     }
 }
 
-#[async_trait]
 impl LlmClient for DefaultLlmClient {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let raw = chat(
-            self.client.clone(),
-            &self.model_name,
-            request.messages,
-            request.temperature,
-            request.max_tokens,
-            None,
-            request.tools,
-            request.tool_choice,
-            request.response_format,
-        )
-        .await?;
+    fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+        Box::pin(async move {
+            let raw = chat(
+                self.client.clone(),
+                &self.model_name,
+                request.messages,
+                request.temperature,
+                request.max_tokens,
+                None,
+                request.tools,
+                request.tool_choice,
+                request.response_format,
+            )
+            .await?;
 
-        let choice = raw
-            .choices
-            .first()
-            .ok_or(crate::error::LlmError::EmptyResponse)?;
+            let choice = raw
+                .choices
+                .first()
+                .ok_or(crate::error::LlmError::EmptyResponse)?;
 
-        Ok(ChatResponse {
-            message: choice.message.clone(),
-            finish_reason: choice.finish_reason.clone(),
-            raw,
+            Ok(ChatResponse {
+                message: choice.message.clone(),
+                finish_reason: choice.finish_reason.clone(),
+                raw,
+            })
         })
     }
 
-    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'_, Result<ChatChunk>>> {
-        let stream = stream_chat(
-            self.client.clone(),
-            &self.model_name,
-            request.messages,
-            request.temperature,
-            request.max_tokens,
-            request.tools,
-            request.tool_choice,
-            request.response_format,
-        )
-        .await?;
+    fn chat_stream(
+        &self,
+        request: ChatRequest,
+    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
+        Box::pin(async move {
+            let stream = stream_chat(
+                self.client.clone(),
+                &self.model_name,
+                request.messages,
+                request.temperature,
+                request.max_tokens,
+                request.tools,
+                request.tool_choice,
+                request.response_format,
+            )
+            .await?;
 
-        Ok(Box::pin(futures::StreamExt::map(stream, |result| {
-            result.map(|chunk| {
-                let choice = chunk.choices.first();
-                ChatChunk {
-                    delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
-                    finish_reason: choice.and_then(|c| c.finish_reason.clone()),
-                }
-            })
-        })))
+            Ok(Box::pin(futures::StreamExt::map(stream, |result| {
+                result.map(|chunk| {
+                    let choice = chunk.choices.first();
+                    ChatChunk {
+                        delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
+                        finish_reason: choice.and_then(|c| c.finish_reason.clone()),
+                    }
+                })
+            })) as BoxStream<'_, Result<ChatChunk>>)
+        })
     }
 
-    async fn chat_simple(&self, messages: Vec<Message>) -> Result<String> {
-        let response = chat(
-            self.client.clone(),
-            &self.model_name,
-            messages,
-            Some(0.3),
-            Some(2048),
-            Some(false),
-            None,
-            None,
-            None,
-        )
-        .await?;
+    fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let response = chat(
+                self.client.clone(),
+                &self.model_name,
+                messages,
+                Some(0.3),
+                Some(2048),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await?;
 
-        response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .ok_or_else(|| crate::error::ReactError::Other("LLM 返回空内容".to_string()))
+            response
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.message.content)
+                .ok_or_else(|| crate::error::ReactError::Other("LLM 返回空内容".to_string()))
+        })
     }
 
     fn model_name(&self) -> &str {

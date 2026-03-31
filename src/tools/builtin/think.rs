@@ -24,6 +24,8 @@
 /// > **注意**：在 `execute_stream` 流式路径中，注册本工具后模型推理内容将写入
 /// > 工具调用参数而非 `content` 字段，导致推理阶段无 `AgentEvent::Token` 事件。
 /// > 流式场景请依赖 CoT 系统提示（默认行为），无需注册本工具。
+use futures::future::BoxFuture;
+
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
@@ -31,7 +33,6 @@ use tracing::info;
 
 pub struct ThinkTool;
 
-#[async_trait::async_trait]
 impl Tool for ThinkTool {
     fn name(&self) -> &str {
         "think"
@@ -54,15 +55,20 @@ impl Tool for ThinkTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let reasoning = parameters
-            .get("reasoning")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let reasoning = parameters
+                .get("reasoning")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;
 
-        info!("Think: {}", reasoning);
+            info!("Think: {}", reasoning);
 
-        // 将推理内容回显到上下文，让下一轮 LLM 调用能看到完整推理记录
-        Ok(ToolResult::success(reasoning.to_string()))
+            // 将推理内容回显到上下文，让下一轮 LLM 调用能看到完整推理记录
+            Ok(ToolResult::success(reasoning.to_string()))
+        })
     }
 }

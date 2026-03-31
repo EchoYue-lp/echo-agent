@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::error::ToolError;
@@ -21,7 +22,6 @@ impl HumanInLoop {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for HumanInLoop {
     fn name(&self) -> &str {
         "human_in_loop"
@@ -52,41 +52,46 @@ impl Tool for HumanInLoop {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let approval_type = parameters
-            .get("approval_type")
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("approval_type".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let approval_type = parameters
+                .get("approval_type")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("approval_type".to_string()))?;
 
-        let reasoning = parameters
-            .get("reasoning")
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;
+            let reasoning = parameters
+                .get("reasoning")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;
 
-        let tool = parameters
-            .get("tool")
-            .and_then(|t| t.as_str())
-            .unwrap_or("无");
+            let tool = parameters
+                .get("tool")
+                .and_then(|t| t.as_str())
+                .unwrap_or("无");
 
-        let prompt = format!(
-            "需要你给予帮助。\n触发类型：{approval_type}\n触发原因：{reasoning}\n触发工具：{tool}\n\n请直接回复你的意见或确认："
-        );
+            let prompt = format!(
+                "需要你给予帮助。\n触发类型：{approval_type}\n触发原因：{reasoning}\n触发工具：{tool}\n\n请直接回复你的意见或确认："
+            );
 
-        let req = HumanLoopRequest::input(prompt);
-        let result_text = match self.provider.request(req).await? {
-            HumanLoopResponse::Text(text) => text,
-            HumanLoopResponse::Approved => "用户已确认".to_string(),
-            HumanLoopResponse::Rejected { reason } => {
-                format!(
-                    "用户已拒绝{}",
-                    reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
-                )
-            }
-            HumanLoopResponse::Timeout => "等待用户输入超时".to_string(),
-        };
+            let req = HumanLoopRequest::input(prompt);
+            let result_text = match self.provider.request(req).await? {
+                HumanLoopResponse::Text(text) => text,
+                HumanLoopResponse::Approved => "用户已确认".to_string(),
+                HumanLoopResponse::Rejected { reason } => {
+                    format!(
+                        "用户已拒绝{}",
+                        reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                    )
+                }
+                HumanLoopResponse::Timeout => "等待用户输入超时".to_string(),
+            };
 
-        Ok(ToolResult::success(format!(
-            "用户回复（触发原因：{reasoning}，工具：{tool}）：{result_text}"
-        )))
+            Ok(ToolResult::success(format!(
+                "用户回复（触发原因：{reasoning}，工具：{tool}）：{result_text}"
+            )))
+        })
     }
 }

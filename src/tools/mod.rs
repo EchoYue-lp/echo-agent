@@ -25,12 +25,11 @@
 //!
 //! ```rust
 //! use echo_agent::prelude::*;
-//! use async_trait::async_trait;
+//! use futures::future::BoxFuture;
 //!
 //! /// 简单的计算器工具
 //! struct Calculator;
 //!
-//! #[async_trait]
 //! impl Tool for Calculator {
 //!     fn name(&self) -> &str {
 //!         "calculator"
@@ -53,29 +52,31 @@
 //!         })
 //!     }
 //!
-//!     async fn execute(&self, params: ToolParameters) -> Result<ToolResult> {
-//!         let expr = params.get("expression")
-//!             .and_then(|v| v.as_str())
-//!             .unwrap_or("");
+//!     fn execute(&self, params: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+//!         Box::pin(async move {
+//!             let expr = params.get("expression")
+//!                 .and_then(|v| v.as_str())
+//!                 .unwrap_or("");
 //!
-//!         // 简化示例：只处理加法
-//!         let result = if expr.contains('+') {
-//!             let parts: Vec<&str> = expr.split('+').collect();
-//!             if parts.len() == 2 {
-//!                 let a: i64 = parts[0].trim().parse().unwrap_or(0);
-//!                 let b: i64 = parts[1].trim().parse().unwrap_or(0);
-//!                 Some(a + b)
+//!             // 简化示例：只处理加法
+//!             let result = if expr.contains('+') {
+//!                 let parts: Vec<&str> = expr.split('+').collect();
+//!                 if parts.len() == 2 {
+//!                     let a: i64 = parts[0].trim().parse().unwrap_or(0);
+//!                     let b: i64 = parts[1].trim().parse().unwrap_or(0);
+//!                     Some(a + b)
+//!                 } else {
+//!                     None
+//!                 }
 //!             } else {
 //!                 None
-//!             }
-//!         } else {
-//!             None
-//!         };
+//!             };
 //!
-//!         match result {
-//!             Some(n) => Ok(ToolResult::success(format!("计算结果: {}", n))),
-//!             None => Ok(ToolResult::error("不支持的表达式".into())),
-//!         }
+//!             match result {
+//!                 Some(n) => Ok(ToolResult::success(format!("计算结果: {}", n))),
+//!                 None => Ok(ToolResult::error("不支持的表达式".into())),
+//!             }
+//!         })
 //!     }
 //! }
 //!
@@ -92,6 +93,9 @@ pub mod shell;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;
+use futures::future::BoxFuture;
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -198,11 +202,10 @@ pub type ToolParameters = HashMap<String, serde_json::Value>;
 ///
 /// ```rust
 /// use echo_agent::prelude::*;
-/// use async_trait::async_trait;
+/// use futures::future::BoxFuture;
 ///
 /// struct EchoTool;
 ///
-/// #[async_trait]
 /// impl Tool for EchoTool {
 ///     fn name(&self) -> &str { "echo" }
 ///     fn description(&self) -> &str { "返回输入内容" }
@@ -214,15 +217,16 @@ pub type ToolParameters = HashMap<String, serde_json::Value>;
 ///             }
 ///         })
 ///     }
-///     async fn execute(&self, params: ToolParameters) -> Result<ToolResult> {
-///         let msg = params.get("message")
-///             .and_then(|v| v.as_str())
-///             .unwrap_or("");
-///         Ok(ToolResult::success(msg.to_string()))
+///     fn execute(&self, params: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+///         Box::pin(async move {
+///             let msg = params.get("message")
+///                 .and_then(|v| v.as_str())
+///                 .unwrap_or("");
+///             Ok(ToolResult::success(msg.to_string()))
+///         })
 ///     }
 /// }
 /// ```
-#[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     /// 工具名称（唯一标识）
     fn name(&self) -> &str;
@@ -234,11 +238,96 @@ pub trait Tool: Send + Sync {
     fn parameters(&self) -> serde_json::Value;
 
     /// 执行工具
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult>;
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>>;
 
     /// 验证参数（可选实现，默认不验证）
     fn validate_parameters(&self, _params: &ToolParameters) -> Result<()> {
         Ok(())
+    }
+}
+
+/// 强类型工具接口
+///
+/// 通过 `#[derive(Deserialize, JsonSchema)]` 定义参数结构体，
+/// 自动生成 JSON Schema 和参数反序列化，消除手写 `serde_json::json!({...})` 的样板代码。
+///
+/// 实现 `TypedTool` 即自动实现 `Tool`（通过 blanket impl），
+/// 原有手动 `impl Tool` 的代码不受影响。
+///
+/// # 示例
+///
+/// ```rust
+/// use echo_agent::prelude::*;
+/// use echo_agent::tools::TypedTool;
+/// use futures::future::BoxFuture;
+/// use schemars::JsonSchema;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize, JsonSchema)]
+/// struct AddParams {
+///     #[schemars(description = "第一个数")]
+///     a: f64,
+///     #[schemars(description = "第二个数")]
+///     b: f64,
+/// }
+///
+/// struct AddTool;
+///
+/// impl TypedTool for AddTool {
+///     type Params = AddParams;
+///     fn name(&self) -> &str { "add" }
+///     fn description(&self) -> &str { "两数相加" }
+///     fn execute_typed(&self, p: AddParams) -> BoxFuture<'_, Result<ToolResult>> {
+///         Box::pin(async move {
+///             Ok(ToolResult::success(format!("{} + {} = {}", p.a, p.b, p.a + p.b)))
+///         })
+///     }
+/// }
+/// ```
+pub trait TypedTool: Send + Sync {
+    /// 参数类型，必须实现 `DeserializeOwned + JsonSchema`
+    type Params: DeserializeOwned + JsonSchema;
+
+    /// 工具名称（唯一标识）
+    fn name(&self) -> &str;
+
+    /// 工具描述（LLM 用于决策是否调用）
+    fn description(&self) -> &str;
+
+    /// 以强类型参数执行工具
+    fn execute_typed(&self, params: Self::Params) -> BoxFuture<'_, Result<ToolResult>>;
+}
+
+impl<T: TypedTool> Tool for T {
+    fn name(&self) -> &str {
+        TypedTool::name(self)
+    }
+
+    fn description(&self) -> &str {
+        TypedTool::description(self)
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        let schema = schemars::schema_for!(T::Params);
+        serde_json::to_value(schema).unwrap_or_default()
+    }
+
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let value = serde_json::to_value(&parameters).map_err(|e| {
+                crate::error::ToolError::InvalidParameter {
+                    name: "(serialization)".to_string(),
+                    message: e.to_string(),
+                }
+            })?;
+            let params: T::Params = serde_json::from_value(value).map_err(|e| {
+                crate::error::ToolError::InvalidParameter {
+                    name: "(deserialization)".to_string(),
+                    message: e.to_string(),
+                }
+            })?;
+            TypedTool::execute_typed(self, params).await
+        })
     }
 }
 

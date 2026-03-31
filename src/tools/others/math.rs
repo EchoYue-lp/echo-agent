@@ -1,6 +1,7 @@
 use crate::error;
 use crate::error::ToolError;
 use crate::prelude::{Tool, ToolParameters, ToolResult};
+use futures::future::BoxFuture;
 use serde_json::Value;
 
 /// 从参数 map 中提取 a、b 两个 f64 操作数，统一处理缺失参数错误
@@ -18,7 +19,6 @@ fn extract_operands(parameters: &ToolParameters) -> error::Result<(f64, f64)> {
 
 pub struct AddTool;
 
-#[async_trait::async_trait]
 impl Tool for AddTool {
     fn name(&self) -> &str {
         "add"
@@ -39,15 +39,16 @@ impl Tool for AddTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let (a, b) = extract_operands(&parameters)?;
-        Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, error::Result<ToolResult>> {
+        Box::pin(async move {
+            let (a, b) = extract_operands(&parameters)?;
+            Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+        })
     }
 }
 
 pub struct SubtractTool;
 
-#[async_trait::async_trait]
 impl Tool for SubtractTool {
     fn name(&self) -> &str {
         "subtract"
@@ -68,15 +69,16 @@ impl Tool for SubtractTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let (a, b) = extract_operands(&parameters)?;
-        Ok(ToolResult::success(format!("{} - {} = {}", a, b, a - b)))
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, error::Result<ToolResult>> {
+        Box::pin(async move {
+            let (a, b) = extract_operands(&parameters)?;
+            Ok(ToolResult::success(format!("{} - {} = {}", a, b, a - b)))
+        })
     }
 }
 
 pub struct MultiplyTool;
 
-#[async_trait::async_trait]
 impl Tool for MultiplyTool {
     fn name(&self) -> &str {
         "multiply"
@@ -97,15 +99,16 @@ impl Tool for MultiplyTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let (a, b) = extract_operands(&parameters)?;
-        Ok(ToolResult::success(format!("{} * {} = {}", a, b, a * b)))
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, error::Result<ToolResult>> {
+        Box::pin(async move {
+            let (a, b) = extract_operands(&parameters)?;
+            Ok(ToolResult::success(format!("{} * {} = {}", a, b, a * b)))
+        })
     }
 }
 
 pub struct DivideTool;
 
-#[async_trait::async_trait]
 impl Tool for DivideTool {
     fn name(&self) -> &str {
         "divide"
@@ -126,15 +129,17 @@ impl Tool for DivideTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> error::Result<ToolResult> {
-        let (a, b) = extract_operands(&parameters)?;
-        if b == 0.0 {
-            return Err(ToolError::ExecutionFailed {
-                tool: "divide".to_string(),
-                message: "除数不能为 0".to_string(),
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, error::Result<ToolResult>> {
+        Box::pin(async move {
+            let (a, b) = extract_operands(&parameters)?;
+            if b == 0.0 {
+                return Err(ToolError::ExecutionFailed {
+                    tool: "divide".to_string(),
+                    message: "除数不能为 0".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
-        Ok(ToolResult::success(format!("{} / {} = {}", a, b, a / b)))
+            Ok(ToolResult::success(format!("{} / {} = {}", a, b, a / b)))
+        })
     }
 }

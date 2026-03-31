@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -140,60 +140,66 @@ impl StdioTransport {
     }
 }
 
-#[async_trait]
 impl McpTransport for StdioTransport {
-    async fn send(&self, mut request: JsonRpcRequest) -> Result<JsonRpcResponse> {
-        // 分配全局唯一 ID
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        request.id = Some(Value::Number(id.into()));
+    fn send(&self, request: JsonRpcRequest) -> BoxFuture<'_, Result<JsonRpcResponse>> {
+        Box::pin(async move {
+            let mut request = request;
+            // 分配全局唯一 ID
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            request.id = Some(Value::Number(id.into()));
 
-        // 注册等待 channel
-        let (tx, rx) = oneshot::channel::<JsonRpcResponse>();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
-        }
+            // 注册等待 channel
+            let (tx, rx) = oneshot::channel::<JsonRpcResponse>();
+            {
+                let mut pending = self.pending.lock().await;
+                pending.insert(id, tx);
+            }
 
-        // 序列化并写入 stdin（每条消息一行）
-        let line = serde_json::to_string(&request)
-            .map_err(|e| ReactError::Mcp(McpError::ProtocolError(e.to_string())))?
-            + "\n";
+            // 序列化并写入 stdin（每条消息一行）
+            let line = serde_json::to_string(&request)
+                .map_err(|e| ReactError::Mcp(McpError::ProtocolError(e.to_string())))?
+                + "\n";
 
-        {
+            {
+                let mut stdin = self.stdin.lock().await;
+                stdin.write_all(line.as_bytes()).await.map_err(|e| {
+                    ReactError::Mcp(McpError::ProtocolError(format!("写入 stdin 失败: {}", e)))
+                })?;
+                stdin.flush().await.map_err(|e| {
+                    ReactError::Mcp(McpError::ProtocolError(format!("flush stdin 失败: {}", e)))
+                })?;
+            }
+
+            // 等待后台 task 路由回响应
+            rx.await
+                .map_err(|_| ReactError::Mcp(McpError::TransportClosed))
+        })
+    }
+
+    fn notify(&self, notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let line = serde_json::to_string(&notification)
+                .map_err(|e| ReactError::Mcp(McpError::ProtocolError(e.to_string())))?
+                + "\n";
+
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                ReactError::Mcp(McpError::ProtocolError(format!("写入 stdin 失败: {}", e)))
+                ReactError::Mcp(McpError::ProtocolError(format!("写入通知失败: {}", e)))
             })?;
             stdin.flush().await.map_err(|e| {
-                ReactError::Mcp(McpError::ProtocolError(format!("flush stdin 失败: {}", e)))
+                ReactError::Mcp(McpError::ProtocolError(format!("flush 通知失败: {}", e)))
             })?;
-        }
-
-        // 等待后台 task 路由回响应
-        rx.await
-            .map_err(|_| ReactError::Mcp(McpError::TransportClosed))
+            Ok(())
+        })
     }
 
-    async fn notify(&self, notification: JsonRpcNotification) -> Result<()> {
-        let line = serde_json::to_string(&notification)
-            .map_err(|e| ReactError::Mcp(McpError::ProtocolError(e.to_string())))?
-            + "\n";
-
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await.map_err(|e| {
-            ReactError::Mcp(McpError::ProtocolError(format!("写入通知失败: {}", e)))
-        })?;
-        stdin.flush().await.map_err(|e| {
-            ReactError::Mcp(McpError::ProtocolError(format!("flush 通知失败: {}", e)))
-        })?;
-        Ok(())
-    }
-
-    async fn close(&self) {
-        let mut child = self._child.lock().await;
-        if let Err(e) = child.kill().await {
-            tracing::warn!("MCP stdio: 终止服务端进程失败: {}", e);
-        }
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let mut child = self._child.lock().await;
+            if let Err(e) = child.kill().await {
+                tracing::warn!("MCP stdio: 终止服务端进程失败: {}", e);
+            }
+        })
     }
 
     fn notification_rx(&self) -> Option<Arc<dyn crate::mcp::types::JsonRpcNotificationReceiver>> {

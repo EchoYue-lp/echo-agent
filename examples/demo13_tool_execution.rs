@@ -1,6 +1,5 @@
 //! demo13_tool_execution.rs —— ToolExecutionConfig 完整演示
 
-use async_trait::async_trait;
 use echo_agent::agent::Agent;
 use echo_agent::error::{Result, ToolError};
 use echo_agent::prelude::*;
@@ -47,7 +46,6 @@ struct SlowTool {
     delay_secs: u64,
 }
 
-#[async_trait]
 impl Tool for SlowTool {
     fn name(&self) -> &str {
         "slow_add"
@@ -58,11 +56,16 @@ impl Tool for SlowTool {
     fn parameters(&self) -> Value {
         serde_json::json!({ "type": "object", "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } }, "required": ["a", "b"] })
     }
-    async fn execute(&self, params: ToolParameters) -> echo_agent::error::Result<ToolResult> {
-        sleep(Duration::from_secs(self.delay_secs)).await;
-        let a = params.get("a").and_then(Value::as_i64).unwrap_or(0);
-        let b = params.get("b").and_then(Value::as_i64).unwrap_or(0);
-        Ok(ToolResult::success(format!("{}", a + b)))
+    fn execute(
+        &self,
+        params: ToolParameters,
+    ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        Box::pin(async move {
+            sleep(Duration::from_secs(self.delay_secs)).await;
+            let a = params.get("a").and_then(Value::as_i64).unwrap_or(0);
+            let b = params.get("b").and_then(Value::as_i64).unwrap_or(0);
+            Ok(ToolResult::success(format!("{}", a + b)))
+        })
     }
 }
 
@@ -80,7 +83,6 @@ impl FlakyTool {
     }
 }
 
-#[async_trait]
 impl Tool for FlakyTool {
     fn name(&self) -> &str {
         "flaky_multiply"
@@ -91,18 +93,23 @@ impl Tool for FlakyTool {
     fn parameters(&self) -> Value {
         serde_json::json!({ "type": "object", "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } }, "required": ["a", "b"] })
     }
-    async fn execute(&self, params: ToolParameters) -> echo_agent::error::Result<ToolResult> {
-        let attempt = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt <= self.fail_times {
-            return Err(ToolError::ExecutionFailed {
-                tool: "flaky_multiply".into(),
-                message: format!("模拟第 {attempt} 次故障"),
+    fn execute(
+        &self,
+        params: ToolParameters,
+    ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let attempt = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt <= self.fail_times {
+                return Err(ToolError::ExecutionFailed {
+                    tool: "flaky_multiply".into(),
+                    message: format!("模拟第 {attempt} 次故障"),
+                }
+                .into());
             }
-            .into());
-        }
-        let a = params.get("a").and_then(Value::as_i64).unwrap_or(0);
-        let b = params.get("b").and_then(Value::as_i64).unwrap_or(0);
-        Ok(ToolResult::success(format!("{}", a * b)))
+            let a = params.get("a").and_then(Value::as_i64).unwrap_or(0);
+            let b = params.get("b").and_then(Value::as_i64).unwrap_or(0);
+            Ok(ToolResult::success(format!("{}", a * b)))
+        })
     }
 }
 

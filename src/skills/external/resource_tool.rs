@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde_json::json;
 use tokio::sync::Mutex;
 
@@ -31,8 +31,6 @@ pub struct LoadSkillResourceTool {
 
 impl LoadSkillResourceTool {
     pub fn new(loader: Arc<Mutex<SkillLoader>>) -> Self {
-        // 在构造时快照资源目录，用于工具描述
-        // （后续如果 loader 动态更新，可以重新构造此工具）
         Self {
             loader,
             resource_catalog_desc: String::new(),
@@ -46,7 +44,6 @@ impl LoadSkillResourceTool {
     }
 }
 
-#[async_trait]
 impl Tool for LoadSkillResourceTool {
     fn name(&self) -> &str {
         "load_skill_resource"
@@ -83,29 +80,31 @@ impl Tool for LoadSkillResourceTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        let skill_name = parameters
-            .get("skill_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("skill_name".to_string()))?
-            .to_string();
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let skill_name = parameters
+                .get("skill_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("skill_name".to_string()))?
+                .to_string();
 
-        let resource_name = parameters
-            .get("resource_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("resource_name".to_string()))?
-            .to_string();
+            let resource_name = parameters
+                .get("resource_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("resource_name".to_string()))?
+                .to_string();
 
-        let mut loader = self.loader.lock().await;
-        match loader.load_resource(&skill_name, &resource_name).await {
-            Ok(content) => {
-                let header = format!("# 资源: {}/{}\n\n", skill_name, resource_name);
-                Ok(ToolResult::success(format!("{}{}", header, content)))
+            let mut loader = self.loader.lock().await;
+            match loader.load_resource(&skill_name, &resource_name).await {
+                Ok(content) => {
+                    let header = format!("# 资源: {}/{}\n\n", skill_name, resource_name);
+                    Ok(ToolResult::success(format!("{}{}", header, content)))
+                }
+                Err(e) => Ok(ToolResult::error(format!(
+                    "加载资源 '{}/{}' 失败: {}",
+                    skill_name, resource_name, e
+                ))),
             }
-            Err(e) => Ok(ToolResult::error(format!(
-                "加载资源 '{}/{}' 失败: {}",
-                skill_name, resource_name, e
-            ))),
-        }
+        })
     }
 }

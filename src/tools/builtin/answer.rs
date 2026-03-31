@@ -1,9 +1,10 @@
+use futures::future::BoxFuture;
+
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
 pub struct FinalAnswerTool;
 
-#[async_trait::async_trait]
 impl Tool for FinalAnswerTool {
     fn name(&self) -> &str {
         "final_answer"
@@ -26,15 +27,20 @@ impl Tool for FinalAnswerTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let answer = parameters
-            .get("answer")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameter {
-                name: "answer".to_string(),
-                message: "answer is required".to_string(),
-            })?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let answer = parameters
+                .get("answer")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::InvalidParameter {
+                    name: "answer".to_string(),
+                    message: "answer is required".to_string(),
+                })?;
 
-        Ok(ToolResult::success(answer.to_string()))
+            Ok(ToolResult::success(answer.to_string()))
+        })
     }
 }

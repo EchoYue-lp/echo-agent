@@ -28,7 +28,7 @@
 
 use crate::error::Result;
 use crate::tools::{Tool, ToolParameters, ToolResult};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -130,7 +130,6 @@ impl MockTool {
     }
 }
 
-#[async_trait]
 impl Tool for MockTool {
     fn name(&self) -> &str {
         &self.name
@@ -144,16 +143,18 @@ impl Tool for MockTool {
         self.parameters.clone()
     }
 
-    async fn execute(&self, params: ToolParameters) -> Result<ToolResult> {
-        // 记录本次调用参数
-        self.calls.lock().unwrap().push(params.clone());
+    fn execute(&self, params: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            // 记录本次调用参数
+            self.calls.lock().unwrap().push(params.clone());
 
-        let response = self.responses.lock().unwrap().pop_front();
-        match response {
-            Some(MockToolResponse::Success(text)) => Ok(ToolResult::success(text)),
-            Some(MockToolResponse::Failure(msg)) => Ok(ToolResult::error(msg)),
-            // 队列耗尽时返回默认成功
-            None => Ok(ToolResult::success("mock response".to_string())),
-        }
+            let response = self.responses.lock().unwrap().pop_front();
+            match response {
+                Some(MockToolResponse::Success(text)) => Ok(ToolResult::success(text)),
+                Some(MockToolResponse::Failure(msg)) => Ok(ToolResult::error(msg)),
+                // 队列耗尽时返回默认成功
+                None => Ok(ToolResult::success("mock response".to_string())),
+            }
+        })
     }
 }

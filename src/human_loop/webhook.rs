@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -84,55 +84,56 @@ struct WebhookResponse {
     reason: Option<String>,
 }
 
-#[async_trait]
 impl HumanLoopProvider for WebhookHumanLoopProvider {
-    async fn request(&self, req: HumanLoopRequest) -> Result<HumanLoopResponse> {
-        let kind_str = match req.kind {
-            HumanLoopKind::Approval => "approval",
-            HumanLoopKind::Input => "input",
-        };
+    fn request(&self, req: HumanLoopRequest) -> BoxFuture<'_, Result<HumanLoopResponse>> {
+        Box::pin(async move {
+            let kind_str = match req.kind {
+                HumanLoopKind::Approval => "approval",
+                HumanLoopKind::Input => "input",
+            };
 
-        let payload = WebhookPayload {
-            kind: kind_str,
-            prompt: &req.prompt,
-            tool_name: req.tool_name.as_deref(),
-            args: req.args.as_ref(),
-        };
+            let payload = WebhookPayload {
+                kind: kind_str,
+                prompt: &req.prompt,
+                tool_name: req.tool_name.as_deref(),
+                args: req.args.as_ref(),
+            };
 
-        let resp = self
-            .client
-            .post(&self.url)
-            .timeout(self.timeout)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| ReactError::Other(format!("Webhook 请求失败: {e}")))?;
+            let resp = self
+                .client
+                .post(&self.url)
+                .timeout(self.timeout)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| ReactError::Other(format!("Webhook 请求失败: {e}")))?;
 
-        if !resp.status().is_success() {
-            return Err(ReactError::Other(format!(
-                "Webhook 返回非成功状态码: {}",
-                resp.status()
-            )));
-        }
+            if !resp.status().is_success() {
+                return Err(ReactError::Other(format!(
+                    "Webhook 返回非成功状态码: {}",
+                    resp.status()
+                )));
+            }
 
-        let response: WebhookResponse = resp
-            .json()
-            .await
-            .map_err(|e| ReactError::Other(format!("Webhook 响应解析失败: {e}")))?;
+            let response: WebhookResponse = resp
+                .json()
+                .await
+                .map_err(|e| ReactError::Other(format!("Webhook 响应解析失败: {e}")))?;
 
-        match req.kind {
-            HumanLoopKind::Approval => match response.decision.as_deref() {
-                Some("approved") => Ok(HumanLoopResponse::Approved),
-                Some("rejected") => Ok(HumanLoopResponse::Rejected {
-                    reason: response.reason,
-                }),
-                Some("timeout") | None => Ok(HumanLoopResponse::Timeout),
-                Some(other) => Err(ReactError::Other(format!("未知的审批决策值: {other}"))),
-            },
-            HumanLoopKind::Input => match response.text {
-                Some(text) => Ok(HumanLoopResponse::Text(text)),
-                None => Ok(HumanLoopResponse::Timeout),
-            },
-        }
+            match req.kind {
+                HumanLoopKind::Approval => match response.decision.as_deref() {
+                    Some("approved") => Ok(HumanLoopResponse::Approved),
+                    Some("rejected") => Ok(HumanLoopResponse::Rejected {
+                        reason: response.reason,
+                    }),
+                    Some("timeout") | None => Ok(HumanLoopResponse::Timeout),
+                    Some(other) => Err(ReactError::Other(format!("未知的审批决策值: {other}"))),
+                },
+                HumanLoopKind::Input => match response.text {
+                    Some(text) => Ok(HumanLoopResponse::Text(text)),
+                    None => Ok(HumanLoopResponse::Timeout),
+                },
+            }
+        })
     }
 }

@@ -37,6 +37,18 @@ use std::sync::OnceLock;
 
 // ── 公共类型 ─────────────────────────────────────────────────────────────────
 
+/// LLM 供应商类型
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum LlmProvider {
+    /// OpenAI 兼容 API（默认，适用于 OpenAI、DashScope、DeepSeek 等）
+    #[default]
+    OpenAi,
+    /// Anthropic Messages API
+    Anthropic,
+    /// Ollama 本地推理
+    Ollama,
+}
+
 /// LLM 运行时配置（依赖注入模式）
 ///
 /// 可以直接创建并注入到 Agent，无需配置文件或环境变量。
@@ -56,11 +68,20 @@ use std::sync::OnceLock;
 /// // 方式二：使用 Provider 快捷方式
 /// let config = LlmConfig::openai("sk-...", "gpt-4o");
 ///
-/// // 方式三：从配置文件/环境变量加载
+/// // 方式三：Anthropic
+/// let config = LlmConfig::anthropic("sk-ant-...", "claude-sonnet-4-6");
+///
+/// // 方式四：Ollama 本地
+/// let config = LlmConfig::ollama("llama3");
+///
+/// // 方式五：从配置文件/环境变量加载
 /// // let config = LlmConfig::from_model("qwen3-max").unwrap();
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
+    /// LLM 供应商
+    #[serde(default)]
+    pub provider: LlmProvider,
     /// Chat Completions 接口完整 URL
     pub base_url: String,
     /// API 密钥
@@ -70,13 +91,14 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
-    /// 创建新的 LLM 配置
+    /// 创建新的 LLM 配置（默认 OpenAI 兼容 provider）
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
         Self {
+            provider: LlmProvider::OpenAi,
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
@@ -89,6 +111,7 @@ impl LlmConfig {
     pub fn from_model(model_name: &str) -> Result<Self> {
         let config = Config::get_model(model_name)?;
         Ok(Self {
+            provider: LlmProvider::OpenAi,
             base_url: config.baseurl,
             api_key: config.apikey,
             model: config.model,
@@ -103,6 +126,7 @@ impl LlmConfig {
     /// 创建 OpenAI 配置
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
+            provider: LlmProvider::OpenAi,
             base_url: "https://api.openai.com/v1/chat/completions".to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -112,8 +136,19 @@ impl LlmConfig {
     /// 创建 Anthropic 配置
     pub fn anthropic(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
+            provider: LlmProvider::Anthropic,
             base_url: "https://api.anthropic.com/v1/messages".to_string(),
             api_key: api_key.into(),
+            model: model.into(),
+        }
+    }
+
+    /// 创建 Ollama 本地推理配置
+    pub fn ollama(model: impl Into<String>) -> Self {
+        Self {
+            provider: LlmProvider::Ollama,
+            base_url: "http://localhost:11434/api/chat".to_string(),
+            api_key: String::new(),
             model: model.into(),
         }
     }
@@ -121,6 +156,7 @@ impl LlmConfig {
     /// 创建 DeepSeek 配置
     pub fn deepseek(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
+            provider: LlmProvider::OpenAi,
             base_url: "https://api.deepseek.com/chat/completions".to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -130,6 +166,7 @@ impl LlmConfig {
     /// 创建阿里云百炼（DashScope）配置
     pub fn dashscope(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
+            provider: LlmProvider::OpenAi,
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
                 .to_string(),
             api_key: api_key.into(),
@@ -144,6 +181,29 @@ impl LlmConfig {
         model: impl Into<String>,
     ) -> Self {
         Self::new(base_url, api_key, model)
+    }
+
+    /// 根据 provider 字段构建对应的 [`LlmClient`] 实例
+    pub fn build_client(&self) -> Result<Box<dyn crate::llm::LlmClient>> {
+        match self.provider {
+            LlmProvider::OpenAi => {
+                let client = crate::llm::OpenAiClient::new(self.clone())?;
+                Ok(Box::new(client))
+            }
+            LlmProvider::Anthropic => {
+                let client = crate::llm::providers::AnthropicClient::with_base_url(
+                    &self.base_url,
+                    &self.api_key,
+                    &self.model,
+                );
+                Ok(Box::new(client))
+            }
+            LlmProvider::Ollama => {
+                let client =
+                    crate::llm::providers::OllamaClient::with_base_url(&self.base_url, &self.model);
+                Ok(Box::new(client))
+            }
+        }
     }
 
     /// 转换为内部 ModelConfig 格式
@@ -378,9 +438,7 @@ impl Config {
                 .clone();
             let baseurl = config_map
                 .get("baseurl")
-                .ok_or_else(|| {
-                    ConfigError::MissingConfig(model_id.clone(), "baseurl".to_string())
-                })?
+                .ok_or_else(|| ConfigError::MissingConfig(model_id.clone(), "baseurl".to_string()))?
                 .clone();
             let apikey = config_map
                 .get("apikey")

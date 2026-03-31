@@ -34,7 +34,7 @@
 use crate::error::{MemoryError, Result};
 use crate::memory::embedder::Embedder;
 use crate::memory::store::{Store, StoreItem};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -176,111 +176,128 @@ impl EmbeddingStore {
     }
 }
 
-#[async_trait]
 impl Store for EmbeddingStore {
-    async fn put(&self, namespace: &[&str], key: &str, value: Value) -> Result<()> {
-        self.inner.put(namespace, key, value.clone()).await?;
+    fn put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        value: Value,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.inner.put(namespace, key, value.clone()).await?;
 
-        // 嵌入计算失败只打 warn，不影响写入
-        let text = Self::extract_text(&value);
-        match self.embedder.embed(&text).await {
-            Ok(vec) => {
-                let ns_key = namespace.join("/");
-                debug!(ns = %ns_key, key = %key, dims = vec.len(), "📌 向量索引已更新");
-                self.index.write().await.insert(&ns_key, key, vec);
-                if let Err(e) = self.flush_index().await {
-                    warn!("向量索引持久化失败（不影响数据写入）: {e}");
+            // 嵌入计算失败只打 warn，不影响写入
+            let text = Self::extract_text(&value);
+            match self.embedder.embed(&text).await {
+                Ok(vec) => {
+                    let ns_key = namespace.join("/");
+                    debug!(ns = %ns_key, key = %key, dims = vec.len(), "📌 向量索引已更新");
+                    self.index.write().await.insert(&ns_key, key, vec);
+                    if let Err(e) = self.flush_index().await {
+                        warn!("向量索引持久化失败（不影响数据写入）: {e}");
+                    }
+                }
+                Err(e) => {
+                    warn!(key = %key, error = %e, "⚠️ 嵌入计算失败，该条目不加入向量索引");
                 }
             }
-            Err(e) => {
-                warn!(key = %key, error = %e, "⚠️ 嵌入计算失败，该条目不加入向量索引");
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn get(&self, namespace: &[&str], key: &str) -> Result<Option<StoreItem>> {
-        self.inner.get(namespace, key).await
+    fn get<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
+        Box::pin(async move { self.inner.get(namespace, key).await })
     }
 
-    async fn search(
-        &self,
-        namespace: &[&str],
-        query: &str,
+    fn search<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        query: &'a str,
         limit: usize,
-    ) -> Result<Vec<StoreItem>> {
-        self.inner.search(namespace, query, limit).await
+    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move { self.inner.search(namespace, query, limit).await })
     }
 
-    async fn delete(&self, namespace: &[&str], key: &str) -> Result<bool> {
-        let found = self.inner.delete(namespace, key).await?;
-        if found {
-            let ns_key = namespace.join("/");
-            self.index.write().await.remove(&ns_key, key);
-            if let Err(e) = self.flush_index().await {
-                warn!("向量索引持久化失败: {e}");
+    fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
+        Box::pin(async move {
+            let found = self.inner.delete(namespace, key).await?;
+            if found {
+                let ns_key = namespace.join("/");
+                self.index.write().await.remove(&ns_key, key);
+                if let Err(e) = self.flush_index().await {
+                    warn!("向量索引持久化失败: {e}");
+                }
             }
-        }
-        Ok(found)
+            Ok(found)
+        })
     }
 
-    async fn list_namespaces(&self, prefix: Option<&[&str]>) -> Result<Vec<Vec<String>>> {
-        self.inner.list_namespaces(prefix).await
+    fn list_namespaces<'a>(
+        &'a self,
+        prefix: Option<&'a [&'a str]>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
+        Box::pin(async move { self.inner.list_namespaces(prefix).await })
     }
 
     fn supports_semantic_search(&self) -> bool {
         true
     }
 
-    async fn semantic_search(
-        &self,
-        namespace: &[&str],
-        query: &str,
+    fn semantic_search<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        query: &'a str,
         limit: usize,
-    ) -> Result<Vec<StoreItem>> {
-        let ns_key = namespace.join("/");
+    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
 
-        // 计算查询向量，失败时回退到关键词检索
-        let query_vec = match self.embedder.embed(query).await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "⚠️ 查询嵌入计算失败，回退到关键词检索");
-                return self.inner.search(namespace, query, limit).await;
-            }
-        };
-
-        // 余弦相似度打分
-        let scored: Vec<(f32, String)> = {
-            let index = self.index.read().await;
-            let Some(ns_vecs) = index.get_namespace(&ns_key) else {
-                debug!(ns = %ns_key, "向量索引为空，回退到关键词检索");
-                drop(index);
-                return self.inner.search(namespace, query, limit).await;
+            // 计算查询向量，失败时回退到关键词检索
+            let query_vec = match self.embedder.embed(query).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(error = %e, "⚠️ 查询嵌入计算失败，回退到关键词检索");
+                    return self.inner.search(namespace, query, limit).await;
+                }
             };
-            let mut scored: Vec<(f32, String)> = ns_vecs
-                .iter()
-                .map(|(key, vec)| (cosine_similarity(&query_vec, vec), key.clone()))
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(limit);
-            scored
-        };
 
-        if scored.is_empty() {
-            return Ok(vec![]);
-        }
+            // 余弦相似度打分
+            let scored: Vec<(f32, String)> = {
+                let index = self.index.read().await;
+                let Some(ns_vecs) = index.get_namespace(&ns_key) else {
+                    debug!(ns = %ns_key, "向量索引为空，回退到关键词检索");
+                    drop(index);
+                    return self.inner.search(namespace, query, limit).await;
+                };
+                let mut scored: Vec<(f32, String)> = ns_vecs
+                    .iter()
+                    .map(|(key, vec)| (cosine_similarity(&query_vec, vec), key.clone()))
+                    .collect();
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                scored.truncate(limit);
+                scored
+            };
 
-        debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
-
-        // 按匹配 key 取出完整条目
-        let mut results = Vec::with_capacity(scored.len());
-        for (score, key) in scored {
-            if let Ok(Some(mut item)) = self.inner.get(namespace, &key).await {
-                item.score = Some(score);
-                results.push(item);
+            if scored.is_empty() {
+                return Ok(vec![]);
             }
-        }
-        Ok(results)
+
+            debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
+
+            // 按匹配 key 取出完整条目
+            let mut results = Vec::with_capacity(scored.len());
+            for (score, key) in scored {
+                if let Ok(Some(mut item)) = self.inner.get(namespace, &key).await {
+                    item.score = Some(score);
+                    results.push(item);
+                }
+            }
+            Ok(results)
+        })
     }
 }
 

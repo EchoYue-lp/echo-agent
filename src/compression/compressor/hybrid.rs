@@ -1,7 +1,7 @@
 use crate::compression::{CompressionInput, CompressionOutput, ContextCompressor};
 use crate::error::Result;
 use crate::llm::types::Message;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 /// 混合压缩：将多个 `ContextCompressor` 串联为有序管道
 ///
@@ -27,29 +27,30 @@ pub struct HybridCompressor {
     stages: Vec<Box<dyn ContextCompressor>>,
 }
 
-#[async_trait]
 impl ContextCompressor for HybridCompressor {
-    async fn compress(&self, input: CompressionInput) -> Result<CompressionOutput> {
-        let token_limit = input.token_limit;
-        let current_query = input.current_query.clone();
-        let mut messages = input.messages;
-        let mut all_evicted: Vec<Message> = Vec::new();
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+        Box::pin(async move {
+            let token_limit = input.token_limit;
+            let current_query = input.current_query.clone();
+            let mut messages = input.messages;
+            let mut all_evicted: Vec<Message> = Vec::new();
 
-        for stage in &self.stages {
-            let output = stage
-                .compress(CompressionInput {
-                    messages,
-                    token_limit,
-                    current_query: current_query.clone(),
-                })
-                .await?;
-            all_evicted.extend(output.evicted);
-            messages = output.messages;
-        }
+            for stage in &self.stages {
+                let output = stage
+                    .compress(CompressionInput {
+                        messages,
+                        token_limit,
+                        current_query: current_query.clone(),
+                    })
+                    .await?;
+                all_evicted.extend(output.evicted);
+                messages = output.messages;
+            }
 
-        Ok(CompressionOutput {
-            messages,
-            evicted: all_evicted,
+            Ok(CompressionOutput {
+                messages,
+                evicted: all_evicted,
+            })
         })
     }
 }

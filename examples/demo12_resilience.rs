@@ -1,6 +1,5 @@
 //! demo12_resilience.rs —— 韧性特性开关对比演示
 
-use async_trait::async_trait;
 use echo_agent::agent::{Agent, AgentCallback};
 use echo_agent::error::ReactError;
 use echo_agent::prelude::*;
@@ -44,7 +43,6 @@ async fn main() -> Result<()> {
 
 struct BrokenTool;
 
-#[async_trait]
 impl Tool for BrokenTool {
     fn name(&self) -> &str {
         "broken_tool"
@@ -55,11 +53,16 @@ impl Tool for BrokenTool {
     fn parameters(&self) -> Value {
         serde_json::json!({ "type": "object", "properties": { "input": { "type": "string" } }, "required": ["input"] })
     }
-    async fn execute(&self, _params: ToolParameters) -> echo_agent::error::Result<ToolResult> {
-        Ok(ToolResult {
-            success: false,
-            output: String::new(),
-            error: Some("BrokenTool: 服务不可用".to_string()),
+    fn execute(
+        &self,
+        _params: ToolParameters,
+    ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        Box::pin(async move {
+            Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("BrokenTool: 服务不可用".to_string()),
+            })
         })
     }
 }
@@ -78,7 +81,6 @@ impl FlakyTool {
     }
 }
 
-#[async_trait]
 impl Tool for FlakyTool {
     fn name(&self) -> &str {
         "weather_api"
@@ -89,28 +91,33 @@ impl Tool for FlakyTool {
     fn parameters(&self) -> Value {
         serde_json::json!({ "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] })
     }
-    async fn execute(&self, params: ToolParameters) -> echo_agent::error::Result<ToolResult> {
-        let city = params
-            .get("city")
-            .and_then(|v| v.as_str())
-            .unwrap_or("未知");
-        let call_idx = self.call_count.fetch_add(1, Ordering::Relaxed) + 1;
-        let remaining = self.fail_remaining.load(Ordering::Relaxed);
+    fn execute(
+        &self,
+        params: ToolParameters,
+    ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let city = params
+                .get("city")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知");
+            let call_idx = self.call_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let remaining = self.fail_remaining.load(Ordering::Relaxed);
 
-        if remaining > 0 {
-            self.fail_remaining.fetch_sub(1, Ordering::Relaxed);
-            Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("服务暂时不可用（第 {call_idx} 次尝试）")),
-            })
-        } else {
-            Ok(ToolResult {
-                success: true,
-                output: format!("{city}：晴，26°C"),
-                error: None,
-            })
-        }
+            if remaining > 0 {
+                self.fail_remaining.fetch_sub(1, Ordering::Relaxed);
+                Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("服务暂时不可用（第 {call_idx} 次尝试）")),
+                })
+            } else {
+                Ok(ToolResult {
+                    success: true,
+                    output: format!("{city}：晴，26°C"),
+                    error: None,
+                })
+            }
+        })
     }
 }
 
@@ -120,32 +127,64 @@ struct SimpleLog {
     label: &'static str,
 }
 
-#[async_trait]
 impl AgentCallback for SimpleLog {
-    async fn on_iteration(&self, _agent: &str, iteration: usize) {
-        println!("  [{}] 🔄 迭代 {}", self.label, iteration + 1);
+    fn on_iteration<'a>(
+        &'a self,
+        _agent: &'a str,
+        iteration: usize,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("  [{}] 🔄 迭代 {}", self.label, iteration + 1);
+        })
     }
-    async fn on_tool_start(&self, _agent: &str, tool: &str, args: &Value) {
-        println!(
-            "  [{}] 🔧 调用: {} args={}",
-            self.label,
-            tool,
-            compact(args)
-        );
+    fn on_tool_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        tool: &'a str,
+        args: &'a Value,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!(
+                "  [{}] 🔧 调用: {} args={}",
+                self.label,
+                tool,
+                compact(args)
+            );
+        })
     }
-    async fn on_tool_end(&self, _agent: &str, tool: &str, result: &str) {
-        println!(
-            "  [{}] ✅ 成功: {} result=\"{}\"",
-            self.label,
-            tool,
-            trunc(result, 60)
-        );
+    fn on_tool_end<'a>(
+        &'a self,
+        _agent: &'a str,
+        tool: &'a str,
+        result: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!(
+                "  [{}] ✅ 成功: {} result=\"{}\"",
+                self.label,
+                tool,
+                trunc(result, 60)
+            );
+        })
     }
-    async fn on_tool_error(&self, _agent: &str, tool: &str, err: &ReactError) {
-        println!("  [{}] ❌ 错误: {} err={}", self.label, tool, err);
+    fn on_tool_error<'a>(
+        &'a self,
+        _agent: &'a str,
+        tool: &'a str,
+        err: &'a ReactError,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("  [{}] ❌ 错误: {} err={}", self.label, tool, err);
+        })
     }
-    async fn on_final_answer(&self, _agent: &str, answer: &str) {
-        println!("  [{}] 🏁 最终答案: \"{}\"", self.label, trunc(answer, 80));
+    fn on_final_answer<'a>(
+        &'a self,
+        _agent: &'a str,
+        answer: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("  [{}] 🏁 最终答案: \"{}\"", self.label, trunc(answer, 80));
+        })
     }
 }
 

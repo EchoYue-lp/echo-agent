@@ -1143,47 +1143,51 @@ async fn stream_run(
 /// agent 内部逻辑无需任何改动。
 struct CliHumanLoopHandler;
 
-#[async_trait::async_trait]
 impl HumanLoopHandler for CliHumanLoopHandler {
-    async fn on_approval(
-        &self,
-        tool_name: &str,
-        args: &serde_json::Value,
-        _prompt: &str,
-    ) -> ApprovalDecision {
-        println!();
-        println!("  ┌── 需要您的确认 ──────────────────────────────────────────");
-        println!("  │  工具  : {}", tool_name);
-        if *args != serde_json::Value::Null {
-            let args_str = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
-            for line in args_str.lines().take(8) {
-                println!("  │  参数  : {}", truncate_chars(line, 80));
+    fn on_approval<'a>(
+        &'a self,
+        tool_name: &'a str,
+        args: &'a serde_json::Value,
+        _prompt: &'a str,
+    ) -> futures::future::BoxFuture<'a, ApprovalDecision> {
+        Box::pin(async move {
+            println!();
+            println!("  ┌── 需要您的确认 ──────────────────────────────────────────");
+            println!("  │  工具  : {}", tool_name);
+            if *args != serde_json::Value::Null {
+                let args_str =
+                    serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+                for line in args_str.lines().take(8) {
+                    println!("  │  参数  : {}", truncate_chars(line, 80));
+                }
             }
-        }
-        println!("  │");
-        println!("  │  y = 批准    其他输入 = 拒绝（可附带原因）");
-        println!("  └─────────────────────────────────────────────────────────");
+            println!("  │");
+            println!("  │  y = 批准    其他输入 = 拒绝（可附带原因）");
+            println!("  └─────────────────────────────────────────────────────────");
 
-        let input = read_human_loop_input().await;
-        let trimmed = input.trim();
-        if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
-            println!("  [✓ 已批准]");
-            ApprovalDecision::Approved
-        } else {
-            let reason = if trimmed.is_empty() {
-                None
+            let input = read_human_loop_input().await;
+            let trimmed = input.trim();
+            if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
+                println!("  [✓ 已批准]");
+                ApprovalDecision::Approved
             } else {
-                Some(trimmed.to_string())
-            };
-            println!("  [✗ 已拒绝]");
-            ApprovalDecision::Rejected { reason }
-        }
+                let reason = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+                println!("  [✗ 已拒绝]");
+                ApprovalDecision::Rejected { reason }
+            }
+        })
     }
 
-    async fn on_input(&self, prompt: &str) -> String {
-        println!();
-        println!("  {}", prompt);
-        read_human_loop_input().await.trim().to_string()
+    fn on_input<'a>(&'a self, prompt: &'a str) -> futures::future::BoxFuture<'a, String> {
+        Box::pin(async move {
+            println!();
+            println!("  {}", prompt);
+            read_human_loop_input().await.trim().to_string()
+        })
     }
 }
 

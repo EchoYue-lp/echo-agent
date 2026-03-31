@@ -29,7 +29,7 @@ use crate::tools::builtin::plan::PlanTool;
 use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
 };
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -376,7 +376,6 @@ pub enum StepType {
 
 // ── impl Agent for ReactAgent ────────────────────────────────────────────────
 
-#[async_trait]
 impl Agent for ReactAgent {
     fn name(&self) -> &str {
         &self.config.agent_name
@@ -391,24 +390,32 @@ impl Agent for ReactAgent {
     }
 
     /// 统一执行入口：`enable_task=true` 时自动路由到规划模式，否则直接执行
-    async fn execute(&mut self, task: &str) -> Result<String> {
-        if self.has_planning_tools() {
-            self.execute_with_planning(task).await
-        } else {
-            self.run_direct(task).await
-        }
+    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            if self.has_planning_tools() {
+                self.execute_with_planning(task).await
+            } else {
+                self.run_direct(task).await
+            }
+        })
     }
 
-    async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
-        self.run_stream(task, run::StreamMode::Execute).await
+    fn execute_stream<'a>(
+        &'a mut self,
+        task: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move { self.run_stream(task, run::StreamMode::Execute).await })
     }
 
-    async fn chat(&mut self, message: &str) -> Result<String> {
-        self.run_chat_direct(message).await
+    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move { self.run_chat_direct(message).await })
     }
 
-    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
-        self.run_stream(message, run::StreamMode::Chat).await
+    fn chat_stream<'a>(
+        &'a mut self,
+        message: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move { self.run_stream(message, run::StreamMode::Chat).await })
     }
 
     fn reset(&mut self) {
@@ -449,7 +456,9 @@ impl Agent for ReactAgent {
             .collect()
     }
 
-    async fn close(&mut self) {
-        self.mcp_manager.close_all().await;
+    fn close(&mut self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.mcp_manager.close_all().await;
+        })
     }
 }

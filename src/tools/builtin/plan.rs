@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
@@ -5,7 +7,6 @@ use tracing::{debug, info};
 
 pub struct PlanTool;
 
-#[async_trait::async_trait]
 impl Tool for PlanTool {
     fn name(&self) -> &str {
         "plan"
@@ -32,25 +33,30 @@ impl Tool for PlanTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let analysis = parameters
-            .get("analysis")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("analysis".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let analysis = parameters
+                .get("analysis")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("analysis".to_string()))?;
 
-        let strategy = parameters
-            .get("strategy")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("strategy".to_string()))?;
+            let strategy = parameters
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("strategy".to_string()))?;
 
-        let plan = format!(
-            "📋 计划已制定\n\n分析:\n{}\n\n策略:\n{}\n\n请使用 create_task 创建具体的子任务",
-            analysis, strategy
-        );
+            let plan = format!(
+                "📋 计划已制定\n\n分析:\n{}\n\n策略:\n{}\n\n请使用 create_task 创建具体的子任务",
+                analysis, strategy
+            );
 
-        debug!("Task plan parameters:{:?} ", parameters);
-        info!("Task plan:{}", plan);
+            debug!("Task plan parameters:{:?} ", parameters);
+            info!("Task plan:{}", plan);
 
-        Ok(ToolResult::success(plan))
+            Ok(ToolResult::success(plan))
+        })
     }
 }

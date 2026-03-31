@@ -1,7 +1,5 @@
 //! demo11_callbacks.rs —— 事件回调系统综合演示
 
-use async_trait::async_trait;
-
 use echo_agent::agent::{Agent, AgentCallback, AgentEvent};
 use echo_agent::error::ReactError;
 
@@ -59,45 +57,77 @@ impl LogCallback {
     }
 }
 
-#[async_trait]
 impl AgentCallback for LogCallback {
-    async fn on_iteration(&self, agent: &str, iteration: usize) {
-        println!(
-            "  [{}] 🔄 迭代 {} agent={}",
-            self.label,
-            iteration + 1,
-            agent
-        );
+    fn on_iteration<'a>(
+        &'a self,
+        agent: &'a str,
+        iteration: usize,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!(
+                "  [{}] 🔄 迭代 {} agent={}",
+                self.label,
+                iteration + 1,
+                agent
+            );
+        })
     }
 
-    async fn on_tool_start(&self, _agent: &str, tool: &str, args: &Value) {
-        println!(
-            "  [{}] 🔧 工具调用: {} args={}",
-            self.label,
-            tool,
-            compact_args(args)
-        );
+    fn on_tool_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        tool: &'a str,
+        args: &'a Value,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!(
+                "  [{}] 🔧 工具调用: {} args={}",
+                self.label,
+                tool,
+                compact_args(args)
+            );
+        })
     }
 
-    async fn on_tool_end(&self, _agent: &str, tool: &str, result: &str) {
-        println!(
-            "  [{}] ✅ 工具成功: {} result=\"{}\"",
-            self.label,
-            tool,
-            truncate(result, 60)
-        );
+    fn on_tool_end<'a>(
+        &'a self,
+        _agent: &'a str,
+        tool: &'a str,
+        result: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!(
+                "  [{}] ✅ 工具成功: {} result=\"{}\"",
+                self.label,
+                tool,
+                truncate(result, 60)
+            );
+        })
     }
 
-    async fn on_tool_error(&self, _agent: &str, tool: &str, err: &ReactError) {
-        println!("  [{}] ❌ 工具错误: {} err={}", self.label, tool, err);
+    fn on_tool_error<'a>(
+        &'a self,
+        _agent: &'a str,
+        tool: &'a str,
+        err: &'a ReactError,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("  [{}] ❌ 工具错误: {} err={}", self.label, tool, err);
+        })
     }
 
-    async fn on_final_answer(&self, _agent: &str, answer: &str) {
-        println!(
-            "  [{}] 🏁 最终答案: \"{}\"",
-            self.label,
-            truncate(answer, 80)
-        );
+    fn on_final_answer<'a>(
+        &'a self,
+        _agent: &'a str,
+        answer: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!(
+                "  [{}] 🏁 最终答案: \"{}\"",
+                self.label,
+                truncate(answer, 80)
+            );
+        })
     }
 }
 
@@ -163,18 +193,34 @@ impl MetricsCallback {
     }
 }
 
-#[async_trait]
 impl AgentCallback for MetricsCallback {
-    async fn on_iteration(&self, _agent: &str, iteration: usize) {
+    fn on_iteration<'a>(
+        &'a self,
+        _agent: &'a str,
+        iteration: usize,
+    ) -> futures::future::BoxFuture<'a, ()> {
         self.iterations.store(iteration + 1, Ordering::Relaxed);
+        Box::pin(async {})
     }
 
-    async fn on_tool_start(&self, _agent: &str, _tool: &str, _args: &Value) {
+    fn on_tool_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _args: &'a Value,
+    ) -> futures::future::BoxFuture<'a, ()> {
         self.tool_calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async {})
     }
 
-    async fn on_tool_error(&self, _agent: &str, _tool: &str, _err: &ReactError) {
+    fn on_tool_error<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _err: &'a ReactError,
+    ) -> futures::future::BoxFuture<'a, ()> {
         self.tool_errors.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async {})
     }
 }
 

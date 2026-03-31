@@ -1,8 +1,36 @@
 //! demo01: 工具调用能力演示（不包含规划 / human-in-loop / subagent）
+//!
+//! 同时展示两种工具定义方式：
+//! - `#[tool]` 宏（推荐）
+//! - 手动 `impl Tool`（原有方式，仍然可用）
 
 use echo_agent::error::Result;
 use echo_agent::prelude::*;
-use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+use echo_agent::tool;
+use echo_agent::tools::others::math::{MultiplyTool, SubtractTool};
+
+#[tool(name = "add", description = "两数相加")]
+async fn add(
+    /// 第一个数
+    a: f64,
+    /// 第二个数
+    b: f64,
+) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+}
+
+#[tool(name = "divide", description = "两数相除")]
+async fn divide(
+    /// 被除数
+    a: f64,
+    /// 除数（不能为 0）
+    b: f64,
+) -> Result<ToolResult> {
+    if b == 0.0 {
+        return Ok(ToolResult::error("除数不能为 0".to_string()));
+    }
+    Ok(ToolResult::success(format!("{} / {} = {}", a, b, a / b)))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,7 +47,6 @@ async fn main() -> Result<()> {
 完成后通过 final_answer 报告结果。
 "#;
 
-    // 使用 AgentBuilder 创建 Agent
     let mut agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("my_math_agent")
@@ -28,9 +55,10 @@ async fn main() -> Result<()> {
         .max_iterations(10)
         .build()?;
 
-    // 注册工具
+    // #[tool] 宏生成的工具
     agent.add_tool(Box::new(AddTool));
     agent.add_tool(Box::new(DivideTool));
+    // 原有手动 impl Tool 的工具
     agent.add_tool(Box::new(MultiplyTool));
     agent.add_tool(Box::new(SubtractTool));
 

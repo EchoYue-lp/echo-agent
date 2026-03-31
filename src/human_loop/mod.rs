@@ -57,7 +57,7 @@ pub use websocket::WebSocketHumanLoopProvider;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
@@ -251,11 +251,12 @@ impl HumanLoopManager {
     ///
     /// ```rust,no_run
     /// # use echo_agent::human_loop::{HumanLoopManager, HumanLoopHandler, ApprovalDecision};
+    /// # use futures::future::BoxFuture;
     /// # use std::sync::Arc;
     /// # struct MyHandler;
-    /// # #[async_trait::async_trait] impl HumanLoopHandler for MyHandler {
-    /// #     async fn on_approval(&self, _: &str, _: &serde_json::Value, _: &str) -> ApprovalDecision { todo!() }
-    /// #     async fn on_input(&self, _: &str) -> String { todo!() }
+    /// # impl HumanLoopHandler for MyHandler {
+    /// #     fn on_approval<'a>(&'a self, _: &'a str, _: &'a serde_json::Value, _: &'a str) -> BoxFuture<'a, ApprovalDecision> { todo!() }
+    /// #     fn on_input<'a>(&'a self, _: &'a str) -> BoxFuture<'a, String> { todo!() }
     /// # }
     /// # async fn example(manager: Arc<HumanLoopManager>) {
     /// let mgr = manager.clone();
@@ -278,60 +279,61 @@ impl Default for HumanLoopManager {
     }
 }
 
-#[async_trait]
 impl HumanLoopProvider for HumanLoopManager {
-    async fn request(&self, req: HumanLoopRequest) -> Result<HumanLoopResponse> {
-        match req.kind {
-            HumanLoopKind::Approval => {
-                let (tx, rx) = oneshot::channel();
-                let responder = ApprovalResponder::new(tx);
+    fn request(&self, req: HumanLoopRequest) -> BoxFuture<'_, Result<HumanLoopResponse>> {
+        Box::pin(async move {
+            match req.kind {
+                HumanLoopKind::Approval => {
+                    let (tx, rx) = oneshot::channel();
+                    let responder = ApprovalResponder::new(tx);
 
-                let event = HumanLoopEvent::ApprovalRequest {
-                    tool_name: req.tool_name.clone().unwrap_or_default(),
-                    args: req.args.clone().unwrap_or(Value::Null),
-                    prompt: req.prompt.clone(),
-                    responder,
-                };
+                    let event = HumanLoopEvent::ApprovalRequest {
+                        tool_name: req.tool_name.clone().unwrap_or_default(),
+                        args: req.args.clone().unwrap_or(Value::Null),
+                        prompt: req.prompt.clone(),
+                        responder,
+                    };
 
-                // 发送事件给上层应用
-                self.event_tx
-                    .send(event)
-                    .await
-                    .map_err(|_| ReactError::Other("HumanLoop channel closed".to_string()))?;
+                    // 发送事件给上层应用
+                    self.event_tx
+                        .send(event)
+                        .await
+                        .map_err(|_| ReactError::Other("HumanLoop channel closed".to_string()))?;
 
-                // 等待用户响应
-                let decision = rx
-                    .await
-                    .map_err(|_| ReactError::Other("Approval responder dropped".to_string()))?;
+                    // 等待用户响应
+                    let decision = rx
+                        .await
+                        .map_err(|_| ReactError::Other("Approval responder dropped".to_string()))?;
 
-                match decision {
-                    ApprovalDecision::Approved => Ok(HumanLoopResponse::Approved),
-                    ApprovalDecision::Rejected { reason } => {
-                        Ok(HumanLoopResponse::Rejected { reason })
+                    match decision {
+                        ApprovalDecision::Approved => Ok(HumanLoopResponse::Approved),
+                        ApprovalDecision::Rejected { reason } => {
+                            Ok(HumanLoopResponse::Rejected { reason })
+                        }
                     }
                 }
+                HumanLoopKind::Input => {
+                    let (tx, rx) = oneshot::channel();
+                    let responder = InputResponder::new(tx);
+
+                    let event = HumanLoopEvent::InputRequest {
+                        prompt: req.prompt.clone(),
+                        responder,
+                    };
+
+                    self.event_tx
+                        .send(event)
+                        .await
+                        .map_err(|_| ReactError::Other("HumanLoop channel closed".to_string()))?;
+
+                    let text = rx
+                        .await
+                        .map_err(|_| ReactError::Other("Input responder dropped".to_string()))?;
+
+                    Ok(HumanLoopResponse::Text(text))
+                }
             }
-            HumanLoopKind::Input => {
-                let (tx, rx) = oneshot::channel();
-                let responder = InputResponder::new(tx);
-
-                let event = HumanLoopEvent::InputRequest {
-                    prompt: req.prompt.clone(),
-                    responder,
-                };
-
-                self.event_tx
-                    .send(event)
-                    .await
-                    .map_err(|_| ReactError::Other("HumanLoop channel closed".to_string()))?;
-
-                let text = rx
-                    .await
-                    .map_err(|_| ReactError::Other("Input responder dropped".to_string()))?;
-
-                Ok(HumanLoopResponse::Text(text))
-            }
-        }
+        })
     }
 }
 
@@ -353,32 +355,39 @@ impl HumanLoopProvider for HumanLoopManager {
 ///
 /// ```rust,no_run
 /// use echo_agent::human_loop::{HumanLoopHandler, ApprovalDecision};
-/// use async_trait::async_trait;
+/// use futures::future::BoxFuture;
 /// use serde_json::Value;
 ///
 /// /// WebSocket 实现（伪代码）
 /// struct WsHumanLoopHandler { /* ws sender */ }
 ///
-/// #[async_trait]
 /// impl HumanLoopHandler for WsHumanLoopHandler {
-///     async fn on_approval(&self, tool_name: &str, _args: &Value, prompt: &str) -> ApprovalDecision {
-///         // 向 WebSocket 发送审批请求，等待客户端响应
-///         // let reply = self.ws.send_and_wait(prompt).await;
-///         ApprovalDecision::Approved
+///     fn on_approval<'a>(&'a self, tool_name: &'a str, _args: &'a Value, prompt: &'a str) -> BoxFuture<'a, ApprovalDecision> {
+///         Box::pin(async move {
+///             // 向 WebSocket 发送审批请求，等待客户端响应
+///             // let reply = self.ws.send_and_wait(prompt).await;
+///             ApprovalDecision::Approved
+///         })
 ///     }
-///     async fn on_input(&self, prompt: &str) -> String {
-///         // 向 WebSocket 发送输入请求，等待客户端响应
-///         String::new()
+///     fn on_input<'a>(&'a self, prompt: &'a str) -> BoxFuture<'a, String> {
+///         Box::pin(async move {
+///             // 向 WebSocket 发送输入请求，等待客户端响应
+///             String::new()
+///         })
 ///     }
 /// }
 /// ```
-#[async_trait]
 pub trait HumanLoopHandler: Send + Sync {
     /// 工具审批请求：展示工具信息，收集用户的批准 / 拒绝决策
-    async fn on_approval(&self, tool_name: &str, args: &Value, prompt: &str) -> ApprovalDecision;
+    fn on_approval<'a>(
+        &'a self,
+        tool_name: &'a str,
+        args: &'a Value,
+        prompt: &'a str,
+    ) -> BoxFuture<'a, ApprovalDecision>;
 
     /// 文本输入请求：展示提示信息，收集用户的自由文本输入
-    async fn on_input(&self, prompt: &str) -> String;
+    fn on_input<'a>(&'a self, prompt: &'a str) -> BoxFuture<'a, String>;
 }
 
 /// 将一个 [`HumanLoopEvent`] 分发给 `handler` 处理，并通过 responder 回传结果
@@ -388,11 +397,12 @@ pub trait HumanLoopHandler: Send + Sync {
 /// ```rust,no_run
 /// # use echo_agent::human_loop::{HumanLoopManager, dispatch_event};
 /// # use echo_agent::prelude::*;
+/// # use futures::future::BoxFuture;
 /// # use std::sync::Arc;
 /// # struct MyHandler;
-/// # #[async_trait::async_trait] impl echo_agent::human_loop::HumanLoopHandler for MyHandler {
-/// #     async fn on_approval(&self, _: &str, _: &serde_json::Value, _: &str) -> echo_agent::human_loop::ApprovalDecision { todo!() }
-/// #     async fn on_input(&self, _: &str) -> String { todo!() }
+/// # impl echo_agent::human_loop::HumanLoopHandler for MyHandler {
+/// #     fn on_approval<'a>(&'a self, _: &'a str, _: &'a serde_json::Value, _: &'a str) -> BoxFuture<'a, echo_agent::human_loop::ApprovalDecision> { todo!() }
+/// #     fn on_input<'a>(&'a self, _: &'a str) -> BoxFuture<'a, String> { todo!() }
 /// # }
 /// # async fn example(manager: Arc<HumanLoopManager>) {
 /// let handler = MyHandler;
@@ -490,10 +500,9 @@ pub enum HumanLoopResponse {
 /// - [`ConsoleHumanLoopProvider`]：命令行阻塞模式
 /// - [`WebhookHumanLoopProvider`]：HTTP 回调模式
 /// - [`WebSocketHumanLoopProvider`]：WebSocket 模式
-#[async_trait]
 pub trait HumanLoopProvider: Send + Sync {
     /// 发起人工介入请求
-    async fn request(&self, req: HumanLoopRequest) -> Result<HumanLoopResponse>;
+    fn request(&self, req: HumanLoopRequest) -> BoxFuture<'_, Result<HumanLoopResponse>>;
 }
 
 /// 默认 Provider：命令行阻塞模式（适用于非交互式程序）

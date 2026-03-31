@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+
 use crate::error::{ReactError, ToolError};
 use crate::tasks::{Task, TaskManager, TaskStatus};
 use crate::tools::{Tool, ToolParameters, ToolResult};
@@ -35,7 +37,6 @@ impl CreateTaskTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for CreateTaskTool {
     fn name(&self) -> &str {
         "create_task"
@@ -75,101 +76,106 @@ impl Tool for CreateTaskTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let task_id = parameters
-            .get("task_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("task_id".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let task_id = parameters
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("task_id".to_string()))?;
 
-        let description = parameters
-            .get("description")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("description".to_string()))?;
+            let description = parameters
+                .get("description")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("description".to_string()))?;
 
-        let reasoning = parameters
-            .get("reasoning")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;
+            let reasoning = parameters
+                .get("reasoning")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("reasoning".to_string()))?;
 
-        let dependencies = parameters
-            .get("dependencies")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+            let dependencies = parameters
+                .get("dependencies")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
 
-        let priority = (parameters
-            .get("priority")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(5.0)
-            .clamp(0.0, 10.0) as u8)
-            .min(10);
+            let priority = (parameters
+                .get("priority")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(5.0)
+                .clamp(0.0, 10.0) as u8)
+                .min(10);
 
-        let now = now_secs();
-        let task = Task {
-            id: task_id.to_string(),
-            description: description.to_string(),
-            status: TaskStatus::Pending,
-            dependencies,
-            priority,
-            result: None,
-            reasoning: Some(reasoning.to_string()),
-            parent_id: None,
-            created_at: now,
-            updated_at: now,
-        };
+            let now = now_secs();
+            let task = Task {
+                id: task_id.to_string(),
+                description: description.to_string(),
+                status: TaskStatus::Pending,
+                dependencies,
+                priority,
+                result: None,
+                reasoning: Some(reasoning.to_string()),
+                parent_id: None,
+                created_at: now,
+                updated_at: now,
+            };
 
-        let mut manager = write_lock(&self.task_manager)?;
+            let mut manager = write_lock(&self.task_manager)?;
 
-        // 先添加任务
-        manager.add_task(task.clone());
+            // 先添加任务
+            manager.add_task(task.clone());
 
-        // 再检测是否因添加此任务而产生循环依赖
-        let has_circular_deps = manager.has_circular_dependencies();
+            // 再检测是否因添加此任务而产生循环依赖
+            let has_circular_deps = manager.has_circular_dependencies();
 
-        if has_circular_deps {
-            // 检测循环依赖
-            let cycles = manager.detect_circular_dependencies();
-            let cycle_paths: Vec<String> = cycles
-                .iter()
-                .map(|cycle| format!("[{}]", cycle.join(" → ")))
-                .collect();
+            if has_circular_deps {
+                // 检测循环依赖
+                let cycles = manager.detect_circular_dependencies();
+                let cycle_paths: Vec<String> = cycles
+                    .iter()
+                    .map(|cycle| format!("[{}]", cycle.join(" → ")))
+                    .collect();
 
-            // 回滚：移除刚添加的有问题的任务
-            manager.delete_task(task_id);
+                // 回滚：移除刚添加的有问题的任务
+                manager.delete_task(task_id);
 
-            let error_msg = format!(
-                "❌ 任务 [{}] 创建失败：此任务与现有任务形成循环依赖！\n\n循环路径: {}\n\n请检查依赖关系并重新规划。",
-                task_id,
-                cycle_paths.join(" | ")
+                let error_msg = format!(
+                    "❌ 任务 [{}] 创建失败：此任务与现有任务形成循环依赖！\n\n循环路径: {}\n\n请检查依赖关系并重新规划。",
+                    task_id,
+                    cycle_paths.join(" | ")
+                );
+
+                return Ok(ToolResult::error(error_msg));
+            }
+
+            info!(
+                "Task [{}] created successfully, no circular dependencies.",
+                task_id
             );
 
-            return Ok(ToolResult::error(error_msg));
-        }
+            let deps_str = if task.dependencies.is_empty() {
+                "无".to_string()
+            } else {
+                task.dependencies.join(", ")
+            };
 
-        info!(
-            "Task [{}] created successfully, no circular dependencies.",
-            task_id
-        );
+            let create = format!(
+                "✅ 已创建任务 [{}]\n📝 描述: {}\n💭 推理: {}\n⭐ 优先级: {}\n🔗 依赖: {}",
+                task_id, description, reasoning, priority, deps_str
+            );
 
-        let deps_str = if task.dependencies.is_empty() {
-            "无".to_string()
-        } else {
-            task.dependencies.join(", ")
-        };
+            debug!("Task create parameters: {:?}", parameters);
+            info!("Task create: {}", create);
 
-        let create = format!(
-            "✅ 已创建任务 [{}]\n📝 描述: {}\n💭 推理: {}\n⭐ 优先级: {}\n🔗 依赖: {}",
-            task_id, description, reasoning, priority, deps_str
-        );
-
-        debug!("Task create parameters: {:?}", parameters);
-        info!("Task create: {}", create);
-
-        Ok(ToolResult::success(create))
+            Ok(ToolResult::success(create))
+        })
     }
 }
 
@@ -183,7 +189,6 @@ impl UpdateTaskTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for UpdateTaskTool {
     fn name(&self) -> &str {
         "update_task"
@@ -219,55 +224,60 @@ impl Tool for UpdateTaskTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let task_id = parameters
-            .get("task_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("task_id".to_string()))?;
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let task_id = parameters
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("task_id".to_string()))?;
 
-        let status_str = parameters
-            .get("status")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::MissingParameter("status".to_string()))?;
+            let status_str = parameters
+                .get("status")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("status".to_string()))?;
 
-        let result = parameters
-            .get("result")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+            let result = parameters
+                .get("result")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
-        let reason = parameters
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+            let reason = parameters
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
-        let new_status = match status_str {
-            "in_progress" => TaskStatus::InProgress,
-            "completed" => TaskStatus::Completed,
-            "cancelled" => TaskStatus::Cancelled,
-            "failed" => TaskStatus::Failed(reason.unwrap_or_default()),
-            _ => {
-                return Err(ToolError::InvalidParameter {
-                    name: "status".to_string(),
-                    message: format!("无效的状态: {}", status_str),
+            let new_status = match status_str {
+                "in_progress" => TaskStatus::InProgress,
+                "completed" => TaskStatus::Completed,
+                "cancelled" => TaskStatus::Cancelled,
+                "failed" => TaskStatus::Failed(reason.unwrap_or_default()),
+                _ => {
+                    return Err(ToolError::InvalidParameter {
+                        name: "status".to_string(),
+                        message: format!("无效的状态: {}", status_str),
+                    }
+                    .into());
                 }
-                .into());
+            };
+
+            let mut manager = write_lock(&self.task_manager)?;
+            manager.update_task(task_id, new_status.clone());
+
+            // 更新结果
+            if let Some(task) = manager.get_task_mut(task_id) {
+                task.result = result;
+                task.updated_at = now_secs();
             }
-        };
 
-        let mut manager = write_lock(&self.task_manager)?;
-        manager.update_task(task_id, new_status.clone());
+            let update = format!("✓ 任务 [{}] 状态已更新为: {:?}", task_id, new_status);
+            debug!("Task update parameters:{:?} ", parameters);
+            info!("Task update:{}", update);
 
-        // 更新结果
-        if let Some(task) = manager.get_task_mut(task_id) {
-            task.result = result;
-            task.updated_at = now_secs();
-        }
-
-        let update = format!("✓ 任务 [{}] 状态已更新为: {:?}", task_id, new_status);
-        debug!("Task update parameters:{:?} ", parameters);
-        info!("Task update:{}", update);
-
-        Ok(ToolResult::success(update))
+            Ok(ToolResult::success(update))
+        })
     }
 }
 
@@ -281,7 +291,6 @@ impl ListTasksTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for ListTasksTool {
     fn name(&self) -> &str {
         "list_tasks"
@@ -304,49 +313,54 @@ impl Tool for ListTasksTool {
         })
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let filter = parameters
-            .get("filter")
-            .and_then(|v| v.as_str())
-            .unwrap_or("all");
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let filter = parameters
+                .get("filter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("all");
 
-        let manager = read_lock(&self.task_manager)?;
+            let manager = read_lock(&self.task_manager)?;
 
-        let tasks = match filter {
-            "pending" => manager.get_pending_tasks(),
-            "in_progress" => manager.get_in_progress_tasks(),
-            "completed" => manager.get_completed_tasks(),
-            "ready" => manager.get_ready_tasks(),
-            _ => manager.get_all_tasks(),
-        };
+            let tasks = match filter {
+                "pending" => manager.get_pending_tasks(),
+                "in_progress" => manager.get_in_progress_tasks(),
+                "completed" => manager.get_completed_tasks(),
+                "ready" => manager.get_ready_tasks(),
+                _ => manager.get_all_tasks(),
+            };
 
-        let summary = manager.get_summary();
+            let summary = manager.get_summary();
 
-        let task_list = tasks
-            .iter()
-            .map(|t| {
-                format!(
-                    "taskid:[{}] ,task status:{:?}  ,task description: {} (任务优先级: {}, 任务依赖: {:?})",
-                    t.id, t.status, t.description, t.priority, t.dependencies
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+            let task_list = tasks
+                .iter()
+                .map(|t| {
+                    format!(
+                        "taskid:[{}] ,task status:{:?}  ,task description: {} (任务优先级: {}, 任务依赖: {:?})",
+                        t.id, t.status, t.description, t.priority, t.dependencies
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
 
-        let list = format!(
-            "{}\n\n任务列表:\n{}",
-            summary,
-            if task_list.is_empty() {
-                "无任务"
-            } else {
-                &task_list
-            }
-        );
+            let list = format!(
+                "{}\n\n任务列表:\n{}",
+                summary,
+                if task_list.is_empty() {
+                    "无任务"
+                } else {
+                    &task_list
+                }
+            );
 
-        debug!("Task list parameters:{:?} ", parameters);
-        info!("Task list:{}", list);
+            debug!("Task list parameters:{:?} ", parameters);
+            info!("Task list:{}", list);
 
-        Ok(ToolResult::success(list))
+            Ok(ToolResult::success(list))
+        })
     }
 }
 
@@ -360,7 +374,6 @@ impl VisualizeDependenciesTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for VisualizeDependenciesTool {
     fn name(&self) -> &str {
         "visualize_dependencies"
@@ -378,10 +391,15 @@ impl Tool for VisualizeDependenciesTool {
         })
     }
 
-    async fn execute(&self, _parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let manager = read_lock(&self.task_manager)?;
-        let mermaid = manager.visualize_dependencies();
-        Ok(ToolResult::success(mermaid))
+    fn execute(
+        &self,
+        _parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let manager = read_lock(&self.task_manager)?;
+            let mermaid = manager.visualize_dependencies();
+            Ok(ToolResult::success(mermaid))
+        })
     }
 }
 
@@ -395,7 +413,6 @@ impl GetExecutionOrderTool {
     }
 }
 
-#[async_trait::async_trait]
 impl Tool for GetExecutionOrderTool {
     fn name(&self) -> &str {
         "get_execution_order"
@@ -413,19 +430,24 @@ impl Tool for GetExecutionOrderTool {
         })
     }
 
-    async fn execute(&self, _parameters: ToolParameters) -> crate::error::Result<ToolResult> {
-        let manager = read_lock(&self.task_manager)?;
-        match manager.get_topological_order() {
-            Ok(order) => {
-                let output = order
-                    .iter()
-                    .enumerate()
-                    .map(|(i, id)| format!("{}. {}", i + 1, id))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(ToolResult::success(output))
+    fn execute(
+        &self,
+        _parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let manager = read_lock(&self.task_manager)?;
+            match manager.get_topological_order() {
+                Ok(order) => {
+                    let output = order
+                        .iter()
+                        .enumerate()
+                        .map(|(i, id)| format!("{}. {}", i + 1, id))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(ToolResult::success(output))
+                }
+                Err(e) => Ok(ToolResult::error(e)),
             }
-            Err(e) => Ok(ToolResult::error(e)),
-        }
+        })
     }
 }

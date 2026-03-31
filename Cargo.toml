@@ -1,16 +1,20 @@
+[workspace]
+members = [".", "echo_agent_macros"]
+
 [package]
 name = "echo_agent"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+echo_agent_macros = { path = "echo_agent_macros" }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde_json = "1.0.143"
 serde = { version = "1.0.228", features = ["derive"] }
-async-trait = "0.1.89"
+schemars = "0.8"
 dotenv = "0.15"
 futures = "0.3"
 tracing = "0.1.44"

@@ -28,7 +28,7 @@
 
 use crate::error::{MemoryError, Result};
 use crate::llm::types::Message;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,22 +56,25 @@ pub struct Checkpoint {
 /// 短期会话记忆的持久化接口
 ///
 /// 实现方可替换为任意存储后端（内存、文件、数据库等）。
-#[async_trait]
 pub trait Checkpointer: Send + Sync {
     /// 保存当前会话的消息历史，返回新快照 ID
-    async fn put(&self, session_id: &str, messages: Vec<Message>) -> Result<String>;
+    fn put<'a>(
+        &'a self,
+        session_id: &'a str,
+        messages: Vec<Message>,
+    ) -> BoxFuture<'a, Result<String>>;
 
     /// 获取指定会话的最新快照（若不存在返回 `None`）
-    async fn get(&self, session_id: &str) -> Result<Option<Checkpoint>>;
+    fn get<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<Checkpoint>>>;
 
     /// 获取指定会话的全部历史快照（时间倒序）
-    async fn list(&self, session_id: &str) -> Result<Vec<Checkpoint>>;
+    fn list<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<Checkpoint>>>;
 
     /// 删除指定会话的所有快照
-    async fn delete_session(&self, session_id: &str) -> Result<()>;
+    fn delete_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>>;
 
     /// 列出所有已存在的 session_id
-    async fn list_sessions(&self) -> Result<Vec<String>>;
+    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>>;
 }
 
 // ── InMemoryCheckpointer ──────────────────────────────────────────────────────
@@ -95,54 +98,65 @@ impl InMemoryCheckpointer {
     }
 }
 
-#[async_trait]
 impl Checkpointer for InMemoryCheckpointer {
-    async fn put(&self, session_id: &str, messages: Vec<Message>) -> Result<String> {
-        let checkpoint_id = new_checkpoint_id();
-        let checkpoint = Checkpoint {
-            session_id: session_id.to_string(),
-            checkpoint_id: checkpoint_id.clone(),
-            messages,
-            created_at: now_secs(),
-        };
-        self.data
-            .write()
-            .await
-            .entry(session_id.to_string())
-            .or_default()
-            .push(checkpoint);
-        Ok(checkpoint_id)
+    fn put<'a>(
+        &'a self,
+        session_id: &'a str,
+        messages: Vec<Message>,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let checkpoint_id = new_checkpoint_id();
+            let checkpoint = Checkpoint {
+                session_id: session_id.to_string(),
+                checkpoint_id: checkpoint_id.clone(),
+                messages,
+                created_at: now_secs(),
+            };
+            self.data
+                .write()
+                .await
+                .entry(session_id.to_string())
+                .or_default()
+                .push(checkpoint);
+            Ok(checkpoint_id)
+        })
     }
 
-    async fn get(&self, session_id: &str) -> Result<Option<Checkpoint>> {
-        Ok(self
-            .data
-            .read()
-            .await
-            .get(session_id)
-            .and_then(|v| v.last())
-            .cloned())
+    fn get<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<Checkpoint>>> {
+        Box::pin(async move {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(session_id)
+                .and_then(|v| v.last())
+                .cloned())
+        })
     }
 
-    async fn list(&self, session_id: &str) -> Result<Vec<Checkpoint>> {
-        let mut checkpoints = self
-            .data
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default();
-        checkpoints.reverse();
-        Ok(checkpoints)
+    fn list<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<Checkpoint>>> {
+        Box::pin(async move {
+            let mut checkpoints = self
+                .data
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
+                .unwrap_or_default();
+            checkpoints.reverse();
+            Ok(checkpoints)
+        })
     }
 
-    async fn delete_session(&self, session_id: &str) -> Result<()> {
-        self.data.write().await.remove(session_id);
-        Ok(())
+    fn delete_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.data.write().await.remove(session_id);
+            Ok(())
+        })
     }
 
-    async fn list_sessions(&self) -> Result<Vec<String>> {
-        Ok(self.data.read().await.keys().cloned().collect())
+    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>> {
+        Box::pin(async move { Ok(self.data.read().await.keys().cloned().collect()) })
     }
 }
 
@@ -203,60 +217,71 @@ impl FileCheckpointer {
     }
 }
 
-#[async_trait]
 impl Checkpointer for FileCheckpointer {
-    async fn put(&self, session_id: &str, messages: Vec<Message>) -> Result<String> {
-        let checkpoint_id = new_checkpoint_id();
-        let checkpoint = Checkpoint {
-            session_id: session_id.to_string(),
-            checkpoint_id: checkpoint_id.clone(),
-            messages,
-            created_at: now_secs(),
-        };
-        info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "🔖 保存 Checkpoint");
-        {
-            let mut data = self.data.write().await;
-            data.entry(session_id.to_string())
-                .or_default()
-                .push(checkpoint);
-        }
-        self.flush().await?;
-        Ok(checkpoint_id)
+    fn put<'a>(
+        &'a self,
+        session_id: &'a str,
+        messages: Vec<Message>,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let checkpoint_id = new_checkpoint_id();
+            let checkpoint = Checkpoint {
+                session_id: session_id.to_string(),
+                checkpoint_id: checkpoint_id.clone(),
+                messages,
+                created_at: now_secs(),
+            };
+            info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "🔖 保存 Checkpoint");
+            {
+                let mut data = self.data.write().await;
+                data.entry(session_id.to_string())
+                    .or_default()
+                    .push(checkpoint);
+            }
+            self.flush().await?;
+            Ok(checkpoint_id)
+        })
     }
 
-    async fn get(&self, session_id: &str) -> Result<Option<Checkpoint>> {
-        Ok(self
-            .data
-            .read()
-            .await
-            .get(session_id)
-            .and_then(|v| v.last())
-            .cloned())
+    fn get<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<Checkpoint>>> {
+        Box::pin(async move {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(session_id)
+                .and_then(|v| v.last())
+                .cloned())
+        })
     }
 
-    async fn list(&self, session_id: &str) -> Result<Vec<Checkpoint>> {
-        let mut checkpoints = self
-            .data
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default();
-        checkpoints.reverse();
-        Ok(checkpoints)
+    fn list<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<Checkpoint>>> {
+        Box::pin(async move {
+            let mut checkpoints = self
+                .data
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
+                .unwrap_or_default();
+            checkpoints.reverse();
+            Ok(checkpoints)
+        })
     }
 
-    async fn delete_session(&self, session_id: &str) -> Result<()> {
-        {
-            self.data.write().await.remove(session_id);
-        }
-        self.flush().await?;
-        info!(session_id = %session_id, "🗑️ 会话 Checkpoint 已删除");
-        Ok(())
+    fn delete_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            {
+                self.data.write().await.remove(session_id);
+            }
+            self.flush().await?;
+            info!(session_id = %session_id, "🗑️ 会话 Checkpoint 已删除");
+            Ok(())
+        })
     }
 
-    async fn list_sessions(&self) -> Result<Vec<String>> {
-        Ok(self.data.read().await.keys().cloned().collect())
+    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>> {
+        Box::pin(async move { Ok(self.data.read().await.keys().cloned().collect()) })
     }
 }
 

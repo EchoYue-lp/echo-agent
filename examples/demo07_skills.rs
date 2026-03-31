@@ -23,7 +23,6 @@ struct TextProcessingSkill;
 
 /// 转大写工具
 struct ToUpperTool;
-#[async_trait::async_trait]
 impl Tool for ToUpperTool {
     fn name(&self) -> &str {
         "to_upper"
@@ -40,18 +39,22 @@ impl Tool for ToUpperTool {
             "required": ["text"]
         })
     }
-    async fn execute(&self, parameters: ToolParameters) -> echo_agent::error::Result<ToolResult> {
-        let text = parameters
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        Ok(ToolResult::success(text.to_uppercase()))
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let text = parameters
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok(ToolResult::success(text.to_uppercase()))
+        })
     }
 }
 
 /// 转小写工具
 struct ToLowerTool;
-#[async_trait::async_trait]
 impl Tool for ToLowerTool {
     fn name(&self) -> &str {
         "to_lower"
@@ -68,12 +71,17 @@ impl Tool for ToLowerTool {
             "required": ["text"]
         })
     }
-    async fn execute(&self, parameters: ToolParameters) -> echo_agent::error::Result<ToolResult> {
-        let text = parameters
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        Ok(ToolResult::success(text.to_lowercase()))
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let text = parameters
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok(ToolResult::success(text.to_lowercase()))
+        })
     }
 }
 

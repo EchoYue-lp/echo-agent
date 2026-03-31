@@ -28,7 +28,7 @@
 
 use crate::agent::{Agent, AgentEvent};
 use crate::error::{AgentError, ReactError, Result};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use futures::stream;
 use futures::stream::BoxStream;
 use std::collections::VecDeque;
@@ -121,7 +121,6 @@ impl MockAgent {
     }
 }
 
-#[async_trait]
 impl Agent for MockAgent {
     fn name(&self) -> &str {
         &self.name
@@ -135,28 +134,42 @@ impl Agent for MockAgent {
         &self.system_prompt
     }
 
-    async fn execute(&mut self, task: &str) -> Result<String> {
-        self.calls.lock().unwrap().push(task.to_string());
-        Ok(self.next_response())
+    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(task.to_string());
+            Ok(self.next_response())
+        })
     }
 
-    async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
-        let answer = self.execute(task).await?;
-        let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
-        Ok(Box::pin(event_stream))
+    fn execute_stream<'a>(
+        &'a mut self,
+        task: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            let answer = self.execute(task).await?;
+            let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
+            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+        })
     }
 
     /// `chat()` 同样记录调用，并消费预设响应队列。
     /// 注意：MockAgent 不维护真实的对话上下文，这里仅满足调用合约。
-    async fn chat(&mut self, message: &str) -> Result<String> {
-        self.calls.lock().unwrap().push(message.to_string());
-        Ok(self.next_response())
+    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(message.to_string());
+            Ok(self.next_response())
+        })
     }
 
-    async fn chat_stream(&mut self, message: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
-        let answer = self.chat(message).await?;
-        let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
-        Ok(Box::pin(event_stream))
+    fn chat_stream<'a>(
+        &'a mut self,
+        message: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            let answer = self.chat(message).await?;
+            let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
+            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+        })
     }
 
     /// 清空调用历史，模拟真实 Agent 的重置语义。
@@ -187,7 +200,6 @@ impl FailingMockAgent {
     }
 }
 
-#[async_trait]
 impl Agent for FailingMockAgent {
     fn name(&self) -> &str {
         &self.name
@@ -201,21 +213,28 @@ impl Agent for FailingMockAgent {
         "failing mock agent"
     }
 
-    async fn execute(&mut self, task: &str) -> Result<String> {
-        self.calls.lock().unwrap().push(task.to_string());
-        Err(ReactError::Agent(AgentError::InitializationFailed(
-            self.error_message.clone(),
-        )))
+    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(task.to_string());
+            Err(ReactError::Agent(AgentError::InitializationFailed(
+                self.error_message.clone(),
+            )))
+        })
     }
 
-    async fn execute_stream(&mut self, task: &str) -> Result<BoxStream<'_, Result<AgentEvent>>> {
-        let err = self.execute(task).await.unwrap_err();
-        let event_stream = stream::once(async move { Err(err) });
-        Ok(Box::pin(event_stream))
+    fn execute_stream<'a>(
+        &'a mut self,
+        task: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            let err = self.execute(task).await.unwrap_err();
+            let event_stream = stream::once(async move { Err(err) });
+            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+        })
     }
 
-    async fn chat(&mut self, message: &str) -> Result<String> {
-        self.execute(message).await
+    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move { self.execute(message).await })
     }
 
     fn reset(&mut self) {

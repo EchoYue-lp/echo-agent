@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -188,55 +188,56 @@ async fn handle_connection(
     info!("WebSocket 客户端断开: {addr}");
 }
 
-#[async_trait]
 impl HumanLoopProvider for WebSocketHumanLoopProvider {
-    async fn request(&self, req: HumanLoopRequest) -> Result<HumanLoopResponse> {
-        let request_id = Uuid::new_v4().to_string();
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(request_id.clone(), tx);
+    fn request(&self, req: HumanLoopRequest) -> BoxFuture<'_, Result<HumanLoopResponse>> {
+        Box::pin(async move {
+            let request_id = Uuid::new_v4().to_string();
+            let (tx, rx) = oneshot::channel();
+            self.pending.lock().await.insert(request_id.clone(), tx);
 
-        let kind_str = match req.kind {
-            HumanLoopKind::Approval => "approval",
-            HumanLoopKind::Input => "input",
-        };
+            let kind_str = match req.kind {
+                HumanLoopKind::Approval => "approval",
+                HumanLoopKind::Input => "input",
+            };
 
-        let msg = serde_json::to_string(&ServerMessage {
-            kind: kind_str,
-            request_id: &request_id,
-            prompt: &req.prompt,
-            tool_name: req.tool_name.as_deref(),
-            args: req.args.as_ref(),
-        })
-        .map_err(|e| ReactError::Other(format!("WS 消息序列化失败: {e}")))?;
+            let msg = serde_json::to_string(&ServerMessage {
+                kind: kind_str,
+                request_id: &request_id,
+                prompt: &req.prompt,
+                tool_name: req.tool_name.as_deref(),
+                args: req.args.as_ref(),
+            })
+            .map_err(|e| ReactError::Other(format!("WS 消息序列化失败: {e}")))?;
 
-        let sent = self.broadcast(&msg).await;
-        if sent == 0 {
-            self.pending.lock().await.remove(&request_id);
-            return Err(ReactError::Other(
-                "没有已连接的 WebSocket 客户端，无法发送人工介入请求".to_string(),
-            ));
-        }
+            let sent = self.broadcast(&msg).await;
+            if sent == 0 {
+                self.pending.lock().await.remove(&request_id);
+                return Err(ReactError::Other(
+                    "没有已连接的 WebSocket 客户端，无法发送人工介入请求".to_string(),
+                ));
+            }
 
-        match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(response)) => match req.kind {
-                HumanLoopKind::Approval => match response.decision.as_deref() {
-                    Some("approved") => Ok(HumanLoopResponse::Approved),
-                    _ => Ok(HumanLoopResponse::Rejected {
-                        reason: response.reason,
-                    }),
+            match tokio::time::timeout(self.timeout, rx).await {
+                Ok(Ok(response)) => match req.kind {
+                    HumanLoopKind::Approval => match response.decision.as_deref() {
+                        Some("approved") => Ok(HumanLoopResponse::Approved),
+                        _ => Ok(HumanLoopResponse::Rejected {
+                            reason: response.reason,
+                        }),
+                    },
+                    HumanLoopKind::Input => {
+                        Ok(HumanLoopResponse::Text(response.text.unwrap_or_default()))
+                    }
                 },
-                HumanLoopKind::Input => {
-                    Ok(HumanLoopResponse::Text(response.text.unwrap_or_default()))
+                Ok(Err(_)) => {
+                    self.pending.lock().await.remove(&request_id);
+                    Err(ReactError::Other("介入 channel 意外关闭".to_string()))
                 }
-            },
-            Ok(Err(_)) => {
-                self.pending.lock().await.remove(&request_id);
-                Err(ReactError::Other("介入 channel 意外关闭".to_string()))
+                Err(_) => {
+                    self.pending.lock().await.remove(&request_id);
+                    Ok(HumanLoopResponse::Timeout)
+                }
             }
-            Err(_) => {
-                self.pending.lock().await.remove(&request_id);
-                Ok(HumanLoopResponse::Timeout)
-            }
-        }
+        })
     }
 }

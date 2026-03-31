@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::error::{McpError, ReactError, Result};
@@ -35,62 +35,68 @@ impl HttpTransport {
     }
 }
 
-#[async_trait]
 impl McpTransport for HttpTransport {
-    async fn send(&self, mut request: JsonRpcRequest) -> Result<JsonRpcResponse> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        request.id = Some(Value::Number(id.into()));
+    fn send(&self, request: JsonRpcRequest) -> BoxFuture<'_, Result<JsonRpcResponse>> {
+        Box::pin(async move {
+            let mut request = request;
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            request.id = Some(Value::Number(id.into()));
 
-        let mut builder = self
-            .client
-            .post(&self.endpoint)
-            .header("Content-Type", "application/json")
-            .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
-            .json(&request);
-        for (k, v) in &self.headers {
-            builder = builder.header(k, v);
-        }
+            let mut builder = self
+                .client
+                .post(&self.endpoint)
+                .header("Content-Type", "application/json")
+                .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+                .json(&request);
+            for (k, v) in &self.headers {
+                builder = builder.header(k, v);
+            }
 
-        let response = builder.send().await.map_err(|e| {
-            ReactError::Mcp(McpError::ConnectionFailed(format!("HTTP 请求失败: {}", e)))
-        })?;
+            let response = builder.send().await.map_err(|e| {
+                ReactError::Mcp(McpError::ConnectionFailed(format!("HTTP 请求失败: {}", e)))
+            })?;
 
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
-                "HTTP 错误 {}: {}",
-                status, body
-            ))));
-        }
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let body = response.text().await.unwrap_or_default();
+                return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+                    "HTTP 错误 {}: {}",
+                    status, body
+                ))));
+            }
 
-        let rpc_response: JsonRpcResponse = response.json().await.map_err(|e| {
-            ReactError::Mcp(McpError::ProtocolError(format!(
-                "解析 HTTP 响应失败: {}",
-                e
-            )))
-        })?;
+            let rpc_response: JsonRpcResponse = response.json().await.map_err(|e| {
+                ReactError::Mcp(McpError::ProtocolError(format!(
+                    "解析 HTTP 响应失败: {}",
+                    e
+                )))
+            })?;
 
-        Ok(rpc_response)
+            Ok(rpc_response)
+        })
     }
 
-    async fn notify(&self, notification: JsonRpcNotification) -> Result<()> {
-        let mut builder = self
-            .client
-            .post(&self.endpoint)
-            .header("Content-Type", "application/json")
-            .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
-            .json(&notification);
-        for (k, v) in &self.headers {
-            builder = builder.header(k, v);
-        }
-        // 通知是 fire-and-forget
-        let _ = builder.send().await;
-        Ok(())
+    fn notify(&self, notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let mut builder = self
+                .client
+                .post(&self.endpoint)
+                .header("Content-Type", "application/json")
+                .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+                .json(&notification);
+            for (k, v) in &self.headers {
+                builder = builder.header(k, v);
+            }
+            // 通知是 fire-and-forget
+            let _ = builder.send().await;
+            Ok(())
+        })
     }
 
-    async fn close(&self) {
-        // HTTP 是无状态连接，无需显式关闭
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            // HTTP 是无状态连接，无需显式关闭
+        })
     }
 
     fn notification_rx(&self) -> Option<Arc<dyn crate::mcp::types::JsonRpcNotificationReceiver>> {

@@ -4,7 +4,7 @@
 
 use crate::error::Result;
 use crate::memory::embedder::Embedder;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 /// 测试用嵌入器，基于字节哈希生成确定性伪嵌入向量
 ///
@@ -40,21 +40,22 @@ impl MockEmbedder {
     }
 }
 
-#[async_trait]
 impl Embedder for MockEmbedder {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let mut vec = vec![0.0f32; self.dimension];
-        // 用字节值累积到各维度（确定性）
-        for (i, b) in text.bytes().enumerate() {
-            vec[i % self.dimension] += b as f32;
-        }
-        // L2 归一化，使余弦相似度有意义
-        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > 0.0 {
-            for v in &mut vec {
-                *v /= norm;
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>> {
+        Box::pin(async move {
+            let mut vec = vec![0.0f32; self.dimension];
+            // 用字节值累积到各维度（确定性）
+            for (i, b) in text.bytes().enumerate() {
+                vec[i % self.dimension] += b as f32;
             }
-        }
-        Ok(vec)
+            // L2 归一化，使余弦相似度有意义
+            let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for v in &mut vec {
+                    *v /= norm;
+                }
+            }
+            Ok(vec)
+        })
     }
 }

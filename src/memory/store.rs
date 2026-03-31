@@ -29,7 +29,7 @@
 //! ```
 
 use crate::error::{MemoryError, Result};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -74,23 +74,38 @@ impl StoreItem {
 // ── Store trait ───────────────────────────────────────────────────────────────
 
 /// 长期记忆的统一存储接口
-#[async_trait]
 pub trait Store: Send + Sync {
     /// 写入或更新一条记录（upsert）
-    async fn put(&self, namespace: &[&str], key: &str, value: Value) -> Result<()>;
+    fn put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        value: Value,
+    ) -> BoxFuture<'a, Result<()>>;
 
     /// 按 key 精确获取
-    async fn get(&self, namespace: &[&str], key: &str) -> Result<Option<StoreItem>>;
+    fn get<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<StoreItem>>>;
 
     /// 关键词检索，返回最多 `limit` 条（按相关度排序）
-    async fn search(&self, namespace: &[&str], query: &str, limit: usize)
-    -> Result<Vec<StoreItem>>;
+    fn search<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        query: &'a str,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
 
     /// 删除指定 key，返回是否存在并删除
-    async fn delete(&self, namespace: &[&str], key: &str) -> Result<bool>;
+    fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>>;
 
     /// 列举满足 `prefix` 前缀的所有命名空间
-    async fn list_namespaces(&self, prefix: Option<&[&str]>) -> Result<Vec<Vec<String>>>;
+    fn list_namespaces<'a>(
+        &'a self,
+        prefix: Option<&'a [&'a str]>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<String>>>>;
 
     /// 是否支持语义（向量）搜索。[`EmbeddingStore`](super::EmbeddingStore) 返回 `true`，其余返回 `false`。
     fn supports_semantic_search(&self) -> bool {
@@ -98,13 +113,13 @@ pub trait Store: Send + Sync {
     }
 
     /// 语义检索：若实现类支持向量搜索则执行余弦相似度检索，否则回退到关键词 [`search`](Store::search)。
-    async fn semantic_search(
-        &self,
-        namespace: &[&str],
-        query: &str,
+    fn semantic_search<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        query: &'a str,
         limit: usize,
-    ) -> Result<Vec<StoreItem>> {
-        self.search(namespace, query, limit).await
+    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        self.search(namespace, query, limit)
     }
 }
 
@@ -144,90 +159,111 @@ impl InMemoryStore {
     }
 }
 
-#[async_trait]
 impl Store for InMemoryStore {
-    async fn put(&self, namespace: &[&str], key: &str, value: Value) -> Result<()> {
-        let ns_key = namespace.join("/");
-        let mut data = self.data.write().await;
-        let bucket = data.entry(ns_key).or_default();
-        bucket
-            .entry(key.to_string())
-            .and_modify(|item| {
-                item.value = value.clone();
-                item.updated_at = now_secs();
-            })
-            .or_insert_with(|| {
-                StoreItem::new(
-                    namespace.iter().map(|s| s.to_string()).collect(),
-                    key.to_string(),
-                    value,
-                )
-            });
-        Ok(())
+    fn put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        value: Value,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let mut data = self.data.write().await;
+            let bucket = data.entry(ns_key).or_default();
+            bucket
+                .entry(key.to_string())
+                .and_modify(|item| {
+                    item.value = value.clone();
+                    item.updated_at = now_secs();
+                })
+                .or_insert_with(|| {
+                    StoreItem::new(
+                        namespace.iter().map(|s| s.to_string()).collect(),
+                        key.to_string(),
+                        value,
+                    )
+                });
+            Ok(())
+        })
     }
 
-    async fn get(&self, namespace: &[&str], key: &str) -> Result<Option<StoreItem>> {
-        let ns_key = namespace.join("/");
-        let data = self.data.read().await;
-        Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
+    fn get<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let data = self.data.read().await;
+            Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
+        })
     }
 
-    async fn search(
-        &self,
-        namespace: &[&str],
-        query: &str,
+    fn search<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        query: &'a str,
         limit: usize,
-    ) -> Result<Vec<StoreItem>> {
-        let ns_key = namespace.join("/");
-        let data = self.data.read().await;
-        let Some(bucket) = data.get(&ns_key) else {
-            return Ok(vec![]);
-        };
-        let keywords = tokenize(query);
-        let mut scored: Vec<(f32, StoreItem)> = bucket
-            .values()
-            .filter_map(|item| {
-                let score = value_relevance_score(&item.value, &keywords);
-                if score > 0.0 {
-                    Some((score, item.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scored
-            .into_iter()
-            .take(limit)
-            .map(|(s, mut item)| {
-                item.score = Some(s);
-                item
-            })
-            .collect())
+    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let data = self.data.read().await;
+            let Some(bucket) = data.get(&ns_key) else {
+                return Ok(vec![]);
+            };
+            let keywords = tokenize(query);
+            let mut scored: Vec<(f32, StoreItem)> = bucket
+                .values()
+                .filter_map(|item| {
+                    let score = value_relevance_score(&item.value, &keywords);
+                    if score > 0.0 {
+                        Some((score, item.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(scored
+                .into_iter()
+                .take(limit)
+                .map(|(s, mut item)| {
+                    item.score = Some(s);
+                    item
+                })
+                .collect())
+        })
     }
 
-    async fn delete(&self, namespace: &[&str], key: &str) -> Result<bool> {
-        let ns_key = namespace.join("/");
-        let mut data = self.data.write().await;
-        Ok(data
-            .get_mut(&ns_key)
-            .map(|b| b.remove(key).is_some())
-            .unwrap_or(false))
+    fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let mut data = self.data.write().await;
+            Ok(data
+                .get_mut(&ns_key)
+                .map(|b| b.remove(key).is_some())
+                .unwrap_or(false))
+        })
     }
 
-    async fn list_namespaces(&self, prefix: Option<&[&str]>) -> Result<Vec<Vec<String>>> {
-        let data = self.data.read().await;
-        let prefix_str = prefix.map(|p| p.join("/"));
-        Ok(data
-            .keys()
-            .filter(|k| {
-                prefix_str
-                    .as_deref()
-                    .map(|p| k.starts_with(p))
-                    .unwrap_or(true)
-            })
-            .map(|k| k.split('/').map(String::from).collect())
-            .collect())
+    fn list_namespaces<'a>(
+        &'a self,
+        prefix: Option<&'a [&'a str]>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
+        Box::pin(async move {
+            let data = self.data.read().await;
+            let prefix_str = prefix.map(|p| p.join("/"));
+            Ok(data
+                .keys()
+                .filter(|k| {
+                    prefix_str
+                        .as_deref()
+                        .map(|p| k.starts_with(p))
+                        .unwrap_or(true)
+                })
+                .map(|k| k.split('/').map(String::from).collect())
+                .collect())
+        })
     }
 }
 
@@ -290,93 +326,114 @@ impl FileStore {
     }
 }
 
-#[async_trait]
 impl Store for FileStore {
-    async fn put(&self, namespace: &[&str], key: &str, value: Value) -> Result<()> {
-        let ns_key = namespace.join("/");
-        let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
-        {
-            let mut data = self.data.write().await;
-            let bucket = data.entry(ns_key).or_default();
-            bucket
-                .entry(key.to_string())
-                .and_modify(|item| {
-                    item.value = value.clone();
-                    item.updated_at = now_secs();
-                })
-                .or_insert_with(|| StoreItem::new(ns_vec, key.to_string(), value));
-        }
-        self.flush().await
+    fn put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        value: Value,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let ns_vec: Vec<String> = namespace.iter().map(|s| s.to_string()).collect();
+            {
+                let mut data = self.data.write().await;
+                let bucket = data.entry(ns_key).or_default();
+                bucket
+                    .entry(key.to_string())
+                    .and_modify(|item| {
+                        item.value = value.clone();
+                        item.updated_at = now_secs();
+                    })
+                    .or_insert_with(|| StoreItem::new(ns_vec, key.to_string(), value));
+            }
+            self.flush().await
+        })
     }
 
-    async fn get(&self, namespace: &[&str], key: &str) -> Result<Option<StoreItem>> {
-        let ns_key = namespace.join("/");
-        let data = self.data.read().await;
-        Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
+    fn get<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let data = self.data.read().await;
+            Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
+        })
     }
 
-    async fn search(
-        &self,
-        namespace: &[&str],
-        query: &str,
+    fn search<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        query: &'a str,
         limit: usize,
-    ) -> Result<Vec<StoreItem>> {
-        let ns_key = namespace.join("/");
-        let data = self.data.read().await;
-        let Some(bucket) = data.get(&ns_key) else {
-            return Ok(vec![]);
-        };
-        let keywords = tokenize(query);
-        let mut scored: Vec<(f32, StoreItem)> = bucket
-            .values()
-            .filter_map(|item| {
-                let score = value_relevance_score(&item.value, &keywords);
-                if score > 0.0 {
-                    Some((score, item.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        debug!(namespace = %ns_key, query = %query, hits = scored.len(), "🔍 Store 检索");
-        Ok(scored
-            .into_iter()
-            .take(limit)
-            .map(|(s, mut item)| {
-                item.score = Some(s);
-                item
-            })
-            .collect())
+    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let data = self.data.read().await;
+            let Some(bucket) = data.get(&ns_key) else {
+                return Ok(vec![]);
+            };
+            let keywords = tokenize(query);
+            let mut scored: Vec<(f32, StoreItem)> = bucket
+                .values()
+                .filter_map(|item| {
+                    let score = value_relevance_score(&item.value, &keywords);
+                    if score > 0.0 {
+                        Some((score, item.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            debug!(namespace = %ns_key, query = %query, hits = scored.len(), "🔍 Store 检索");
+            Ok(scored
+                .into_iter()
+                .take(limit)
+                .map(|(s, mut item)| {
+                    item.score = Some(s);
+                    item
+                })
+                .collect())
+        })
     }
 
-    async fn delete(&self, namespace: &[&str], key: &str) -> Result<bool> {
-        let ns_key = namespace.join("/");
-        let found = {
-            let mut data = self.data.write().await;
-            data.get_mut(&ns_key)
-                .map(|b| b.remove(key).is_some())
-                .unwrap_or(false)
-        };
-        if found {
-            self.flush().await?;
-        }
-        Ok(found)
+    fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let found = {
+                let mut data = self.data.write().await;
+                data.get_mut(&ns_key)
+                    .map(|b| b.remove(key).is_some())
+                    .unwrap_or(false)
+            };
+            if found {
+                self.flush().await?;
+            }
+            Ok(found)
+        })
     }
 
-    async fn list_namespaces(&self, prefix: Option<&[&str]>) -> Result<Vec<Vec<String>>> {
-        let data = self.data.read().await;
-        let prefix_str = prefix.map(|p| p.join("/"));
-        Ok(data
-            .keys()
-            .filter(|k| {
-                prefix_str
-                    .as_deref()
-                    .map(|p| k.starts_with(p))
-                    .unwrap_or(true)
-            })
-            .map(|k| k.split('/').map(String::from).collect())
-            .collect())
+    fn list_namespaces<'a>(
+        &'a self,
+        prefix: Option<&'a [&'a str]>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
+        Box::pin(async move {
+            let data = self.data.read().await;
+            let prefix_str = prefix.map(|p| p.join("/"));
+            Ok(data
+                .keys()
+                .filter(|k| {
+                    prefix_str
+                        .as_deref()
+                        .map(|p| k.starts_with(p))
+                        .unwrap_or(true)
+                })
+                .map(|k| k.split('/').map(String::from).collect())
+                .collect())
+        })
     }
 }
 

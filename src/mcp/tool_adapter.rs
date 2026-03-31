@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 use crate::error::Result;
 use crate::mcp::client::McpClient;
@@ -22,7 +22,6 @@ impl McpToolAdapter {
     }
 }
 
-#[async_trait]
 impl Tool for McpToolAdapter {
     fn name(&self) -> &str {
         &self.tool.name
@@ -36,17 +35,18 @@ impl Tool for McpToolAdapter {
         self.tool.input_schema.clone()
     }
 
-    async fn execute(&self, parameters: ToolParameters) -> Result<ToolResult> {
-        // 将 HashMap<String, Value> 序列化为 JSON Object 传递给 MCP
-        let args = serde_json::to_value(&parameters)?;
-        let result = self.client.call_tool(&self.tool.name, args).await?;
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let args = serde_json::to_value(&parameters)?;
+            let result = self.client.call_tool(&self.tool.name, args).await?;
 
-        let text = McpClient::content_to_text(&result.content);
+            let text = McpClient::content_to_text(&result.content);
 
-        if result.is_error {
-            Ok(ToolResult::error(text))
-        } else {
-            Ok(ToolResult::success(text))
-        }
+            if result.is_error {
+                Ok(ToolResult::error(text))
+            } else {
+                Ok(ToolResult::success(text))
+            }
+        })
     }
 }

@@ -266,14 +266,23 @@ impl CounterCallback {
     }
 }
 
-#[async_trait::async_trait]
 impl crate::agent::AgentCallback for CounterCallback {
-    async fn on_think_start(&self, _agent: &str, _messages: &[Message]) {
+    fn on_think_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        _messages: &'a [Message],
+    ) -> futures::future::BoxFuture<'a, ()> {
         self.count.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
     }
 
-    async fn on_final_answer(&self, _agent: &str, _answer: &str) {
+    fn on_final_answer<'a>(
+        &'a self,
+        _agent: &'a str,
+        _answer: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
         self.count.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
     }
 }
 

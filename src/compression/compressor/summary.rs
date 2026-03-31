@@ -2,7 +2,7 @@ use crate::compression::{CompressionInput, CompressionOutput, ContextCompressor}
 use crate::error::Result;
 use crate::llm::LlmClient;
 use crate::llm::types::Message;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use std::sync::Arc;
 
 const COMPRESSION_PROMPT: &str =
@@ -138,35 +138,36 @@ impl<P: SummaryPromptBuilder> SummaryCompressor<P> {
     }
 }
 
-#[async_trait]
 impl<P: SummaryPromptBuilder + 'static> ContextCompressor for SummaryCompressor<P> {
-    async fn compress(&self, input: CompressionInput) -> Result<CompressionOutput> {
-        let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) =
-            input.messages.into_iter().partition(|m| m.role == "system");
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+        Box::pin(async move {
+            let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) =
+                input.messages.into_iter().partition(|m| m.role == "system");
 
-        if conv_msgs.len() <= self.keep_recent {
+            if conv_msgs.len() <= self.keep_recent {
+                let mut messages = system_msgs;
+                messages.extend(conv_msgs);
+                return Ok(CompressionOutput {
+                    messages,
+                    evicted: vec![],
+                });
+            }
+
+            let split_at = conv_msgs.len() - self.keep_recent;
+            let to_summarize = &conv_msgs[..split_at];
+            let to_keep = conv_msgs[split_at..].to_vec();
+
+            let prompt = self.prompt_builder.build(to_summarize);
+            let summary = self.llm.chat_simple(vec![Message::user(prompt)]).await?;
+
             let mut messages = system_msgs;
-            messages.extend(conv_msgs);
-            return Ok(CompressionOutput {
+            messages.push(Message::system(format!("[对话历史摘要]\n{}", summary)));
+            messages.extend(to_keep);
+
+            Ok(CompressionOutput {
                 messages,
-                evicted: vec![],
-            });
-        }
-
-        let split_at = conv_msgs.len() - self.keep_recent;
-        let to_summarize = &conv_msgs[..split_at];
-        let to_keep = conv_msgs[split_at..].to_vec();
-
-        let prompt = self.prompt_builder.build(to_summarize);
-        let summary = self.llm.chat_simple(vec![Message::user(prompt)]).await?;
-
-        let mut messages = system_msgs;
-        messages.push(Message::system(format!("[对话历史摘要]\n{}", summary)));
-        messages.extend(to_keep);
-
-        Ok(CompressionOutput {
-            messages,
-            evicted: to_summarize.to_vec(),
+                evicted: to_summarize.to_vec(),
+            })
         })
     }
 }

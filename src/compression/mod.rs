@@ -12,7 +12,7 @@ pub mod compressor;
 use crate::compression::compressor::SlidingWindowCompressor;
 use crate::error::Result;
 use crate::llm::types::Message;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 /// 压缩管道的输入
 pub struct CompressionInput {
@@ -33,17 +33,15 @@ pub struct CompressionOutput {
 }
 
 /// 所有压缩策略的统一接口（async，支持 `dyn` trait object）
-#[async_trait]
 pub trait ContextCompressor: Send + Sync {
-    async fn compress(&self, input: CompressionInput) -> Result<CompressionOutput>;
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>>;
 }
 
 /// 允许将 `Box<dyn ContextCompressor>` 直接传给任何接受 `impl ContextCompressor` 的函数，
 /// 无需引入额外的包装枚举。
-#[async_trait]
 impl ContextCompressor for Box<dyn ContextCompressor> {
-    async fn compress(&self, input: CompressionInput) -> Result<CompressionOutput> {
-        (**self).compress(input).await
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+        (**self).compress(input)
     }
 }
 
