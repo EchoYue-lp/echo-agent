@@ -13,6 +13,7 @@ pub use crate::agent::config::{AgentConfig, AgentRole};
 use crate::agent::{Agent, AgentEvent, SubAgentMap};
 use crate::compression::ContextManager;
 use crate::error::{LlmError, ReactError, Result};
+use crate::guard::GuardManager;
 use crate::human_loop::{HumanApprovalManager, HumanLoopProvider};
 use crate::llm::config::LlmConfig;
 use crate::mcp::McpManager;
@@ -82,6 +83,12 @@ pub struct ReactAgent {
     checkpointer: Option<Arc<dyn Checkpointer>>,
     /// MCP 连接管理器：持有所有 MCP 服务端的客户端，保证连接生命周期与 Agent 一致
     mcp_manager: McpManager,
+    /// 护栏管理器：对输入/输出进行安全过滤
+    pub(crate) guard_manager: Option<GuardManager>,
+    /// 权限策略：控制工具执行权限
+    pub(crate) permission_policy: Option<Arc<dyn crate::tools::permission::PermissionPolicy>>,
+    /// 审计日志记录器
+    pub(crate) audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
 }
 
 // ── 构造与初始化 ──────────────────────────────────────────────────────────────
@@ -190,6 +197,9 @@ impl ReactAgent {
             store,
             checkpointer,
             mcp_manager: McpManager::new(),
+            guard_manager: None,
+            permission_policy: None,
+            audit_logger: None,
         }
     }
 
@@ -314,6 +324,24 @@ impl ReactAgent {
     /// 获取已连接的 MCP 服务端名称列表
     pub fn mcp_server_names(&self) -> Vec<&str> {
         self.mcp_manager.server_names()
+    }
+
+    /// 设置护栏管理器
+    pub fn set_guard_manager(&mut self, manager: GuardManager) {
+        self.guard_manager = Some(manager);
+    }
+
+    /// 设置权限策略
+    pub fn set_permission_policy(
+        &mut self,
+        policy: Arc<dyn crate::tools::permission::PermissionPolicy>,
+    ) {
+        self.permission_policy = Some(policy);
+    }
+
+    /// 设置审计日志记录器
+    pub fn set_audit_logger(&mut self, logger: Arc<dyn crate::audit::AuditLogger>) {
+        self.audit_logger = Some(logger);
     }
 
     /// 替换审批 Provider，支持在运行时切换审批渠道。

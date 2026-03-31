@@ -24,3 +24,9 @@ clap = { version = "4", features = ["derive", "env"] }
 rustyline = "14"
 tokio-tungstenite = "0.24"
 uuid = { version = "1", features = ["v4"] }
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+opentelemetry = { version = "0.27", features = ["trace"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["tonic"] }
+tracing-opentelemetry = "0.28"

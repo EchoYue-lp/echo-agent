@@ -89,6 +89,7 @@
 pub mod builtin;
 pub mod files;
 pub mod others;
+pub mod permission;
 pub mod shell;
 
 use crate::error::{Result, ToolError};
@@ -243,6 +244,11 @@ pub trait Tool: Send + Sync {
     /// 验证参数（可选实现，默认不验证）
     fn validate_parameters(&self, _params: &ToolParameters) -> Result<()> {
         Ok(())
+    }
+
+    /// 声明工具所需权限（默认无特殊权限要求）
+    fn permissions(&self) -> Vec<permission::ToolPermission> {
+        vec![]
     }
 }
 

@@ -66,14 +66,17 @@
 //!
 
 pub mod agent;
+pub mod audit;
 pub mod compression;
 pub mod error;
+pub mod guard;
 pub mod human_loop;
 pub mod llm;
 pub mod mcp;
 pub mod memory;
 pub mod skills;
 pub mod tasks;
+pub mod telemetry;
 pub mod testing;
 pub mod tools;
 
@@ -122,5 +125,21 @@ pub mod prelude {
     };
     pub use crate::testing::{FailingMockAgent, MockAgent, MockEmbedder, MockLlmClient, MockTool};
     pub use crate::tools::builtin::think::ThinkTool;
+    pub use crate::tools::permission::{
+        DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
+    };
     pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, TypedTool};
+
+    // Guard 护栏
+    pub use crate::guard::llm::LlmGuard;
+    pub use crate::guard::rule::{RuleGuard, RuleGuardBuilder};
+    pub use crate::guard::{Guard, GuardDirection, GuardManager, GuardResult};
+
+    // 审计日志
+    pub use crate::audit::file::FileAuditLogger;
+    pub use crate::audit::memory::InMemoryAuditLogger;
+    pub use crate::audit::{AuditCallback, AuditEvent, AuditEventType, AuditFilter, AuditLogger};
+
+    // Telemetry
+    pub use crate::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};
 }

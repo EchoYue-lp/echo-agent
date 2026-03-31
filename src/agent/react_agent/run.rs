@@ -10,6 +10,7 @@
 use super::{ReactAgent, StepType, TOOL_FINAL_ANSWER, is_retryable_llm_error};
 use crate::agent::AgentEvent;
 use crate::error::{AgentError, ReactError, Result, ToolError};
+use crate::guard::GuardDirection;
 use crate::human_loop::{HumanLoopRequest, HumanLoopResponse};
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
 use crate::llm::{chat, stream_chat};
@@ -19,7 +20,7 @@ use futures::future::join_all;
 use futures::stream::BoxStream;
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 // ── 流式执行模式 ─────────────────────────────────────────────────────────────
 
@@ -71,6 +72,57 @@ impl ReactAgent {
 
         info!(agent = %agent, tool = %tool_name, "🔧 开始执行工具");
         debug!(agent = %agent, tool = %tool_name, params = %input, "工具参数详情");
+
+        // 权限策略检查
+        if let Some(policy) = &self.permission_policy {
+            let tool_perms = self
+                .tool_manager
+                .get_tool(tool_name)
+                .map(|t| t.permissions())
+                .unwrap_or_default();
+
+            if !tool_perms.is_empty() {
+                let decision = policy.check(tool_name, &tool_perms).await;
+                match decision {
+                    crate::tools::permission::PermissionDecision::Allow => {}
+                    crate::tools::permission::PermissionDecision::Deny { reason } => {
+                        warn!(agent = %agent, tool = %tool_name, reason = %reason, "🔒 权限拒绝");
+                        if let Some(al) = &self.audit_logger {
+                            let event = crate::audit::AuditEvent::now(
+                                self.config.session_id.clone(),
+                                agent.to_string(),
+                                crate::audit::AuditEventType::PermissionDenied {
+                                    tool: tool_name.to_string(),
+                                    required: tool_perms,
+                                    reason: reason.clone(),
+                                },
+                            );
+                            let _ = al.log(event).await;
+                        }
+                        return Ok(format!("工具 {tool_name} 权限不足: {reason}"));
+                    }
+                    crate::tools::permission::PermissionDecision::RequireApproval => {
+                        info!(agent = %agent, tool = %tool_name, "🔐 权限要求人工审批");
+                        let req = HumanLoopRequest::approval(tool_name, input.clone());
+                        match self.approval_provider.request(req).await? {
+                            HumanLoopResponse::Approved => {
+                                info!(agent = %agent, tool = %tool_name, "✅ 权限审批通过");
+                            }
+                            HumanLoopResponse::Rejected { reason } => {
+                                warn!(agent = %agent, tool = %tool_name, "❌ 权限审批被拒绝");
+                                return Ok(format!(
+                                    "工具 {tool_name} 权限审批被拒绝{}",
+                                    reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                                ));
+                            }
+                            _ => {
+                                return Ok(format!("工具 {tool_name} 权限审批超时或异常"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // 获取人工审批状态
         // 保守策略：读取失败时返回错误（安全优先）
@@ -329,7 +381,10 @@ impl ReactAgent {
         } else {
             let futures: Vec<_> = tool_calls
                 .iter()
-                .map(|(_, name, args)| self.execute_tool_feedback(name, args))
+                .map(|(_, name, args)| {
+                    self.execute_tool_feedback(name, args)
+                        .instrument(info_span!("tool_execute", tool.name = %name))
+                })
                 .collect();
             let results = join_all(futures).await;
 
@@ -389,7 +444,10 @@ impl ReactAgent {
             "执行详情"
         );
 
-        self.run_react_loop(task).await
+        let model = self.config.model_name.clone();
+        self.run_react_loop(task)
+            .instrument(info_span!("agent_execute", agent.name = %agent, agent.model = %model))
+            .await
     }
 
     /// 多轮对话：不重置上下文，直接追加消息后进入 ReAct 循环
@@ -405,7 +463,10 @@ impl ReactAgent {
             "对话详情"
         );
 
-        self.run_react_loop(message).await
+        let model = self.config.model_name.clone();
+        self.run_react_loop(message)
+            .instrument(info_span!("agent_chat", agent.name = %agent, agent.model = %model))
+            .await
     }
 
     /// 核心 ReAct 循环（注入记忆 → 追加消息 → think/act 迭代）。
@@ -413,6 +474,27 @@ impl ReactAgent {
     async fn run_react_loop(&mut self, message: &str) -> Result<String> {
         let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
+
+        // 输入护栏检查
+        if let Some(gm) = &self.guard_manager {
+            let result = gm.check_all(message, GuardDirection::Input).await?;
+            if let crate::guard::GuardResult::Block { reason } = &result {
+                info!(agent = %agent, reason = %reason, "🛡️ 输入被护栏阻断");
+                if let Some(al) = &self.audit_logger {
+                    let event = crate::audit::AuditEvent::now(
+                        self.config.session_id.clone(),
+                        agent.clone(),
+                        crate::audit::AuditEventType::GuardBlock {
+                            guard: "guard_manager".to_string(),
+                            direction: GuardDirection::Input,
+                            reason: reason.clone(),
+                        },
+                    );
+                    let _ = al.log(event).await;
+                }
+                return Ok(format!("请求被安全护栏拦截: {reason}"));
+            }
+        }
 
         if let Some(store) = &self.store {
             let agent_name = self.config.agent_name.clone();
@@ -449,13 +531,38 @@ impl ReactAgent {
 
             debug!(agent = %agent, iteration = iteration + 1, "--- 迭代 ---");
 
-            let steps = self.think().await?;
+            let think_model = self.config.model_name.clone();
+            let steps = self
+                .think()
+                .instrument(info_span!("llm_think", model = %think_model))
+                .await?;
             if steps.is_empty() {
                 warn!(agent = %agent, "LLM 没有响应");
                 return Err(ReactError::from(AgentError::NoResponse));
             }
 
-            if let Some(answer) = self.process_steps(steps).await? {
+            if let Some(mut answer) = self.process_steps(steps).await? {
+                // 输出护栏检查
+                if let Some(gm) = &self.guard_manager {
+                    let result = gm.check_all(&answer, GuardDirection::Output).await?;
+                    if let crate::guard::GuardResult::Block { reason } = &result {
+                        info!(agent = %agent, reason = %reason, "🛡️ 输出被护栏阻断");
+                        if let Some(al) = &self.audit_logger {
+                            let event = crate::audit::AuditEvent::now(
+                                self.config.session_id.clone(),
+                                agent.clone(),
+                                crate::audit::AuditEventType::GuardBlock {
+                                    guard: "guard_manager".to_string(),
+                                    direction: GuardDirection::Output,
+                                    reason: reason.clone(),
+                                },
+                            );
+                            let _ = al.log(event).await;
+                        }
+                        answer = format!("回复内容已被安全护栏过滤: {reason}");
+                    }
+                }
+
                 for cb in &callbacks {
                     cb.on_final_answer(&agent, &answer).await;
                 }

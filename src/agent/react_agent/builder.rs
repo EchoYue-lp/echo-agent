@@ -1,13 +1,16 @@
 //! Agent 构建器
 
 use crate::agent::{AgentCallback, AgentConfig, AgentRole};
+use crate::audit::AuditLogger;
 use crate::error::Result;
+use crate::guard::{Guard, GuardManager};
 use crate::human_loop::HumanLoopProvider;
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient};
 use crate::memory::checkpointer::Checkpointer;
 use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
 use crate::tools::Tool;
+use crate::tools::permission::PermissionPolicy;
 use std::sync::Arc;
 
 /// Agent 构建器
@@ -35,6 +38,9 @@ pub struct ReactAgentBuilder {
     checkpointer: Option<Arc<dyn Checkpointer>>,
     session_id: Option<String>,
     approval_provider: Option<Arc<dyn HumanLoopProvider>>,
+    guards: Vec<Arc<dyn Guard>>,
+    permission_policy: Option<Arc<dyn PermissionPolicy>>,
+    audit_logger: Option<Arc<dyn AuditLogger>>,
 }
 
 impl Default for ReactAgentBuilder {
@@ -67,6 +73,9 @@ impl ReactAgentBuilder {
             checkpointer: None,
             session_id: None,
             approval_provider: None,
+            guards: Vec::new(),
+            permission_policy: None,
+            audit_logger: None,
         }
     }
 
@@ -286,6 +295,32 @@ impl ReactAgentBuilder {
         self
     }
 
+    // ── 护栏 & 权限 & 审计 ──────────────────────────────────────────────────────
+
+    /// 添加护栏
+    pub fn guard(mut self, guard: Arc<dyn Guard>) -> Self {
+        self.guards.push(guard);
+        self
+    }
+
+    /// 批量添加护栏
+    pub fn guards(mut self, guards: Vec<Arc<dyn Guard>>) -> Self {
+        self.guards.extend(guards);
+        self
+    }
+
+    /// 设置工具权限策略
+    pub fn permission_policy(mut self, policy: Arc<dyn PermissionPolicy>) -> Self {
+        self.permission_policy = Some(policy);
+        self
+    }
+
+    /// 设置审计日志记录器
+    pub fn audit_logger(mut self, logger: Arc<dyn AuditLogger>) -> Self {
+        self.audit_logger = Some(logger);
+        self
+    }
+
     // ── 构建 ────────────────────────────────────────────────────────────────────
 
     /// 构建 ReAct Agent（内部方法）
@@ -334,6 +369,21 @@ impl ReactAgentBuilder {
         // 设置审批 Provider
         if let Some(provider) = self.approval_provider {
             agent.set_approval_provider(provider);
+        }
+
+        // 设置护栏
+        if !self.guards.is_empty() {
+            agent.set_guard_manager(GuardManager::from_guards(self.guards));
+        }
+
+        // 设置权限策略
+        if let Some(policy) = self.permission_policy {
+            agent.set_permission_policy(policy);
+        }
+
+        // 设置审计日志
+        if let Some(logger) = self.audit_logger {
+            agent.set_audit_logger(logger);
         }
 
         Ok(agent)
