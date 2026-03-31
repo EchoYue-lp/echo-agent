@@ -12,9 +12,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     dotenv::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     println!("=== Plan-and-Execute 示例 ===\n");
 
@@ -30,8 +28,7 @@ async fn main() -> echo_agent::error::Result<()> {
     let executor = ReactExecutor::new(executor_agent);
 
     // 组装 Plan-and-Execute Agent
-    let mut agent = PlanExecuteAgent::new("plan_execute_agent", planner, executor)
-        .max_replans(2);
+    let mut agent = PlanExecuteAgent::new("plan_execute_agent", planner, executor).max_replans(2);
 
     println!("--- 执行复杂任务 ---\n");
     let result = agent

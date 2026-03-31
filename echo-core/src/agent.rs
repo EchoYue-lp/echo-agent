@@ -1,0 +1,145 @@
+//! Agent 核心 trait、事件和回调接口
+
+use crate::error::{ReactError, Result};
+use crate::llm::ToolDefinition;
+use crate::llm::types::Message;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
+use serde_json::Value;
+pub use tokio_util::sync::CancellationToken;
+
+/// Agent 执行过程中产生的事件
+#[derive(Debug)]
+pub enum AgentEvent {
+    Token(String),
+    ToolCall { name: String, args: Value },
+    ToolResult { name: String, output: String },
+    FinalAnswer(String),
+    Cancelled,
+}
+
+/// LLM 响应解析后的步骤类型
+#[derive(Debug)]
+pub enum StepType {
+    Thought(String),
+    Call {
+        tool_call_id: String,
+        function_name: String,
+        arguments: Value,
+    },
+}
+
+/// Agent 统一执行接口
+pub trait Agent: Send + Sync {
+    fn name(&self) -> &str;
+    fn model_name(&self) -> &str;
+    fn system_prompt(&self) -> &str;
+
+    fn tool_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        vec![]
+    }
+
+    fn skill_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn mcp_server_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn close(&mut self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>>;
+
+    fn execute_stream<'a>(
+        &'a mut self,
+        task: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>>;
+
+    fn execute_stream_with_cancel<'a>(
+        &'a mut self,
+        task: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let _ = cancel;
+        self.execute_stream(task)
+    }
+
+    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+        self.execute(message)
+    }
+
+    fn chat_stream<'a>(
+        &'a mut self,
+        message: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.execute_stream(message)
+    }
+
+    fn chat_stream_with_cancel<'a>(
+        &'a mut self,
+        message: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let _ = cancel;
+        self.chat_stream(message)
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// Agent 生命周期回调接口
+pub trait AgentCallback: Send + Sync {
+    fn on_think_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        _messages: &'a [Message],
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn on_think_end<'a>(&'a self, _agent: &'a str, _steps: &'a [StepType]) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn on_tool_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _args: &'a Value,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn on_tool_end<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _result: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn on_tool_error<'a>(
+        &'a self,
+        _agent: &'a str,
+        _tool: &'a str,
+        _err: &'a ReactError,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn on_final_answer<'a>(&'a self, _agent: &'a str, _answer: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn on_iteration<'a>(&'a self, _agent: &'a str, _iteration: usize) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}

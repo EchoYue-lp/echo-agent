@@ -14,27 +14,31 @@ use crate::agent::{Agent, AgentEvent, SubAgentMap};
 use crate::compression::ContextManager;
 use crate::error::{LlmError, ReactError, Result};
 use crate::guard::GuardManager;
+#[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanApprovalManager, HumanLoopProvider};
 use crate::llm::config::LlmConfig;
+#[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
 use crate::memory::checkpointer::{Checkpointer, FileCheckpointer};
 use crate::memory::store::{FileStore, Store};
 use crate::skills::SkillManager;
+#[cfg(feature = "tasks")]
 use crate::tasks::TaskManager;
 use crate::tools::ToolManager;
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
+#[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
 use crate::tools::builtin::memory::{ForgetTool, RecallTool, RememberTool};
+#[cfg(feature = "tasks")]
 use crate::tools::builtin::plan::PlanTool;
+#[cfg(feature = "tasks")]
 use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
 };
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -47,8 +51,11 @@ mod tests;
 // ── 内置工具名常量 ─────────────────────────────────────────────────────────────
 
 pub(crate) const TOOL_FINAL_ANSWER: &str = "final_answer";
+#[cfg(feature = "tasks")]
 pub(crate) const TOOL_CREATE_TASK: &str = "create_task";
+#[cfg(feature = "tasks")]
 pub(crate) const TOOL_PLAN: &str = "plan";
+#[cfg(feature = "tasks")]
 pub(crate) const TOOL_UPDATE_TASK: &str = "update_task";
 
 /// 判断 LLM 错误是否值得重试（网络/超时/限流/服务端 5xx）
@@ -71,9 +78,11 @@ pub struct ReactAgent {
     client: Arc<Client>,
     /// LLM 配置（可选，不设置时使用环境变量配置）
     llm_config: Option<LlmConfig>,
+    #[cfg(feature = "tasks")]
     pub(crate) task_manager: Arc<RwLock<TaskManager>>,
+    #[cfg(feature = "human-loop")]
     human_in_loop: Arc<RwLock<HumanApprovalManager>>,
-    /// 人工介入 Provider：支持命令行、HTTP Webhook、WebSocket 等多种渠道
+    #[cfg(feature = "human-loop")]
     approval_provider: Arc<dyn HumanLoopProvider>,
     /// Skill 管理器：记录已安装的所有 Skill 元数据
     skill_manager: SkillManager,
@@ -81,7 +90,7 @@ pub struct ReactAgent {
     store: Option<Arc<dyn Store>>,
     /// 短期会话 Checkpointer，按 session_id 持久化对话历史
     checkpointer: Option<Arc<dyn Checkpointer>>,
-    /// MCP 连接管理器：持有所有 MCP 服务端的客户端，保证连接生命周期与 Agent 一致
+    #[cfg(feature = "mcp")]
     mcp_manager: McpManager,
     /// 护栏管理器：对输入/输出进行安全过滤
     pub(crate) guard_manager: Option<GuardManager>,
@@ -94,11 +103,18 @@ pub struct ReactAgent {
 // ── 构造与初始化 ──────────────────────────────────────────────────────────────
 
 impl ReactAgent {
+    #[cfg(feature = "tasks")]
     pub(crate) fn has_planning_tools(&self) -> bool {
         self.config.enable_task
             && [TOOL_PLAN, TOOL_CREATE_TASK, TOOL_UPDATE_TASK]
                 .iter()
                 .all(|name| self.tool_manager.get_tool(name).is_some())
+    }
+
+    #[cfg(not(feature = "tasks"))]
+    #[allow(dead_code)]
+    pub(crate) fn has_planning_tools(&self) -> bool {
+        false
     }
 
     /// 工具调用场景下自动注入的思维链引导语。
@@ -124,15 +140,20 @@ impl ReactAgent {
 
         tool_manager.register(Box::new(FinalAnswerTool));
 
+        #[cfg(feature = "tasks")]
         let task_manager = Arc::new(RwLock::new(TaskManager::default()));
+        #[cfg(feature = "human-loop")]
         let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::default()));
         let subagents = Arc::new(RwLock::new(HashMap::new()));
+        #[cfg(feature = "human-loop")]
         let approval_provider = crate::human_loop::default_provider();
 
+        #[cfg(feature = "human-loop")]
         if config.enable_human_in_loop {
             tool_manager.register(Box::new(HumanInLoop::new(approval_provider.clone())));
         }
 
+        #[cfg(feature = "tasks")]
         if config.enable_task {
             tool_manager.register(Box::new(PlanTool));
             tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
@@ -190,12 +211,16 @@ impl ReactAgent {
             subagents,
             client: Arc::new(client),
             llm_config: None,
+            #[cfg(feature = "tasks")]
             task_manager,
+            #[cfg(feature = "human-loop")]
             human_in_loop,
+            #[cfg(feature = "human-loop")]
             approval_provider,
             skill_manager: SkillManager::new(),
             store,
             checkpointer,
+            #[cfg(feature = "mcp")]
             mcp_manager: McpManager::new(),
             guard_manager: None,
             permission_policy: None,
@@ -322,8 +347,14 @@ impl ReactAgent {
     }
 
     /// 获取已连接的 MCP 服务端名称列表
+    #[cfg(feature = "mcp")]
     pub fn mcp_server_names(&self) -> Vec<&str> {
         self.mcp_manager.server_names()
+    }
+
+    #[cfg(not(feature = "mcp"))]
+    pub fn mcp_server_names(&self) -> Vec<&str> {
+        vec![]
     }
 
     /// 设置护栏管理器
@@ -344,40 +375,19 @@ impl ReactAgent {
         self.audit_logger = Some(logger);
     }
 
+    #[cfg(feature = "human-loop")]
     /// 替换审批 Provider，支持在运行时切换审批渠道。
-    ///
-    /// 等同于 [`set_human_loop_provider`]，两者均会同步更新 `human_in_loop` 工具。
     pub fn set_approval_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
         self.set_human_loop_provider(provider);
     }
 
-    /// 设置人工介入 Provider（`set_approval_provider` 的别名）
+    #[cfg(feature = "human-loop")]
+    /// 设置人工介入 Provider
     ///
     /// 同时更新 `approval_provider`（工具审批 guard）和 `human_in_loop` 内置工具（LLM
-    /// 主动触发），保证两者始终指向同一个 provider，避免"新旧 provider 割裂"的问题。
-    ///
-    /// 推荐使用 [`HumanLoopManager`] 作为 provider，支持事件驱动模式：
-    ///
-    /// ```rust,no_run
-    /// use echo_agent::human_loop::{HumanLoopManager, HumanLoopEvent, ApprovalDecision};
-    /// use echo_agent::prelude::*;
-    /// use std::sync::Arc;
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() -> echo_agent::error::Result<()> {
-    /// let manager = Arc::new(HumanLoopManager::new());
-    ///
-    /// let config = AgentConfig::standard("qwen3-max", "assistant", "你是一个助手")
-    ///     .enable_human_in_loop(true);
-    /// let mut agent = ReactAgent::new(config);
-    /// // 调用后，HumanInLoop 工具与 approval_provider 均指向 manager
-    /// agent.set_human_loop_provider(manager);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// 主动触发），保证两者始终指向同一个 provider。
     pub fn set_human_loop_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
         self.approval_provider = provider.clone();
-        // 若 human_in_loop 工具已注册，用新 provider 重新注册，保持同步
         if self.tool_manager.get_tool("human_in_loop").is_some() {
             self.tool_manager
                 .register(Box::new(HumanInLoop::new(provider)));
@@ -387,20 +397,7 @@ impl ReactAgent {
 
 // ── LLM 每轮推理的输出类型 ────────────────────────────────────────────────────
 
-/// LLM 每轮推理的输出类型
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum StepType {
-    /// LLM 返回的纯文本响应（无工具调用时）
-    Thought(String),
-
-    /// LLM 发起的工具调用（一次响应可能包含多个，支持并行执行）
-    Call {
-        /// 工具调用唯一 ID，回传 observation 时需要匹配
-        tool_call_id: String,
-        function_name: String,
-        arguments: Value,
-    },
-}
+pub use echo_core::agent::StepType;
 
 // ── impl Agent for ReactAgent ────────────────────────────────────────────────
 
@@ -417,14 +414,13 @@ impl Agent for ReactAgent {
         &self.config.system_prompt
     }
 
-    /// 统一执行入口：`enable_task=true` 时自动路由到规划模式，否则直接执行
     fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
+            #[cfg(feature = "tasks")]
             if self.has_planning_tools() {
-                self.execute_with_planning(task).await
-            } else {
-                self.run_direct(task).await
+                return self.execute_with_planning(task).await;
             }
+            self.run_direct(task).await
         })
     }
 
@@ -477,15 +473,23 @@ impl Agent for ReactAgent {
     }
 
     fn mcp_server_names(&self) -> Vec<String> {
-        self.mcp_manager
-            .server_names()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect()
+        #[cfg(feature = "mcp")]
+        {
+            self.mcp_manager
+                .server_names()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            vec![]
+        }
     }
 
     fn close(&mut self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            #[cfg(feature = "mcp")]
             self.mcp_manager.close_all().await;
         })
     }

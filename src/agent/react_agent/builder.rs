@@ -4,6 +4,7 @@ use crate::agent::{AgentCallback, AgentConfig, AgentRole};
 use crate::audit::AuditLogger;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
+#[cfg(feature = "human-loop")]
 use crate::human_loop::HumanLoopProvider;
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient};
 use crate::memory::checkpointer::Checkpointer;
@@ -37,6 +38,7 @@ pub struct ReactAgentBuilder {
     store: Option<Arc<dyn Store>>,
     checkpointer: Option<Arc<dyn Checkpointer>>,
     session_id: Option<String>,
+    #[cfg(feature = "human-loop")]
     approval_provider: Option<Arc<dyn HumanLoopProvider>>,
     guards: Vec<Arc<dyn Guard>>,
     permission_policy: Option<Arc<dyn PermissionPolicy>>,
@@ -72,6 +74,7 @@ impl ReactAgentBuilder {
             store: None,
             checkpointer: None,
             session_id: None,
+            #[cfg(feature = "human-loop")]
             approval_provider: None,
             guards: Vec::new(),
             permission_policy: None,
@@ -289,6 +292,7 @@ impl ReactAgentBuilder {
         self
     }
 
+    #[cfg(feature = "human-loop")]
     /// 设置审批 Provider
     pub fn approval_provider(mut self, provider: Arc<dyn HumanLoopProvider>) -> Self {
         self.approval_provider = Some(provider);
@@ -366,7 +370,7 @@ impl ReactAgentBuilder {
             agent.set_checkpointer(checkpointer, session_id);
         }
 
-        // 设置审批 Provider
+        #[cfg(feature = "human-loop")]
         if let Some(provider) = self.approval_provider {
             agent.set_approval_provider(provider);
         }

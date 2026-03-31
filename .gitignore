@@ -2,5 +2,7 @@
 /.idea
 /.vscode
 /.classpath
+/.claude
 .env
 /Cargo.lock
+/echo-agent.yaml

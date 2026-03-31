@@ -65,9 +65,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // 查看审计记录
     println!("=== 审计记录 ===");
-    let events = audit_logger
-        .query(AuditFilter::default())
-        .await?;
+    let events = audit_logger.query(AuditFilter::default()).await?;
     for event in &events {
         println!(
             "[{}] {:?}",

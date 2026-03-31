@@ -164,11 +164,7 @@ impl HandoffManager {
     }
 
     /// 注册一个已包装为 Arc<Mutex<Box<dyn Agent>>> 的 Agent
-    pub fn register_shared(
-        &mut self,
-        name: impl Into<String>,
-        agent: Arc<Mutex<Box<dyn Agent>>>,
-    ) {
+    pub fn register_shared(&mut self, name: impl Into<String>, agent: Arc<Mutex<Box<dyn Agent>>>) {
         self.agents.insert(name.into(), agent);
     }
 
@@ -235,16 +231,9 @@ impl HandoffManager {
             let history_summary: Vec<String> = context
                 .messages
                 .iter()
-                .filter_map(|msg| {
-                    msg.content
-                        .as_ref()
-                        .map(|c| format!("{}: {}", msg.role, c))
-                })
+                .filter_map(|msg| msg.content.as_ref().map(|c| format!("{}: {}", msg.role, c)))
                 .collect();
-            prompt_parts.push(format!(
-                "[对话历史]\n{}",
-                history_summary.join("\n")
-            ));
+            prompt_parts.push(format!("[对话历史]\n{}", history_summary.join("\n")));
         }
 
         // 添加任务消息
@@ -336,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_handoff_manager_register() {
-        let mut manager = HandoffManager::new();
+        let manager = HandoffManager::new();
         assert!(manager.registered_agents().is_empty());
         assert!(!manager.has_agent("test"));
     }

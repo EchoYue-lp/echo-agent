@@ -78,9 +78,7 @@ impl Guard for LlmGuard {
                 return Ok(GuardResult::Pass);
             }
 
-            let user_message = format!(
-                "请审查以下 [{direction}] 内容：\n\n{content}"
-            );
+            let user_message = format!("请审查以下 [{direction}] 内容：\n\n{content}");
 
             let messages = vec![
                 crate::llm::types::Message::system(self.system_prompt.clone()),
@@ -121,10 +119,7 @@ fn parse_guard_response(response: &str) -> Result<GuardResult> {
         }
     } else {
         // 无法解析时默认放行并警告
-        tracing::warn!(
-            response = trimmed,
-            "LLM 护栏返回无法解析的响应，默认放行"
-        );
+        tracing::warn!(response = trimmed, "LLM 护栏返回无法解析的响应，默认放行");
         Ok(GuardResult::Warn {
             reason: "LLM 护栏返回格式异常".to_string(),
         })
@@ -143,8 +138,7 @@ mod tests {
 
     #[test]
     fn test_parse_blocked() {
-        let result =
-            parse_guard_response(r#"{"safe": false, "reason": "包含敏感信息"}"#).unwrap();
+        let result = parse_guard_response(r#"{"safe": false, "reason": "包含敏感信息"}"#).unwrap();
         assert!(result.is_blocked());
     }
 

@@ -261,6 +261,7 @@ impl CounterCallback {
         }
     }
 
+    #[allow(dead_code)]
     fn get_count(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
@@ -715,7 +716,7 @@ fn agent_tool_registration_isolation() {
     let config2 = AgentConfig::minimal("model", "agent2");
 
     let mut agent1 = ReactAgent::new(config1);
-    let mut agent2 = ReactAgent::new(config2);
+    let agent2 = ReactAgent::new(config2);
 
     // agent1 注册工具
     agent1.add_tool(Box::new(MockTool::new("tool1")));

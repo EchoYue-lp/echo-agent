@@ -27,7 +27,10 @@ impl InMemoryAuditLogger {
 
     /// 获取所有事件的快照
     pub fn snapshot(&self) -> Vec<AuditEvent> {
-        self.events.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.events
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// 事件数量

@@ -18,8 +18,8 @@
 //! ```
 
 use crate::error::Result;
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::TracerProvider;
 use tracing_subscriber::layer::SubscriberExt;
@@ -59,9 +59,10 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<()> {
 
     let provider = TracerProvider::builder()
         .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_resource(opentelemetry_sdk::Resource::new(vec![
-            KeyValue::new("service.name", config.service_name),
-        ]))
+        .with_resource(opentelemetry_sdk::Resource::new(vec![KeyValue::new(
+            "service.name",
+            config.service_name,
+        )]))
         .build();
 
     let tracer = provider.tracer("echo-agent");

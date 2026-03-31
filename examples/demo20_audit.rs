@@ -36,7 +36,10 @@ impl Tool for RunCommandTool {
         })
     }
 
-    fn execute(&self, params: ToolParameters) -> BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+    fn execute(
+        &self,
+        params: ToolParameters,
+    ) -> BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
         Box::pin(async move {
             let cmd = params
                 .get("command")
@@ -67,10 +70,11 @@ impl Tool for SafeTool {
         serde_json::json!({ "type": "object", "properties": {} })
     }
 
-    fn execute(&self, _params: ToolParameters) -> BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
-        Box::pin(async {
-            Ok(ToolResult::success("2026-03-31 12:00:00".to_string()))
-        })
+    fn execute(
+        &self,
+        _params: ToolParameters,
+    ) -> BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        Box::pin(async { Ok(ToolResult::success("2026-03-31 12:00:00".to_string())) })
     }
 }
 
@@ -86,11 +90,7 @@ async fn main() -> echo_agent::error::Result<()> {
     let audit_logger = Arc::new(InMemoryAuditLogger::new());
 
     // 创建审计回调（自动记录 tool 调用链）
-    let audit_cb = Arc::new(AuditCallback::new(
-        audit_logger.clone(),
-        "demo-agent",
-        None,
-    ));
+    let audit_cb = Arc::new(AuditCallback::new(audit_logger.clone(), "demo-agent", None));
 
     // 创建权限策略：只授予 Read 权限，Execute 需要审批
     let policy = Arc::new(

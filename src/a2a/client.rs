@@ -40,16 +40,16 @@ impl A2AClient {
     /// # }
     /// ```
     pub async fn discover(&self, base_url: &str) -> Result<AgentCard> {
-        let url = format!(
-            "{}/.well-known/agent.json",
-            base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/.well-known/agent.json", base_url.trim_end_matches('/'));
 
         info!(url = %url, "🔍 A2A: 发现远程 Agent");
 
-        let response = self.client.get(&url).send().await.map_err(|e| {
-            ReactError::Other(format!("A2A 发现请求失败: {}", e))
-        })?;
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ReactError::Other(format!("A2A 发现请求失败: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(ReactError::Other(format!(
@@ -58,9 +58,10 @@ impl A2AClient {
             )));
         }
 
-        let card: AgentCard = response.json().await.map_err(|e| {
-            ReactError::Other(format!("A2A Agent Card 解析失败: {}", e))
-        })?;
+        let card: AgentCard = response
+            .json()
+            .await
+            .map_err(|e| ReactError::Other(format!("A2A Agent Card 解析失败: {}", e)))?;
 
         info!(
             agent = %card.name,
@@ -90,11 +91,7 @@ impl A2AClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn send_task(
-        &self,
-        agent_url: &str,
-        message: &str,
-    ) -> Result<Option<A2ATask>> {
+    pub async fn send_task(&self, agent_url: &str, message: &str) -> Result<Option<A2ATask>> {
         self.send_task_with_session(agent_url, message, None).await
     }
 
@@ -151,11 +148,7 @@ impl A2AClient {
     }
 
     /// 查询远程任务状态
-    pub async fn get_task(
-        &self,
-        agent_url: &str,
-        task_id: &str,
-    ) -> Result<Option<A2ATask>> {
+    pub async fn get_task(&self, agent_url: &str, task_id: &str) -> Result<Option<A2ATask>> {
         let request = A2ATaskRequest {
             jsonrpc: "2.0".to_string(),
             id: uuid::Uuid::new_v4().to_string(),
@@ -184,11 +177,7 @@ impl A2AClient {
     }
 
     /// 取消远程任务
-    pub async fn cancel_task(
-        &self,
-        agent_url: &str,
-        task_id: &str,
-    ) -> Result<Option<A2ATask>> {
+    pub async fn cancel_task(&self, agent_url: &str, task_id: &str) -> Result<Option<A2ATask>> {
         let request = A2ATaskRequest {
             jsonrpc: "2.0".to_string(),
             id: uuid::Uuid::new_v4().to_string(),

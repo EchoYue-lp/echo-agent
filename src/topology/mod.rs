@@ -237,7 +237,9 @@ impl TopologyTracker {
                     NodeType::Tool => "🔧",
                 };
                 let shape = match node.node_type {
-                    NodeType::Orchestrator => format!("{}{{{{\"{}  {}\"}}}}",  node.id, icon, node.label),
+                    NodeType::Orchestrator => {
+                        format!("{}{{{{\"{}  {}\"}}}}", node.id, icon, node.label)
+                    }
                     NodeType::Tool => format!("{}[/\"{}  {}\"/]", node.id, icon, node.label),
                     NodeType::External => format!("{}((\"{}  {}\"))", node.id, icon, node.label),
                     _ => format!("{}[\"{}  {}\"]", node.id, icon, node.label),
@@ -263,10 +265,7 @@ impl TopologyTracker {
                 } else {
                     format!("x{}", edge.call_count)
                 };
-                lines.push(format!(
-                    "    {} -->|\"{}\"| {}",
-                    edge.from, label, edge.to
-                ));
+                lines.push(format!("    {} -->|\"{}\"| {}", edge.from, label, edge.to));
             }
         }
 

@@ -43,8 +43,8 @@ mod executor;
 mod planner;
 mod types;
 
-pub use executor::{Executor, ReactExecutor};
-pub use planner::{LlmPlanner, Planner};
+pub use executor::{Executor, ReactExecutor, SimpleExecutor};
+pub use planner::{LlmPlanner, Planner, StaticPlanner};
 pub use types::{Plan, PlanStep, StepResult, StepStatus};
 
 use crate::agent::{Agent, AgentEvent};
@@ -152,11 +152,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                 let context = self.build_step_context(&plan, idx, &all_results);
                 plan.steps[idx].status = StepStatus::Running;
 
-                match self
-                    .executor
-                    .execute_step(step_desc, &context)
-                    .await
-                {
+                match self.executor.execute_step(step_desc, &context).await {
                     Ok(output) => {
                         info!(
                             agent = %agent,

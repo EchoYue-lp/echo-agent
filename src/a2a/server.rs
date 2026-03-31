@@ -48,9 +48,8 @@ impl A2AServer {
 
     /// 返回 Agent Card 的 JSON 字符串
     pub fn agent_card_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(&self.card).map_err(|e| {
-            crate::error::ReactError::Other(format!("Agent Card 序列化失败: {}", e))
-        })
+        serde_json::to_string_pretty(&self.card)
+            .map_err(|e| crate::error::ReactError::Other(format!("Agent Card 序列化失败: {}", e)))
     }
 
     /// 处理 A2A JSON-RPC 请求

@@ -2,8 +2,8 @@
 
 use super::types::{Plan, PlanStep};
 use crate::error::Result;
-use crate::llm::{self, LlmConfig};
 use crate::llm::types::Message;
+use crate::llm::{self, LlmConfig};
 use futures::future::BoxFuture;
 use reqwest::Client;
 use std::sync::Arc;
@@ -107,8 +107,9 @@ impl LlmPlanner {
             })
             .map(|line| {
                 // 去除序号前缀
-                let cleaned = line
-                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == ' ');
+                let cleaned = line.trim_start_matches(|c: char| {
+                    c.is_ascii_digit() || c == '.' || c == '-' || c == ' '
+                });
                 PlanStep::new(if cleaned.is_empty() { line } else { cleaned })
             })
             .collect()

@@ -6,14 +6,13 @@
 //! cargo run --example demo21_handoff
 //! ```
 
+use echo_agent::advanced::*;
 use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     dotenv::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     println!("=== Handoff 示例：Agent 间控制权转移 ===\n");
 
@@ -40,8 +39,7 @@ async fn main() -> echo_agent::error::Result<()> {
     // ── 单次 Handoff ──────────────────────────────────────────
     println!("--- 1. 单次 Handoff ---");
 
-    let target = HandoffTarget::new("translator")
-        .with_message("请翻译：人工智能正在改变世界");
+    let target = HandoffTarget::new("translator").with_message("请翻译：人工智能正在改变世界");
 
     let context = HandoffContext::new()
         .with_source("orchestrator")

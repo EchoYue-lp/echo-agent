@@ -10,7 +10,9 @@ use super::ReactAgent;
 use crate::agent::Agent;
 use crate::compression::{ContextCompressor, ForceCompressStats};
 use crate::error::Result;
-use crate::mcp::config_loader::McpServerEntry;
+#[cfg(feature = "mcp")]
+use crate::mcp::McpServerEntry;
+#[cfg(feature = "mcp")]
 use crate::mcp::{McpClient, McpConfigFile, McpServerConfig};
 use crate::skills::external::{LoadSkillResourceTool, SkillLoader};
 use crate::skills::{Skill, SkillInfo};
@@ -48,24 +50,27 @@ impl ReactAgent {
 
     /// 注册需要人工审批的工具：执行前会在控制台弹出 y/n 确认
     pub fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>) {
-        if !self.config.enable_human_in_loop {
-            warn!(
-                agent = %self.config.agent_name,
-                tool = %tool.name(),
-                "⚠️ human_in_loop 能力已禁用，工具将注册但不会进入人工审批"
-            );
+        #[cfg(feature = "human-loop")]
+        if self.config.enable_human_in_loop {
+            let tool_name = tool.name().to_string();
             self.add_tool(tool);
+            self.human_in_loop
+                .write()
+                .map_err(|e| {
+                    warn!("human_in_loop lock poisoned: {}", e);
+                })
+                .map(|mut guard| guard.mark_need_approval(tool_name))
+                .ok();
             return;
         }
-        let tool_name = tool.name().to_string();
+        #[cfg(not(feature = "human-loop"))]
+        let _ = &self.config.enable_human_in_loop;
+        warn!(
+            agent = %self.config.agent_name,
+            tool = %tool.name(),
+            "⚠️ human_in_loop 能力已禁用，工具将注册但不会进入人工审批"
+        );
         self.add_tool(tool);
-        self.human_in_loop
-            .write()
-            .map_err(|e| {
-                warn!("human_in_loop lock poisoned: {}", e);
-            })
-            .map(|mut guard| guard.mark_need_approval(tool_name))
-            .ok();
     }
 
     // ── 上下文压缩 ────────────────────────────────────────────────────────────
@@ -384,10 +389,10 @@ impl ReactAgent {
     ///
     /// ```rust,no_run
     /// # async fn example() -> echo_agent::error::Result<()> {
+    /// use echo_agent::advanced::*;
     /// use echo_agent::mcp::McpManager;
     /// use echo_agent::prelude::*;
     ///
-    /// // 应用层管理 MCP 连接
     /// let mut mcp_manager = McpManager::new();
     /// let tools = mcp_manager.connect(
     ///     McpServerConfig::stdio("fs", "npx", vec![
@@ -395,12 +400,8 @@ impl ReactAgent {
     ///     ])
     /// ).await?;
     ///
-    /// // 将工具注入到 Agent
     /// let mut agent = ReactAgent::new(AgentConfig::standard("qwen3-max", "a1", "助手"));
     /// agent.register_mcp_tools(tools);
-    ///
-    /// // MCP 连接由应用层管理，可在 Agent 生命周期外关闭
-    /// // mcp_manager.close_all().await;
     /// # Ok(())
     /// # }
     /// ```
@@ -417,6 +418,7 @@ impl ReactAgent {
     ///
     /// ```rust,no_run
     /// # async fn example() -> echo_agent::error::Result<()> {
+    /// use echo_agent::advanced::*;
     /// use echo_agent::prelude::*;
     ///
     /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
@@ -431,6 +433,7 @@ impl ReactAgent {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "mcp")]
     pub async fn connect_mcp_from_config(
         &mut self,
         config: McpServerConfig,
@@ -456,33 +459,7 @@ impl ReactAgent {
         Ok(client.clone())
     }
 
-    /// 从 json MCP 配置连接单个 MCP 服务端，并将其工具自动注册到 Agent。
-    ///
-    /// - 将连接生命周期绑定到 Agent（Agent 释放时自动关闭）
-    /// - 返回 `Arc<McpClient>`，可进一步访问资源、提示词等
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::prelude::*;
-    ///
-    /// let name = "json_str";
-    ///
-    /// let config = r#"{
-    ///       "command": "npx",
-    ///       "args": ["-y", "@modelcontextprotocol/server-github"],
-    ///       "env": {
-    ///         "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_token_here"
-    ///       },
-    ///       "disabled": true
-    ///     }"#;
-    ///
-    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
-    /// let client = agent.connect_mcp_from_json(name, config).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    #[cfg(feature = "mcp")]
     pub async fn connect_mcp_from_json(
         &mut self,
         name: &str,
@@ -493,22 +470,7 @@ impl ReactAgent {
         self.connect_mcp_from_config(config).await
     }
 
-    /// 从 `mcp.json` / `mcp.yaml` 配置文件批量连接所有 MCP 服务端，并注册工具。
-    ///
-    /// 连接失败的服务端打印警告并跳过，不影响其他服务端。
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::prelude::*;
-    ///
-    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
-    /// let clients = agent.load_mcp_from_file("examples/mcp1.json").await?;
-    /// println!("已连接 {} 个 MCP 服务端", clients.len());
-    /// # Ok(())
-    /// # }
-    /// ```
+    #[cfg(feature = "mcp")]
     pub async fn load_mcp_from_file(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -533,19 +495,17 @@ impl ReactAgent {
         Ok(clients)
     }
 
-    /// 获取已连接的指定 MCP 服务端客户端
+    #[cfg(feature = "mcp")]
     pub fn mcp_client(&self, name: &str) -> Option<&Arc<McpClient>> {
         self.mcp_manager.get_client(name)
     }
 
-    /// 列出所有已连接的 MCP 服务端名称
+    #[cfg(feature = "mcp")]
     pub fn list_mcp_servers(&self) -> Vec<&str> {
         self.mcp_manager.server_names()
     }
 
-    /// 断开指定的 MCP 服务端连接
-    ///
-    /// 关闭连接并从管理器中移除。成功返回 true，服务端不存在返回 false。
+    #[cfg(feature = "mcp")]
     pub async fn disconnect_mcp(&mut self, name: &str) -> bool {
         self.mcp_manager.disconnect(name).await
     }

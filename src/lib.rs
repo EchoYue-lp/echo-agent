@@ -2,13 +2,15 @@
 //!
 //! 一个通用、易用、高性能的 Rust AI Agent 开发框架。
 //!
-//! ## 核心特性
+//! ## Workspace 结构
 //!
-//! - **ReAct 执行引擎**: 自动工具调用、多轮推理、流式输出
-//! - **工具系统**: 内置工具 + MCP 协议 + 自定义扩展
-//! - **双层记忆**: 会话持久化 + 长期 KV 存储
-//! - **上下文压缩**: 滑动窗口 / LLM 摘要 / 混合管道
-//! - **人工介入**: 审批 guard / 文本输入，支持多渠道
+//! | Crate | 职责 |
+//! |-------|------|
+//! | **echo-core** | 核心 trait 与类型（Tool、LlmClient、Agent、Guard、Error） |
+//! | **echo-macros** | 过程宏（`#[tool]`、`#[callback]`、`#[guard]`、`#[handler]` 等） |
+//! | **echo-providers** | LLM 客户端实现（OpenAI、Anthropic、Ollama） |
+//! | **echo-mcp** | MCP 协议客户端（stdio / SSE / HTTP） |
+//! | **echo-agent** | 主 crate —— 重新导出所有子 crate，并提供 Agent 引擎、记忆、技能等 |
 //!
 //! ## 快速开始
 //!
@@ -17,34 +19,32 @@
 //!
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
-//! // 创建 Agent
 //! let mut agent = ReactAgentBuilder::simple("qwen3-max", "你是一个有帮助的助手")?;
-//!
-//! // 执行对话
 //! let answer = agent.chat("你好！").await?;
 //! println!("Agent: {}", answer);
-//!
-//! // 重置对话
-//! agent.reset();
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ## 带工具的 Agent
+//! ## 使用宏快速构建
 //!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
+//! use echo_agent::{agent, tool};
+//!
+//! #[tool(name = "add", description = "两数相加")]
+//! async fn add(a: f64, b: f64) -> Result<ToolResult> {
+//!     Ok(ToolResult::success(format!("{}", a + b)))
+//! }
 //!
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
-//! let mut agent = ReactAgentBuilder::new()
-//!     .model("qwen3-max")
-//!     .system_prompt("你是一个助手，可以使用工具完成任务")
-//!     .enable_tools()
-//!     .build()?;
-//!
-//! // agent 会自动使用 final_answer 工具返回结果
-//! let answer = agent.chat("今天天气如何？").await?;
+//! let mut agent = agent! {
+//!     model: "qwen3-max",
+//!     system_prompt: "你是计算助手",
+//!     tools: [AddTool],
+//! }?;
+//! let answer = agent.execute("3 + 7 = ?").await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -54,65 +54,80 @@
 //! | 模块 | 能力 |
 //! |------|------|
 //! | [`agent`] | ReAct Agent 执行引擎 |
-//! | [`llm`] | LLM 客户端（OpenAI 兼容） |
+//! | [`llm`] | LLM 客户端（OpenAI / Anthropic / Ollama） |
 //! | [`tools`] | 工具系统（Tool trait、并发限流、超时重试） |
 //! | [`memory`] | 双层记忆（Checkpointer + Store） |
 //! | [`compression`] | 上下文压缩 |
 //! | [`human_loop`] | 人工介入（审批/输入） |
+//! | [`guard`] | 护栏系统（规则 / LLM 内容过滤） |
+//! | [`audit`] | 审计日志 |
 //! | [`skills`] | Skill 系统（Tool + Prompt 包） |
 //! | [`mcp`] | MCP 协议客户端 |
 //! | [`tasks`] | DAG 任务管理 |
+//! | [`handoff`] | Agent 间 Handoff |
+//! | [`plan_execute`] | Plan-and-Execute 引擎 |
+//! | [`a2a`] | A2A 协议 |
+//! | [`topology`] | Agent 拓扑可视化 |
+//! | [`telemetry`] | OpenTelemetry 追踪与指标 |
 //! | [`error`] | 统一错误类型 |
-//! | [`handoff`] | Agent 间 Handoff（控制权转移 + 上下文传递） |
-//! | [`plan_execute`] | Plan-and-Execute 引擎（Planner + Executor 分离） |
-//! | [`a2a`] | A2A 协议（Agent Card 发布 / 跨框架协作） |
-//! | [`topology`] | Agent 拓扑可视化（运行时调用关系图） |
-//!
 
-pub mod a2a;
+// ── 核心模块（始终编译） ─────────────────────────────────────────────────────
+
 pub mod agent;
 pub mod audit;
 pub mod compression;
 pub mod error;
 pub mod guard;
-pub mod handoff;
-pub mod human_loop;
 pub mod llm;
-pub mod mcp;
 pub mod memory;
-pub mod plan_execute;
 pub mod skills;
-pub mod tasks;
-pub mod telemetry;
 pub mod testing;
 pub mod tools;
+
+// ── 可选模块（feature-gated） ────────────────────────────────────────────────
+
+#[cfg(feature = "a2a")]
+pub mod a2a;
+#[cfg(feature = "handoff")]
+pub mod handoff;
+#[cfg(feature = "human-loop")]
+pub mod human_loop;
+#[cfg(feature = "mcp")]
+pub mod mcp;
+#[cfg(feature = "plan-execute")]
+pub mod plan_execute;
+#[cfg(feature = "tasks")]
+pub mod tasks;
+#[cfg(feature = "telemetry")]
+pub mod telemetry;
+#[cfg(feature = "topology")]
 pub mod topology;
 
-pub use echo_agent_macros::tool;
+// ── 声明式宏 ─────────────────────────────────────────────────────────────────
+
+mod macros;
+
+// ── 过程宏 re-export ─────────────────────────────────────────────────────────
+
+pub use echo_macros::{
+    audit_logger, callback, compressor, guard, handler, permission_policy, tool,
+};
+
+// ── Prelude ──────────────────────────────────────────────────────────────────
 
 /// 常用类型导出
 ///
-/// 包含最常用的类型，通过 `use echo_agent::prelude::*` 导入。
+/// 包含最常用的核心类型，通过 `use echo_agent::prelude::*` 导入。
 pub mod prelude {
+    // Agent
     pub use crate::agent::react_agent::ReactAgent;
     pub use crate::agent::react_agent::StepType;
     pub use crate::agent::{
         Agent, AgentBuilder, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
         ReactAgentBuilder,
     };
-    pub use crate::compression::compressor::{
-        DefaultSummaryPrompt, FnSummaryPrompt, HybridCompressor, SlidingWindowCompressor,
-        SummaryCompressor, SummaryPromptBuilder,
-    };
-    pub use crate::compression::{
-        CompressionInput, CompressionOutput, ContextCompressor, ContextManager, ForceCompressStats,
-    };
-    pub use crate::error::Result;
-    pub use crate::human_loop::{
-        ApprovalDecision, ApprovalResponder, ConsoleHumanLoopProvider, HumanLoopEvent,
-        HumanLoopHandler, HumanLoopManager, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
-        InputResponder, WebSocketHumanLoopProvider, WebhookHumanLoopProvider, dispatch_event,
-    };
+
+    // LLM
     pub use crate::llm::config::LlmProvider;
     pub use crate::llm::providers::{AnthropicClient, OllamaClient};
     pub use crate::llm::types::{Message, ToolCall};
@@ -120,56 +135,90 @@ pub mod prelude {
         ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient,
         ResponseFormat, ToolDefinition,
     };
-    pub use crate::mcp::types::McpTool;
-    pub use crate::mcp::{McpManager, McpServerConfig, TransportConfig};
-    pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
-    pub use crate::memory::embedder::{Embedder, HttpEmbedder};
-    pub use crate::memory::embedding_store::EmbeddingStore;
-    pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};
-    pub use crate::skills::{
-        Skill, SkillInfo, SkillManager,
-        builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
-        external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
-    };
-    pub use crate::testing::{FailingMockAgent, MockAgent, MockEmbedder, MockLlmClient, MockTool};
+
+    // Tools
     pub use crate::tools::builtin::think::ThinkTool;
     pub use crate::tools::permission::{
         DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
     };
     pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, TypedTool};
 
-    // Guard 护栏
+    // Compression
+    pub use crate::compression::compressor::{
+        DefaultSummaryPrompt, FnSummaryPrompt, HybridCompressor, SlidingWindowCompressor,
+        SummaryCompressor, SummaryPromptBuilder,
+    };
+    pub use crate::compression::{
+        CompressionInput, CompressionOutput, ContextCompressor, ContextManager, ForceCompressStats,
+    };
+
+    // Memory
+    pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
+    pub use crate::memory::embedder::{Embedder, HttpEmbedder};
+    pub use crate::memory::embedding_store::EmbeddingStore;
+    pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};
+
+    // Skills
+    pub use crate::skills::{
+        Skill, SkillInfo, SkillManager,
+        builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
+        external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
+    };
+
+    // Guard
     pub use crate::guard::llm::LlmGuard;
     pub use crate::guard::rule::{RuleGuard, RuleGuardBuilder};
     pub use crate::guard::{Guard, GuardDirection, GuardManager, GuardResult};
 
-    // 审计日志
+    // Audit
     pub use crate::audit::file::FileAuditLogger;
     pub use crate::audit::memory::InMemoryAuditLogger;
     pub use crate::audit::{AuditCallback, AuditEvent, AuditEventType, AuditFilter, AuditLogger};
 
-    // Telemetry
+    // Error
+    pub use crate::error::Result;
+
+    // Testing
+    pub use crate::testing::{FailingMockAgent, MockAgent, MockEmbedder, MockLlmClient, MockTool};
+}
+
+/// 进阶类型导出（可选模块的类型，需启用对应 feature）
+pub mod advanced {
+    #[cfg(feature = "human-loop")]
+    pub use crate::human_loop::{
+        ApprovalDecision, ApprovalResponder, ConsoleHumanLoopProvider, HumanLoopEvent,
+        HumanLoopHandler, HumanLoopManager, HumanLoopProvider, HumanLoopRequest, HumanLoopResponse,
+        InputResponder, WebSocketHumanLoopProvider, WebhookHumanLoopProvider, dispatch_event,
+    };
+
+    #[cfg(feature = "mcp")]
+    pub use crate::mcp::{McpManager, McpServerConfig, McpTool, TransportConfig};
+
+    #[cfg(feature = "telemetry")]
     pub use crate::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};
 
-    // Handoff
+    #[cfg(feature = "handoff")]
     pub use crate::handoff::{
         HandoffContext, HandoffManager, HandoffResult, HandoffTarget, HandoffTool,
     };
 
-    // Plan-and-Execute
+    #[cfg(feature = "plan-execute")]
     pub use crate::plan_execute::{
-        Executor, LlmPlanner, Plan, PlanExecuteAgent, PlanStep, Planner, ReactExecutor, StepResult,
-        StepStatus,
+        Executor, LlmPlanner, Plan, PlanExecuteAgent, PlanStep, Planner, ReactExecutor,
+        SimpleExecutor, StaticPlanner, StepResult, StepStatus,
     };
 
-    // A2A 协议
+    #[cfg(feature = "a2a")]
     pub use crate::a2a::{
         A2AClient, A2AServer, AgentCapabilities, AgentCard, AgentProvider, AgentSkill,
     };
 
-    // 拓扑可视化
+    #[cfg(feature = "topology")]
     pub use crate::topology::{
         NodeType, TopologyCallback, TopologyData, TopologyEdge, TopologyNode, TopologyStats,
         TopologyTracker,
     };
+
+    #[cfg(feature = "tasks")]
+    pub use crate::tasks::{Task, TaskManager, TaskStatus};
 }

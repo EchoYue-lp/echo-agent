@@ -12,9 +12,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     dotenv::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     println!("=== A2A 协议示例 ===\n");
 
@@ -82,7 +80,10 @@ async fn main() -> echo_agent::error::Result<()> {
         }
     });
 
-    println!("发送请求: {}", serde_json::to_string_pretty(&request).unwrap());
+    println!(
+        "发送请求: {}",
+        serde_json::to_string_pretty(&request).unwrap()
+    );
     let response = server.handle_request(&request.to_string()).await;
     println!("\n响应: {}\n", response);
 

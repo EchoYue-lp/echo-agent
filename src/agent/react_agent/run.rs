@@ -11,6 +11,7 @@ use super::{ReactAgent, StepType, TOOL_FINAL_ANSWER, is_retryable_llm_error};
 use crate::agent::AgentEvent;
 use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::guard::GuardDirection;
+#[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopRequest, HumanLoopResponse};
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
 use crate::llm::{chat, stream_chat};
@@ -34,10 +35,7 @@ pub(crate) enum StreamMode {
 }
 
 impl ReactAgent {
-    /// 统一的 RwLock 中毒处理：获取 human_in_loop 的读锁
-    ///
-    /// 当锁中毒时，统一返回 `AgentError::InitializationFailed` 错误。
-    /// 这确保了并发安全问题的一致处理。
+    #[cfg(feature = "human-loop")]
     fn get_approval_manager(
         &self,
     ) -> Result<std::sync::RwLockReadGuard<'_, crate::human_loop::HumanApprovalManager>> {
@@ -102,57 +100,68 @@ impl ReactAgent {
                         return Ok(format!("工具 {tool_name} 权限不足: {reason}"));
                     }
                     crate::tools::permission::PermissionDecision::RequireApproval => {
-                        info!(agent = %agent, tool = %tool_name, "🔐 权限要求人工审批");
-                        let req = HumanLoopRequest::approval(tool_name, input.clone());
-                        match self.approval_provider.request(req).await? {
-                            HumanLoopResponse::Approved => {
-                                info!(agent = %agent, tool = %tool_name, "✅ 权限审批通过");
+                        #[cfg(feature = "human-loop")]
+                        {
+                            info!(agent = %agent, tool = %tool_name, "🔐 权限要求人工审批");
+                            let req = HumanLoopRequest::approval(tool_name, input.clone());
+                            match self.approval_provider.request(req).await? {
+                                HumanLoopResponse::Approved => {
+                                    info!(agent = %agent, tool = %tool_name, "✅ 权限审批通过");
+                                }
+                                HumanLoopResponse::Rejected { reason } => {
+                                    warn!(agent = %agent, tool = %tool_name, "❌ 权限审批被拒绝");
+                                    return Ok(format!(
+                                        "工具 {tool_name} 权限审批被拒绝{}",
+                                        reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                                    ));
+                                }
+                                _ => {
+                                    return Ok(format!("工具 {tool_name} 权限审批超时或异常"));
+                                }
                             }
-                            HumanLoopResponse::Rejected { reason } => {
-                                warn!(agent = %agent, tool = %tool_name, "❌ 权限审批被拒绝");
-                                return Ok(format!(
-                                    "工具 {tool_name} 权限审批被拒绝{}",
-                                    reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
-                                ));
-                            }
-                            _ => {
-                                return Ok(format!("工具 {tool_name} 权限审批超时或异常"));
-                            }
+                        }
+                        #[cfg(not(feature = "human-loop"))]
+                        {
+                            warn!(agent = %agent, tool = %tool_name, "🔒 需要人工审批但 human-loop 未启用");
+                            return Ok(format!(
+                                "工具 {tool_name} 需要人工审批（human-loop 功能未启用）"
+                            ));
                         }
                     }
                 }
             }
         }
 
-        // 获取人工审批状态
-        // 保守策略：读取失败时返回错误（安全优先）
-        let needs_approval = {
-            let approval_manager = self.get_approval_manager()?;
-            approval_manager.needs_approval(tool_name)
-        };
+        #[cfg(feature = "human-loop")]
+        {
+            let needs_approval = {
+                let approval_manager = self.get_approval_manager()?;
+                approval_manager.needs_approval(tool_name)
+            };
 
-        if needs_approval {
-            warn!(agent = %agent, tool = %tool_name, "⚠️ 工具需要人工审批");
-            let req = HumanLoopRequest::approval(tool_name, input.clone());
-            match self.approval_provider.request(req).await? {
-                HumanLoopResponse::Approved => {
-                    info!(agent = %agent, tool = %tool_name, "✅ 用户批准执行工具");
-                }
-                HumanLoopResponse::Rejected { reason } => {
-                    warn!(agent = %agent, tool = %tool_name, reason = ?reason, "❌ 用户拒绝执行工具");
-                    return Ok(format!(
-                        "用户已拒绝执行工具 {}{}",
-                        tool_name,
-                        reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
-                    ));
-                }
-                HumanLoopResponse::Timeout => {
-                    warn!(agent = %agent, tool = %tool_name, "⏰ 审批超时，工具未执行");
-                    return Ok(format!("工具 {tool_name} 审批超时，已跳过执行"));
-                }
-                HumanLoopResponse::Text(_) => {
-                    warn!(agent = %agent, tool = %tool_name, "⚠️ 审批请求收到意外的 Text 响应，视为拒绝");
-                    return Ok(format!("工具 {tool_name} 审批异常，已跳过执行"));
+            if needs_approval {
+                warn!(agent = %agent, tool = %tool_name, "⚠️ 工具需要人工审批");
+                let req = HumanLoopRequest::approval(tool_name, input.clone());
+                match self.approval_provider.request(req).await? {
+                    HumanLoopResponse::Approved => {
+                        info!(agent = %agent, tool = %tool_name, "✅ 用户批准执行工具");
+                    }
+                    HumanLoopResponse::Rejected { reason } => {
+                        warn!(agent = %agent, tool = %tool_name, reason = ?reason, "❌ 用户拒绝执行工具");
+                        return Ok(format!(
+                            "用户已拒绝执行工具 {}{}",
+                            tool_name,
+                            reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                        ));
+                    }
+                    HumanLoopResponse::Timeout => {
+                        warn!(agent = %agent, tool = %tool_name, "⏰ 审批超时，工具未执行");
+                        return Ok(format!("工具 {tool_name} 审批超时，已跳过执行"));
+                    }
+                    HumanLoopResponse::Text(_) => {
+                        warn!(agent = %agent, tool = %tool_name, "⚠️ 审批请求收到意外的 Text 响应，视为拒绝");
+                        return Ok(format!("工具 {tool_name} 审批异常，已跳过执行"));
+                    }
                 }
             }
         }
@@ -353,14 +362,15 @@ impl ReactAgent {
             );
         }
 
-        // 检查是否有需要人工审批的工具
-        // 统一错误处理：RwLock 中毒时返回错误
+        #[cfg(feature = "human-loop")]
         let has_approval_tools = {
             let approval_manager = self.get_approval_manager()?;
             tool_calls
                 .iter()
                 .any(|(_, name, _)| approval_manager.needs_approval(name))
         };
+        #[cfg(not(feature = "human-loop"))]
+        let has_approval_tools = false;
 
         if has_approval_tools {
             info!(agent = %agent, "⚠️ 检测到需人工审批工具，切换为串行执行");

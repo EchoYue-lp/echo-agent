@@ -6,6 +6,7 @@
 //! cargo run --example demo24_topology
 //! ```
 
+use echo_agent::advanced::*;
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
@@ -27,13 +28,10 @@ async fn main() -> echo_agent::error::Result<()> {
             .with_label("数学计算 Agent")
             .with_metadata("model", "qwen3-max"),
     );
-    tracker.add_node(
-        TopologyNode::new("translator", NodeType::Worker)
-            .with_label("翻译 Agent"),
-    );
+    tracker.add_node(TopologyNode::new("translator", NodeType::Worker).with_label("翻译 Agent"));
     tracker.add_node(TopologyNode::new("calculator", NodeType::Tool));
-    tracker.add_node(TopologyNode::new("a2a_remote", NodeType::External)
-        .with_label("远程 A2A Agent"));
+    tracker
+        .add_node(TopologyNode::new("a2a_remote", NodeType::External).with_label("远程 A2A Agent"));
 
     // 记录调用关系
     tracker.record_call("orchestrator", "math_agent", "计算 100 的阶乘");

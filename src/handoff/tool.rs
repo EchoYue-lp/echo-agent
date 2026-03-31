@@ -72,9 +72,7 @@ impl Tool for HandoffTool {
             let message = params
                 .get("message")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    crate::error::ToolError::MissingParameter("message".to_string())
-                })?
+                .ok_or_else(|| crate::error::ToolError::MissingParameter("message".to_string()))?
                 .to_string();
 
             let transfer_history = params
@@ -108,10 +106,7 @@ impl Tool for HandoffTool {
                     "[Handoff 完成] Agent '{}' 返回:\n{}",
                     result.target_agent, result.output
                 ))),
-                Err(e) => Ok(ToolResult::error(format!(
-                    "Handoff 失败: {}",
-                    e
-                ))),
+                Err(e) => Ok(ToolResult::error(format!("Handoff 失败: {}", e))),
             }
         })
     }

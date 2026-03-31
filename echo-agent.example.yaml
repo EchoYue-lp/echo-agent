@@ -16,7 +16,7 @@ models:
   # ── 阿里云百炼（DashScope）──────────────────────────────────────────────
   qwen3-max:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
-    api_key: ${DASHSCOPE_API_KEY}
+    api_key: sk-c93346fdb1c84ab5ab3b416681a512a5
 
   # 使用 provider 快捷方式（等效于上面手动填 base_url）
   # qwen3-plus:
@@ -26,7 +26,7 @@ models:
   # ── DeepSeek ────────────────────────────────────────────────────────────
   deepseek-chat:
     provider: deepseek
-    api_key: ${DEEPSEEK_API_KEY}
+    api_key: sk-ca71ed0e3c214bb199212bf96b9d76ff
 
   # deepseek-reasoner:
   #   provider: deepseek

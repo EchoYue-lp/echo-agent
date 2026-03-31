@@ -1,7 +1,10 @@
 pub(crate) mod agent_dispatch;
 pub(crate) mod answer;
+#[cfg(feature = "human-loop")]
 pub(crate) mod human_in_loop;
 pub(crate) mod memory;
+#[cfg(feature = "tasks")]
 pub(crate) mod plan;
+#[cfg(feature = "tasks")]
 pub(crate) mod task;
 pub mod think;

@@ -50,11 +50,7 @@ impl Guard for RuleGuard {
             if let Some(max_len) = self.max_length {
                 if content.len() > max_len {
                     return Ok(GuardResult::Block {
-                        reason: format!(
-                            "内容长度 {} 超过限制 {}",
-                            content.len(),
-                            max_len
-                        ),
+                        reason: format!("内容长度 {} 超过限制 {}", content.len(), max_len),
                     });
                 }
             }

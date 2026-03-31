@@ -65,16 +65,11 @@ impl AgentCard {
     }
 
     /// 从已有的 Agent trait 对象自动生成 Agent Card
-    pub fn from_agent(
-        agent: &dyn crate::agent::Agent,
-        url: impl Into<String>,
-    ) -> Self {
+    pub fn from_agent(agent: &dyn crate::agent::Agent, url: impl Into<String>) -> Self {
         let skills: Vec<AgentSkill> = agent
             .tool_definitions()
             .into_iter()
-            .map(|td| {
-                AgentSkill::new(&td.function.name, &td.function.description)
-            })
+            .map(|td| AgentSkill::new(&td.function.name, &td.function.description))
             .collect();
 
         AgentCard {

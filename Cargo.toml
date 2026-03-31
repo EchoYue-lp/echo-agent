@@ -1,13 +1,28 @@
 [workspace]
-members = [".", "echo_agent_macros"]
+members = [".", "echo-core", "echo-macros", "echo-providers", "echo-mcp", "echo-cli"]
 
 [package]
 name = "echo_agent"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["full"]
+full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks"]
+a2a = []
+mcp = ["dep:echo_mcp"]
+telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+plan-execute = []
+human-loop = ["dep:tokio-tungstenite"]
+handoff = []
+topology = []
+tasks = []
+
 [dependencies]
-echo_agent_macros = { path = "echo_agent_macros" }
+echo_core = { path = "echo-core", features = ["reqwest"] }
+echo_macros = { path = "echo-macros" }
+echo_providers = { path = "echo-providers" }
+echo_mcp = { path = "echo-mcp", optional = true }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
@@ -20,13 +35,11 @@ futures = "0.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_yaml = "0.9"
-clap = { version = "4", features = ["derive", "env"] }
-rustyline = "14"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = { version = "0.24", optional = true }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
-opentelemetry = { version = "0.27", features = ["trace"] }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", features = ["tonic"] }
-tracing-opentelemetry = "0.28"
+opentelemetry = { version = "0.27", features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["tonic"], optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
