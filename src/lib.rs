@@ -81,6 +81,7 @@ pub mod error;
 pub mod guard;
 pub mod llm;
 pub mod memory;
+pub mod sandbox;
 pub mod skills;
 pub mod testing;
 pub mod tools;
@@ -180,6 +181,13 @@ pub mod prelude {
     pub use crate::audit::file::FileAuditLogger;
     pub use crate::audit::memory::InMemoryAuditLogger;
     pub use crate::audit::{AuditCallback, AuditEvent, AuditEventType, AuditFilter, AuditLogger};
+
+    // Sandbox
+    pub use crate::sandbox::{
+        DockerSandbox, ExecutionResult as SandboxResult, IsolationLevel, K8sSandbox, LocalSandbox,
+        ResourceLimits, SandboxCommand, SandboxExecutor, SandboxManager, SandboxPolicy,
+        SecurityLevel,
+    };
 
     // Error
     pub use crate::error::Result;

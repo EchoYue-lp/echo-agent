@@ -21,6 +21,8 @@ pub enum ReactError {
     Mcp(McpError),
     /// 记忆系统错误
     Memory(MemoryError),
+    /// 沙箱错误
+    Sandbox(SandboxError),
     /// IO 错误
     Io(std::io::Error),
     /// 其他错误
@@ -87,6 +89,23 @@ pub enum McpError {
     TransportClosed,
 }
 
+/// 沙箱错误
+#[derive(Debug)]
+pub enum SandboxError {
+    /// 沙箱不可用（未安装 Docker、无 K8s 集群等）
+    Unavailable(String),
+    /// 沙箱启动失败
+    StartFailed(String),
+    /// 执行超时
+    Timeout(String),
+    /// 资源限制超出
+    ResourceExceeded(String),
+    /// 权限被拒绝
+    PermissionDenied(String),
+    /// IO 错误
+    IoError(String),
+}
+
 /// 配置错误
 #[derive(Debug)]
 pub enum ConfigError {
@@ -110,6 +129,7 @@ impl fmt::Display for ReactError {
             ReactError::Config(e) => write!(f, "Config Error: {}", e),
             ReactError::Mcp(e) => write!(f, "MCP Error: {}", e),
             ReactError::Memory(e) => write!(f, "Memory Error: {}", e),
+            ReactError::Sandbox(e) => write!(f, "Sandbox Error: {}", e),
             ReactError::Io(e) => write!(f, "IO Error: {}", e),
             ReactError::Other(msg) => write!(f, "Error: {}", msg),
         }
@@ -135,6 +155,19 @@ impl fmt::Display for McpError {
             McpError::ProtocolError(msg) => write!(f, "Protocol error: {}", msg),
             McpError::ToolCallFailed(msg) => write!(f, "Tool call failed: {}", msg),
             McpError::TransportClosed => write!(f, "MCP transport closed unexpectedly"),
+        }
+    }
+}
+
+impl fmt::Display for SandboxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SandboxError::Unavailable(msg) => write!(f, "Sandbox unavailable: {}", msg),
+            SandboxError::StartFailed(msg) => write!(f, "Sandbox start failed: {}", msg),
+            SandboxError::Timeout(msg) => write!(f, "Sandbox timeout: {}", msg),
+            SandboxError::ResourceExceeded(msg) => write!(f, "Resource exceeded: {}", msg),
+            SandboxError::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
+            SandboxError::IoError(msg) => write!(f, "IO error: {}", msg),
         }
     }
 }
@@ -233,6 +266,7 @@ impl std::error::Error for ReactError {
             ReactError::Config(e) => Some(e),
             ReactError::Mcp(e) => Some(e),
             ReactError::Memory(e) => Some(e),
+            ReactError::Sandbox(e) => Some(e),
             ReactError::Io(e) => Some(e),
             ReactError::Other(_) => None,
         }
@@ -246,6 +280,7 @@ impl std::error::Error for AgentError {}
 impl std::error::Error for ConfigError {}
 impl std::error::Error for McpError {}
 impl std::error::Error for MemoryError {}
+impl std::error::Error for SandboxError {}
 
 // ── From 转换实现 ─────────────────────────────────────────────────────────────
 
@@ -316,6 +351,12 @@ impl From<McpError> for ReactError {
 impl From<MemoryError> for ReactError {
     fn from(err: MemoryError) -> Self {
         ReactError::Memory(err)
+    }
+}
+
+impl From<SandboxError> for ReactError {
+    fn from(err: SandboxError) -> Self {
+        ReactError::Sandbox(err)
     }
 }
 
