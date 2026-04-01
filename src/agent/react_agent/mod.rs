@@ -20,6 +20,7 @@ use crate::llm::config::LlmConfig;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
 use crate::memory::checkpointer::{Checkpointer, FileCheckpointer};
+use crate::memory::snapshot::{SnapshotManager, StateSnapshot};
 use crate::memory::store::{FileStore, Store};
 use crate::skills::SkillManager;
 #[cfg(feature = "tasks")]
@@ -98,6 +99,8 @@ pub struct ReactAgent {
     pub(crate) permission_policy: Option<Arc<dyn crate::tools::permission::PermissionPolicy>>,
     /// 审计日志记录器
     pub(crate) audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
+    /// 状态快照管理器，支持每轮迭代自动快照和回滚
+    pub(crate) snapshot_manager: Option<SnapshotManager>,
 }
 
 // ── 构造与初始化 ──────────────────────────────────────────────────────────────
@@ -225,6 +228,7 @@ impl ReactAgent {
             guard_manager: None,
             permission_policy: None,
             audit_logger: None,
+            snapshot_manager: None,
         }
     }
 
@@ -373,6 +377,63 @@ impl ReactAgent {
     /// 设置审计日志记录器
     pub fn set_audit_logger(&mut self, logger: Arc<dyn crate::audit::AuditLogger>) {
         self.audit_logger = Some(logger);
+    }
+
+    // ── 快照 & 回滚 ──────────────────────────────────────────────────────────
+
+    /// 启用状态快照功能
+    pub fn set_snapshot_manager(&mut self, manager: SnapshotManager) {
+        self.snapshot_manager = Some(manager);
+    }
+
+    /// 手动捕获一份当前对话状态的快照，返回快照 ID
+    pub fn snapshot(&mut self) -> Option<String> {
+        let messages = self.context.messages();
+        self.snapshot_manager
+            .as_mut()
+            .map(|mgr| mgr.capture(0, messages))
+    }
+
+    /// 回滚到 N 步之前的快照
+    ///
+    /// `steps_back = 1` 表示回到最近一次快照。
+    /// 成功时恢复对话历史并返回快照信息。
+    pub fn rollback(&mut self, steps_back: usize) -> Option<StateSnapshot> {
+        let snapshot = self
+            .snapshot_manager
+            .as_mut()
+            .and_then(|mgr| mgr.rollback(steps_back))?;
+        self.context.clear();
+        for msg in &snapshot.messages {
+            self.context.push(msg.clone());
+        }
+        Some(snapshot)
+    }
+
+    /// 回滚到指定 ID 的快照
+    pub fn rollback_to(&mut self, snapshot_id: &str) -> Option<StateSnapshot> {
+        let snapshot = self
+            .snapshot_manager
+            .as_mut()
+            .and_then(|mgr| mgr.rollback_to(snapshot_id))?;
+        self.context.clear();
+        for msg in &snapshot.messages {
+            self.context.push(msg.clone());
+        }
+        Some(snapshot)
+    }
+
+    /// 获取所有快照列表
+    pub fn snapshots(&self) -> &[StateSnapshot] {
+        self.snapshot_manager
+            .as_ref()
+            .map(|mgr| mgr.list())
+            .unwrap_or(&[])
+    }
+
+    /// 获取最新快照
+    pub fn latest_snapshot(&self) -> Option<&StateSnapshot> {
+        self.snapshot_manager.as_ref().and_then(|mgr| mgr.latest())
     }
 
     #[cfg(feature = "human-loop")]

@@ -68,6 +68,7 @@
 //! | [`plan_execute`] | Plan-and-Execute 引擎 |
 //! | [`a2a`] | A2A 协议 |
 //! | [`topology`] | Agent 拓扑可视化 |
+//! | [`workflow`] | 通用 Workflow / Pipeline（Sequential / Concurrent / DAG） |
 //! | [`telemetry`] | OpenTelemetry 追踪与指标 |
 //! | [`error`] | 统一错误类型 |
 
@@ -102,6 +103,8 @@ pub mod tasks;
 pub mod telemetry;
 #[cfg(feature = "topology")]
 pub mod topology;
+#[cfg(feature = "workflow")]
+pub mod workflow;
 
 // ── 声明式宏 ─────────────────────────────────────────────────────────────────
 
@@ -156,6 +159,7 @@ pub mod prelude {
     pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
     pub use crate::memory::embedder::{Embedder, HttpEmbedder};
     pub use crate::memory::embedding_store::EmbeddingStore;
+    pub use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
     #[cfg(feature = "sqlite")]
     pub use crate::memory::SqliteStore;
     pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};
@@ -223,4 +227,10 @@ pub mod advanced {
 
     #[cfg(feature = "tasks")]
     pub use crate::tasks::{Task, TaskManager, TaskStatus};
+
+    #[cfg(feature = "workflow")]
+    pub use crate::workflow::{
+        ConcurrentWorkflow, DagWorkflow, SequentialWorkflow, SharedAgent, StepOutput, Workflow,
+        WorkflowOutput, shared_agent,
+    };
 }

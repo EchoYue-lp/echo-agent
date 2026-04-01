@@ -8,6 +8,7 @@ use crate::guard::{Guard, GuardManager};
 use crate::human_loop::HumanLoopProvider;
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient};
 use crate::memory::checkpointer::Checkpointer;
+use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
 use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
 use crate::tools::Tool;
@@ -43,6 +44,8 @@ pub struct ReactAgentBuilder {
     guards: Vec<Arc<dyn Guard>>,
     permission_policy: Option<Arc<dyn PermissionPolicy>>,
     audit_logger: Option<Arc<dyn AuditLogger>>,
+    snapshot_policy: Option<SnapshotPolicy>,
+    max_snapshots: usize,
 }
 
 impl Default for ReactAgentBuilder {
@@ -79,6 +82,8 @@ impl ReactAgentBuilder {
             guards: Vec::new(),
             permission_policy: None,
             audit_logger: None,
+            snapshot_policy: None,
+            max_snapshots: 10,
         }
     }
 
@@ -325,6 +330,23 @@ impl ReactAgentBuilder {
         self
     }
 
+    // ── 快照配置 ────────────────────────────────────────────────────────────────
+
+    /// 设置快照策略，启用状态快照功能
+    ///
+    /// 启用后，ReAct 循环的每轮迭代可自动捕获对话历史快照，
+    /// 异常时可通过 `agent.rollback(n)` 回滚到之前的 known-good 状态。
+    pub fn snapshot_policy(mut self, policy: SnapshotPolicy) -> Self {
+        self.snapshot_policy = Some(policy);
+        self
+    }
+
+    /// 设置最大快照保留数量（默认 10）
+    pub fn max_snapshots(mut self, max: usize) -> Self {
+        self.max_snapshots = max;
+        self
+    }
+
     // ── 构建 ────────────────────────────────────────────────────────────────────
 
     /// 构建 ReAct Agent（内部方法）
@@ -388,6 +410,11 @@ impl ReactAgentBuilder {
         // 设置审计日志
         if let Some(logger) = self.audit_logger {
             agent.set_audit_logger(logger);
+        }
+
+        // 设置快照管理器
+        if let Some(policy) = self.snapshot_policy {
+            agent.set_snapshot_manager(SnapshotManager::new(policy, self.max_snapshots));
         }
 
         Ok(agent)

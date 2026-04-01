@@ -47,6 +47,29 @@ impl ReactAgent {
         })
     }
 
+    /// 根据快照策略自动捕获状态快照
+    pub(crate) fn auto_snapshot(&mut self, iteration: usize) {
+        let should = self
+            .snapshot_manager
+            .as_ref()
+            .is_some_and(|mgr| mgr.should_capture(iteration));
+
+        if should {
+            let messages = self.context.messages();
+            let id = self
+                .snapshot_manager
+                .as_mut()
+                .unwrap()
+                .capture(iteration, messages);
+            debug!(
+                agent = %self.config.agent_name,
+                iteration = iteration,
+                snapshot_id = %id,
+                "📸 自动快照已捕获"
+            );
+        }
+    }
+
     /// 重置消息历史，仅保留 system prompt，确保每次执行互不干扰
     pub(crate) fn reset_messages(&mut self) {
         self.context.clear();
@@ -573,6 +596,9 @@ impl ReactAgent {
                     }
                 }
 
+                // 最终快照
+                self.auto_snapshot(iteration);
+
                 for cb in &callbacks {
                     cb.on_final_answer(&agent, &answer).await;
                 }
@@ -593,6 +619,9 @@ impl ReactAgent {
 
                 return Ok(answer);
             }
+
+            // 迭代中间快照（尚未产生最终答案）
+            self.auto_snapshot(iteration);
         }
 
         warn!(agent = %agent, max = self.config.max_iterations, "达到最大迭代次数");
