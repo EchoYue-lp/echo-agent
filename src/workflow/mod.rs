@@ -1,6 +1,19 @@
-//! 通用 Workflow / Pipeline 抽象
+//! 图工作流引擎 + 通用 Workflow / Pipeline
 //!
-//! 提供三种编排模式，将多个 [`Agent`](crate::agent::Agent) 组合为可复用的执行管道：
+//! 提供两套编排能力：
+//!
+//! ## 1. Graph 工作流（对标 LangGraph）
+//!
+//! 将 Agent 执行建模为**有向图 + 共享状态**，支持：
+//! - 线性管道、条件分支、循环、并行 fan-out/fan-in
+//!
+//! | 概念 | 类型 | 说明 |
+//! |------|------|------|
+//! | 状态 | [`SharedState`] | 节点间共享的 KV store + 结构化消息历史 |
+//! | 图 | [`Graph`] | 编译后的不可变工作流 |
+//! | 构建器 | [`GraphBuilder`] | 链式 API 构建图 |
+//!
+//! ## 2. Pipeline 工作流（Sequential / Concurrent / DAG）
 //!
 //! | 类型 | 说明 |
 //! |------|------|
@@ -8,23 +21,40 @@
 //! | [`ConcurrentWorkflow`] | 并发管道，所有 Agent 并行执行后合并结果 |
 //! | [`DagWorkflow`] | DAG 管道，按拓扑序执行，独立节点自动并发 |
 //!
-//! # 快速上手
+//! ## 快速上手
 //!
 //! ```rust,no_run
-//! use echo_agent::prelude::*;
-//! use echo_agent::workflow::{SequentialWorkflow, ConcurrentWorkflow};
+//! use echo_agent::workflow::{GraphBuilder, SharedState};
 //!
-//! # fn example() -> echo_agent::error::Result<()> {
-//! let agent_a = ReactAgentBuilder::simple("qwen3-max", "你是翻译")?;
-//! let agent_b = ReactAgentBuilder::simple("qwen3-max", "你是校对")?;
+//! # async fn example() -> echo_agent::error::Result<()> {
+//! let graph = GraphBuilder::new("my_flow")
+//!     .add_function_node("greet", |state| Box::pin(async move {
+//!         let name: String = state.get("name").unwrap_or_else(|| "World".to_string());
+//!         state.set("greeting", format!("Hello, {name}!"));
+//!         Ok(())
+//!     }))
+//!     .set_entry("greet")
+//!     .add_edge("greet", "__end__")
+//!     .build()?;
 //!
-//! let mut wf = SequentialWorkflow::builder()
-//!     .step(agent_a)
-//!     .step(agent_b)
-//!     .build();
+//! let state = SharedState::new();
+//! state.set("name", "Echo");
+//! let result = graph.run(state).await?;
+//! assert_eq!(result.state.get::<String>("greeting"), Some("Hello, Echo!".to_string()));
 //! # Ok(())
 //! # }
 //! ```
+
+// ── Graph 工作流 ────────────────────────────────────────────────────────────
+
+mod graph;
+mod node;
+pub mod state;
+
+pub use graph::{Graph, GraphBuilder, GraphResult};
+pub use state::SharedState;
+
+// ── Pipeline 工作流 ─────────────────────────────────────────────────────────
 
 mod concurrent;
 mod dag;

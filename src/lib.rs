@@ -68,7 +68,7 @@
 //! | [`plan_execute`] | Plan-and-Execute 引擎 |
 //! | [`a2a`] | A2A 协议 |
 //! | [`topology`] | Agent 拓扑可视化 |
-//! | [`workflow`] | 通用 Workflow / Pipeline（Sequential / Concurrent / DAG） |
+//! | [`workflow`] | 图工作流引擎（Graph + SharedState + Sequential/Concurrent/DAG） |
 //! | [`telemetry`] | OpenTelemetry 追踪与指标 |
 //! | [`error`] | 统一错误类型 |
 
@@ -85,6 +85,7 @@ pub mod sandbox;
 pub mod skills;
 pub mod testing;
 pub mod tools;
+pub mod workflow;
 
 // ── 可选模块（feature-gated） ────────────────────────────────────────────────
 
@@ -104,8 +105,6 @@ pub mod tasks;
 pub mod telemetry;
 #[cfg(feature = "topology")]
 pub mod topology;
-#[cfg(feature = "workflow")]
-pub mod workflow;
 
 // ── 声明式宏 ─────────────────────────────────────────────────────────────────
 
@@ -185,6 +184,12 @@ pub mod prelude {
     pub use crate::audit::memory::InMemoryAuditLogger;
     pub use crate::audit::{AuditCallback, AuditEvent, AuditEventType, AuditFilter, AuditLogger};
 
+    // Workflow
+    pub use crate::workflow::{
+        ConcurrentWorkflow, DagWorkflow, Graph, GraphBuilder, GraphResult, SequentialWorkflow,
+        SharedAgent, SharedState, StepOutput, Workflow, WorkflowOutput, shared_agent,
+    };
+
     // Sandbox
     pub use crate::sandbox::{
         DockerSandbox, ExecutionResult as SandboxResult, IsolationLevel, K8sSandbox, LocalSandbox,
@@ -239,10 +244,4 @@ pub mod advanced {
 
     #[cfg(feature = "tasks")]
     pub use crate::tasks::{Task, TaskManager, TaskStatus};
-
-    #[cfg(feature = "workflow")]
-    pub use crate::workflow::{
-        ConcurrentWorkflow, DagWorkflow, SequentialWorkflow, SharedAgent, StepOutput, Workflow,
-        WorkflowOutput, shared_agent,
-    };
 }
