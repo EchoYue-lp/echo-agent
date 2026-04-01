@@ -108,10 +108,13 @@ impl LlmConfig {
     /// 从配置文件或环境变量加载指定模型的配置
     ///
     /// 查找顺序：YAML 配置文件 → 环境变量（`AGENT_MODEL_*`）
+    ///
+    /// 自动识别 provider 类型：如果配置中指定了 `provider` 字段则直接使用，
+    /// 否则根据 `base_url` 自动推断（Anthropic / Ollama / OpenAI 兼容）。
     pub fn from_model(model_name: &str) -> Result<Self> {
         let config = Config::get_model(model_name)?;
         Ok(Self {
-            provider: LlmProvider::OpenAi,
+            provider: config.provider,
             base_url: config.baseurl,
             api_key: config.apikey,
             model: config.model,
@@ -211,7 +214,116 @@ impl LlmConfig {
             model: self.model.clone(),
             baseurl: self.base_url.clone(),
             apikey: self.api_key.clone(),
+            provider: self.provider.clone(),
         }
+    }
+}
+
+// ── ProviderFactory ─────────────────────────────────────────────────────────
+
+/// Provider 工厂：通过配置字符串自动实例化 LLM 客户端
+///
+/// 支持三种配置方式：
+///
+/// 1. **模型名称**：从配置文件/环境变量加载（如 `"qwen3-max"`）
+/// 2. **Provider:Model 格式**：自动匹配内置 Provider（如 `"anthropic:claude-sonnet-4-6"`、`"ollama:llama3"`）
+/// 3. **完整 LlmConfig**：手动构造配置后调用 `from_config()`
+///
+/// # 示例
+///
+/// ```rust,no_run
+/// use echo_providers::ProviderFactory;
+/// use echo_core::error::Result;
+///
+/// # fn example() -> Result<()> {
+/// // 方式一：从配置文件加载
+/// let client = ProviderFactory::create("qwen3-max")?;
+///
+/// // 方式二：Provider:Model 简写
+/// let client = ProviderFactory::create("anthropic:claude-sonnet-4-6")?;
+/// let client = ProviderFactory::create("ollama:llama3")?;
+/// let client = ProviderFactory::create("deepseek:deepseek-chat")?;
+///
+/// // 方式三：从已有配置构建
+/// use echo_providers::LlmConfig;
+/// let config = LlmConfig::anthropic("sk-ant-...", "claude-sonnet-4-6");
+/// let client = ProviderFactory::from_config(&config)?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct ProviderFactory;
+
+impl ProviderFactory {
+    /// 通过配置字符串自动创建 LLM 客户端
+    ///
+    /// 解析规则：
+    /// - 含 `:` 分隔符 → 解析为 `provider:model`，自动填充 base_url，API key 从环境变量获取
+    /// - 不含 `:` → 视为模型名称，从配置文件/环境变量加载完整配置
+    pub fn create(config_str: &str) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+        if let Some((provider_name, model_name)) = config_str.split_once(':') {
+            Self::from_provider_model(provider_name.trim(), model_name.trim())
+        } else {
+            let config = LlmConfig::from_model(config_str)?;
+            config.build_client()
+        }
+    }
+
+    /// 从 `LlmConfig` 构建客户端
+    pub fn from_config(config: &LlmConfig) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+        config.build_client()
+    }
+
+    /// 从 provider 名称 + 模型名称自动构建
+    ///
+    /// API key 从对应的环境变量读取：
+    /// - `anthropic` → `ANTHROPIC_API_KEY`
+    /// - `openai` → `OPENAI_API_KEY`
+    /// - `deepseek` → `DEEPSEEK_API_KEY`
+    /// - `dashscope`/`qwen` → `DASHSCOPE_API_KEY`
+    /// - `moonshot` → `MOONSHOT_API_KEY`
+    /// - `zhipu` → `ZHIPU_API_KEY`
+    /// - `ollama` → 无需 API key
+    fn from_provider_model(provider: &str, model: &str) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+        let base_url = provider_base_url(provider).ok_or_else(|| {
+            ReactError::Config(ConfigError::ConfigFileError(format!(
+                "未知的 provider: '{provider}'，\
+                 支持: openai, anthropic, deepseek, dashscope, moonshot, zhipu, ollama"
+            )))
+        })?;
+
+        let api_key = Self::env_api_key(provider);
+        let llm_provider = parse_provider(provider);
+
+        let config = LlmConfig {
+            provider: llm_provider,
+            base_url: base_url.to_string(),
+            api_key,
+            model: model.to_string(),
+        };
+        config.build_client()
+    }
+
+    /// 根据 provider 名称获取对应的环境变量 API key
+    fn env_api_key(provider: &str) -> String {
+        let env_var = match provider.to_lowercase().as_str() {
+            "anthropic" => "ANTHROPIC_API_KEY",
+            "openai" => "OPENAI_API_KEY",
+            "deepseek" => "DEEPSEEK_API_KEY",
+            "dashscope" | "qwen" | "aliyun" => "DASHSCOPE_API_KEY",
+            "moonshot" | "kimi" => "MOONSHOT_API_KEY",
+            "zhipu" | "glm" => "ZHIPU_API_KEY",
+            "ollama" => return String::new(),
+            _ => return String::new(),
+        };
+        std::env::var(env_var).unwrap_or_default()
+    }
+
+    /// 列出所有支持的 provider 名称
+    pub fn supported_providers() -> &'static [&'static str] {
+        &[
+            "openai", "anthropic", "deepseek", "dashscope", "qwen",
+            "moonshot", "kimi", "zhipu", "glm", "ollama",
+        ]
     }
 }
 
@@ -230,6 +342,28 @@ fn provider_base_url(provider: &str) -> Option<&'static str> {
         "zhipu" | "glm" => Some("https://open.bigmodel.cn/api/paas/v4/chat/completions"),
         "ollama" => Some("http://localhost:11434/v1/chat/completions"),
         _ => None,
+    }
+}
+
+/// 从 provider 字符串解析 [`LlmProvider`] 枚举
+fn parse_provider(provider: &str) -> LlmProvider {
+    match provider.to_lowercase().as_str() {
+        "anthropic" => LlmProvider::Anthropic,
+        "ollama" => LlmProvider::Ollama,
+        // OpenAI 兼容类（openai、deepseek、dashscope 等）统一走 OpenAI 实现
+        _ => LlmProvider::OpenAi,
+    }
+}
+
+/// 根据 base_url 自动推断 [`LlmProvider`]
+fn detect_provider_from_url(url: &str) -> LlmProvider {
+    let lower = url.to_lowercase();
+    if lower.contains("anthropic.com") {
+        LlmProvider::Anthropic
+    } else if lower.contains("localhost:11434") || lower.contains("ollama") {
+        LlmProvider::Ollama
+    } else {
+        LlmProvider::OpenAi
     }
 }
 
@@ -268,6 +402,9 @@ pub struct ModelConfig {
     pub baseurl: String,
     /// API 密钥
     pub apikey: String,
+    /// LLM 供应商类型（用于自动选择客户端实现）
+    #[serde(default)]
+    pub provider: LlmProvider,
 }
 
 /// 全局配置，持有所有已加载的模型配置表
@@ -377,10 +514,17 @@ impl Config {
                 .map(resolve_env_ref)
                 .unwrap_or_else(|| key.clone());
 
+            // 确定 provider：显式指定 > 从 base_url 推断
+            let provider = match entry.provider.as_deref() {
+                Some(p) => parse_provider(&resolve_env_ref(p)),
+                None => detect_provider_from_url(&base_url),
+            };
+
             let mc = ModelConfig {
                 model: model_name.clone(),
                 baseurl: base_url,
                 apikey: api_key,
+                provider,
             };
 
             // 同时注册 key 和 model_name，方便按任意名称查找
@@ -444,12 +588,14 @@ impl Config {
                 .ok_or_else(|| ConfigError::MissingConfig(model_id.clone(), "apikey".to_string()))?
                 .clone();
 
+            let provider = detect_provider_from_url(&baseurl);
             models.insert(
                 model.to_string(),
                 ModelConfig {
                     model,
                     baseurl,
                     apikey,
+                    provider,
                 },
             );
         }
@@ -635,5 +781,80 @@ models:
         assert_eq!(mc.model, "model-1");
         assert_eq!(mc.baseurl, "https://example.com");
         assert_eq!(mc.apikey, "sk-test");
+        assert_eq!(mc.provider, LlmProvider::OpenAi);
+    }
+
+    #[test]
+    fn test_to_model_config_anthropic() {
+        let config = LlmConfig::anthropic("sk-ant-test", "claude-sonnet-4-6");
+        let mc = config.to_model_config();
+        assert_eq!(mc.provider, LlmProvider::Anthropic);
+    }
+
+    #[test]
+    fn test_parse_provider() {
+        assert_eq!(parse_provider("anthropic"), LlmProvider::Anthropic);
+        assert_eq!(parse_provider("Anthropic"), LlmProvider::Anthropic);
+        assert_eq!(parse_provider("ollama"), LlmProvider::Ollama);
+        assert_eq!(parse_provider("openai"), LlmProvider::OpenAi);
+        assert_eq!(parse_provider("deepseek"), LlmProvider::OpenAi);
+        assert_eq!(parse_provider("unknown"), LlmProvider::OpenAi);
+    }
+
+    #[test]
+    fn test_detect_provider_from_url() {
+        assert_eq!(
+            detect_provider_from_url("https://api.anthropic.com/v1/messages"),
+            LlmProvider::Anthropic,
+        );
+        assert_eq!(
+            detect_provider_from_url("http://localhost:11434/api/chat"),
+            LlmProvider::Ollama,
+        );
+        assert_eq!(
+            detect_provider_from_url("https://api.openai.com/v1/chat/completions"),
+            LlmProvider::OpenAi,
+        );
+        assert_eq!(
+            detect_provider_from_url("https://api.deepseek.com/chat/completions"),
+            LlmProvider::OpenAi,
+        );
+    }
+
+    #[test]
+    fn test_provider_factory_supported_providers() {
+        let providers = ProviderFactory::supported_providers();
+        assert!(providers.contains(&"openai"));
+        assert!(providers.contains(&"anthropic"));
+        assert!(providers.contains(&"ollama"));
+        assert!(providers.contains(&"deepseek"));
+    }
+
+    #[test]
+    fn test_provider_factory_parse_config_str() {
+        // 测试 provider:model 格式的解析（不实际创建客户端，只验证参数解析）
+        // ProviderFactory::create("ollama:llama3") 会尝试创建客户端
+        // 这里测试 env_api_key 解析
+        assert_eq!(ProviderFactory::env_api_key("ollama"), "");
+        assert_eq!(ProviderFactory::env_api_key("unknown"), "");
+    }
+
+    #[test]
+    fn test_config_from_yaml_with_provider_detection() {
+        let yaml = r#"
+models:
+  claude-test:
+    base_url: https://api.anthropic.com/v1/messages
+    api_key: sk-test
+  ollama-test:
+    base_url: http://localhost:11434/api/chat
+    api_key: ""
+  openai-test:
+    provider: openai
+    api_key: sk-test
+"#;
+        let file: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.models.len(), 3);
+        // provider 字段检测在 Config::from_config_file 中完成
     }
 }

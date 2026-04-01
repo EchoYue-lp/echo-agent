@@ -11,6 +11,7 @@ default = ["full"]
 full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks"]
 a2a = []
 mcp = ["dep:echo_mcp"]
+sqlite = ["dep:rusqlite"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 plan-execute = []
 human-loop = ["dep:tokio-tungstenite"]
@@ -36,6 +37,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_yaml = "0.9"
 tokio-tungstenite = { version = "0.24", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }

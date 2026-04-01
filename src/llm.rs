@@ -77,8 +77,9 @@ pub use echo_providers::openai::{
     DefaultLlmClient, OpenAiClient, assemble_req_header, chat, stream_chat,
 };
 
-// Config
+// Config & Factory
 pub use config::LlmConfig;
+pub use echo_providers::ProviderFactory;
 
 // Wire types for internal use
 #[allow(unused_imports)]

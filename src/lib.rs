@@ -133,7 +133,7 @@ pub mod prelude {
     pub use crate::llm::types::{Message, ToolCall};
     pub use crate::llm::{
         ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient,
-        ResponseFormat, ToolDefinition,
+        ProviderFactory, ResponseFormat, ToolDefinition,
     };
 
     // Tools
@@ -156,6 +156,8 @@ pub mod prelude {
     pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
     pub use crate::memory::embedder::{Embedder, HttpEmbedder};
     pub use crate::memory::embedding_store::EmbeddingStore;
+    #[cfg(feature = "sqlite")]
+    pub use crate::memory::SqliteStore;
     pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};
 
     // Skills

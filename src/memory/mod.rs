@@ -6,7 +6,7 @@
 //! |------|------|--------|
 //! | 短期上下文 | [`compression::ContextManager`] | 单次 `execute()` 内 |
 //! | 短期持久化 | [`Checkpointer`] / [`FileCheckpointer`] | 跨进程恢复同一会话 |
-//! | 长期记忆 | [`Store`] / [`FileStore`] | 跨会话、跨用户共享 |
+//! | 长期记忆 | [`Store`] / [`FileStore`] / `SqliteStore` | 跨会话、跨用户共享 |
 //!
 //! ## 会话持久化（Checkpointer）
 //!
@@ -45,9 +45,13 @@
 pub mod checkpointer;
 pub mod embedder;
 pub mod embedding_store;
+#[cfg(feature = "sqlite")]
+pub mod sqlite_store;
 pub mod store;
 
 pub use checkpointer::{Checkpoint, Checkpointer, FileCheckpointer, InMemoryCheckpointer};
 pub use embedder::{Embedder, HttpEmbedder};
 pub use embedding_store::EmbeddingStore;
+#[cfg(feature = "sqlite")]
+pub use sqlite_store::SqliteStore;
 pub use store::{FileStore, InMemoryStore, Store, StoreItem};
