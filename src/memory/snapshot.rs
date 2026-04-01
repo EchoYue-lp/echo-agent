@@ -148,10 +148,7 @@ impl SnapshotManager {
 
     /// 回滚到指定 ID 的快照
     pub fn rollback_to(&mut self, snapshot_id: &str) -> Option<StateSnapshot> {
-        let idx = self
-            .snapshots
-            .iter()
-            .position(|s| s.id == snapshot_id)?;
+        let idx = self.snapshots.iter().position(|s| s.id == snapshot_id)?;
         let snapshot = self.snapshots[idx].clone();
         self.snapshots.truncate(idx + 1);
         Some(snapshot)
@@ -197,9 +194,7 @@ mod tests {
     use super::*;
 
     fn sample_messages(n: usize) -> Vec<Message> {
-        (0..n)
-            .map(|i| Message::user(format!("msg-{i}")))
-            .collect()
+        (0..n).map(|i| Message::user(format!("msg-{i}"))).collect()
     }
 
     #[test]

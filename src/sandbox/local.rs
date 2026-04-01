@@ -213,7 +213,11 @@ impl LocalSandbox {
     }
 
     /// 执行命令并收集输出
-    async fn run_command(&self, mut command: Command, timeout: std::time::Duration) -> Result<ExecutionResult> {
+    async fn run_command(
+        &self,
+        mut command: Command,
+        timeout: std::time::Duration,
+    ) -> Result<ExecutionResult> {
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
 
@@ -295,11 +299,9 @@ impl SandboxExecutor for LocalSandbox {
                 CommandKind::Program { program, args } => {
                     self.build_program_command(program, args, &command)
                 }
-                CommandKind::Code { language, code } => {
-                    self.build_code_command(language, code, &command).map_err(
-                        echo_core::error::ReactError::Sandbox,
-                    )?
-                }
+                CommandKind::Code { language, code } => self
+                    .build_code_command(language, code, &command)
+                    .map_err(echo_core::error::ReactError::Sandbox)?,
             };
             self.run_command(cmd, timeout).await
         })
@@ -317,10 +319,7 @@ impl SandboxExecutor for LocalSandbox {
             } else {
                 command.timeout
             };
-            let cmd_with_timeout = SandboxCommand {
-                timeout,
-                ..command
-            };
+            let cmd_with_timeout = SandboxCommand { timeout, ..command };
             self.execute(cmd_with_timeout).await
         })
     }
@@ -366,8 +365,8 @@ mod tests {
             ..Default::default()
         });
 
-        let cmd = SandboxCommand::shell("sleep 60")
-            .with_timeout(std::time::Duration::from_millis(100));
+        let cmd =
+            SandboxCommand::shell("sleep 60").with_timeout(std::time::Duration::from_millis(100));
         let result = sandbox.execute(cmd).await.unwrap();
         assert!(result.timed_out);
         assert!(!result.success());

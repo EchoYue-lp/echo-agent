@@ -15,6 +15,7 @@
 
 pub mod client;
 pub mod config_loader;
+pub mod server;
 pub mod server_config;
 pub mod tool_adapter;
 pub mod transport;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 
 pub use client::McpClient;
 pub use config_loader::{McpConfigFile, McpServerEntry};
+pub use server::McpServer;
 pub use server_config::{McpServerConfig, TransportConfig};
 pub use tool_adapter::McpToolAdapter;
 pub use types::{

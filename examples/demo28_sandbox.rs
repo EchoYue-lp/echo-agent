@@ -150,8 +150,7 @@ async fn demo_local_sandbox() -> echo_agent::error::Result<()> {
 
     // 超时测试
     println!();
-    let cmd =
-        SandboxCommand::shell("sleep 10").with_timeout(Duration::from_millis(500));
+    let cmd = SandboxCommand::shell("sleep 10").with_timeout(Duration::from_millis(500));
     let result = sandbox.execute(cmd).await?;
     println!("  超时测试 (500ms timeout):");
     println!("    timed_out: {}", result.timed_out);
@@ -162,7 +161,11 @@ async fn demo_local_sandbox() -> echo_agent::error::Result<()> {
     let cmd = SandboxCommand::shell("exit 1");
     let result = sandbox.execute(cmd).await?;
     println!("  失败命令 (exit 1):");
-    println!("    exit_code: {}, success: {}", result.exit_code, result.success());
+    println!(
+        "    exit_code: {}, success: {}",
+        result.exit_code,
+        result.success()
+    );
 
     println!();
     Ok(())
@@ -227,17 +230,17 @@ async fn demo_manager() -> echo_agent::error::Result<()> {
     let cmd = SandboxCommand::shell("echo 'auto-routed'");
     let result = manager.execute(cmd).await?;
     println!("  安全命令 'echo':");
-    println!(
-        "    → {} ({})",
-        result.sandbox_type,
-        result.stdout.trim()
-    );
+    println!("    → {} ({})", result.sandbox_type, result.stdout.trim());
 
     // 脚本命令 → 可能升级到 OS 沙箱
     let cmd = SandboxCommand::shell("python3 -c 'print(2+2)'");
     let result = manager.execute(cmd).await;
     match result {
-        Ok(r) => println!("  脚本命令 'python3': → {} ({})", r.sandbox_type, r.stdout.trim()),
+        Ok(r) => println!(
+            "  脚本命令 'python3': → {} ({})",
+            r.sandbox_type,
+            r.stdout.trim()
+        ),
         Err(e) => println!("  脚本命令 'python3': → 执行失败: {e}"),
     }
 
@@ -286,9 +289,7 @@ async fn demo_resource_limits() -> echo_agent::error::Result<()> {
     println!("  Unrestricted:");
     println!(
         "    CPU: {:?}, Memory: {:?}, Network: {}\n",
-        unrestricted.cpu_time_secs,
-        unrestricted.memory_bytes,
-        unrestricted.network,
+        unrestricted.cpu_time_secs, unrestricted.memory_bytes, unrestricted.network,
     );
 
     // 超时限制演示

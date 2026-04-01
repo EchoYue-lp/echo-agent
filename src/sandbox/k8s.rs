@@ -138,8 +138,14 @@ impl K8sSandbox {
             "--rm".to_string(),
             "--attach".to_string(),
             "--stdin=false".to_string(),
-            format!("--requests=cpu={},memory={}", self.config.cpu_request, self.config.memory_request),
-            format!("--limits=cpu={},memory={}", self.config.cpu_limit, self.config.memory_limit),
+            format!(
+                "--requests=cpu={},memory={}",
+                self.config.cpu_request, self.config.memory_request
+            ),
+            format!(
+                "--limits=cpu={},memory={}",
+                self.config.cpu_limit, self.config.memory_limit
+            ),
         ];
 
         if let Some(ref sa) = self.config.service_account {
@@ -148,24 +154,27 @@ impl K8sSandbox {
 
         // SecurityContext overrides
         args.push("--overrides".to_string());
-        args.push(serde_json::json!({
-            "spec": {
-                "securityContext": {
-                    "runAsNonRoot": true,
-                    "runAsUser": 65534,
-                    "fsGroup": 65534
-                },
-                "containers": [{
-                    "name": pod_name,
+        args.push(
+            serde_json::json!({
+                "spec": {
                     "securityContext": {
-                        "allowPrivilegeEscalation": false,
-                        "readOnlyRootFilesystem": false,
-                        "capabilities": { "drop": ["ALL"] }
-                    }
-                }],
-                "automountServiceAccountToken": false
-            }
-        }).to_string());
+                        "runAsNonRoot": true,
+                        "runAsUser": 65534,
+                        "fsGroup": 65534
+                    },
+                    "containers": [{
+                        "name": pod_name,
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "readOnlyRootFilesystem": false,
+                            "capabilities": { "drop": ["ALL"] }
+                        }
+                    }],
+                    "automountServiceAccountToken": false
+                }
+            })
+            .to_string(),
+        );
 
         // 命令分隔
         args.push("--command".to_string());
@@ -205,7 +214,15 @@ impl K8sSandbox {
             Err(_) => {
                 // 超时时尝试删除 Pod
                 let _ = Command::new("kubectl")
-                    .args(["delete", "pod", &pod_name, "-n", &self.config.namespace, "--grace-period=0", "--force"])
+                    .args([
+                        "delete",
+                        "pod",
+                        &pod_name,
+                        "-n",
+                        &self.config.namespace,
+                        "--grace-period=0",
+                        "--force",
+                    ])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()

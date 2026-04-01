@@ -77,20 +77,28 @@ async fn demo_crud() -> echo_agent::error::Result<()> {
 
     // 写入
     store
-        .put(ns, "user-pref-001", json!({
-            "content": "用户偏好深色主题",
-            "importance": 8,
-            "tags": ["偏好", "界面"]
-        }))
+        .put(
+            ns,
+            "user-pref-001",
+            json!({
+                "content": "用户偏好深色主题",
+                "importance": 8,
+                "tags": ["偏好", "界面"]
+            }),
+        )
         .await?;
     println!("  ✅ put: user-pref-001");
 
     store
-        .put(ns, "user-pref-002", json!({
-            "content": "用户使用 Rust 语言开发后端服务",
-            "importance": 9,
-            "tags": ["技术", "编程"]
-        }))
+        .put(
+            ns,
+            "user-pref-002",
+            json!({
+                "content": "用户使用 Rust 语言开发后端服务",
+                "importance": 9,
+                "tags": ["技术", "编程"]
+            }),
+        )
         .await?;
     println!("  ✅ put: user-pref-002");
 
@@ -106,11 +114,15 @@ async fn demo_crud() -> echo_agent::error::Result<()> {
 
     // 更新（upsert）
     store
-        .put(ns, "user-pref-001", json!({
-            "content": "用户偏好深色主题，且喜欢 Monokai 配色",
-            "importance": 9,
-            "tags": ["偏好", "界面", "配色"]
-        }))
+        .put(
+            ns,
+            "user-pref-001",
+            json!({
+                "content": "用户偏好深色主题，且喜欢 Monokai 配色",
+                "importance": 9,
+                "tags": ["偏好", "界面", "配色"]
+            }),
+        )
         .await?;
     let updated = store.get(ns, "user-pref-001").await?.unwrap();
     println!(
@@ -137,17 +149,30 @@ async fn demo_fts5_search() -> echo_agent::error::Result<()> {
 
     // 写入测试数据
     let memories = [
-        ("m1", "Rust is a systems programming language focused on safety and performance"),
-        ("m2", "Python is widely used in machine learning and data science"),
-        ("m3", "JavaScript powers the web frontend with frameworks like React and Vue"),
-        ("m4", "Go is designed for cloud native applications and microservices"),
-        ("m5", "Rust provides memory safety without garbage collection through ownership"),
+        (
+            "m1",
+            "Rust is a systems programming language focused on safety and performance",
+        ),
+        (
+            "m2",
+            "Python is widely used in machine learning and data science",
+        ),
+        (
+            "m3",
+            "JavaScript powers the web frontend with frameworks like React and Vue",
+        ),
+        (
+            "m4",
+            "Go is designed for cloud native applications and microservices",
+        ),
+        (
+            "m5",
+            "Rust provides memory safety without garbage collection through ownership",
+        ),
     ];
 
     for (key, content) in &memories {
-        store
-            .put(ns, key, json!({"content": content}))
-            .await?;
+        store.put(ns, key, json!({"content": content})).await?;
     }
     println!("  📝 写入 {} 条测试数据\n", memories.len());
 
@@ -217,9 +242,7 @@ async fn demo_namespace_isolation() -> echo_agent::error::Result<()> {
     );
 
     // Bob 搜索 Alice 的内容
-    let cross_search = store
-        .search(&["bob", "memories"], "Alice", 10)
-        .await?;
+    let cross_search = store.search(&["bob", "memories"], "Alice", 10).await?;
     println!(
         "\n  🔍 Bob 搜索 \"Alice\": {} 条命中 ✅ (跨 namespace 不可见)",
         cross_search.len()
@@ -273,7 +296,10 @@ async fn demo_semantic_search() -> echo_agent::error::Result<()> {
     for (key, content) in &memories {
         store.put(ns, key, json!({"content": content})).await?;
     }
-    println!("  📝 写入 {} 条中文记忆（已计算嵌入向量）\n", memories.len());
+    println!(
+        "  📝 写入 {} 条中文记忆（已计算嵌入向量）\n",
+        memories.len()
+    );
 
     // 语义搜索：用英文查询中文内容
     let queries = [
@@ -335,10 +361,18 @@ async fn demo_agent_integration() -> echo_agent::error::Result<()> {
 
     // 预填充记忆
     store
-        .put(ns, "m1", json!({"content": "用户叫 Alice，是一名 Rust 开发者"}))
+        .put(
+            ns,
+            "m1",
+            json!({"content": "用户叫 Alice，是一名 Rust 开发者"}),
+        )
         .await?;
     store
-        .put(ns, "m2", json!({"content": "用户偏好使用 SQLite 作为嵌入式数据库"}))
+        .put(
+            ns,
+            "m2",
+            json!({"content": "用户偏好使用 SQLite 作为嵌入式数据库"}),
+        )
         .await?;
     println!("  📚 预填充 2 条长期记忆\n");
 
@@ -374,7 +408,11 @@ async fn demo_persistence() -> echo_agent::error::Result<()> {
     {
         let store = SqliteStore::new(DB_PATH)?;
         store
-            .put(ns, "persist-key", json!({"content": "这条记忆会在数据库关闭后保留"}))
+            .put(
+                ns,
+                "persist-key",
+                json!({"content": "这条记忆会在数据库关闭后保留"}),
+            )
             .await?;
         println!("  ✅ 实例 1: 写入 persist-key");
         // store dropped here

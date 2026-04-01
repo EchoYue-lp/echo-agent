@@ -1,8 +1,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// MCP 协议版本（当前支持的最新稳定版本：2025-03-26）
-pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+/// MCP 协议版本（当前支持的最新稳定版本）
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// 服务端支持的所有协议版本（最新在前）
+///
+/// 在 `initialize` 握手时用于版本协商：
+/// - 若客户端请求的版本在此列表中 → 回复相同版本
+/// - 若不支持 → 回复列表中最新版本，由客户端决定是否继续
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 // ── JSON-RPC 2.0 核心类型 ─────────────────────────────────────────────────────
 
@@ -113,11 +121,24 @@ pub struct SamplingCapability {}
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ElicitationCapability {}
 
-/// 客户端身份信息
+/// 客户端身份信息（2025-11-25 扩展）
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientInfo {
     pub name: String,
     pub version: String,
+    /// 人类可读的显示名称
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 客户端描述
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 图标列表
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<Icon>,
+    /// 客户端主页 URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website_url: Option<String>,
 }
 
 /// initialize 响应结果
@@ -148,6 +169,9 @@ pub struct ServerCapabilities {
     /// 日志能力
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingCapability>,
+    /// 补全能力（2025-11-25）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completions: Option<CompletionsCapability>,
     /// 实验性能力
     #[serde(skip_serializing_if = "Option::is_none")]
     pub experimental: Option<Value>,
@@ -184,30 +208,111 @@ pub struct PromptsCapability {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct LoggingCapability {}
 
-/// 服务端身份信息
+/// 补全能力配置（空对象表示支持，2025-11-25）
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct CompletionsCapability {}
+
+// ── MCP 通用类型 ──────────────────────────────────────────────────────────────
+
+/// 图标定义（2025-11-25 新增）
+///
+/// 为 Tool、Prompt、Resource、Implementation 提供可视化标识。
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Icon {
+    /// 图标资源 URI（HTTP/HTTPS URL 或 data: URI）
+    pub src: String,
+    /// MIME 类型
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// 尺寸列表（如 `["48x48"]`、`["any"]`）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sizes: Vec<String>,
+    /// 主题偏好：`"light"` 或 `"dark"`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+}
+
+/// 服务端身份信息（2025-11-25 扩展）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
+    /// 人类可读的显示名称
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 服务端描述
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 图标列表
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<Icon>,
+    /// 服务端主页 URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website_url: Option<String>,
 }
 
 // ── MCP 工具相关类型 ──────────────────────────────────────────────────────────
 
-/// MCP 工具定义（来自 tools/list）
+/// MCP 工具定义（来自 tools/list，2025-11-25 超集）
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct McpTool {
+    /// 工具唯一名称
     pub name: String,
+    /// 人类可读的显示名称（2025-11-25）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 工具功能描述
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// 工具参数的 JSON Schema
-    #[serde(rename = "inputSchema")]
     pub input_schema: Value,
-    /// 工具的输出模式（可选）
-    #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
+    /// 工具输出的 JSON Schema（2025-11-25）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
-    /// 是否为只读工具（可选）
+    /// 图标列表（2025-11-25）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<Icon>,
+    /// 工具行为注解（2025-11-25）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
+    /// 执行相关属性（2025-11-25）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ToolExecution>,
+    /// 元数据
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+}
+
+/// 工具行为注解（2025-11-25 新增）
+///
+/// 描述工具的安全属性，客户端不应信任来自不可信服务端的注解。
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    /// 工具是否只读（不修改外部状态）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    /// 工具是否具有破坏性
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    /// 工具是否幂等
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    /// 工具是否需要人工确认
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+}
+
+/// 工具执行属性（2025-11-25 新增）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecution {
+    /// 是否支持 task-augmented 执行：`"forbidden"` | `"optional"` | `"required"`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_support: Option<String>,
 }
 
 /// tools/list 响应结果
@@ -227,13 +332,18 @@ pub struct McpToolCallParams {
     pub arguments: Option<Value>,
 }
 
-/// tools/call 响应结果
+/// tools/call 响应结果（2025-11-25 超集）
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct McpToolCallResult {
+    /// 非结构化内容列表
     pub content: Vec<McpContent>,
     /// 为 true 时表示工具执行出错（但协议层成功）
-    #[serde(rename = "isError", default)]
+    #[serde(default)]
     pub is_error: bool,
+    /// 结构化输出（2025-11-25），与 outputSchema 配合使用
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
 }
 
 // ── MCP 资源相关类型 ──────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ use crate::agent::Agent;
 use crate::error::Result;
 use futures::future::BoxFuture;
 use std::time::Instant;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// 结果合并函数
 type MergeFn = Box<dyn Fn(Vec<String>) -> String + Send + Sync>;
@@ -86,9 +86,9 @@ impl Workflow for ConcurrentWorkflow {
             let mut results = Vec::with_capacity(agent_count);
 
             for handle in handles {
-                let (agent_name, step_input, result, elapsed) = handle
-                    .await
-                    .map_err(|e| crate::error::ReactError::Other(format!("task join error: {e}")))?;
+                let (agent_name, step_input, result, elapsed) = handle.await.map_err(|e| {
+                    crate::error::ReactError::Other(format!("task join error: {e}"))
+                })?;
 
                 let output = result?;
                 info!(

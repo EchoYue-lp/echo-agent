@@ -6,11 +6,8 @@
 //! - 统一的 `execute()` 接口屏蔽底层差异
 
 use super::{
-    DockerSandbox, ExecutionResult, IsolationLevel, K8sSandbox, LocalSandbox,
-    ResourceLimits, SandboxCommand, SandboxExecutor,
-    docker::DockerConfig,
-    k8s::K8sConfig,
-    local::LocalConfig,
+    DockerSandbox, ExecutionResult, IsolationLevel, K8sSandbox, LocalSandbox, ResourceLimits,
+    SandboxCommand, SandboxExecutor, docker::DockerConfig, k8s::K8sConfig, local::LocalConfig,
     policy::SandboxPolicy,
 };
 use crate::error::Result;
@@ -50,11 +47,7 @@ impl SandboxManager {
 
         Self {
             local,
-            docker: if docker_available {
-                Some(docker)
-            } else {
-                None
-            },
+            docker: if docker_available { Some(docker) } else { None },
             k8s: if k8s_available { Some(k8s) } else { None },
             policy: SandboxPolicy::default(),
             allow_fallback: true,

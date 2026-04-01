@@ -65,6 +65,10 @@ impl McpClient {
             client_info: ClientInfo {
                 name: "echo-agent".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                title: Some("Echo Agent MCP Client".to_string()),
+                description: None,
+                icons: Vec::new(),
+                website_url: None,
             },
         };
 

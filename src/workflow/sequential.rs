@@ -5,7 +5,7 @@ use crate::agent::Agent;
 use crate::error::Result;
 use futures::future::BoxFuture;
 use std::time::Instant;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// 步间输入变换函数
 type TransformFn = Box<dyn Fn(&str) -> String + Send + Sync>;
@@ -74,7 +74,11 @@ impl Workflow for SequentialWorkflow {
                     agent = %agent_name,
                     "▶ 执行步骤"
                 );
-                debug!(workflow = "sequential", step = i + 1, input_len = actual_input.len());
+                debug!(
+                    workflow = "sequential",
+                    step = i + 1,
+                    input_len = actual_input.len()
+                );
 
                 let step_start = Instant::now();
                 let output = agent.execute(&actual_input).await?;

@@ -42,7 +42,7 @@ use crate::error::{MemoryError, Result};
 use crate::memory::embedder::Embedder;
 use crate::memory::store::{Store, StoreItem};
 use futures::future::BoxFuture;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -529,7 +529,9 @@ impl Store for SqliteStore {
                     let prefix_str = p.join("/");
                     let pattern = format!("{prefix_str}%");
                     let mut stmt = conn
-                        .prepare("SELECT DISTINCT namespace FROM store_items WHERE namespace LIKE ?1")
+                        .prepare(
+                            "SELECT DISTINCT namespace FROM store_items WHERE namespace LIKE ?1",
+                        )
                         .map_err(|e| MemoryError::IoError(format!("查询命名空间失败: {e}")))?;
                     stmt.query_map(params![pattern], |row| row.get::<_, String>(0))
                         .map_err(|e| MemoryError::IoError(format!("查询命名空间失败: {e}")))?
@@ -726,10 +728,7 @@ mod tests {
         let store = temp_db();
         let ns = &["user", "mem"];
 
-        store
-            .put(ns, "k1", json!({"data": "value"}))
-            .await
-            .unwrap();
+        store.put(ns, "k1", json!({"data": "value"})).await.unwrap();
 
         let deleted = store.delete(ns, "k1").await.unwrap();
         assert!(deleted);
@@ -771,11 +770,19 @@ mod tests {
         let ns = &["search", "test"];
 
         store
-            .put(ns, "k1", json!({"content": "dark theme user preference settings"}))
+            .put(
+                ns,
+                "k1",
+                json!({"content": "dark theme user preference settings"}),
+            )
             .await
             .unwrap();
         store
-            .put(ns, "k2", json!({"content": "light theme default configuration"}))
+            .put(
+                ns,
+                "k2",
+                json!({"content": "light theme default configuration"}),
+            )
             .await
             .unwrap();
 

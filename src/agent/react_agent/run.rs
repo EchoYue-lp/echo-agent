@@ -634,8 +634,9 @@ impl ReactAgent {
 
     /// 流式执行的公共初始化逻辑
     ///
-    /// 根据模式决定是否重置上下文、是否从 checkpoint 恢复
-    pub(crate) async fn prepare_stream_context(&mut self, mode: StreamMode, input: &str) {
+    /// 根据模式决定是否重置上下文、是否从 checkpoint 恢复。
+    /// 返回召回的长期记忆数量（0 表示无记忆注入）。
+    pub(crate) async fn prepare_stream_context(&mut self, mode: StreamMode, input: &str) -> usize {
         match mode {
             StreamMode::Execute => {
                 self.reset_messages();
@@ -671,12 +672,14 @@ impl ReactAgent {
         }
 
         // 注入相关长期记忆
+        let mut recalled = 0usize;
         if let Some(store) = &self.store {
             let agent_name = self.config.agent_name.clone();
             let ns = vec![agent_name.as_str(), "memories"];
             if let Ok(items) = store.semantic_search(&ns, input, 5).await
                 && !items.is_empty()
             {
+                recalled = items.len();
                 let mut lines = vec!["[相关历史记忆]".to_string()];
                 for (i, item) in items.iter().enumerate() {
                     let content_str = item
@@ -694,6 +697,7 @@ impl ReactAgent {
 
         // 推送用户消息
         self.context.push(Message::user(input.to_string()));
+        recalled
     }
 
     /// 流式执行的 LLM 请求（带重试）
@@ -863,12 +867,16 @@ impl ReactAgent {
             let callbacks = self.config.callbacks.clone();
 
             // 初始化上下文
-            self.prepare_stream_context(mode, &input).await;
+            let recalled = self.prepare_stream_context(mode, &input).await;
 
             // 根据模式输出不同的日志
             match mode {
                 StreamMode::Execute => info!(agent = %agent, "🌊 Agent 开始流式执行任务"),
                 StreamMode::Chat => info!(agent = %agent, "🌊 Agent 开始流式多轮对话"),
+            }
+
+            if recalled > 0 {
+                yield AgentEvent::MemoryRecalled { count: recalled };
             }
 
             for iteration in 0..self.config.max_iterations {
@@ -884,6 +892,8 @@ impl ReactAgent {
                     cb.on_think_start(&agent, &messages).await;
                 }
 
+                yield AgentEvent::ThinkStart;
+
                 // 创建 LLM 流
                 let llm_stream = self.create_llm_stream(messages.clone()).await?;
                 let mut llm_stream = Box::pin(llm_stream);
@@ -898,6 +908,10 @@ impl ReactAgent {
                         yield event;
                     }
                 }
+
+                yield AgentEvent::ThinkEnd {
+                    tokens_used: content_buffer.len() / 4 + 1,
+                };
 
                 // 判断是否有工具调用
                 let has_tool_calls = !tool_call_map.is_empty();

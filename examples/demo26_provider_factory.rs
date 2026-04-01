@@ -75,11 +75,7 @@ fn demo_provider_model_shorthand() {
     for (config_str, desc) in &configs {
         match ProviderFactory::create(config_str) {
             Ok(client) => {
-                println!(
-                    "  ✅ \"{config_str}\" → {} ({})",
-                    client.model_name(),
-                    desc
-                );
+                println!("  ✅ \"{config_str}\" → {} ({})", client.model_name(), desc);
             }
             Err(e) => {
                 println!("  ⚠️  \"{config_str}\" → 创建失败: {e} ({desc})");
@@ -171,18 +167,9 @@ fn demo_auto_provider_detection() {
     println!("  否则根据 base_url 自动推断：\n");
 
     let url_examples = [
-        (
-            "https://api.anthropic.com/v1/messages",
-            "→ Anthropic",
-        ),
-        (
-            "http://localhost:11434/api/chat",
-            "→ Ollama",
-        ),
-        (
-            "https://api.openai.com/v1/chat/completions",
-            "→ OpenAI",
-        ),
+        ("https://api.anthropic.com/v1/messages", "→ Anthropic"),
+        ("http://localhost:11434/api/chat", "→ Ollama"),
+        ("https://api.openai.com/v1/chat/completions", "→ OpenAI"),
         (
             "https://api.deepseek.com/chat/completions",
             "→ OpenAI (兼容)",

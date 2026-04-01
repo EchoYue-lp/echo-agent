@@ -274,6 +274,77 @@ pub struct AgentCapabilities {
     pub state_transition_history: bool,
 }
 
+// ── A2A Task 状态机 ──────────────────────────────────────────────────────────
+//
+//  submitted → working → [input-required] → completed / failed
+//                       ↑___________________↓
+//
+//  终态: completed, failed, canceled
+
+/// 任务生命周期状态（A2A 规范状态机）
+///
+/// ```text
+/// submitted → working → completed
+///                     → failed
+///                     → input-required ⇄ working
+///
+/// 任何非终态 → canceled
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskState {
+    /// 任务已提交，等待处理
+    Submitted,
+    /// Agent 正在执行
+    Working,
+    /// Agent 需要更多输入才能继续
+    InputRequired,
+    /// 任务成功完成
+    Completed,
+    /// 任务执行失败
+    Failed,
+    /// 任务已被取消
+    Canceled,
+}
+
+impl TaskState {
+    /// 是否为终态（completed / failed / canceled）
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Canceled)
+    }
+
+    /// 校验状态转换是否合法
+    pub fn can_transition_to(self, next: Self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        match (self, next) {
+            (Self::Submitted, Self::Working) => true,
+            (Self::Submitted, Self::Canceled) => true,
+            (Self::Working, Self::Completed) => true,
+            (Self::Working, Self::Failed) => true,
+            (Self::Working, Self::InputRequired) => true,
+            (Self::Working, Self::Canceled) => true,
+            (Self::InputRequired, Self::Working) => true,
+            (Self::InputRequired, Self::Canceled) => true,
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for TaskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Submitted => write!(f, "submitted"),
+            Self::Working => write!(f, "working"),
+            Self::InputRequired => write!(f, "input-required"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Canceled => write!(f, "canceled"),
+        }
+    }
+}
+
 // ── A2A Task 类型 ────────────────────────────────────────────────────────────
 
 /// A2A 任务请求
@@ -376,7 +447,7 @@ pub struct A2ATaskResponse {
     pub error: Option<A2AError>,
 }
 
-/// A2A 任务状态
+/// A2A 任务
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct A2ATask {
@@ -399,11 +470,32 @@ pub struct A2ATask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct A2ATaskStatus {
-    /// 状态: submitted, working, input-required, completed, canceled, failed
-    pub state: String,
-    /// 状态消息
+    /// 状态枚举
+    pub state: TaskState,
+    /// 状态消息（可含 Agent 回复或错误说明）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<A2AMessage>,
+    /// 状态变更时间戳（ISO 8601）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+impl A2ATaskStatus {
+    pub fn new(state: TaskState) -> Self {
+        Self {
+            state,
+            message: None,
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        }
+    }
+
+    pub fn with_message(state: TaskState, message: A2AMessage) -> Self {
+        Self {
+            state,
+            message: Some(message),
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        }
+    }
 }
 
 /// Agent 产出
@@ -413,8 +505,14 @@ pub struct A2AArtifact {
     /// 产出名称
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Artifact 在列表中的索引（流式追加时标识同一 artifact）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
     /// 产出内容部分
     pub parts: Vec<A2APart>,
+    /// 是否追加到已有同 index 的 artifact（流式场景）
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub append: bool,
 }
 
 /// A2A 错误
@@ -422,6 +520,61 @@ pub struct A2AArtifact {
 pub struct A2AError {
     pub code: i32,
     pub message: String,
+}
+
+// ── A2A 流式事件类型 ─────────────────────────────────────────────────────────
+//
+// 用于 tasks/sendSubscribe 的 SSE 流式响应。
+// 每个事件是一行 JSON，格式：`data: <json>\n\n`
+
+/// 流式响应中的事件类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum A2AStreamEvent {
+    /// 任务状态变更事件
+    #[serde(rename = "status")]
+    StatusUpdate(TaskStatusUpdateEvent),
+    /// Artifact 更新事件（流式产出）
+    #[serde(rename = "artifact")]
+    ArtifactUpdate(TaskArtifactUpdateEvent),
+}
+
+/// 任务状态变更事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStatusUpdateEvent {
+    /// 任务 ID
+    pub task_id: String,
+    /// 新状态
+    pub status: A2ATaskStatus,
+    /// 是否为该任务的最终事件
+    #[serde(rename = "final", default)]
+    pub is_final: bool,
+}
+
+/// Artifact 更新事件（增量产出）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactUpdateEvent {
+    /// 任务 ID
+    pub task_id: String,
+    /// 更新的 Artifact
+    pub artifact: A2AArtifact,
+    /// 是否为该任务的最终事件
+    #[serde(rename = "final", default)]
+    pub is_final: bool,
+}
+
+/// 流式 JSON-RPC 响应包装（SSE `data:` 行的载体）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2AStreamResponse {
+    pub jsonrpc: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<A2AStreamEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<A2AError>,
 }
 
 #[cfg(test)]
@@ -453,7 +606,6 @@ mod tests {
         assert!(json.contains("\"name\":"));
         assert!(json.contains("\"skills\":"));
 
-        // 反序列化
         let parsed: AgentCard = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "test");
     }
@@ -474,5 +626,117 @@ mod tests {
         assert_eq!(skill.id, "translate");
         assert_eq!(skill.tags.len(), 2);
         assert_eq!(skill.examples.len(), 1);
+    }
+
+    // ── TaskState 状态机测试 ──────────────────────────────────
+
+    #[test]
+    fn test_task_state_terminal() {
+        assert!(!TaskState::Submitted.is_terminal());
+        assert!(!TaskState::Working.is_terminal());
+        assert!(!TaskState::InputRequired.is_terminal());
+        assert!(TaskState::Completed.is_terminal());
+        assert!(TaskState::Failed.is_terminal());
+        assert!(TaskState::Canceled.is_terminal());
+    }
+
+    #[test]
+    fn test_task_state_transitions() {
+        assert!(TaskState::Submitted.can_transition_to(TaskState::Working));
+        assert!(TaskState::Submitted.can_transition_to(TaskState::Canceled));
+        assert!(!TaskState::Submitted.can_transition_to(TaskState::Completed));
+
+        assert!(TaskState::Working.can_transition_to(TaskState::Completed));
+        assert!(TaskState::Working.can_transition_to(TaskState::Failed));
+        assert!(TaskState::Working.can_transition_to(TaskState::InputRequired));
+        assert!(TaskState::Working.can_transition_to(TaskState::Canceled));
+        assert!(!TaskState::Working.can_transition_to(TaskState::Submitted));
+
+        // input-required ⇄ working cycle
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Working));
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Canceled));
+        assert!(!TaskState::InputRequired.can_transition_to(TaskState::Completed));
+
+        // terminal states cannot transition
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Working));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::Working));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::Working));
+    }
+
+    #[test]
+    fn test_task_state_serde_kebab_case() {
+        let json = serde_json::to_string(&TaskState::InputRequired).unwrap();
+        assert_eq!(json, "\"input-required\"");
+
+        let parsed: TaskState = serde_json::from_str("\"input-required\"").unwrap();
+        assert_eq!(parsed, TaskState::InputRequired);
+
+        let parsed: TaskState = serde_json::from_str("\"working\"").unwrap();
+        assert_eq!(parsed, TaskState::Working);
+    }
+
+    #[test]
+    fn test_task_status_with_timestamp() {
+        let status = A2ATaskStatus::new(TaskState::Working);
+        assert_eq!(status.state, TaskState::Working);
+        assert!(status.timestamp.is_some());
+        assert!(status.message.is_none());
+
+        let status =
+            A2ATaskStatus::with_message(TaskState::Completed, A2AMessage::agent_text("done"));
+        assert_eq!(status.state, TaskState::Completed);
+        assert!(status.message.is_some());
+    }
+
+    #[test]
+    fn test_artifact_with_streaming_fields() {
+        let artifact = A2AArtifact {
+            name: Some("output".to_string()),
+            index: Some(0),
+            parts: vec![A2APart::Text {
+                text: "chunk".into(),
+            }],
+            append: true,
+        };
+        let json = serde_json::to_string(&artifact).unwrap();
+        assert!(json.contains("\"index\":0"));
+        assert!(json.contains("\"append\":true"));
+
+        let non_append = A2AArtifact {
+            name: None,
+            index: None,
+            parts: vec![A2APart::Text {
+                text: "full".into(),
+            }],
+            append: false,
+        };
+        let json = serde_json::to_string(&non_append).unwrap();
+        assert!(!json.contains("index"));
+        assert!(!json.contains("append"));
+    }
+
+    #[test]
+    fn test_stream_event_serialization() {
+        let event = A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+            task_id: "t1".into(),
+            status: A2ATaskStatus::new(TaskState::Working),
+            is_final: false,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"status\""));
+        assert!(json.contains("\"working\""));
+
+        let event = A2AStreamEvent::ArtifactUpdate(TaskArtifactUpdateEvent {
+            task_id: "t1".into(),
+            artifact: A2AArtifact {
+                name: None,
+                index: Some(0),
+                parts: vec![A2APart::Text { text: "hi".into() }],
+                append: true,
+            },
+            is_final: false,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"artifact\""));
     }
 }

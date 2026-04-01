@@ -138,15 +138,9 @@ pub enum CommandKind {
     /// Shell 命令（通过 sh -c / cmd /C 执行）
     Shell(String),
     /// 直接执行程序
-    Program {
-        program: String,
-        args: Vec<String>,
-    },
+    Program { program: String, args: Vec<String> },
     /// 执行代码片段（需指定语言运行时）
-    Code {
-        language: String,
-        code: String,
-    },
+    Code { language: String, code: String },
 }
 
 impl SandboxCommand {
@@ -273,7 +267,7 @@ impl Default for ResourceLimits {
         Self {
             cpu_time_secs: Some(30),
             memory_bytes: Some(256 * 1024 * 1024), // 256 MB
-            max_output_bytes: Some(1024 * 1024),    // 1 MB
+            max_output_bytes: Some(1024 * 1024),   // 1 MB
             max_processes: Some(64),
             network: false,
             read_only_paths: vec![],
@@ -301,7 +295,7 @@ impl ResourceLimits {
         Self {
             cpu_time_secs: Some(10),
             memory_bytes: Some(64 * 1024 * 1024), // 64 MB
-            max_output_bytes: Some(256 * 1024),    // 256 KB
+            max_output_bytes: Some(256 * 1024),   // 256 KB
             max_processes: Some(8),
             network: false,
             read_only_paths: vec![],

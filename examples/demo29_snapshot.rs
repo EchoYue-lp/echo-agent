@@ -13,9 +13,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     println!("=== Agent 状态快照与回滚 ===\n");
 

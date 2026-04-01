@@ -10,9 +10,7 @@
 //! ```
 
 use echo_agent::prelude::*;
-use echo_agent::workflow::{
-    ConcurrentWorkflow, DagWorkflow, SequentialWorkflow, Workflow,
-};
+use echo_agent::workflow::{ConcurrentWorkflow, DagWorkflow, SequentialWorkflow, Workflow};
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -23,10 +21,14 @@ async fn main() -> echo_agent::error::Result<()> {
     // ── 示例 1：顺序工作流 ────────────────────────────────────────────────
     println!("=== 示例 1：SequentialWorkflow ===\n");
     {
-        let translator =
-            ReactAgentBuilder::simple("qwen3-max", "你是翻译，将用户输入翻译成英文，只输出翻译结果")?;
-        let reviewer =
-            ReactAgentBuilder::simple("qwen3-max", "你是校对，检查英文翻译的准确性并给出修改建议，输出最终翻译")?;
+        let translator = ReactAgentBuilder::simple(
+            "qwen3-max",
+            "你是翻译，将用户输入翻译成英文，只输出翻译结果",
+        )?;
+        let reviewer = ReactAgentBuilder::simple(
+            "qwen3-max",
+            "你是校对，检查英文翻译的准确性并给出修改建议，输出最终翻译",
+        )?;
 
         let mut wf = SequentialWorkflow::builder()
             .step(translator)
@@ -52,10 +54,14 @@ async fn main() -> echo_agent::error::Result<()> {
     // ── 示例 2：并发工作流 ────────────────────────────────────────────────
     println!("=== 示例 2：ConcurrentWorkflow ===\n");
     {
-        let tech_analyst =
-            ReactAgentBuilder::simple("qwen3-max", "你是技术分析师，从技术可行性角度简要分析（3句话以内）")?;
-        let biz_analyst =
-            ReactAgentBuilder::simple("qwen3-max", "你是商业分析师，从市场与商业模式角度简要分析（3句话以内）")?;
+        let tech_analyst = ReactAgentBuilder::simple(
+            "qwen3-max",
+            "你是技术分析师，从技术可行性角度简要分析（3句话以内）",
+        )?;
+        let biz_analyst = ReactAgentBuilder::simple(
+            "qwen3-max",
+            "你是商业分析师，从市场与商业模式角度简要分析（3句话以内）",
+        )?;
 
         let mut wf = ConcurrentWorkflow::builder()
             .agent(tech_analyst)

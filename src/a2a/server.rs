@@ -2,12 +2,21 @@
 //!
 //! 提供符合 A2A 协议的 HTTP 端点：
 //! - `GET /.well-known/agent.json` — 返回 Agent Card
-//! - `POST /` — 处理 JSON-RPC 任务请求（tasks/send、tasks/get 等）
+//! - `POST /` — 处理 JSON-RPC 任务请求
+//!
+//! 支持的 JSON-RPC 方法：
+//! - `tasks/send`          — 同步发送任务并等待完成
+//! - `tasks/sendSubscribe` — 流式发送任务，通过 SSE 接收实时事件
+//! - `tasks/get`           — 查询任务状态
+//! - `tasks/cancel`        — 取消任务
 
 use super::types::*;
 use crate::agent::Agent;
 use crate::error::Result;
+use echo_core::agent::AgentEvent;
+use futures::StreamExt;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -15,12 +24,16 @@ use tracing::{info, warn};
 /// A2A 服务端
 ///
 /// 将一个 Agent 暴露为 A2A 协议兼容的 HTTP 服务。
+///
+/// # 状态机
+///
+/// ```text
+/// submitted → working → [input-required] → completed / failed
+///                      ↑___________________↓
+/// ```
 pub struct A2AServer {
-    /// Agent Card 描述
     card: AgentCard,
-    /// 底层 Agent 实例
     agent: Arc<Mutex<Box<dyn Agent>>>,
-    /// 任务存储（任务 ID → 任务状态）
     tasks: Arc<Mutex<HashMap<String, A2ATask>>>,
 }
 
@@ -52,12 +65,12 @@ impl A2AServer {
             .map_err(|e| crate::error::ReactError::Other(format!("Agent Card 序列化失败: {}", e)))
     }
 
-    /// 处理 A2A JSON-RPC 请求
+    // ── 请求分发 ─────────────────────────────────────────────────────────────
+
+    /// 处理 A2A JSON-RPC 请求（同步方法）
     ///
-    /// 支持的方法：
-    /// - `tasks/send`: 发送任务并等待结果
-    /// - `tasks/get`: 查询任务状态
-    /// - `tasks/cancel`: 取消任务
+    /// 支持 `tasks/send`、`tasks/get`、`tasks/cancel`。
+    /// 对于 `tasks/sendSubscribe`，请使用 [`handle_request_stream`]。
     pub async fn handle_request(&self, request_json: &str) -> String {
         let request: A2ATaskRequest = match serde_json::from_str(request_json) {
             Ok(req) => req,
@@ -79,6 +92,17 @@ impl A2AServer {
             "tasks/send" => self.handle_task_send(&request).await,
             "tasks/get" => self.handle_task_get(&request).await,
             "tasks/cancel" => self.handle_task_cancel(&request).await,
+            "tasks/sendSubscribe" => A2ATaskResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: None,
+                error: Some(A2AError {
+                    code: -32601,
+                    message:
+                        "tasks/sendSubscribe requires SSE transport; use handle_request_stream()"
+                            .to_string(),
+                }),
+            },
             _ => A2ATaskResponse {
                 jsonrpc: "2.0".to_string(),
                 id: request.id,
@@ -93,7 +117,221 @@ impl A2AServer {
         serde_json::to_string(&response).unwrap_or_default()
     }
 
-    /// 处理 tasks/send 请求
+    /// 处理流式请求 `tasks/sendSubscribe`
+    ///
+    /// 返回 SSE 事件流，每个事件序列化为一行 JSON（`data: <json>\n\n`）。
+    /// 调用方负责将流写入 HTTP 响应体（Content-Type: text/event-stream）。
+    ///
+    /// # 事件序列示例
+    ///
+    /// ```text
+    /// data: {"type":"status","taskId":"...","status":{"state":"submitted"},"final":false}
+    /// data: {"type":"status","taskId":"...","status":{"state":"working"},"final":false}
+    /// data: {"type":"artifact","taskId":"...","artifact":{"index":0,"parts":[...],"append":true},"final":false}
+    /// data: {"type":"status","taskId":"...","status":{"state":"completed",...},"final":true}
+    /// ```
+    pub async fn handle_request_stream(
+        &self,
+        request_json: &str,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = A2AStreamEvent> + Send + '_>>> {
+        let request: A2ATaskRequest = serde_json::from_str(request_json)
+            .map_err(|e| crate::error::ReactError::Other(format!("Parse error: {}", e)))?;
+
+        if request.method != "tasks/sendSubscribe" {
+            return Err(crate::error::ReactError::Other(format!(
+                "handle_request_stream only supports tasks/sendSubscribe, got '{}'",
+                request.method
+            )));
+        }
+
+        let task_id = request
+            .params
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let session_id = request.params.session_id.clone();
+        let input_text = request.params.message.text_content();
+        let user_message = request.params.message.clone();
+
+        info!(task_id = %task_id, "📨 A2A Stream: 收到流式任务请求");
+
+        // submitted
+        let initial_task = A2ATask {
+            id: task_id.clone(),
+            session_id: session_id.clone(),
+            status: A2ATaskStatus::new(TaskState::Submitted),
+            history: vec![user_message.clone()],
+            artifacts: Vec::new(),
+        };
+        {
+            let mut tasks = self.tasks.lock().await;
+            tasks.insert(task_id.clone(), initial_task);
+        }
+
+        let tasks = self.tasks.clone();
+        let agent = self.agent.clone();
+
+        let stream = async_stream::stream! {
+            // Event 1: submitted
+            yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: task_id.clone(),
+                status: A2ATaskStatus::new(TaskState::Submitted),
+                is_final: false,
+            });
+
+            // Event 2: working
+            Self::update_task_state(&tasks, &task_id, TaskState::Working, None).await;
+            yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: task_id.clone(),
+                status: A2ATaskStatus::new(TaskState::Working),
+                is_final: false,
+            });
+
+            // Execute agent with streaming
+            let mut agent_guard = agent.lock().await;
+            let stream_result = agent_guard.execute_stream(&input_text).await;
+
+            match stream_result {
+                Ok(mut event_stream) => {
+                    let mut accumulated_text = String::new();
+                    let mut artifact_index: usize = 0;
+                    let mut first_chunk = true;
+
+                    while let Some(event_result) = event_stream.next().await {
+                        match event_result {
+                            Ok(AgentEvent::Token(token)) => {
+                                accumulated_text.push_str(&token);
+                                yield A2AStreamEvent::ArtifactUpdate(TaskArtifactUpdateEvent {
+                                    task_id: task_id.clone(),
+                                    artifact: A2AArtifact {
+                                        name: if first_chunk { Some("output".to_string()) } else { None },
+                                        index: Some(artifact_index),
+                                        parts: vec![A2APart::Text { text: token }],
+                                        append: !first_chunk,
+                                    },
+                                    is_final: false,
+                                });
+                                first_chunk = false;
+                            }
+                            Ok(AgentEvent::ToolCall { name, .. }) => {
+                                yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                                    task_id: task_id.clone(),
+                                    status: A2ATaskStatus::with_message(
+                                        TaskState::Working,
+                                        A2AMessage::agent_text(format!("调用工具: {name}")),
+                                    ),
+                                    is_final: false,
+                                });
+                            }
+                            Ok(AgentEvent::ToolResult { name, output }) => {
+                                artifact_index += 1;
+                                yield A2AStreamEvent::ArtifactUpdate(TaskArtifactUpdateEvent {
+                                    task_id: task_id.clone(),
+                                    artifact: A2AArtifact {
+                                        name: Some(format!("tool_result:{name}")),
+                                        index: Some(artifact_index),
+                                        parts: vec![A2APart::Text { text: output }],
+                                        append: false,
+                                    },
+                                    is_final: false,
+                                });
+                                artifact_index += 1;
+                                first_chunk = true;
+                            }
+                            Ok(AgentEvent::FinalAnswer(answer)) => {
+                                accumulated_text = answer;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!(task_id = %task_id, error = %e, "A2A Stream: 事件流错误");
+                                let status = A2ATaskStatus::with_message(
+                                    TaskState::Failed,
+                                    A2AMessage::agent_text(format!("执行失败: {e}")),
+                                );
+                                Self::update_task_state(&tasks, &task_id, TaskState::Failed, Some(&status)).await;
+                                yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                                    task_id: task_id.clone(),
+                                    status,
+                                    is_final: true,
+                                });
+                                return;
+                            }
+                        }
+                    }
+
+                    // completed
+                    let result_message = A2AMessage::agent_text(&accumulated_text);
+                    let final_artifact = A2AArtifact {
+                        name: Some("output".to_string()),
+                        index: Some(0),
+                        parts: vec![A2APart::Text { text: accumulated_text }],
+                        append: false,
+                    };
+
+                    let completed_status = A2ATaskStatus::with_message(
+                        TaskState::Completed,
+                        result_message.clone(),
+                    );
+
+                    {
+                        let mut store = tasks.lock().await;
+                        if let Some(task) = store.get_mut(&task_id) {
+                            task.status = completed_status.clone();
+                            task.history.push(result_message);
+                            task.artifacts = vec![final_artifact];
+                        }
+                    }
+
+                    info!(task_id = %task_id, "✅ A2A Stream: 任务完成");
+
+                    yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                        task_id: task_id.clone(),
+                        status: completed_status,
+                        is_final: true,
+                    });
+                }
+                Err(e) => {
+                    warn!(task_id = %task_id, error = %e, "A2A Stream: Agent 执行失败");
+                    let status = A2ATaskStatus::with_message(
+                        TaskState::Failed,
+                        A2AMessage::agent_text(format!("执行失败: {e}")),
+                    );
+                    Self::update_task_state(&tasks, &task_id, TaskState::Failed, Some(&status)).await;
+                    yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                        task_id: task_id.clone(),
+                        status,
+                        is_final: true,
+                    });
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+
+    /// 将流式事件格式化为 SSE `data:` 行
+    ///
+    /// 方便在 HTTP 框架中直接使用：
+    /// ```rust,ignore
+    /// let events = server.handle_request_stream(json).await?;
+    /// let sse = events.map(|e| A2AServer::format_sse_event(&e, "req-1"));
+    /// // 写入 HTTP response body
+    /// ```
+    pub fn format_sse_event(event: &A2AStreamEvent, request_id: &str) -> String {
+        let response = A2AStreamResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request_id.to_string(),
+            result: Some(event.clone()),
+            error: None,
+        };
+        format!(
+            "data: {}\n\n",
+            serde_json::to_string(&response).unwrap_or_default()
+        )
+    }
+
+    // ── tasks/send ───────────────────────────────────────────────────────────
+
     async fn handle_task_send(&self, request: &A2ATaskRequest) -> A2ATaskResponse {
         let task_id = request
             .params
@@ -103,20 +341,13 @@ impl A2AServer {
 
         let input_text = request.params.message.text_content();
 
-        info!(
-            task_id = %task_id,
-            input_len = input_text.len(),
-            "📨 A2A: 收到任务请求"
-        );
+        info!(task_id = %task_id, input_len = input_text.len(), "📨 A2A: 收到任务请求");
 
-        // 创建任务记录
+        // submitted → working
         let task = A2ATask {
             id: task_id.clone(),
             session_id: request.params.session_id.clone(),
-            status: A2ATaskStatus {
-                state: "working".to_string(),
-                message: None,
-            },
+            status: A2ATaskStatus::new(TaskState::Submitted),
             history: vec![request.params.message.clone()],
             artifacts: Vec::new(),
         };
@@ -126,7 +357,9 @@ impl A2AServer {
             tasks.insert(task_id.clone(), task);
         }
 
-        // 执行 Agent
+        Self::update_task_state(&self.tasks, &task_id, TaskState::Working, None).await;
+
+        // working → completed / failed
         let mut agent = self.agent.lock().await;
         match agent.execute(&input_text).await {
             Ok(output) => {
@@ -135,18 +368,20 @@ impl A2AServer {
                 let result_message = A2AMessage::agent_text(&output);
                 let artifact = A2AArtifact {
                     name: Some("output".to_string()),
+                    index: Some(0),
                     parts: vec![A2APart::Text {
                         text: output.clone(),
                     }],
+                    append: false,
                 };
 
                 let completed_task = A2ATask {
                     id: task_id.clone(),
                     session_id: request.params.session_id.clone(),
-                    status: A2ATaskStatus {
-                        state: "completed".to_string(),
-                        message: Some(result_message.clone()),
-                    },
+                    status: A2ATaskStatus::with_message(
+                        TaskState::Completed,
+                        result_message.clone(),
+                    ),
                     history: vec![request.params.message.clone(), result_message],
                     artifacts: vec![artifact],
                 };
@@ -169,10 +404,10 @@ impl A2AServer {
                 let failed_task = A2ATask {
                     id: task_id.clone(),
                     session_id: request.params.session_id.clone(),
-                    status: A2ATaskStatus {
-                        state: "failed".to_string(),
-                        message: Some(A2AMessage::agent_text(format!("执行失败: {}", e))),
-                    },
+                    status: A2ATaskStatus::with_message(
+                        TaskState::Failed,
+                        A2AMessage::agent_text(format!("执行失败: {}", e)),
+                    ),
                     history: vec![request.params.message.clone()],
                     artifacts: Vec::new(),
                 };
@@ -195,7 +430,8 @@ impl A2AServer {
         }
     }
 
-    /// 处理 tasks/get 请求
+    // ── tasks/get ────────────────────────────────────────────────────────────
+
     async fn handle_task_get(&self, request: &A2ATaskRequest) -> A2ATaskResponse {
         let task_id = match &request.params.id {
             Some(id) => id.clone(),
@@ -232,7 +468,8 @@ impl A2AServer {
         }
     }
 
-    /// 处理 tasks/cancel 请求
+    // ── tasks/cancel ─────────────────────────────────────────────────────────
+
     async fn handle_task_cancel(&self, request: &A2ATaskRequest) -> A2ATaskResponse {
         let task_id = match &request.params.id {
             Some(id) => id.clone(),
@@ -251,10 +488,22 @@ impl A2AServer {
 
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get_mut(&task_id) {
-            task.status = A2ATaskStatus {
-                state: "canceled".to_string(),
-                message: None,
-            };
+            if task.status.state.is_terminal() {
+                return A2ATaskResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id.clone(),
+                    result: None,
+                    error: Some(A2AError {
+                        code: -32002,
+                        message: format!(
+                            "Task '{}' is in terminal state '{}' and cannot be canceled",
+                            task_id, task.status.state
+                        ),
+                    }),
+                };
+            }
+
+            task.status = A2ATaskStatus::new(TaskState::Canceled);
             A2ATaskResponse {
                 jsonrpc: "2.0".to_string(),
                 id: request.id.clone(),
@@ -272,5 +521,127 @@ impl A2AServer {
                 }),
             }
         }
+    }
+
+    // ── 内部辅助 ─────────────────────────────────────────────────────────────
+
+    async fn update_task_state(
+        tasks: &Arc<Mutex<HashMap<String, A2ATask>>>,
+        task_id: &str,
+        state: TaskState,
+        status: Option<&A2ATaskStatus>,
+    ) {
+        let mut store = tasks.lock().await;
+        if let Some(task) = store.get_mut(task_id) {
+            task.status = status.cloned().unwrap_or_else(|| A2ATaskStatus::new(state));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::react_agent::builder::ReactAgentBuilder;
+
+    fn make_request(method: &str, message: &str, task_id: Option<&str>) -> String {
+        let params = if let Some(id) = task_id {
+            serde_json::json!({
+                "id": id,
+                "message": { "role": "user", "parts": [{"type": "text", "text": message}] }
+            })
+        } else {
+            serde_json::json!({
+                "message": { "role": "user", "parts": [{"type": "text", "text": message}] }
+            })
+        };
+
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "test-req-1",
+            "method": method,
+            "params": params
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_task_state_in_response() {
+        let status = A2ATaskStatus::new(TaskState::Submitted);
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"state\":\"submitted\""));
+
+        let status = A2ATaskStatus::new(TaskState::InputRequired);
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"state\":\"input-required\""));
+    }
+
+    #[test]
+    fn test_cancel_terminal_state_rejected() {
+        let task = A2ATask {
+            id: "t1".into(),
+            session_id: None,
+            status: A2ATaskStatus::new(TaskState::Completed),
+            history: vec![],
+            artifacts: vec![],
+        };
+        assert!(task.status.state.is_terminal());
+        assert!(!task.status.state.can_transition_to(TaskState::Canceled));
+    }
+
+    #[tokio::test]
+    async fn test_handle_task_get_not_found() {
+        let card = AgentCard::builder("test", "http://localhost").build();
+        let agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .name("test_agent")
+            .system_prompt("test")
+            .build()
+            .unwrap();
+        let server = A2AServer::new(card, agent);
+
+        let req = make_request("tasks/get", "", Some("nonexistent"));
+        let resp_json = server.handle_request(&req).await;
+        let resp: A2ATaskResponse = serde_json::from_str(&resp_json).unwrap();
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, -32001);
+    }
+
+    #[tokio::test]
+    async fn test_handle_unknown_method() {
+        let card = AgentCard::builder("test", "http://localhost").build();
+        let agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .name("test_agent")
+            .system_prompt("test")
+            .build()
+            .unwrap();
+        let server = A2AServer::new(card, agent);
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "unknown/method",
+            "params": { "message": { "role": "user", "parts": [{"type":"text","text":"hi"}] } }
+        })
+        .to_string();
+        let resp_json = server.handle_request(&req).await;
+        let resp: A2ATaskResponse = serde_json::from_str(&resp_json).unwrap();
+        assert_eq!(resp.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn test_handle_parse_error() {
+        let card = AgentCard::builder("test", "http://localhost").build();
+        let agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .name("test_agent")
+            .system_prompt("test")
+            .build()
+            .unwrap();
+        let server = A2AServer::new(card, agent);
+
+        let resp_json = server.handle_request("not json").await;
+        let resp: A2ATaskResponse = serde_json::from_str(&resp_json).unwrap();
+        assert_eq!(resp.error.unwrap().code, -32700);
     }
 }

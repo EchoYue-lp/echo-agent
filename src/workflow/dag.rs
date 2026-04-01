@@ -6,7 +6,7 @@ use crate::error::{AgentError, ReactError, Result};
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// DAG 中的节点
 pub struct DagNode {
@@ -107,7 +107,10 @@ impl Workflow for DagWorkflow {
 
                 for node_id in &batch {
                     let agent_handle = self.nodes[node_id].clone();
-                    let preds = predecessors.get(node_id.as_str()).cloned().unwrap_or_default();
+                    let preds = predecessors
+                        .get(node_id.as_str())
+                        .cloned()
+                        .unwrap_or_default();
 
                     let node_input = if preds.is_empty() {
                         input.to_string()
@@ -172,11 +175,7 @@ impl Workflow for DagWorkflow {
             let leaf_nodes: Vec<&str> = self
                 .node_order
                 .iter()
-                .filter(|id| {
-                    successors
-                        .get(id.as_str())
-                        .map_or(true, |s| s.is_empty())
-                })
+                .filter(|id| successors.get(id.as_str()).map_or(true, |s| s.is_empty()))
                 .map(|s| s.as_str())
                 .collect();
 
@@ -403,8 +402,14 @@ mod tests {
     fn test_topological_sort_simple() {
         let nodes = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let edges = vec![
-            DagEdge { from: "a".into(), to: "b".into() },
-            DagEdge { from: "b".into(), to: "c".into() },
+            DagEdge {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            DagEdge {
+                from: "b".into(),
+                to: "c".into(),
+            },
         ];
         let order = topological_sort(&nodes, &edges).unwrap();
         assert_eq!(order, vec!["a", "b", "c"]);
@@ -419,10 +424,22 @@ mod tests {
             "d".to_string(),
         ];
         let edges = vec![
-            DagEdge { from: "a".into(), to: "b".into() },
-            DagEdge { from: "a".into(), to: "c".into() },
-            DagEdge { from: "b".into(), to: "d".into() },
-            DagEdge { from: "c".into(), to: "d".into() },
+            DagEdge {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            DagEdge {
+                from: "a".into(),
+                to: "c".into(),
+            },
+            DagEdge {
+                from: "b".into(),
+                to: "d".into(),
+            },
+            DagEdge {
+                from: "c".into(),
+                to: "d".into(),
+            },
         ];
         let order = topological_sort(&nodes, &edges).unwrap();
         assert_eq!(order[0], "a");
@@ -435,9 +452,18 @@ mod tests {
     fn test_cycle_detection() {
         let nodes = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let edges = vec![
-            DagEdge { from: "a".into(), to: "b".into() },
-            DagEdge { from: "b".into(), to: "c".into() },
-            DagEdge { from: "c".into(), to: "a".into() },
+            DagEdge {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            DagEdge {
+                from: "b".into(),
+                to: "c".into(),
+            },
+            DagEdge {
+                from: "c".into(),
+                to: "a".into(),
+            },
         ];
         assert!(detect_cycle(&nodes, &edges).is_some());
     }
@@ -446,8 +472,14 @@ mod tests {
     fn test_no_cycle() {
         let nodes = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let edges = vec![
-            DagEdge { from: "a".into(), to: "b".into() },
-            DagEdge { from: "a".into(), to: "c".into() },
+            DagEdge {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            DagEdge {
+                from: "a".into(),
+                to: "c".into(),
+            },
         ];
         assert!(detect_cycle(&nodes, &edges).is_none());
     }

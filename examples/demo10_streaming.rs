@@ -136,6 +136,15 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
 
     while let Some(event_result) = event_stream.next().await {
         match event_result? {
+            AgentEvent::ThinkStart => {
+                println!("  💭 开始推理...");
+            }
+            AgentEvent::ThinkEnd { tokens_used } => {
+                println!("  💭 推理结束 (tokens: {tokens_used})");
+            }
+            AgentEvent::MemoryRecalled { count } if count > 0 => {
+                println!("  🧠 召回 {count} 条记忆");
+            }
             AgentEvent::Token(token) => {
                 print!("{}", token);
                 std::io::stdout().flush().ok();
@@ -152,6 +161,7 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
             AgentEvent::Cancelled => {
                 println!("\n  ⚠️ 执行已取消");
             }
+            _ => {}
         }
     }
 

@@ -156,13 +156,16 @@ pub mod prelude {
         CompressionInput, CompressionOutput, ContextCompressor, ContextManager, ForceCompressStats,
     };
 
+    // Tokenizer
+    pub use echo_core::tokenizer::{HeuristicTokenizer, SimpleTokenizer, Tokenizer};
+
     // Memory
+    #[cfg(feature = "sqlite")]
+    pub use crate::memory::SqliteStore;
     pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
     pub use crate::memory::embedder::{Embedder, HttpEmbedder};
     pub use crate::memory::embedding_store::EmbeddingStore;
     pub use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
-    #[cfg(feature = "sqlite")]
-    pub use crate::memory::SqliteStore;
     pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};
 
     // Skills
@@ -224,7 +227,8 @@ pub mod advanced {
 
     #[cfg(feature = "a2a")]
     pub use crate::a2a::{
-        A2AClient, A2AServer, AgentCapabilities, AgentCard, AgentProvider, AgentSkill,
+        A2AClient, A2AServer, A2AStreamEvent, AgentCapabilities, AgentCard, AgentProvider,
+        AgentSkill, TaskState,
     };
 
     #[cfg(feature = "topology")]

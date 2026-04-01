@@ -12,7 +12,9 @@ pub mod compressor;
 use crate::compression::compressor::SlidingWindowCompressor;
 use crate::error::Result;
 use crate::llm::types::Message;
+use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use futures::future::BoxFuture;
+use std::sync::Arc;
 
 /// 压缩管道的输入
 pub struct CompressionInput {
@@ -108,6 +110,7 @@ pub struct ContextManager {
     messages: Vec<Message>,
     compressor: Option<Box<dyn ContextCompressor>>,
     token_limit: usize,
+    tokenizer: Arc<dyn Tokenizer>,
 }
 
 impl ContextManager {
@@ -116,6 +119,7 @@ impl ContextManager {
             token_limit,
             compressor: None,
             initial_messages: Vec::new(),
+            tokenizer: None,
         }
     }
 
@@ -134,9 +138,21 @@ impl ContextManager {
         &self.messages
     }
 
-    /// 估算当前上下文的 token 数（粗略估算：字符数 / 4）
+    /// 估算当前上下文的 token 数
+    ///
+    /// 使用已配置的 [`Tokenizer`] 实现（默认 [`HeuristicTokenizer`]，区分 ASCII/CJK）。
     pub fn token_estimate(&self) -> usize {
-        Self::estimate_tokens(&self.messages)
+        Self::estimate_tokens(&self.messages, &*self.tokenizer)
+    }
+
+    /// 获取当前 Tokenizer
+    pub fn tokenizer(&self) -> &dyn Tokenizer {
+        &*self.tokenizer
+    }
+
+    /// 动态替换 Tokenizer
+    pub fn set_tokenizer(&mut self, tokenizer: Arc<dyn Tokenizer>) {
+        self.tokenizer = tokenizer;
     }
 
     /// 清空上下文缓冲区（保留已设置的压缩器）
@@ -246,7 +262,7 @@ impl ContextManager {
     /// `current_query` 为保留字段，传 `None` 即可。
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<Vec<Message>> {
         if let Some(compressor) = &self.compressor
-            && Self::estimate_tokens(&self.messages) > self.token_limit
+            && Self::estimate_tokens(&self.messages, &*self.tokenizer) > self.token_limit
         {
             let output = compressor
                 .compress(CompressionInput {
@@ -260,11 +276,11 @@ impl ContextManager {
         Ok(self.messages.clone())
     }
 
-    fn estimate_tokens(messages: &[Message]) -> usize {
+    fn estimate_tokens(messages: &[Message], tokenizer: &dyn Tokenizer) -> usize {
         messages
             .iter()
             .filter_map(|m| m.content.as_ref())
-            .map(|c| c.len() / 4 + 1)
+            .map(|c| tokenizer.count_tokens(c))
             .sum()
     }
 }
@@ -274,6 +290,7 @@ pub struct ContextManagerBuilder {
     token_limit: usize,
     compressor: Option<Box<dyn ContextCompressor>>,
     initial_messages: Vec<Message>,
+    tokenizer: Option<Arc<dyn Tokenizer>>,
 }
 
 impl ContextManagerBuilder {
@@ -290,11 +307,32 @@ impl ContextManagerBuilder {
         self
     }
 
+    /// 设置自定义 Tokenizer（默认 [`HeuristicTokenizer`]）
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::compression::ContextManager;
+    /// use echo_core::tokenizer::SimpleTokenizer;
+    /// use std::sync::Arc;
+    ///
+    /// let ctx = ContextManager::builder(4096)
+    ///     .tokenizer(Arc::new(SimpleTokenizer))
+    ///     .build();
+    /// ```
+    pub fn tokenizer(mut self, tokenizer: Arc<dyn Tokenizer>) -> Self {
+        self.tokenizer = Some(tokenizer);
+        self
+    }
+
     pub fn build(self) -> ContextManager {
         ContextManager {
             messages: self.initial_messages,
             compressor: self.compressor,
             token_limit: self.token_limit,
+            tokenizer: self
+                .tokenizer
+                .unwrap_or_else(|| Arc::new(HeuristicTokenizer)),
         }
     }
 }

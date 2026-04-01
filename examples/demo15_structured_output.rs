@@ -47,7 +47,10 @@ async fn main() -> echo_agent::error::Result<()> {
     // 演示 3：批量提取
     demo_batch_extract(&agent).await?;
 
-    // 演示 4：AgentConfig 全局设置
+    // 演示 4：output_type<T> + execute_typed<T>
+    demo_output_type().await?;
+
+    // 演示 5：AgentConfig 全局设置
     demo_config_level().await?;
 
     println!("\n✅ 所有演示完成");
@@ -144,9 +147,47 @@ async fn demo_batch_extract(agent: &ReactAgent) -> echo_agent::error::Result<()>
     Ok(())
 }
 
+/// 演示 4：`output_type<T>` 自动推导 JSON Schema + `execute_typed<T>` 直接返回结构体
+async fn demo_output_type() -> echo_agent::error::Result<()> {
+    println!("\n══════════════════════════════════════════════════════");
+    println!("  演示 4：output_type<T> + execute_typed<T>");
+    println!("    （通过 schemars 自动推导 JSON Schema，无需手写）\n");
+
+    #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+    struct TranslationResult {
+        original: String,
+        translated: String,
+        source_lang: String,
+        target_lang: String,
+    }
+
+    let mut agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .name("typed_translator")
+        .system_prompt("你是一个翻译助手，将用户输入翻译为英文，返回 JSON 格式的翻译结果。")
+        .output_type::<TranslationResult>()
+        .build()?;
+
+    let input = "今天天气真好";
+    println!("  输入: {input}");
+
+    match agent.execute_typed::<TranslationResult>(input).await {
+        Ok(result) => {
+            println!("  结果: {:?}", result);
+            println!("    original    = {}", result.original);
+            println!("    translated  = {}", result.translated);
+        }
+        Err(e) => {
+            println!("  execute_typed 失败（可能 LLM 返回格式不符）: {e}");
+            println!("  （提示：output_type 需要 LLM 支持 JSON mode）");
+        }
+    }
+    Ok(())
+}
+
 async fn demo_config_level() -> echo_agent::error::Result<()> {
     println!("\n══════════════════════════════════════════════════════");
-    println!("  演示 4：AgentBuilder 全局设置 response_format");
+    println!("  演示 5：AgentBuilder 全局设置 response_format");
 
     let _schema = ResponseFormat::json_schema(
         "translation_result",

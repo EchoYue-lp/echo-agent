@@ -131,7 +131,9 @@ impl DockerSandbox {
         }
 
         // 网络隔离
-        let network_allowed = limits.map(|l| l.network).unwrap_or(!self.config.disable_network);
+        let network_allowed = limits
+            .map(|l| l.network)
+            .unwrap_or(!self.config.disable_network);
         if !network_allowed {
             args.push("--network=none".to_string());
         }
@@ -220,11 +222,7 @@ impl DockerSandbox {
                     "php" => ("php", "-r"),
                     _ => ("sh", "-c"),
                 };
-                vec![
-                    interpreter.to_string(),
-                    flag.to_string(),
-                    code.clone(),
-                ]
+                vec![interpreter.to_string(), flag.to_string(), code.clone()]
             }
         }
     }

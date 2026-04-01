@@ -1125,6 +1125,7 @@ async fn stream_run(
                     }
                     println!("\n  [执行已取消]");
                 }
+                _ => {}
             },
         }
     }

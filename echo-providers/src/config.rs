@@ -283,7 +283,10 @@ impl ProviderFactory {
     /// - `moonshot` → `MOONSHOT_API_KEY`
     /// - `zhipu` → `ZHIPU_API_KEY`
     /// - `ollama` → 无需 API key
-    fn from_provider_model(provider: &str, model: &str) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+    fn from_provider_model(
+        provider: &str,
+        model: &str,
+    ) -> Result<Box<dyn echo_core::llm::LlmClient>> {
         let base_url = provider_base_url(provider).ok_or_else(|| {
             ReactError::Config(ConfigError::ConfigFileError(format!(
                 "未知的 provider: '{provider}'，\
@@ -321,8 +324,16 @@ impl ProviderFactory {
     /// 列出所有支持的 provider 名称
     pub fn supported_providers() -> &'static [&'static str] {
         &[
-            "openai", "anthropic", "deepseek", "dashscope", "qwen",
-            "moonshot", "kimi", "zhipu", "glm", "ollama",
+            "openai",
+            "anthropic",
+            "deepseek",
+            "dashscope",
+            "qwen",
+            "moonshot",
+            "kimi",
+            "zhipu",
+            "glm",
+            "ollama",
         ]
     }
 }
@@ -413,10 +424,16 @@ pub struct Config {
     pub models: HashMap<String, ModelConfig>,
 }
 
-static MODEL_CONFIG: OnceLock<Config> = OnceLock::new();
+/// 缓存的加载结果：`Ok(Config)` 或 `Err(描述)`。
+/// 使用 `Result<Config, String>` 而非裸 `Config`，加载失败时不 panic，
+/// 只缓存错误信息，由调用方决定错误处理策略。
+static MODEL_CONFIG: OnceLock<std::result::Result<Config, String>> = OnceLock::new();
 
 impl Config {
     /// 加载配置（YAML 配置文件优先，回退到环境变量）
+    ///
+    /// 每次调用都重新读取文件 / 环境变量，不使用缓存。
+    /// 如需缓存请使用 [`load_cached`](Self::load_cached)。
     pub fn load() -> Result<Self> {
         dotenv::dotenv().ok();
 
@@ -605,9 +622,23 @@ impl Config {
 
     // ── 公共查询 API ─────────────────────────────────────────────────────────
 
+    /// 惰性加载并缓存配置（进程级单例）
+    ///
+    /// 首次调用时执行 [`load`](Self::load)，后续调用返回缓存结果。
+    /// 加载失败时缓存错误信息，不 panic。
+    pub fn load_cached() -> Result<&'static Config> {
+        let result = MODEL_CONFIG.get_or_init(|| Config::load().map_err(|e| e.to_string()));
+        match result {
+            Ok(config) => Ok(config),
+            Err(msg) => Err(ReactError::Config(ConfigError::ConfigFileError(
+                msg.clone(),
+            ))),
+        }
+    }
+
     /// 获取指定模型的配置
     pub fn get_model(model: &str) -> Result<ModelConfig> {
-        let config = MODEL_CONFIG.get_or_init(|| Config::load().expect("Failed to load config"));
+        let config = Self::load_cached()?;
         config
             .models
             .get(model)
@@ -627,15 +658,21 @@ impl Config {
     }
 
     /// 检查模型配置是否存在
+    ///
+    /// 配置加载失败时返回 `false`（不 panic）。
     pub fn has_model(model: &str) -> bool {
-        let config = MODEL_CONFIG.get_or_init(|| Config::load().expect("Failed to load config"));
-        config.models.contains_key(model)
+        Self::load_cached()
+            .map(|config| config.models.contains_key(model))
+            .unwrap_or(false)
     }
 
     /// 列出所有可用的模型名称
+    ///
+    /// 配置加载失败时返回空列表（不 panic）。
     pub fn list_models() -> Vec<String> {
-        let config = MODEL_CONFIG.get_or_init(|| Config::load().expect("Failed to load config"));
-        config.models.keys().cloned().collect()
+        Self::load_cached()
+            .map(|config| config.models.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// 向后兼容：`from_env` 是 `load` 的别名

@@ -10,12 +10,57 @@ pub use tokio_util::sync::CancellationToken;
 
 /// Agent 执行过程中产生的事件
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AgentEvent {
     Token(String),
-    ToolCall { name: String, args: Value },
-    ToolResult { name: String, output: String },
+    ToolCall {
+        name: String,
+        args: Value,
+    },
+    ToolResult {
+        name: String,
+        output: String,
+    },
     FinalAnswer(String),
     Cancelled,
+    /// LLM 推理开始
+    ThinkStart,
+    /// LLM 推理结束
+    ThinkEnd {
+        tokens_used: usize,
+    },
+    /// Plan-and-Execute 引擎生成了计划
+    PlanGenerated {
+        steps: Vec<String>,
+    },
+    /// 计划步骤开始执行
+    StepStart {
+        step_index: usize,
+        description: String,
+    },
+    /// 计划步骤执行结束
+    StepEnd {
+        step_index: usize,
+        success: bool,
+    },
+    /// 护栏被触发
+    GuardTriggered {
+        guard: String,
+        blocked: bool,
+    },
+    /// 长期记忆已召回
+    MemoryRecalled {
+        count: usize,
+    },
+    /// Agent 间 Handoff 开始
+    HandoffStart {
+        from: String,
+        to: String,
+    },
+    /// Agent 间 Handoff 结束
+    HandoffEnd {
+        to: String,
+    },
 }
 
 /// LLM 响应解析后的步骤类型

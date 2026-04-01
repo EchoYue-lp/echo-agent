@@ -294,6 +294,7 @@ async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
             AgentEvent::Cancelled => {
                 println!("\n  [Cancelled] 执行已取消");
             }
+            _ => {}
         }
     }
 

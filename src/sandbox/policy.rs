@@ -36,28 +36,39 @@ pub struct SandboxPolicy {
 /// 已知需要容器隔离的编程语言
 static CONTAINER_LANGUAGES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        "python", "python3", "javascript", "js", "node", "typescript", "ts",
-        "ruby", "perl", "php", "lua", "r", "julia", "swift",
+        "python",
+        "python3",
+        "javascript",
+        "js",
+        "node",
+        "typescript",
+        "ts",
+        "ruby",
+        "perl",
+        "php",
+        "lua",
+        "r",
+        "julia",
+        "swift",
     ])
 });
 
 /// 明确安全的只读命令
 static SAFE_LOCAL_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        "ls", "cat", "head", "tail", "wc", "pwd", "tree", "find", "du",
-        "echo", "printf", "sort", "uniq", "diff", "which", "env", "date", "uname",
-        "grep", "rg", "ag", "fd",
+        "ls", "cat", "head", "tail", "wc", "pwd", "tree", "find", "du", "echo", "printf", "sort",
+        "uniq", "diff", "which", "env", "date", "uname", "grep", "rg", "ag", "fd",
     ])
 });
 
 /// 需要高隔离的危险模式
 static DANGEROUS_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "curl", "wget", "nc", "ncat",    // 网络
-        "eval", "exec",                   // 动态执行
-        "rm -rf", "dd ",                  // 破坏性
-        "> /dev/", "| bash", "| sh",      // 管道注入
-        "$(", "`",                         // 命令替换
+        "curl", "wget", "nc", "ncat", // 网络
+        "eval", "exec", // 动态执行
+        "rm -rf", "dd ", // 破坏性
+        "> /dev/", "| bash", "| sh", // 管道注入
+        "$(", "`", // 命令替换
     ]
 });
 
@@ -70,10 +81,7 @@ impl Default for SandboxPolicy {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            trusted_commands: SAFE_LOCAL_COMMANDS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            trusted_commands: SAFE_LOCAL_COMMANDS.iter().map(|s| s.to_string()).collect(),
         }
     }
 }

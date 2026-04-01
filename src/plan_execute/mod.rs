@@ -53,6 +53,9 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use tracing::{debug, info, warn};
 
+#[allow(unused_imports)]
+use futures::StreamExt;
+
 /// Plan-and-Execute Agent
 ///
 /// 将任务分为规划和执行两个阶段。Planner 生成计划，Executor 逐步执行。
@@ -364,8 +367,102 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
-            let result = self.run_plan_execute(task).await?;
-            let stream = futures::stream::once(async move { Ok(AgentEvent::FinalAnswer(result)) });
+            let task = task.to_string();
+            let stream = async_stream::try_stream! {
+                let agent = self.name.clone();
+
+                // ── Phase 1: Planning ──
+                info!(agent = %agent, "📐 Plan-and-Execute (stream): 生成计划");
+                let mut plan = self.planner.plan(&task).await?;
+                yield AgentEvent::PlanGenerated {
+                    steps: plan.steps.iter().map(|s| s.description.clone()).collect(),
+                };
+
+                let mut replan_count = 0;
+                let mut all_results: Vec<StepResult> = Vec::new();
+
+                // ── Phase 2: Execute ──
+                loop {
+                    let pending: Vec<(usize, String)> = plan
+                        .steps
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.status == StepStatus::Pending)
+                        .map(|(i, s)| (i, s.description.clone()))
+                        .collect();
+
+                    if pending.is_empty() {
+                        break;
+                    }
+
+                    for (idx, step_desc) in &pending {
+                        let idx = *idx;
+                        yield AgentEvent::StepStart {
+                            step_index: idx,
+                            description: step_desc.clone(),
+                        };
+
+                        let context = self.build_step_context(&plan, idx, &all_results);
+                        plan.steps[idx].status = StepStatus::Running;
+
+                        match self.executor.execute_step(step_desc, &context).await {
+                            Ok(output) => {
+                                plan.steps[idx].status = StepStatus::Completed;
+                                all_results.push(StepResult {
+                                    step_index: idx,
+                                    description: step_desc.clone(),
+                                    output: output.clone(),
+                                    success: true,
+                                });
+                                yield AgentEvent::StepEnd { step_index: idx, success: true };
+                            }
+                            Err(e) => {
+                                plan.steps[idx].status = StepStatus::Failed;
+                                all_results.push(StepResult {
+                                    step_index: idx,
+                                    description: step_desc.clone(),
+                                    output: format!("执行失败: {}", e),
+                                    success: false,
+                                });
+                                yield AgentEvent::StepEnd { step_index: idx, success: false };
+
+                                if self.enable_replan && replan_count < self.max_replans {
+                                    replan_count += 1;
+                                    let replan_prompt = format!(
+                                        "原始任务: {}\n\n已完成的步骤:\n{}\n\n失败的步骤: {}\n错误: {}\n\n请根据以上情况重新制定剩余计划。",
+                                        task,
+                                        self.format_completed_results(&all_results),
+                                        step_desc,
+                                        e
+                                    );
+
+                                    if let Ok(new_plan) = self.planner.plan(&replan_prompt).await {
+                                        let completed_count = plan.steps.iter()
+                                            .filter(|s| s.status == StepStatus::Completed)
+                                            .count();
+                                        plan.steps.truncate(completed_count);
+                                        plan.steps.extend(new_plan.steps);
+                                        yield AgentEvent::PlanGenerated {
+                                            steps: plan.steps.iter().map(|s| s.description.clone()).collect(),
+                                        };
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let all_done = plan.steps.iter()
+                        .all(|s| s.status == StepStatus::Completed || s.status == StepStatus::Failed);
+                    if all_done {
+                        break;
+                    }
+                }
+
+                // ── Phase 3: Summarize ──
+                let summary = self.summarize_results(&task, &all_results).await?;
+                yield AgentEvent::FinalAnswer(summary);
+            };
             Ok(Box::pin(stream) as BoxStream<'_, Result<AgentEvent>>)
         })
     }

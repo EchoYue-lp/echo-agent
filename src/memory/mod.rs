@@ -53,7 +53,7 @@ pub mod store;
 pub use checkpointer::{Checkpoint, Checkpointer, FileCheckpointer, InMemoryCheckpointer};
 pub use embedder::{Embedder, HttpEmbedder};
 pub use embedding_store::EmbeddingStore;
+pub use snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
 #[cfg(feature = "sqlite")]
 pub use sqlite_store::SqliteStore;
-pub use snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
 pub use store::{FileStore, InMemoryStore, Store, StoreItem};

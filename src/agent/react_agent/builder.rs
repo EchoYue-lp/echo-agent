@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
 use crate::human_loop::HumanLoopProvider;
-use crate::llm::{LlmClient, LlmConfig, OpenAiClient};
+use crate::llm::{LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
 use crate::memory::checkpointer::Checkpointer;
 use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
 use crate::memory::store::Store;
@@ -46,6 +46,7 @@ pub struct ReactAgentBuilder {
     audit_logger: Option<Arc<dyn AuditLogger>>,
     snapshot_policy: Option<SnapshotPolicy>,
     max_snapshots: usize,
+    response_format: Option<ResponseFormat>,
 }
 
 impl Default for ReactAgentBuilder {
@@ -84,6 +85,7 @@ impl ReactAgentBuilder {
             audit_logger: None,
             snapshot_policy: None,
             max_snapshots: 10,
+            response_format: None,
         }
     }
 
@@ -245,6 +247,50 @@ impl ReactAgentBuilder {
         self
     }
 
+    // ── 结构化输出 ──────────────────────────────────────────────────────────────
+
+    /// 声明 Agent 的结构化输出类型
+    ///
+    /// 自动根据 `T` 的 [`JsonSchema`](schemars::JsonSchema) 生成 `response_format`，
+    /// 配合 [`ReactAgent::execute_typed`] 使用可直接获得反序列化后的结果。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::prelude::*;
+    /// use schemars::JsonSchema;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Debug, Deserialize, JsonSchema)]
+    /// struct Person { name: String, age: u32 }
+    ///
+    /// # fn main() -> echo_agent::error::Result<()> {
+    /// let agent = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .output_type::<Person>()
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn output_type<T: schemars::JsonSchema>(mut self) -> Self {
+        let schema_gen = schemars::r#gen::SchemaGenerator::default();
+        let root_schema = schema_gen.into_root_schema_for::<T>();
+        let schema_value = serde_json::to_value(root_schema).unwrap_or_default();
+        let type_name = std::any::type_name::<T>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("output")
+            .to_lowercase();
+        self.response_format = Some(ResponseFormat::json_schema(type_name, schema_value));
+        self
+    }
+
+    /// 手动设置响应格式
+    pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
+        self.response_format = Some(fmt);
+        self
+    }
+
     // ── 执行参数 ────────────────────────────────────────────────────────────────
 
     /// 设置最大迭代次数
@@ -361,6 +407,10 @@ impl ReactAgentBuilder {
             .enable_cot(self.enable_cot)
             .max_iterations(self.max_iterations)
             .token_limit(self.token_limit);
+
+        if let Some(fmt) = self.response_format {
+            config = config.response_format(fmt);
+        }
 
         for callback in self.callbacks {
             config = config.with_callback(callback);
