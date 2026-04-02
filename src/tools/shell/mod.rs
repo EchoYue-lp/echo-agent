@@ -4,10 +4,11 @@
 
 use super::{Tool, ToolParameters, ToolResult};
 use crate::error::{Result, ToolError};
+use crate::sandbox::{SandboxCommand, SandboxExecutor};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use tokio::process::Command;
 
 static ALLOWED_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -78,9 +79,14 @@ pub enum CommandSafety {
 }
 
 /// Shell 命令执行工具（带安全检查）
+///
+/// 可选集成沙箱执行器：当设置了 `sandbox` 后，所有命令通过沙箱执行，
+/// 提供额外的隔离和资源限制。
 pub struct ShellTool {
     /// 是否启用严格模式（默认 true）
     strict_mode: bool,
+    /// 可选的沙箱执行器
+    sandbox: Option<Arc<dyn SandboxExecutor>>,
 }
 
 impl Default for ShellTool {
@@ -92,12 +98,24 @@ impl Default for ShellTool {
 impl ShellTool {
     /// 创建新的 Shell 工具（默认严格模式）
     pub fn new() -> Self {
-        Self { strict_mode: true }
+        Self {
+            strict_mode: true,
+            sandbox: None,
+        }
     }
 
     /// 创建非严格模式的 Shell 工具（不推荐！）
     pub fn new_permissive() -> Self {
-        Self { strict_mode: false }
+        Self {
+            strict_mode: false,
+            sandbox: None,
+        }
+    }
+
+    /// 设置沙箱执行器，命令将通过沙箱执行
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
     }
 
     /// 检查命令是否安全
@@ -273,33 +291,52 @@ impl Tool for ShellTool {
                 }
             }
 
-            #[cfg(target_os = "windows")]
-            let (shell, shell_arg) = ("cmd", "/C");
-            #[cfg(not(target_os = "windows"))]
-            let (shell, shell_arg) = ("sh", "-c");
-
-            match Command::new(shell)
-                .arg(shell_arg)
-                .arg(command)
-                .output()
-                .await
-            {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                    if output.status.success() {
-                        Ok(ToolResult::success(stdout))
-                    } else {
-                        Ok(ToolResult::error(format!(
-                            "命令执行失败，退出码: {:?}\n标准输出: {}\n错误输出: {}",
-                            output.status.code(),
-                            stdout,
-                            stderr
-                        )))
+            // 如果配置了沙箱，通过沙箱执行
+            if let Some(sandbox) = &self.sandbox {
+                let sandbox_cmd = SandboxCommand::shell(command);
+                match sandbox.execute(sandbox_cmd).await {
+                    Ok(result) => {
+                        if result.success() {
+                            Ok(ToolResult::success(result.stdout))
+                        } else {
+                            Ok(ToolResult::error(format!(
+                                "命令执行失败，退出码: {}\n标准输出: {}\n错误输出: {}",
+                                result.exit_code, result.stdout, result.stderr
+                            )))
+                        }
                     }
+                    Err(e) => Ok(ToolResult::error(format!("沙箱执行失败: {}", e))),
                 }
-                Err(e) => Ok(ToolResult::error(format!("无法执行命令: {}", e))),
+            } else {
+                // 直接执行（无沙箱）
+                #[cfg(target_os = "windows")]
+                let (shell, shell_arg) = ("cmd", "/C");
+                #[cfg(not(target_os = "windows"))]
+                let (shell, shell_arg) = ("sh", "-c");
+
+                match Command::new(shell)
+                    .arg(shell_arg)
+                    .arg(command)
+                    .output()
+                    .await
+                {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                        if output.status.success() {
+                            Ok(ToolResult::success(stdout))
+                        } else {
+                            Ok(ToolResult::error(format!(
+                                "命令执行失败，退出码: {:?}\n标准输出: {}\n错误输出: {}",
+                                output.status.code(),
+                                stdout,
+                                stderr
+                            )))
+                        }
+                    }
+                    Err(e) => Ok(ToolResult::error(format!("无法执行命令: {}", e))),
+                }
             }
         })
     }
@@ -487,5 +524,23 @@ mod tests {
         let result = tool.execute(params).await.unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("拒绝"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_tool_with_sandbox() {
+        use crate::sandbox::{LocalConfig, LocalSandbox};
+
+        let config = LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        };
+        let sandbox = Arc::new(LocalSandbox::new(config));
+        let tool = ShellTool::new().with_sandbox(sandbox);
+
+        let mut params = HashMap::new();
+        params.insert("command".to_string(), serde_json::json!("echo sandbox_test"));
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success, "Tool failed: {:?}", result.error);
+        assert!(result.output.contains("sandbox_test"));
     }
 }

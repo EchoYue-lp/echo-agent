@@ -375,14 +375,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_summary_compressor_default_prompt() -> Result<()> {
-        // ──────────────────────────────────────────────
-        // 示例 2：摘要压缩（使用系统默认摘要提示词）
-        // ──────────────────────────────────────────────
         println!("\n=== 示例 2：摘要压缩（使用系统默认摘要提示词） ===");
         let http = Arc::new(Client::new());
         let llm = Arc::new(DefaultLlmClient::new(http, MODEL));
 
-        // token_limit 设得很小，确保触发压缩
         let mut ctx2 = ContextManager::builder(50)
             .compressor(SummaryCompressor::new(llm.clone(), DefaultSummaryPrompt, 2))
             .build();
@@ -426,14 +422,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_summary_compressor_fn_prompt() -> Result<()> {
-        // ──────────────────────────────────────────────
-        // 示例 3：摘要压缩（使用自定义摘要提示词）
-        // ──────────────────────────────────────────────
         println!("\n=== 示例 3：摘要压缩（使用自定义摘要提示词） ===");
         let http = Arc::new(Client::new());
         let llm = Arc::new(DefaultLlmClient::new(http, MODEL));
 
-        // token_limit 设得很小，确保触发压缩
         let mut ctx2 = ContextManager::builder(50)
             .compressor(SummaryCompressor::new(
                 llm.clone(),
@@ -481,9 +473,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_hybrid_compressor() -> Result<()> {
-        // ──────────────────────────────────────────────
-        // 示例 4：混合管道（SlidingWindow → Summary）
-        // ──────────────────────────────────────────────
         println!("\n=== 示例 4：混合管道（滑动窗口 → 摘要） ===");
         let http = Arc::new(Client::new());
         let llm = Arc::new(DefaultLlmClient::new(http, MODEL));
@@ -493,7 +482,6 @@ mod tests {
             .stage(SummaryCompressor::new(llm.clone(), DefaultSummaryPrompt, 2))
             .build();
 
-        // token_limit 设得很小，确保两个阶段都被触发
         let mut ctx3 = ContextManager::builder(80).compressor(hybrid).build();
 
         ctx3.push(Message::system("你是一个项目管理助手。".to_string()));

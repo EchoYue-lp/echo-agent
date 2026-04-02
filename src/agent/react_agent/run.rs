@@ -510,6 +510,7 @@ impl ReactAgent {
 
         // 输入护栏检查
         if let Some(gm) = &self.guard_manager {
+            info!(agent = %agent, direction = "input", "🛡️ 护栏检查开始");
             let result = gm.check_all(message, GuardDirection::Input).await?;
             if let crate::guard::GuardResult::Block { reason } = &result {
                 info!(agent = %agent, reason = %reason, "🛡️ 输入被护栏阻断");
@@ -558,6 +559,8 @@ impl ReactAgent {
         self.context.push(Message::user(message.to_string()));
 
         for iteration in 0..self.config.max_iterations {
+            info!(agent = %agent, iteration = iteration + 1, "🔄 ReAct 迭代开始");
+
             for cb in &callbacks {
                 cb.on_iteration(&agent, iteration).await;
             }

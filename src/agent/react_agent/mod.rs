@@ -47,6 +47,7 @@ pub mod builder;
 mod capabilities;
 mod extract;
 mod run;
+pub mod structured;
 #[cfg(test)]
 mod tests;
 // ── 内置工具名常量 ─────────────────────────────────────────────────────────────

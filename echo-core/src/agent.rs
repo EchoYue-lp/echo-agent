@@ -9,26 +9,39 @@ use serde_json::Value;
 pub use tokio_util::sync::CancellationToken;
 
 /// Agent 执行过程中产生的事件
+///
+/// 覆盖 Agent 生命周期的各个阶段，便于实现进度条、日志、UI 更新等。
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AgentEvent {
+    // ── LLM 交互 ──────────────────────────────────────────────────────────
+    /// LLM 正在生成 token（流式）
     Token(String),
-    ToolCall {
-        name: String,
-        args: Value,
-    },
-    ToolResult {
-        name: String,
-        output: String,
-    },
-    FinalAnswer(String),
-    Cancelled,
     /// LLM 推理开始
     ThinkStart,
     /// LLM 推理结束
     ThinkEnd {
         tokens_used: usize,
     },
+
+    // ── 工具调用 ──────────────────────────────────────────────────────────
+    /// 准备调用工具
+    ToolCall {
+        name: String,
+        args: Value,
+    },
+    /// 工具执行完毕
+    ToolResult {
+        name: String,
+        output: String,
+    },
+    /// 工具执行出错
+    ToolError {
+        name: String,
+        error: String,
+    },
+
+    // ── 步骤级事件 ────────────────────────────────────────────────────────
     /// Plan-and-Execute 引擎生成了计划
     PlanGenerated {
         steps: Vec<String>,
@@ -43,11 +56,15 @@ pub enum AgentEvent {
         step_index: usize,
         success: bool,
     },
+
+    // ── 护栏 & 安全 ──────────────────────────────────────────────────────
     /// 护栏被触发
     GuardTriggered {
         guard: String,
         blocked: bool,
     },
+
+    // ── 记忆 & 编排 ──────────────────────────────────────────────────────
     /// 长期记忆已召回
     MemoryRecalled {
         count: usize,
@@ -61,6 +78,12 @@ pub enum AgentEvent {
     HandoffEnd {
         to: String,
     },
+
+    // ── 终态 ──────────────────────────────────────────────────────────────
+    /// 最终回答
+    FinalAnswer(String),
+    /// 被取消
+    Cancelled,
 }
 
 /// LLM 响应解析后的步骤类型

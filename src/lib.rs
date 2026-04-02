@@ -125,9 +125,10 @@ pub mod prelude {
     // Agent
     pub use crate::agent::react_agent::ReactAgent;
     pub use crate::agent::react_agent::StepType;
+    pub use crate::agent::react_agent::structured::StructuredAgent;
     pub use crate::agent::{
         Agent, AgentBuilder, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
-        ReactAgentBuilder,
+        ReactAgentBuilder, Runner,
     };
 
     // LLM

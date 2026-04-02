@@ -28,16 +28,17 @@
 //! ```
 
 use crate::error::{LlmError, ReactError, Result};
-use crate::llm::types::{DeltaMessage, Message};
+use crate::llm::types::{DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message, ToolCall};
 use crate::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-/// 预设响应的枚举（文本或错误）
+/// 预设响应的枚举（文本、工具调用或错误）
 enum MockLlmResponse {
     Content(String),
+    ToolCalls(Vec<ToolCall>),
     Err(ReactError),
 }
 
@@ -104,6 +105,47 @@ impl MockLlmClient {
         self
     }
 
+    /// 追加一次工具调用响应（模拟 LLM 发起 tool call）
+    ///
+    /// # 示例
+    ///
+    /// ```rust
+    /// use echo_agent::testing::MockLlmClient;
+    ///
+    /// let mock = MockLlmClient::new()
+    ///     .then_tool_call("call_1", "calculator", r#"{"a":1,"b":2}"#)
+    ///     .with_response("The answer is 3");
+    /// ```
+    pub fn then_tool_call(
+        self,
+        id: impl Into<String>,
+        function_name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        let tc = ToolCall {
+            id: id.into(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: function_name.into(),
+                arguments: arguments.into(),
+            },
+        };
+        self.responses
+            .lock()
+            .unwrap()
+            .push_back(MockLlmResponse::ToolCalls(vec![tc]));
+        self
+    }
+
+    /// 追加一次多工具调用响应（并行 tool calls）
+    pub fn then_tool_calls(self, calls: Vec<ToolCall>) -> Self {
+        self.responses
+            .lock()
+            .unwrap()
+            .push_back(MockLlmResponse::ToolCalls(calls));
+        self
+    }
+
     /// 追加一条网络错误（常用的便捷方法）
     pub fn with_network_error(self, msg: impl Into<String>) -> Self {
         self.with_error(ReactError::Llm(LlmError::NetworkError(msg.into())))
@@ -142,14 +184,20 @@ impl MockLlmClient {
         self.calls.lock().unwrap().clear();
     }
 
-    /// 取出下一个响应
-    fn pop_response(&self) -> Result<String> {
+    /// 取出下一个响应（文本或工具调用）
+    fn pop_response(&self) -> Result<PopResult> {
         match self.responses.lock().unwrap().pop_front() {
-            Some(MockLlmResponse::Content(text)) => Ok(text),
+            Some(MockLlmResponse::Content(text)) => Ok(PopResult::Content(text)),
+            Some(MockLlmResponse::ToolCalls(calls)) => Ok(PopResult::ToolCalls(calls)),
             Some(MockLlmResponse::Err(e)) => Err(e),
             None => Err(ReactError::Llm(LlmError::EmptyResponse)),
         }
     }
+}
+
+enum PopResult {
+    Content(String),
+    ToolCalls(Vec<ToolCall>),
 }
 
 impl LlmClient for MockLlmClient {
@@ -158,13 +206,18 @@ impl LlmClient for MockLlmClient {
             // 记录本次调用
             self.calls.lock().unwrap().push(request.messages);
 
-            let text = self.pop_response()?;
-
-            Ok(ChatResponse {
-                message: Message::assistant(text),
-                finish_reason: Some("stop".to_string()),
-                raw: crate::llm::types::ChatCompletionResponse::default(),
-            })
+            match self.pop_response()? {
+                PopResult::Content(text) => Ok(ChatResponse {
+                    message: Message::assistant(text),
+                    finish_reason: Some("stop".to_string()),
+                    raw: crate::llm::types::ChatCompletionResponse::default(),
+                }),
+                PopResult::ToolCalls(calls) => Ok(ChatResponse {
+                    message: Message::assistant_with_tools(calls),
+                    finish_reason: Some("tool_calls".to_string()),
+                    raw: crate::llm::types::ChatCompletionResponse::default(),
+                }),
+            }
         })
     }
 
@@ -176,21 +229,48 @@ impl LlmClient for MockLlmClient {
             // 记录本次调用
             self.calls.lock().unwrap().push(request.messages);
 
-            let text = self.pop_response()?;
-
-            // 创建一个简单的流，一次性返回整个内容
-            let stream = futures::stream::once(async move {
-                Ok(ChatChunk {
-                    delta: DeltaMessage {
-                        role: Some("assistant".to_string()),
-                        content: Some(text),
-                        tool_calls: None,
-                    },
-                    finish_reason: Some("stop".to_string()),
-                })
-            });
-
-            Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
+            match self.pop_response()? {
+                PopResult::Content(text) => {
+                    let stream = futures::stream::once(async move {
+                        Ok(ChatChunk {
+                            delta: DeltaMessage {
+                                role: Some("assistant".to_string()),
+                                content: Some(text),
+                                tool_calls: None,
+                            },
+                            finish_reason: Some("stop".to_string()),
+                        })
+                    });
+                    Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
+                }
+                PopResult::ToolCalls(calls) => {
+                    // Convert ToolCall → DeltaToolCall for streaming
+                    let delta_calls: Vec<DeltaToolCall> = calls
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, tc)| DeltaToolCall {
+                            index: i as u32,
+                            id: Some(tc.id),
+                            call_type: Some(tc.call_type),
+                            function: Some(DeltaFunctionCall {
+                                name: Some(tc.function.name),
+                                arguments: Some(tc.function.arguments),
+                            }),
+                        })
+                        .collect();
+                    let stream = futures::stream::once(async move {
+                        Ok(ChatChunk {
+                            delta: DeltaMessage {
+                                role: Some("assistant".to_string()),
+                                content: None,
+                                tool_calls: Some(delta_calls),
+                            },
+                            finish_reason: Some("tool_calls".to_string()),
+                        })
+                    });
+                    Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
+                }
+            }
         })
     }
 

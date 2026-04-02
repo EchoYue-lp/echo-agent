@@ -36,8 +36,10 @@ mod config;
 #[cfg(feature = "tasks")]
 mod planning;
 pub mod react_agent;
+pub mod runner;
 
 pub use react_agent::builder::ReactAgentBuilder;
+pub use runner::Runner;
 
 /// AgentBuilder 是 ReactAgentBuilder 的别名，用于宏和极简 API
 pub type AgentBuilder = ReactAgentBuilder;
