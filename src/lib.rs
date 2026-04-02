@@ -170,10 +170,19 @@ pub mod prelude {
 
     // Skills
     pub use crate::skills::{
-        Skill, SkillInfo, SkillManager,
+        Skill, SkillInfo, SkillRegistry,
         builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
-        external::{LoadedSkill, ResourceRef, SkillLoader, SkillMeta},
+        external::{
+            ActivateSkillTool, DiscoveryScope, PromptContext, ReadSkillResourceTool,
+            RunSkillScriptTool, SkillContent, SkillDescriptor, SkillLoader, SkillResourceEntry,
+            SkillResourceKind, SkillSource,
+        },
+        hooks::{HookAction, HookEvent, HookRegistry, HookResult, HookRule, HooksDefinition},
     };
+
+    // Skills — backward compatibility
+    #[allow(deprecated)]
+    pub use crate::skills::SkillManager;
 
     // Guard
     pub use crate::guard::llm::LlmGuard;

@@ -22,7 +22,8 @@ use crate::mcp::McpManager;
 use crate::memory::checkpointer::{Checkpointer, FileCheckpointer};
 use crate::memory::snapshot::{SnapshotManager, StateSnapshot};
 use crate::memory::store::{FileStore, Store};
-use crate::skills::SkillManager;
+use crate::skills::SkillRegistry;
+use crate::skills::hooks::HookRegistry;
 #[cfg(feature = "tasks")]
 use crate::tasks::TaskManager;
 use crate::tools::ToolManager;
@@ -86,8 +87,10 @@ pub struct ReactAgent {
     human_in_loop: Arc<RwLock<HumanApprovalManager>>,
     #[cfg(feature = "human-loop")]
     approval_provider: Arc<dyn HumanLoopProvider>,
-    /// Skill 管理器：记录已安装的所有 Skill 元数据
-    skill_manager: SkillManager,
+    /// Skill 注册表：管理 code-based 和 file-based skills
+    skill_registry: SkillRegistry,
+    /// Hook registry for skill-defined tool call interception
+    pub(crate) hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
     /// 长期记忆 Store，通过 `remember`/`recall`/`forget` 工具访问
     store: Option<Arc<dyn Store>>,
     /// 短期会话 Checkpointer，按 session_id 持久化对话历史
@@ -221,7 +224,8 @@ impl ReactAgent {
             human_in_loop,
             #[cfg(feature = "human-loop")]
             approval_provider,
-            skill_manager: SkillManager::new(),
+            skill_registry: SkillRegistry::new(),
+            hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             store,
             checkpointer,
             #[cfg(feature = "mcp")]
@@ -344,7 +348,7 @@ impl ReactAgent {
 
     /// 获取已注册的 Skill 名称列表
     pub fn skill_names(&self) -> Vec<&str> {
-        self.skill_manager
+        self.skill_registry
             .list()
             .iter()
             .map(|s| s.name.as_str())
@@ -527,11 +531,19 @@ impl Agent for ReactAgent {
     }
 
     fn skill_names(&self) -> Vec<String> {
-        self.skill_manager
+        let mut names: Vec<String> = self
+            .skill_registry
             .list()
             .into_iter()
             .map(|s| s.name.clone())
-            .collect()
+            .collect();
+        // Also include file-based skill names
+        for desc in self.skill_registry.list_descriptors() {
+            if !names.contains(&desc.name) {
+                names.push(desc.name.clone());
+            }
+        }
+        names
     }
 
     fn mcp_server_names(&self) -> Vec<String> {

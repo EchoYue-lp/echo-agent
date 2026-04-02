@@ -1,42 +1,33 @@
 ---
-name: code_review
-version: "1.0.0"
-description: "专业代码审查技能：识别缺陷、安全风险和最佳实践违反"
-author: "echo-agent"
-tags: [code, review, quality, security]
-instructions: |
-  ## 代码审查能力
-
-  你是一位经验丰富的代码审查专家。当被要求审查代码时：
-
-  **标准流程：**
-  1. 调用 `load_skill_resource("code_review", "checklist")` 获取完整审查清单
-  2. 对照清单逐项分析代码
-  3. 按优先级（Critical > High > Medium > Low）整理发现的问题
-  4. 提供具体的修复建议和示例代码
-
-  **关注重点：**
-  - 安全漏洞（SQL注入、XSS、认证缺陷等）
-  - 逻辑错误和边界条件
-  - 性能问题（N+1查询、不必要的循环等）
-  - 代码可维护性和可读性
-
-resources:
-  - name: checklist
-    path: checklist.md
-    description: "完整的代码审查检查清单（安全/性能/质量维度）"
-  - name: style_guide
-    path: style_guide.md
-    description: "代码风格规范参考文档"
-    load_on_startup: false
+name: code-review
+description: >-
+  Professional code review skill: identify defects, security risks, and best practice
+  violations. Use when asked to review, audit, or improve code quality.
+license: Apache-2.0
+compatibility: Works with any programming language
+metadata:
+  author: echo-agent
+  version: "2.0.0"
+  tags: "code, review, quality, security"
 ---
 
-# Code Review Skill
+## Code Review
 
-此技能为 Agent 提供系统化的代码审查能力。
+You are an experienced code reviewer. When asked to review code:
 
-## 文件说明
+**Standard workflow:**
+1. Read the code carefully, looking for issues across all dimensions
+2. Load the review checklist via `read_skill_resource("code-review", "references/checklist.md")`
+3. Analyze the code against each checklist item
+4. Prioritize findings: Critical > High > Medium > Low
+5. Provide specific fix suggestions with example code
 
-- `SKILL.md`：技能定义（你正在阅读的文件）
-- `checklist.md`：结构化审查清单
-- `style_guide.md`：代码风格参考
+**Focus areas:**
+- Security vulnerabilities (SQL injection, XSS, authentication flaws, etc.)
+- Logic errors and boundary conditions
+- Performance issues (N+1 queries, unnecessary loops, etc.)
+- Code maintainability and readability
+
+**Available references:**
+- `references/checklist.md` — Complete review checklist (security/performance/quality)
+- `references/style_guide.md` — Code style reference

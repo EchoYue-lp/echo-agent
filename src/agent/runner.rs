@@ -23,8 +23,8 @@
 //! # }
 //! ```
 
-use crate::agent::react_agent::builder::ReactAgentBuilder;
 use crate::agent::Agent;
+use crate::agent::react_agent::builder::ReactAgentBuilder;
 use crate::error::Result;
 use crate::tools::Tool;
 use std::sync::Arc;

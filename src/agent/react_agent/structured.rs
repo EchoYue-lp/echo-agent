@@ -128,8 +128,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_direct() {
-        let result: Person =
-            parse_json_output(r#"{"name": "Alice", "age": 30}"#).unwrap();
+        let result: Person = parse_json_output(r#"{"name": "Alice", "age": 30}"#).unwrap();
         assert_eq!(
             result,
             Person {
@@ -141,8 +140,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_with_whitespace() {
-        let result: Person =
-            parse_json_output("  \n{\"name\": \"Bob\", \"age\": 25}\n  ").unwrap();
+        let result: Person = parse_json_output("  \n{\"name\": \"Bob\", \"age\": 25}\n  ").unwrap();
         assert_eq!(result.name, "Bob");
     }
 

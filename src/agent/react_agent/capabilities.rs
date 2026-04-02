@@ -1,10 +1,9 @@
-//! ReactAgent 能力配置 API
+//! ReactAgent capability configuration API
 //!
-//! 包含所有"配置型"方法：
-//! - 工具注册（`add_tool` / `add_tools` / `add_need_appeal_tool`）
-//! - Skill 安装（`add_skill` / `add_skills` / `load_skills_from_dir`）
-//! - MCP 连接（`connect_mcp` / `load_mcp_from_file`）
-//! - SubAgent 注册、压缩器、回调等
+//! - Tool registration (`add_tool` / `add_tools` / `add_need_appeal_tool`)
+//! - Skill installation (`add_skill` / `add_skills` / `discover_skills` / `load_skills_from_dir`)
+//! - MCP connections (`connect_mcp` / `load_mcp_from_file`)
+//! - SubAgent, compressor, callbacks, etc.
 
 use super::ReactAgent;
 use crate::agent::Agent;
@@ -14,23 +13,28 @@ use crate::error::Result;
 use crate::mcp::McpServerEntry;
 #[cfg(feature = "mcp")]
 use crate::mcp::{McpClient, McpConfigFile, McpServerConfig};
-use crate::skills::external::{LoadSkillResourceTool, SkillLoader};
+use crate::skills::external::activate_tool::ActivateSkillTool;
+use crate::skills::external::loader::{DiscoveryScope, SkillLoader};
+use crate::skills::external::resource_tool::ReadSkillResourceTool;
+use crate::skills::external::run_script_tool::RunSkillScriptTool;
+use crate::skills::registry::SharedRegistry;
 use crate::skills::{Skill, SkillInfo};
 use crate::tools::Tool;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 impl ReactAgent {
-    // ── 工具注册 ──────────────────────────────────────────────────────────────
+    // ── Tool registration ────────────────────────────────────────────────────
 
-    /// 注册单个工具。`enable_tool = false` 时自动开启工具能力。
+    /// Register a single tool. Automatically enables tool capability.
     pub fn add_tool(&mut self, tool: Box<dyn Tool>) {
         self.config.enable_tool = true;
         self.tool_manager.register(tool);
     }
 
-    /// 批量注册工具。`enable_tool = false` 时自动开启工具能力。
+    /// Register multiple tools. Automatically enables tool capability.
     pub fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         if tools.is_empty() {
             return;
@@ -48,7 +52,7 @@ impl ReactAgent {
         }
     }
 
-    /// 注册需要人工审批的工具：执行前会在控制台弹出 y/n 确认
+    /// Register a tool that requires human approval before execution.
     pub fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>) {
         #[cfg(feature = "human-loop")]
         if self.config.enable_human_in_loop {
@@ -68,42 +72,21 @@ impl ReactAgent {
         warn!(
             agent = %self.config.agent_name,
             tool = %tool.name(),
-            "⚠️ human_in_loop 能力已禁用，工具将注册但不会进入人工审批"
+            "human_in_loop disabled, tool registered without approval requirement"
         );
         self.add_tool(tool);
     }
 
-    // ── 上下文压缩 ────────────────────────────────────────────────────────────
+    // ── Context compression ──────────────────────────────────────────────────
 
-    /// 设置上下文压缩器。
-    ///
-    /// 配合 `AgentConfig::token_limit` 使用：token 超限时自动在 `think()` 前压缩消息历史。
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// use echo_agent::compression::compressor::{SlidingWindowCompressor, SummaryCompressor, DefaultSummaryPrompt};
-    /// use echo_agent::llm::DefaultLlmClient;
-    /// use reqwest::Client;
-    /// use std::sync::Arc;
-    ///
-    /// # fn example(agent: &mut echo_agent::agent::react_agent::ReactAgent) {
-    /// agent.set_compressor(SlidingWindowCompressor::new(20));
-    ///
-    /// let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen3-max"));
-    /// agent.set_compressor(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8));
-    /// # }
-    /// ```
     pub fn set_compressor(&mut self, compressor: impl ContextCompressor + 'static) {
         self.context.set_compressor(compressor);
     }
 
-    /// 返回当前上下文的（消息条数，估算 token 数）
     pub fn context_stats(&self) -> (usize, usize) {
         (self.context.messages().len(), self.context.token_estimate())
     }
 
-    /// 使用指定压缩器强制压缩上下文（不影响已安装的默认压缩器）
     pub async fn force_compress_with(
         &mut self,
         compressor: &dyn ContextCompressor,
@@ -111,19 +94,18 @@ impl ReactAgent {
         self.context.force_compress_with(compressor).await
     }
 
-    /// 返回所有已注册的工具名（含内置工具）
     pub fn list_tools(&self) -> Vec<&str> {
         self.tool_manager.list_tools()
     }
 
-    // ── SubAgent ──────────────────────────────────────────────────────────────
+    // ── SubAgent ─────────────────────────────────────────────────────────────
 
     pub fn register_agent(&mut self, agent: Box<dyn Agent>) {
         if !self.config.enable_subagent {
             warn!(
                 agent = %self.config.agent_name,
                 subagent = %agent.name(),
-                "⚠️ subagent 能力已禁用，忽略子 agent 注册"
+                "subagent capability disabled, ignoring registration"
             );
             return;
         }
@@ -136,7 +118,7 @@ impl ReactAgent {
                 warn!(
                     agent = %self.config.agent_name,
                     subagent = %name,
-                    "⚠️ subagents lock poisoned，无法注册子 agent: {}",
+                    "subagents lock poisoned: {}",
                     e
                 );
             }
@@ -149,178 +131,27 @@ impl ReactAgent {
         }
     }
 
-    // ── 基础配置 ──────────────────────────────────────────────────────────────
+    // ── Basic config ─────────────────────────────────────────────────────────
 
     pub fn set_model(&mut self, model_name: &str) {
         self.config.model_name = model_name.to_string();
     }
 
-    /// 运行时注册事件回调
     pub fn add_callback(&mut self, callback: Arc<dyn crate::agent::AgentCallback>) {
         self.config.callbacks.push(callback);
     }
 
-    // ── Skill ─────────────────────────────────────────────────────────────────
+    // ── Skills (code-based) ──────────────────────────────────────────────────
 
-    /// 扫描指定目录下的所有外部技能（SKILL.md），并将它们安装到 Agent
-    ///
-    /// # 整体流程
-    ///
-    /// ```text
-    /// 1. 扫描 skills_dir/ 下的每个子目录
-    /// 2. 解析 SKILL.md 的 YAML Frontmatter → SkillMeta
-    /// 3. 将 meta.instructions 注入 system_prompt
-    /// 4. 预加载 load_on_startup: true 的资源并追加到 system_prompt
-    /// 5. 注册 LoadSkillResourceTool（LLM 按需调用懒加载其余资源）
-    /// 6. 在 SkillManager 中记录元数据
-    /// ```
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::prelude::*;
-    ///
-    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
-    /// agent.load_skills_from_dir("./skills").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn load_skills_from_dir(
-        &mut self,
-        skills_dir: impl Into<std::path::PathBuf>,
-    ) -> Result<Vec<String>> {
-        let loader = Arc::new(tokio::sync::Mutex::new(SkillLoader::new(skills_dir)));
-
-        let loaded = {
-            let mut l = loader.lock().await;
-            l.scan().await?
-        };
-
-        if loaded.is_empty() {
-            tracing::warn!(
-                agent = %self.config.agent_name,
-                "外部技能目录扫描完毕，未找到任何有效 SKILL.md"
-            );
-            return Ok(vec![]);
-        }
-
-        let mut loaded_names = Vec::new();
-        let mut has_resources = false;
-
-        for skill in &loaded {
-            let meta = &skill.meta;
-
-            if self.skill_manager.is_installed(&meta.name) {
-                tracing::warn!(
-                    agent = %self.config.agent_name,
-                    skill = %meta.name,
-                    "Skill 已安装，跳过"
-                );
-                continue;
-            }
-
-            let prompt_block = meta.to_prompt_block();
-            self.config.system_prompt.push_str(&prompt_block);
-
-            {
-                let l = loader.lock().await;
-                for res_ref in meta.startup_resources() {
-                    if l.is_cached(&meta.name, &res_ref.name) {
-                        tracing::debug!(
-                            "预加载资源 '{}/{}' 已就绪，可通过工具访问",
-                            meta.name,
-                            res_ref.name
-                        );
-                    }
-                }
-            }
-
-            if meta.resources.as_ref().is_some_and(|r| !r.is_empty()) {
-                has_resources = true;
-            }
-
-            let tool_names = if has_resources {
-                vec!["load_skill_resource".to_string()]
-            } else {
-                vec![]
-            };
-            self.skill_manager.record(SkillInfo {
-                name: meta.name.clone(),
-                description: meta.description.clone(),
-                tool_names,
-                has_prompt_injection: true,
-            });
-
-            tracing::info!(
-                agent = %self.config.agent_name,
-                skill = %meta.name,
-                version = %meta.version.as_deref().unwrap_or("?"),
-                resources = meta.resources.as_ref().map_or(0, |r| r.len()),
-                "🎯 外部 Skill 已加载"
-            );
-
-            loaded_names.push(meta.name.clone());
-        }
-
-        self.context
-            .update_system(self.config.system_prompt.clone());
-
-        if has_resources && self.tool_manager.get_tool("load_skill_resource").is_none() {
-            let catalog_desc = {
-                let l = loader.lock().await;
-                l.resource_catalog()
-                    .iter()
-                    .map(|(sname, rref)| {
-                        format!(
-                            "  - {}/{}: {}",
-                            sname,
-                            rref.name,
-                            rref.description.as_deref().unwrap_or("")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-
-            let tool = LoadSkillResourceTool::new(loader).with_catalog_desc(catalog_desc);
-            self.tool_manager.register(Box::new(tool));
-
-            tracing::info!(
-                agent = %self.config.agent_name,
-                "已注册 load_skill_resource 工具"
-            );
-        }
-
-        Ok(loaded_names)
-    }
-
-    /// 为 Agent 安装一个 Skill
-    ///
-    /// 安装过程：
-    /// 1. 将 Skill 提供的所有工具注册到 ToolManager
-    /// 2. 若 Skill 有 system_prompt_injection，追加到 system_prompt
-    /// 3. 记录 Skill 元数据到 SkillManager
-    ///
-    /// # 示例
-    /// ```rust,no_run
-    /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::prelude::*;
-    ///
-    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
-    /// agent.add_skill(Box::new(CalculatorSkill));
-    /// agent.add_skill(Box::new(FileSystemSkill::with_base_dir("/workspace")));
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Install a code-based skill (eager: tools + prompt injected immediately).
     pub fn add_skill(&mut self, skill: Box<dyn Skill>) {
         let name = skill.name().to_string();
 
-        if self.skill_manager.is_installed(&name) {
+        if self.skill_registry.is_installed(&name) {
             warn!(
                 agent = %self.config.agent_name,
                 skill = %name,
-                "⚠️ Skill 已安装，跳过重复注册"
+                "Skill already installed, skipping"
             );
             return;
         }
@@ -339,7 +170,7 @@ impl ReactAgent {
                 .update_system(self.config.system_prompt.clone());
         }
 
-        self.skill_manager.record(SkillInfo {
+        self.skill_registry.record_code_skill(SkillInfo {
             name: name.clone(),
             description: skill.description().to_string(),
             tool_names,
@@ -350,89 +181,160 @@ impl ReactAgent {
             agent = %self.config.agent_name,
             skill = %name,
             description = %skill.description(),
-            "🎯 Skill 已安装"
+            "Skill installed"
         );
     }
 
-    /// 批量安装多个 Skill
+    /// Install multiple code-based skills.
     pub fn add_skills(&mut self, skills: Vec<Box<dyn Skill>>) {
         for skill in skills {
             self.add_skill(skill);
         }
     }
 
-    /// 列出所有已安装的 Skill 元数据
+    // ── Skills (file-based, progressive disclosure) ──────────────────────────
+
+    /// Discover file-based skills from the given scopes.
+    ///
+    /// Implements the agentskills.io progressive disclosure model:
+    /// 1. Parse `SKILL.md` frontmatter (name + description) from each scope
+    /// 2. Build a compact **catalog** and inject it into the system prompt
+    /// 3. Register `activate_skill` and `read_skill_resource` tools
+    ///
+    /// The LLM can then decide which skills to activate on demand.
+    pub async fn discover_skills(&mut self, scopes: &[DiscoveryScope]) -> Result<Vec<String>> {
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover(scopes).await?;
+
+        if descriptors.is_empty() {
+            info!(
+                agent = %self.config.agent_name,
+                "No skills found during discovery"
+            );
+            return Ok(vec![]);
+        }
+
+        let mut names = Vec::new();
+
+        // Build a shared registry for the progressive disclosure tools.
+        // This is separate from `self.skill_registry` (which tracks code-based skills).
+        // The shared registry holds descriptors + activation state, accessed by
+        // both ActivateSkillTool and ReadSkillResourceTool during async execution.
+        let tool_registry = {
+            let mut reg = crate::skills::SkillRegistry::new();
+            for desc in descriptors {
+                if self.skill_registry.is_installed(&desc.name) {
+                    warn!(
+                        agent = %self.config.agent_name,
+                        skill = %desc.name,
+                        "Skill already installed, skipping duplicate"
+                    );
+                    continue;
+                }
+
+                // Register hooks from frontmatter if present
+                if let Some(hooks_def) = &desc.hooks {
+                    let skill_dir = desc
+                        .location
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    let mut hook_reg = self.hook_registry.write().await;
+                    hook_reg.register(&desc.name, &skill_dir, hooks_def.clone());
+                }
+
+                names.push(desc.name.clone());
+                self.skill_registry.register_descriptor(desc.clone());
+                reg.register_descriptor(desc);
+            }
+            reg
+        };
+
+        if names.is_empty() {
+            return Ok(names);
+        }
+
+        // Inject compact catalog into system prompt
+        if let Some(catalog) = self.skill_registry.catalog_prompt() {
+            self.config
+                .system_prompt
+                .push_str(&format!("\n\n{}", catalog));
+            self.context
+                .update_system(self.config.system_prompt.clone());
+        }
+
+        // Register progressive disclosure tools with shared registry
+        let available_names = self.skill_registry.available_names();
+        if self.tool_manager.get_tool("activate_skill").is_none() {
+            let shared: SharedRegistry = Arc::new(RwLock::new(tool_registry));
+
+            self.tool_manager.register(Box::new(ActivateSkillTool::new(
+                shared.clone(),
+                available_names,
+            )));
+            self.tool_manager
+                .register(Box::new(ReadSkillResourceTool::new(shared.clone())));
+            self.tool_manager
+                .register(Box::new(RunSkillScriptTool::new(shared)));
+
+            // Protect activated skill content from context compaction.
+            // Messages containing <skill_content will survive compression passes.
+            self.context
+                .add_protected_marker("<skill_content".to_string());
+        }
+
+        info!(
+            agent = %self.config.agent_name,
+            count = names.len(),
+            skills = ?names,
+            "Skills discovered and catalog injected"
+        );
+
+        Ok(names)
+    }
+
+    /// Backward-compatible: discover skills from a single directory.
+    ///
+    /// Equivalent to `discover_skills(&[DiscoveryScope::Custom(path)])`.
+    pub async fn load_skills_from_dir(
+        &mut self,
+        skills_dir: impl Into<std::path::PathBuf>,
+    ) -> Result<Vec<String>> {
+        self.discover_skills(&[DiscoveryScope::Custom(skills_dir.into())])
+            .await
+    }
+
+    /// List all installed code-based skills.
     pub fn list_skills(&self) -> Vec<&SkillInfo> {
-        self.skill_manager.list()
+        self.skill_registry.list()
     }
 
-    /// 查询某个 Skill 是否已安装
+    /// Check if a skill (code or file-based) is installed.
     pub fn has_skill(&self, name: &str) -> bool {
-        self.skill_manager.is_installed(name)
+        self.skill_registry.is_installed(name)
     }
 
-    /// 已安装的 Skill 数量
+    /// Total number of installed skills (code + file-based).
     pub fn skill_count(&self) -> usize {
-        self.skill_manager.count()
+        self.skill_registry.count()
     }
 
-    // ── MCP 连接管理 ──────────────────────────────────────────────────────────
+    /// Get the shared skill registry handle (for external tool access).
+    pub fn skill_registry(&self) -> &crate::skills::SkillRegistry {
+        &self.skill_registry
+    }
 
-    /// 从外部注入 MCP 工具（应用层管理 MCP 生命周期）
-    ///
-    /// 适用场景：
-    /// - 多 Agent 共享同一组 MCP 连接
-    /// - 需要在 Agent 生命周期外管理 MCP 连接
-    /// - 测试时注入 Mock MCP 工具
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::advanced::*;
-    /// use echo_agent::mcp::McpManager;
-    /// use echo_agent::prelude::*;
-    ///
-    /// let mut mcp_manager = McpManager::new();
-    /// let tools = mcp_manager.connect(
-    ///     McpServerConfig::stdio("fs", "npx", vec![
-    ///         "-y", "@modelcontextprotocol/server-filesystem", "/tmp"
-    ///     ])
-    /// ).await?;
-    ///
-    /// let mut agent = ReactAgent::new(AgentConfig::standard("qwen3-max", "a1", "助手"));
-    /// agent.register_mcp_tools(tools);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Get the shared hook registry handle.
+    pub fn hook_registry(&self) -> &Arc<tokio::sync::RwLock<crate::skills::hooks::HookRegistry>> {
+        &self.hook_registry
+    }
+
+    // ── MCP ──────────────────────────────────────────────────────────────────
+
     pub fn register_mcp_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         self.add_tools(tools);
     }
 
-    /// 从 McpServerConfig 连接单个 MCP 服务端，并将其工具自动注册到 Agent。
-    ///
-    /// - 将连接生命周期绑定到 Agent（Agent 释放时自动关闭）
-    /// - 返回 `Arc<McpClient>`，可进一步访问资源、提示词等
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> echo_agent::error::Result<()> {
-    /// use echo_agent::advanced::*;
-    /// use echo_agent::prelude::*;
-    ///
-    /// let mut agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "你是一个助手"));
-    /// let client = agent.connect_mcp_from_config(McpServerConfig {
-    ///     name: "my-server".to_string(),
-    ///     transport: TransportConfig::Stdio {
-    ///         command: "java".to_string(),
-    ///         args: vec!["-jar".to_string(), "server.jar".to_string(), "stdio".to_string()],
-    ///         env: vec![],
-    ///     },
-    /// }).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     #[cfg(feature = "mcp")]
     pub async fn connect_mcp_from_config(
         &mut self,
@@ -454,7 +356,7 @@ impl ReactAgent {
             agent = %self.config.agent_name,
             server = %name,
             tools = count,
-            "🔌 MCP 服务端已连接"
+            "MCP server connected"
         );
         Ok(client.clone())
     }
@@ -487,7 +389,7 @@ impl ReactAgent {
                         agent = %self.config.agent_name,
                         server = %name,
                         error = %e,
-                        "⚠️ MCP 服务端连接失败，已跳过"
+                        "MCP server connection failed, skipping"
                     );
                 }
             }
@@ -510,19 +412,14 @@ impl ReactAgent {
         self.mcp_manager.disconnect(name).await
     }
 
-    // ── System Prompt 热更新 ─────────────────────────────────────────────────────
+    // ── System Prompt ────────────────────────────────────────────────────────
 
-    /// 运行时更新系统提示词
-    ///
-    /// 同时更新配置和上下文中的 system 消息
     pub fn set_system_prompt(&mut self, prompt: String) {
-        // 更新配置
         self.config.system_prompt = prompt.clone();
-        // 更新上下文中的 system 消息
         self.context.update_system(prompt);
         tracing::info!(
             agent = %self.config.agent_name,
-            "📝 系统提示词已更新"
+            "System prompt updated"
         );
     }
 }

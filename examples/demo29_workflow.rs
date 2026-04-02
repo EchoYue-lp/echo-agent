@@ -73,10 +73,7 @@ async fn demo_linear_pipeline() -> echo_agent::error::Result<()> {
         .add_function_node("transform", |state: &SharedState| {
             Box::pin(async move {
                 let data: Vec<String> = state.get("raw_data").unwrap_or_default();
-                let transformed: Vec<String> = data
-                    .iter()
-                    .map(|s| s.to_uppercase())
-                    .collect();
+                let transformed: Vec<String> = data.iter().map(|s| s.to_uppercase()).collect();
                 state.set("transformed_data", transformed);
                 state.set("stage", "transformed");
                 Ok(())
@@ -360,7 +357,10 @@ async fn demo_agent_node() -> echo_agent::error::Result<()> {
     let graph = GraphBuilder::new("agent_workflow")
         .add_function_node("prepare_prompt", |state: &SharedState| {
             Box::pin(async move {
-                state.set("task", "Analyze the following metrics: revenue=100M, users=5M, growth=15%");
+                state.set(
+                    "task",
+                    "Analyze the following metrics: revenue=100M, users=5M, growth=15%",
+                );
                 Ok(())
             })
         })
@@ -427,14 +427,8 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
     // Restore from snapshot
     let restored = SharedState::from_snapshot(&snapshot).unwrap();
     println!("\n  Restored state:");
-    println!(
-        "    counter: {}",
-        restored.get::<i64>("counter").unwrap()
-    );
-    println!(
-        "    label: {}",
-        restored.get::<String>("label").unwrap()
-    );
+    println!("    counter: {}", restored.get::<i64>("counter").unwrap());
+    println!("    label: {}", restored.get::<String>("label").unwrap());
     println!("    messages: {}", restored.message_count());
 
     // Demonstrate merge

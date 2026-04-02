@@ -1,82 +1,62 @@
+//! ReadSkillResourceTool — on-demand resource loading (Tier 3).
+//!
+//! When a skill's instructions reference a bundled file (script, reference doc,
+//! asset), the LLM calls this tool to load its content into context.
+//!
+//! Security: rejects path traversal (`..`) and only allows reading from
+//! activated skills' directories.
+
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::error::{Result, ToolError};
+use crate::skills::registry::SkillRegistry;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
-use super::loader::SkillLoader;
-
-/// 技能资源懒加载工具
+/// Tool for reading resource files from activated skill directories.
 ///
-/// 当 Agent 安装了带有 `resources` 字段的外部技能后，
-/// 此工具会自动注册到 ToolManager，让 LLM 可以按需加载资源文件内容。
-///
-/// # 工作流程
-///
-/// ```text
-/// LLM 需要代码审查清单
-///   → 调用 load_skill_resource("code_review", "checklist")
-///   → SkillLoader 检查缓存（命中则直接返回）
-///   → 未命中时读取 skills/code_review/checklist.md
-///   → 文件内容作为工具结果返回到 LLM 上下文
-/// ```
-pub struct LoadSkillResourceTool {
-    loader: Arc<Mutex<SkillLoader>>,
-    /// 工具描述中展示的资源目录（让 LLM 知道有哪些可用资源）
-    resource_catalog_desc: String,
+/// Only allows reading from skills that have been activated via `activate_skill`.
+/// Rejects path traversal attempts for security.
+pub struct ReadSkillResourceTool {
+    registry: Arc<RwLock<SkillRegistry>>,
 }
 
-impl LoadSkillResourceTool {
-    pub fn new(loader: Arc<Mutex<SkillLoader>>) -> Self {
-        Self {
-            loader,
-            resource_catalog_desc: String::new(),
-        }
-    }
-
-    /// 构建时注入资源目录描述（由 load_skills_from_dir 负责调用）
-    pub fn with_catalog_desc(mut self, desc: String) -> Self {
-        self.resource_catalog_desc = desc;
-        self
+impl ReadSkillResourceTool {
+    pub fn new(registry: Arc<RwLock<SkillRegistry>>) -> Self {
+        Self { registry }
     }
 }
 
-impl Tool for LoadSkillResourceTool {
+impl Tool for ReadSkillResourceTool {
     fn name(&self) -> &str {
-        "load_skill_resource"
+        "read_skill_resource"
     }
 
     fn description(&self) -> &str {
-        "按需加载技能的参考资源文件内容（如规范文档、检查清单、模板等）。\
-         当你需要更多背景信息或参考资料时调用此工具。"
+        "Read a resource file from an activated skill's directory. \
+         Use this when a skill's instructions reference a file \
+         (e.g., scripts/extract.py, references/guide.md). \
+         The skill must be activated first via activate_skill."
     }
 
     fn parameters(&self) -> serde_json::Value {
-        let catalog = if self.resource_catalog_desc.is_empty() {
-            "（资源目录将在运行时动态提供）".to_string()
-        } else {
-            self.resource_catalog_desc.clone()
-        };
-
         json!({
             "type": "object",
             "properties": {
                 "skill_name": {
                     "type": "string",
-                    "description": format!(
-                        "技能名称。可用资源目录：\n{}",
-                        catalog
-                    )
+                    "description": "Name of the activated skill"
                 },
-                "resource_name": {
+                "path": {
                     "type": "string",
-                    "description": "资源名称（与 SKILL.md 中 resources[].name 对应）"
+                    "description": "Relative path to the resource file within the skill directory \
+                                    (e.g., 'references/guide.md', 'scripts/run.py', 'checklist.md')"
                 }
             },
-            "required": ["skill_name", "resource_name"]
+            "required": ["skill_name", "path"]
         })
     }
 
@@ -88,23 +68,89 @@ impl Tool for LoadSkillResourceTool {
                 .ok_or_else(|| ToolError::MissingParameter("skill_name".to_string()))?
                 .to_string();
 
-            let resource_name = parameters
-                .get("resource_name")
+            let rel_path = parameters
+                .get("path")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("resource_name".to_string()))?
+                .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?
                 .to_string();
 
-            let mut loader = self.loader.lock().await;
-            match loader.load_resource(&skill_name, &resource_name).await {
+            // Path safety check
+            if rel_path.contains("..") {
+                return Ok(ToolResult::error(
+                    "Path traversal ('..') is not allowed in resource paths".into(),
+                ));
+            }
+
+            let registry = self.registry.read().await;
+
+            if !registry.is_activated(&skill_name) {
+                return Ok(ToolResult::error(format!(
+                    "Skill '{}' has not been activated. Call activate_skill first.",
+                    skill_name
+                )));
+            }
+
+            let descriptor = match registry.get_descriptor(&skill_name) {
+                Some(d) => d,
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Skill '{}' not found in catalog",
+                        skill_name
+                    )));
+                }
+            };
+
+            let skill_dir = match descriptor.location.parent() {
+                Some(d) => d,
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Cannot determine skill directory for '{}'",
+                        skill_name
+                    )));
+                }
+            };
+
+            let resource_path = skill_dir.join(&rel_path);
+
+            // Verify the resolved path is still under the skill directory
+            if let (Ok(canonical_skill), Ok(canonical_resource)) =
+                (skill_dir.canonicalize(), resource_path.canonicalize())
+            {
+                if !canonical_resource.starts_with(&canonical_skill) {
+                    return Ok(ToolResult::error(
+                        "Resolved path escapes the skill directory".into(),
+                    ));
+                }
+            }
+
+            if !resource_path.exists() {
+                return Ok(ToolResult::error(format!(
+                    "Resource file not found: {} (in skill '{}')",
+                    rel_path, skill_name
+                )));
+            }
+
+            match tokio::fs::read_to_string(&resource_path).await {
                 Ok(content) => {
-                    let header = format!("# 资源: {}/{}\n\n", skill_name, resource_name);
-                    Ok(ToolResult::success(format!("{}{}", header, content)))
+                    let header = format!(
+                        "<skill_resource skill=\"{}\" path=\"{}\">\n",
+                        skill_name, rel_path
+                    );
+                    let footer = "\n</skill_resource>";
+                    Ok(ToolResult::success(format!(
+                        "{}{}{}",
+                        header, content, footer
+                    )))
                 }
                 Err(e) => Ok(ToolResult::error(format!(
-                    "加载资源 '{}/{}' 失败: {}",
-                    skill_name, resource_name, e
+                    "Failed to read '{}' in skill '{}': {}",
+                    rel_path, skill_name, e
                 ))),
             }
         })
     }
 }
+
+// Backward compatibility alias
+#[deprecated(note = "Use ReadSkillResourceTool instead")]
+pub type LoadSkillResourceTool = ReadSkillResourceTool;

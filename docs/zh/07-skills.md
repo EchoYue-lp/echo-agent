@@ -2,23 +2,17 @@
 
 ## 是什么
 
-Skill（技能）是比 Tool 更高层次的能力单元。一个 Skill 将一组相关的 Tool 和对应的 LLM 指引（系统提示词片段）打包在一起，作为一个整体"安装"到 Agent 上。
+Skill（技能）是比 Tool 更高层次的能力单元。Echo Agent 提供两种 Skill 类型：
+
+| 类型 | 注册方式 | 加载策略 |
+|------|---------|---------|
+| **Code-based** | `agent.add_skill(Box::new(MySkill))` | 立即加载（工具 + 提示词一次性注入） |
+| **File-based** | `agent.discover_skills(scopes)` | 渐进式披露（目录 → 激活 → 资源） |
 
 ```
 Tool:  单一原子操作（"读取文件"）
 Skill: 领域能力包（"文件系统操作" = read_file + write_file + list_dir + 使用说明提示词）
 ```
-
----
-
-## 解决什么问题
-
-直接使用 Tool 的问题：
-- **分散注册**：相关的 5 个工具需要分别调用 5 次 `add_tool()`
-- **无语义引导**：工具有 description，但没有"何时用这组工具"的整体指引
-- **复用困难**：同一组工具想用于不同 Agent，需要重复配置
-
-Skill 将"工具集 + 使用方法"打包成可复用的能力单元，一次 `add_skill()` 解决所有问题。
 
 ---
 
@@ -43,151 +37,351 @@ Skill 将"工具集 + 使用方法"打包成可复用的能力单元，一次 `a
 | `ShellSkill` | shell | Shell 命令执行 |
 | `WeatherSkill` | get_weather | 天气查询 |
 
----
-
-## 使用内置 Skill
-
 ```rust
 use echo_agent::prelude::*;
 
-let config = AgentConfig::new("qwen3-max", "assistant", "你是一个有帮助的助手")
-    .enable_tool(true);
+let mut agent = ReactAgent::new(
+    AgentConfig::new("qwen3-max", "assistant", "你是一个有帮助的助手")
+        .enable_tool(true)
+);
 
-let mut agent = ReactAgent::new(config);
-
-// 一次安装多个 Skill
 agent.add_skill(Box::new(CalculatorSkill));
 agent.add_skill(Box::new(FileSystemSkill));
-// 等价于分别注册所有工具 + 在系统提示词末尾追加使用说明
 
 let answer = agent.execute("计算 42 * 8，并将结果写入 result.txt").await?;
 ```
 
 ---
 
-## 自定义 Skill
+## 自定义 Code-based Skill
 
 实现 `Skill` trait：
 
 ```rust
 use echo_agent::skills::Skill;
-use echo_agent::tools::{Tool, ToolParameters, ToolResult};
-use echo_agent::error::Result;
-use async_trait::async_trait;
-use serde_json::{Value, json};
+use echo_agent::tools::Tool;
 
-// 自定义工具
-struct SearchTool;
-struct SummarizeTool;
-
-#[async_trait]
-impl Tool for SearchTool {
-    fn name(&self) -> &str { "web_search" }
-    fn description(&self) -> &str { "搜索网页内容" }
-    fn parameters(&self) -> Value {
-        json!({ "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] })
-    }
-    async fn execute(&self, _params: ToolParameters) -> Result<ToolResult> {
-        Ok(ToolResult::success("搜索结果...".to_string()))
-    }
-}
-
-// 省略 SummarizeTool 实现...
-
-// 将工具打包为 Skill
 struct ResearchSkill;
 
 impl Skill for ResearchSkill {
     fn name(&self) -> &str { "research" }
-
-    fn description(&self) -> &str { "网络研究能力：搜索 + 摘要" }
+    fn description(&self) -> &str { "网络研究：搜索 + 摘要" }
 
     fn tools(&self) -> Vec<Box<dyn Tool>> {
-        vec![
-            Box::new(SearchTool),
-            Box::new(SummarizeTool),
-        ]
+        vec![Box::new(SearchTool), Box::new(SummarizeTool)]
     }
 
     fn system_prompt_injection(&self) -> Option<String> {
-        Some("当需要获取网络信息时，先用 web_search 搜索，再用 summarize 整理结果。\
-              注意：搜索词要简洁，不要超过 5 个词。".to_string())
+        Some("当需要获取网络信息时，先用 web_search 搜索，再用 summarize 整理。".to_string())
     }
 }
 
-// 安装到 Agent
-let mut agent = ReactAgent::new(config);
 agent.add_skill(Box::new(ResearchSkill));
 ```
 
 ---
 
-## 外部 Skill（文件系统加载）
+## 外部 Skill（渐进式披露）
 
-除了代码内定义的 Skill，还支持从目录加载 **SKILL.md** 文件定义的外部技能，无需修改代码即可扩展 Agent 能力。
+对齐 [agentskills.io](https://agentskills.io/specification) 开放规范，从文件系统加载 Skill，**无需修改代码**即可扩展 Agent 能力。
 
-### SKILL.md 格式
+### 三层渐进式披露模型
+
+这是核心设计思想：不一次性加载所有内容，而是按需逐层展开，保持上下文窗口精简。
+
+| 层级 | 内容 | 触发方式 | Token 开销 |
+|------|------|---------|-----------|
+| **Tier 1: 目录** | 名称 + 描述（frontmatter） | 启动时自动扫描 | ~50-100 / skill |
+| **Tier 2: 激活** | 完整指引 + 资源列表 | LLM 调用 `activate_skill` | <5000 / skill |
+| **Tier 3a: 资源** | 参考文件内容 | LLM 调用 `read_skill_resource` | 按需 |
+| **Tier 3b: 脚本** | Python/Bash/TS 脚本执行 | LLM 调用 `run_skill_script` | 按需 |
+
+### SKILL.md 格式（agentskills.io 标准）
 
 ```markdown
 ---
-name: code_review
-description: 代码审查技能
-tools:
-  - read_file
-  - shell
-load_on_startup:
-  - guidelines.md
+name: code-review
+description: >-
+  代码审查技能：识别缺陷、安全风险和最佳实践违规。
+  当被要求审查或改善代码质量时使用。
+license: Apache-2.0
+shell: bash
+paths:
+  - "*.rs"
+  - "*.py"
+allowed-tools:
+  - read_skill_resource
+  - run_skill_script
+  - Bash
+metadata:
+  author: my-team
+  version: "1.0.0"
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: prompt
+          prompt: "执行命令前验证安全性"
+  PostToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: "${SKILL_DIR}/scripts/log_usage.sh"
+          timeout: 5
 ---
 
-## 使用说明
+## 代码审查
 
 当用户要求审查代码时：
-1. 使用 read_file 读取源文件
-2. 对照 guidelines.md 中的规范检查
-3. 输出结构化的审查意见
+
+1. 加载检查清单：`read_skill_resource("code-review", "references/checklist.md")`
+2. 逐项检查代码
+3. 输出结构化审查意见
+
+当前环境：!`uname -s`
+技能目录：${SKILL_DIR}
 ```
 
-### 加载外部 Skill
+### Frontmatter 字段说明
 
-```rust
-// 扫描 skills/ 目录下的所有 SKILL.md
-let loaded = agent.load_skills_from_dir("./skills").await?;
-println!("已加载技能: {:?}", loaded);
+| 字段 | 必须 | 说明 |
+|------|------|------|
+| `name` | ✓ | 唯一名称，kebab-case，1-64 字符 |
+| `description` | ✓ | 描述，最长 1024 字符，说明何时使用 |
+| `license` | | SPDX 许可标识 |
+| `shell` | | 内联命令使用的 Shell：`bash`（默认）或 `powershell` |
+| `paths` | | 条件激活的文件 glob 模式（如 `["*.py"]`） |
+| `allowed-tools` | | 限定此 Skill 可使用的工具列表 |
+| `hooks` | | PreToolUse / PostToolUse 钩子定义 |
+| `metadata` | | 任意键值对（author, version, tags 等） |
+
+### 内联命令执行
+
+Skill 激活时，Markdown 正文中的命令会被自动执行并替换为输出：
+
+```markdown
+当前主机：!`uname -s`
 ```
+→ 激活后变为：`当前主机：Darwin`
 
-### 目录结构示例
+块命令：
+
+````markdown
+```!
+rustc --version
+```
+````
+→ 激活后变为：`rustc 1.93.0 (254b59607 2026-01-19)`
+
+**安全限制**：MCP 来源的 Skill **永远不执行**内联命令（远程不可信内容）。
+
+### 变量替换
+
+| 变量 | 值 |
+|------|-----|
+| `${SKILL_DIR}` / `${CLAUDE_SKILL_DIR}` | Skill 目录的绝对路径 |
+| `${SESSION_ID}` / `${CLAUDE_SESSION_ID}` | 当前会话标识 |
+| `${ARGUMENTS}` | 所有参数（空格连接） |
+| `${1}`, `${2}`, ... | 位置参数 |
+
+### 目录结构
 
 ```
 skills/
-├── code_review/
-│   ├── SKILL.md       ← 技能定义（YAML frontmatter + 指引文本）
-│   └── guidelines.md  ← load_on_startup 资源（自动注入系统提示词）
-└── data_analysis/
+├── code-review/
+│   ├── SKILL.md              ← 技能定义
+│   ├── scripts/
+│   │   └── lint.sh           ← 可执行脚本
+│   └── references/
+│       ├── checklist.md      ← 参考文档
+│       └── style_guide.md
+└── project-stats/
     ├── SKILL.md
-    └── schema.json
+    ├── scripts/
+    │   ├── count_lines.py    ← Python 脚本
+    │   ├── find_todos.sh     ← Bash 脚本
+    │   └── dep_summary.ts    ← TypeScript 脚本
+    └── references/
+        └── metrics_guide.md
+```
+
+### 发现与加载
+
+```rust
+use echo_agent::prelude::*;
+
+let mut agent = ReactAgent::new(config);
+
+// 方式 1：自动发现（项目级 + 用户级）
+let skills = agent.discover_skills(&[
+    DiscoveryScope::Project(".".into()),  // ./skills/ + ./.agents/skills/
+    DiscoveryScope::User,                 // ~/.agents/skills/
+]).await?;
+
+// 方式 2：指定目录（向后兼容）
+let skills = agent.load_skills_from_dir("./skills").await?;
+```
+
+发现后自动注册三个渐进式披露工具：
+
+| 工具 | 说明 |
+|------|------|
+| `activate_skill` | 加载完整指引 + 资源列表（支持 `arguments` 参数） |
+| `read_skill_resource` | 读取参考文件 |
+| `run_skill_script` | 执行 Python/Bash/TS/PowerShell 脚本 |
+
+---
+
+## Hooks 系统
+
+Skill 可以通过 Hooks 拦截工具调用，实现安全审查、日志记录、输入/输出修改等功能。
+
+### Hook 事件
+
+| 事件 | 时机 | 能力 |
+|------|------|------|
+| `PreToolUse` | 工具执行前 | 阻止执行、修改输入、注入提示 |
+| `PostToolUse` | 工具执行后 | 检查输出、触发后续操作 |
+
+### Hook 类型
+
+| 类型 | 行为 |
+|------|------|
+| `command` | 执行 Shell 命令，stdin 接收 JSON 上下文，stdout 返回 JSON 控制指令 |
+| `prompt` | 注入提示消息给 LLM |
+
+### Command Hook 输入（stdin JSON）
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "git status"},
+  "tool_output": null
+}
+```
+
+### Command Hook 输出（stdout JSON）
+
+```json
+{
+  "decision": "block",
+  "reason": "检测到不安全命令",
+  "updatedInput": {"command": "git status --short"},
+  "continue": false
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `decision` | `"allow"` 放行 / `"block"` 阻止 |
+| `reason` | 阻止原因 |
+| `updatedInput` | 修改后的工具输入（仅 PreToolUse） |
+| `continue` | `false` 停止后续 Hook 执行 |
+
+### 示例：YAML 定义
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "${SKILL_DIR}/scripts/validate.sh"
+          timeout: 5
+        - type: prompt
+          prompt: "执行前请验证命令安全性"
+  PostToolUse:
+    - matcher: "*"
+      hooks:
+        - type: prompt
+          prompt: "检查输出中是否包含敏感信息"
+```
+
+### Matcher 匹配规则
+
+- `"*"` — 匹配所有工具
+- `"Bash"` — 精确匹配
+- `"Bash"` 也匹配 `"Bash(git:*)"` 等带括号的变体
+
+---
+
+## 条件激活
+
+带 `paths` 字段的 Skill 仅在匹配文件被访问时激活：
+
+```yaml
+paths:
+  - "*.py"
+  - "tests/**"
+```
+
+目录中会标注：`- python-linter: ... [activates for: *.py, tests/**]`
+
+---
+
+## 工具权限限制
+
+`allowed-tools` 限定 Skill 可使用的工具，激活时自动注入约束提示：
+
+```yaml
+allowed-tools:
+  - read_skill_resource
+  - run_skill_script
+  - Bash
 ```
 
 ---
 
-## Skill 管理器
+## 跨平台脚本执行
 
-查询已安装的 Skill：
+`run_skill_script` 工具支持自动检测解释器：
+
+| 扩展名 | Unix | Windows |
+|--------|------|---------|
+| `.py` | `python3` | `python` / `py -3` |
+| `.js` | `node` | `node` |
+| `.ts` | `bun` → `deno` → `npx tsx` | 同左 |
+| `.sh` | `bash` | Git Bash → PowerShell |
+| `.ps1` | `pwsh` | `powershell` |
+| `.rb` | `ruby` | `ruby` |
+
+直接调用解释器（不通过 `sh -c` / `cmd /C`），避免 Shell 注入风险。
+
+---
+
+## 上下文保护
+
+已激活 Skill 的指引内容受到**压缩保护**——即使上下文超限触发压缩，Skill 指引也不会被裁剪。
+
+```rust
+// 内部机制：包含 <skill_content 标记的消息被排除在压缩范围外
+ctx.add_protected_marker("<skill_content".to_string());
+```
+
+---
+
+## 查询已安装 Skill
 
 ```rust
 // 列出所有已安装 Skill
-for info in agent.skill_manager().list() {
-    println!(
-        "- {} ({} 个工具, {}提示词注入)",
-        info.name,
-        info.tool_names.len(),
-        if info.has_prompt_injection { "有" } else { "无" }
-    );
+for info in agent.list_skills() {
+    println!("- {} ({} 个工具)", info.name, info.tool_names.len());
 }
 
-// 检查某 Skill 是否已安装
-if agent.skill_manager().is_installed("calculator") {
+// 检查 Skill 是否已安装
+if agent.has_skill("calculator") {
     println!("计算器技能已安装");
 }
+
+// 总数
+println!("已安装 {} 个 Skill", agent.skill_count());
 ```
 
-对应示例：`examples/demo07_skills.rs`、`examples/demo08_external_skills.rs`
+---
+
+## 完整示例
+
+对应示例文件：
+- `examples/demo07_skills.rs` — Code-based Skill 演示
+- `examples/demo08_external_skills.rs` — File-based Skill 全功能演示（渐进式披露 + 脚本执行 + 内联命令 + Hooks）

@@ -189,7 +189,45 @@ impl ReactAgent {
             }
         }
 
-        let result = self.tool_manager.execute_tool(tool_name, params).await?;
+        // ── PreToolUse hooks ──
+        let mut effective_params = params;
+        {
+            let hook_reg = self.hook_registry.read().await;
+            if !hook_reg.is_empty() {
+                let hook_result = hook_reg.run_pre_tool_use(tool_name, input).await;
+
+                if hook_result.block {
+                    let reason = hook_result
+                        .block_reason
+                        .unwrap_or_else(|| "blocked by skill hook".into());
+                    info!(agent = %agent, tool = %tool_name, reason = %reason, "Hook blocked tool");
+                    return Ok(format!("Tool {} blocked by hook: {}", tool_name, reason));
+                }
+
+                if let Some(updated) = hook_result.updated_input {
+                    if let Value::Object(map) = updated {
+                        effective_params = map.into_iter().collect();
+                    }
+                }
+            }
+        }
+
+        let result = self
+            .tool_manager
+            .execute_tool(tool_name, effective_params)
+            .await?;
+
+        // ── PostToolUse hooks ──
+        {
+            let hook_reg = self.hook_registry.read().await;
+            if !hook_reg.is_empty() {
+                let _post_result = hook_reg
+                    .run_post_tool_use(tool_name, input, &result.output)
+                    .await;
+                // PostToolUse hooks are informational; they don't modify the output
+                // but could be used for logging, notifications, etc.
+            }
+        }
 
         if result.success {
             info!(agent = %agent, tool = %tool_name, "📤 工具执行成功");

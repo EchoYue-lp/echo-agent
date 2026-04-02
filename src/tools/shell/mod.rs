@@ -538,7 +538,10 @@ mod tests {
         let tool = ShellTool::new().with_sandbox(sandbox);
 
         let mut params = HashMap::new();
-        params.insert("command".to_string(), serde_json::json!("echo sandbox_test"));
+        params.insert(
+            "command".to_string(),
+            serde_json::json!("echo sandbox_test"),
+        );
         let result = tool.execute(params).await.unwrap();
         assert!(result.success, "Tool failed: {:?}", result.error);
         assert!(result.output.contains("sandbox_test"));

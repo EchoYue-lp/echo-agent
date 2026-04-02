@@ -65,10 +65,7 @@ pub(crate) enum EdgeKind {
     /// 条件转移：根据 state 返回下一个节点名
     Conditional(Box<dyn ConditionFn>),
     /// 并行 fan-out：同时进入多个节点，所有完成后 merge 回 then 节点
-    Parallel {
-        targets: Vec<String>,
-        then: String,
-    },
+    Parallel { targets: Vec<String>, then: String },
 }
 
 /// 条件函数 trait（object-safe）
@@ -161,16 +158,14 @@ impl GraphBuilder {
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
     {
         let name = name.into();
-        self.nodes
-            .insert(name.clone(), Node::function(&name, f));
+        self.nodes.insert(name.clone(), Node::function(&name, f));
         self
     }
 
     /// 添加路由节点（不执行逻辑，仅用于条件分支的汇聚点）
     pub fn add_router_node(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
-        self.nodes
-            .insert(name.clone(), Node::passthrough(&name));
+        self.nodes.insert(name.clone(), Node::passthrough(&name));
         self
     }
 
@@ -587,14 +582,20 @@ mod tests {
         let state = SharedState::new();
         state.set("score", 80i64);
         let result = graph.run(state).await.unwrap();
-        assert_eq!(result.state.get::<String>("result"), Some("passed".to_string()));
+        assert_eq!(
+            result.state.get::<String>("result"),
+            Some("passed".to_string())
+        );
         assert_eq!(result.path, vec!["check", "pass"]);
 
         // 测试失败路径
         let state = SharedState::new();
         state.set("score", 40i64);
         let result = graph.run(state).await.unwrap();
-        assert_eq!(result.state.get::<String>("result"), Some("failed".to_string()));
+        assert_eq!(
+            result.state.get::<String>("result"),
+            Some("failed".to_string())
+        );
         assert_eq!(result.path, vec!["check", "fail"]);
     }
 
@@ -623,7 +624,11 @@ mod tests {
             .add_conditional_edge("increment", |state: &SharedState| {
                 Box::pin(async move {
                     let c: i64 = state.get("counter").unwrap_or(0);
-                    if c >= 5 { "done".to_string() } else { "increment".to_string() }
+                    if c >= 5 {
+                        "done".to_string()
+                    } else {
+                        "increment".to_string()
+                    }
                 })
             })
             .set_finish("done")

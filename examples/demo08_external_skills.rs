@@ -1,161 +1,658 @@
-//! demo08_external_skills.rs —— 外部 Skill 文件系统加载演示
+//! demo08_external_skills.rs — File-based Skills: Full Feature Demo
 //!
-//! 演示如何从 `skills/` 目录自动扫描并加载基于 SKILL.md 定义的外部技能。
+//! Demonstrates the complete agentskills.io skill system:
+//!
+//! | Feature | Description |
+//! |---------|------------|
+//! | Progressive disclosure | 3-tier: catalog → activate → resources/scripts |
+//! | Inline shell execution | `!`cmd`` and ` ```! cmd ``` ` in SKILL.md |
+//! | Variable substitution | `${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}` |
+//! | Hooks | PreToolUse/PostToolUse interception |
+//! | Conditional activation | `paths` frontmatter for file-triggered skills |
+//! | `allowed-tools` | Restrict available tools per skill |
+//!
+//! # Run
+//! ```bash
+//! cargo run --example demo08_external_skills
+//! ```
 
 use echo_agent::prelude::*;
-use echo_agent::skills::external::SkillLoader;
+use echo_agent::skills::external::loader::{DiscoveryScope, SkillLoader};
+use echo_agent::skills::registry::SkillRegistry;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     dotenv::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "echo_agent=info,demo08_external_skills=info".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "echo_agent=info,demo08=info".into()),
         )
         .init();
 
-    println!("═══════════════════════════════════════════════════════");
-    println!("       Echo Agent × 外部 Skill 文件系统加载演示");
-    println!("═══════════════════════════════════════════════════════\n");
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  Echo Agent × File-Based Skills (agentskills.io v2)");
+    println!("═══════════════════════════════════════════════════════════\n");
 
-    // Part 1: 直接使用 SkillLoader API
-    demo_skill_loader().await?;
+    demo_1_discovery().await?;
+    demo_2_catalog().await?;
+    demo_3_activation().await?;
+    demo_4_script_execution().await?;
+    demo_5_agent_integration().await?;
+    demo_6_new_features().await?;
 
-    // Part 2: 解析单个 SKILL.md frontmatter
-    demo_parse_frontmatter()?;
-
-    // Part 3: Agent 自动加载目录中所有技能
-    demo_agent_with_external_skills().await?;
+    println!("\n{}", "═".repeat(59));
+    println!("All demos completed.");
 
     Ok(())
 }
 
-/// Part 1: 直接操作 SkillLoader
-async fn demo_skill_loader() -> echo_agent::error::Result<()> {
-    println!("{}", "─".repeat(55));
-    println!("Part 1: SkillLoader 扫描与懒加载演示\n");
+// ── Part 1: Discovery ────────────────────────────────────────────────────────
 
-    let mut loader = SkillLoader::new("./skills");
-    let skills = loader.scan().await?;
+/// Tier 1: Parse SKILL.md frontmatter only (name + description).
+/// This is the cheapest operation — no file bodies are read.
+async fn demo_1_discovery() -> echo_agent::error::Result<()> {
+    println!("{}", "─".repeat(59));
+    println!("Part 1: Skill Discovery (Tier 1 — frontmatter only)\n");
 
-    if skills.is_empty() {
-        println!("未找到技能目录，请确认 ./skills/ 目录存在\n");
+    let skills_dir = std::path::Path::new("skills");
+    if !skills_dir.exists() {
+        println!("  [skip] ./skills/ directory not found");
         return Ok(());
     }
 
-    println!("扫描到 {} 个技能：", skills.len());
-    for skill in &skills {
-        let meta = &skill.meta;
-        let resource_count = meta.resources.as_ref().map_or(0, |r| r.len());
+    let mut loader = SkillLoader::new();
+    let descriptors = loader.discover_from_dir(skills_dir).await?;
+
+    println!("  Discovered {} skills:\n", descriptors.len());
+
+    for desc in &descriptors {
+        println!("  {} {}", "●", desc.name);
+        println!("    description: {}", desc.description);
         println!(
-            "  • {} v{} — {} [{} 个资源]",
-            meta.name,
-            meta.version.as_deref().unwrap_or("?"),
-            meta.description,
-            resource_count
+            "    name valid:  {}",
+            if desc.validate_name().is_empty() {
+                "✓"
+            } else {
+                "⚠ (see warnings)"
+            }
         );
+        if let Some(license) = &desc.license {
+            println!("    license:     {}", license);
+        }
+        if let Some(shell) = &desc.shell {
+            println!("    shell:       {}", shell);
+        }
+        if !desc.paths.is_empty() {
+            println!("    paths:       {:?}", desc.paths);
+        }
+        if !desc.allowed_tools.is_empty() {
+            println!("    allowed:     {:?}", desc.allowed_tools);
+        }
+        if desc.hooks.is_some() {
+            println!("    hooks:       defined");
+        }
+        if !desc.metadata.is_empty() {
+            let pairs: Vec<String> = desc
+                .metadata
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            println!("    metadata:    {}", pairs.join(", "));
+        }
+        println!();
     }
 
-    println!("\n懒加载资源演示：");
-    match loader.load_resource("code_review", "checklist").await {
-        Ok(content) => {
-            let preview: String = content.lines().take(3).collect::<Vec<_>>().join("\n");
+    Ok(())
+}
+
+// ── Part 2: Catalog ──────────────────────────────────────────────────────────
+
+/// System prompt injection: only name + description per skill.
+/// This is what the LLM "sees" at the start of every conversation.
+async fn demo_2_catalog() -> echo_agent::error::Result<()> {
+    println!("{}", "─".repeat(59));
+    println!("Part 2: Skill Catalog (injected into system prompt)\n");
+
+    let mut loader = SkillLoader::new();
+    let descriptors = loader.discover_from_dir("skills").await?;
+
+    let mut registry = SkillRegistry::new();
+    for desc in descriptors {
+        registry.register_descriptor(desc);
+    }
+
+    match registry.catalog_prompt() {
+        Some(catalog) => {
             println!(
-                "  已加载 code_review/checklist:\n  ---\n  {}\n  ---",
-                preview
+                "  Catalog ({} skills, {} chars):\n",
+                registry.descriptor_count(),
+                catalog.len()
             );
+            for line in catalog.lines() {
+                println!("  │ {}", line);
+            }
+            println!("\n  ↑ This is the ONLY text injected at startup.");
+            println!("    Full instructions are loaded on-demand via activate_skill.");
         }
-        Err(e) => println!("  加载失败: {}", e),
+        None => {
+            println!("  No skills discovered, catalog is empty.");
+        }
     }
 
     println!();
     Ok(())
 }
 
-/// Part 2: 手动解析 SKILL.md frontmatter
-fn demo_parse_frontmatter() -> echo_agent::error::Result<()> {
-    println!("{}", "─".repeat(55));
-    println!("Part 2: 手动解析 SKILL.md Frontmatter\n");
+// ── Part 3: Activation ───────────────────────────────────────────────────────
 
-    let skill_md = r#"---
-name: example_skill
-version: "0.1.0"
-description: "演示用技能"
-tags: [demo, example]
-instructions: |
-  这是一个演示性技能，展示 frontmatter 格式。
-resources:
-  - name: guide
-    path: guide.md
-    description: "使用指南"
----
+/// Tier 2: Load full SKILL.md body + resource listing.
+/// This only happens when the LLM calls activate_skill.
+async fn demo_3_activation() -> echo_agent::error::Result<()> {
+    println!("{}", "─".repeat(59));
+    println!("Part 3: Skill Activation (Tier 2 — full instructions)\n");
 
-# Example Skill
-"#;
+    let mut loader = SkillLoader::new();
+    let descriptors = loader.discover_from_dir("skills").await?;
 
-    match SkillLoader::parse_frontmatter(skill_md) {
-        Ok(meta) => {
-            println!("解析成功！");
-            println!("  name: {}", meta.name);
-            println!("  version: {}", meta.version.as_deref().unwrap_or("-"));
-            println!("  description: {}", meta.description);
-            println!("\n生成的 System Prompt 注入块：");
-            println!("{}", "·".repeat(40));
-            println!("{}", meta.to_prompt_block());
-            println!("{}", "·".repeat(40));
+    if descriptors.is_empty() {
+        println!("  [skip] No skills to activate");
+        return Ok(());
+    }
+
+    let mut registry = SkillRegistry::new();
+    for desc in descriptors {
+        registry.register_descriptor(desc);
+    }
+
+    // Activate "project-stats" (has scripts), or fall back to the first available
+    let names = registry.available_names();
+    let skill_name = if registry.get_descriptor("project-stats").is_some() {
+        "project-stats".to_string()
+    } else {
+        names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "code-review".to_string())
+    };
+
+    println!("  Activating skill '{}'...\n", skill_name);
+    assert!(!registry.is_activated(&skill_name));
+
+    let content = registry.activate(&skill_name).await?;
+
+    println!("  Instructions ({} chars):", content.instructions.len());
+    for line in content.instructions.lines().take(12) {
+        println!("  │ {}", line);
+    }
+    let total_lines = content.instructions.lines().count();
+    if total_lines > 12 {
+        println!("  │ ... ({} more lines)", total_lines - 12);
+    }
+
+    println!("\n  Bundled resources ({}):", content.resources.len());
+    for res in &content.resources {
+        let icon = match res.kind {
+            echo_agent::skills::external::SkillResourceKind::Script => "⚡",
+            echo_agent::skills::external::SkillResourceKind::Reference => "📄",
+            _ => "📦",
+        };
+        println!("    {} [{}] {}", icon, res.kind, res.relative_path);
+    }
+
+    assert!(registry.is_activated(&skill_name));
+    println!(
+        "\n  Dedup: activate again → {}",
+        if registry.mark_activated(&skill_name) {
+            "new (bug!)"
+        } else {
+            "already activated ✓ (skipped, no wasted tokens)"
         }
-        Err(e) => println!("解析失败: {}", e),
+    );
+
+    println!();
+    Ok(())
+}
+
+// ── Part 4: Script Execution ─────────────────────────────────────────────────
+
+/// Tier 3b: Execute scripts from the skill's scripts/ directory.
+/// Shows Python, Bash, and TS script execution with automatic interpreter detection.
+async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
+    println!("{}", "─".repeat(59));
+    println!("Part 4: Script Execution (Tier 3b — run_skill_script)\n");
+
+    let scripts_dir = std::path::Path::new("skills/project-stats/scripts");
+    if !scripts_dir.exists() {
+        println!("  [skip] project-stats skill not found");
+        return Ok(());
+    }
+
+    let project_dir = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    // 4a: Python script (count lines)
+    println!("  4a. Python: count_lines.py");
+    println!("  ─────────────────────────");
+    {
+        let output = tokio::process::Command::new("python3")
+            .arg("skills/project-stats/scripts/count_lines.py")
+            .arg(&project_dir)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    let summary = &json["summary"];
+                    println!(
+                        "    Files: {}, Lines: {}, Code: {}, Languages: {}",
+                        summary["total_files"],
+                        summary["total_lines"],
+                        summary["code_lines"],
+                        summary["languages_detected"]
+                    );
+                    if let Some(langs) = json["languages"].as_array() {
+                        println!("    Top languages:");
+                        for lang in langs.iter().take(5) {
+                            println!(
+                                "      {:>5.1}%  {} ({} files, {} lines)",
+                                lang["percentage"].as_f64().unwrap_or(0.0),
+                                lang["language"].as_str().unwrap_or("?"),
+                                lang["files"],
+                                lang["code_lines"]
+                            );
+                        }
+                    }
+                } else {
+                    println!("    {}", stdout.chars().take(200).collect::<String>());
+                }
+            }
+            Ok(out) => {
+                println!(
+                    "    [error] exit code {:?}: {}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Err(e) => println!("    [skip] python3 not available: {}", e),
+        }
+    }
+
+    println!();
+
+    // 4b: Shell script (find TODOs)
+    println!("  4b. Bash: find_todos.sh");
+    println!("  ───────────────────────");
+    {
+        let output = tokio::process::Command::new("bash")
+            .arg("skills/project-stats/scripts/find_todos.sh")
+            .arg(&project_dir)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    let summary = &json["summary"];
+                    println!(
+                        "    Total markers: {} (TODO={}, FIXME={}, HACK={}, XXX={})",
+                        summary["total"],
+                        summary["TODO"],
+                        summary["FIXME"],
+                        summary["HACK"],
+                        summary["XXX"]
+                    );
+                } else {
+                    for line in stdout.lines().take(5) {
+                        println!("    {}", line);
+                    }
+                }
+            }
+            Ok(out) => {
+                println!(
+                    "    [error] exit code {:?}: {}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr)
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                );
+            }
+            Err(e) => println!("    [skip] bash not available: {}", e),
+        }
+    }
+
+    println!();
+
+    // 4c: TypeScript script (dependency summary)
+    println!("  4c. TypeScript: dep_summary.ts");
+    println!("  ──────────────────────────────");
+    {
+        // Detect best TS runtime (same logic as RunSkillScriptTool)
+        let (runtime, args) = detect_ts_runtime_for_demo();
+        println!("    Using runtime: {}", runtime);
+
+        let mut cmd = tokio::process::Command::new(&runtime);
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.arg("skills/project-stats/scripts/dep_summary.ts");
+        cmd.arg(&project_dir);
+
+        match tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await {
+            Ok(Ok(out)) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    let total = json["total_dependencies"].as_u64().unwrap_or(0);
+                    println!("    Total dependencies: {}", total);
+                    if let Some(managers) = json["managers"].as_array() {
+                        for mgr in managers {
+                            println!(
+                                "    {} ({}): {} direct, {} dev",
+                                mgr["manager"].as_str().unwrap_or("?"),
+                                mgr["file"].as_str().unwrap_or("?"),
+                                mgr["direct_count"],
+                                mgr["dev_count"]
+                            );
+                        }
+                    }
+                } else {
+                    for line in stdout.lines().take(5) {
+                        println!("    {}", line);
+                    }
+                }
+            }
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                println!(
+                    "    [error] exit {:?}: {}",
+                    out.status.code(),
+                    stderr.chars().take(200).collect::<String>()
+                );
+            }
+            Ok(Err(e)) => println!("    [skip] {} not available: {}", runtime, e),
+            Err(_) => println!("    [timeout] script took too long"),
+        }
     }
 
     println!();
     Ok(())
 }
 
-/// Part 3: Agent 自动加载目录中所有技能
-async fn demo_agent_with_external_skills() -> echo_agent::error::Result<()> {
-    println!("{}", "─".repeat(55));
-    println!("Part 3: Agent 自动加载外部技能\n");
+/// Detect the best TypeScript runtime for the demo.
+fn detect_ts_runtime_for_demo() -> (String, Vec<String>) {
+    for cmd in &["bun", "deno"] {
+        if std::process::Command::new(cmd)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return if *cmd == "deno" {
+                ("deno".into(), vec!["run".into(), "--allow-read".into()])
+            } else {
+                (cmd.to_string(), vec![])
+            };
+        }
+    }
+    ("npx".into(), vec!["tsx".into()])
+}
 
-    // 使用 AgentBuilder 创建 Agent
+// ── Part 5: Full Agent Integration ───────────────────────────────────────────
+
+/// Full integration: agent discovers skills, injects catalog, registers 3 tools.
+async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
+    println!("{}", "─".repeat(59));
+    println!("Part 5: Agent + Skills (Full Progressive Disclosure)\n");
+
+    let skills_dir = std::path::Path::new("skills");
+    if !skills_dir.exists() {
+        println!("  [skip] ./skills/ directory not found");
+        return Ok(());
+    }
+
     let mut agent = ReactAgentBuilder::new()
         .model("qwen3-max")
-        .name("multi-skill-agent")
-        .system_prompt(
-            "你是一个多功能专业助手，拥有以下专业技能。在执行任务时，请充分利用你的专业技能指引。",
-        )
+        .name("skill-demo-agent")
+        .system_prompt("你是一个多功能助手，能根据任务自动激活合适的技能。")
         .enable_tools()
         .build()?;
 
-    println!("正在从 ./skills 目录加载外部技能...");
-    let loaded = agent.load_skills_from_dir("./skills").await?;
+    let discovered = agent
+        .discover_skills(&[DiscoveryScope::Custom(skills_dir.into())])
+        .await?;
 
-    println!("\n已加载 {} 个外部技能: {:?}", loaded.len(), loaded);
-    println!("已注册工具: {:?}", agent.list_tools());
+    println!("  Discovered skills: {:?}", discovered);
+    println!("  Total skill count: {}", agent.skill_count());
 
-    if !has_llm_config() {
-        println!("\n跳过 LLM 执行部分：未检测到 API 密钥");
-        return Ok(());
+    let tools = agent.list_tools();
+    let tool_checks = [
+        ("activate_skill", "Tier 2: load full instructions on demand"),
+        (
+            "read_skill_resource",
+            "Tier 3a: read reference files on demand",
+        ),
+        (
+            "run_skill_script",
+            "Tier 3b: execute Python/Bash/TS scripts",
+        ),
+    ];
+    println!("\n  Progressive disclosure tools:");
+    for (name, purpose) in &tool_checks {
+        let registered = tools.iter().any(|t| *t == *name);
+        println!(
+            "    {:<24} {} {}",
+            name,
+            if registered { "✓" } else { "✗" },
+            purpose
+        );
     }
 
-    // 执行代码审查任务
-    println!("\n--- 场景：代码审查 ---");
-    let code_task = r#"
-请帮我审查以下 Python 函数，找出安全和质量问题：
+    println!("\n  Context protection:");
+    println!("    Activated skill instructions are protected from");
+    println!("    compression — they survive context compaction.");
 
-```python
-def get_user(user_id):
-    query = "SELECT * FROM users WHERE id = " + str(user_id)
-    result = db.execute(query)
-    return result
-```
-"#;
-
-    match agent.execute(code_task).await {
-        Ok(result) => println!("审查结果:\n{}", result),
-        Err(e) => println!("执行失败: {}", e),
+    if has_llm_config() {
+        println!("\n  Executing task with progressive disclosure...\n");
+        let task = "分析一下当前项目的代码量和技术债务情况，给出一个简要的项目健康报告。";
+        println!("  Task: {}\n", task);
+        match agent.execute(task).await {
+            Ok(result) => {
+                println!("  Result:");
+                for line in result.lines() {
+                    println!("  │ {}", line);
+                }
+            }
+            Err(e) => println!("  Error: {}", e),
+        }
+    } else {
+        println!(
+            "\n  [skip] LLM not configured (set OPENAI_API_KEY / DEEPSEEK_API_KEY / QWEN_API_KEY)"
+        );
+        println!("  In a real session the LLM would:");
+        println!("    1. See the compact skill catalog in the system prompt");
+        println!("    2. Call activate_skill(\"project-stats\") for the analysis task");
+        println!("    3. Receive full instructions listing scripts/count_lines.py, etc.");
+        println!(
+            "    4. Call run_skill_script(\"project-stats\", \"scripts/count_lines.py\", \".\")"
+        );
+        println!(
+            "    5. Call run_skill_script(\"project-stats\", \"scripts/find_todos.sh\", \".\")"
+        );
+        println!("    6. Optionally run dep_summary.ts and read references/metrics_guide.md");
+        println!("    7. Synthesize all outputs into a project health report");
     }
 
+    Ok(())
+}
+
+// ── Part 6: New Features Demo ────────────────────────────────────────────────
+
+/// Demonstrates v2 features: inline execution, variable substitution, hooks,
+/// conditional activation, and allowed-tools.
+async fn demo_6_new_features() -> echo_agent::error::Result<()> {
+    use echo_agent::skills::external::prompt_exec::{
+        PromptContext, SkillSource, process_skill_content,
+    };
+    use echo_agent::skills::hooks::{HookAction, HookRegistry, HookRule, HooksDefinition};
+
+    println!("{}", "─".repeat(59));
+    println!("Part 6: New Features (v2)\n");
+
+    // 6a: Variable substitution
+    println!("  6a. Variable Substitution");
+    println!("  ─────────────────────────");
+    {
+        let ctx = PromptContext {
+            skill_dir: "/home/user/skills/my-skill".into(),
+            session_id: "session-abc12345".into(),
+            arguments: vec!["src/".into(), "--verbose".into()],
+            source: SkillSource::Local,
+            ..Default::default()
+        };
+
+        let template = "Skill at ${SKILL_DIR}\nSession: ${SESSION_ID}\nTarget: ${1}, Flags: ${2}\nAll: ${ARGUMENTS}";
+        let result = process_skill_content(template, &ctx).await;
+        for line in result.lines() {
+            println!("    {}", line);
+        }
+    }
+    println!();
+
+    // 6b: Inline shell execution
+    println!("  6b. Inline Shell Execution");
+    println!("  ──────────────────────────");
+    {
+        let ctx = PromptContext {
+            skill_dir: ".".into(),
+            source: SkillSource::Local,
+            ..Default::default()
+        };
+
+        let content = "Host OS: !`uname -s 2>/dev/null || echo unknown`\nRust version:\n```!\nrustc --version 2>/dev/null || echo 'not installed'\n```";
+        let result = process_skill_content(content, &ctx).await;
+        for line in result.lines() {
+            println!("    {}", line);
+        }
+    }
+    println!();
+
+    // 6c: MCP source safety
+    println!("  6c. MCP Source Safety");
+    println!("  ─────────────────────");
+    {
+        let ctx = PromptContext {
+            source: SkillSource::Mcp,
+            ..Default::default()
+        };
+
+        let content = "Safe text. Dangerous: !`rm -rf /` more text";
+        let result = process_skill_content(content, &ctx).await;
+        println!("    Input:  {}", content);
+        println!("    Output: {}", result);
+        println!("    (MCP skills never execute inline commands)");
+    }
+    println!();
+
+    // 6d: Hooks system
+    println!("  6d. Hooks System");
+    println!("  ────────────────");
+    {
+        let mut registry = HookRegistry::new();
+
+        let def = HooksDefinition {
+            pre_tool_use: vec![HookRule {
+                matcher: "Bash".into(),
+                hooks: vec![HookAction::Prompt {
+                    prompt: "Verify command safety before execution".into(),
+                }],
+            }],
+            post_tool_use: vec![HookRule {
+                matcher: "*".into(),
+                hooks: vec![HookAction::Prompt {
+                    prompt: "Check output for sensitive data".into(),
+                }],
+            }],
+        };
+
+        registry.register("security-guard", "/tmp/security", def);
+
+        let pre = registry
+            .run_pre_tool_use("Bash", &serde_json::json!({"command": "git status"}))
+            .await;
+        println!("    PreToolUse(Bash) → messages: {:?}", pre.messages);
+        println!("    PreToolUse(Bash) → blocked:  {}", pre.block);
+
+        let pre_read = registry
+            .run_pre_tool_use("Read", &serde_json::json!({"path": "/etc/passwd"}))
+            .await;
+        println!(
+            "    PreToolUse(Read) → messages: {:?} (no match)",
+            pre_read.messages
+        );
+
+        let post = registry
+            .run_post_tool_use("Read", &serde_json::json!({}), "file content here")
+            .await;
+        println!(
+            "    PostToolUse(Read) → messages: {:?} (wildcard match)",
+            post.messages
+        );
+    }
+    println!();
+
+    // 6e: Conditional activation & allowed-tools
+    println!("  6e. Conditional Activation & Allowed Tools");
+    println!("  ──────────────────────────────────────────");
+    {
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_from_dir("skills").await?;
+
+        for desc in &descriptors {
+            if !desc.paths.is_empty() || !desc.allowed_tools.is_empty() {
+                println!("    Skill '{}' has constraints:", desc.name);
+                if !desc.paths.is_empty() {
+                    println!("      Activates for: {:?}", desc.paths);
+                }
+                if !desc.allowed_tools.is_empty() {
+                    println!("      Allowed tools: {:?}", desc.allowed_tools);
+                }
+            }
+        }
+    }
+    println!();
+
+    // 6f: Activation with inline execution
+    println!("  6f. Activation with Inline Execution");
+    println!("  ────────────────────────────────────");
+    {
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_from_dir("skills").await?;
+
+        let mut registry = SkillRegistry::new();
+        for desc in descriptors {
+            registry.register_descriptor(desc);
+        }
+
+        if registry.get_descriptor("project-stats").is_some() {
+            let content = registry.activate("project-stats").await?;
+            println!("    After activation, instructions contain resolved values:");
+            for line in content.instructions.lines().take(8) {
+                println!("    │ {}", line);
+            }
+            if content.instructions.lines().count() > 8 {
+                println!("    │ ...");
+            }
+            println!("    (${{SKILL_DIR}} and !`uname -s` have been replaced with actual values)");
+        }
+    }
+
+    println!();
     Ok(())
 }
 

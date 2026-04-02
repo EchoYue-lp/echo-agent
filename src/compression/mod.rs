@@ -111,6 +111,10 @@ pub struct ContextManager {
     compressor: Option<Box<dyn ContextCompressor>>,
     token_limit: usize,
     tokenizer: Arc<dyn Tokenizer>,
+    /// Content markers that identify protected messages (survive compaction).
+    /// Any message whose content contains one of these markers is excluded from compression.
+    /// Used by the skill system to protect activated skill instructions.
+    protected_markers: Vec<String>,
 }
 
 impl ContextManager {
@@ -155,9 +159,79 @@ impl ContextManager {
         self.tokenizer = tokenizer;
     }
 
-    /// 清空上下文缓冲区（保留已设置的压缩器）
+    /// 清空上下文缓冲区（保留已设置的压缩器和保护标记）
     pub fn clear(&mut self) {
         self.messages.clear();
+    }
+
+    /// Register a content marker that protects messages from compression.
+    ///
+    /// Any message whose content contains this marker string will be excluded
+    /// from compression passes. This is used by the skill system to protect
+    /// activated skill instructions from being evicted during context compaction.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use echo_agent::compression::ContextManager;
+    /// let mut ctx = ContextManager::builder(4096).build();
+    /// ctx.add_protected_marker("<skill_content".to_string());
+    /// ```
+    pub fn add_protected_marker(&mut self, marker: String) {
+        if !self.protected_markers.contains(&marker) {
+            self.protected_markers.push(marker);
+        }
+    }
+
+    /// Check if a message is protected from compression.
+    fn is_protected(&self, message: &Message) -> bool {
+        if self.protected_markers.is_empty() {
+            return false;
+        }
+        if let Some(content) = &message.content {
+            self.protected_markers.iter().any(|m| content.contains(m))
+        } else {
+            false
+        }
+    }
+
+    /// Split messages into (compressible, protected_with_original_index).
+    ///
+    /// Protected messages are removed from the compressible set and will be
+    /// re-inserted at their original relative positions after compression.
+    fn split_protected(&self, messages: Vec<Message>) -> (Vec<Message>, Vec<(usize, Message)>) {
+        let mut compressible = Vec::new();
+        let mut protected = Vec::new();
+
+        for (idx, msg) in messages.into_iter().enumerate() {
+            if self.is_protected(&msg) {
+                protected.push((idx, msg));
+            } else {
+                compressible.push(msg);
+            }
+        }
+
+        (compressible, protected)
+    }
+
+    /// Merge protected messages back into the compressed output.
+    ///
+    /// Protected messages are re-inserted after the system message(s) and
+    /// before the conversation messages, preserving their relative order.
+    fn merge_protected(compressed: Vec<Message>, protected: Vec<(usize, Message)>) -> Vec<Message> {
+        if protected.is_empty() {
+            return compressed;
+        }
+
+        let (system_msgs, conv_msgs): (Vec<Message>, Vec<Message>) =
+            compressed.into_iter().partition(|m| m.role == "system");
+
+        let mut result = system_msgs;
+        // Protected messages go right after system messages
+        for (_idx, msg) in protected {
+            result.push(msg);
+        }
+        result.extend(conv_msgs);
+        result
     }
 
     /// 动态替换压缩器，不影响已有的消息缓冲区
@@ -179,14 +253,17 @@ impl ContextManager {
     ///
     /// - 若已配置压缩器，使用当前压缩器执行；
     /// - 若未配置，则临时使用 `SlidingWindowCompressor::new(fallback_window)` 执行。
+    ///
+    /// Protected messages are excluded from compression and preserved.
     pub async fn force_compress(&mut self, fallback_window: usize) -> Result<ForceCompressStats> {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
 
-        // 分两条路径借用，避免同时持有 `self.compressor` 和 `self.messages` 的可变引用
+        let (compressible, protected) = self.split_protected(self.messages.clone());
+
         let output = if let Some(compressor) = &self.compressor {
             let input = CompressionInput {
-                messages: self.messages.clone(),
+                messages: compressible,
                 token_limit: self.token_limit,
                 current_query: None,
             };
@@ -194,7 +271,7 @@ impl ContextManager {
         } else {
             SlidingWindowCompressor::new(fallback_window)
                 .compress(CompressionInput {
-                    messages: self.messages.clone(),
+                    messages: compressible,
                     token_limit: self.token_limit,
                     current_query: None,
                 })
@@ -202,7 +279,7 @@ impl ContextManager {
         };
 
         let evicted = output.evicted.len();
-        self.messages = output.messages;
+        self.messages = Self::merge_protected(output.messages, protected);
         Ok(ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
@@ -222,16 +299,18 @@ impl ContextManager {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
 
+        let (compressible, protected) = self.split_protected(self.messages.clone());
+
         let output = compressor
             .compress(CompressionInput {
-                messages: self.messages.clone(),
+                messages: compressible,
                 token_limit: self.token_limit,
                 current_query: None,
             })
             .await?;
 
         let evicted = output.evicted.len();
-        self.messages = output.messages;
+        self.messages = Self::merge_protected(output.messages, protected);
         Ok(ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
@@ -259,19 +338,25 @@ impl ContextManager {
     /// 当估算 token 超过 `token_limit` 且已配置压缩器时，自动触发压缩并更新内部缓冲区。
     /// 压缩后的消息会替换原有缓冲区。
     ///
+    /// Protected messages (containing registered markers, e.g. `<skill_content>`) are
+    /// excluded from compression and re-inserted after system messages.
+    ///
     /// `current_query` 为保留字段，传 `None` 即可。
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<Vec<Message>> {
         if let Some(compressor) = &self.compressor
             && Self::estimate_tokens(&self.messages, &*self.tokenizer) > self.token_limit
         {
+            let (compressible, protected) = self.split_protected(self.messages.clone());
+
             let output = compressor
                 .compress(CompressionInput {
-                    messages: self.messages.clone(),
+                    messages: compressible,
                     token_limit: self.token_limit,
                     current_query: current_query.map(String::from),
                 })
                 .await?;
-            self.messages = output.messages;
+
+            self.messages = Self::merge_protected(output.messages, protected);
         }
         Ok(self.messages.clone())
     }
@@ -333,6 +418,7 @@ impl ContextManagerBuilder {
             tokenizer: self
                 .tokenizer
                 .unwrap_or_else(|| Arc::new(HeuristicTokenizer)),
+            protected_markers: Vec::new(),
         }
     }
 }

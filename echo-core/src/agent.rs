@@ -20,64 +20,38 @@ pub enum AgentEvent {
     /// LLM 推理开始
     ThinkStart,
     /// LLM 推理结束
-    ThinkEnd {
-        tokens_used: usize,
-    },
+    ThinkEnd { tokens_used: usize },
 
     // ── 工具调用 ──────────────────────────────────────────────────────────
     /// 准备调用工具
-    ToolCall {
-        name: String,
-        args: Value,
-    },
+    ToolCall { name: String, args: Value },
     /// 工具执行完毕
-    ToolResult {
-        name: String,
-        output: String,
-    },
+    ToolResult { name: String, output: String },
     /// 工具执行出错
-    ToolError {
-        name: String,
-        error: String,
-    },
+    ToolError { name: String, error: String },
 
     // ── 步骤级事件 ────────────────────────────────────────────────────────
     /// Plan-and-Execute 引擎生成了计划
-    PlanGenerated {
-        steps: Vec<String>,
-    },
+    PlanGenerated { steps: Vec<String> },
     /// 计划步骤开始执行
     StepStart {
         step_index: usize,
         description: String,
     },
     /// 计划步骤执行结束
-    StepEnd {
-        step_index: usize,
-        success: bool,
-    },
+    StepEnd { step_index: usize, success: bool },
 
     // ── 护栏 & 安全 ──────────────────────────────────────────────────────
     /// 护栏被触发
-    GuardTriggered {
-        guard: String,
-        blocked: bool,
-    },
+    GuardTriggered { guard: String, blocked: bool },
 
     // ── 记忆 & 编排 ──────────────────────────────────────────────────────
     /// 长期记忆已召回
-    MemoryRecalled {
-        count: usize,
-    },
+    MemoryRecalled { count: usize },
     /// Agent 间 Handoff 开始
-    HandoffStart {
-        from: String,
-        to: String,
-    },
+    HandoffStart { from: String, to: String },
     /// Agent 间 Handoff 结束
-    HandoffEnd {
-        to: String,
-    },
+    HandoffEnd { to: String },
 
     // ── 终态 ──────────────────────────────────────────────────────────────
     /// 最终回答

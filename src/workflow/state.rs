@@ -162,7 +162,10 @@ impl SharedState {
         let other_inner = other.inner.read().unwrap();
         let mut self_inner = self.inner.write().unwrap();
         for (k, v) in &other_inner.values {
-            self_inner.values.entry(k.clone()).or_insert_with(|| v.clone());
+            self_inner
+                .values
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
     }
 

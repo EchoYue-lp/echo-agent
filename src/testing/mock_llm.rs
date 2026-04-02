@@ -28,7 +28,9 @@
 //! ```
 
 use crate::error::{LlmError, ReactError, Result};
-use crate::llm::types::{DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message, ToolCall};
+use crate::llm::types::{
+    DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message, ToolCall,
+};
 use crate::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
