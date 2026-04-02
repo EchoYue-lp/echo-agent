@@ -794,3 +794,202 @@ fn react_agent_no_planning_tools_without_flag() {
     // 不启用任务规划时不应有相关工具
     assert!(!tool_names.iter().any(|n| *n == "create_task"));
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Feature 1: Memory Tool 自动注入（with_memory_tools + SearchMemoryTool）
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn builder_with_memory_tools_registers_all_memory_tools() {
+    let store = Arc::new(crate::memory::store::InMemoryStore::new());
+    let agent = crate::agent::ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .with_memory_tools(store)
+        .build()
+        .unwrap();
+
+    let tools = agent.tool_names();
+    assert!(tools.iter().any(|n| *n == "remember"), "应注册 remember");
+    assert!(tools.iter().any(|n| *n == "recall"), "应注册 recall");
+    assert!(
+        tools.iter().any(|n| *n == "search_memory"),
+        "应注册 search_memory"
+    );
+    assert!(tools.iter().any(|n| *n == "forget"), "应注册 forget");
+}
+
+#[test]
+fn builder_with_memory_tools_sets_store() {
+    let store = Arc::new(crate::memory::store::InMemoryStore::new());
+    let agent = crate::agent::ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .with_memory_tools(store)
+        .build()
+        .unwrap();
+
+    assert!(agent.store().is_some(), "Store 应已设置");
+}
+
+#[test]
+fn set_memory_store_registers_search_memory_tool() {
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+
+    assert!(
+        !agent.tool_names().iter().any(|n| *n == "search_memory"),
+        "初始不应有 search_memory"
+    );
+
+    let store = Arc::new(crate::memory::store::InMemoryStore::new());
+    agent.set_memory_store(store);
+
+    assert!(
+        agent.tool_names().iter().any(|n| *n == "search_memory"),
+        "set_memory_store 后应有 search_memory"
+    );
+}
+
+#[tokio::test]
+async fn search_memory_tool_returns_empty_for_no_matches() {
+    let store = Arc::new(crate::memory::store::InMemoryStore::new());
+    let tool = crate::tools::builtin::memory::SearchMemoryTool::new(
+        store,
+        vec!["test".to_string(), "memories".to_string()],
+    );
+    use crate::tools::Tool;
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "query".to_string(),
+        serde_json::Value::String("不存在的记忆".to_string()),
+    );
+    let result = tool.execute(params).await.unwrap();
+    assert!(result.success);
+    assert!(result.output.contains("未找到"));
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Feature 2: Token 预算管控（max_tool_output_tokens）
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn config_max_tool_output_tokens_default_is_none() {
+    let config = AgentConfig::new("model", "agent", "prompt");
+    assert_eq!(config.get_max_tool_output_tokens(), None);
+}
+
+#[test]
+fn config_max_tool_output_tokens_setter() {
+    let config = AgentConfig::new("model", "agent", "prompt").max_tool_output_tokens(2000);
+    assert_eq!(config.get_max_tool_output_tokens(), Some(2000));
+}
+
+#[test]
+fn builder_max_tool_output_tokens() {
+    let agent = crate::agent::ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .max_tool_output_tokens(1500)
+        .build()
+        .unwrap();
+
+    assert_eq!(agent.config().get_max_tool_output_tokens(), Some(1500));
+}
+
+#[test]
+fn truncate_tool_output_no_limit() {
+    let config = AgentConfig::new("model", "agent", "prompt");
+    let agent = ReactAgent::new(config);
+    let long_text = "a".repeat(10000);
+    let result = agent.truncate_tool_output(long_text.clone());
+    assert_eq!(result.len(), long_text.len(), "无限制时不应截断");
+}
+
+#[test]
+fn truncate_tool_output_within_limit() {
+    let config = AgentConfig::new("model", "agent", "prompt").max_tool_output_tokens(100000);
+    let agent = ReactAgent::new(config);
+    let short_text = "hello world".to_string();
+    let result = agent.truncate_tool_output(short_text.clone());
+    assert_eq!(result, short_text, "未超限时不应截断");
+}
+
+#[test]
+fn truncate_tool_output_exceeds_limit() {
+    let config = AgentConfig::new("model", "agent", "prompt").max_tool_output_tokens(10);
+    let agent = ReactAgent::new(config);
+    let long_text = "a ".repeat(500);
+    let result = agent.truncate_tool_output(long_text);
+    assert!(result.contains("[输出已截断"), "超限时应有截断提示");
+    assert!(result.len() < 1000, "截断后应显著变短");
+}
+
+#[test]
+fn config_compress_threshold_ratio_default() {
+    let config = AgentConfig::new("model", "agent", "prompt");
+    assert!((config.get_compress_threshold_ratio() - 0.2).abs() < f64::EPSILON);
+}
+
+#[test]
+fn config_compress_threshold_ratio_custom() {
+    let config = AgentConfig::new("model", "agent", "prompt").compress_threshold_ratio(0.5);
+    assert!((config.get_compress_threshold_ratio() - 0.5).abs() < f64::EPSILON);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Feature 5: 动态 Tool 注册/注销
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn remove_tool_basic() {
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    agent.add_tool(Box::new(MockTool::new("tool_a")));
+    agent.add_tool(Box::new(MockTool::new("tool_b")));
+
+    assert!(agent.tool_names().iter().any(|n| *n == "tool_a"));
+
+    let removed = agent.remove_tool("tool_a");
+    assert!(removed.is_some(), "应返回被移除的工具");
+    assert!(
+        !agent.tool_names().iter().any(|n| *n == "tool_a"),
+        "移除后不应存在"
+    );
+    assert!(
+        agent.tool_names().iter().any(|n| *n == "tool_b"),
+        "其他工具应不受影响"
+    );
+}
+
+#[test]
+fn remove_tool_nonexistent() {
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    let removed = agent.remove_tool("nonexistent");
+    assert!(removed.is_none());
+}
+
+#[test]
+fn replace_tool_basic() {
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    agent.add_tool(Box::new(MockTool::new("tool_x")));
+
+    let old = agent.replace_tool(Box::new(MockTool::new("tool_x")));
+    assert!(old.is_some(), "应返回旧工具");
+    assert!(
+        agent.tool_names().iter().any(|n| *n == "tool_x"),
+        "新工具应存在"
+    );
+}
+
+#[test]
+fn replace_tool_when_not_exists() {
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+
+    let old = agent.replace_tool(Box::new(MockTool::new("new_tool")));
+    assert!(old.is_none(), "不存在旧工具时应返回 None");
+    assert!(
+        agent.tool_names().iter().any(|n| *n == "new_tool"),
+        "新工具应已注册"
+    );
+}

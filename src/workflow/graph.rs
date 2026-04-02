@@ -46,13 +46,16 @@
 //! # }
 //! ```
 
+use super::WorkflowEvent;
 use super::node::Node;
 use super::state::SharedState;
 use crate::agent::Agent;
 use crate::error::{AgentError, ReactError, Result};
 use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -442,6 +445,125 @@ impl Graph {
         }
     }
 
+    /// 流式执行图工作流，逐节点发出 [`WorkflowEvent`] 事件。
+    ///
+    /// 每个节点的 Start/End 事件都会被发出，最后发出 `Completed` 事件。
+    pub async fn run_stream(
+        &self,
+        state: SharedState,
+    ) -> Result<BoxStream<'_, Result<WorkflowEvent>>> {
+        let state_clone = state.clone();
+        let stream = async_stream::try_stream! {
+            let mut current = self.entry.clone();
+            let mut path = Vec::new();
+            let mut step_count = 0usize;
+            let workflow_start = Instant::now();
+
+            loop {
+                if step_count >= self.max_steps {
+                    Err(ReactError::Agent(AgentError::MaxIterationsExceeded(self.max_steps)))?;
+                }
+
+                if current == Self::END || self.finish_nodes.contains(&current) {
+                    if current != Self::END {
+                        if let Some(node) = self.nodes.get(&current) {
+                            state_clone.set_current_node(&current);
+                            yield WorkflowEvent::NodeStart {
+                                node_name: current.clone(),
+                                step_index: step_count,
+                            };
+                            let node_start = Instant::now();
+                            node.execute(&state_clone).await?;
+                            yield WorkflowEvent::NodeEnd {
+                                node_name: current.clone(),
+                                step_index: step_count,
+                                elapsed: node_start.elapsed(),
+                            };
+                            path.push(current.clone());
+                            step_count += 1;
+                        }
+                    }
+
+                    let final_result = state_clone
+                        .get::<String>("result")
+                        .or_else(|| state_clone.get::<String>("output"))
+                        .unwrap_or_default();
+
+                    yield WorkflowEvent::Completed {
+                        result: final_result,
+                        total_steps: step_count,
+                        elapsed: workflow_start.elapsed(),
+                    };
+                    return;
+                }
+
+                let node = self.nodes.get(&current).ok_or_else(|| {
+                    ReactError::Agent(AgentError::InitializationFailed(format!(
+                        "Node '{}' not found in graph '{}'",
+                        current, self.name
+                    )))
+                })?;
+
+                state_clone.set_current_node(&current);
+                yield WorkflowEvent::NodeStart {
+                    node_name: current.clone(),
+                    step_index: step_count,
+                };
+                let node_start = Instant::now();
+                node.execute(&state_clone).await?;
+                yield WorkflowEvent::NodeEnd {
+                    node_name: current.clone(),
+                    step_index: step_count,
+                    elapsed: node_start.elapsed(),
+                };
+                path.push(current.clone());
+                step_count += 1;
+
+                let next = self.resolve_next(&current, &state_clone).await?;
+                match next {
+                    NextStep::Single(name) => {
+                        current = name;
+                    }
+                    NextStep::Parallel { targets, then } => {
+                        for target_name in &targets {
+                            if let Some(target_node) = self.nodes.get(target_name) {
+                                state_clone.set_current_node(target_name);
+                                yield WorkflowEvent::NodeStart {
+                                    node_name: target_name.clone(),
+                                    step_index: step_count,
+                                };
+                                let branch_start = Instant::now();
+                                target_node.execute(&state_clone).await?;
+                                yield WorkflowEvent::NodeEnd {
+                                    node_name: target_name.clone(),
+                                    step_index: step_count,
+                                    elapsed: branch_start.elapsed(),
+                                };
+                                path.push(target_name.clone());
+                                step_count += 1;
+                            }
+                        }
+                        current = then;
+                    }
+                    NextStep::End => {
+                        let final_result = state_clone
+                            .get::<String>("result")
+                            .or_else(|| state_clone.get::<String>("output"))
+                            .unwrap_or_default();
+                        yield WorkflowEvent::Completed {
+                            result: final_result,
+                            total_steps: step_count,
+                            elapsed: workflow_start.elapsed(),
+                        };
+                        return;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+
     /// 解析下一个节点
     async fn resolve_next(&self, current: &str, state: &SharedState) -> Result<NextStep> {
         let edges = match self.edges.get(current) {
@@ -792,5 +914,177 @@ mod tests {
         );
         assert_eq!(result.state.get::<bool>("verified"), Some(true));
         assert_eq!(result.path, vec!["prepare", "solver", "verify"]);
+    }
+
+    // ── Feature 4: Workflow 流式输出 (run_stream) ────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_stream_linear() {
+        use super::WorkflowEvent;
+        use futures::StreamExt;
+
+        let graph = GraphBuilder::new("stream_linear")
+            .add_function_node("a", |state: &SharedState| {
+                Box::pin(async move {
+                    state.set("x", 1i64);
+                    Ok(())
+                })
+            })
+            .add_function_node("b", |state: &SharedState| {
+                Box::pin(async move {
+                    let x: i64 = state.get("x").unwrap();
+                    state.set("result", format!("x={}", x));
+                    Ok(())
+                })
+            })
+            .set_entry("a")
+            .add_edge("a", "b")
+            .set_finish("b")
+            .build()
+            .unwrap();
+
+        let state = SharedState::new();
+        let mut stream = graph.run_stream(state).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+
+        let node_starts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::NodeStart { node_name, .. } => Some(node_name.clone()),
+                _ => None,
+            })
+            .collect();
+        let node_ends: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::NodeEnd { node_name, .. } => Some(node_name.clone()),
+                _ => None,
+            })
+            .collect();
+        let completed = events
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::Completed { .. }));
+
+        assert_eq!(node_starts, vec!["a", "b"]);
+        assert_eq!(node_ends, vec!["a", "b"]);
+        assert!(completed, "应收到 Completed 事件");
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_parallel() {
+        use super::WorkflowEvent;
+        use futures::StreamExt;
+
+        let graph = GraphBuilder::new("stream_parallel")
+            .add_function_node("start", |state: &SharedState| {
+                Box::pin(async move {
+                    state.set("val", "ok");
+                    Ok(())
+                })
+            })
+            .add_function_node("b1", |state: &SharedState| {
+                Box::pin(async move {
+                    state.set("b1_done", true);
+                    Ok(())
+                })
+            })
+            .add_function_node("b2", |state: &SharedState| {
+                Box::pin(async move {
+                    state.set("b2_done", true);
+                    Ok(())
+                })
+            })
+            .add_function_node("merge", |state: &SharedState| {
+                Box::pin(async move {
+                    let b1: bool = state.get("b1_done").unwrap_or(false);
+                    let b2: bool = state.get("b2_done").unwrap_or(false);
+                    state.set("result", format!("b1={b1},b2={b2}"));
+                    Ok(())
+                })
+            })
+            .set_entry("start")
+            .add_parallel_edge("start", vec!["b1".into(), "b2".into()], "merge")
+            .set_finish("merge")
+            .build()
+            .unwrap();
+
+        let state = SharedState::new();
+        let mut stream = graph.run_stream(state).await.unwrap();
+
+        let mut node_start_names = Vec::new();
+        let mut completed_result = None;
+
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                WorkflowEvent::NodeStart { node_name, .. } => {
+                    node_start_names.push(node_name);
+                }
+                WorkflowEvent::Completed { result, .. } => {
+                    completed_result = Some(result);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(node_start_names.contains(&"start".to_string()));
+        assert!(node_start_names.contains(&"b1".to_string()));
+        assert!(node_start_names.contains(&"b2".to_string()));
+        assert!(node_start_names.contains(&"merge".to_string()));
+        assert_eq!(completed_result, Some("b1=true,b2=true".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_conditional() {
+        use super::WorkflowEvent;
+        use futures::StreamExt;
+
+        let graph = GraphBuilder::new("stream_cond")
+            .add_function_node("check", |_state: &SharedState| {
+                Box::pin(async move { Ok(()) })
+            })
+            .add_function_node("yes", |state: &SharedState| {
+                Box::pin(async move {
+                    state.set("result", "took_yes_path");
+                    Ok(())
+                })
+            })
+            .add_function_node("no", |state: &SharedState| {
+                Box::pin(async move {
+                    state.set("result", "took_no_path");
+                    Ok(())
+                })
+            })
+            .set_entry("check")
+            .add_conditional_edge("check", |state: &SharedState| {
+                Box::pin(async move {
+                    let flag: bool = state.get("flag").unwrap_or(false);
+                    if flag {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    }
+                })
+            })
+            .set_finish("yes")
+            .set_finish("no")
+            .build()
+            .unwrap();
+
+        let state = SharedState::new();
+        state.set("flag", true);
+        let mut stream = graph.run_stream(state).await.unwrap();
+
+        let mut visited = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let WorkflowEvent::NodeStart { node_name, .. } = event.unwrap() {
+                visited.push(node_name);
+            }
+        }
+
+        assert_eq!(visited, vec!["check", "yes"]);
     }
 }

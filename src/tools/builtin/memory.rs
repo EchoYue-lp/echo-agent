@@ -298,6 +298,101 @@ impl Tool for ForgetTool {
     }
 }
 
+// ── SearchMemoryTool ─────────────────────────────────────────────────────────
+
+/// 在持久化 Store 中进行语义搜索（基于 embedding 相似度）
+///
+/// 与 `RecallTool`（关键词搜索）不同，本工具走
+/// [`Store::semantic_search`]，对接 EmbeddingStore 时可利用向量相似度
+/// 获得更精准的召回结果。当 Store 不支持语义搜索时自动降级为关键词搜索。
+pub struct SearchMemoryTool {
+    pub store: Arc<dyn Store>,
+    pub namespace: Vec<String>,
+}
+
+impl SearchMemoryTool {
+    pub fn new(store: Arc<dyn Store>, namespace: Vec<String>) -> Self {
+        Self { store, namespace }
+    }
+
+    fn ns_refs(&self) -> Vec<&str> {
+        self.namespace.iter().map(String::as_str).collect()
+    }
+}
+
+impl Tool for SearchMemoryTool {
+    fn name(&self) -> &str {
+        "search_memory"
+    }
+
+    fn description(&self) -> &str {
+        "使用语义搜索在持久记忆库中查找最相关的历史记忆。\
+         支持自然语言查询，可按语义相似度匹配而非仅关键词匹配。\
+         当底层 Store 支持 embedding 时效果最佳。"
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "自然语言查询，描述你想要找到的记忆内容"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "最多返回条数（默认 5）"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let query = parameters
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
+
+            let limit = parameters
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 20) as usize)
+                .unwrap_or(5);
+
+            debug!(query = %query, limit = limit, "🔎 search_memory 语义搜索 Store");
+
+            let ns: Vec<&str> = self.ns_refs();
+            let items = self.store.semantic_search(&ns, query, limit).await?;
+
+            if items.is_empty() {
+                return Ok(ToolResult::success(format!(
+                    "未找到与「{}」语义相关的记忆。",
+                    query
+                )));
+            }
+
+            let mut lines = vec![format!("语义搜索找到 {} 条相关记忆：", items.len())];
+            for (i, item) in items.iter().enumerate() {
+                lines.push(format!(
+                    "{}. [ID:{}] {}",
+                    i + 1,
+                    item.key.get(..8).unwrap_or(&item.key),
+                    format_store_item(item),
+                ));
+            }
+
+            Ok(ToolResult::success(lines.join("\n")))
+        })
+    }
+}
+
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
 
 fn format_store_item(item: &StoreItem) -> String {

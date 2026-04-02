@@ -121,6 +121,7 @@ impl OllamaClient {
             } else {
                 Some(msg.content.clone())
             },
+            content_parts: None,
             tool_calls,
             tool_call_id: None,
             name: None,

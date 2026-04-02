@@ -154,6 +154,7 @@ impl AnthropicClient {
         let message = Message {
             role: "assistant".to_string(),
             content,
+            content_parts: None,
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {

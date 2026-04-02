@@ -47,6 +47,7 @@ pub struct ReactAgentBuilder {
     snapshot_policy: Option<SnapshotPolicy>,
     max_snapshots: usize,
     response_format: Option<ResponseFormat>,
+    max_tool_output_tokens: Option<usize>,
 }
 
 impl Default for ReactAgentBuilder {
@@ -86,6 +87,7 @@ impl ReactAgentBuilder {
             snapshot_policy: None,
             max_snapshots: 10,
             response_format: None,
+            max_tool_output_tokens: None,
         }
     }
 
@@ -305,6 +307,15 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// 设置单次工具输出的最大 token 数
+    ///
+    /// 工具输出超过此限制时自动截断，并在尾部追加 `[输出已截断，共 N tokens]`。
+    /// 防止单次工具调用撑爆上下文窗口。
+    pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
+        self.max_tool_output_tokens = Some(max);
+        self
+    }
+
     // ── 回调与扩展 ──────────────────────────────────────────────────────────────
 
     /// 添加回调
@@ -316,6 +327,33 @@ impl ReactAgentBuilder {
     /// 设置长期记忆 Store
     pub fn store(mut self, store: Arc<dyn Store>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// 注入外部 Store 并自动注册 remember / recall / search_memory / forget 四个内置 Tool
+    ///
+    /// 这是从"有记忆存储"到"Agent 自主使用记忆"的快捷方式，
+    /// 等价于 `.store(store).enable_memory()`，但支持传入任意 `Store` 实现
+    /// （如 `EmbeddingStore`），无需依赖默认的 `FileStore`。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::prelude::*;
+    /// use std::sync::Arc;
+    ///
+    /// # fn main() -> echo_agent::error::Result<()> {
+    /// let store = Arc::new(InMemoryStore::new());
+    /// let agent = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .with_memory_tools(store)
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_memory_tools(mut self, store: Arc<dyn Store>) -> Self {
+        self.store = Some(store);
+        self.enable_memory = true;
         self
     }
 
@@ -411,6 +449,9 @@ impl ReactAgentBuilder {
         if let Some(fmt) = self.response_format {
             config = config.response_format(fmt);
         }
+        if let Some(max) = self.max_tool_output_tokens {
+            config = config.max_tool_output_tokens(max);
+        }
 
         for callback in self.callbacks {
             config = config.with_callback(callback);
@@ -418,6 +459,14 @@ impl ReactAgentBuilder {
 
         if let Some(session_id) = &self.session_id {
             config = config.session_id(session_id);
+        }
+
+        // 当用户通过 with_memory_tools(store) 传入自定义 Store 时，
+        // 跳过 ReactAgent::new() 内部的 FileStore 自动初始化，
+        // 改由 build() 阶段手动注入用户提供的 Store。
+        let has_external_store = self.store.is_some();
+        if has_external_store {
+            config = config.enable_memory(false);
         }
 
         let mut agent = crate::agent::react_agent::ReactAgent::new(config);
@@ -432,7 +481,7 @@ impl ReactAgentBuilder {
             agent.add_tool(tool);
         }
 
-        // 设置 Store
+        // 设置 Store（同时注册 remember/recall/search_memory/forget 工具）
         if let Some(store) = self.store {
             agent.set_memory_store(store);
         }

@@ -59,6 +59,12 @@ pub struct AgentConfig {
     pub(crate) checkpointer_path: String,
     /// 结构化输出格式（None = 默认文本）
     pub(crate) response_format: Option<ResponseFormat>,
+    /// 单次工具输出的最大 token 数（None = 不限制）。
+    /// 超限时自动截断并在末尾追加 `[输出已截断，共 N tokens]` 提示。
+    pub(crate) max_tool_output_tokens: Option<usize>,
+    /// 当可用 token 余量低于此比例时，在 think() 前主动触发压缩。
+    /// 取值 0.0–1.0，默认 0.2（即剩余不到 20% 时触发）。
+    pub(crate) compress_threshold_ratio: f64,
 }
 
 impl AgentConfig {
@@ -87,6 +93,8 @@ impl AgentConfig {
             session_id: None,
             checkpointer_path: "~/.echo-agent/checkpoints.json".to_string(),
             response_format: None,
+            max_tool_output_tokens: None,
+            compress_threshold_ratio: 0.2,
         }
     }
 
@@ -342,6 +350,26 @@ impl AgentConfig {
     pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
         self.response_format = Some(fmt);
         self
+    }
+
+    /// 设置单次工具输出的最大 token 数，超限自动截断
+    pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
+        self.max_tool_output_tokens = Some(max);
+        self
+    }
+
+    pub fn get_max_tool_output_tokens(&self) -> Option<usize> {
+        self.max_tool_output_tokens
+    }
+
+    /// 设置主动压缩阈值比例（0.0–1.0），默认 0.2
+    pub fn compress_threshold_ratio(mut self, ratio: f64) -> Self {
+        self.compress_threshold_ratio = ratio.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn get_compress_threshold_ratio(&self) -> f64 {
+        self.compress_threshold_ratio
     }
 }
 

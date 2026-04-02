@@ -48,10 +48,12 @@
 // ── Graph 工作流 ────────────────────────────────────────────────────────────
 
 mod graph;
+pub mod loader;
 mod node;
 pub mod state;
 
 pub use graph::{Graph, GraphBuilder, GraphResult};
+pub use loader::{ConditionDefinition, EdgeDefinition, NodeDefinition, WorkflowDefinition};
 pub use state::SharedState;
 
 // ── Pipeline 工作流 ─────────────────────────────────────────────────────────
@@ -67,6 +69,7 @@ pub use sequential::{SequentialWorkflow, SequentialWorkflowBuilder, WorkflowStep
 use crate::agent::Agent;
 use crate::error::Result;
 use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
@@ -79,10 +82,59 @@ pub fn shared_agent(agent: impl Agent + 'static) -> SharedAgent {
     Arc::new(AsyncMutex::new(Box::new(agent)))
 }
 
+/// 工作流执行过程中产生的逐步事件
+///
+/// 通过 [`Workflow::run_stream`] 获取 `BoxStream<WorkflowEvent>`，
+/// 实现 UI 实时更新、进度条、日志等场景。
+#[derive(Debug, Clone)]
+pub enum WorkflowEvent {
+    /// 节点开始执行
+    NodeStart {
+        node_name: String,
+        step_index: usize,
+    },
+    /// 节点执行结束
+    NodeEnd {
+        node_name: String,
+        step_index: usize,
+        elapsed: Duration,
+    },
+    /// 节点产生的 token（流式 Agent 输出时透传）
+    Token { node_name: String, token: String },
+    /// 节点执行错误（非致命，错误被记录但流继续）
+    NodeError { node_name: String, error: String },
+    /// 工作流执行完毕
+    Completed {
+        result: String,
+        total_steps: usize,
+        elapsed: Duration,
+    },
+}
+
 /// Workflow 统一执行接口
 pub trait Workflow: Send + Sync {
     /// 以 `input` 为初始输入运行整个工作流
     fn run<'a>(&'a mut self, input: &'a str) -> BoxFuture<'a, Result<WorkflowOutput>>;
+
+    /// 以 `input` 为初始输入运行整个工作流（流式输出逐节点事件）
+    ///
+    /// 默认实现回退到 `run()` 并仅发出 `Completed` 事件。
+    fn run_stream<'a>(
+        &'a mut self,
+        input: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<WorkflowEvent>>>> {
+        Box::pin(async move {
+            let output = self.run(input).await?;
+            let event = WorkflowEvent::Completed {
+                result: output.result,
+                total_steps: output.steps.len(),
+                elapsed: output.elapsed,
+            };
+            let stream: BoxStream<'a, Result<WorkflowEvent>> =
+                Box::pin(futures::stream::once(async { Ok(event) }));
+            Ok(stream)
+        })
+    }
 }
 
 /// Workflow 执行的完整输出

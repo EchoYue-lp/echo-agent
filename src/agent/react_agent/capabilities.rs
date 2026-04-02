@@ -52,6 +52,25 @@ impl ReactAgent {
         }
     }
 
+    /// Remove a tool by name. Returns the removed tool if it existed.
+    ///
+    /// Supports dynamic tool management in the ReAct loop — for example,
+    /// switching from search tools to execution tools mid-task.
+    pub fn remove_tool(&mut self, name: &str) -> Option<Box<dyn Tool>> {
+        self.tool_manager.unregister(name)
+    }
+
+    /// Replace an existing tool with a new one of the same name.
+    ///
+    /// If a tool with the same name exists, it is removed and the new tool is registered.
+    /// Returns the old tool if it was replaced.
+    pub fn replace_tool(&mut self, tool: Box<dyn Tool>) -> Option<Box<dyn Tool>> {
+        let name = tool.name().to_string();
+        let old = self.tool_manager.unregister(&name);
+        self.tool_manager.register(tool);
+        old
+    }
+
     /// Register a tool that requires human approval before execution.
     pub fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>) {
         #[cfg(feature = "human-loop")]

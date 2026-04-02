@@ -253,18 +253,44 @@ impl ReactAgent {
         }
     }
 
+    /// 对工具输出进行 token 预算截断。
+    ///
+    /// 当 `max_tool_output_tokens` 已配置且输出估算 token 超限时，
+    /// 截断文本并在尾部追加 `[输出已截断，共 N tokens]` 提示。
+    pub(crate) fn truncate_tool_output(&self, output: String) -> String {
+        let Some(max_tokens) = self.config.max_tool_output_tokens else {
+            return output;
+        };
+        let tokenizer = self.context.tokenizer();
+        let token_count = tokenizer.count_tokens(&output);
+        if token_count <= max_tokens {
+            return output;
+        }
+
+        // 按字符比例估算截断位置
+        let ratio = max_tokens as f64 / token_count as f64;
+        let char_limit = (output.len() as f64 * ratio * 0.95) as usize;
+        let truncated: String = output.chars().take(char_limit).collect();
+        let suffix = format!(
+            "\n[输出已截断，共 {} tokens，保留前 {} tokens]",
+            token_count, max_tokens
+        );
+        format!("{truncated}{suffix}")
+    }
+
     /// 执行工具，并根据 `tool_error_feedback` 配置决定失败时的行为：
     /// - `true`（默认）：将错误信息转换为工具观测值回传给 LLM，让模型自行纠错
     /// - `false`：直接向上抛出 `Err`，与旧行为一致
     ///
     /// `final_answer` 工具始终保持原始错误语义，不会被软化。
+    /// 工具输出会经过 `truncate_tool_output` 进行 token 预算截断。
     pub(crate) async fn execute_tool_feedback(
         &self,
         tool_name: &str,
         input: &Value,
     ) -> Result<String> {
         match self.execute_tool(tool_name, input).await {
-            Ok(result) => Ok(result),
+            Ok(result) => Ok(self.truncate_tool_output(result)),
             Err(e) if self.config.tool_error_feedback && tool_name != TOOL_FINAL_ANSWER => {
                 warn!(
                     agent = %self.config.agent_name,
@@ -290,6 +316,23 @@ impl ReactAgent {
         let mut res = Vec::new();
 
         debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM 思考中...");
+
+        // 预检查：当可用 token 余量不足时，主动触发压缩
+        if self.config.token_limit != usize::MAX {
+            let current_tokens = self.context.token_estimate();
+            let threshold = (self.config.token_limit as f64
+                * (1.0 - self.config.compress_threshold_ratio))
+                as usize;
+            if current_tokens > threshold && self.context.has_compressor() {
+                debug!(
+                    agent = %agent,
+                    current = current_tokens,
+                    threshold = threshold,
+                    limit = self.config.token_limit,
+                    "📦 Token 余量不足，主动触发上下文压缩"
+                );
+            }
+        }
 
         let messages = self.context.prepare(None).await?;
 

@@ -2,12 +2,15 @@
 
 # echo-agent
 
-**A composable, production-ready Agent framework for Rust**
+**A composable, production-ready AI Agent framework for Rust**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
+[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/your-org/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
+
+Build autonomous AI agents with Rust's **memory safety**, **zero-cost abstractions**, and **async-native concurrency**.
 
 [中文文档](./README.zh.md) · [Documentation](./docs/en/README.md) · [Examples](./examples/)
 
@@ -17,7 +20,7 @@
 
 ## Why echo-agent?
 
-Most AI agent frameworks are written in Python. echo-agent brings the full power of a modern agent framework to Rust — with **memory safety**, **zero-cost abstractions**, and **async-native concurrency** you can't get elsewhere.
+Most AI agent frameworks are written in Python. **echo-agent** brings the full power of a modern agent framework to Rust — matching feature parity with LangGraph, CrewAI, and AutoGen while delivering the performance and reliability only Rust can offer.
 
 ```rust
 use echo_agent::prelude::*;
@@ -44,6 +47,18 @@ async fn main() -> Result<()> {
 
 ---
 
+## Highlights
+
+- **30+ capabilities** — ReAct loop, tools, memory, streaming, multi-agent, skills, MCP, guards, audit, and more
+- **39 runnable examples** — every feature has a demo you can `cargo run` immediately
+- **350+ unit tests** — comprehensive coverage across all modules
+- **5 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
+- **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
+- **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
+- **Unified retry** — one `RetryPolicy` for all external calls (LLM, MCP, A2A, sandbox)
+
+---
+
 ## Features
 
 | Capability | Description |
@@ -51,35 +66,160 @@ async fn main() -> Result<()> {
 | 🔄 **ReAct Engine** | Thought → Action → Observation loop with Chain-of-Thought |
 | 🔧 **Tool System** | `#[tool]` macro with auto JSON Schema; timeout + retry + parallelism |
 | 🧠 **Dual-layer Memory** | `Store` (long-term KV) + `Checkpointer` (session history) |
+| 🔍 **Memory Tools** | `with_memory_tools(store)` — auto-inject remember / recall / search / forget |
+| 🖼️ **Multi-Modal** | `ContentPart::Text` / `ImageUrl` / `File` — images & files in messages |
 | 📦 **Context Compression** | SlidingWindow / LLM Summary / Hybrid pipeline |
+| 📏 **Token Budget** | `max_tool_output_tokens` auto-truncation + pre-think compression trigger |
+| 🔁 **Unified Retry** | `RetryPolicy` + `with_retry` / `with_retry_if` for all external calls |
+| 🔀 **Dynamic Tools** | `remove_tool()` / `replace_tool()` — adjust toolset mid-conversation |
 | 🤝 **Human-in-the-Loop** | Approval gates via Console, Webhook, or WebSocket |
 | 🏗️ **Multi-Agent** | Orchestrator → SubAgent dispatch; Handoff between agents |
-| 💡 **Skill System** | Tools + prompts packaged as reusable capability units |
+| 💡 **Skill System** | Progressive disclosure: discover → activate → use |
 | 🔌 **MCP Protocol** | Connect any MCP-compliant server (stdio / SSE / HTTP) |
-| 📊 **Plan-and-Execute** | Planner + Executor: explicit plan → step execution strategy |
+| 📊 **Plan-and-Execute** | Planner + Executor: explicit plan → step execution |
 | 📡 **Streaming** | `execute_stream()` returns real-time `AgentEvent` stream |
-| 📐 **Structured Output** | `extract::<T>()` — LLM output to typed Rust structs via JSON Schema |
+| 🌊 **Workflow Streaming** | `Graph::run_stream()` — per-node `WorkflowEvent` events |
+| 📐 **Structured Output** | `extract::<T>()` — LLM output to typed Rust structs |
+| 📝 **Declarative Workflow** | `Graph::from_yaml()` / `from_json()` — no-code workflow definition |
 | 🛡️ **Guard System** | Rule-based / LLM-powered content filtering on input & output |
 | 🔑 **Permission Model** | Declarative tool permissions with pluggable policies |
-| 📝 **Audit Logging** | Structured event logging with pluggable backends |
+| 📋 **Audit Logging** | Structured event logging with pluggable backends |
 | 📈 **OpenTelemetry** | Distributed tracing and metrics via OTLP |
 | 🎣 **Macro System** | `#[tool]`, `#[callback]`, `#[guard]`, `#[handler]`, `agent!{}`, `messages![]` |
 | 🌐 **A2A Protocol** | Agent Card publishing and cross-framework collaboration |
+| 🏖️ **Sandbox** | Local / Docker / K8s code execution with resource limits |
+| 🔗 **Graph Workflow** | Directed graph: linear, conditional, loop, parallel fan-out/fan-in |
+
+---
+
+## What's New in v1.0.0
+
+### Memory Tool Auto-Injection
+
+One line to give your agent persistent memory — no manual tool wiring:
+
+```rust
+let store = Arc::new(InMemoryStore::new());
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .with_memory_tools(store)  // registers remember + recall + search_memory + forget
+    .build()?;
+```
+
+### Multi-Modal Support
+
+Send images and files alongside text — compatible with OpenAI Vision and Anthropic APIs:
+
+```rust
+let msg = Message::user_with_image(
+    "What's in this image?",
+    "image/png",
+    base64_data,
+);
+// Also: Message::user_with_image_url(), Message::user_multimodal()
+```
+
+### Declarative Workflow (YAML/JSON)
+
+Define agent graphs without writing Rust:
+
+```yaml
+name: research_pipeline
+nodes:
+  - name: researcher
+    type: agent
+    model: qwen3-max
+    system_prompt: "You are a research assistant"
+    input_key: task
+    output_key: research
+  - name: writer
+    type: agent
+    model: qwen3-max
+    system_prompt: "You are a writing assistant"
+    input_key: research
+    output_key: result
+edges:
+  - from: researcher
+    to: writer
+entry: researcher
+finish: [writer]
+```
+
+```rust
+let graph = Graph::from_yaml("workflow.yaml")?;
+let result = graph.run(state).await?;
+```
+
+### Unified Retry Policy
+
+One retry strategy for all external calls:
+
+```rust
+let policy = RetryPolicy::new(3, Duration::from_millis(500))
+    .max_delay(Duration::from_secs(30))
+    .jitter(true);
+
+let response = with_retry(&policy, || llm_client.chat(request)).await?;
+
+// Skip non-retryable errors:
+let response = with_retry_if(&policy, || mcp.call(tool), |e| e.is_transient()).await?;
+```
+
+### Workflow Streaming
+
+Get real-time events as your graph executes:
+
+```rust
+let mut stream = graph.run_stream(state).await?;
+while let Some(event) = stream.next().await {
+    match event? {
+        WorkflowEvent::NodeStart { node_name, .. } => println!("▶ {node_name}"),
+        WorkflowEvent::NodeEnd { node_name, elapsed, .. } => println!("✓ {node_name} ({elapsed:?})"),
+        WorkflowEvent::Completed { result, .. } => println!("Done: {result}"),
+        _ => {}
+    }
+}
+```
+
+### Dynamic Tool Management
+
+Swap tools mid-conversation for multi-phase tasks:
+
+```rust
+// Research phase
+agent.add_tool(Box::new(SearchWebTool));
+
+// Switch to execution phase
+agent.remove_tool("search_web");
+agent.add_tool(Box::new(ExecuteCodeTool));
+
+// Hot-swap a tool implementation
+agent.replace_tool(Box::new(SaferExecuteCodeTool));
+```
+
+### Token Budget Control
+
+Prevent tool output from blowing up your context window:
+
+```rust
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .max_tool_output_tokens(2000)   // auto-truncate oversized tool output
+    .build()?;
+```
 
 ---
 
 ## Workspace Structure
 
-echo-agent is organized as a multi-crate workspace:
-
 ```
 echo-agent/
-├── echo-core/         Core traits & types (Tool, LlmClient, Agent, Guard, Error, etc.)
+├── echo-core/         Core traits & types (Tool, LlmClient, Agent, Guard, Retry, etc.)
 ├── echo-macros/       Procedural macros (#[tool], #[callback], #[guard], #[handler], etc.)
 ├── echo-providers/    LLM provider implementations (OpenAI, Anthropic, Ollama)
 ├── echo-mcp/          MCP protocol client (stdio, SSE, HTTP transports)
-├── src/               Main crate — agent engine, memory, skills, tools, and more
-├── examples/          25 runnable demo programs
+├── src/               Main crate — agent engine, memory, skills, tools, workflow, and more
+├── examples/          39 runnable demo programs
 ├── docs/              Bilingual documentation (en + zh)
 └── skills/            External skill packs (Markdown-based)
 ```
@@ -116,6 +256,8 @@ models:
 ```bash
 cargo run --example demo01_tools
 cargo run --example demo25_macros
+cargo run --example demo34_workflow_stream
+cargo run --example demo36_multimodal
 ```
 
 ---
@@ -153,7 +295,28 @@ let mut agent = agent! {
 let answer = agent.execute("What's the weather in Tokyo?").await?;
 ```
 
-### 3. Callback — override only what you need
+### 3. Graph Workflow — orchestrate agent pipelines
+
+```rust
+let graph = GraphBuilder::new("etl_pipeline")
+    .add_function_node("extract", |state| Box::pin(async move {
+        state.set("data", vec!["hello", "world"]);
+        Ok(())
+    }))
+    .add_function_node("transform", |state| Box::pin(async move {
+        let data: Vec<String> = state.get("data").unwrap_or_default();
+        state.set("result", data.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>());
+        Ok(())
+    }))
+    .set_entry("extract")
+    .add_edge("extract", "transform")
+    .set_finish("transform")
+    .build()?;
+
+let result = graph.run(SharedState::new()).await?;
+```
+
+### 4. Callback — override only what you need
 
 ```rust
 use echo_agent::{callback, prelude::*};
@@ -168,7 +331,7 @@ impl MyCallback {
 }
 ```
 
-### 4. Guard — content filtering in one function
+### 5. Guard — content filtering in one function
 
 ```rust
 use echo_agent::{guard, prelude::*};
@@ -183,7 +346,7 @@ async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardR
 }
 ```
 
-### 5. Streaming — real-time feedback
+### 6. Streaming — real-time feedback
 
 ```rust
 let mut stream = agent.execute_stream("Explain quantum entanglement").await?;
@@ -197,7 +360,7 @@ while let Some(event) = stream.next().await {
 }
 ```
 
-### 6. MCP — plug in any tool server
+### 7. MCP — plug in any tool server
 
 ```rust
 let mut mcp = McpManager::new();
@@ -257,6 +420,16 @@ agent.add_tools(tools);
 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A protocol |
 | [`demo24_topology`](examples/demo24_topology.rs) | Topology visualization |
 | [`demo25_macros`](examples/demo25_macros.rs) | Macro system showcase |
+| [`demo28_sandbox`](examples/demo28_sandbox.rs) | Sandbox code execution |
+| [`demo29_workflow`](examples/demo29_workflow.rs) | Graph workflow engine |
+| [`demo30_mcp_server`](examples/demo30_mcp_server.rs) | MCP server mode |
+| [`demo31_memory_tools`](examples/demo31_memory_tools.rs) | **Memory tool auto-injection** |
+| [`demo32_token_budget`](examples/demo32_token_budget.rs) | **Token budget control** |
+| [`demo33_retry_policy`](examples/demo33_retry_policy.rs) | **Unified retry policy** |
+| [`demo34_workflow_stream`](examples/demo34_workflow_stream.rs) | **Workflow streaming events** |
+| [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | **Dynamic tool registration** |
+| [`demo36_multimodal`](examples/demo36_multimodal.rs) | **Multi-modal messages** |
+| [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | **Declarative YAML/JSON workflow** |
 
 ---
 

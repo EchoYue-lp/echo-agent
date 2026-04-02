@@ -134,7 +134,7 @@ pub mod prelude {
     // LLM
     pub use crate::llm::config::LlmProvider;
     pub use crate::llm::providers::{AnthropicClient, OllamaClient};
-    pub use crate::llm::types::{Message, ToolCall};
+    pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, ToolCall};
     pub use crate::llm::{
         ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient,
         ProviderFactory, ResponseFormat, ToolDefinition,
@@ -197,7 +197,8 @@ pub mod prelude {
     // Workflow
     pub use crate::workflow::{
         ConcurrentWorkflow, DagWorkflow, Graph, GraphBuilder, GraphResult, SequentialWorkflow,
-        SharedAgent, SharedState, StepOutput, Workflow, WorkflowOutput, shared_agent,
+        SharedAgent, SharedState, StepOutput, Workflow, WorkflowDefinition, WorkflowEvent,
+        WorkflowOutput, shared_agent,
     };
 
     // Sandbox
@@ -206,6 +207,9 @@ pub mod prelude {
         ResourceLimits, SandboxCommand, SandboxExecutor, SandboxManager, SandboxPolicy,
         SecurityLevel,
     };
+
+    // Retry
+    pub use echo_core::retry::{RetryPolicy, with_retry, with_retry_if};
 
     // Error
     pub use crate::error::Result;

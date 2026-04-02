@@ -31,7 +31,7 @@ use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
-use crate::tools::builtin::memory::{ForgetTool, RecallTool, RememberTool};
+use crate::tools::builtin::memory::{ForgetTool, RecallTool, RememberTool, SearchMemoryTool};
 #[cfg(feature = "tasks")]
 use crate::tools::builtin::plan::PlanTool;
 #[cfg(feature = "tasks")]
@@ -187,6 +187,10 @@ impl ReactAgent {
                     )));
                     tool_manager
                         .register(Box::new(RecallTool::new(store.clone(), namespace.clone())));
+                    tool_manager.register(Box::new(SearchMemoryTool::new(
+                        store.clone(),
+                        namespace.clone(),
+                    )));
                     tool_manager.register(Box::new(ForgetTool::new(store.clone(), namespace)));
                     Some(store)
                 }
@@ -315,6 +319,8 @@ impl ReactAgent {
             .register(Box::new(RememberTool::new(store.clone(), ns.clone())));
         self.tool_manager
             .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
+        self.tool_manager
+            .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
         self.tool_manager
             .register(Box::new(ForgetTool::new(store.clone(), ns)));
         self.store = Some(store);
