@@ -5,7 +5,7 @@
 **A composable, production-ready AI Agent framework for Rust**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/your-org/echo-agent)
+[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)](https://github.com/your-org/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
@@ -92,7 +92,36 @@ async fn main() -> Result<()> {
 
 ---
 
-## What's New in v1.0.0
+## What's New in v1.1.0
+
+### Agent Directory Restructuring + StateGraph DSL
+
+Agent modules reorganized: `src/agent/react_agent` → `src/agents/react`, `src/plan_execute` → `src/agents/plan_execute`. New `agents/self_reflection` module (Composite/Critic/LlmCritic). StateGraph DSL for declarative workflow definition. Enhanced Task system with DAG scheduling, Hooks, Events, Store persistence, and Executor.
+
+### Human-in-the-Loop 7-Stage Pipeline
+
+Full permission system inspired by Claude Code:
+
+```
+Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → DenialTracker → Mode dispatch
+```
+
+- **SessionApprovalCache** with configurable TTL (default 30 min)
+- **Audit Trail**: `PermissionAuditSink` trait + InMemory/Logging/Composite implementations
+- **ProtectedPathChecker**: `.git`/`.env`/`.ssh` always protected
+- **AI Classifier**: RuleClassifier/LlmClassifier/CompositeClassifier for Auto mode
+- **Enhanced ClassifierContext**: workspace/project_type/recent_files/RiskContext
+- **DenialTracker**: auto-fallback after consecutive denials
+- **PermissionMode**: Default/Plan/Auto/AcceptEdits/BypassPermissions/DontAsk/Bubble
+- **Managed rules**: enterprise admin, users cannot override
+
+### Subagent System
+
+Sync/Fork/Teammate three execution modes. SubagentBuilder/Registry/Executor/Hooks. Team collaboration with Coordinator + Mailbox.
+
+---
+
+## Previous: v1.0.0
 
 ### Memory Tool Auto-Injection
 
@@ -222,6 +251,8 @@ echo-agent/
 ├── examples/          39 runnable demo programs
 ├── docs/              Bilingual documentation (en + zh)
 └── skills/            External skill packs (Markdown-based)
+
+> **Note**: echo-agent is a pure library framework. For a ready-to-use Agent application with CLI and Web UI, see [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli).
 ```
 
 End users depend only on the root `echo_agent` crate, which re-exports everything.

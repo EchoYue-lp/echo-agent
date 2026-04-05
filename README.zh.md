@@ -5,7 +5,7 @@
 **为 Rust 打造的可组合、生产级 AI Agent 开发框架**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/your-org/echo-agent)
+[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)](https://github.com/your-org/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20兼容-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
@@ -92,7 +92,35 @@ async fn main() -> Result<()> {
 
 ---
 
-## v1.0.0 新功能
+## v1.1.0 新功能
+
+### Agent 目录重组 + StateGraph DSL
+
+Agent 模块目录重组：`src/agent/react_agent` → `src/agents/react`，`src/plan_execute` → `src/agents/plan_execute`。新增 `agents/self_reflection` 自反思模块（Composite/Critic/LlmCritic）。StateGraph DSL 声明式工作流定义。Task 系统增强：DAG 调度、Hooks、Events、Store 持久化、Executor。
+
+### Human-in-the-Loop 7 阶段管线
+
+完整权限系统（对标 Claude Code）：
+
+```
+Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → DenialTracker → Mode dispatch
+```
+
+- **SessionApprovalCache** 带 TTL 过期（默认 30 分钟）
+- **审计追踪**：`PermissionAuditSink` trait + InMemory/Logging/Composite 实现
+- **ProtectedPathChecker**：`.git`/`.env`/`.ssh` 始终受保护
+- **AI 分类器**：RuleClassifier/LlmClassifier/CompositeClassifier
+- **DenialTracker**：连续拒绝自动回退
+- **PermissionMode**：Default/Plan/Auto/AcceptEdits/BypassPermissions/DontAsk/Bubble
+- **Managed 规则**：企业管理员设置，用户不可覆盖
+
+### Subagent 子代理系统
+
+Sync/Fork/Teammate 三种执行模式。SubagentBuilder/Registry/Executor/Hooks。Team 协作：Coordinator + Mailbox。
+
+---
+
+## 上一版本：v1.0.0
 
 ### 记忆工具自动注入
 
@@ -222,6 +250,8 @@ echo-agent/
 ├── examples/          39 个可运行示例
 ├── docs/              双语文档（en + zh）
 └── skills/            外部技能包（Markdown 格式）
+
+> **注意**：echo-agent 是纯库框架。开箱即用的 Agent 应用（含 CLI 和 Web UI）请参见 [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli)。
 ```
 
 终端用户只需依赖根 `echo_agent` crate，它会重新导出所有公共 API。

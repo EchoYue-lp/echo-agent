@@ -1,9 +1,9 @@
 [workspace]
-members = [".", "echo-core", "echo-macros", "echo-providers", "echo-mcp", "echo-cli"]
+members = [".", "echo-core", "echo-macros", "echo-providers", "echo-mcp"]
 
 [package]
 name = "echo_agent"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 
 [features]
