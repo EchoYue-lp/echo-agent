@@ -157,6 +157,20 @@ impl SharedState {
         serde_json::to_string_pretty(&*inner).expect("SharedState::snapshot: serialize failed")
     }
 
+    /// 导出为 JSON Value
+    pub fn to_json(&self) -> serde_json::Value {
+        let inner = self.inner.read().unwrap();
+        serde_json::to_value(&*inner).expect("SharedState::to_json: serialize failed")
+    }
+
+    /// 从 JSON Value 恢复
+    pub fn from_json(json: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        let inner: StateInner = serde_json::from_value(json.clone())?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
     /// 合并另一个 state 的 values（不覆盖已有 key）
     pub fn merge(&self, other: &SharedState) {
         let other_inner = other.inner.read().unwrap();

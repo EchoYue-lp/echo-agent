@@ -65,6 +65,28 @@ pub enum AuditEventType {
     FinalAnswer {
         content: String,
     },
+    /// 审批请求已发起
+    ApprovalRequested {
+        /// 工具名称
+        tool: String,
+        /// 参数哈希（用于匹配缓存）
+        args_hash: String,
+        /// 风险等级
+        risk_level: String,
+    },
+    /// 审批决策已返回
+    ApprovalCompleted {
+        /// 工具名称
+        tool: String,
+        /// 决策结果
+        decision: String,
+        /// 审批范围
+        scope: String,
+        /// 拒绝原因（如果有）
+        reason: Option<String>,
+        /// 从请求到决策的耗时（毫秒）
+        duration_ms: u64,
+    },
 }
 
 /// 审计查询过滤器

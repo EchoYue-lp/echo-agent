@@ -8,7 +8,7 @@ edition = "2024"
 
 [features]
 default = ["full"]
-full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection"]
+full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection", "subagent"]
 a2a = []
 mcp = ["dep:echo_mcp"]
 sqlite = ["dep:rusqlite"]
@@ -20,7 +20,7 @@ topology = []
 tasks = []
 workflow = []
 self-reflection = []
-
+subagent = []
 [dependencies]
 echo_core = { path = "echo-core", features = ["reqwest"] }
 echo_macros = { path = "echo-macros" }

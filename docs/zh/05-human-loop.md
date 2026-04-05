@@ -2,123 +2,287 @@
 
 ## 是什么
 
-Human-in-the-Loop（HIL）是一种在 Agent 自动执行过程中插入人工决策点的机制。当 Agent 即将执行某个高风险操作时（如删除文件、发送邮件、转账），先暂停并向人类请求确认，再决定是否继续。
+Human-in-the-Loop（HIL）在 Agent 自动执行流程中插入人工决策点。在执行高风险操作（删除文件、发送邮件、转账）前，Agent 暂停并请求人工确认后再继续。
 
 echo-agent 支持两种介入场景：
 
 | 场景 | 说明 |
 |------|------|
-| **审批（Approval）** | 工具执行前弹出 y/n 确认，用户决定是否允许 |
+| **审批（Approval）** | 工具执行前弹出 y/n 确认，由用户决定是否允许 |
 | **输入（Input）** | Agent 需要额外信息时，向用户请求自由文本输入 |
 
 ---
 
-## 解决什么问题
+## 架构概览
 
-完全自动化的 Agent 存在风险：
-- 执行不可逆操作（删除、发送、扣款）前没有确认
-- 信息不足时凭猜测行动，而不是询问用户
-- 生产环境中需要审计记录（谁批准了什么操作）
-
-Human-in-the-Loop 在自动化效率与人工安全之间取得平衡。
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                       工具调用请求                                     │
+│                   (Agent 发起 tool_use)                              │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              PermissionService 7 阶段管线                             │
+│                                                                     │
+│  1. BypassPermissions → Allow（若未被管理员禁用）                      │
+│  2. Plan 模式 → 按 permissions 过滤（只读）                           │
+│  3. RuleRegistry → deny-first 评估 (Allow/Deny/Ask)                 │
+│  3.5. ProtectedPathChecker → .git/.env/.ssh 始终受保护               │
+│  4. SessionApprovalCache（带 TTL）→ 缓存命中 = AutoApprove           │
+│  5. DenialTracker → 连续/总拒绝数超限回退                             │
+│  6. 模式分发：                                                       │
+│     - Auto → Classifier (LLM / Rule / Composite)                   │
+│     - Default → PermissionRequestHandler                            │
+│     - AcceptEdits → 写操作自动允许                                    │
+│     - DontAsk → 未匹配规则静默拒绝                                    │
+│  7. 后处理：缓存写入、拒绝跟踪、审计记录                                │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 三种 Provider
+## 权限模式
 
-### ConsoleHumanLoopProvider（命令行，默认）
+| 模式 | 行为 |
+|------|------|
+| `Default` | 危险操作需要用户确认 |
+| `Plan` | 只读模式，禁止 Write/Execute/Sensitive |
+| `Auto` | AI Classifier 自动决策 |
+| `AcceptEdits` | 文件编辑自动通过，其他需确认 |
+| `BypassPermissions` | 跳过所有检查（可被管理员禁用） |
+| `DontAsk` | 匹配 allow 规则的直接通过，未匹配的静默拒绝 |
+| `Bubble` | 子 Agent 权限上溯到父级处理 |
+
+---
+
+## 规则系统 (RuleRegistry)
+
+### Deny-First 评估
+
+规则按 deny-first 顺序评估——**来自任何来源的 Deny 规则始终优先于所有 Allow 规则**：
+
+```
+第 1 轮：Deny 规则（所有来源）
+第 2 轮：Ask 规则（按来源优先级）
+第 3 轮：Allow 规则（按来源优先级）
+```
+
+这确保低优先级的 Deny 不会被高优先级的 Allow 覆盖。
+
+### 规则来源优先级
+
+数值越大优先级越高（同一行为类型内）：
+
+| 来源 | 优先级 |
+|------|--------|
+| `Default` | 0 (最低) |
+| `LocalSettings` | 1 |
+| `ProjectSettings` | 2 |
+| `UserSettings` | 3 |
+| `Managed` | 4 (企业管理员设置，用户不可覆盖) |
+| `CliArg` | 5 |
+| `Session` | 6 (最高) |
+
+---
+
+## 审批缓存（带 TTL）
+
+会话级审批缓存避免对相同工具 + 参数的重复审批请求。
 
 ```rust
-// Agent 执行时会在控制台打印：
-// 工具 [delete_file] 需要人工审批，是否批准执行？(y/n)
-// 用户输入 y → 执行   n → 跳过
+use echo_agent::human_loop::SessionApprovalCache;
+use std::time::Duration;
+
+// 带 30 分钟 TTL（条目自动过期）
+let cache = SessionApprovalCache::with_ttl(Duration::from_secs(30 * 60));
+
+// 无 TTL（永不过期，向后兼容）
+let cache = SessionApprovalCache::new();
+```
+
+三种缓存范围：
+- `Once` — 不缓存
+- `Session` — 按 tool_name + args_hash 缓存
+- `SessionAllTools` — 按 tool_name 缓存（所有参数匹配）
+
+---
+
+## 受保护路径检查器
+
+阻止 Agent 操作关键系统路径。所有模式下均生效（包括 Bypass）。
+
+默认受保护模式：`.git`、`.env`、`.env.*`、`.ssh`、`.claude`、`.vscode`、shell 配置文件、SSH 密钥。
+
+```rust
+use echo_agent::human_loop::ProtectedPathChecker;
+
+let checker = ProtectedPathChecker::new()
+    .with_pattern("secrets/");
+
+// 在工具执行前检查
+match checker.check("Write", &serde_json::json!({"path": ".env"})) {
+    ProtectedPathResult::Protected { matched_pattern, path } => { /* 拒绝 */ }
+    ProtectedPathResult::Safe => { /* 继续 */ }
+}
+```
+
+---
+
+## 审计追踪
+
+记录每个权限决策用于安全审计和合规。
+
+```rust
+use echo_agent::human_loop::{
+    PermissionService, InMemoryPermissionAuditSink, LoggingPermissionAuditSink,
+    CompositePermissionAuditSink,
+};
+use std::sync::Arc;
+
+// 内存 sink（环形缓冲区，保留最近 1000 条）
+let mem_sink = Arc::new(InMemoryPermissionAuditSink::new(1000));
+
+// 日志 sink（tracing）
+let log_sink = Arc::new(LoggingPermissionAuditSink::info());
+
+// 组合：同时写入两者
+let composite = Arc::new(CompositePermissionAuditSink::new(vec![
+    Box::new(mem_sink.clone()) as _,
+    Box::new(log_sink) as _,
+]));
+
+let service = PermissionService::new()
+    .with_audit_sink(composite);
+
+// 执行后查询审计记录
+let recent = mem_sink.recent(10);
+for entry in recent {
+    println!("{} {} → {} ({}, {}us)",
+        entry.tool_name, entry.args_hash, entry.decision, entry.reason, entry.duration_us);
+}
+```
+
+### 审计条目字段
+
+| 字段 | 说明 |
+|------|------|
+| `tool_name` | 被检查的工具 |
+| `args_hash` | 工具输入的 SHA-256 哈希（前 8 位） |
+| `decision` | "allow" / "deny" / "require_approval" / "ask" |
+| `reason` | 管线阶段："bypass" / "plan_mode" / "rule_match" / "protected_path" / "cache_hit" / "denial_tracker" / "classifier" / "handler" / "dont_ask" / "no_handler" |
+| `source` | 做出决策的阶段 |
+| `duration_us` | 决策耗时（微秒） |
+
+---
+
+## AI 分类器
+
+### 增强 ClassifierContext
+
+分类器接收丰富上下文以做出更好的决策：
+
+```rust
+use echo_agent::human_loop::{ClassifierContext, RiskContext};
+
+let context = ClassifierContext::new("agent".to_string(), "session-123".to_string())
+    .with_workspace_path("/project/myapp".to_string())
+    .with_project_type("rust".to_string())
+    .with_recent_files(vec!["src/main.rs".to_string(), "Cargo.toml".to_string()])
+    .with_risk_context(RiskContext {
+        has_sensitive_files: true,
+        is_destructive: false,
+        directory_depth: 3,
+        repetition_count: 0,
+    });
+```
+
+### 内置分类器
+
+```rust
+use echo_agent::human_loop::{RuleClassifier, LlmClassifier, CompositeClassifier};
+
+// 基于规则（无需 LLM）
+let rule_clf = RuleClassifier::new()
+    .with_allow_patterns(vec!["Read".to_string(), "Glob".to_string()])
+    .with_deny_patterns(vec!["Bash(rm:*)".to_string()]);
+
+// 基于 LLM
+let llm_clf = LlmClassifier::new(client, "qwen3-max".to_string());
+
+// 组合：先尝试规则，再回退到 LLM
+let composite = CompositeClassifier::new()
+    .with_classifiers(vec![
+        Arc::new(rule_clf),
+        Arc::new(llm_clf),
+    ]);
+```
+
+### 拒绝跟踪器
+
+防止 Auto 模式下无限拒绝循环：
+
+```rust
+// 默认：连续 3 次或总共 20 次拒绝后回退
+let tracker = DenialTracker::new();
+
+tracker.record_denial();
+if tracker.should_fallback() {
+    // 升级为人工审批
+}
+```
+
+---
+
+## PermissionService
+
+统一的权限检查入口，支持构建器模式：
+
+```rust
+use echo_agent::human_loop::{PermissionService, PermissionServiceBuilder};
+use echo_agent::human_loop::permission::{PermissionMode, PermissionRequestHandler};
+
+let service = PermissionServiceBuilder::new()
+    .mode(PermissionMode::Auto)
+    .classifier(Arc::new(composite_classifier))
+    .request_handler(Arc::new(handler))
+    .audit_sink(Arc::new(audit_sink))
+    .build();
+
+// 权限检查
+let decision = service.check("Bash", &serde_json::json!({"command": "ls"})).await?;
+```
+
+---
+
+## Provider 实现
+
+### ConsoleHumanLoopProvider（终端，默认）
+
+```
+🔔 工具 [delete_file] 需要人工审批
+   参数: {"path": "/important/data.csv"}
+   是否批准？(y/n): _
 ```
 
 ### WebhookHumanLoopProvider（HTTP 回调）
 
-将审批请求发送到外部 HTTP 服务，等待服务返回决策。适合：
-- 企业审批系统集成（钉钉、企微机器人）
-- 将审批推送到外部工单系统
-
 ```rust
-use echo_agent::prelude::*;
-
 let provider = WebhookHumanLoopProvider::new(
     "https://your-approval-service/approve",
-    30, // 超时秒数
+    30,
 );
-agent.set_approval_provider(Arc::new(provider));
+agent.set_human_loop_provider(Arc::new(provider));
 ```
 
 ### WebSocketHumanLoopProvider（WebSocket 推送）
 
-在本地启动 WebSocket 服务器，将审批请求实时推送给已连接的客户端（前端 UI）。适合：
-- 带可视化界面的 Agent 应用
-- 移动端 App 接收审批通知
-
 ```rust
-use echo_agent::prelude::*;
-
 let provider = WebSocketHumanLoopProvider::new("127.0.0.1:9000").await?;
-agent.set_approval_provider(Arc::new(provider));
+agent.set_human_loop_provider(Arc::new(provider));
 ```
 
----
-
-## 使用方式
-
-### 工具审批：`add_need_appeal_tool`
-
-标记某个工具为"需要审批"，在执行前自动弹出人工确认：
-
-```rust
-use echo_agent::prelude::*;
-use echo_agent::tools::shell::ShellTool;
-
-let config = AgentConfig::new("qwen3-max", "agent", "你是一个系统管理助手")
-    .enable_tool(true)
-    .enable_human_in_loop(true);
-
-let mut agent = ReactAgent::new(config);
-
-// 注册工具为"需要审批"：执行前必须得到用户确认
-agent.add_need_appeal_tool(Box::new(ShellTool));
-
-let answer = agent.execute("删除 /tmp 下所有 .log 文件").await?;
-```
-
-执行时控制台显示：
-```
-🔔 工具 [shell] 需要人工审批
-   参数: {"command": "rm /tmp/*.log"}
-   是否批准执行？(y/n): _
-```
-
----
-
-### 文本输入：`human_in_loop` 工具
-
-当 Agent 信息不足时，主动向用户请求输入。通过注册 `HumanInLoop` 工具实现（`enable_human_in_loop=true` 时自动注册）：
-
-```rust
-// Agent 系统提示词中告知 LLM 何时使用 human_in_loop 工具：
-let system = "当你需要额外信息才能完成任务时，使用 human_in_loop 工具向用户提问。";
-
-let config = AgentConfig::new("qwen3-max", "agent", system)
-    .enable_tool(true)
-    .enable_human_in_loop(true);
-
-let mut agent = ReactAgent::new(config);
-let answer = agent.execute("帮我订一张机票").await?;
-// Agent 会调用 human_in_loop("请问您想去哪个城市？出发日期是？")
-// 控制台等待用户输入后继续执行
-```
-
----
-
-## 自定义 Provider
-
-实现 `HumanLoopProvider` trait 可接入任意审批系统：
+### 自定义 Provider
 
 ```rust
 use echo_agent::prelude::*;
@@ -129,17 +293,14 @@ struct SlackApprovalProvider;
 #[async_trait]
 impl HumanLoopProvider for SlackApprovalProvider {
     async fn request(&self, req: HumanLoopRequest) -> echo_agent::error::Result<HumanLoopResponse> {
-        // 向 Slack 频道发送消息，等待 reaction 或回复
         let approved = send_slack_and_wait(&req.prompt).await;
         if approved {
             Ok(HumanLoopResponse::Approved)
         } else {
-            Ok(HumanLoopResponse::Rejected { reason: Some("Slack 用户拒绝".to_string()) })
+            Ok(HumanLoopResponse::Rejected { reason: Some("Rejected".to_string()) })
         }
     }
 }
-
-// fn send_slack_and_wait(...) -> bool { ... }
 ```
 
 ---
@@ -149,17 +310,51 @@ impl HumanLoopProvider for SlackApprovalProvider {
 ```
 Agent 准备执行工具 "delete_file"
     │
-    ├─ 检查：HumanApprovalManager.needs_approval("delete_file") ?
+    ├─ 1. BypassPermissions? → Allow（若未被禁用）
     │
-    ├─ 是 → 调用 approval_provider.request(HumanLoopRequest::approval(...))
-    │         │
-    │         ├─ Console: 等待用户在终端输入 y/n
-    │         ├─ Webhook: POST 到外部服务，轮询结果
-    │         └─ WebSocket: 推送给客户端，等待回调
+    ├─ 2. Plan 模式? → 拒绝写入/执行操作
     │
-    ├─ Approved  → 继续执行工具
-    └─ Rejected  → 将拒绝原因作为 tool result 返回给 LLM（LLM 可调整策略）
-       Timeout   → 默认视为拒绝
+    ├─ 3. RuleRegistry（deny-first）
+    │       ├─ Deny 规则匹配 → Deny
+    │       ├─ Ask 规则匹配 → Ask
+    │       └─ Allow 规则匹配 → Allow
+    │
+    ├─ 3.5. 受保护路径 (.git/.env/.ssh)? → Deny
+    │
+    ├─ 4. 审批缓存命中（带 TTL）? → Allow
+    │
+    ├─ 5. DenialTracker 超限? → RequireApproval
+    │
+    ├─ 6. 模式分发：
+    │       ├─ Auto → Classifier → Allow/Deny
+    │       ├─ Default → Handler → Allow/Deny/Ask
+    │       ├─ AcceptEdits → 写操作自动允许
+    │       └─ DontAsk → 静默拒绝
+    │
+    └─ 7. 后处理：缓存写入、拒绝跟踪、审计记录
 ```
 
-对应示例：`examples/demo03_approval.rs`
+---
+
+## 与业界框架对比
+
+| 特性 | LangGraph | AutoGen | Claude Code | echo-agent |
+|------|-----------|---------|-------------|------------|
+| interrupt_before/after | ✅ | ❌ | ❌ | ✅ |
+| Checkpoint 持久化 | ✅ | ❌ | ❌ | ✅ |
+| 权限模式 | ❌ | human_input_mode | PermissionMode | ✅ |
+| AI 分类器 | ❌ | ❌ | YoloClassifier | ✅ |
+| Deny-first 规则评估 | ❌ | ❌ | ✅ | ✅ |
+| 审批缓存（带 TTL） | ❌ | ❌ | ✅ (1h/5min) | ✅ (可配置) |
+| 受保护路径 | ❌ | ❌ | ✅ | ✅ |
+| 审计追踪 | ❌ | ❌ | ✅ | ✅ |
+| 拒绝跟踪 + 回退 | ❌ | ❌ | ✅ | ✅ |
+| Hooks 拦截 | ❌ | ❌ | ✅ | ✅ |
+| Managed 规则（企业） | ❌ | ❌ | ✅ | ✅ |
+
+---
+
+## 示例文件
+
+- `examples/demo03_approval.rs` — 基础审批示例
+- `examples/demo20_audit.rs` — 审计日志 + 权限模型示例

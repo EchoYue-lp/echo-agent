@@ -10,12 +10,15 @@
 //! | `extract.rs` | 结构化 JSON 提取（`extract_json` / `extract`） |
 
 pub use crate::agent::config::{AgentConfig, AgentRole};
-use crate::agent::{Agent, AgentEvent, SubAgentMap};
+use crate::agent::{Agent, AgentEvent, CancellationToken};
+use crate::agents::subagent::SubagentRegistry;
+use crate::agents::subagent::executor::{SubagentExecutor, SubagentExecutorConfig};
 use crate::compression::ContextManager;
 use crate::error::{LlmError, ReactError, Result};
 use crate::guard::GuardManager;
 #[cfg(feature = "human-loop")]
-use crate::human_loop::{HumanApprovalManager, HumanLoopProvider};
+#[allow(deprecated)] // HumanApprovalManager kept for backward compatibility
+use crate::human_loop::{HumanApprovalManager, HumanLoopProvider, PermissionService};
 use crate::llm::config::LlmConfig;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
@@ -41,7 +44,6 @@ use crate::tools::builtin::task::{
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 pub mod builder;
@@ -79,13 +81,18 @@ pub struct ReactAgent {
     /// 上下文管理器：维护对话历史，并在 token 超限时自动触发压缩
     pub(crate) context: ContextManager,
     tool_manager: ToolManager,
-    pub(crate) subagents: SubAgentMap,
+    /// Subagent 注册表：管理子代理的定义、发现和生命周期
+    pub(crate) subagent_registry: Arc<SubagentRegistry>,
+    /// Subagent 执行器：统一调度 Sync/Fork/Teammate 模式
+    #[allow(dead_code)] // Used by AgentDispatchTool at construction; accessor TBD
+    pub(crate) subagent_executor: Arc<SubagentExecutor>,
     client: Arc<Client>,
     /// LLM 配置（可选，不设置时使用环境变量配置）
     llm_config: Option<LlmConfig>,
     #[cfg(feature = "tasks")]
     pub(crate) task_manager: Arc<TaskManager>,
     #[cfg(feature = "human-loop")]
+    #[allow(deprecated)]
     human_in_loop: Arc<RwLock<HumanApprovalManager>>,
     #[cfg(feature = "human-loop")]
     approval_provider: Arc<dyn HumanLoopProvider>,
@@ -103,6 +110,9 @@ pub struct ReactAgent {
     pub(crate) guard_manager: Option<GuardManager>,
     /// 权限策略：控制工具执行权限
     pub(crate) permission_policy: Option<Arc<dyn crate::tools::permission::PermissionPolicy>>,
+    /// 统一权限服务：整合 mode/rules/hooks/classifier/handler
+    #[cfg(feature = "human-loop")]
+    pub(crate) permission_service: Option<Arc<PermissionService>>,
     /// 审计日志记录器
     pub(crate) audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
     /// 状态快照管理器，支持每轮迭代自动快照和回滚
@@ -152,8 +162,13 @@ impl ReactAgent {
         #[cfg(feature = "tasks")]
         let task_manager = Arc::new(TaskManager::default());
         #[cfg(feature = "human-loop")]
+        #[allow(deprecated)]
         let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::default()));
-        let subagents = Arc::new(RwLock::new(HashMap::new()));
+        let subagent_registry = Arc::new(SubagentRegistry::new());
+        let subagent_executor = Arc::new(SubagentExecutor::new(
+            subagent_registry.clone(),
+            SubagentExecutorConfig::default(),
+        ));
         #[cfg(feature = "human-loop")]
         let approval_provider = crate::human_loop::default_provider();
 
@@ -174,7 +189,11 @@ impl ReactAgent {
             tool_manager.register(Box::new(GetExecutionOrderTool::new(task_manager.clone())));
         }
         if config.enable_subagent {
-            tool_manager.register(Box::new(AgentDispatchTool::new(subagents.clone())));
+            tool_manager.register(Box::new(AgentDispatchTool::new(
+                subagent_executor.clone(),
+                config.agent_name.clone(),
+                CancellationToken::new(),
+            )));
         }
 
         let store: Option<Arc<dyn Store>> = if config.enable_memory {
@@ -221,7 +240,8 @@ impl ReactAgent {
             config,
             context,
             tool_manager,
-            subagents,
+            subagent_registry,
+            subagent_executor,
             client: Arc::new(client),
             llm_config: None,
             #[cfg(feature = "tasks")]
@@ -238,6 +258,8 @@ impl ReactAgent {
             mcp_manager: McpManager::new(),
             guard_manager: None,
             permission_policy: None,
+            #[cfg(feature = "human-loop")]
+            permission_service: None,
             audit_logger: None,
             snapshot_manager: None,
         }
@@ -385,6 +407,36 @@ impl ReactAgent {
         policy: Arc<dyn crate::tools::permission::PermissionPolicy>,
     ) {
         self.permission_policy = Some(policy);
+    }
+
+    #[cfg(feature = "human-loop")]
+    /// 设置统一权限服务
+    ///
+    /// 一旦设置，`check_tool_approval()` 将优先使用此服务，
+    /// 回退到旧的 PermissionPolicy + HumanApprovalManager 逻辑。
+    pub fn set_permission_service(&mut self, service: Arc<PermissionService>) {
+        self.permission_service = Some(service);
+    }
+
+    #[cfg(feature = "human-loop")]
+    /// 从旧的权限组件构建统一 PermissionService 并设置
+    ///
+    /// 将当前 `permission_policy` + `approval_provider` 合并为一个
+    /// `PermissionService`，保证管线顺序正确（mode → hooks → rules → handler）。
+    pub fn build_permission_service(&mut self) {
+        use crate::human_loop::service::PermissionService;
+
+        let policy = self.permission_policy.take();
+        let provider = self.approval_provider.clone();
+
+        let service = PermissionService::from_provider(provider);
+        let service = if let Some(p) = policy {
+            service.with_legacy_policy(p)
+        } else {
+            service
+        };
+
+        self.permission_service = Some(Arc::new(service));
     }
 
     /// 设置审计日志记录器

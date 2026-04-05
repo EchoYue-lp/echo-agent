@@ -206,8 +206,10 @@ impl ReactAgent {
         let model = self.config.model_name.clone();
         let is_orchestrator = self.config.role == AgentRole::Orchestrator;
         let subagent_names: Vec<String> = if is_orchestrator {
-            self.subagents
-                .read()
+            // Use blocking read from the registry since we're in sync context
+            self.subagent_registry
+                .agents_map()
+                .try_read()
                 .map(|agents| agents.keys().cloned().collect())
                 .unwrap_or_default()
         } else {

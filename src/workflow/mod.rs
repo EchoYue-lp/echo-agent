@@ -47,15 +47,22 @@
 
 // ── Graph 工作流 ────────────────────────────────────────────────────────────
 
+pub mod checkpoint_store;
 pub mod dsl;
 mod graph;
 pub mod loader;
 mod node;
 pub mod state;
 
+pub use checkpoint_store::{
+    Checkpoint, CheckpointInfo, CheckpointStore, FileCheckpointStore, InterruptType,
+    MemoryCheckpointStore,
+};
 pub use dsl::StateGraph;
 
-pub use graph::{Graph, GraphBuilder, GraphResult};
+pub use graph::{
+    Graph, GraphBuilder, GraphResult, InterruptConfig, InterruptState, RunUntilInterruptResult,
+};
 pub use loader::{ConditionDefinition, EdgeDefinition, NodeDefinition, WorkflowDefinition};
 pub use state::SharedState;
 

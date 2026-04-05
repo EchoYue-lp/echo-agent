@@ -21,7 +21,6 @@ use crate::skills::registry::SharedRegistry;
 use crate::skills::{Skill, SkillInfo};
 use crate::tools::Tool;
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -77,13 +76,35 @@ impl ReactAgent {
         if self.config.enable_human_in_loop {
             let tool_name = tool.name().to_string();
             self.add_tool(tool);
-            self.human_in_loop
-                .write()
-                .map_err(|e| {
-                    warn!("human_in_loop lock poisoned: {}", e);
-                })
-                .map(|mut guard| guard.mark_need_approval(tool_name))
-                .ok();
+
+            // 优先添加到 PermissionService 规则
+            if let Some(service) = &self.permission_service {
+                use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
+                let rule = PermissionRule {
+                    matcher: RuleMatcher::Pattern {
+                        pattern: tool_name.clone(),
+                    },
+                    behavior: echo_core::tools::permission::RuleBehavior::Ask {
+                        suggestions: vec!["允许".to_string(), "拒绝".to_string()],
+                    },
+                    source: RuleSource::Session,
+                    description: Some(format!("工具 {} 需要人工审批", tool_name)),
+                };
+                // 同步添加规则（PermissionService 内部用 RwLock，这里用 block_on）
+                let service = service.clone();
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async { service.add_rule(rule).await });
+            } else {
+                // 回退到旧的 HumanApprovalManager
+                #[allow(deprecated)]
+                self.human_in_loop
+                    .write()
+                    .map_err(|e| {
+                        warn!("human_in_loop lock poisoned: {}", e);
+                    })
+                    .map(|mut guard| guard.mark_need_approval(tool_name))
+                    .ok();
+            }
             return;
         }
         #[cfg(not(feature = "human-loop"))]
@@ -119,6 +140,10 @@ impl ReactAgent {
 
     // ── SubAgent ─────────────────────────────────────────────────────────────
 
+    /// Register a subagent with the subagent registry.
+    ///
+    /// The agent is automatically wrapped in a default Sync-mode `SubagentDefinition`.
+    /// For more control, use `register_subagent_with_definition()`.
     pub fn register_agent(&mut self, agent: Box<dyn Agent>) {
         if !self.config.enable_subagent {
             warn!(
@@ -129,18 +154,9 @@ impl ReactAgent {
             return;
         }
         let name = agent.name().to_string();
-        match self.subagents.write() {
-            Ok(mut agents) => {
-                agents.insert(name, Arc::new(AsyncMutex::new(agent)));
-            }
-            Err(e) => {
-                warn!(
-                    agent = %self.config.agent_name,
-                    subagent = %name,
-                    "subagents lock poisoned: {}",
-                    e
-                );
-            }
+        let def = crate::agents::subagent::SubagentDefinition::simple_sync(&name);
+        if self.subagent_registry.register_sync(def, agent) {
+            info!(agent = %self.config.agent_name, subagent = %name, "Subagent registered");
         }
     }
 

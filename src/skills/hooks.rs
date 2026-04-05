@@ -17,6 +17,7 @@
 //! |------|----------|
 //! | `command` | Execute a shell command, stdin receives JSON context |
 //! | `prompt` | Inject a prompt message for the LLM to consider |
+//! | `permission` | Return a permission decision (allow/deny/ask) |
 //!
 //! ## YAML format in SKILL.md frontmatter
 //!
@@ -32,6 +33,11 @@
 //!       hooks:
 //!         - type: prompt
 //!           prompt: "Check file permissions before writing"
+//!         - type: permission
+//!           decision: "ask"
+//!           suggestions:
+//!             - "Allow write"
+//!             - "Deny"
 //!   PostToolUse:
 //!     - matcher: "Bash"
 //!       hooks:
@@ -43,6 +49,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use echo_core::tools::permission::{PermissionDecision, PermissionMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
@@ -70,6 +77,17 @@ pub enum HookAction {
     },
     /// Inject a prompt for the LLM to consider.
     Prompt { prompt: String },
+    /// Return a permission decision directly.
+    Permission {
+        /// Decision: "allow" | "deny" | "ask"
+        decision: String,
+        /// Reason for deny
+        #[serde(default)]
+        reason: Option<String>,
+        /// Suggestions for ask
+        #[serde(default)]
+        suggestions: Vec<String>,
+    },
 }
 
 fn default_hook_timeout() -> u64 {
@@ -110,6 +128,10 @@ pub struct HookResult {
     pub messages: Vec<String>,
     /// If true, prevent further hooks from running.
     pub stop_propagation: bool,
+    /// Permission decision (PreToolUse only, overrides normal permission check).
+    pub permission_decision: Option<PermissionDecision>,
+    /// Permission mode override (PreToolUse only).
+    pub permission_mode_override: Option<PermissionMode>,
 }
 
 impl Default for HookResult {
@@ -120,7 +142,42 @@ impl Default for HookResult {
             updated_input: None,
             messages: Vec::new(),
             stop_propagation: false,
+            permission_decision: None,
+            permission_mode_override: None,
         }
+    }
+}
+
+impl HookResult {
+    /// Create an allow result
+    pub fn allow() -> Self {
+        Self {
+            permission_decision: Some(PermissionDecision::Allow),
+            ..Self::default()
+        }
+    }
+
+    /// Create a deny result
+    pub fn deny(reason: String) -> Self {
+        Self {
+            block: true,
+            block_reason: Some(reason.clone()),
+            permission_decision: Some(PermissionDecision::Deny { reason }),
+            ..Self::default()
+        }
+    }
+
+    /// Create an ask result
+    pub fn ask(suggestions: Vec<String>) -> Self {
+        Self {
+            permission_decision: Some(PermissionDecision::Ask { suggestions }),
+            ..Self::default()
+        }
+    }
+
+    /// Check if hook made a permission decision
+    pub fn has_permission_decision(&self) -> bool {
+        self.permission_decision.is_some()
     }
 }
 
@@ -292,6 +349,36 @@ async fn execute_action(
             result.messages.push(prompt.clone());
             result
         }
+        HookAction::Permission {
+            decision,
+            reason,
+            suggestions,
+        } => {
+            let mut result = HookResult::default();
+            match decision.as_str() {
+                "allow" => {
+                    result.permission_decision = Some(PermissionDecision::Allow);
+                }
+                "deny" => {
+                    let reason_text = reason.clone().unwrap_or_else(|| "Hook denied".to_string());
+                    result.block = true;
+                    result.block_reason = Some(reason_text.clone());
+                    result.permission_decision = Some(PermissionDecision::Deny {
+                        reason: reason_text,
+                    });
+                }
+                "ask" => {
+                    result.permission_decision = Some(PermissionDecision::Ask {
+                        suggestions: suggestions.clone(),
+                    });
+                }
+                _ => {
+                    warn!(decision = %decision, "Unknown permission decision from hook");
+                }
+            }
+            result.stop_propagation = true; // 权限决策后停止传播
+            result
+        }
     }
 }
 
@@ -385,7 +472,9 @@ async fn execute_command_hook(
 /// {
 ///   "decision": "block",
 ///   "reason": "Unsafe command detected",
-///   "continue": false
+///   "continue": false,
+///   "permission_decision": "allow" | "deny" | "ask",
+///   "permission_suggestions": ["Allow", "Deny"]
 /// }
 /// ```
 fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
@@ -404,16 +493,63 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
     }
 
     if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
-        if json.get("decision").and_then(|v| v.as_str()) == Some("block") {
-            result.block = true;
-            if let Some(reason) = json.get("reason").and_then(|v| v.as_str()) {
-                result.block_reason = Some(reason.to_string());
+        // Parse decision field
+        if let Some(decision) = json.get("decision").and_then(|v| v.as_str()) {
+            match decision {
+                "block" => {
+                    result.block = true;
+                    if let Some(reason) = json.get("reason").and_then(|v| v.as_str()) {
+                        result.block_reason = Some(reason.to_string());
+                    }
+                }
+                "allow" => {
+                    result.block = false;
+                    result.block_reason = None;
+                }
+                _ => {}
             }
         }
 
-        if json.get("decision").and_then(|v| v.as_str()) == Some("allow") {
-            result.block = false;
-            result.block_reason = None;
+        // Parse permission_decision field
+        if let Some(perm_decision) = json.get("permission_decision").and_then(|v| v.as_str()) {
+            match perm_decision {
+                "allow" => {
+                    result.permission_decision = Some(PermissionDecision::Allow);
+                }
+                "deny" => {
+                    let reason = json
+                        .get("permission_reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Hook denied permission")
+                        .to_string();
+                    result.permission_decision = Some(PermissionDecision::Deny { reason });
+                }
+                "ask" => {
+                    let suggestions = json
+                        .get("permission_suggestions")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    result.permission_decision = Some(PermissionDecision::Ask { suggestions });
+                }
+                _ => {}
+            }
+        }
+
+        // Parse permission_mode_override field
+        if let Some(mode) = json.get("permission_mode").and_then(|v| v.as_str()) {
+            result.permission_mode_override = match mode {
+                "default" => Some(PermissionMode::Default),
+                "plan" => Some(PermissionMode::Plan),
+                "auto" => Some(PermissionMode::Auto),
+                "acceptEdits" => Some(PermissionMode::AcceptEdits),
+                "bypassPermissions" => Some(PermissionMode::BypassPermissions),
+                _ => None,
+            };
         }
 
         if json.get("continue") == Some(&Value::Bool(false)) {
@@ -522,6 +658,13 @@ fn merge_result(combined: &mut HookResult, incoming: HookResult) {
     combined.messages.extend(incoming.messages);
     if incoming.stop_propagation {
         combined.stop_propagation = true;
+    }
+    // 权限决策：后来的覆盖之前的
+    if incoming.permission_decision.is_some() {
+        combined.permission_decision = incoming.permission_decision;
+    }
+    if incoming.permission_mode_override.is_some() {
+        combined.permission_mode_override = incoming.permission_mode_override;
     }
 }
 
@@ -693,5 +836,80 @@ PostToolUse:
             .run_pre_tool_use("Bash", &json!({"command": "ls"}))
             .await;
         assert!(!result.block);
+    }
+
+    #[test]
+    fn test_hook_result_permission_decision() {
+        let result = HookResult::allow();
+        assert!(result.has_permission_decision());
+        assert!(result.permission_decision.unwrap().is_allowed());
+
+        let result = HookResult::deny("test reason".to_string());
+        assert!(result.has_permission_decision());
+        assert!(result.permission_decision.unwrap().is_denied());
+
+        let result = HookResult::ask(vec!["Option A".to_string()]);
+        assert!(result.has_permission_decision());
+        assert!(result.permission_decision.unwrap().requires_approval());
+    }
+
+    #[test]
+    fn test_parse_hook_output_permission_decision_allow() {
+        let result = parse_hook_output(r#"{"permission_decision": "allow"}"#, 0);
+        assert!(result.has_permission_decision());
+        assert!(result.permission_decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn test_parse_hook_output_permission_decision_deny() {
+        let result = parse_hook_output(
+            r#"{"permission_decision": "deny", "permission_reason": "unsafe"}"#,
+            0,
+        );
+        assert!(result.has_permission_decision());
+        let decision = result.permission_decision.unwrap();
+        assert!(decision.is_denied());
+    }
+
+    #[test]
+    fn test_parse_hook_output_permission_decision_ask() {
+        let result = parse_hook_output(
+            r#"{"permission_decision": "ask", "permission_suggestions": ["Allow", "Deny"]}"#,
+            0,
+        );
+        assert!(result.has_permission_decision());
+        assert!(result.permission_decision.unwrap().requires_approval());
+    }
+
+    #[test]
+    fn test_parse_hook_output_permission_mode() {
+        let result = parse_hook_output(r#"{"permission_mode": "auto"}"#, 0);
+        assert_eq!(result.permission_mode_override, Some(PermissionMode::Auto));
+
+        let result = parse_hook_output(r#"{"permission_mode": "plan"}"#, 0);
+        assert_eq!(result.permission_mode_override, Some(PermissionMode::Plan));
+    }
+
+    #[tokio::test]
+    async fn test_hook_action_permission() {
+        let mut registry = HookRegistry::new();
+        let def = HooksDefinition {
+            pre_tool_use: vec![HookRule {
+                matcher: "Bash".into(),
+                hooks: vec![HookAction::Permission {
+                    decision: "deny".into(),
+                    reason: Some("unsafe command".into()),
+                    suggestions: vec![],
+                }],
+            }],
+            post_tool_use: vec![],
+        };
+        registry.register("security", "/tmp", def);
+
+        let result = registry
+            .run_pre_tool_use("Bash", &json!({"command": "rm -rf"}))
+            .await;
+        assert!(result.block);
+        assert!(result.has_permission_decision());
     }
 }

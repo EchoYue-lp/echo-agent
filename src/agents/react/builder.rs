@@ -5,7 +5,7 @@ use crate::audit::AuditLogger;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
-use crate::human_loop::HumanLoopProvider;
+use crate::human_loop::{HumanLoopProvider, PermissionService};
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
 use crate::memory::checkpointer::Checkpointer;
 use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
@@ -41,6 +41,8 @@ pub struct ReactAgentBuilder {
     session_id: Option<String>,
     #[cfg(feature = "human-loop")]
     approval_provider: Option<Arc<dyn HumanLoopProvider>>,
+    #[cfg(feature = "human-loop")]
+    permission_service: Option<Arc<PermissionService>>,
     guards: Vec<Arc<dyn Guard>>,
     permission_policy: Option<Arc<dyn PermissionPolicy>>,
     audit_logger: Option<Arc<dyn AuditLogger>>,
@@ -81,6 +83,8 @@ impl ReactAgentBuilder {
             session_id: None,
             #[cfg(feature = "human-loop")]
             approval_provider: None,
+            #[cfg(feature = "human-loop")]
+            permission_service: None,
             guards: Vec::new(),
             permission_policy: None,
             audit_logger: None,
@@ -388,6 +392,16 @@ impl ReactAgentBuilder {
         self
     }
 
+    #[cfg(feature = "human-loop")]
+    /// 设置统一权限服务
+    ///
+    /// 一旦设置，将优先使用此服务进行权限检查，
+    /// 回退到旧的 PermissionPolicy + HumanApprovalManager 逻辑。
+    pub fn permission_service(mut self, service: Arc<PermissionService>) -> Self {
+        self.permission_service = Some(service);
+        self
+    }
+
     // ── 护栏 & 权限 & 审计 ──────────────────────────────────────────────────────
 
     /// 添加护栏
@@ -494,6 +508,11 @@ impl ReactAgentBuilder {
         #[cfg(feature = "human-loop")]
         if let Some(provider) = self.approval_provider {
             agent.set_approval_provider(provider);
+        }
+
+        #[cfg(feature = "human-loop")]
+        if let Some(service) = self.permission_service {
+            agent.set_permission_service(service);
         }
 
         // 设置护栏

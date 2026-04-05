@@ -1,18 +1,30 @@
 use futures::future::BoxFuture;
 
-use crate::agent::SubAgentMap;
+use crate::agents::subagent::executor::SubagentExecutor;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::agent::CancellationToken;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 pub struct AgentDispatchTool {
-    subagents: SubAgentMap,
+    executor: Arc<SubagentExecutor>,
+    parent_agent: String,
+    cancel: CancellationToken,
 }
 
 impl AgentDispatchTool {
-    pub fn new(subagents: SubAgentMap) -> Self {
-        Self { subagents }
+    pub fn new(
+        executor: Arc<SubagentExecutor>,
+        parent_agent: impl Into<String>,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            executor,
+            parent_agent: parent_agent.into(),
+            cancel,
+        }
     }
 }
 
@@ -26,21 +38,23 @@ impl Tool for AgentDispatchTool {
     }
 
     fn parameters(&self) -> Value {
-        let agent_names: Vec<String> = self
-            .subagents
-            .read()
-            .map(|agents| agents.keys().cloned().collect())
-            .unwrap_or_default();
-        let agent_desc = if agent_names.is_empty() {
-            "子 Agent 名称".to_string()
-        } else {
-            format!("子 Agent 名称，可用: {}", agent_names.join(", "))
-        };
+        // NOTE: agent_names would require async, so we provide a generic description
         json!({
             "type": "object",
             "properties": {
-                "agent_name": { "type": "string", "description": agent_desc },
-                "task": { "type": "string", "description": "要分配给子 Agent 的具体任务描述，应包含必要的上下文信息" }
+                "agent_name": {
+                    "type": "string",
+                    "description": "子 Agent 名称"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "要分配给子 Agent 的具体任务描述，应包含必要的上下文信息"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["sync", "fork", "teammate"],
+                    "description": "执行模式：sync-同步等待（默认）, fork-继承上下文独立运行, teammate-并行协作"
+                }
             },
             "required": ["agent_name", "task"]
         })
@@ -50,68 +64,63 @@ impl Tool for AgentDispatchTool {
         &self,
         parameters: ToolParameters,
     ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        let executor = self.executor.clone();
+        let parent_agent = self.parent_agent.clone();
+        let cancel = self.cancel.clone();
+
         Box::pin(async move {
             let agent_name = parameters
                 .get("agent_name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::InvalidParameter {
-                    name: "agent_name".to_string(),
-                    message: "agent_name is required".to_string(),
-                })?;
+                .ok_or_else(|| ToolError::MissingParameter("agent_name".to_string()))?;
 
             let task = parameters
                 .get("task")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::InvalidParameter {
-                    name: "task".to_string(),
-                    message: "task is required".to_string(),
-                })?;
+                .ok_or_else(|| ToolError::MissingParameter("task".to_string()))?;
 
-            // 只克隆 Arc 指针（不持有读锁跨越 await），并发同名调用会在 mutex 处自动排队
-            let agent_arc = {
-                let agents = self
-                    .subagents
-                    .read()
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        tool: "agent_tool".to_string(),
-                        message: format!("Lock poisoned: {}", e),
-                    })?;
-                agents
-                    .get(agent_name)
-                    .ok_or_else(|| ToolError::ExecutionFailed {
-                        tool: "agent_tool".to_string(),
-                        message: format!("SubAgent '{}' not found", agent_name),
-                    })?
-                    .clone()
-            };
+            let mode_override =
+                parameters
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .and_then(|m| match m {
+                        "sync" => Some(crate::agents::subagent::ExecutionMode::Sync),
+                        "fork" => Some(crate::agents::subagent::ExecutionMode::Fork),
+                        "teammate" => Some(crate::agents::subagent::ExecutionMode::Teammate),
+                        _ => None,
+                    });
 
             info!(
                 target_agent = %agent_name,
                 task = %task,
-                "📡 分派任务到子 Agent"
+                mode = ?mode_override,
+                "Dispatching task to subagent via SubagentExecutor"
             );
 
-            // 对同一 agent 的并发调用会在此处排队，不会丢失 agent
-            let mut agent = agent_arc.lock().await;
-            let result = agent
-                .execute(task)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "agent_tool".to_string(),
-                    message: format!("SubAgent execution failed: {}", e),
-                });
+            let req = crate::agents::subagent::DispatchRequest {
+                agent_name: agent_name.to_string(),
+                task: task.to_string(),
+                mode_override,
+                cancel,
+                parent_agent: parent_agent.clone(),
+                parent_context: None, // Context inheritance handled by executor based on definition
+                delegate_depth: 0,
+            };
 
-            match &result {
-                Ok(answer) => {
-                    info!(target_agent = %agent_name, "✅ 子 Agent 执行完成");
-                    debug!(target_agent = %agent_name, output = %answer, "子 Agent 返回详情");
+            match executor.dispatch(req).await {
+                Ok(result) => {
+                    info!(target_agent = %agent_name, "Subagent completed successfully");
+                    debug!(target_agent = %agent_name, output = %result.output, "Subagent result");
+                    Ok(ToolResult::success(result.output))
                 }
                 Err(e) => {
-                    warn!(target_agent = %agent_name, error = %e, "💥 子 Agent 执行失败");
+                    warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
+                    Ok(ToolResult::error(format!(
+                        "SubAgent '{}' execution failed: {}",
+                        agent_name, e
+                    )))
                 }
             }
-
-            Ok(ToolResult::success(result?))
         })
     }
 }

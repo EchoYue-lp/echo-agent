@@ -47,12 +47,15 @@
 //! ```
 
 use super::WorkflowEvent;
+use super::checkpoint_store::{Checkpoint, CheckpointStore, InterruptType, MemoryCheckpointStore};
 use super::node::Node;
 use super::state::SharedState;
 use crate::agent::Agent;
 use crate::error::{AgentError, ReactError, Result};
+use crate::human_loop::ApprovalDecision;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -93,6 +96,101 @@ pub(crate) struct Edge {
     pub kind: EdgeKind,
 }
 
+// ── Interrupt Configuration ────────────────────────────────────────────────────
+
+/// Interrupt 配置
+#[derive(Debug, Clone, Default)]
+pub struct InterruptConfig {
+    /// 进入这些节点前暂停
+    pub before: Vec<String>,
+    /// 这些节点执行后暂停
+    pub after: Vec<String>,
+}
+
+impl InterruptConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 检查节点是否需要在进入前暂停
+    pub fn should_interrupt_before(&self, node_name: &str) -> bool {
+        self.before.iter().any(|n| n == node_name || n == "*")
+    }
+
+    /// 检查节点是否需要在执行后暂停
+    pub fn should_interrupt_after(&self, node_name: &str) -> bool {
+        self.after.iter().any(|n| n == node_name || n == "*")
+    }
+
+    /// 检查是否需要任何 interrupt
+    pub fn has_interrupts(&self) -> bool {
+        !self.before.is_empty() || !self.after.is_empty()
+    }
+}
+
+// ── Interrupt State ────────────────────────────────────────────────────────────
+
+/// Interrupt 状态 - 执行暂停时的状态
+#[derive(Debug)]
+pub struct InterruptState {
+    /// Checkpoint（可用于恢复）
+    pub checkpoint: Checkpoint,
+    /// Interrupt 类型
+    pub interrupt_type: InterruptType,
+    /// 暂停的节点名
+    pub pending_node: String,
+    /// 给用户的提示
+    pub prompt: String,
+}
+
+impl InterruptState {
+    /// 创建 BeforeNode interrupt
+    pub fn before_node(checkpoint: Checkpoint, node_name: String) -> Self {
+        let prompt = format!("节点 '{}' 执行前需要确认", node_name);
+        Self {
+            checkpoint,
+            interrupt_type: InterruptType::BeforeNode,
+            pending_node: node_name,
+            prompt,
+        }
+    }
+
+    /// 创建 AfterNode interrupt
+    pub fn after_node(checkpoint: Checkpoint, node_name: String) -> Self {
+        let prompt = format!("节点 '{}' 执行后需要确认", node_name);
+        Self {
+            checkpoint,
+            interrupt_type: InterruptType::AfterNode,
+            pending_node: node_name,
+            prompt,
+        }
+    }
+
+    /// 创建 ToolApproval interrupt
+    pub fn tool_approval(checkpoint: Checkpoint, tool_name: String, args: Value) -> Self {
+        let prompt = format!(
+            "工具 '{}' 需要审批\n参数: {}",
+            tool_name,
+            serde_json::to_string_pretty(&args).unwrap_or_default()
+        );
+        Self {
+            checkpoint,
+            interrupt_type: InterruptType::ToolApproval,
+            pending_node: tool_name,
+            prompt,
+        }
+    }
+}
+
+/// run_until_interrupt 的返回类型
+#[derive(Debug)]
+pub enum RunUntilInterruptResult {
+    /// 执行完成
+    Completed(GraphResult),
+    /// 遇到 interrupt 点暂停
+    Interrupted(InterruptState),
+}
+
 // ── GraphBuilder ────────────────────────────────────────────────────────────
 
 /// 图工作流构建器
@@ -104,6 +202,8 @@ pub struct GraphBuilder {
     edges: Vec<Edge>,
     entry_node: Option<String>,
     finish_nodes: Vec<String>,
+    /// Interrupt 配置
+    interrupt_config: InterruptConfig,
 }
 
 impl GraphBuilder {
@@ -115,6 +215,7 @@ impl GraphBuilder {
             edges: Vec::new(),
             entry_node: None,
             finish_nodes: Vec::new(),
+            interrupt_config: InterruptConfig::default(),
         }
     }
 
@@ -231,6 +332,39 @@ impl GraphBuilder {
         self
     }
 
+    // ── Interrupt 配置 ──────────────────────────────────────────────────────
+
+    /// 设置 interrupt_before（进入节点前暂停）
+    ///
+    /// 支持 "*" 通配符表示所有节点。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::workflow::GraphBuilder;
+    ///
+    /// let graph = GraphBuilder::new("my_flow")
+    ///     .add_function_node("step1", |_| Box::pin(async { Ok(()) }))
+    ///     .add_function_node("step2", |_| Box::pin(async { Ok(()) }))
+    ///     .set_entry("step1")
+    ///     .add_edge("step1", "step2")
+    ///     .interrupt_before(vec!["step2"])  // 进入 step2 前暂停
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn interrupt_before(mut self, nodes: Vec<&str>) -> Self {
+        self.interrupt_config.before = nodes.into_iter().map(String::from).collect();
+        self
+    }
+
+    /// 设置 interrupt_after（节点执行后暂停）
+    ///
+    /// 支持 "*" 通配符表示所有节点。
+    pub fn interrupt_after(mut self, nodes: Vec<&str>) -> Self {
+        self.interrupt_config.after = nodes.into_iter().map(String::from).collect();
+        self
+    }
+
     /// 构建不可变的 Graph
     pub fn build(self) -> Result<Graph> {
         let entry = self.entry_node.ok_or_else(|| {
@@ -291,6 +425,8 @@ impl GraphBuilder {
             entry,
             finish_nodes: self.finish_nodes,
             max_steps: 100,
+            interrupt_config: self.interrupt_config,
+            checkpoint_store: Arc::new(MemoryCheckpointStore::new()),
         })
     }
 
@@ -343,6 +479,10 @@ pub struct Graph {
     finish_nodes: Vec<String>,
     /// 最大执行步数（防止无限循环）
     max_steps: usize,
+    /// Interrupt 配置
+    interrupt_config: InterruptConfig,
+    /// Checkpoint 存储
+    checkpoint_store: Arc<dyn CheckpointStore>,
 }
 
 /// 图执行结果
@@ -473,6 +613,344 @@ impl Graph {
                 }
             }
         }
+    }
+
+    // ── Interrupt + Checkpoint 方法 ───────────────────────────────────────────
+
+    /// 执行到 interrupt 点暂停
+    ///
+    /// 如果配置了 `interrupt_before` 或 `interrupt_after`，执行到相应节点时会暂停
+    /// 并返回 `InterruptState`。可以通过 `resume()` 方法继续执行。
+    ///
+    /// # Returns
+    ///
+    /// - `RunUntilInterruptResult::Completed(GraphResult)` - 执行完成
+    /// - `RunUntilInterruptResult::Interrupted(InterruptState)` - 遇到 interrupt 点暂停
+    pub async fn run_until_interrupt(&self, state: SharedState) -> Result<RunUntilInterruptResult> {
+        let mut current = self.entry.clone();
+        let mut path = Vec::new();
+        let mut step_count = 0;
+
+        info!(graph = %self.name, entry = %current, "Starting graph execution (with interrupt)");
+
+        loop {
+            // 防止无限循环
+            if step_count >= self.max_steps {
+                warn!(
+                    graph = %self.name,
+                    steps = step_count,
+                    "Graph execution exceeded max steps"
+                );
+                return Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+                    self.max_steps,
+                )));
+            }
+
+            // 检查 interrupt_before
+            if self.interrupt_config.should_interrupt_before(&current) {
+                debug!(graph = %self.name, node = %current, "Interrupt before node");
+
+                let checkpoint = Checkpoint::new(
+                    self.name.clone(),
+                    current.clone(),
+                    &state,
+                    path.clone(),
+                    step_count,
+                    InterruptType::BeforeNode,
+                );
+
+                // 保存 checkpoint
+                self.checkpoint_store.save(&checkpoint).await?;
+
+                let interrupt_state = InterruptState::before_node(checkpoint, current);
+                return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
+            }
+
+            // 检查终止条件
+            if current == Self::END || self.finish_nodes.contains(&current) {
+                if current != Self::END {
+                    if let Some(node) = self.nodes.get(&current) {
+                        state.set_current_node(&current);
+                        debug!(graph = %self.name, node = %current, "Executing finish node");
+                        node.execute(&state).await?;
+                        path.push(current.clone());
+                        step_count += 1;
+                    }
+                }
+                info!(
+                    graph = %self.name,
+                    steps = step_count,
+                    path = ?path,
+                    "Graph execution completed"
+                );
+                return Ok(RunUntilInterruptResult::Completed(GraphResult {
+                    state,
+                    path,
+                    steps: step_count,
+                }));
+            }
+
+            // 执行当前节点
+            let node = self.nodes.get(&current).ok_or_else(|| {
+                ReactError::Agent(AgentError::InitializationFailed(format!(
+                    "Node '{}' not found in graph '{}'",
+                    current, self.name
+                )))
+            })?;
+
+            state.set_current_node(&current);
+            debug!(graph = %self.name, node = %current, step = step_count, "Executing node");
+            node.execute(&state).await?;
+            path.push(current.clone());
+            step_count += 1;
+
+            // 检查 interrupt_after
+            if self.interrupt_config.should_interrupt_after(&current) {
+                debug!(graph = %self.name, node = %current, "Interrupt after node");
+
+                // 获取下一个节点
+                let next = self.resolve_next(&current, &state).await?;
+
+                let checkpoint = Checkpoint::new(
+                    self.name.clone(),
+                    match next {
+                        NextStep::Single(ref name) => name.clone(),
+                        NextStep::Parallel { ref then, .. } => then.clone(),
+                        NextStep::End => "__end__".to_string(),
+                    },
+                    &state,
+                    path.clone(),
+                    step_count,
+                    InterruptType::AfterNode,
+                );
+
+                self.checkpoint_store.save(&checkpoint).await?;
+
+                let interrupt_state = InterruptState::after_node(checkpoint, current);
+                return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
+            }
+
+            // 路由到下一个节点
+            let next = self.resolve_next(&current, &state).await?;
+
+            match next {
+                NextStep::Single(name) => {
+                    current = name;
+                }
+                NextStep::Parallel { targets, then } => {
+                    debug!(
+                        graph = %self.name,
+                        targets = ?targets,
+                        then = %then,
+                        "Executing parallel fan-out"
+                    );
+
+                    for target_name in &targets {
+                        if let Some(target_node) = self.nodes.get(target_name) {
+                            state.set_current_node(target_name);
+                            debug!(graph = %self.name, node = %target_name, "Executing parallel branch");
+                            target_node.execute(&state).await?;
+                            path.push(target_name.clone());
+                            step_count += 1;
+                        }
+                    }
+
+                    current = then;
+                }
+                NextStep::End => {
+                    info!(
+                        graph = %self.name,
+                        steps = step_count,
+                        path = ?path,
+                        "Graph execution completed (reached END)"
+                    );
+                    return Ok(RunUntilInterruptResult::Completed(GraphResult {
+                        state,
+                        path,
+                        steps: step_count,
+                    }));
+                }
+            }
+        }
+    }
+
+    /// 从 Checkpoint 恢复执行
+    ///
+    /// 当用户批准继续后，从保存的 checkpoint 恢复执行。
+    ///
+    /// 修复：遇到 interrupt 点时返回 `RunUntilInterruptResult::Interrupted` 而非 `Err`。
+    pub async fn resume(
+        &self,
+        checkpoint: Checkpoint,
+        _decision: ApprovalDecision,
+    ) -> Result<RunUntilInterruptResult> {
+        // 恢复状态
+        let state = checkpoint.restore_state()?;
+        let mut current = checkpoint.current_node;
+        let mut path = checkpoint.path;
+        let mut step_count = checkpoint.step_count;
+
+        info!(
+            graph = %self.name,
+            checkpoint_id = %checkpoint.id,
+            node = %current,
+            "Resuming from checkpoint"
+        );
+
+        // 删除已使用的 checkpoint
+        self.checkpoint_store.delete(&checkpoint.id).await?;
+
+        // 继续执行
+        loop {
+            if step_count >= self.max_steps {
+                return Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+                    self.max_steps,
+                )));
+            }
+
+            // 检查 interrupt_before（跳过，因为已经处理过了）
+            // 如果是从 BeforeNode interrupt 恢复，需要执行当前节点
+
+            if current == Self::END || self.finish_nodes.contains(&current) {
+                if current != Self::END {
+                    if let Some(node) = self.nodes.get(&current) {
+                        state.set_current_node(&current);
+                        node.execute(&state).await?;
+                        path.push(current.clone());
+                        step_count += 1;
+                    }
+                }
+                return Ok(RunUntilInterruptResult::Completed(GraphResult {
+                    state,
+                    path,
+                    steps: step_count,
+                }));
+            }
+
+            // 执行当前节点
+            let node = self.nodes.get(&current).ok_or_else(|| {
+                ReactError::Agent(AgentError::InitializationFailed(format!(
+                    "Node '{}' not found",
+                    current
+                )))
+            })?;
+
+            state.set_current_node(&current);
+            node.execute(&state).await?;
+            path.push(current.clone());
+            step_count += 1;
+
+            // 检查 interrupt_after
+            if self.interrupt_config.should_interrupt_after(&current) {
+                let next = self.resolve_next(&current, &state).await?;
+
+                let next_node_name = match &next {
+                    NextStep::Single(name) => name.clone(),
+                    NextStep::Parallel { then, .. } => then.clone(),
+                    NextStep::End => "__end__".to_string(),
+                };
+
+                let new_checkpoint = Checkpoint::new(
+                    self.name.clone(),
+                    next_node_name,
+                    &state,
+                    path.clone(),
+                    step_count,
+                    InterruptType::AfterNode,
+                );
+
+                self.checkpoint_store.save(&new_checkpoint).await?;
+
+                let interrupt_state = InterruptState::after_node(new_checkpoint, current);
+                return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
+            }
+
+            let next = self.resolve_next(&current, &state).await?;
+
+            match next {
+                NextStep::Single(name) => {
+                    // 检查下一个节点的 interrupt_before
+                    if self.interrupt_config.should_interrupt_before(&name) {
+                        let new_checkpoint = Checkpoint::new(
+                            self.name.clone(),
+                            name.clone(),
+                            &state,
+                            path.clone(),
+                            step_count,
+                            InterruptType::BeforeNode,
+                        );
+                        self.checkpoint_store.save(&new_checkpoint).await?;
+
+                        let interrupt_state = InterruptState::before_node(new_checkpoint, name);
+                        return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
+                    }
+                    current = name;
+                }
+                NextStep::Parallel { targets, then } => {
+                    for target_name in &targets {
+                        if let Some(target_node) = self.nodes.get(target_name) {
+                            state.set_current_node(target_name);
+                            target_node.execute(&state).await?;
+                            path.push(target_name.clone());
+                            step_count += 1;
+                        }
+                    }
+                    current = then;
+                }
+                NextStep::End => {
+                    return Ok(RunUntilInterruptResult::Completed(GraphResult {
+                        state,
+                        path,
+                        steps: step_count,
+                    }));
+                }
+            }
+        }
+    }
+
+    /// 从 checkpoint 恢复执行，同时注入状态修改。
+    ///
+    /// 在恢复前将 `state_updates` 合并到 checkpoint 的状态中，
+    /// 适用于需要在外部修改 workflow 状态后继续执行的场景。
+    pub async fn resume_with_state(
+        &self,
+        checkpoint: Checkpoint,
+        state_updates: std::collections::HashMap<String, Value>,
+    ) -> Result<RunUntilInterruptResult> {
+        // Apply state updates to the checkpoint before resuming
+        let state = checkpoint.restore_state()?;
+        for (key, value) in &state_updates {
+            state.set(key, value.clone());
+        }
+
+        // Create a modified checkpoint with updated state
+        let modified_checkpoint = Checkpoint::new(
+            checkpoint.graph_name.clone(),
+            checkpoint.current_node.clone(),
+            &state,
+            checkpoint.path.clone(),
+            checkpoint.step_count,
+            checkpoint.interrupt_type.clone(),
+        );
+
+        self.resume(modified_checkpoint, ApprovalDecision::Approved)
+            .await
+    }
+
+    /// 加载 Checkpoint
+    pub async fn load_checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
+        self.checkpoint_store.load(id).await
+    }
+
+    /// 列出所有 Checkpoint
+    pub async fn list_checkpoints(&self) -> Result<Vec<super::checkpoint_store::CheckpointInfo>> {
+        self.checkpoint_store.list().await
+    }
+
+    /// 设置自定义 Checkpoint 存储
+    pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
+        self.checkpoint_store = store;
+        self
     }
 
     /// 流式执行图工作流，逐节点发出 [`WorkflowEvent`] 事件。

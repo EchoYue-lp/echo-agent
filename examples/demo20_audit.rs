@@ -1,11 +1,19 @@
-//! 审计日志 + 权限模型示例
+//! 审计追踪 + 权限服务示例
 //!
-//! 演示 AuditCallback 自动记录工具调用链，以及 ToolPermission 权限控制。
+//! 演示 PermissionService 管线的审计记录：
+//! - InMemoryPermissionAuditSink：内存环形缓冲区
+//! - LoggingPermissionAuditSink：tracing 日志
+//! - CompositePermissionAuditSink：组合多个 Sink
+//! - 查询审计记录：recent() / query()
 //!
 //! ```bash
 //! RUST_LOG=info cargo run --example demo20_audit
 //! ```
 
+use echo_agent::human_loop::{
+    CompositePermissionAuditSink, InMemoryPermissionAuditSink, LoggingPermissionAuditSink,
+    PermissionService,
+};
 use echo_agent::prelude::*;
 use echo_agent::tools::ToolResult;
 use futures::future::BoxFuture;
@@ -74,7 +82,7 @@ impl Tool for SafeTool {
         &self,
         _params: ToolParameters,
     ) -> BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
-        Box::pin(async { Ok(ToolResult::success("2026-03-31 12:00:00".to_string())) })
+        Box::pin(async { Ok(ToolResult::success("2026-04-05 12:00:00".to_string())) })
     }
 }
 
@@ -86,51 +94,56 @@ async fn main() -> echo_agent::error::Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    // 创建内存审计日志
-    let audit_logger = Arc::new(InMemoryAuditLogger::new());
+    // ── 1. 创建审计 Sink ───────────────────────────────────────────────
 
-    // 创建审计回调（自动记录 tool 调用链）
-    let audit_cb = Arc::new(AuditCallback::new(audit_logger.clone(), "demo-agent", None));
+    // 内存 Sink：保留最近 100 条审计记录
+    let mem_sink = Arc::new(InMemoryPermissionAuditSink::new(100));
 
-    // 创建权限策略：只授予 Read 权限，Execute 需要审批
-    let policy = Arc::new(
-        DefaultPermissionPolicy::new()
-            .grant(ToolPermission::Read)
-            .grant(ToolPermission::Network),
-    );
+    // 日志 Sink：通过 tracing 输出
+    let log_sink = Arc::new(LoggingPermissionAuditSink::info());
 
-    println!("=== 权限策略 ===");
-    println!("已授权: Read, Network");
-    println!("需审批: Execute, Sensitive");
-    println!("未授权: Write\n");
+    // 组合 Sink：同时写入内存和日志
+    let composite = Arc::new(CompositePermissionAuditSink::new(vec![
+        Box::new(mem_sink.clone()) as _,
+        Box::new(log_sink) as _,
+    ]));
 
-    // 构建 Agent
+    // ── 2. 创建带审计的 PermissionService ──────────────────────────────
+    let _service = PermissionService::new().with_audit_sink(composite);
+
+    // ── 3. 构建 Agent ──────────────────────────────────────────────────
     let mut agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .system_prompt("你是一个助手，可以使用工具完成任务。请直接调用工具，不要询问用户。")
         .enable_tools()
         .tool(Box::new(RunCommandTool))
         .tool(Box::new(SafeTool))
-        .callback(audit_cb)
-        .permission_policy(policy)
-        .audit_logger(audit_logger.clone())
         .build()?;
 
     // 执行对话
     let answer = agent.chat("请获取当前时间").await?;
     println!("Agent: {answer}\n");
 
-    // 查看审计日志
-    println!("=== 审计日志 ({} 条事件) ===", audit_logger.len());
-    let events = audit_logger.query(AuditFilter::default()).await?;
-    for (i, event) in events.iter().enumerate() {
+    // ── 4. 查询审计记录 ────────────────────────────────────────────────
+    println!("=== 审计记录 ({} 条) ===", mem_sink.count());
+
+    let recent = mem_sink.recent(10);
+    for (i, entry) in recent.iter().enumerate() {
         println!(
-            "  [{}] {} - {:?}",
+            "  [{}] {} {} → {} (原因: {}, 来源: {}, {}us)",
             i + 1,
-            event.timestamp.format("%H:%M:%S%.3f"),
-            event.event_type
+            entry.tool_name,
+            entry.args_hash,
+            entry.decision,
+            entry.reason,
+            entry.source,
+            entry.duration_us
         );
     }
+
+    // 按条件查询
+    let allows = mem_sink.query(|e| e.decision == "allow");
+    println!("\n允许的操作: {} 条", allows.len());
 
     Ok(())
 }

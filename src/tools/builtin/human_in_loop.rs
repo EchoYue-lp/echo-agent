@@ -80,6 +80,12 @@ impl Tool for HumanInLoop {
             let result_text = match self.provider.request(req).await? {
                 HumanLoopResponse::Text(text) => text,
                 HumanLoopResponse::Approved => "用户已确认".to_string(),
+                HumanLoopResponse::ApprovedWithScope { scope } => {
+                    format!("用户已确认（scope: {:?}）", scope)
+                }
+                HumanLoopResponse::ModifiedArgs { args, scope } => {
+                    format!("用户修改参数后确认（args: {}, scope: {:?}）", args, scope)
+                }
                 HumanLoopResponse::Rejected { reason } => {
                     format!(
                         "用户已拒绝{}",
@@ -87,6 +93,7 @@ impl Tool for HumanInLoop {
                     )
                 }
                 HumanLoopResponse::Timeout => "等待用户输入超时".to_string(),
+                HumanLoopResponse::Deferred => "用户推迟决策".to_string(),
             };
 
             Ok(ToolResult::success(format!(

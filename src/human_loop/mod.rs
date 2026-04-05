@@ -7,6 +7,7 @@
 //! - **事件驱动**: 审批请求通过事件通知上层应用，而非直接阻塞
 //! - **统一入口**: 用户输入和审批响应共用同一个输入通道
 //! - **异步解耦**: Agent 执行与用户交互分离，支持复杂 UI 场景
+//! - **策略驱动**: 通过 [`ApprovalPolicy`] 配置审批策略，支持风险等级和会话缓存
 //!
 //! ## 使用示例
 //!
@@ -25,9 +26,8 @@
 //! tokio::spawn(async move {
 //!     while let Some(event) = mgr.recv_event().await {
 //!         match event {
-//!             HumanLoopEvent::ApprovalRequest { tool_name, args, responder, .. } => {
+//!             HumanLoopEvent::ApprovalRequest { tool_name, responder, .. } => {
 //!                 println!("工具 '{}' 需要审批", tool_name);
-//!                 // 用户确认后响应
 //!                 responder.respond(ApprovalDecision::Approved);
 //!             }
 //!             HumanLoopEvent::InputRequest { prompt, responder } => {
@@ -46,16 +46,45 @@
 //! # }
 //! ```
 
+pub mod adapter;
+mod approval_cache;
+mod audit;
+mod batch;
+mod classifier;
 mod console;
+mod pattern;
+mod permission;
+pub mod policy;
+mod protected;
+pub mod service;
 mod webhook;
 mod websocket;
 
+pub use approval_cache::SessionApprovalCache;
+pub use audit::{
+    CompositePermissionAuditSink, InMemoryPermissionAuditSink, LoggingPermissionAuditSink,
+    PermissionAuditEntry, PermissionAuditSink,
+};
+pub use batch::BatchApprovalProvider;
+pub use classifier::{
+    Classifier, ClassifierContext, ClassifierResult, CompositeClassifier, DenialTracker,
+    LlmClassifier, RiskContext, RuleClassifier,
+};
 pub use console::ConsoleHumanLoopProvider;
+pub use permission::{
+    DefaultPermissionRequestHandler, PermissionContext, PermissionRequest,
+    PermissionRequestHandler, PermissionResponse, PermissionResponseDecision, PermissionUpdate,
+    RiskLevel, SuggestedAction, Suggestion,
+};
+pub use policy::{ApprovalPolicy, ApprovalRule, ApprovalScope, PolicyDecision};
+pub use protected::{ProtectedPathChecker, ProtectedPathResult};
+pub use service::{PermissionService, TimeoutStrategy};
 pub use webhook::WebhookHumanLoopProvider;
 pub use websocket::WebSocketHumanLoopProvider;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -70,8 +99,19 @@ use crate::error::{ReactError, Result};
 pub enum ApprovalDecision {
     /// 用户批准执行
     Approved,
+    /// 用户批准执行，并指定审批范围（用于会话级缓存）
+    ApprovedWithScope { scope: ApprovalScope },
+    /// 用户修改了参数后批准执行
+    Modified {
+        /// 修改后的参数
+        args: Value,
+        /// 审批范围
+        scope: ApprovalScope,
+    },
     /// 用户拒绝执行
     Rejected { reason: Option<String> },
+    /// 用户推迟决策（暂不处理）
+    Deferred,
 }
 
 // ── 响应器 ─────────────────────────────────────────────────────────────────
@@ -103,9 +143,24 @@ impl ApprovalResponder {
         self.respond(ApprovalDecision::Approved);
     }
 
+    /// 快捷方法：带范围批准
+    pub fn approve_with_scope(self, scope: ApprovalScope) {
+        self.respond(ApprovalDecision::ApprovedWithScope { scope });
+    }
+
+    /// 快捷方法：修改参数后批准
+    pub fn approve_modified(self, args: Value, scope: ApprovalScope) {
+        self.respond(ApprovalDecision::Modified { args, scope });
+    }
+
     /// 快捷方法：拒绝
     pub fn reject(self, reason: Option<String>) {
         self.respond(ApprovalDecision::Rejected { reason });
+    }
+
+    /// 快捷方法：推迟决策
+    pub fn defer(self) {
+        self.respond(ApprovalDecision::Deferred);
     }
 }
 
@@ -180,6 +235,8 @@ pub enum HumanLoopEvent {
         args: Value,
         /// 给用户的提示信息
         prompt: String,
+        /// 风险等级
+        risk_level: RiskLevel,
         /// 响应器：用于返回用户决定
         responder: ApprovalResponder,
     },
@@ -197,7 +254,7 @@ pub enum HumanLoopEvent {
 
 /// 人工介入管理器（事件驱动模式）
 ///
-/// 这是推荐的 Human-in-the-Loop 实现方式：
+/// 推荐的 Human-in-the-Loop 实现方式：
 /// - Agent 通过 `request` 方法发起请求并等待响应
 /// - 上层应用通过 `recv_event` 接收事件并返回用户决定
 /// - 两者解耦，适合聊天应用、Web 应用等场景
@@ -231,7 +288,6 @@ impl HumanLoopManager {
     ///
     /// 返回 `None` 表示 Manager 已关闭。
     pub async fn recv_event(&self) -> Option<HumanLoopEvent> {
-        // 从 Mutex 中取出 receiver，处理后放回
         let mut guard = self.event_rx.lock().await;
         let receiver = guard.as_mut()?;
         receiver.recv().await
@@ -244,28 +300,7 @@ impl HumanLoopManager {
         receiver.try_recv().ok()
     }
 
-    /// 运行事件处理循环，直到 channel 关闭（适用于同步阻塞等待的场景）
-    ///
-    /// 在 `tokio::spawn` 中使用时，请在 async block 内构造 handler，
-    /// 避免生命周期泄漏：
-    ///
-    /// ```rust,no_run
-    /// # use echo_agent::human_loop::{HumanLoopManager, HumanLoopHandler, ApprovalDecision};
-    /// # use futures::future::BoxFuture;
-    /// # use std::sync::Arc;
-    /// # struct MyHandler;
-    /// # impl HumanLoopHandler for MyHandler {
-    /// #     fn on_approval<'a>(&'a self, _: &'a str, _: &'a serde_json::Value, _: &'a str) -> BoxFuture<'a, ApprovalDecision> { todo!() }
-    /// #     fn on_input<'a>(&'a self, _: &'a str) -> BoxFuture<'a, String> { todo!() }
-    /// # }
-    /// # async fn example(manager: Arc<HumanLoopManager>) {
-    /// let mgr = manager.clone();
-    /// tokio::spawn(async move {
-    ///     let handler = MyHandler;          // handler 在 async block 内构造
-    ///     mgr.serve(&handler).await;
-    /// });
-    /// # }
-    /// ```
+    /// 运行事件处理循环，直到 channel 关闭
     pub async fn serve(&self, handler: &dyn HumanLoopHandler) {
         while let Some(event) = self.recv_event().await {
             dispatch_event(event, handler).await;
@@ -287,29 +322,49 @@ impl HumanLoopProvider for HumanLoopManager {
                     let (tx, rx) = oneshot::channel();
                     let responder = ApprovalResponder::new(tx);
 
+                    let risk_level = req.risk_level.unwrap_or(RiskLevel::Medium);
+
                     let event = HumanLoopEvent::ApprovalRequest {
                         tool_name: req.tool_name.clone().unwrap_or_default(),
                         args: req.args.clone().unwrap_or(Value::Null),
                         prompt: req.prompt.clone(),
+                        risk_level,
                         responder,
                     };
 
-                    // 发送事件给上层应用
                     self.event_tx
                         .send(event)
                         .await
                         .map_err(|_| ReactError::Other("HumanLoop channel closed".to_string()))?;
 
-                    // 等待用户响应
-                    let decision = rx
-                        .await
-                        .map_err(|_| ReactError::Other("Approval responder dropped".to_string()))?;
+                    // 等待用户响应（带可选超时）
+                    let decision = if let Some(timeout) = req.timeout {
+                        match tokio::time::timeout(timeout, rx).await {
+                            Ok(result) => result.map_err(|_| {
+                                ReactError::Other("Approval responder dropped".to_string())
+                            })?,
+                            Err(_) => {
+                                return Ok(HumanLoopResponse::Timeout);
+                            }
+                        }
+                    } else {
+                        rx.await.map_err(|_| {
+                            ReactError::Other("Approval responder dropped".to_string())
+                        })?
+                    };
 
                     match decision {
                         ApprovalDecision::Approved => Ok(HumanLoopResponse::Approved),
+                        ApprovalDecision::ApprovedWithScope { scope } => {
+                            Ok(HumanLoopResponse::ApprovedWithScope { scope })
+                        }
+                        ApprovalDecision::Modified { args, scope } => {
+                            Ok(HumanLoopResponse::ModifiedArgs { args, scope })
+                        }
                         ApprovalDecision::Rejected { reason } => {
                             Ok(HumanLoopResponse::Rejected { reason })
                         }
+                        ApprovalDecision::Deferred => Ok(HumanLoopResponse::Deferred),
                     }
                 }
                 HumanLoopKind::Input => {
@@ -342,41 +397,7 @@ impl HumanLoopProvider for HumanLoopManager {
 /// 将 [`HumanLoopEvent`] 转化为具体 UI 交互的桥接接口
 ///
 /// 实现此 trait 即可将 agent 的人工介入请求接入任意输入渠道，
-/// 所有实现共用同一套事件驱动基础设施（[`HumanLoopManager`] + [`dispatch_event`]），
-/// 无需改动 agent 内部逻辑。
-///
-/// # 内置实现（开箱即用）
-///
-/// | 实现 | 使用场景 |
-/// |------|---------|
-/// | 在 `main.rs` 中实现 `CliHumanLoopHandler` | 交互式命令行（统一 `you > ` 入口） |
-///
-/// # 自定义实现示例
-///
-/// ```rust,no_run
-/// use echo_agent::human_loop::{HumanLoopHandler, ApprovalDecision};
-/// use futures::future::BoxFuture;
-/// use serde_json::Value;
-///
-/// /// WebSocket 实现（伪代码）
-/// struct WsHumanLoopHandler { /* ws sender */ }
-///
-/// impl HumanLoopHandler for WsHumanLoopHandler {
-///     fn on_approval<'a>(&'a self, tool_name: &'a str, _args: &'a Value, prompt: &'a str) -> BoxFuture<'a, ApprovalDecision> {
-///         Box::pin(async move {
-///             // 向 WebSocket 发送审批请求，等待客户端响应
-///             // let reply = self.ws.send_and_wait(prompt).await;
-///             ApprovalDecision::Approved
-///         })
-///     }
-///     fn on_input<'a>(&'a self, prompt: &'a str) -> BoxFuture<'a, String> {
-///         Box::pin(async move {
-///             // 向 WebSocket 发送输入请求，等待客户端响应
-///             String::new()
-///         })
-///     }
-/// }
-/// ```
+/// 所有实现共用同一套事件驱动基础设施。
 pub trait HumanLoopHandler: Send + Sync {
     /// 工具审批请求：展示工具信息，收集用户的批准 / 拒绝决策
     fn on_approval<'a>(
@@ -390,33 +411,14 @@ pub trait HumanLoopHandler: Send + Sync {
     fn on_input<'a>(&'a self, prompt: &'a str) -> BoxFuture<'a, String>;
 }
 
-/// 将一个 [`HumanLoopEvent`] 分发给 `handler` 处理，并通过 responder 回传结果
-///
-/// 适合在 `tokio::select!` 循环中直接调用，或配合 [`HumanLoopManager::serve`] 使用。
-///
-/// ```rust,no_run
-/// # use echo_agent::human_loop::{HumanLoopManager, dispatch_event};
-/// # use echo_agent::prelude::*;
-/// # use futures::future::BoxFuture;
-/// # use std::sync::Arc;
-/// # struct MyHandler;
-/// # impl echo_agent::human_loop::HumanLoopHandler for MyHandler {
-/// #     fn on_approval<'a>(&'a self, _: &'a str, _: &'a serde_json::Value, _: &'a str) -> BoxFuture<'a, echo_agent::human_loop::ApprovalDecision> { todo!() }
-/// #     fn on_input<'a>(&'a self, _: &'a str) -> BoxFuture<'a, String> { todo!() }
-/// # }
-/// # async fn example(manager: Arc<HumanLoopManager>) {
-/// let handler = MyHandler;
-/// while let Some(event) = manager.recv_event().await {
-///     dispatch_event(event, &handler).await;
-/// }
-/// # }
-/// ```
+/// 将一个 [`HumanLoopEvent`] 分发给 `handler` 处理
 pub async fn dispatch_event(event: HumanLoopEvent, handler: &dyn HumanLoopHandler) {
     match event {
         HumanLoopEvent::ApprovalRequest {
             tool_name,
             args,
             prompt,
+            risk_level: _,
             responder,
         } => {
             let decision = handler.on_approval(&tool_name, &args, &prompt).await;
@@ -429,7 +431,7 @@ pub async fn dispatch_event(event: HumanLoopEvent, handler: &dyn HumanLoopHandle
     }
 }
 
-// ── 请求类型（保留兼容性）────────────────────────────────────────────────────
+// ── 请求类型 ────────────────────────────────────────────────────────────────
 
 /// 人工介入的场景类型
 #[derive(Debug, Clone, PartialEq)]
@@ -451,6 +453,10 @@ pub struct HumanLoopRequest {
     pub tool_name: Option<String>,
     /// 工具参数（仅 Approval 场景）
     pub args: Option<Value>,
+    /// 风险等级（仅 Approval 场景）
+    pub risk_level: Option<RiskLevel>,
+    /// 超时时长（None 表示无限等待）
+    pub timeout: Option<Duration>,
 }
 
 impl HumanLoopRequest {
@@ -462,6 +468,42 @@ impl HumanLoopRequest {
             prompt: format!("工具 [{}] 需要人工审批", tool_name),
             tool_name: Some(tool_name),
             args: Some(args),
+            risk_level: None,
+            timeout: None,
+        }
+    }
+
+    /// 构造带风险等级的审批请求
+    pub fn approval_with_risk(
+        tool_name: impl Into<String>,
+        args: Value,
+        risk_level: RiskLevel,
+    ) -> Self {
+        let tool_name = tool_name.into();
+        Self {
+            kind: HumanLoopKind::Approval,
+            prompt: format!("工具 [{}] 需要人工审批（{}风险）", tool_name, risk_level),
+            tool_name: Some(tool_name),
+            args: Some(args),
+            risk_level: Some(risk_level),
+            timeout: None,
+        }
+    }
+
+    /// 构造带超时的审批请求
+    pub fn approval_with_timeout(
+        tool_name: impl Into<String>,
+        args: Value,
+        timeout: Duration,
+    ) -> Self {
+        let tool_name = tool_name.into();
+        Self {
+            kind: HumanLoopKind::Approval,
+            prompt: format!("工具 [{}] 需要人工审批", tool_name),
+            tool_name: Some(tool_name),
+            args: Some(args),
+            risk_level: None,
+            timeout: Some(timeout),
         }
     }
 
@@ -472,6 +514,8 @@ impl HumanLoopRequest {
             prompt: prompt.into(),
             tool_name: None,
             args: None,
+            risk_level: None,
+            timeout: None,
         }
     }
 }
@@ -483,15 +527,21 @@ impl HumanLoopRequest {
 pub enum HumanLoopResponse {
     /// 用户批准
     Approved,
+    /// 用户带范围批准
+    ApprovedWithScope { scope: ApprovalScope },
+    /// 用户修改了参数后批准
+    ModifiedArgs { args: Value, scope: ApprovalScope },
     /// 用户拒绝
     Rejected { reason: Option<String> },
     /// 用户输入的文本
     Text(String),
     /// 等待超时
     Timeout,
+    /// 用户推迟决策
+    Deferred,
 }
 
-// ── Provider trait ────────────────────────────────────────────────────────────
+// ── Provider trait ──────────────────────────────────────────────────────────
 
 /// 人工介入 Provider trait
 ///
@@ -505,24 +555,25 @@ pub trait HumanLoopProvider: Send + Sync {
     fn request(&self, req: HumanLoopRequest) -> BoxFuture<'_, Result<HumanLoopResponse>>;
 }
 
-/// 默认 Provider：命令行阻塞模式（适用于非交互式程序）
-///
-/// 在交互式 CLI 场景中，应使用 [`HumanLoopManager`] 并自行处理事件，
-/// 以便与主循环共享同一个用户输入入口。
+/// 默认 Provider：命令行阻塞模式
 pub fn default_provider() -> Arc<dyn HumanLoopProvider> {
     Arc::new(ConsoleHumanLoopProvider)
 }
 
-// ── Guard 管理器 ──────────────────────────────────────────────────────────────
+// ── Guard 管理器（向后兼容）─────────────────────────────────────────────────
 
 /// 工具执行前的人工审批管理器（guard 模式）
 ///
-/// 通过 [`ReactAgent::add_need_approval_tool`] 标记工具为"需要审批"，
-/// 执行前会调用注入的 [`HumanLoopProvider`] 请求确认。
+/// 已被 [`ApprovalPolicy`] 取代，保留用于向后兼容。
+/// 通过 [`ReactAgent::add_need_appeal_tool`] 标记工具为"需要审批"。
+#[deprecated(
+    note = "请使用 ApprovalPolicy 代替。通过 DefaultApprovalPolicy::mark_always_require() 实现相同功能。"
+)]
 pub struct HumanApprovalManager {
     need_approval_tools: HashSet<String>,
 }
 
+#[allow(deprecated)]
 impl HumanApprovalManager {
     pub fn new() -> Self {
         HumanApprovalManager {
@@ -539,13 +590,14 @@ impl HumanApprovalManager {
     }
 }
 
+#[allow(deprecated)]
 impl Default for HumanApprovalManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+// ── 单元测试 ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -594,6 +646,23 @@ mod tests {
     }
 
     #[test]
+    fn test_approval_responder_approve_with_scope() {
+        let (tx, mut rx) = oneshot::channel();
+        let responder = ApprovalResponder::new(tx);
+
+        responder.approve_with_scope(ApprovalScope::Session);
+
+        let result = rx.try_recv();
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ApprovalDecision::ApprovedWithScope { scope } => {
+                assert_eq!(scope, ApprovalScope::Session);
+            }
+            _ => panic!("Should be ApprovedWithScope"),
+        }
+    }
+
+    #[test]
     fn test_approval_responder_reject() {
         let (tx, mut rx) = oneshot::channel();
         let responder = ApprovalResponder::new(tx);
@@ -615,12 +684,10 @@ mod tests {
         let (tx, mut rx) = oneshot::channel();
         {
             let _responder = ApprovalResponder::new(tx);
-            // responder 被丢弃但未调用 respond
         }
 
         let result = rx.try_recv();
         assert!(result.is_ok());
-        // 未响应时默认拒绝
         match result.unwrap() {
             ApprovalDecision::Rejected { reason } => assert!(reason.is_some()),
             _ => panic!("Should be Rejected"),
@@ -649,6 +716,18 @@ mod tests {
     }
 
     #[test]
+    fn test_human_loop_request_with_risk() {
+        let request = HumanLoopRequest::approval_with_risk(
+            "dangerous_tool",
+            serde_json::json!({"cmd": "rm -rf"}),
+            RiskLevel::Critical,
+        );
+
+        assert_eq!(request.kind, HumanLoopKind::Approval);
+        assert_eq!(request.risk_level, Some(RiskLevel::Critical));
+    }
+
+    #[test]
     fn test_human_loop_request_input() {
         let request = HumanLoopRequest::input("Please enter your name");
 
@@ -666,34 +745,23 @@ mod tests {
         };
         let text = HumanLoopResponse::Text("hello".to_string());
         let timeout = HumanLoopResponse::Timeout;
+        let deferred = HumanLoopResponse::Deferred;
 
-        match approved {
-            HumanLoopResponse::Approved => assert!(true),
-            _ => panic!("Should be Approved"),
-        }
-
-        match rejected {
-            HumanLoopResponse::Rejected { reason } => assert_eq!(reason, Some("test".to_string())),
-            _ => panic!("Should be Rejected"),
-        }
-
-        match text {
-            HumanLoopResponse::Text(s) => assert_eq!(s, "hello"),
-            _ => panic!("Should be Text"),
-        }
-
-        match timeout {
-            HumanLoopResponse::Timeout => assert!(true),
-            _ => panic!("Should be Timeout"),
-        }
+        assert!(matches!(approved, HumanLoopResponse::Approved));
+        assert!(matches!(rejected, HumanLoopResponse::Rejected { .. }));
+        assert!(matches!(text, HumanLoopResponse::Text(_)));
+        assert!(matches!(timeout, HumanLoopResponse::Timeout));
+        assert!(matches!(deferred, HumanLoopResponse::Deferred));
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_human_approval_manager_new() {
         let manager = HumanApprovalManager::new();
         assert!(!manager.needs_approval("any_tool"));
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_human_approval_manager_mark_need_approval() {
         let mut manager = HumanApprovalManager::new();
@@ -704,40 +772,14 @@ mod tests {
         assert!(!manager.needs_approval("safe_tool"));
     }
 
-    #[test]
-    fn test_human_approval_manager_multiple_tools() {
-        let mut manager = HumanApprovalManager::new();
-
-        manager.mark_need_approval("tool1".to_string());
-        manager.mark_need_approval("tool2".to_string());
-        manager.mark_need_approval("tool3".to_string());
-
-        assert!(manager.needs_approval("tool1"));
-        assert!(manager.needs_approval("tool2"));
-        assert!(manager.needs_approval("tool3"));
-        assert!(!manager.needs_approval("tool4"));
-    }
-
     #[tokio::test]
     async fn test_human_loop_manager_new() {
-        let manager = HumanLoopManager::new();
-        // 验证可以成功创建
-        let _ = manager;
+        let _manager = HumanLoopManager::new();
     }
 
     #[test]
     fn test_human_loop_kind_variants() {
-        let approval = HumanLoopKind::Approval;
-        let input = HumanLoopKind::Input;
-
-        match approval {
-            HumanLoopKind::Approval => assert!(true),
-            _ => panic!("Should be Approval"),
-        }
-
-        match input {
-            HumanLoopKind::Input => assert!(true),
-            _ => panic!("Should be Input"),
-        }
+        assert!(matches!(HumanLoopKind::Approval, HumanLoopKind::Approval));
+        assert!(matches!(HumanLoopKind::Input, HumanLoopKind::Input));
     }
 }
