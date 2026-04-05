@@ -15,7 +15,7 @@ fn main() {
     println!("═══ Dynamic Tool Registration Demo ═══\n");
 
     let config = AgentConfig::minimal("qwen3-max", "phase_agent");
-    let mut agent = echo_agent::agent::react_agent::ReactAgent::new(config);
+    let mut agent = echo_agent::agents::react::ReactAgent::new(config);
 
     // ── Phase 0: 初始状态 ─────────────────────────────────────────────────
     println!("[Phase 0] 初始工具集：{:?}", agent.tool_names());

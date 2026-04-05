@@ -75,6 +75,7 @@
 // ── 核心模块（始终编译） ─────────────────────────────────────────────────────
 
 pub mod agent;
+pub mod agents;
 pub mod audit;
 pub mod compression;
 pub mod error;
@@ -85,6 +86,7 @@ pub mod sandbox;
 pub mod skills;
 pub mod testing;
 pub mod tools;
+pub mod utils;
 pub mod workflow;
 
 // ── 可选模块（feature-gated） ────────────────────────────────────────────────
@@ -97,8 +99,6 @@ pub mod handoff;
 pub mod human_loop;
 #[cfg(feature = "mcp")]
 pub mod mcp;
-#[cfg(feature = "plan-execute")]
-pub mod plan_execute;
 #[cfg(feature = "tasks")]
 pub mod tasks;
 #[cfg(feature = "telemetry")]
@@ -123,13 +123,17 @@ pub use echo_macros::{
 /// 包含最常用的核心类型，通过 `use echo_agent::prelude::*` 导入。
 pub mod prelude {
     // Agent
-    pub use crate::agent::react_agent::ReactAgent;
-    pub use crate::agent::react_agent::StepType;
-    pub use crate::agent::react_agent::structured::StructuredAgent;
     pub use crate::agent::{
-        Agent, AgentBuilder, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
+        Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
         ReactAgentBuilder, Runner,
     };
+    pub use crate::agents::react::ReactAgent;
+    pub use crate::agents::react::StepType;
+    pub use crate::agents::react::structured::StructuredAgent;
+
+    /// AgentBuilder 是 ReactAgentBuilder 的别名（向后兼容）
+    #[allow(deprecated)]
+    pub type AgentBuilder = ReactAgentBuilder;
 
     // LLM
     pub use crate::llm::config::LlmProvider;
@@ -239,9 +243,9 @@ pub mod advanced {
     };
 
     #[cfg(feature = "plan-execute")]
-    pub use crate::plan_execute::{
-        Executor, LlmPlanner, Plan, PlanExecuteAgent, PlanStep, Planner, ReactExecutor,
-        SimpleExecutor, StaticPlanner, StepResult, StepStatus,
+    pub use crate::agents::plan_execute::{
+        ExecutionMode, Executor, LlmPlanner, Plan, PlanExecuteAgent, PlanStep, Planner,
+        ReactExecutor, SimpleExecutor, StaticPlanner, StepResult, StepStatus,
     };
 
     #[cfg(feature = "a2a")]
@@ -258,4 +262,16 @@ pub mod advanced {
 
     #[cfg(feature = "tasks")]
     pub use crate::tasks::{Task, TaskManager, TaskStatus};
+
+    #[cfg(feature = "self-reflection")]
+    pub use crate::agents::self_reflection::{
+        CompositeCritic, CompositeStrategy, Critic, DefaultRefinementPromptBuilder,
+        DefaultReflectionPromptBuilder, InMemoryReflectionStore, LlmCritic,
+        RefinementPromptBuilder, ReflectionExperience, ReflectionPromptBuilder, ReflectionRecord,
+        ReflectionStore, SelfReflectionAgent, StaticCritic, ThresholdCritic,
+        critique_output_schema,
+    };
+
+    #[cfg(all(feature = "self-reflection", feature = "plan-execute"))]
+    pub use crate::agents::self_reflection::ReflectiveExecutor;
 }

@@ -32,14 +32,12 @@ pub use echo_core::agent::{Agent, AgentCallback, AgentEvent, CancellationToken, 
 /// SubAgent 注册表类型别名
 pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
 
-mod config;
-#[cfg(feature = "tasks")]
-mod planning;
-pub mod react_agent;
+pub mod config;
 pub mod runner;
 
-pub use react_agent::builder::ReactAgentBuilder;
 pub use runner::Runner;
+// ReactAgent 通过 agents/react 模块提供
+pub use crate::agents::react::builder::ReactAgentBuilder;
 
 /// AgentBuilder 是 ReactAgentBuilder 的别名，用于宏和极简 API
 pub type AgentBuilder = ReactAgentBuilder;

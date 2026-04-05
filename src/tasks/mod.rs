@@ -3,10 +3,26 @@
 //! 由规划模式（[`crate::agent::planning`]）使用，支持并行执行互不依赖的子任务。
 
 mod dag;
+mod events;
+pub mod executor;
+pub mod hooks;
 mod manager;
+mod store;
 mod task;
 
+pub use events::{
+    AsyncTaskEventListener, LoggingListener, TaskEvent, TaskEventBus, TaskEventListener,
+};
+pub use executor::{
+    TaskContext, TaskExecuteFn, TaskExecutionResult, TaskExecutor, TaskExecutorConfig,
+};
+pub use hooks::{
+    LoggingHooks, NoopHooks, RetryDecision, TaskHookContext, TaskHookRegistry, TaskHooks,
+};
 pub use manager::TaskManager;
+pub use store::{
+    CheckpointStore, ExecutionCheckpoint, SqliteCheckpointStore, SqliteTaskStore, TaskStore,
+};
 pub use task::{Task, TaskStatus};
 
 #[cfg(test)]
@@ -18,20 +34,26 @@ mod tests {
         Task {
             id: id.to_string(),
             description: description.to_string(),
+            subject: description.to_string(),
             status: TaskStatus::Pending,
             dependencies: dependencies.into_iter().map(String::from).collect(),
             priority: 5,
             result: None,
             reasoning: None,
+            assigned_agent: None,
+            tags: Vec::new(),
             parent_id: None,
             created_at: 0,
             updated_at: 0,
+            timeout_secs: 0,
+            max_retries: 0,
+            retry_count: 0,
         }
     }
 
     #[test]
     fn test_no_circular_dependencies() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // 创建无循环依赖的任务链: task1 -> task2 -> task3
         manager.add_task(create_task("task1", "First task", vec![]));
@@ -45,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_simple_circular_dependency() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // 创建简单循环: task1 -> task2 -> task1
         manager.add_task(create_task("task1", "Task 1", vec!["task2"]));
@@ -63,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_complex_circular_dependency() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // 创建复杂循环: task1 -> task2 -> task3 -> task1
         manager.add_task(create_task("task1", "Task 1", vec!["task3"]));
@@ -77,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_multiple_circular_dependencies() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // 创建两个独立的循环
         // 循环1: task1 -> task2 -> task1
@@ -94,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_self_dependency() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // 创建自依赖: task1 -> task1
         manager.add_task(create_task("task1", "Task 1", vec!["task1"]));
@@ -106,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_mixed_dependencies() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // 混合情况：部分有循环，部分没有
         // 正常链: task1 -> task2 -> task3
@@ -126,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_topological_order_no_cycles() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // task3 -> task2 -> task1
         manager.add_task(create_task("task1", "Task 1", vec![]));
@@ -150,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_topological_order_with_cycles() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // 创建循环
         manager.add_task(create_task("task1", "Task 1", vec!["task2"]));
@@ -168,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_get_dependency_chain() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // task3 -> task2 -> task1
         manager.add_task(create_task("task1", "Task 1", vec![]));
@@ -186,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_get_dependency_chain_multiple() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         // task4 依赖 task2 和 task3
         // task2 -> task1
@@ -211,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_visualize_dependencies() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         manager.add_task(create_task("task1", "Task 1", vec![]));
         manager.add_task(create_task("task2", "Task 2", vec!["task1"]));
@@ -227,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_ready_tasks_with_dependencies() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         manager.add_task(create_task("task1", "Task 1", vec![]));
         manager.add_task(create_task("task2", "Task 2", vec!["task1"]));
@@ -239,7 +261,10 @@ mod tests {
         assert_eq!(ready[0].id, "task1", "应该是 task1");
 
         // 标记 task1 完成
-        manager.update_task("task1", TaskStatus::Completed);
+        manager
+            .update_task("task1", TaskStatus::InProgress)
+            .unwrap();
+        manager.update_task("task1", TaskStatus::Completed).unwrap();
         let ready = manager.get_ready_tasks();
         assert_eq!(ready.len(), 1, "应该只有一个可执行任务");
         assert_eq!(ready[0].id, "task2", "应该是 task2");
@@ -247,32 +272,44 @@ mod tests {
 
     #[test]
     fn test_get_next_task_priority() {
-        let mut manager = TaskManager::new();
+        let manager = TaskManager::new();
 
         manager.add_task(Task {
             id: "task1".to_string(),
             description: "Low priority".to_string(),
+            subject: "Low priority".to_string(),
             status: TaskStatus::Pending,
             dependencies: vec![],
             priority: 3,
             result: None,
             reasoning: None,
+            assigned_agent: None,
+            tags: vec![],
             parent_id: None,
             created_at: 0,
             updated_at: 0,
+            timeout_secs: 0,
+            max_retries: 0,
+            retry_count: 0,
         });
 
         manager.add_task(Task {
             id: "task2".to_string(),
             description: "High priority".to_string(),
+            subject: "High priority".to_string(),
             status: TaskStatus::Pending,
             dependencies: vec![],
             priority: 8,
             result: None,
             reasoning: None,
+            assigned_agent: None,
+            tags: vec![],
             parent_id: None,
             created_at: 0,
             updated_at: 0,
+            timeout_secs: 0,
+            max_retries: 0,
+            retry_count: 0,
         });
 
         let next = manager.get_next_task();

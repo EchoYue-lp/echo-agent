@@ -53,6 +53,24 @@ pub enum AgentEvent {
     /// Agent 间 Handoff 结束
     HandoffEnd { to: String },
 
+    // ── 自省反思 ──────────────────────────────────────────────────────────
+    /// 反思迭代开始
+    ReflectionStart { iteration: usize },
+    /// 反思迭代结束
+    ReflectionEnd {
+        iteration: usize,
+        score: f64,
+        passed: bool,
+    },
+    /// 评估者生成了评价结果
+    CritiqueGenerated {
+        score: f64,
+        passed: bool,
+        feedback: String,
+    },
+    /// 正在基于反思修正回答
+    Refining { iteration: usize },
+
     // ── 终态 ──────────────────────────────────────────────────────────────
     /// 最终回答
     FinalAnswer(String),

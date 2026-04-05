@@ -6,7 +6,7 @@
 //! cargo run --example demo22_plan_execute
 //! ```
 
-use echo_agent::plan_execute::{LlmPlanner, PlanExecuteAgent, ReactExecutor};
+use echo_agent::agents::plan_execute::{LlmPlanner, PlanExecuteAgent, ReactExecutor};
 use echo_agent::prelude::*;
 
 #[tokio::main]

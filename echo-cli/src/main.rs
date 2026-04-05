@@ -49,8 +49,8 @@
 //! ```
 
 use clap::Parser;
-use echo_agent::agent::react_agent::ReactAgent;
 use echo_agent::agent::{Agent, AgentConfig, AgentEvent};
+use echo_agent::agents::react::ReactAgent;
 use echo_agent::compression::ContextCompressor;
 use echo_agent::compression::compressor::{
     DefaultSummaryPrompt, HybridCompressor, SlidingWindowCompressor, SummaryCompressor,

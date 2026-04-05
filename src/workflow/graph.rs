@@ -293,6 +293,36 @@ impl GraphBuilder {
             max_steps: 100,
         })
     }
+
+    // ── 便捷方法 ────────────────────────────────────────────────────────
+
+    /// 快捷添加 ReactAgent 节点（默认 input="task", output="result"）
+    pub fn add_react_node(self, name: impl Into<String>, agent: impl Agent + 'static) -> Self {
+        self.add_agent_node(name, agent, "task", "result")
+    }
+
+    /// 快捷添加 PlanExecuteAgent 节点（默认 input="task", output="plan_result"）
+    #[cfg(feature = "plan-execute")]
+    pub fn add_plan_node<
+        P: crate::agents::plan_execute::Planner + Send + Sync + 'static,
+        E: crate::agents::plan_execute::Executor + Send + Sync + 'static,
+    >(
+        self,
+        name: impl Into<String>,
+        agent: crate::agents::plan_execute::PlanExecuteAgent<P, E>,
+    ) -> Self {
+        self.add_agent_node(name, agent, "task", "plan_result")
+    }
+
+    /// 快捷添加 SelfReflectionAgent 节点（默认 input="task", output="reflection_result"）
+    #[cfg(feature = "self-reflection")]
+    pub fn add_reflect_node<C: crate::agents::self_reflection::Critic + Send + Sync + 'static>(
+        self,
+        name: impl Into<String>,
+        agent: crate::agents::self_reflection::SelfReflectionAgent<C>,
+    ) -> Self {
+        self.add_agent_node(name, agent, "task", "reflection_result")
+    }
 }
 
 // ── Graph ───────────────────────────────────────────────────────────────────

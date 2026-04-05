@@ -1,38 +1,23 @@
 use futures::future::BoxFuture;
 
-use crate::error::{ReactError, ToolError};
+use crate::error::ToolError;
 use crate::tasks::{Task, TaskManager, TaskStatus};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{debug, info};
 
 /// 获取当前时间戳（秒），不会 panic
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-/// 安全读取 RwLock，将 poisoned lock 转为 ReactError
-fn read_lock<T>(lock: &RwLock<T>) -> crate::error::Result<std::sync::RwLockReadGuard<'_, T>> {
-    lock.read()
-        .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))
-}
-
-/// 安全写入 RwLock，将 poisoned lock 转为 ReactError
-fn write_lock<T>(lock: &RwLock<T>) -> crate::error::Result<std::sync::RwLockWriteGuard<'_, T>> {
-    lock.write()
-        .map_err(|e| ReactError::Other(format!("Lock poisoned: {}", e)))
+    crate::utils::time::now_secs()
 }
 
 pub struct CreateTaskTool {
-    task_manager: Arc<RwLock<TaskManager>>,
+    task_manager: Arc<TaskManager>,
 }
 
 impl CreateTaskTool {
-    pub fn new(task_manager: Arc<RwLock<TaskManager>>) -> Self {
+    pub fn new(task_manager: Arc<TaskManager>) -> Self {
         Self { task_manager }
     }
 }
@@ -70,6 +55,15 @@ impl Tool for CreateTaskTool {
                 "priority": {
                     "type": "number",
                     "description": "优先级 0-10，默认5"
+                },
+                "assigned_agent": {
+                    "type": "string",
+                    "description": "分配执行的 Agent 名称（可选）"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "任务标签（可选，用于分类和过滤）"
                 }
             },
             "required": ["task_id", "description", "reasoning"]
@@ -113,38 +107,56 @@ impl Tool for CreateTaskTool {
                 .clamp(0.0, 10.0) as u8)
                 .min(10);
 
+            let assigned_agent = parameters
+                .get("assigned_agent")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let tags: Vec<String> = parameters
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let now = now_secs();
             let task = Task {
                 id: task_id.to_string(),
                 description: description.to_string(),
+                subject: description.to_string(),
                 status: TaskStatus::Pending,
                 dependencies,
                 priority,
                 result: None,
                 reasoning: Some(reasoning.to_string()),
+                assigned_agent: assigned_agent.clone(),
+                tags: tags.clone(),
                 parent_id: None,
                 created_at: now,
                 updated_at: now,
+                timeout_secs: 0,
+                max_retries: 0,
+                retry_count: 0,
             };
 
-            let mut manager = write_lock(&self.task_manager)?;
-
             // 先添加任务
-            manager.add_task(task.clone());
+            self.task_manager.add_task(task.clone());
 
             // 再检测是否因添加此任务而产生循环依赖
-            let has_circular_deps = manager.has_circular_dependencies();
+            let has_circular_deps = self.task_manager.has_circular_dependencies();
 
             if has_circular_deps {
-                // 检测循环依赖
-                let cycles = manager.detect_circular_dependencies();
+                let cycles = self.task_manager.detect_circular_dependencies();
                 let cycle_paths: Vec<String> = cycles
                     .iter()
                     .map(|cycle| format!("[{}]", cycle.join(" → ")))
                     .collect();
 
                 // 回滚：移除刚添加的有问题的任务
-                manager.delete_task(task_id);
+                self.task_manager.delete_task(task_id);
 
                 let error_msg = format!(
                     "❌ 任务 [{}] 创建失败：此任务与现有任务形成循环依赖！\n\n循环路径: {}\n\n请检查依赖关系并重新规划。",
@@ -180,11 +192,11 @@ impl Tool for CreateTaskTool {
 }
 
 pub struct UpdateTaskTool {
-    task_manager: Arc<RwLock<TaskManager>>,
+    task_manager: Arc<TaskManager>,
 }
 
 impl UpdateTaskTool {
-    pub fn new(task_manager: Arc<RwLock<TaskManager>>) -> Self {
+    pub fn new(task_manager: Arc<TaskManager>) -> Self {
         Self { task_manager }
     }
 }
@@ -263,13 +275,17 @@ impl Tool for UpdateTaskTool {
                 }
             };
 
-            let mut manager = write_lock(&self.task_manager)?;
-            manager.update_task(task_id, new_status.clone());
+            // Validate state transition
+            if let Err(e) = self.task_manager.update_task(task_id, new_status.clone()) {
+                return Ok(ToolResult::error(format!(
+                    "❌ 任务 [{}] 状态更新失败: {}",
+                    task_id, e
+                )));
+            }
 
             // 更新结果
-            if let Some(task) = manager.get_task_mut(task_id) {
-                task.result = result;
-                task.updated_at = now_secs();
+            if let Some(r) = result {
+                self.task_manager.set_task_result(task_id, r);
             }
 
             let update = format!("✓ 任务 [{}] 状态已更新为: {:?}", task_id, new_status);
@@ -282,11 +298,11 @@ impl Tool for UpdateTaskTool {
 }
 
 pub struct ListTasksTool {
-    task_manager: Arc<RwLock<TaskManager>>,
+    task_manager: Arc<TaskManager>,
 }
 
 impl ListTasksTool {
-    pub fn new(task_manager: Arc<RwLock<TaskManager>>) -> Self {
+    pub fn new(task_manager: Arc<TaskManager>) -> Self {
         Self { task_manager }
     }
 }
@@ -323,17 +339,15 @@ impl Tool for ListTasksTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or("all");
 
-            let manager = read_lock(&self.task_manager)?;
-
             let tasks = match filter {
-                "pending" => manager.get_pending_tasks(),
-                "in_progress" => manager.get_in_progress_tasks(),
-                "completed" => manager.get_completed_tasks(),
-                "ready" => manager.get_ready_tasks(),
-                _ => manager.get_all_tasks(),
+                "pending" => self.task_manager.get_pending_tasks(),
+                "in_progress" => self.task_manager.get_in_progress_tasks(),
+                "completed" => self.task_manager.get_completed_tasks(),
+                "ready" => self.task_manager.get_ready_tasks(),
+                _ => self.task_manager.get_all_tasks(),
             };
 
-            let summary = manager.get_summary();
+            let summary = self.task_manager.get_summary();
 
             let task_list = tasks
                 .iter()
@@ -365,11 +379,11 @@ impl Tool for ListTasksTool {
 }
 
 pub struct VisualizeDependenciesTool {
-    task_manager: Arc<RwLock<TaskManager>>,
+    task_manager: Arc<TaskManager>,
 }
 
 impl VisualizeDependenciesTool {
-    pub fn new(task_manager: Arc<RwLock<TaskManager>>) -> Self {
+    pub fn new(task_manager: Arc<TaskManager>) -> Self {
         Self { task_manager }
     }
 }
@@ -396,19 +410,18 @@ impl Tool for VisualizeDependenciesTool {
         _parameters: ToolParameters,
     ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
         Box::pin(async move {
-            let manager = read_lock(&self.task_manager)?;
-            let mermaid = manager.visualize_dependencies();
+            let mermaid = self.task_manager.visualize_dependencies();
             Ok(ToolResult::success(mermaid))
         })
     }
 }
 
 pub struct GetExecutionOrderTool {
-    task_manager: Arc<RwLock<TaskManager>>,
+    task_manager: Arc<TaskManager>,
 }
 
 impl GetExecutionOrderTool {
-    pub fn new(task_manager: Arc<RwLock<TaskManager>>) -> Self {
+    pub fn new(task_manager: Arc<TaskManager>) -> Self {
         Self { task_manager }
     }
 }
@@ -435,8 +448,7 @@ impl Tool for GetExecutionOrderTool {
         _parameters: ToolParameters,
     ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
         Box::pin(async move {
-            let manager = read_lock(&self.task_manager)?;
-            match manager.get_topological_order() {
+            match self.task_manager.get_topological_order() {
                 Ok(order) => {
                     let output = order
                         .iter()

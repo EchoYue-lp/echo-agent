@@ -8,7 +8,7 @@ edition = "2024"
 
 [features]
 default = ["full"]
-full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow"]
+full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection"]
 a2a = []
 mcp = ["dep:echo_mcp"]
 sqlite = ["dep:rusqlite"]
@@ -19,6 +19,7 @@ handoff = []
 topology = []
 tasks = []
 workflow = []
+self-reflection = []
 
 [dependencies]
 echo_core = { path = "echo-core", features = ["reqwest"] }
@@ -43,6 +44,9 @@ uuid = { version = "1", features = ["v4"] }
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+dashmap = "6"
+async-trait = "0.1"
+fastrand = "2"
 opentelemetry = { version = "0.27", features = ["trace"], optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["tonic"], optional = true }

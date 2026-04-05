@@ -82,7 +82,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // ── 4. set_memory_store 也同样注册所有记忆工具 ─────────────────────────
     let config = AgentConfig::minimal("qwen3-max", "bare_agent");
-    let mut bare_agent = echo_agent::agent::react_agent::ReactAgent::new(config);
+    let mut bare_agent = echo_agent::agents::react::ReactAgent::new(config);
     assert!(!bare_agent.tool_names().contains(&"search_memory"));
 
     bare_agent.set_memory_store(Arc::new(InMemoryStore::new()));

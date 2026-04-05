@@ -10,9 +10,10 @@ impl TaskManager {
         let mut visited: HashMap<String, crate::tasks::manager::VisitState> = HashMap::new();
         let mut path: Vec<String> = Vec::new();
 
-        for task_id in self.tasks.keys() {
-            if visited.get(task_id) != Some(&crate::tasks::manager::VisitState::Visited) {
-                self.dfs_detect_cycle(task_id, &mut visited, &mut path, &mut cycles);
+        let task_ids: Vec<String> = self.tasks.iter().map(|r| r.key().clone()).collect();
+        for task_id in task_ids {
+            if visited.get(&task_id) != Some(&crate::tasks::manager::VisitState::Visited) {
+                self.dfs_detect_cycle(&task_id, &mut visited, &mut path, &mut cycles);
             }
         }
 
@@ -37,12 +38,15 @@ impl TaskManager {
         let mut in_degree: HashMap<String, usize> = HashMap::new();
         let mut adj_list: HashMap<String, Vec<String>> = HashMap::new();
 
-        for task_id in self.tasks.keys() {
+        let task_ids: Vec<String> = self.tasks.iter().map(|r| r.key().clone()).collect();
+        for task_id in &task_ids {
             in_degree.insert(task_id.clone(), 0);
             adj_list.insert(task_id.clone(), Vec::new());
         }
 
-        for (task_id, task) in &self.tasks {
+        for entry in self.tasks.iter() {
+            let task_id = entry.key();
+            let task = entry.value();
             for dep_id in &task.dependencies {
                 if let Some(adj) = adj_list.get_mut(dep_id) {
                     adj.push(task_id.clone());
@@ -89,7 +93,9 @@ impl TaskManager {
     pub fn visualize_dependencies(&self) -> String {
         let mut mermaid = String::from("graph TD\n");
 
-        for (task_id, task) in &self.tasks {
+        for entry in self.tasks.iter() {
+            let task_id = entry.key();
+            let task = entry.value();
             for dep_id in &task.dependencies {
                 mermaid.push_str(&format!(
                     "  {}[{}] --> {}[{}]\n",

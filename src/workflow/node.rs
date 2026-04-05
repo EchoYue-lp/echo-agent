@@ -48,6 +48,7 @@ where
 // ── Node ────────────────────────────────────────────────────────────────────
 
 /// 图中的节点定义
+#[allow(dead_code)]
 pub(crate) struct Node {
     /// 节点唯一名称
     pub name: String,

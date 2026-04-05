@@ -47,10 +47,13 @@
 
 // ── Graph 工作流 ────────────────────────────────────────────────────────────
 
+pub mod dsl;
 mod graph;
 pub mod loader;
 mod node;
 pub mod state;
+
+pub use dsl::StateGraph;
 
 pub use graph::{Graph, GraphBuilder, GraphResult};
 pub use loader::{ConditionDefinition, EdgeDefinition, NodeDefinition, WorkflowDefinition};

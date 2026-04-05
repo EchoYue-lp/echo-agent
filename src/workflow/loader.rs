@@ -45,7 +45,7 @@
 //! }
 //! ```
 
-use crate::agent::react_agent::builder::ReactAgentBuilder;
+use crate::agents::react::builder::ReactAgentBuilder;
 use crate::error::{AgentError, ReactError, Result};
 use crate::llm::config::LlmConfig;
 use crate::workflow::graph::{Graph, GraphBuilder};

@@ -541,7 +541,7 @@ impl A2AServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::react_agent::builder::ReactAgentBuilder;
+    use crate::agents::react::builder::ReactAgentBuilder;
 
     fn make_request(method: &str, message: &str, task_id: Option<&str>) -> String {
         let params = if let Some(id) = task_id {

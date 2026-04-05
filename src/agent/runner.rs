@@ -24,7 +24,7 @@
 //! ```
 
 use crate::agent::Agent;
-use crate::agent::react_agent::builder::ReactAgentBuilder;
+use crate::agents::react::builder::ReactAgentBuilder;
 use crate::error::Result;
 use crate::tools::Tool;
 use std::sync::Arc;
@@ -111,7 +111,7 @@ impl RunnerBuilder {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn build(self) -> Result<crate::agent::react_agent::ReactAgent> {
+    pub fn build(self) -> Result<crate::agents::react::ReactAgent> {
         self.inner.build()
     }
 }
