@@ -1,0 +1,20 @@
+[package]
+name = "echo_channels"
+version = "1.0.0"
+edition = "2024"
+description = "IM channel plugins for echo-agent (QQ Bot, Feishu, etc.)"
+
+[dependencies]
+echo_core = { path = "../echo-core" }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+dashmap = "6"
+chrono = { version = "0.4", features = ["serde"] }
+axum = "0.7"

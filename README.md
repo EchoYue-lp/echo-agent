@@ -2,10 +2,10 @@
 
 # echo-agent
 
-**A composable, production-ready AI Agent framework for Rust**
+**A Composable, Production-Ready AI Agent Framework for Rust**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)](https://github.com/your-org/echo-agent)
+[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)](https://github.com/your-org/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
@@ -20,7 +20,7 @@ Build autonomous AI agents with Rust's **memory safety**, **zero-cost abstractio
 
 ## Why echo-agent?
 
-Most AI agent frameworks are written in Python. **echo-agent** brings the full power of a modern agent framework to Rust — matching feature parity with LangGraph, CrewAI, and AutoGen while delivering the performance and reliability only Rust can offer.
+Most AI agent frameworks are built in Python. **echo-agent** brings the full power of a modern Agent framework to Rust — matching feature parity with LangGraph, CrewAI, and AutoGen while delivering the performance, reliability, and type safety only Rust can offer.
 
 ```rust
 use echo_agent::prelude::*;
@@ -45,21 +45,31 @@ async fn main() -> Result<()> {
 }
 ```
 
+**Go further** — deploy your agent on QQ, Feishu, or any IM platform with just a few lines:
+
+```rust
+let mut manager = ChannelManager::new();
+manager.register(Box::new(QqChannel::new(qq_config)?));
+manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+manager.start_all(handler).await?;  // done — your agent now lives in IM
+```
+
 ---
 
 ## Highlights
 
-- **30+ capabilities** — ReAct loop, tools, memory, streaming, multi-agent, skills, MCP, guards, audit, and more
-- **39 runnable examples** — every feature has a demo you can `cargo run` immediately
+- **40+ capabilities** — ReAct loop, tools, memory, streaming, multi-agent, skills, MCP, IM channels, guards, audit, and more
+- **40 runnable examples** — every feature has a demo you can `cargo run` immediately
 - **350+ unit tests** — comprehensive coverage across all modules
-- **5 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
+- **6 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
+- **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
 - **Unified retry** — one `RetryPolicy` for all external calls (LLM, MCP, A2A, sandbox)
 
 ---
 
-## Features
+## Feature Matrix
 
 | Capability | Description |
 |------------|-------------|
@@ -89,10 +99,46 @@ async fn main() -> Result<()> {
 | 🌐 **A2A Protocol** | Agent Card publishing and cross-framework collaboration |
 | 🏖️ **Sandbox** | Local / Docker / K8s code execution with resource limits |
 | 🔗 **Graph Workflow** | Directed graph: linear, conditional, loop, parallel fan-out/fan-in |
+| 💬 **IM Channels** | QQ Bot (WebSocket) & Feishu (Webhook) — plug your agent into IM |
 
 ---
 
-## What's New in v1.1.0
+## What's New in v1.2.0
+
+### IM Channel Integration
+
+Connect your Agent to real-world messaging platforms:
+
+```rust
+// QQ Bot — WebSocket gateway
+let qq = QqChannel::new(QqConfig {
+    app_id, client_secret,
+})?;
+
+// Feishu — HTTP webhook
+let feishu = FeishuChannel::new(FeishuConfig {
+    app_id, app_secret,
+    webhook_bind: "0.0.0.0:8080",
+    webhook_path: "/webhook",
+    verification_token: None,
+})?;
+
+let mut manager = ChannelManager::new();
+manager.register(Box::new(qq));
+manager.register(Box::new(feishu));
+manager.start_all(handler).await?;
+```
+
+Features:
+- **Unified `ChannelPlugin` interface** — add new platforms by implementing one trait
+- **Automatic token management** — OAuth caching and refresh, no manual handling
+- **WebSocket reconnection** — exponential backoff, never drops silently
+- **Message queuing** — async `mpsc` channel prevents lost messages under load
+- **Whitelist support** — `ChatConfig::with_allow_from()` for access control
+
+---
+
+## v1.1.0
 
 ### Agent Directory Restructuring + StateGraph DSL
 
@@ -110,10 +156,8 @@ Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → Deni
 - **Audit Trail**: `PermissionAuditSink` trait + InMemory/Logging/Composite implementations
 - **ProtectedPathChecker**: `.git`/`.env`/`.ssh` always protected
 - **AI Classifier**: RuleClassifier/LlmClassifier/CompositeClassifier for Auto mode
-- **Enhanced ClassifierContext**: workspace/project_type/recent_files/RiskContext
 - **DenialTracker**: auto-fallback after consecutive denials
 - **PermissionMode**: Default/Plan/Auto/AcceptEdits/BypassPermissions/DontAsk/Bubble
-- **Managed rules**: enterprise admin, users cannot override
 
 ### Subagent System
 
@@ -145,7 +189,6 @@ let msg = Message::user_with_image(
     "image/png",
     base64_data,
 );
-// Also: Message::user_with_image_url(), Message::user_multimodal()
 ```
 
 ### Declarative Workflow (YAML/JSON)
@@ -189,25 +232,6 @@ let policy = RetryPolicy::new(3, Duration::from_millis(500))
     .jitter(true);
 
 let response = with_retry(&policy, || llm_client.chat(request)).await?;
-
-// Skip non-retryable errors:
-let response = with_retry_if(&policy, || mcp.call(tool), |e| e.is_transient()).await?;
-```
-
-### Workflow Streaming
-
-Get real-time events as your graph executes:
-
-```rust
-let mut stream = graph.run_stream(state).await?;
-while let Some(event) = stream.next().await {
-    match event? {
-        WorkflowEvent::NodeStart { node_name, .. } => println!("▶ {node_name}"),
-        WorkflowEvent::NodeEnd { node_name, elapsed, .. } => println!("✓ {node_name} ({elapsed:?})"),
-        WorkflowEvent::Completed { result, .. } => println!("Done: {result}"),
-        _ => {}
-    }
-}
 ```
 
 ### Dynamic Tool Management
@@ -215,26 +239,9 @@ while let Some(event) = stream.next().await {
 Swap tools mid-conversation for multi-phase tasks:
 
 ```rust
-// Research phase
 agent.add_tool(Box::new(SearchWebTool));
-
-// Switch to execution phase
 agent.remove_tool("search_web");
-agent.add_tool(Box::new(ExecuteCodeTool));
-
-// Hot-swap a tool implementation
 agent.replace_tool(Box::new(SaferExecuteCodeTool));
-```
-
-### Token Budget Control
-
-Prevent tool output from blowing up your context window:
-
-```rust
-let agent = ReactAgentBuilder::new()
-    .model("qwen3-max")
-    .max_tool_output_tokens(2000)   // auto-truncate oversized tool output
-    .build()?;
 ```
 
 ---
@@ -247,8 +254,9 @@ echo-agent/
 ├── echo-macros/       Procedural macros (#[tool], #[callback], #[guard], #[handler], etc.)
 ├── echo-providers/    LLM provider implementations (OpenAI, Anthropic, Ollama)
 ├── echo-mcp/          MCP protocol client (stdio, SSE, HTTP transports)
+├── echo-channels/     IM channel plugins (QQ Bot, Feishu)
 ├── src/               Main crate — agent engine, memory, skills, tools, workflow, and more
-├── examples/          39 runnable demo programs
+├── examples/          40 runnable demo programs
 ├── docs/              Bilingual documentation (en + zh)
 └── skills/            External skill packs (Markdown-based)
 
@@ -289,6 +297,9 @@ cargo run --example demo01_tools
 cargo run --example demo25_macros
 cargo run --example demo34_workflow_stream
 cargo run --example demo36_multimodal
+
+# IM channels (requires env vars)
+cargo run --example demo38_im_channels --features channels
 ```
 
 ---
@@ -383,9 +394,9 @@ async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardR
 let mut stream = agent.execute_stream("Explain quantum entanglement").await?;
 while let Some(event) = stream.next().await {
     match event? {
-        AgentEvent::Token(t)           => print!("{t}"),
-        AgentEvent::ToolCall { name, ..} => println!("\n[→ {name}]"),
-        AgentEvent::FinalAnswer(a)     => { println!("\n{a}"); break; }
+        AgentEvent::Token(t)            => print!("{t}"),
+        AgentEvent::ToolCall { name, .. } => println!("\n[→ {name}]"),
+        AgentEvent::FinalAnswer(a)      => { println!("\n{a}"); break; }
         _ => {}
     }
 }
@@ -400,6 +411,14 @@ let tools = mcp.connect(McpServerConfig::stdio(
     "npx", vec!["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
 )).await?;
 agent.add_tools(tools);
+```
+
+### 8. IM Channels — deploy to messaging platforms
+
+```rust
+let mut manager = ChannelManager::new();
+manager.register(Box::new(QqChannel::new(qq_config)?));
+manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
 ```
 
 ---
@@ -460,7 +479,8 @@ agent.add_tools(tools);
 | [`demo34_workflow_stream`](examples/demo34_workflow_stream.rs) | **Workflow streaming events** |
 | [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | **Dynamic tool registration** |
 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | **Multi-modal messages** |
-| [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | **Declarative YAML/JSON workflow** |
+| [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | **Declarative YAML/JSON workflows** |
+| [`demo38_im_channels`](examples/demo38_im_channels.rs) | **IM platform integration (QQ + Feishu)** |
 
 ---
 
@@ -495,6 +515,7 @@ Full docs in [`docs/`](./docs/):
 - [Streaming](docs/en/10-streaming.md)
 - [Structured Output](docs/en/11-structured-output.md)
 - [Mock Testing](docs/en/12-mock.md)
+- [IM Channels](docs/en/15-im-channels.md)
 
 ---
 

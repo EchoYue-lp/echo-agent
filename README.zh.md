@@ -5,7 +5,7 @@
 **为 Rust 打造的可组合、生产级 AI Agent 开发框架**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)](https://github.com/your-org/echo-agent)
+[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)](https://github.com/your-org/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20兼容-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
@@ -45,15 +45,25 @@ async fn main() -> Result<()> {
 }
 ```
 
+**更进一步**——只需几行代码，将 Agent 部署到 QQ、飞书等 IM 平台：
+
+```rust
+let mut manager = ChannelManager::new();
+manager.register(Box::new(QqChannel::new(qq_config)?));
+manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+manager.start_all(handler).await?;  // 完成 —— 你的 Agent 已在 IM 中运行
+```
+
 ---
 
 ## 亮点
 
-- **30+ 项能力** —— ReAct 循环、工具、记忆、流式、多 Agent、技能、MCP、护栏、审计等
-- **39 个可运行示例** —— 每个功能都有对应 demo，`cargo run` 即可体验
+- **40+ 项能力** —— ReAct 循环、工具、记忆、流式、多 Agent、技能、MCP、IM 通道、护栏、审计等
+- **40 个可运行示例** —— 每个功能都有对应 demo，`cargo run` 即可体验
 - **350+ 单元测试** —— 覆盖所有模块
-- **5 个 crate，1 行导入** —— 模块化 workspace，但 `use echo_agent::prelude::*` 就够了
+- **6 个 crate，1 行导入** —— 模块化 workspace，但 `use echo_agent::prelude::*` 就够了
 - **多模态支持** —— 文本、图片（base64 / URL）、文件附件可在同一条消息中混合使用
+- **IM 平台接入** —— QQ Bot（WebSocket）和飞书（Webhook）开箱即用
 - **声明式工作流** —— 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
 - **统一重试** —— 一套 `RetryPolicy` 统管所有外部调用（LLM、MCP、A2A、沙箱）
 
@@ -89,6 +99,42 @@ async fn main() -> Result<()> {
 | 🌐 **A2A 协议** | Agent Card 发布 / 跨框架协作 |
 | 🏖️ **沙箱执行** | Local / Docker / K8s 代码执行，支持资源限制 |
 | 🔗 **图工作流** | 有向图：线性、条件分支、循环、并行 fan-out/fan-in |
+| 💬 **IM 通道** | QQ Bot（WebSocket）和飞书（Webhook）—— 将 Agent 接入即时通讯 |
+
+---
+
+## v1.2.0 新功能
+
+### IM 通道集成
+
+将你的 Agent 接入真实消息平台：
+
+```rust
+// QQ Bot —— WebSocket Gateway
+let qq = QqChannel::new(QqConfig {
+    app_id, client_secret,
+})?;
+
+// 飞书 —— HTTP Webhook
+let feishu = FeishuChannel::new(FeishuConfig {
+    app_id, app_secret,
+    webhook_bind: "0.0.0.0:8080",
+    webhook_path: "/webhook",
+    verification_token: None,
+})?;
+
+let mut manager = ChannelManager::new();
+manager.register(Box::new(qq));
+manager.register(Box::new(feishu));
+manager.start_all(handler).await?;
+```
+
+特性：
+- **统一 `ChannelPlugin` 接口** —— 实现一个 trait 即可接入新平台
+- **自动 Token 管理** —— OAuth 缓存 + 刷新，无需手动处理
+- **WebSocket 自动重连** —— 指数退避，永不断线
+- **消息队列** —— 异步 `mpsc` 通道，高负载下不丢消息
+- **白名单支持** —— `ChatConfig::with_allow_from()` 实现访问控制
 
 ---
 
@@ -112,7 +158,6 @@ Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → Deni
 - **AI 分类器**：RuleClassifier/LlmClassifier/CompositeClassifier
 - **DenialTracker**：连续拒绝自动回退
 - **PermissionMode**：Default/Plan/Auto/AcceptEdits/BypassPermissions/DontAsk/Bubble
-- **Managed 规则**：企业管理员设置，用户不可覆盖
 
 ### Subagent 子代理系统
 
@@ -144,7 +189,6 @@ let msg = Message::user_with_image(
     "image/png",
     base64_data,
 );
-// 另有: Message::user_with_image_url(), Message::user_multimodal()
 ```
 
 ### 声明式工作流（YAML/JSON）
@@ -188,25 +232,6 @@ let policy = RetryPolicy::new(3, Duration::from_millis(500))
     .jitter(true);
 
 let response = with_retry(&policy, || llm_client.chat(request)).await?;
-
-// 跳过不可恢复的错误：
-let response = with_retry_if(&policy, || mcp.call(tool), |e| e.is_transient()).await?;
-```
-
-### 工作流流式输出
-
-图执行过程中实时获取事件：
-
-```rust
-let mut stream = graph.run_stream(state).await?;
-while let Some(event) = stream.next().await {
-    match event? {
-        WorkflowEvent::NodeStart { node_name, .. } => println!("▶ {node_name}"),
-        WorkflowEvent::NodeEnd { node_name, elapsed, .. } => println!("✓ {node_name} ({elapsed:?})"),
-        WorkflowEvent::Completed { result, .. } => println!("完成: {result}"),
-        _ => {}
-    }
-}
 ```
 
 ### 动态工具管理
@@ -214,26 +239,9 @@ while let Some(event) = stream.next().await {
 对话中途按阶段切换工具集：
 
 ```rust
-// 研究阶段
 agent.add_tool(Box::new(SearchWebTool));
-
-// 切换到执行阶段
 agent.remove_tool("search_web");
-agent.add_tool(Box::new(ExecuteCodeTool));
-
-// 热替换工具实现
 agent.replace_tool(Box::new(SaferExecuteCodeTool));
-```
-
-### Token 预算管控
-
-防止工具输出撑爆上下文窗口：
-
-```rust
-let agent = ReactAgentBuilder::new()
-    .model("qwen3-max")
-    .max_tool_output_tokens(2000)   // 超限自动截断
-    .build()?;
 ```
 
 ---
@@ -246,8 +254,9 @@ echo-agent/
 ├── echo-macros/       过程宏（#[tool]、#[callback]、#[guard]、#[handler] 等）
 ├── echo-providers/    LLM 提供方实现（OpenAI、Anthropic、Ollama）
 ├── echo-mcp/          MCP 协议客户端（stdio、SSE、HTTP 传输）
+├── echo-channels/     IM 通道插件（QQ Bot、飞书）
 ├── src/               主 crate —— Agent 引擎、记忆、技能、工具、工作流等
-├── examples/          39 个可运行示例
+├── examples/          40 个可运行示例
 ├── docs/              双语文档（en + zh）
 └── skills/            外部技能包（Markdown 格式）
 
@@ -288,6 +297,9 @@ cargo run --example demo01_tools
 cargo run --example demo25_macros
 cargo run --example demo34_workflow_stream
 cargo run --example demo36_multimodal
+
+# IM 通道（需配置环境变量）
+cargo run --example demo38_im_channels --features channels
 ```
 
 ---
@@ -401,6 +413,14 @@ let tools = mcp.connect(McpServerConfig::stdio(
 agent.add_tools(tools);
 ```
 
+### 8. IM 通道 —— 部署到消息平台
+
+```rust
+let mut manager = ChannelManager::new();
+manager.register(Box::new(QqChannel::new(qq_config)?));
+manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
+```
+
 ---
 
 ## 宏速查
@@ -460,6 +480,7 @@ agent.add_tools(tools);
 | [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | **动态工具注册/注销** |
 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | **多模态消息** |
 | [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | **YAML/JSON 声明式工作流** |
+| [`demo38_im_channels`](examples/demo38_im_channels.rs) | **IM 平台接入（QQ + 飞书）** |
 
 ---
 
@@ -482,7 +503,7 @@ agent.add_tools(tools);
 
 完整文档位于 [`docs/`](./docs/)：
 
-**中文**（[`docs/zh/`](./docs/zh/)）
+**中文**（[`docs/zh/`](./docs/zh/README.md)）
 
 - [ReAct Agent](docs/zh/01-react-agent.md)
 - [工具系统](docs/zh/02-tools.md)
@@ -496,6 +517,7 @@ agent.add_tools(tools);
 - [流式输出](docs/zh/10-streaming.md)
 - [结构化输出](docs/zh/11-structured-output.md)
 - [Mock 测试](docs/zh/12-mock.md)
+- [IM 通道](docs/zh/15-im-channels.md)
 
 **English**（[`docs/en/`](./docs/en/README.md)）
 
