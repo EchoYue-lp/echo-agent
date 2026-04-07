@@ -115,6 +115,9 @@ pub struct ContextManager {
     /// Any message whose content contains one of these markers is excluded from compression.
     /// Used by the skill system to protect activated skill instructions.
     protected_markers: Vec<String>,
+    /// 硬性消息数量上限。超过时触发 sliding window 降级，防止 OOM。
+    /// 默认 200 条。
+    max_messages: usize,
 }
 
 impl ContextManager {
@@ -124,12 +127,43 @@ impl ContextManager {
             compressor: None,
             initial_messages: Vec::new(),
             tokenizer: None,
+            max_messages: None,
         }
     }
 
-    /// 追加一条消息到上下文缓冲区
+    /// 追加一条消息到上下文缓冲区。
+    ///
+    /// 当消息数超过 `max_messages` 硬性上限时，自动应用 sliding window 降级：
+    /// 保留 system 消息和最近的消息，丢弃中间最早的对话消息。
+    /// 这是最后的防线，即使压缩器未配置或压缩失败也不会 OOM。
     pub fn push(&mut self, message: Message) {
         self.messages.push(message);
+
+        // 硬性上限降级：超过 max_messages 时应用 sliding window
+        if self.messages.len() > self.max_messages {
+            self.apply_hard_cap();
+        }
+    }
+
+    /// 应用硬性消息上限：保留 system 消息和最近的消息，丢弃中间最早的。
+    fn apply_hard_cap(&mut self) {
+        let target = self.max_messages;
+        if self.messages.len() <= target {
+            return;
+        }
+
+        let excess = self.messages.len() - target;
+        // 找到第一条非 system 消息的位置
+        let first_non_system = self.messages.iter().position(|m| m.role != "system").unwrap_or(0);
+        // 从 first_non_system 开始删除 excess 条消息
+        let remove_end = (first_non_system + excess).min(self.messages.len());
+        tracing::warn!(
+            total = self.messages.len(),
+            cap = target,
+            evicted = remove_end - first_non_system,
+            "📦 消息数超过硬性上限，应用 sliding window 降级"
+        );
+        self.messages.drain(first_non_system..remove_end);
     }
 
     /// 批量追加消息
@@ -140,6 +174,13 @@ impl ContextManager {
     /// 返回当前缓冲区中的所有消息（不做压缩）
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// 替换内部消息缓冲区（用于从持久化存储恢复对话）
+    ///
+    /// 消息应包含 system prompt 作为第一条（如需要）。
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
     }
 
     /// 估算当前上下文的 token 数
@@ -376,6 +417,7 @@ pub struct ContextManagerBuilder {
     compressor: Option<Box<dyn ContextCompressor>>,
     initial_messages: Vec<Message>,
     tokenizer: Option<Arc<dyn Tokenizer>>,
+    max_messages: Option<usize>,
 }
 
 impl ContextManagerBuilder {
@@ -410,6 +452,14 @@ impl ContextManagerBuilder {
         self
     }
 
+    /// 设置消息数量硬性上限（默认 200）。
+    ///
+    /// 超过此上限时自动应用 sliding window 降级，保留 system 消息和最近的消息。
+    pub fn max_messages(mut self, max: usize) -> Self {
+        self.max_messages = Some(max);
+        self
+    }
+
     pub fn build(self) -> ContextManager {
         ContextManager {
             messages: self.initial_messages,
@@ -419,6 +469,7 @@ impl ContextManagerBuilder {
                 .tokenizer
                 .unwrap_or_else(|| Arc::new(HeuristicTokenizer)),
             protected_markers: Vec::new(),
+            max_messages: self.max_messages.unwrap_or(200),
         }
     }
 }

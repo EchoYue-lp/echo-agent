@@ -18,7 +18,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 /// A2A 服务端
@@ -34,7 +34,7 @@ use tracing::{info, warn};
 pub struct A2AServer {
     card: AgentCard,
     agent: Arc<Mutex<Box<dyn Agent>>>,
-    tasks: Arc<Mutex<HashMap<String, A2ATask>>>,
+    tasks: Arc<RwLock<HashMap<String, A2ATask>>>,
 }
 
 impl A2AServer {
@@ -42,7 +42,7 @@ impl A2AServer {
         Self {
             card,
             agent: Arc::new(Mutex::new(Box::new(agent))),
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -50,7 +50,7 @@ impl A2AServer {
         Self {
             card,
             agent: Arc::new(Mutex::new(agent)),
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -164,7 +164,7 @@ impl A2AServer {
             artifacts: Vec::new(),
         };
         {
-            let mut tasks = self.tasks.lock().await;
+            let mut tasks = self.tasks.write().await;
             tasks.insert(task_id.clone(), initial_task);
         }
 
@@ -274,7 +274,7 @@ impl A2AServer {
                     );
 
                     {
-                        let mut store = tasks.lock().await;
+                        let mut store = tasks.write().await;
                         if let Some(task) = store.get_mut(&task_id) {
                             task.status = completed_status.clone();
                             task.history.push(result_message);
@@ -353,7 +353,7 @@ impl A2AServer {
         };
 
         {
-            let mut tasks = self.tasks.lock().await;
+            let mut tasks = self.tasks.write().await;
             tasks.insert(task_id.clone(), task);
         }
 
@@ -387,7 +387,7 @@ impl A2AServer {
                 };
 
                 {
-                    let mut tasks = self.tasks.lock().await;
+                    let mut tasks = self.tasks.write().await;
                     tasks.insert(task_id.clone(), completed_task.clone());
                 }
 
@@ -413,7 +413,7 @@ impl A2AServer {
                 };
 
                 {
-                    let mut tasks = self.tasks.lock().await;
+                    let mut tasks = self.tasks.write().await;
                     tasks.insert(task_id.clone(), failed_task);
                 }
 
@@ -448,7 +448,7 @@ impl A2AServer {
             }
         };
 
-        let tasks = self.tasks.lock().await;
+        let tasks = self.tasks.read().await;
         match tasks.get(&task_id) {
             Some(task) => A2ATaskResponse {
                 jsonrpc: "2.0".to_string(),
@@ -486,7 +486,7 @@ impl A2AServer {
             }
         };
 
-        let mut tasks = self.tasks.lock().await;
+        let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(&task_id) {
             if task.status.state.is_terminal() {
                 return A2ATaskResponse {
@@ -526,12 +526,12 @@ impl A2AServer {
     // ── 内部辅助 ─────────────────────────────────────────────────────────────
 
     async fn update_task_state(
-        tasks: &Arc<Mutex<HashMap<String, A2ATask>>>,
+        tasks: &Arc<RwLock<HashMap<String, A2ATask>>>,
         task_id: &str,
         state: TaskState,
         status: Option<&A2ATaskStatus>,
     ) {
-        let mut store = tasks.lock().await;
+        let mut store = tasks.write().await;
         if let Some(task) = store.get_mut(task_id) {
             task.status = status.cloned().unwrap_or_else(|| A2ATaskStatus::new(state));
         }

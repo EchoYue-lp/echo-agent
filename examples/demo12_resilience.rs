@@ -3,11 +3,16 @@
 use echo_agent::agent::{Agent, AgentCallback};
 use echo_agent::error::ReactError;
 use echo_agent::prelude::*;
-use echo_agent::tools::others::math::AddTool;
+use echo_agent::tool;
 use echo_agent::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[tool(name = "add", description = "两数相加")]
+async fn add(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {

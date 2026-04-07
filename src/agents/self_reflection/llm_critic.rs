@@ -130,7 +130,7 @@ impl Critic for LlmCritic {
             let response = llm::chat(
                 self.client.clone(),
                 &self.model,
-                messages,
+                &messages,
                 Some(0.3),
                 Some(2048u32),
                 Some(false),

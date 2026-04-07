@@ -446,25 +446,33 @@ impl ReactAgent {
         // ── PreToolUse hooks（审批前执行，允许 hook 拦截或修改参数）──
         let mut effective_params = params;
         let mut hook_modified_input = input.clone();
-        {
+        let has_hooks = {
             let hook_reg = self.hook_registry.read().await;
-            if !hook_reg.is_empty() {
-                let hook_result = hook_reg.run_pre_tool_use(tool_name, input).await;
+            !hook_reg.is_empty()
+        };
+        if has_hooks {
+            // Clone registry to release lock BEFORE awaiting hooks.
+            // Prevents deadlock when hook triggers nested tool calls
+            // that re-enter execute_tool and try to acquire the same RwLock.
+            let hook_reg = {
+                let guard = self.hook_registry.read().await;
+                guard.clone()
+            };
+            let hook_result = hook_reg.run_pre_tool_use(tool_name, input).await;
 
-                if hook_result.block {
-                    let reason = hook_result
-                        .block_reason
-                        .unwrap_or_else(|| "blocked by skill hook".into());
-                    info!(agent = %agent, tool = %tool_name, reason = %reason, "Hook blocked tool");
-                    return Ok(format!("Tool {} blocked by hook: {}", tool_name, reason));
-                }
+            if hook_result.block {
+                let reason = hook_result
+                    .block_reason
+                    .unwrap_or_else(|| "blocked by skill hook".into());
+                info!(agent = %agent, tool = %tool_name, reason = %reason, "Hook blocked tool");
+                return Ok(format!("Tool {} blocked by hook: {}", tool_name, reason));
+            }
 
-                if let Some(updated) = hook_result.updated_input {
-                    hook_modified_input = updated.clone();
-                    if let Value::Object(map) = &updated {
-                        effective_params =
-                            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    }
+            if let Some(updated) = hook_result.updated_input {
+                hook_modified_input = updated.clone();
+                if let Value::Object(map) = &updated {
+                    effective_params =
+                        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 }
             }
         }
@@ -489,13 +497,19 @@ impl ReactAgent {
             .await?;
 
         // ── PostToolUse hooks ──
-        {
+        let is_hook_post = {
             let hook_reg = self.hook_registry.read().await;
-            if !hook_reg.is_empty() {
-                let _post_result = hook_reg
-                    .run_post_tool_use(tool_name, input, &result.output)
-                    .await;
-            }
+            !hook_reg.is_empty()
+        };
+        if is_hook_post {
+            // Clone registry to release lock BEFORE awaiting hooks (prevent deadlock).
+            let hook_reg = {
+                let guard = self.hook_registry.read().await;
+                guard.clone()
+            };
+            let _post_result = hook_reg
+                .run_post_tool_use(tool_name, input, &result.output)
+                .await;
         }
 
         if result.success {
@@ -617,10 +631,24 @@ impl ReactAgent {
         let model_name = self.config.model_name.clone();
         let response_format = self.config.response_format.clone();
 
+        // 熔断器检查：LLM 服务持续不可用时快速失败
+        let circuit_breaker = self.circuit_breaker.clone();
+        if let Some(cb) = &circuit_breaker {
+            if cb.is_open() {
+                warn!(agent = %agent, "🔴 熔断器已开启，跳过 LLM 请求");
+                return Err(ReactError::Agent(AgentError::InitializationFailed(
+                    "LLM service unavailable (circuit breaker open)".to_string(),
+                )));
+            }
+        }
+
         let mut response_result: Result<_> = Err(ReactError::Agent(AgentError::NoResponse));
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let delay_ms = retry_delay * (1u64 << (attempt - 1).min(5));
+                // Exponential backoff with jitter: base * 2^(attempt-1) + rand(0..base/2)
+                let base_delay = retry_delay * (1u64 << (attempt - 1).min(5));
+                let jitter = fastrand::u64(0..=base_delay / 2);
+                let delay_ms = base_delay + jitter;
                 warn!(
                     agent = %agent,
                     attempt = attempt,
@@ -633,7 +661,7 @@ impl ReactAgent {
             response_result = chat(
                 client.clone(),
                 model_name.as_str(),
-                messages.clone(),
+                &messages,
                 Some(0.7),
                 Some(8192u32),
                 Some(false),
@@ -653,6 +681,15 @@ impl ReactAgent {
                     warn!(agent = %agent, error = %e, "LLM 可重试错误");
                 }
                 Err(_) => break,
+            }
+        }
+
+        // 更新熔断器状态
+        if let Some(cb) = &circuit_breaker {
+            if response_result.is_ok() {
+                cb.record_success();
+            } else {
+                cb.record_failure();
             }
         }
 

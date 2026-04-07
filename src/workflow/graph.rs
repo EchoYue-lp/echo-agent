@@ -27,7 +27,7 @@
 //! # async fn example() -> echo_agent::error::Result<()> {
 //! let graph = GraphBuilder::new("my_workflow")
 //!     .add_function_node("start", |state| Box::pin(async move {
-//!         state.set("greeting", "Hello, World!");
+//!         let _ = state.set("greeting", "Hello, World!");
 //!         Ok(())
 //!     }))
 //!     .add_function_node("end", |state| Box::pin(async move {
@@ -920,7 +920,7 @@ impl Graph {
         // Apply state updates to the checkpoint before resuming
         let state = checkpoint.restore_state()?;
         for (key, value) in &state_updates {
-            state.set(key, value.clone());
+            let _ = state.set(key, value.clone());
         }
 
         // Create a modified checkpoint with updated state
@@ -1138,21 +1138,21 @@ mod tests {
         let graph = GraphBuilder::new("linear")
             .add_function_node("a", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("x", 1i64);
+                    let _ = state.set("x", 1i64);
                     Ok(())
                 })
             })
             .add_function_node("b", |state: &SharedState| {
                 Box::pin(async move {
                     let x: i64 = state.get("x").unwrap();
-                    state.set("x", x + 10);
+                    let _ = state.set("x", x + 10);
                     Ok(())
                 })
             })
             .add_function_node("c", |state: &SharedState| {
                 Box::pin(async move {
                     let x: i64 = state.get("x").unwrap();
-                    state.set("x", x * 2);
+                    let _ = state.set("x", x * 2);
                     Ok(())
                 })
             })
@@ -1182,13 +1182,13 @@ mod tests {
             })
             .add_function_node("pass", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("result", "passed");
+                    let _ = state.set("result", "passed");
                     Ok(())
                 })
             })
             .add_function_node("fail", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("result", "failed");
+                    let _ = state.set("result", "failed");
                     Ok(())
                 })
             })
@@ -1210,7 +1210,7 @@ mod tests {
 
         // 测试通过路径
         let state = SharedState::new();
-        state.set("score", 80i64);
+        let _ = state.set("score", 80i64);
         let result = graph.run(state).await.unwrap();
         assert_eq!(
             result.state.get::<String>("result"),
@@ -1220,7 +1220,7 @@ mod tests {
 
         // 测试失败路径
         let state = SharedState::new();
-        state.set("score", 40i64);
+        let _ = state.set("score", 40i64);
         let result = graph.run(state).await.unwrap();
         assert_eq!(
             result.state.get::<String>("result"),
@@ -1235,14 +1235,14 @@ mod tests {
         let graph = GraphBuilder::new("loop")
             .add_function_node("init", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("counter", 0i64);
+                    let _ = state.set("counter", 0i64);
                     Ok(())
                 })
             })
             .add_function_node("increment", |state: &SharedState| {
                 Box::pin(async move {
                     let c: i64 = state.get("counter").unwrap();
-                    state.set("counter", c + 1);
+                    let _ = state.set("counter", c + 1);
                     Ok(())
                 })
             })
@@ -1277,21 +1277,21 @@ mod tests {
         let graph = GraphBuilder::new("parallel")
             .add_function_node("start", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("input", "hello");
+                    let _ = state.set("input", "hello");
                     Ok(())
                 })
             })
             .add_function_node("upper", |state: &SharedState| {
                 Box::pin(async move {
                     let s: String = state.get("input").unwrap();
-                    state.set("upper_result", s.to_uppercase());
+                    let _ = state.set("upper_result", s.to_uppercase());
                     Ok(())
                 })
             })
             .add_function_node("length", |state: &SharedState| {
                 Box::pin(async move {
                     let s: String = state.get("input").unwrap();
-                    state.set("length_result", s.len() as i64);
+                    let _ = state.set("length_result", s.len() as i64);
                     Ok(())
                 })
             })
@@ -1299,7 +1299,7 @@ mod tests {
                 Box::pin(async move {
                     let u: String = state.get("upper_result").unwrap();
                     let l: i64 = state.get("length_result").unwrap();
-                    state.set("final", format!("{u} (len={l})"));
+                    let _ = state.set("final", format!("{u} (len={l})"));
                     Ok(())
                 })
             })
@@ -1326,7 +1326,7 @@ mod tests {
         let graph = GraphBuilder::new("end_test")
             .add_function_node("only", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("done", true);
+                    let _ = state.set("done", true);
                     Ok(())
                 })
             })
@@ -1395,7 +1395,7 @@ mod tests {
         let graph = GraphBuilder::new("agent_graph")
             .add_function_node("prepare", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("task", "What is 2+2?");
+                    let _ = state.set("task", "What is 2+2?");
                     Ok(())
                 })
             })
@@ -1403,7 +1403,7 @@ mod tests {
             .add_function_node("verify", |state: &SharedState| {
                 Box::pin(async move {
                     let answer: String = state.get("answer").unwrap();
-                    state.set("verified", !answer.is_empty());
+                    let _ = state.set("verified", !answer.is_empty());
                     Ok(())
                 })
             })
@@ -1434,14 +1434,14 @@ mod tests {
         let graph = GraphBuilder::new("stream_linear")
             .add_function_node("a", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("x", 1i64);
+                    let _ = state.set("x", 1i64);
                     Ok(())
                 })
             })
             .add_function_node("b", |state: &SharedState| {
                 Box::pin(async move {
                     let x: i64 = state.get("x").unwrap();
-                    state.set("result", format!("x={}", x));
+                    let _ = state.set("result", format!("x={}", x));
                     Ok(())
                 })
             })
@@ -1490,19 +1490,19 @@ mod tests {
         let graph = GraphBuilder::new("stream_parallel")
             .add_function_node("start", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("val", "ok");
+                    let _ = state.set("val", "ok");
                     Ok(())
                 })
             })
             .add_function_node("b1", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("b1_done", true);
+                    let _ = state.set("b1_done", true);
                     Ok(())
                 })
             })
             .add_function_node("b2", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("b2_done", true);
+                    let _ = state.set("b2_done", true);
                     Ok(())
                 })
             })
@@ -1510,7 +1510,7 @@ mod tests {
                 Box::pin(async move {
                     let b1: bool = state.get("b1_done").unwrap_or(false);
                     let b2: bool = state.get("b2_done").unwrap_or(false);
-                    state.set("result", format!("b1={b1},b2={b2}"));
+                    let _ = state.set("result", format!("b1={b1},b2={b2}"));
                     Ok(())
                 })
             })
@@ -1556,13 +1556,13 @@ mod tests {
             })
             .add_function_node("yes", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("result", "took_yes_path");
+                    let _ = state.set("result", "took_yes_path");
                     Ok(())
                 })
             })
             .add_function_node("no", |state: &SharedState| {
                 Box::pin(async move {
-                    state.set("result", "took_no_path");
+                    let _ = state.set("result", "took_no_path");
                     Ok(())
                 })
             })
@@ -1583,7 +1583,7 @@ mod tests {
             .unwrap();
 
         let state = SharedState::new();
-        state.set("flag", true);
+        let _ = state.set("flag", true);
         let mut stream = graph.run_stream(state).await.unwrap();
 
         let mut visited = Vec::new();

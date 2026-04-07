@@ -35,11 +35,14 @@ pub fn assemble_req_header(model: &ModelConfig) -> Result<HeaderMap> {
 }
 
 /// 同步聊天请求（独立函数，使用环境变量配置）
+///
+/// `messages` 接受切片引用，调用方无需在重试循环中重复 clone 整个消息列表。
+/// 内部按需转换为 owned Vec，开销固定为单次 clone。
 #[allow(clippy::too_many_arguments)]
 pub async fn chat(
     client: Arc<Client>,
     model_name: &str,
-    messages: Vec<Message>,
+    messages: &[Message],
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     stream: Option<bool>,
@@ -50,7 +53,7 @@ pub async fn chat(
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
         model: model.model.clone(),
-        messages,
+        messages: messages.to_vec(),
         temperature,
         max_tokens,
         stream,
@@ -232,7 +235,7 @@ impl LlmClient for DefaultLlmClient {
             let raw = chat(
                 self.client.clone(),
                 &self.model_name,
-                request.messages,
+                &request.messages,
                 request.temperature,
                 request.max_tokens,
                 None,
@@ -286,7 +289,7 @@ impl LlmClient for DefaultLlmClient {
             let response = chat(
                 self.client.clone(),
                 &self.model_name,
-                messages,
+                &messages,
                 Some(0.3),
                 Some(2048),
                 Some(false),

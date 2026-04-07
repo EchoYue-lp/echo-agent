@@ -1,13 +1,10 @@
 //! demo01: 工具调用能力演示（不包含规划 / human-in-loop / subagent）
 //!
-//! 同时展示两种工具定义方式：
-//! - `#[tool]` 宏（推荐）
-//! - 手动 `impl Tool`（原有方式，仍然可用）
+//! 展示 `#[tool]` 宏工具定义方式
 
 use echo_agent::error::Result;
 use echo_agent::prelude::*;
 use echo_agent::tool;
-use echo_agent::tools::others::math::{MultiplyTool, SubtractTool};
 
 #[tool(name = "add", description = "两数相加")]
 async fn add(
@@ -17,6 +14,26 @@ async fn add(
     b: f64,
 ) -> Result<ToolResult> {
     Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+}
+
+#[tool(name = "subtract", description = "两数相减")]
+async fn subtract(
+    /// 第一个数
+    a: f64,
+    /// 第二个数
+    b: f64,
+) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} - {} = {}", a, b, a - b)))
+}
+
+#[tool(name = "multiply", description = "两数相乘")]
+async fn multiply(
+    /// 第一个数
+    a: f64,
+    /// 第二个数
+    b: f64,
+) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} * {} = {}", a, b, a * b)))
 }
 
 #[tool(name = "divide", description = "两数相除")]
@@ -57,10 +74,9 @@ async fn main() -> Result<()> {
 
     // #[tool] 宏生成的工具
     agent.add_tool(Box::new(AddTool));
-    agent.add_tool(Box::new(DivideTool));
-    // 原有手动 impl Tool 的工具
-    agent.add_tool(Box::new(MultiplyTool));
     agent.add_tool(Box::new(SubtractTool));
+    agent.add_tool(Box::new(MultiplyTool));
+    agent.add_tool(Box::new(DivideTool));
 
     let result = agent
         .execute("计算 (12 / 3) + (2 * 8) + (6 * 4) + 2")

@@ -4,7 +4,9 @@
 
 ---
 
-## 中文文档
+## 文档索引
+
+### 核心功能
 
 | 文档 | 功能模块 | 核心关键词 |
 |------|---------|-----------|
@@ -22,6 +24,23 @@
 | [12 - Mock 测试工具](12-mock.md) | Testing | MockLlmClient、MockTool、MockAgent、InMemoryStore |
 | [13 - 多轮对话](13-chat.md) | Chat | chat()、chat_stream()、跨轮记忆、reset() |
 | [14 - 语义搜索](14-semantic-search.md) | Semantic Search | EmbeddingStore、Embedder、向量索引、余弦相似度 |
+
+### 高级功能 (v1.0.0)
+
+| 文档 | 功能模块 | 核心关键词 |
+|------|---------|-----------|
+| [15 - Self-Reflection Agent](15-self-reflection.md) | 自我反思 | 生成 → 评估 → 修正、情景记忆、LlmCritic |
+| [16 - Plan-and-Execute](16-plan-execute.md) | 规划执行 | Planner/Executor、增量重规划、DAG 调度 |
+| [17 - Graph Workflow](17-graph-workflow.md) | 图工作流 | LangGraph 风格、SharedState、条件边、fan-out/fan-in |
+| [18 - Guard 系统](18-guard-system.md) | 护栏系统 | RuleGuard、LlmGuard、输入/输出过滤 |
+
+### 知识库
+
+参见 [知识库](../knowledge/README.md) 获取深入概念讲解：
+- [Agent 模式](../knowledge/agent-patterns.md) — ReAct、Plan-and-Execute、Self-Reflection、Graph Workflow
+- [MCP 协议](../knowledge/mcp-protocol.md) — Model Context Protocol 规范
+- [Skill 系统设计](../knowledge/skill-system.md) — agentskills.io 规范对齐
+- [A2A 协议](../knowledge/a2a-protocol.md) — Agent-to-Agent 通信
 
 ---
 
@@ -98,6 +117,23 @@ async fn main() -> Result<()> {
 │                  LLM Provider                            │
 └─────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 功能矩阵
+
+| 功能 | API / 配置字段 | 默认值 |
+|------|---------------|--------|
+| 单次任务执行 | `execute()` / `execute_stream()` | — |
+| **多轮对话** | **`chat()` / `chat_stream()`** | — |
+| 工具调用 | `enable_tool` | `true` |
+| DAG 任务规划 | `enable_task` | `false` |
+| SubAgent 编排 | `enable_subagent` | `false` |
+| 长期记忆 (Store) | `enable_memory` | `false` |
+| 人工介入 | `enable_human_in_loop` | `false` |
+| Chain-of-Thought 提示词 | `enable_cot` | `true` |
+| 上下文压缩 | 通过 `set_compressor()` | 无 |
+| 会话持久化 | `session_id` + `checkpointer_path` | 无 |
 
 ---
 

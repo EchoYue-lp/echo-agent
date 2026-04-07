@@ -275,14 +275,14 @@ mod tests {
         let mut sg = StateGraph::new("test_flow");
         sg.add_function_node("step1", |state| {
             Box::pin(async move {
-                state.set("x", "hello");
+                let _ = state.set("x", "hello");
                 Ok(())
             })
         })
         .add_function_node("step2", |state| {
             Box::pin(async move {
                 let x: String = state.get("x").unwrap_or_default();
-                state.set("y", format!("{} world", x));
+                let _ = state.set("y", format!("{} world", x));
                 Ok(())
             })
         })
@@ -291,7 +291,7 @@ mod tests {
         .entry("step1")
         .finish("step2");
 
-        let mut graph = sg.compile().unwrap();
+        let graph = sg.compile().unwrap();
         let state = SharedState::new();
         let result = graph.run(state).await.unwrap();
         let y: String = result.state.get("y").unwrap_or_default();
@@ -303,14 +303,14 @@ mod tests {
         let mut sg = StateGraph::new("hello_flow");
         sg.add_function_node("greet", |state| {
             Box::pin(async move {
-                state.set("msg", "hello");
+                let _ = state.set("msg", "hello");
                 Ok(())
             })
         })
         .add_function_node("shout", |state| {
             Box::pin(async move {
                 let msg: String = state.get("msg").unwrap_or_default();
-                state.set("msg", format!("{}!", msg.to_uppercase()));
+                let _ = state.set("msg", format!("{}!", msg.to_uppercase()));
                 Ok(())
             })
         })
@@ -319,7 +319,7 @@ mod tests {
         .entry("greet")
         .finish("shout");
 
-        let mut graph = sg.compile().unwrap();
+        let graph = sg.compile().unwrap();
         let state = SharedState::new();
         let result = graph.run(state).await.unwrap();
         let msg: String = result.state.get("msg").unwrap_or_default();
@@ -331,19 +331,19 @@ mod tests {
         let mut sg = StateGraph::new("cond_flow");
         sg.add_function_node("check", |state| {
             Box::pin(async move {
-                state.set("status", "ok");
+                let _ = state.set("status", "ok");
                 Ok(())
             })
         })
         .add_function_node("pass", |state| {
             Box::pin(async move {
-                state.set("result", "passed");
+                let _ = state.set("result", "passed");
                 Ok(())
             })
         })
         .add_function_node("fail", |state| {
             Box::pin(async move {
-                state.set("result", "failed");
+                let _ = state.set("result", "failed");
                 Ok(())
             })
         })
@@ -359,7 +359,7 @@ mod tests {
         .finish("pass")
         .finish("fail");
 
-        let mut graph = sg.compile().unwrap();
+        let graph = sg.compile().unwrap();
         let state = SharedState::new();
         let result = graph.run(state).await.unwrap();
         assert_eq!(result.steps, 2); // check + pass

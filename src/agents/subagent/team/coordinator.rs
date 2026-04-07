@@ -168,6 +168,7 @@ impl TeamCoordinator {
     }
 
     /// Collect all completed results.
+    #[deprecated(note = "Results are now tracked by the caller. This method always returns empty.")]
     pub async fn collect_results(&self) -> Vec<SubagentResult> {
         // No longer storing results in coordinator — results are tracked by the caller
         // This method is kept for API compatibility but returns empty

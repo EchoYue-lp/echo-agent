@@ -572,6 +572,15 @@ pub trait PermissionRequestHandler: Send + Sync {
         }
         Ok(responses)
     }
+
+    /// 是否为空占位处理器（Null Handler）。
+    ///
+    /// 默认返回 `false`。`NullPermissionRequestHandler` 覆盖为 `true`。
+    /// 用于 `PermissionService` 判断是否已配置真实处理器，
+    /// 避免使用 `type_name_of_val` 等脆弱的字符串匹配。
+    fn is_null_handler(&self) -> bool {
+        false
+    }
 }
 
 // ── 默认实现 ────────────────────────────────────────────────────────────────────

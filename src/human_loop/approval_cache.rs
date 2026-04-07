@@ -13,7 +13,6 @@
 //! 默认 `new()` 不过期（向后兼容），通过 `with_ttl()` 启用。
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -34,8 +33,8 @@ const DEFAULT_MAX_ENTRIES: usize = 10_000;
 /// 支持可选 TTL：缓存条目超过 TTL 后自动失效。
 #[derive(Debug)]
 pub struct SessionApprovalCache {
-    /// tool_name -> (args_hash -> 记录时间)
-    approvals: Arc<RwLock<HashMap<String, HashMap<u64, Instant>>>>,
+    /// tool_name -> (canonical_args_json -> 记录时间)
+    approvals: Arc<RwLock<HashMap<String, HashMap<String, Instant>>>>,
     /// tool_name -> 记录时间（SessionAllTools 粒度，忽略参数）
     global_approvals: Arc<RwLock<HashMap<String, Instant>>>,
     /// 缓存 TTL（None = 永不过期）
@@ -88,10 +87,10 @@ impl SessionApprovalCache {
         }
 
         // 再检查参数级审批
-        let hash = Self::hash_args(args);
+        let key = Self::args_key(args);
         let approvals = self.approvals.read().unwrap();
-        if let Some(hashes) = approvals.get(tool_name) {
-            if let Some(recorded_at) = hashes.get(&hash) {
+        if let Some(entries) = approvals.get(tool_name) {
+            if let Some(recorded_at) = entries.get(&key) {
                 if self.is_entry_valid(recorded_at) {
                     return true;
                 }
@@ -108,7 +107,7 @@ impl SessionApprovalCache {
                 // 不缓存
             }
             ApprovalScope::Session => {
-                let hash = Self::hash_args(args);
+                let key = Self::args_key(args);
                 let mut approvals = self.approvals.write().unwrap();
 
                 // 容量检查
@@ -118,12 +117,12 @@ impl SessionApprovalCache {
                     if let Some(oldest_key) = entry
                         .iter()
                         .min_by_key(|(_, instant)| *instant)
-                        .map(|(k, _)| *k)
+                        .map(|(k, _)| k.clone())
                     {
                         entry.remove(&oldest_key);
                     }
                 }
-                entry.insert(hash, Instant::now());
+                entry.insert(key, Instant::now());
             }
             ApprovalScope::SessionAllTools => {
                 let mut global = self.global_approvals.write().unwrap();
@@ -223,16 +222,11 @@ impl SessionApprovalCache {
         }
     }
 
-    /// 计算参数的哈希值
-    fn hash_args(args: &Value) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        // 使用规范化的 JSON 字符串作为哈希输入
-        if let Ok(canonical) = serde_json::to_string(args) {
-            canonical.hash(&mut hasher);
-        } else {
-            format!("{args}").hash(&mut hasher);
-        }
-        hasher.finish()
+    /// 将参数序列化为规范化 JSON 字符串作为缓存 key
+    ///
+    /// 直接使用 JSON 字符串而非哈希值，避免 DefaultHasher 的非确定性和哈希碰撞风险。
+    fn args_key(args: &Value) -> String {
+        serde_json::to_string(args).unwrap_or_else(|_| format!("{args}"))
     }
 }
 

@@ -248,7 +248,7 @@ impl ReactAgent {
                 let response = crate::llm::chat(
                     Arc::new(client),
                     &model,
-                    messages,
+                    &messages,
                     Some(0.3),
                     Some(4096u32),
                     Some(false),

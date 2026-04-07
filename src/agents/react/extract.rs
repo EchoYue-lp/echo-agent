@@ -55,7 +55,7 @@ impl ReactAgent {
         let response = chat(
             self.client.clone(),
             &self.config.model_name,
-            messages,
+            &messages,
             Some(0.0),
             Some(4096),
             Some(false),

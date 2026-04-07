@@ -9,7 +9,7 @@ use echo_core::agent::Agent;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex as AsyncMutex, RwLock};
+use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
 use tracing::{debug, info, warn};
 
 use super::events::SubagentEventBus;
@@ -68,6 +68,8 @@ pub struct SubagentRegistry {
     factories: Arc<RwLock<HashMap<String, Arc<dyn AgentFactory>>>>,
     /// Names currently being instantiated (prevents double-creation races).
     instantiating: Arc<RwLock<HashSet<String>>>,
+    /// Notifier for waiters on factory instantiation completion.
+    instantiating_done: Arc<Notify>,
     /// Event bus for lifecycle events.
     event_bus: SubagentEventBus,
 }
@@ -80,6 +82,7 @@ impl SubagentRegistry {
             definitions: Arc::new(RwLock::new(HashMap::new())),
             factories: Arc::new(RwLock::new(HashMap::new())),
             instantiating: Arc::new(RwLock::new(HashSet::new())),
+            instantiating_done: Arc::new(Notify::new()),
             event_bus: SubagentEventBus::new(),
         }
     }
@@ -91,6 +94,7 @@ impl SubagentRegistry {
             definitions: Arc::new(RwLock::new(HashMap::new())),
             factories: Arc::new(RwLock::new(HashMap::new())),
             instantiating: Arc::new(RwLock::new(HashSet::new())),
+            instantiating_done: Arc::new(Notify::new()),
             event_bus,
         }
     }
@@ -249,17 +253,12 @@ impl SubagentRegistry {
                 let mut in_progress = self.instantiating.write().await;
                 if in_progress.contains(name) {
                     debug!(subagent = %name, "Factory instantiation already in progress, waiting");
-                    // Drop the lock and spin-wait for instantiation to complete
                     drop(in_progress);
-                    // Re-check agents map after a yield
-                    for _ in 0..50 {
-                        tokio::task::yield_now().await;
-                        let agents = self.agents.read().await;
-                        if let Some(agent) = agents.get(name) {
-                            return Some(agent.clone());
-                        }
-                    }
-                    return None;
+                    // Wait for the notifier instead of spin-waiting
+                    self.instantiating_done.notified().await;
+                    // Re-check agents map after notification
+                    let agents = self.agents.read().await;
+                    return agents.get(name).cloned();
                 }
                 in_progress.insert(name.to_string());
             }
@@ -267,11 +266,12 @@ impl SubagentRegistry {
             info!(subagent = %name, "Instantiating agent from factory");
             let result = factory.create().await;
 
-            // Clean up instantiating guard
+            // Clean up instantiating guard and notify waiters
             {
                 let mut in_progress = self.instantiating.write().await;
                 in_progress.remove(name);
             }
+            self.instantiating_done.notify_waiters();
 
             match result {
                 Ok(agent) => {
@@ -345,6 +345,7 @@ impl Clone for SubagentRegistry {
             definitions: self.definitions.clone(),
             factories: self.factories.clone(),
             instantiating: self.instantiating.clone(),
+            instantiating_done: self.instantiating_done.clone(),
             event_bus: self.event_bus.clone(),
         }
     }

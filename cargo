@@ -1,0 +1,10 @@
+error: unexpected argument 'clippy' found
+
+Usage: cargo check [OPTIONS]
+
+For more information, try '--help'.
+error: unexpected argument 'clippy' found
+
+Usage: cargo check [OPTIONS]
+
+For more information, try '--help'.

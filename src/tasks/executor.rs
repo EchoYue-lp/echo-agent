@@ -583,7 +583,7 @@ impl TaskExecutor {
             .filter_map(|dep_id| {
                 manager
                     .get_task(dep_id)
-                    .and_then(|dep| dep.result.map(|r| (dep.description.clone(), r)))
+                    .and_then(|dep| dep.result.map(|r| (dep_id.clone(), r)))
             })
             .collect()
     }
@@ -653,6 +653,13 @@ impl TaskExecutor {
                 empty_rounds += 1;
                 if empty_rounds >= 3 {
                     warn!("No tasks became ready after 3 consecutive rounds, possible deadlock");
+                    if !self.is_completed() {
+                        let (completed, total) = self.get_progress();
+                        return Err(ReactError::Other(format!(
+                            "Task execution stopped with incomplete tasks: {}/{} completed. Possible deadlock or unresolved dependencies.",
+                            completed, total
+                        )));
+                    }
                     break;
                 }
             } else {

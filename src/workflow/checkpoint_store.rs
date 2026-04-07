@@ -65,7 +65,7 @@ impl Checkpoint {
         interrupt_type: InterruptType,
     ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
-        let state_snapshot = state.to_json();
+        let state_snapshot = state.to_json_value().unwrap_or_default();
 
         Self {
             id,
@@ -234,8 +234,13 @@ impl CheckpointStore for FileCheckpointStore {
         let json = serde_json::to_string_pretty(checkpoint).map_err(|e| {
             crate::error::ReactError::Other(format!("Failed to serialize checkpoint: {}", e))
         })?;
-        tokio::fs::write(path, json).await.map_err(|e| {
-            crate::error::ReactError::Other(format!("Failed to write checkpoint: {}", e))
+        // 原子写入：先写临时文件再 rename，避免崩溃时损坏
+        let tmp_path = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp_path, &json).await.map_err(|e| {
+            crate::error::ReactError::Other(format!("Failed to write temp checkpoint: {}", e))
+        })?;
+        tokio::fs::rename(&tmp_path, &path).await.map_err(|e| {
+            crate::error::ReactError::Other(format!("Failed to rename checkpoint file: {}", e))
         })?;
         Ok(())
     }
@@ -322,7 +327,7 @@ mod tests {
     #[test]
     fn test_checkpoint_create() {
         let state = SharedState::new();
-        state.set("test_key", "test_value");
+        state.set("test_key", "test_value").unwrap();
 
         let cp = Checkpoint::new(
             "test_graph".to_string(),
@@ -344,7 +349,7 @@ mod tests {
     #[test]
     fn test_checkpoint_restore_state() {
         let state = SharedState::new();
-        state.set("key", "value");
+        state.set("key", "value").unwrap();
 
         let cp = Checkpoint::new(
             "test".to_string(),
@@ -364,7 +369,7 @@ mod tests {
         let store = MemoryCheckpointStore::new();
 
         let state = SharedState::new();
-        state.set("x", 42);
+        state.set("x", 42).unwrap();
 
         let cp = Checkpoint::new(
             "graph".to_string(),
@@ -403,7 +408,7 @@ mod tests {
         let store = FileCheckpointStore::new(&temp_path);
 
         let state = SharedState::new();
-        state.set("data", "test");
+        state.set("data", "test").unwrap();
 
         let cp = Checkpoint::new(
             "test_graph".to_string(),

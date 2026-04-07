@@ -2,9 +2,24 @@
 
 use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::prelude::*;
-use echo_agent::tools::others::math::{AddTool, MultiplyTool, SubtractTool};
+use echo_agent::tool;
 use futures::StreamExt;
 use std::io::Write;
+
+#[tool(name = "add", description = "两数相加")]
+async fn add(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+}
+
+#[tool(name = "subtract", description = "两数相减")]
+async fn subtract(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} - {} = {}", a, b, a - b)))
+}
+
+#[tool(name = "multiply", description = "两数相乘")]
+async fn multiply(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} * {} = {}", a, b, a * b)))
+}
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {

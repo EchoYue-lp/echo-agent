@@ -318,9 +318,14 @@ impl FileStore {
         let data = self.data.read().await;
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
-        tokio::fs::write(&self.path, json)
+        // 原子写入：先写临时文件再 rename，避免写入中途崩溃导致数据损坏
+        let tmp = format!("{}.tmp", self.path.display());
+        tokio::fs::write(&tmp, &json)
             .await
-            .map_err(|e| MemoryError::IoError(format!("写入 store 文件失败: {e}")))?;
+            .map_err(|e| MemoryError::IoError(format!("写入临时文件失败: {e}")))?;
+        tokio::fs::rename(&tmp, &self.path)
+            .await
+            .map_err(|e| MemoryError::IoError(format!("原子替换文件失败: {e}")))?;
         debug!(path = %self.path.display(), "💾 Store 已持久化");
         Ok(())
     }

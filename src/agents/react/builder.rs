@@ -4,6 +4,7 @@ use crate::agent::{AgentCallback, AgentConfig, AgentRole};
 use crate::audit::AuditLogger;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
+use echo_core::circuit_breaker::CircuitBreakerConfig;
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
@@ -50,6 +51,7 @@ pub struct ReactAgentBuilder {
     max_snapshots: usize,
     response_format: Option<ResponseFormat>,
     max_tool_output_tokens: Option<usize>,
+    circuit_breaker_config: Option<CircuitBreakerConfig>,
 }
 
 impl Default for ReactAgentBuilder {
@@ -92,6 +94,7 @@ impl ReactAgentBuilder {
             max_snapshots: 10,
             response_format: None,
             max_tool_output_tokens: None,
+            circuit_breaker_config: None,
         }
     }
 
@@ -445,6 +448,14 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// 启用熔断器
+    ///
+    /// LLM 连续失败 `failure_threshold` 次后开启熔断，等待 `timeout` 后进入半开状态探测。
+    pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker_config = Some(config);
+        self
+    }
+
     // ── 构建 ────────────────────────────────────────────────────────────────────
 
     /// 构建 ReAct Agent（内部方法）
@@ -533,6 +544,11 @@ impl ReactAgentBuilder {
         // 设置快照管理器
         if let Some(policy) = self.snapshot_policy {
             agent.set_snapshot_manager(SnapshotManager::new(policy, self.max_snapshots));
+        }
+
+        // 设置熔断器
+        if let Some(cb_config) = self.circuit_breaker_config {
+            agent.set_circuit_breaker(cb_config);
         }
 
         Ok(agent)

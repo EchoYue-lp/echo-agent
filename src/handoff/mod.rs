@@ -206,49 +206,61 @@ impl HandoffManager {
             "🤝 执行 Handoff"
         );
 
-        let mut agent = agent_arc.lock().await;
+        // 构建发送给目标 Agent 的完整提示（在锁外执行，避免持锁时间过长）
+        let full_prompt = {
+            let mut prompt_parts = Vec::new();
 
-        // 构建发送给目标 Agent 的完整提示
-        let mut prompt_parts = Vec::new();
+            // 添加来源信息
+            if let Some(source) = &context.source_agent {
+                prompt_parts.push(format!("[Handoff 来源: Agent '{}']", source));
+            }
 
-        // 添加来源信息
-        if let Some(source) = &context.source_agent {
-            prompt_parts.push(format!("[Handoff 来源: Agent '{}']", source));
-        }
+            // 添加元数据
+            if !context.metadata.is_empty() {
+                let meta_lines: Vec<String> = context
+                    .metadata
+                    .iter()
+                    .map(|(k, v)| format!("  - {}: {}", k, v))
+                    .collect();
+                prompt_parts.push(format!("[上下文元数据]\n{}", meta_lines.join("\n")));
+            }
 
-        // 添加元数据
-        if !context.metadata.is_empty() {
-            let meta_lines: Vec<String> = context
-                .metadata
-                .iter()
-                .map(|(k, v)| format!("  - {}: {}", k, v))
-                .collect();
-            prompt_parts.push(format!("[上下文元数据]\n{}", meta_lines.join("\n")));
-        }
+            // 添加历史摘要
+            if target.transfer_history && !context.messages.is_empty() {
+                let history_summary: Vec<String> = context
+                    .messages
+                    .iter()
+                    .filter_map(|msg| msg.content.as_ref().map(|c| format!("{}: {}", msg.role, c)))
+                    .collect();
+                prompt_parts.push(format!("[对话历史]\n{}", history_summary.join("\n")));
+            }
 
-        // 添加历史摘要
-        if target.transfer_history && !context.messages.is_empty() {
-            let history_summary: Vec<String> = context
-                .messages
-                .iter()
-                .filter_map(|msg| msg.content.as_ref().map(|c| format!("{}: {}", msg.role, c)))
-                .collect();
-            prompt_parts.push(format!("[对话历史]\n{}", history_summary.join("\n")));
-        }
+            // 添加任务消息
+            if let Some(message) = &target.message {
+                prompt_parts.push(format!("[任务]\n{}", message));
+            }
 
-        // 添加任务消息
-        if let Some(message) = &target.message {
-            prompt_parts.push(format!("[任务]\n{}", message));
-        }
+            prompt_parts.join("\n\n")
+        };
 
-        let full_prompt = prompt_parts.join("\n\n");
         debug!(
             target = %target.agent_name,
             prompt_len = full_prompt.len(),
             "📨 发送 Handoff 提示"
         );
 
-        let output = agent.execute(&full_prompt).await?;
+        // 使用 spawn 避免在 execute 期间持锁阻塞其他 handoff 请求
+        let agent_arc_clone = agent_arc.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut agent = agent_arc_clone.lock().await;
+            let result = agent.execute(&full_prompt).await;
+            let _ = tx.send(result);
+        });
+
+        let output = rx.await
+            .map_err(|_| ReactError::Other("Handoff task failed to complete".to_string()))??;
 
         info!(
             target = %target.agent_name,
@@ -267,6 +279,7 @@ impl HandoffManager {
     /// 执行 Handoff 链：依次将控制权传递给多个 Agent
     ///
     /// 每个 Agent 的输出会作为下一个 Agent 的输入。
+    /// 完整的对话历史会在链中传递。
     pub async fn handoff_chain(
         &self,
         targets: Vec<HandoffTarget>,
@@ -276,12 +289,36 @@ impl HandoffManager {
         let mut current_context = initial_context;
 
         for target in targets {
-            let result = self.handoff(target, current_context.clone()).await?;
+            // 确保链中的 handoff 传递历史
+            let mut target_with_history = target.clone();
+            target_with_history.transfer_history = true;
 
-            // 为下一个 Agent 更新上下文
-            current_context = HandoffContext::new()
-                .with_source(result.target_agent.clone())
-                .with_metadata("previous_output", result.output.clone());
+            let result = self.handoff(target_with_history, current_context.clone()).await?;
+
+            // 为下一个 Agent 更新上下文，保留所有元数据和消息历史
+            // 添加本次交互到消息历史
+            let mut updated_messages = current_context.messages.clone();
+
+            // 构建本次交互的提示（模拟 handoff 内部构建的提示）
+            // 但实际上，我们需要知道发送给 Agent 的确切提示
+            // 简化：将任务消息作为 user 消息，输出作为 assistant 消息
+            if let Some(task_msg) = &target.message {
+                updated_messages.push(Message::user(task_msg.clone()));
+            }
+
+            // 添加 Agent 的输出
+            updated_messages.push(Message::assistant(result.output.clone()));
+
+            // 更新上下文：保留所有元数据，添加新的消息历史
+            current_context = HandoffContext {
+                source_agent: Some(result.target_agent.clone()),
+                messages: updated_messages,
+                metadata: {
+                    let mut metadata = current_context.metadata.clone();
+                    metadata.insert("previous_output".to_string(), result.output.clone());
+                    metadata
+                },
+            };
 
             results.push(result);
         }

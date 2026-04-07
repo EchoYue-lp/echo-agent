@@ -175,7 +175,7 @@ pub mod prelude {
     // Skills
     pub use crate::skills::{
         Skill, SkillInfo, SkillRegistry,
-        builtin::{CalculatorSkill, FileSystemSkill, ShellSkill, WeatherSkill},
+        builtin::{FileSystemSkill, ShellSkill},
         external::{
             ActivateSkillTool, DiscoveryScope, PromptContext, ReadSkillResourceTool,
             RunSkillScriptTool, SkillContent, SkillDescriptor, SkillLoader, SkillResourceEntry,

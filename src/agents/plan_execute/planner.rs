@@ -236,7 +236,7 @@ impl Planner for LlmPlanner {
             let response = llm::chat(
                 self.client.clone(),
                 &self.model,
-                messages,
+                &messages,
                 Some(0.3),
                 Some(4096u32),
                 Some(false),

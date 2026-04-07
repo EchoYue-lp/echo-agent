@@ -342,18 +342,18 @@ mod tests {
 
     #[test]
     fn agent_macro_with_tools_and_options() {
-        use crate::tools::others::math::AddTool;
+        use crate::tools::builtin::answer::FinalAnswerTool;
 
         let result = agent! {
             model: "test-model",
             system_prompt: "你是计算助手",
             name: "calc",
-            tools: [AddTool],
+            tools: [FinalAnswerTool],
             max_iterations: 5,
         };
         assert!(result.is_ok());
 
         let agent = result.unwrap();
-        assert!(agent.tool_names().contains(&"add"));
+        assert!(agent.tool_names().contains(&"final_answer"));
     }
 }

@@ -106,22 +106,38 @@ fn parse_guard_response(response: &str) -> Result<GuardResult> {
     };
 
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-        let safe = v.get("safe").and_then(|s| s.as_bool()).unwrap_or(true);
-        if safe {
-            Ok(GuardResult::Pass)
-        } else {
-            let reason = v
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("LLM 审查未通过")
-                .to_string();
-            Ok(GuardResult::Block { reason })
+        let safe = v.get("safe").and_then(|s| s.as_bool());
+        match safe {
+            Some(true) => Ok(GuardResult::Pass),
+            Some(false) => {
+                let reason = v
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("LLM 审查未通过")
+                    .to_string();
+                Ok(GuardResult::Block { reason })
+            }
+            // safe 字段不是布尔值，视为异常
+            None => {
+                tracing::warn!(
+                    response = trimmed,
+                    reason = "LLM 返回 safe 字段不是布尔值",
+                    "LLM 护栏解析失败，fail-closed 阻断"
+                );
+                Ok(GuardResult::Block {
+                    reason: "LLM 护栏返回格式异常".to_string(),
+                })
+            }
         }
     } else {
-        // 无法解析时默认放行并警告
-        tracing::warn!(response = trimmed, "LLM 护栏返回无法解析的响应，默认放行");
-        Ok(GuardResult::Warn {
-            reason: "LLM 护栏返回格式异常".to_string(),
+        // 安全组件应 fail-closed：解析失败时阻断内容
+        tracing::warn!(
+            response = trimmed,
+            reason = "无法从 LLM 响应中提取 JSON",
+            "LLM 护栏解析失败，fail-closed 阻断"
+        );
+        Ok(GuardResult::Block {
+            reason: "LLM 护栏返回无法解析，系统已默认阻断".to_string(),
         })
     }
 }
@@ -153,6 +169,12 @@ mod tests {
     #[test]
     fn test_parse_invalid_fallback() {
         let result = parse_guard_response("无法解析的回复").unwrap();
-        matches!(result, GuardResult::Warn { .. });
+        matches!(result, GuardResult::Block { .. });
+    }
+
+    #[test]
+    fn test_parse_non_bool_safe() {
+        let result = parse_guard_response(r#"{"safe": "yes"}"#).unwrap();
+        matches!(result, GuardResult::Block { .. });
     }
 }

@@ -235,10 +235,9 @@ impl PermissionService {
     }
 
     /// 是否已配置真实的权限请求处理器（非 NullHandler）
+    /// 使用 trait method 标记而非 type_name 字符串匹配
     fn has_real_handler(&self) -> bool {
-        // NullPermissionRequestHandler 的 type name 包含 "NullPermissionRequestHandler"
-        let type_name = std::any::type_name_of_val(&*self.request_handler);
-        !type_name.contains("NullPermissionRequestHandler")
+        !self.request_handler.is_null_handler()
     }
 
     /// 设置最大连续拒绝次数
@@ -703,6 +702,10 @@ impl PermissionRequestHandler for NullPermissionRequestHandler {
             "没有配置权限请求处理器".to_string(),
         )))
     }
+
+    fn is_null_handler(&self) -> bool {
+        true
+    }
 }
 
 // ── Dyn Provider Handler (桥接 dyn HumanLoopProvider) ─────────────────────────
@@ -920,13 +923,13 @@ mod tests {
     async fn test_permission_service_default_handler() {
         let service = PermissionService::new();
 
-        // 没有配置 handler，应该返回需要审批
+        // 没有配置 handler，应该返回 RequireApproval（而非静默拒绝）
         let decision = service
             .check_with_permissions("Bash", &serde_json::json!({}), &[ToolPermission::Execute])
             .await
             .unwrap();
 
-        assert!(decision.is_denied()); // Null handler 返回拒绝
+        assert!(matches!(decision, PermissionDecision::RequireApproval));
     }
 
     #[test]

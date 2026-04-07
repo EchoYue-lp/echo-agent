@@ -12,6 +12,7 @@
 
 pub mod agent;
 pub mod audit;
+pub mod circuit_breaker;
 pub mod error;
 pub mod guard;
 pub mod llm;

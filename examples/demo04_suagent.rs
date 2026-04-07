@@ -1,6 +1,38 @@
 use echo_agent::prelude::*;
-use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
-use echo_agent::tools::others::weather::WeatherTool;
+use echo_agent::tool;
+
+#[tool(name = "add", description = "两数相加")]
+async fn add(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+}
+
+#[tool(name = "subtract", description = "两数相减")]
+async fn subtract(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} - {} = {}", a, b, a - b)))
+}
+
+#[tool(name = "multiply", description = "两数相乘")]
+async fn multiply(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} * {} = {}", a, b, a * b)))
+}
+
+#[tool(name = "divide", description = "两数相除")]
+async fn divide(a: f64, b: f64) -> Result<ToolResult> {
+    if b == 0.0 {
+        return Ok(ToolResult::error("除数不能为 0".to_string()));
+    }
+    Ok(ToolResult::success(format!("{} / {} = {}", a, b, a / b)))
+}
+
+#[tool(name = "weather", description = "查询指定城市的天气")]
+async fn weather(
+    /// 城市名称
+    city: String,
+) -> Result<ToolResult> {
+    // 模拟天气数据
+    let weather_data = format!("{}: 气温 25°C，晴天", city);
+    Ok(ToolResult::success(weather_data))
+}
 
 /// demo04: SubAgent 编排演示（Orchestrator + Worker）
 fn create_all_tools() -> Vec<Box<dyn Tool>> {
@@ -35,7 +67,7 @@ async fn main() -> Result<()> {
         .enable_task(false)
         .enable_human_in_loop(true)
         .enable_subagent(false)
-        .allowed_tools(vec![WeatherTool.name().to_string()]),
+        .allowed_tools(vec!["weather".to_string()]),
         AgentConfig::new(
             "qwen3-max",
             "math-agent",
@@ -48,10 +80,10 @@ async fn main() -> Result<()> {
         .enable_human_in_loop(false)
         .enable_subagent(false)
         .allowed_tools(vec![
-            AddTool.name().to_string(),
-            SubtractTool.name().to_string(),
-            MultiplyTool.name().to_string(),
-            DivideTool.name().to_string(),
+            "add".to_string(),
+            "subtract".to_string(),
+            "multiply".to_string(),
+            "divide".to_string(),
         ]),
     ];
 

@@ -413,7 +413,7 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
     ));
 
     // Take snapshot
-    let snapshot = state.snapshot();
+    let snapshot = state.snapshot().expect("snapshot failed");
     println!("  Snapshot taken ({} bytes):", snapshot.len());
     println!(
         "  {}",

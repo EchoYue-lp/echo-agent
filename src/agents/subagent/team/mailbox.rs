@@ -59,7 +59,7 @@ impl MailboxMessage {
 
 // ── Mailbox ───────────────────────────────────────────────────────────────────
 
-const MAILBOX_CAPACITY: usize = 64;
+const MAILBOX_CAPACITY: usize = 256;
 
 /// Async mailbox for a single agent.
 ///

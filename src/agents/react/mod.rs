@@ -16,6 +16,7 @@ use crate::agents::subagent::executor::{SubagentExecutor, SubagentExecutorConfig
 use crate::compression::ContextManager;
 use crate::error::{LlmError, ReactError, Result};
 use crate::guard::GuardManager;
+use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 #[cfg(feature = "human-loop")]
 #[allow(deprecated)] // HumanApprovalManager kept for backward compatibility
 use crate::human_loop::{HumanApprovalManager, HumanLoopProvider, PermissionService};
@@ -117,6 +118,10 @@ pub struct ReactAgent {
     pub(crate) audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
     /// 状态快照管理器，支持每轮迭代自动快照和回滚
     pub(crate) snapshot_manager: Option<SnapshotManager>,
+    /// 对话持久化 Store，支持对话保存、恢复和历史管理
+    pub(crate) conversation_store: Option<Arc<dyn crate::memory::conversation::ConversationStore>>,
+    /// 熔断器：LLM 持续不可用时快速失败，防止无效重试
+    pub(crate) circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
 
 // ── 构造与初始化 ──────────────────────────────────────────────────────────────
@@ -262,6 +267,8 @@ impl ReactAgent {
             permission_service: None,
             audit_logger: None,
             snapshot_manager: None,
+            conversation_store: None,
+            circuit_breaker: None,
         }
     }
 
@@ -396,6 +403,13 @@ impl ReactAgent {
         vec![]
     }
 
+    /// 启用熔断器
+    ///
+    /// LLM 连续失败达到阈值后自动熔断，等待 timeout 后恢复探测。
+    pub fn set_circuit_breaker(&mut self, config: CircuitBreakerConfig) {
+        self.circuit_breaker = Some(Arc::new(CircuitBreaker::new(config)));
+    }
+
     /// 设置护栏管理器
     pub fn set_guard_manager(&mut self, manager: GuardManager) {
         self.guard_manager = Some(manager);
@@ -518,6 +532,26 @@ impl ReactAgent {
             self.tool_manager
                 .register(Box::new(HumanInLoop::new(provider)));
         }
+    }
+
+    // ── 对话持久化 ──────────────────────────────────────────────────────────────
+
+    /// 设置对话持久化 Store
+    ///
+    /// 启用后，对话将自动保存到 Store，支持跨会话恢复。
+    pub fn set_conversation_store(
+        &mut self,
+        store: Arc<dyn crate::memory::conversation::ConversationStore>,
+    ) {
+        self.conversation_store = Some(store);
+    }
+
+    /// 加载历史消息到 agent 上下文（替换现有上下文）
+    ///
+    /// 用于从持久化存储恢复对话，使 agent 可以继续之前的对话。
+    /// 消息应包含 system prompt 作为第一条（如需要）。
+    pub fn load_messages(&mut self, messages: Vec<crate::llm::types::Message>) {
+        self.context.set_messages(messages);
     }
 }
 

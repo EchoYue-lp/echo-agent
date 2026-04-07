@@ -8,8 +8,10 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 ## Documentation Index
 
+### Core Features
+
 | Doc | Module | Key Concepts |
-|-----|--------|-------------|
+|-----|--------|--------------|
 | [01 - ReAct Agent](./01-react-agent.md) | Core engine | Thought→Action→Observation, CoT, parallel tool calls, callbacks |
 | [02 - Tool System](./02-tools.md) | Tools | Tool trait, ToolManager, timeout/retry, concurrency limiting |
 | [03 - Memory System](./03-memory.md) | Memory | Store (long-term), Checkpointer (short-term), namespace isolation |
@@ -24,6 +26,23 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [12 - Mock Testing Utilities](./12-mock.md) | Testing | MockLlmClient, MockTool, MockAgent, InMemoryStore |
 | [13 - Multi-Turn Chat](./13-chat.md) | Chat | chat(), chat_stream(), cross-turn memory, reset() |
 | [14 - Semantic Search](./14-semantic-search.md) | Semantic Search | EmbeddingStore, Embedder, vector index, cosine similarity |
+
+### Advanced Features (v1.0.0)
+
+| Doc | Module | Key Concepts |
+|-----|--------|--------------|
+| [15 - Self-Reflection Agent](./15-self-reflection.md) | Self-Reflection | Generate → Critique → Refine, episodic memory, LlmCritic |
+| [16 - Plan-and-Execute](./16-plan-execute.md) | Plan-Execute | Planner/Executor, incremental replanning, DAG scheduling |
+| [17 - Graph Workflow](./17-graph-workflow.md) | Workflow | LangGraph-style, SharedState, conditional edges, fan-out/fan-in |
+| [18 - Guard System](./18-guard-system.md) | Guards | RuleGuard, LlmGuard, input/output filtering |
+
+### Knowledge Base
+
+See [Knowledge Base](../knowledge/README.md) for in-depth concept explanations:
+- [Agent Patterns](../knowledge/agent-patterns.md) — ReAct, Plan-and-Execute, Self-Reflection, Graph Workflow
+- [MCP Protocol](../knowledge/mcp-protocol.md) — Model Context Protocol specification
+- [Skill System Design](../knowledge/skill-system.md) — agentskills.io specification alignment
+- [A2A Protocol](../knowledge/a2a-protocol.md) — Agent-to-Agent communication
 
 ---
 

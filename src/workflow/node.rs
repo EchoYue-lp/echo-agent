@@ -125,9 +125,9 @@ impl Node {
                 let mut agent = agent.lock().await;
                 let output = agent.execute(&input).await?;
 
-                state.set(output_key, &output);
+                let _ = state.set(output_key, &output);
                 // 同时追加到消息历史
-                state.push_message(crate::llm::types::Message::assistant(output));
+                let _ = state.push_message(crate::llm::types::Message::assistant(output));
                 Ok(())
             }
             NodeAction::Function(f) => f.call(state).await,
@@ -147,13 +147,13 @@ mod tests {
         let node = Node::function("double", |state: &SharedState| {
             Box::pin(async move {
                 let x: i64 = state.get("input").unwrap_or(0);
-                state.set("output", x * 2);
+                let _ = state.set("output", x * 2);
                 Ok(())
             })
         });
 
         let state = SharedState::new();
-        state.set("input", 21i64);
+        let _ = state.set("input", 21i64);
         node.execute(&state).await.unwrap();
         assert_eq!(state.get::<i64>("output"), Some(42));
     }
@@ -162,7 +162,7 @@ mod tests {
     async fn test_passthrough_node() {
         let node = Node::passthrough("noop");
         let state = SharedState::new();
-        state.set("x", 1);
+        let _ = state.set("x", 1);
         node.execute(&state).await.unwrap();
         assert_eq!(state.get::<i64>("x"), Some(1)); // 不变
     }
@@ -175,7 +175,7 @@ mod tests {
         let node = Node::agent("test-agent", mock, "task", "result");
 
         let state = SharedState::new();
-        state.set("task", "hello");
+        let _ = state.set("task", "hello");
         node.execute(&state).await.unwrap();
         assert_eq!(
             state.get::<String>("result"),

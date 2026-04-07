@@ -4,11 +4,34 @@ use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::llm::stream_chat;
 use echo_agent::llm::types::Message;
 use echo_agent::prelude::*;
-use echo_agent::tools::others::math::{AddTool, DivideTool, MultiplyTool, SubtractTool};
+use echo_agent::tool;
 use futures::StreamExt;
 use reqwest::Client;
 use std::io::Write;
 use std::sync::Arc;
+
+#[tool(name = "add", description = "两数相加")]
+async fn add(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} + {} = {}", a, b, a + b)))
+}
+
+#[tool(name = "subtract", description = "两数相减")]
+async fn subtract(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} - {} = {}", a, b, a - b)))
+}
+
+#[tool(name = "multiply", description = "两数相乘")]
+async fn multiply(a: f64, b: f64) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{} * {} = {}", a, b, a * b)))
+}
+
+#[tool(name = "divide", description = "两数相除")]
+async fn divide(a: f64, b: f64) -> Result<ToolResult> {
+    if b == 0.0 {
+        return Ok(ToolResult::error("除数不能为 0".to_string()));
+    }
+    Ok(ToolResult::success(format!("{} / {} = {}", a, b, a / b)))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
