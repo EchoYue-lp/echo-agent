@@ -23,6 +23,8 @@ pub enum ReactError {
     Memory(MemoryError),
     /// 沙箱错误
     Sandbox(SandboxError),
+    /// Channel / IM 集成错误
+    Channel(ChannelError),
     /// IO 错误
     Io(std::io::Error),
     /// 其他错误
@@ -106,6 +108,18 @@ pub enum SandboxError {
     IoError(String),
 }
 
+/// Channel / IM 集成错误
+#[derive(Debug)]
+pub enum ChannelError {
+    NetworkError(String),
+    ApiError { status: u16, message: String },
+    AuthError(String),
+    ConnectionError(String),
+    SendError(String),
+    InvalidConfig(String),
+    Other(String),
+}
+
 /// 配置错误
 #[derive(Debug)]
 pub enum ConfigError {
@@ -130,6 +144,7 @@ impl fmt::Display for ReactError {
             ReactError::Mcp(e) => write!(f, "MCP Error: {}", e),
             ReactError::Memory(e) => write!(f, "Memory Error: {}", e),
             ReactError::Sandbox(e) => write!(f, "Sandbox Error: {}", e),
+            ReactError::Channel(e) => write!(f, "Channel Error: {}", e),
             ReactError::Io(e) => write!(f, "IO Error: {}", e),
             ReactError::Other(msg) => write!(f, "Error: {}", msg),
         }
@@ -229,6 +244,22 @@ impl fmt::Display for AgentError {
     }
 }
 
+impl fmt::Display for ChannelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChannelError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            ChannelError::ApiError { status, message } => {
+                write!(f, "API error (status {}): {}", status, message)
+            }
+            ChannelError::AuthError(msg) => write!(f, "Auth error: {}", msg),
+            ChannelError::ConnectionError(msg) => write!(f, "Connection error: {}", msg),
+            ChannelError::SendError(msg) => write!(f, "Send error: {}", msg),
+            ChannelError::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
+            ChannelError::Other(msg) => write!(f, "Channel error: {}", msg),
+        }
+    }
+}
+
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -267,6 +298,7 @@ impl std::error::Error for ReactError {
             ReactError::Mcp(e) => Some(e),
             ReactError::Memory(e) => Some(e),
             ReactError::Sandbox(e) => Some(e),
+            ReactError::Channel(e) => Some(e),
             ReactError::Io(e) => Some(e),
             ReactError::Other(_) => None,
         }
@@ -281,6 +313,7 @@ impl std::error::Error for ConfigError {}
 impl std::error::Error for McpError {}
 impl std::error::Error for MemoryError {}
 impl std::error::Error for SandboxError {}
+impl std::error::Error for ChannelError {}
 
 // ── From 转换实现 ─────────────────────────────────────────────────────────────
 
@@ -357,6 +390,12 @@ impl From<MemoryError> for ReactError {
 impl From<SandboxError> for ReactError {
     fn from(err: SandboxError) -> Self {
         ReactError::Sandbox(err)
+    }
+}
+
+impl From<ChannelError> for ReactError {
+    fn from(err: ChannelError) -> Self {
+        ReactError::Channel(err)
     }
 }
 

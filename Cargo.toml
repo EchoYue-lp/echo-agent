@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "echo-core", "echo-macros", "echo-providers", "echo-mcp"]
+members = [".", "echo-core", "echo-macros", "echo-providers", "echo-mcp", "echo-channels"]
 
 [package]
 name = "echo_agent"
@@ -21,11 +21,14 @@ tasks = []
 workflow = []
 self-reflection = []
 subagent = []
+channels = ["dep:echo_channels"]
+
 [dependencies]
 echo_core = { path = "echo-core", features = ["reqwest"] }
 echo_macros = { path = "echo-macros" }
 echo_providers = { path = "echo-providers" }
 echo_mcp = { path = "echo-mcp", optional = true }
+echo_channels = { path = "echo-channels", optional = true }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
@@ -55,3 +58,7 @@ tracing-opentelemetry = { version = "0.28", optional = true }
 [[example]]
 name = "demo27_sqlite_memory"
 required-features = ["sqlite"]
+
+[[example]]
+name = "demo38_im_channels"
+required-features = ["channels"]

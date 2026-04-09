@@ -24,6 +24,7 @@
 | [12 - Mock 测试工具](12-mock.md) | Testing | MockLlmClient、MockTool、MockAgent、InMemoryStore |
 | [13 - 多轮对话](13-chat.md) | Chat | chat()、chat_stream()、跨轮记忆、reset() |
 | [14 - 语义搜索](14-semantic-search.md) | Semantic Search | EmbeddingStore、Embedder、向量索引、余弦相似度 |
+| [15 - IM Channels](15-im-channels.md) | IM Channels | QQ Bot / 飞书接入、WebSocket / Webhook、ChannelPlugin、消息路由 |
 
 ### 高级功能 (v1.0.0)
 

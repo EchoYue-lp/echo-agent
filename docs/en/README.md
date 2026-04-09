@@ -26,6 +26,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [12 - Mock Testing Utilities](./12-mock.md) | Testing | MockLlmClient, MockTool, MockAgent, InMemoryStore |
 | [13 - Multi-Turn Chat](./13-chat.md) | Chat | chat(), chat_stream(), cross-turn memory, reset() |
 | [14 - Semantic Search](./14-semantic-search.md) | Semantic Search | EmbeddingStore, Embedder, vector index, cosine similarity |
+| [15 - IM Channels](./15-im-channels.md) | IM Channels | QQ Bot / Feishu integration, WebSocket / Webhook, ChannelPlugin, message routing |
 
 ### Advanced Features (v1.0.0)
 

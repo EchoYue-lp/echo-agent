@@ -2,17 +2,17 @@
 
 # echo-agent
 
-**生产级、可组合的 Rust AI Agent 开发框架**
+**为 Rust 打造的可组合、生产级 AI Agent 开发框架**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/your-org/echo-agent)
+[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)](https://github.com/your-org/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
-[![Async](https://img.shields.io/badge/runtime-tokio-blue)](https://tokio.rs/)
+[![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20兼容-green)](https://platform.openai.com/docs/api-reference)
+[![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
 
-用 Rust 的 **内存安全**、**零成本抽象** 和 **原生异步并发** 构建自主 AI Agent。
+用 Rust 的**内存安全**、**零成本抽象**和**异步原生并发**构建自主 AI Agent。
 
-[English](./README.md) · [文档](./docs/zh/README.md) · [示例](./examples/) · [知识库](./docs/knowledge/)
+[English](./README.md) · [文档中心](docs/zh/README.md) · [示例](./examples/)
 
 </div>
 
@@ -20,17 +20,7 @@
 
 ## 为什么选择 echo-agent？
 
-大多数 AI Agent 框架用 Python 编写。**echo-agent** 将现代 Agent 框架的完整能力带入 Rust —— 与 LangGraph、CrewAI、AutoGen 功能对等，同时提供只有 Rust 才能提供的性能和可靠性。
-
-### Rust 的优势
-
-| Python 框架 | echo-agent (Rust) |
-|-------------|-------------------|
-| 拼写错误在运行时才发现 | 编译时类型检查 |
-| GIL 限制并发 | 真正的异步并行 |
-| 可能的内存泄漏 | 保证内存安全 |
-| 启动慢（模块导入） | 二进制即时启动 |
-| 部署复杂 | 单文件部署 |
+绝大多数 AI Agent 框架基于 Python 构建。**echo-agent** 将完整的现代 Agent 框架能力带入 Rust 生态——与 LangGraph、CrewAI、AutoGen 功能对齐，同时提供只有 Rust 才能带来的性能和可靠性。
 
 ```rust
 use echo_agent::prelude::*;
@@ -45,7 +35,7 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 async fn main() -> Result<()> {
     let mut agent = agent! {
         model: "qwen3-max",
-        system_prompt: "你是一个数学助手",
+        system_prompt: "你是一个计算助手",
         tools: [AddTool],
     }?;
 
@@ -55,383 +45,239 @@ async fn main() -> Result<()> {
 }
 ```
 
+**更进一步**——只需几行代码，将 Agent 部署到 QQ、飞书等 IM 平台：
+
+```rust
+let mut manager = ChannelManager::new();
+manager.register(Box::new(QqChannel::new(qq_config)?));
+manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+manager.start_all(handler).await?;  // 完成 —— 你的 Agent 已在 IM 中运行
+```
+
 ---
 
-## 项目亮点
+## 亮点
 
-| 指标 | 数值 |
+- **40+ 项能力** —— ReAct 循环、工具、记忆、流式、多 Agent、技能、MCP、IM 通道、护栏、审计等
+- **40 个可运行示例** —— 每个功能都有对应 demo，`cargo run` 即可体验
+- **350+ 单元测试** —— 覆盖所有模块
+- **6 个 crate，1 行导入** —— 模块化 workspace，但 `use echo_agent::prelude::*` 就够了
+- **多模态支持** —— 文本、图片（base64 / URL）、文件附件可在同一条消息中混合使用
+- **IM 平台接入** —— QQ Bot（WebSocket）和飞书（Webhook）开箱即用
+- **声明式工作流** —— 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
+- **统一重试** —— 一套 `RetryPolicy` 统管所有外部调用（LLM、MCP、A2A、沙箱）
+
+---
+
+## 功能一览
+
+| 能力 | 描述 |
 |------|------|
-| **能力模块** | 30+ 模块：ReAct、工具、记忆、流式、多Agent、技能、MCP、护栏、审计... |
-| **示例程序** | 39 个可运行 demo — 每个功能都有 `cargo run --example demoXX` |
-| **单元测试** | 350+ 测试用例，覆盖率完善 |
-| **Crate 结构** | 5 个模块化 crate，1 行导入 `use echo_agent::prelude::*` |
-| **源文件** | 154 个 Rust 源文件 |
-| **文档** | 中英双语 + 18 篇功能指南 |
+| 🔄 **ReAct 引擎** | Thought → Action → Observation 循环，内置 Chain-of-Thought |
+| 🔧 **工具系统** | `#[tool]` 宏 + 自动 JSON Schema；超时、重试、并行执行 |
+| 🧠 **双层记忆** | `Store`（长期 KV）+ `Checkpointer`（会话历史） |
+| 🔍 **记忆工具** | `with_memory_tools(store)` —— 自动注入 remember / recall / search / forget |
+| 🖼️ **多模态** | `ContentPart::Text` / `ImageUrl` / `File` —— 消息中嵌入图片与文件 |
+| 📦 **上下文压缩** | 滑动窗口 / LLM 摘要 / 混合管道 |
+| 📏 **Token 预算** | `max_tool_output_tokens` 自动截断 + think() 前主动触发压缩 |
+| 🔁 **统一重试** | `RetryPolicy` + `with_retry` / `with_retry_if` 包装所有外部调用 |
+| 🔀 **动态工具** | `remove_tool()` / `replace_tool()` —— 对话过程中动态调整工具集 |
+| 🤝 **人工介入** | 工具审批门，支持命令行、Webhook、WebSocket |
+| 🏗️ **多 Agent 编排** | Orchestrator → SubAgent 分派；Agent 间 Handoff |
+| 💡 **Skill 系统** | 渐进式披露：发现 → 激活 → 使用 |
+| 🔌 **MCP 协议** | 接入任意 MCP 服务（stdio / SSE / HTTP） |
+| 📊 **Plan-and-Execute** | Planner + Executor：先规划后执行策略 |
+| 📡 **流式输出** | `execute_stream()` 返回实时 `AgentEvent` 流 |
+| 🌊 **工作流流式** | `Graph::run_stream()` —— 逐节点发出 `WorkflowEvent` 事件 |
+| 📐 **结构化输出** | `extract::<T>()` —— 通过 JSON Schema 将 LLM 输出反序列化为 Rust 类型 |
+| 📝 **声明式工作流** | `Graph::from_yaml()` / `from_json()` —— 零代码工作流定义 |
+| 🛡️ **护栏系统** | 规则 / LLM 双模式内容过滤 |
+| 🔑 **权限模型** | 声明式工具权限 + 可插拔策略 |
+| 📋 **审计日志** | 结构化事件日志，可插拔存储后端 |
+| 📈 **OpenTelemetry** | 分布式追踪与指标（OTLP） |
+| 🎣 **宏系统** | `#[tool]`、`#[callback]`、`#[guard]`、`#[handler]`、`agent!{}`、`messages![]` |
+| 🌐 **A2A 协议** | Agent Card 发布 / 跨框架协作 |
+| 🏖️ **沙箱执行** | Local / Docker / K8s 代码执行，支持资源限制 |
+| 🔗 **图工作流** | 有向图：线性、条件分支、循环、并行 fan-out/fan-in |
+| 💬 **IM 通道** | QQ Bot（WebSocket）和飞书（Webhook）—— 将 Agent 接入即时通讯 |
 
 ---
 
-## 架构总览
+## v1.2.0 新功能
 
+### IM 通道集成
+
+将你的 Agent 接入真实消息平台：
+
+```rust
+// QQ Bot —— WebSocket Gateway
+let qq = QqChannel::new(QqConfig {
+    app_id, client_secret,
+})?;
+
+// 飞书 —— HTTP Webhook
+let feishu = FeishuChannel::new(FeishuConfig {
+    app_id, app_secret,
+    webhook_bind: "0.0.0.0:8080",
+    webhook_path: "/webhook",
+    verification_token: None,
+})?;
+
+let mut manager = ChannelManager::new();
+manager.register(Box::new(qq));
+manager.register(Box::new(feishu));
+manager.start_all(handler).await?;
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          用户 / 应用层                                    │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                                     │  execute()     → 单次任务（重置上下文）
-                                     │  chat()        → 多轮对话（保留历史）
-                                     │  execute_stream() / chat_stream() → 实时事件流
-                                     │
-┌────────────────────────────────────▼────────────────────────────────────┐
-│                         ReactAgent 执行引擎                              │
-│                                                                         │
-│   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐  │
-│   │ ContextManager  │   │   ToolManager   │   │    SkillRegistry    │  │
-│   │ (压缩/截断)     │   │ (注册/执行)     │   │ (代码+文件技能)     │  │
-│   └─────────────────┘   └─────────────────┘   └─────────────────────┘  │
-│                                                                         │
-│   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐  │
-│   │   Checkpointer  │   │     Store       │   │   GuardManager      │  │
-│   │ (会话历史持久化)│   │  (长期KV存储)   │   │  (输入/输出过滤)    │  │
-│   └─────────────────┘   └─────────────────┘   └─────────────────────┘  │
-│                                                                         │
-│   ┌─────────────────────────────────────────────────────────────────┐  │
-│   │                     SubAgent 注册表                              │  │
-│   │   orchestrator → math_agent / writer_agent / researcher_agent   │  │
-│   └─────────────────────────────────────────────────────────────────┘  │
-│                                                                         │
-│   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐  │
-│   │  AuditLogger    │   │  PermissionSvc  │   │    McpManager       │  │
-│   │ (事件审计)      │   │ (工具权限)      │   │  (外部工具)         │  │
-│   └─────────────────┘   └─────────────────┘   └─────────────────────┘  │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                                     │  HTTP (OpenAI 兼容 API)
-                                     │
-┌────────────────────────────────────▼────────────────────────────────────┐
-│                         LLM 提供商层                                     │
-│                                                                         │
-│   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌─────────┐ │
-│   │   OpenAI     │   │  Anthropic   │   │   Ollama     │   │  Qwen   │ │
-│   │  (GPT-4o)    │   │  (Claude)    │   │  (本地)      │   │(DeepSeek)│ │
-│   └──────────────┘   └──────────────┘   └──────────────┘   └─────────┘ │
-│                                                                         │
-│   统一 RetryPolicy + ProviderFactory 支持热切换                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+
+特性：
+- **统一 `ChannelPlugin` 接口** —— 实现一个 trait 即可接入新平台
+- **自动 Token 管理** —— OAuth 缓存 + 刷新，无需手动处理
+- **WebSocket 自动重连** —— 指数退避，永不断线
+- **消息队列** —— 异步 `mpsc` 通道，高负载下不丢消息
+- **白名单支持** —— `ChatConfig::with_allow_from()` 实现访问控制
 
 ---
 
-## 核心特性
+## v1.1.0 新功能
 
-### Agent 执行策略
+### Agent 目录重组 + StateGraph DSL
 
-| 策略 | 模式 | 适用场景 |
-|------|------|----------|
-| **ReAct** | 思考 → 行动 → 观察 | 交互式推理、工具编排 |
-| **Plan-and-Execute** | 规划器 → 执行器 → 汇总 | 结构化多步任务（DAG） |
-| **Self-Reflection** | 生成 → 评估 → 修正 | 质量保证输出、持续学习 |
+Agent 模块目录重组：`src/agent/react_agent` → `src/agents/react`，`src/plan_execute` → `src/agents/plan_execute`。新增 `agents/self_reflection` 自反思模块（Composite/Critic/LlmCritic）。StateGraph DSL 声明式工作流定义。Task 系统增强：DAG 调度、Hooks、Events、Store 持久化、Executor。
 
-### 双层记忆系统
+### Human-in-the-Loop 7 阶段管线
 
-| 层级 | Trait | 存储 | 作用域 |
-|------|-------|------|--------|
-| **短期** | `Checkpointer` | File / InMemory | 会话对话历史 |
-| **长期** | `Store` | File / InMemory / SQLite / Embedding | 命名空间隔离的 KV 存储 |
-| **语义** | `EmbeddingStore` | 向量索引 | 余弦相似度检索 |
+完整权限系统（对标 Claude Code）：
 
-### 工具系统
-
-```rust
-// 一个宏 = 参数结构体 + JSON Schema + TypedTool 实现
-#[tool(name = "search_web", description = "搜索网页信息")]
-async fn search_web(
-    /// 搜索关键词
-    query: String,
-    /// 最大结果数（默认 5）
-    #[schemars(default = "default_limit")]
-    limit: usize,
-) -> Result<ToolResult> {
-    Ok(ToolResult::success(format!("搜索结果: {}", query)))
-}
-
-fn default_limit() -> usize { 5 }
+```
+Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → DenialTracker → Mode dispatch
 ```
 
-**能力：**
-- 自动 JSON Schema 生成（schemars）
-- 超时 + 重试 + 并发限制（`ToolExecutionConfig`）
-- 动态工具管理（`add_tool`、`remove_tool`、`replace_tool`）
-- 可插拔的权限策略
+- **SessionApprovalCache** 带 TTL 过期（默认 30 分钟）
+- **审计追踪**：`PermissionAuditSink` trait + InMemory/Logging/Composite 实现
+- **ProtectedPathChecker**：`.git`/`.env`/`.ssh` 始终受保护
+- **AI 分类器**：RuleClassifier/LlmClassifier/CompositeClassifier
+- **DenialTracker**：连续拒绝自动回退
+- **PermissionMode**：Default/Plan/Auto/AcceptEdits/BypassPermissions/DontAsk/Bubble
 
-### 图工作流（对标 LangGraph）
+### Subagent 子代理系统
+
+Sync/Fork/Teammate 三种执行模式。SubagentBuilder/Registry/Executor/Hooks。Team 协作：Coordinator + Mailbox。
+
+---
+
+## 上一版本：v1.0.0
+
+### 记忆工具自动注入
+
+一行代码让 Agent 拥有持久记忆——无需手动接线：
 
 ```rust
-use echo_agent::workflow::{GraphBuilder, SharedState};
-
-let graph = GraphBuilder::new("research_pipeline")
-    // Agent 节点：输入/输出键映射
-    .add_agent_node("researcher", researcher_agent)
-        .input_key("task")
-        .output_key("research")
-    .add_agent_node("writer", writer_agent)
-        .input_key("research")
-        .output_key("result")
-    // 函数节点：数据转换
-    .add_function_node("format", |state| Box::pin(async move {
-        let result: String = state.get("result").unwrap_or_default();
-        state.set("final", format!("### 报告\n\n{}", result));
-        Ok(())
-    }))
-    // 图结构定义
-    .set_entry("researcher")
-    .add_edge("researcher", "writer")
-    .add_edge("writer", "format")
-    .set_finish("format")
+let store = Arc::new(InMemoryStore::new());
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .with_memory_tools(store)  // 自动注册 remember + recall + search_memory + forget
     .build()?;
-
-// 执行并获取实时事件
-let mut stream = graph.run_stream(SharedState::new()).await?;
-while let Some(event) = stream.next().await {
-    match event? {
-        WorkflowEvent::NodeStart { node_name, .. } => println!("▶ {node_name}"),
-        WorkflowEvent::NodeEnd { elapsed, .. } => println!("✓ 完成 ({elapsed:?})"),
-        WorkflowEvent::Completed { result, .. } => println!("最终: {result}"),
-        _ => {}
-    }
-}
 ```
 
-**工作流类型：**
-- `Graph` — LangGraph 风格 DAG，支持条件边
-- `SequentialWorkflow` — 简单管道
-- `ConcurrentWorkflow` — 并行执行
-- `DagWorkflow` — 拓扑调度
+### 多模态支持
 
-### MCP 协议集成
+发送图片和文件——兼容 OpenAI Vision 和 Anthropic API：
 
 ```rust
-use echo_agent::mcp::{McpManager, McpServerConfig};
-
-let mut mcp = McpManager::new();
-
-// 连接 stdio MCP 服务器（文件系统访问）
-let tools = mcp.connect(McpServerConfig::stdio(
-    "filesystem",
-    "npx", vec!["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
-)).await?;
-
-agent.add_tools(tools);
-
-// 连接 HTTP MCP 服务器
-let tools = mcp.connect(McpServerConfig::http(
-    "api-server",
-    "http://localhost:3000/mcp"
-)).await?;
+let msg = Message::user_with_image(
+    "这张图片里有什么？",
+    "image/png",
+    base64_data,
+);
 ```
 
-**传输支持：**
-- stdio（本地进程）
-- SSE（Server-Sent Events）
-- HTTP（REST API）
+### 声明式工作流（YAML/JSON）
 
-### Skill 系统（对齐 agentskills.io）
+无需写 Rust 即可定义 Agent 图：
 
-```rust
-// 代码型 Skill：工具包 + 可选提示词注入
-pub struct CalculatorSkill;
-
-impl Skill for CalculatorSkill {
-    fn name(&self) -> &str { "calculator" }
-    fn description(&self) -> &str { "数学计算" }
-    fn tools(&self) -> Vec<Box<dyn Tool>> {
-        vec![Box::new(AddTool), Box::new(MultiplyTool)]
-    }
-    fn system_prompt_injection(&self) -> Option<String> {
-        Some("你有计算器用于精确数学运算。".into())
-    }
-}
-
-// 文件型 Skill（SKILL.md）：
-// skills/code_review/SKILL.md
-// → 渐进式披露：发现 → 激活 → 使用
+```yaml
+name: research_pipeline
+nodes:
+  - name: researcher
+    type: agent
+    model: qwen3-max
+    system_prompt: "你是一个研究助手"
+    input_key: task
+    output_key: research
+  - name: writer
+    type: agent
+    model: qwen3-max
+    system_prompt: "你是一个写作助手"
+    input_key: research
+    output_key: result
+edges:
+  - from: researcher
+    to: writer
+entry: researcher
+finish: [writer]
 ```
 
-### Human-in-the-Loop
-
 ```rust
-use echo_agent::human_loop::{ConsoleHumanLoopProvider, WebSocketHumanLoopProvider};
-
-// 控制台审批（终端提示）
-let provider = ConsoleHumanLoopProvider::new();
-agent.set_human_loop_provider(Arc::new(provider));
-
-// WebSocket 审批（Web UI）
-let provider = WebSocketHumanLoopProvider::new("ws://localhost:8080/approval");
-agent.set_human_loop_provider(Arc::new(provider));
+let graph = Graph::from_yaml("workflow.yaml")?;
+let result = graph.run(state).await?;
 ```
 
-### 护栏系统
+### 统一重试策略
+
+一套策略覆盖所有外部调用：
 
 ```rust
-// 规则型护栏（即时）
-let guard = RuleGuardBuilder::new("no-pii")
-    .block_regex(r"\b\d{3}-\d{2}-\d{4}\b") // SSN 模式
-    .block_regex(r"\b[A-Z]{2}\d{6}\b")     // 护照模式
-    .build();
+let policy = RetryPolicy::new(3, Duration::from_millis(500))
+    .max_delay(Duration::from_secs(30))
+    .jitter(true);
 
-// LLM 型护栏（语义理解）
-let llm_guard = LlmGuard::new("qwen3-max")
-    .prompt("检查内容是否包含敏感信息");
-
-agent.set_guard_manager(GuardManager::new()
-    .add_input_guard(Box::new(guard))
-    .add_output_guard(Box::new(llm_guard)));
+let response = with_retry(&policy, || llm_client.chat(request)).await?;
 ```
 
-### 结构化输出
+### 动态工具管理
+
+对话中途按阶段切换工具集：
 
 ```rust
-#[derive(Deserialize, JsonSchema)]
-struct AnalysisResult {
-    sentiment: String,
-    confidence: f64,
-    keywords: Vec<String>,
-}
-
-let result: AnalysisResult = agent.extract("分析：'我喜欢 Rust！'").await?;
-println!("情感: {} ({:.0}% 置信度)", result.sentiment, result.confidence * 100);
-```
-
-### Self-Reflection Agent
-
-```rust
-use echo_agent::agents::self_reflection::{SelfReflectionAgent, LlmCritic};
-
-let generator = ReactAgentBuilder::simple("qwen3-max", "技术文档撰写者")?;
-let critic = LlmCritic::new("qwen3-max").with_pass_threshold(8.0);
-
-let mut agent = SelfReflectionAgent::new("reflection_agent", generator, critic)
-    .max_reflections(3);
-
-// 生成 → 评估（分数 < 8）→ 反思 → 修正 → 循环
-let result = agent.execute("清晰准确地解释 Rust 所有权").await?;
-```
-
-### Plan-and-Execute Agent
-
-```rust
-use echo_agent::agents::plan_execute::{PlanExecuteAgent, LlmPlanner, ReactExecutor};
-
-let planner = LlmPlanner::new("qwen3-max");
-let executor = ReactExecutor::new(ReactAgentBuilder::simple("qwen3-max", "执行器")?);
-
-let mut agent = PlanExecuteAgent::new("planner", planner, executor)
-    .max_replans(3);
-
-// 规划 → DAG 任务 → 执行 → 失败时增量重规划 → 汇总
-let result = agent.execute("研究、分析并撰写 Rust 异步模式报告").await?;
-```
-
-### A2A 协议（Agent-to-Agent）
-
-```rust
-use echo_agent::a2a::{AgentCard, A2AServer, A2AClient};
-
-// 服务端：发布 Agent Card
-let card = AgentCard::builder("translator", "http://localhost:8080")
-    .description("多语言翻译 Agent")
-    .skill(AgentSkill::new("translate", "翻译文本"))
-    .streaming()
-    .build();
-
-let server = A2AServer::new(card, agent);
-
-// 客户端：发现并调用远程 Agent
-let client = A2AClient::new("http://remote-agent:8080");
-let task_id = client.send_task("翻译成法语：你好世界").await?;
+agent.add_tool(Box::new(SearchWebTool));
+agent.remove_tool("search_web");
+agent.replace_tool(Box::new(SaferExecuteCodeTool));
 ```
 
 ---
 
-## 宏系统
-
-| 宏 | 输入 | 输出 | 用途 |
-|-----|------|------|------|
-| `#[tool]` | `async fn` | `Params` + `TypedTool` | 一个函数定义工具 |
-| `#[callback]` | `impl` 块 | `AgentCallback` | 覆写生命周期钩子 |
-| `#[guard]` | `async fn` | `Guard` | 内容过滤规则 |
-| `#[handler]` | `impl` 块 | `HumanLoopHandler` | 审批/输入处理 |
-| `#[compressor]` | `async fn` | `ContextCompressor` | 自定义压缩策略 |
-| `#[audit_logger]` | `impl` 块 | `AuditLogger` | 事件日志后端 |
-| `agent!{}` | 键值对 | `ReactAgent` | 声明式 Agent 构建 |
-| `messages![]` | 角色-内容对 | `Vec<Message>` | 快速消息列表 |
-| `tool_params!{}` | schema DSL | `JSON Value` | JSON Schema 构建器 |
-
----
-
-## 工作区结构
+## Workspace 结构
 
 ```
 echo-agent/
-├── echo-core/          # 核心 trait 与类型
-│   ├── agent.rs        # Agent trait, AgentEvent, AgentCallback
-│   ├── tools/mod.rs    # Tool, TypedTool, ToolResult, Permission
-│   ├── llm/mod.rs      # LlmClient trait, Message 类型
-│   ├── guard.rs        # Guard trait, GuardResult
-│   ├── audit.rs        # AuditLogger trait
-│   └── retry.rs        # RetryPolicy, with_retry, with_retry_if
-│
-├── echo-macros/        # 过程宏
-│   └── lib.rs          # #[tool], #[callback], #[guard], #[handler] 等
-│
-├── echo-providers/     # LLM 实现
-│   ├── openai.rs       # OpenAI 兼容客户端
-│   ├── anthropic.rs    # Anthropic Claude 原生客户端
-│   └── ollama.rs       # 本地 Ollama 客户端
-│
-├── echo-mcp/           # MCP 协议
-│   ├── client.rs       # McpManager, 工具适配
-│   ├── transport/      # stdio, SSE, HTTP 传输
-│   └── types.rs        # MCP 消息类型
-│
-├── src/                # 主 crate
-│   ├── agents/         # Agent 实现
-│   │   ├── react/      # ReAct 引擎
-│   │   ├── plan_execute/ # Plan-and-Execute
-│   │   ├── self_reflection/ # Self-Reflection
-│   │   └── subagent/   # SubAgent 编排
-│   ├── memory/         # Store, Checkpointer, EmbeddingStore
-│   ├── workflow/       # Graph, Sequential, Concurrent, DagWorkflow
-│   ├── tools/          # ToolManager, 内置工具
-│   ├── skills/         # SkillRegistry, Skill trait
-│   ├── guard/          # GuardManager, RuleGuard, LlmGuard
-│   ├── compression/    # SlidingWindow, Summary, Hybrid
-│   ├── testing/        # MockLlmClient, MockAgent, MockTool
-│   ├── a2a/            # Agent-to-Agent 协议
-│   └── telemetry/      # OpenTelemetry 集成
-│
-├── examples/           # 39 个可运行 demo
-├── docs/               # 中英双语文档
-│   └ knowledge/        # 知识库（模式、概念）
-├── skills/             # 外部技能包（SKILL.md 格式）
-│
-└── echo-cli/           # CLI 工具（可选）
+├── echo-core/         核心 trait 与类型（Tool、LlmClient、Agent、Guard、Retry 等）
+├── echo-macros/       过程宏（#[tool]、#[callback]、#[guard]、#[handler] 等）
+├── echo-providers/    LLM 提供方实现（OpenAI、Anthropic、Ollama）
+├── echo-mcp/          MCP 协议客户端（stdio、SSE、HTTP 传输）
+├── echo-channels/     IM 通道插件（QQ Bot、飞书）
+├── src/               主 crate —— Agent 引擎、记忆、技能、工具、工作流等
+├── examples/          40 个可运行示例
+├── docs/              双语文档（en + zh）
+└── skills/            外部技能包（Markdown 格式）
+
+> **注意**：echo-agent 是纯库框架。开箱即用的 Agent 应用（含 CLI 和 Web UI）请参见 [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli)。
 ```
+
+终端用户只需依赖根 `echo_agent` crate，它会重新导出所有公共 API。
 
 ---
 
-## 快速开始
+## 快速上手
 
-### 环境准备
+### 前置条件
 
 ```bash
-# 安装 Rust（2024 edition）
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### 配置
+### 配置模型
 
-创建 `echo-agent.yaml`（或设置 `$ECHO_AGENT_CONFIG`）：
+在项目根目录创建 `echo-agent.yaml`（或设置 `$ECHO_AGENT_CONFIG`）：
 
 ```yaml
 models:
@@ -442,126 +288,242 @@ models:
   gpt-4o:
     provider: openai
     api_key: ${OPENAI_API_KEY}
-
-  claude-3-5-sonnet:
-    provider: anthropic
-    api_key: ${ANTHROPIC_API_KEY}
-
-  llama3:
-    provider: ollama
-    base_url: http://localhost:11434
 ```
 
 ### 运行示例
 
 ```bash
-# 基础工具
 cargo run --example demo01_tools
-
-# 宏展示
 cargo run --example demo25_macros
-
-# 工作流流式
 cargo run --example demo34_workflow_stream
-
-# 多模态（图片）
 cargo run --example demo36_multimodal
 
-# 声明式 YAML 工作流
-cargo run --example demo37_declarative_workflow
-
-# Self-Reflection Agent
-cargo run --example demo20_audit
-
-# MCP 集成
-cargo run --example demo06_mcp
+# IM 通道（需配置环境变量）
+cargo run --example demo38_im_channels --features channels
 ```
 
-### 构建 & 测试
+---
 
-```bash
-cargo build --release
-cargo test --lib
-cargo clippy -- -D warnings
+## 核心概念
+
+### 1. Tool —— 一个宏定义一个工具
+
+```rust
+use echo_agent::{tool, prelude::*};
+
+#[tool(name = "weather", description = "查询城市天气")]
+async fn weather(
+    /// 城市名
+    city: String,
+) -> Result<ToolResult> {
+    Ok(ToolResult::success(format!("{city} 晴天")))
+}
+
+// 自动生成: WeatherParams + WeatherTool + impl TypedTool
 ```
+
+### 2. Agent —— 声明式构建
+
+```rust
+use echo_agent::{agent, prelude::*};
+
+let mut agent = agent! {
+    model: "qwen3-max",
+    system_prompt: "你是一个有帮助的助手",
+    tools: [WeatherTool, CalculatorTool],
+    max_iterations: 10,
+}?;
+
+let answer = agent.execute("东京天气如何？").await?;
+```
+
+### 3. 图工作流 —— 编排 Agent 管道
+
+```rust
+let graph = GraphBuilder::new("etl_pipeline")
+    .add_function_node("extract", |state| Box::pin(async move {
+        state.set("data", vec!["hello", "world"]);
+        Ok(())
+    }))
+    .add_function_node("transform", |state| Box::pin(async move {
+        let data: Vec<String> = state.get("data").unwrap_or_default();
+        state.set("result", data.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>());
+        Ok(())
+    }))
+    .set_entry("extract")
+    .add_edge("extract", "transform")
+    .set_finish("transform")
+    .build()?;
+
+let result = graph.run(SharedState::new()).await?;
+```
+
+### 4. Callback —— 只覆写你需要的方法
+
+```rust
+use echo_agent::{callback, prelude::*};
+
+struct MyCallback;
+
+#[callback]
+impl MyCallback {
+    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
+        println!("[工具调用] {tool}");
+    }
+}
+```
+
+### 5. Guard —— 一个函数即护栏
+
+```rust
+use echo_agent::{guard, prelude::*};
+
+#[guard(name = "length-limit")]
+async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardResult> {
+    if content.len() > 50000 {
+        Ok(GuardResult::Block { reason: "内容过长".into() })
+    } else {
+        Ok(GuardResult::Pass)
+    }
+}
+```
+
+### 6. Streaming —— 实时反馈
+
+```rust
+let mut stream = agent.execute_stream("解释量子纠缠").await?;
+while let Some(event) = stream.next().await {
+    match event? {
+        AgentEvent::Token(t)              => print!("{t}"),
+        AgentEvent::ToolCall { name, .. } => println!("\n[→ {name}]"),
+        AgentEvent::FinalAnswer(a)        => { println!("\n{a}"); break; }
+        _ => {}
+    }
+}
+```
+
+### 7. MCP —— 接入任意工具服务器
+
+```rust
+let mut mcp = McpManager::new();
+let tools = mcp.connect(McpServerConfig::stdio(
+    "filesystem",
+    "npx", vec!["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+)).await?;
+agent.add_tools(tools);
+```
+
+### 8. IM 通道 —— 部署到消息平台
+
+```rust
+let mut manager = ChannelManager::new();
+manager.register(Box::new(QqChannel::new(qq_config)?));
+manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
+```
+
+---
+
+## 宏速查
+
+| 宏 | 类型 | 用途 |
+|----|------|------|
+| `#[tool]` | 过程宏 | 从 async fn 生成 TypedTool |
+| `#[callback]` | 过程宏 | 从 impl 块生成 AgentCallback |
+| `#[guard]` | 过程宏 | 从 async fn 生成 Guard |
+| `#[handler]` | 过程宏 | 从 impl 块生成 HumanLoopHandler |
+| `#[compressor]` | 过程宏 | 从 async fn 生成 ContextCompressor |
+| `#[permission_policy]` | 过程宏 | 从 async fn 生成 PermissionPolicy |
+| `#[audit_logger]` | 过程宏 | 从 impl 块生成 AuditLogger |
+| `agent!{}` | 声明宏 | 声明式 Agent 构建 |
+| `messages![]` | 声明宏 | 快速构建消息列表 |
+| `tool_params!{}` | 声明宏 | 快速构建工具参数 Schema |
+| `chat_request!{}` | 声明宏 | 快速构建聊天请求 |
+
+---
+
+## 示例
+
+| 示例 | 演示内容 |
+|------|---------|
+| [`demo01_tools`](examples/demo01_tools.rs) | `#[tool]` 宏定义与调用 |
+| [`demo02_tasks`](examples/demo02_tasks.rs) | DAG 任务规划 |
+| [`demo03_approval`](examples/demo03_approval.rs) | 人工审批 |
+| [`demo04_suagent`](examples/demo04_suagent.rs) | Orchestrator + SubAgent |
+| [`demo05_compressor`](examples/demo05_compressor.rs) | 上下文压缩 |
+| [`demo06_mcp`](examples/demo06_mcp.rs) | MCP 工具服务器 |
+| [`demo07_skills`](examples/demo07_skills.rs) | 内置技能 |
+| [`demo08_external_skills`](examples/demo08_external_skills.rs) | 外部技能加载 |
+| [`demo09_file_shell`](examples/demo09_file_shell.rs) | 文件和 Shell 工具 |
+| [`demo10_streaming`](examples/demo10_streaming.rs) | 流式输出 |
+| [`demo11_callbacks`](examples/demo11_callbacks.rs) | 生命周期回调 |
+| [`demo12_resilience`](examples/demo12_resilience.rs) | 重试、超时、容错 |
+| [`demo13_tool_execution`](examples/demo13_tool_execution.rs) | 工具执行配置 |
+| [`demo14_memory_isolation`](examples/demo14_memory_isolation.rs) | 记忆隔离 |
+| [`demo15_structured_output`](examples/demo15_structured_output.rs) | JSON Schema 结构化输出 |
+| [`demo16_testing`](examples/demo16_testing.rs) | Mock 测试 |
+| [`demo17_chat`](examples/demo17_chat.rs) | 交互式对话 |
+| [`demo18_semantic_memory`](examples/demo18_semantic_memory.rs) | 语义记忆 |
+| [`demo19_guard`](examples/demo19_guard.rs) | 护栏系统 |
+| [`demo20_audit`](examples/demo20_audit.rs) | 审计日志 |
+| [`demo21_handoff`](examples/demo21_handoff.rs) | Agent 间 Handoff |
+| [`demo22_plan_execute`](examples/demo22_plan_execute.rs) | Plan-and-Execute |
+| [`demo23_a2a`](examples/demo23_a2a.rs) | A2A 协议 |
+| [`demo24_topology`](examples/demo24_topology.rs) | 拓扑可视化 |
+| [`demo25_macros`](examples/demo25_macros.rs) | 宏系统综合展示 |
+| [`demo28_sandbox`](examples/demo28_sandbox.rs) | 沙箱代码执行 |
+| [`demo29_workflow`](examples/demo29_workflow.rs) | 图工作流引擎 |
+| [`demo30_mcp_server`](examples/demo30_mcp_server.rs) | MCP 服务端模式 |
+| [`demo31_memory_tools`](examples/demo31_memory_tools.rs) | **记忆工具自动注入** |
+| [`demo32_token_budget`](examples/demo32_token_budget.rs) | **Token 预算管控** |
+| [`demo33_retry_policy`](examples/demo33_retry_policy.rs) | **统一重试策略** |
+| [`demo34_workflow_stream`](examples/demo34_workflow_stream.rs) | **工作流流式事件** |
+| [`demo35_dynamic_tools`](examples/demo35_dynamic_tools.rs) | **动态工具注册/注销** |
+| [`demo36_multimodal`](examples/demo36_multimodal.rs) | **多模态消息** |
+| [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | **YAML/JSON 声明式工作流** |
+| [`demo38_im_channels`](examples/demo38_im_channels.rs) | **IM 平台接入（QQ + 飞书）** |
+
+---
+
+## 兼容性
+
+支持任意 **OpenAI 兼容** API，以及原生 Anthropic、Ollama 支持：
+
+| Provider | 接入地址 |
+|----------|---------|
+| OpenAI | `https://api.openai.com/v1` |
+| Anthropic | `https://api.anthropic.com/v1`（原生） |
+| DeepSeek | `https://api.deepseek.com/v1` |
+| 阿里云 Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Ollama（本地） | `http://localhost:11434`（原生） |
+| LM Studio | `http://localhost:1234/v1` |
 
 ---
 
 ## 文档
 
-### 功能指南
+完整文档位于 [`docs/`](./docs/)：
 
-| 文档 | 模块 | 核心概念 |
-|------|------|----------|
-| [01 - ReAct Agent](docs/zh/01-react-agent.md) | 核心引擎 | 思考→行动→观察、CoT、回调 |
-| [02 - 工具系统](docs/zh/02-tools.md) | Tools | TypedTool、超时重试、权限 |
-| [03 - 记忆系统](docs/zh/03-memory.md) | Memory | Store、Checkpointer、命名空间隔离 |
-| [04 - 上下文压缩](docs/zh/04-compression.md) | Compression | SlidingWindow、Summary、Hybrid |
-| [05 - 人工介入](docs/zh/05-human-loop.md) | HIL | 审批、Console/WebSocket 提供者 |
-| [06 - 多 Agent](docs/zh/06-subagent.md) | SubAgent | Orchestrator、上下文隔离 |
-| [07 - Skill 系统](docs/zh/07-skills.md) | Skills | 代码/文件型、渐进式披露 |
-| [08 - MCP 集成](docs/zh/08-mcp.md) | MCP | stdio/HTTP 传输、工具适配 |
-| [09 - 任务规划](docs/zh/09-tasks.md) | Tasks | DAG、拓扑排序、Mermaid |
-| [10 - 流式输出](docs/zh/10-streaming.md) | Streaming | AgentEvent、SSE、TTFT |
-| [11 - 结构化输出](docs/zh/11-structured-output.md) | Structured | JsonSchema、extract() |
-| [12 - Mock 测试](docs/zh/12-mock.md) | Testing | MockLlmClient、MockAgent |
-| [13 - 多轮对话](docs/zh/13-chat.md) | Chat | chat()、reset() |
-| [14 - 语义搜索](docs/zh/14-semantic-search.md) | Semantic | EmbeddingStore、向量 |
-| [15 - Self-Reflection](docs/zh/15-self-reflection.md) | 反思 | 评估→修正、情景记忆 |
-| [16 - Plan-and-Execute](docs/zh/16-plan-execute.md) | 规划执行 | Planner/Executor、增量重规划 |
-| [17 - Graph Workflow](docs/zh/17-graph-workflow.md) | 工作流 | LangGraph 风格、条件边 |
-| [18 - Guard 系统](docs/zh/18-guard-system.md) | 护栏 | RuleGuard、LlmGuard |
+**中文**（[`docs/zh/`](./docs/zh/README.md)）
 
-### 知识库
+- [ReAct Agent](docs/zh/01-react-agent.md)
+- [工具系统](docs/zh/02-tools.md)
+- [记忆系统](docs/zh/03-memory.md)
+- [上下文压缩](docs/zh/04-compression.md)
+- [人工介入](docs/zh/05-human-loop.md)
+- [多 Agent 编排](docs/zh/06-subagent.md)
+- [Skill 系统](docs/zh/07-skills.md)
+- [MCP 协议](docs/zh/08-mcp.md)
+- [DAG 任务](docs/zh/09-tasks.md)
+- [流式输出](docs/zh/10-streaming.md)
+- [结构化输出](docs/zh/11-structured-output.md)
+- [Mock 测试](docs/zh/12-mock.md)
+- [IM 通道](docs/zh/15-im-channels.md)
 
-| 主题 | 描述 |
-|------|------|
-| [Agent 模式](docs/knowledge/agent-patterns.md) | ReAct、Plan-and-Execute、Self-Reflection、LangGraph 工作流 |
-| [MCP 协议](docs/knowledge/mcp-protocol.md) | Model Context Protocol 规范与集成 |
-| [Skill 系统设计](docs/knowledge/skill-system.md) | agentskills.io 规范与渐进式披露 |
-| [A2A 协议](docs/knowledge/a2a-protocol.md) | Agent-to-Agent 通信与发现 |
+**English**（[`docs/en/`](./docs/en/README.md)）
 
 ---
 
-## 提供商兼容性
-
-| 提供商 | 端点 | 特性 |
-|--------|------|------|
-| OpenAI | `https://api.openai.com/v1` | GPT-4o、流式、视觉 |
-| Anthropic | `https://api.anthropic.com/v1` | Claude、原生格式 |
-| DeepSeek | `https://api.deepseek.com/v1` | DeepSeek-V3 |
-| 阿里 Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Qwen3-max |
-| Ollama (本地) | `http://localhost:11434` | Llama3、Mistral、Qwen2 |
-| LM Studio | `http://localhost:1234/v1` | 本地模型 |
-
----
-
-## Feature Flags
-
-```toml
-[dependencies]
-echo_agent = { version = "1.0.0", features = ["full"] }
-
-# 或选择性启用：
-echo_agent = { version = "1.0.0", features = ["mcp", "a2a", "sqlite"] }
-```
-
-| Feature | 描述 |
-|---------|------|
-| `full` | 所有功能（默认） |
-| `mcp` | MCP 协议集成 |
-| `a2a` | Agent-to-Agent 协议 |
-| `sqlite` | SQLite 存储 |
-| `telemetry` | OpenTelemetry 追踪 |
-| `human-loop` | WebSocket 审批 |
-| `plan-execute` | Plan-and-Execute Agent |
-| `workflow` | 图工作流引擎 |
-| `self-reflection` | Self-Reflection Agent |
-| `subagent` | SubAgent 编排 |
-
----
-
-## 贡献指南
+## 参与贡献
 
 ```bash
 git clone https://github.com/your-org/echo-agent
@@ -572,12 +534,12 @@ cargo run --example demo01_tools
 ```
 
 提交 PR 前：
-- `cargo fmt && cargo clippy -- -D warnings`
+- 运行 `cargo fmt` 和 `cargo clippy`
 - 为新功能添加测试
-- 更新 `docs/` 中的文档
+- 更新 `docs/` 下相关文档
 
 ---
 
-## 许可证
+## License
 
-MIT © echo-agent 贡献者
+MIT © echo-agent contributors
