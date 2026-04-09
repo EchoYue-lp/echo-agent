@@ -192,13 +192,15 @@ fn extract_paths_from_bash_command(cmd: &str) -> Vec<String> {
     // 使用正则表达式提取所有看起来像路径的字符串
     // 匹配：以 /, ./, ~/, . 开头的字符串，或者包含 / 的字符串
     // 排除明显的非路径 token（如命令选项）
-    let path_re = Regex::new(r#"(?:^|\s)((?:/|\./|~/|\.)[^\s"'`$(){}|;&<>]*|/[^\s"'`$(){}|;&<>]+)"#).unwrap();
+    let path_re =
+        Regex::new(r#"(?:^|\s)((?:/|\./|~/|\.)[^\s"'`$(){}|;&<>]*|/[^\s"'`$(){}|;&<>]+)"#).unwrap();
 
     for cap in path_re.captures_iter(&expanded) {
         if let Some(matched) = cap.get(1) {
             let path = matched.as_str().trim();
             // 过滤掉明显的非路径（如单个点、双点）和已处理的引号内容
-            if !path.is_empty() && path != "." && path != ".." && !paths.contains(&path.to_string()) {
+            if !path.is_empty() && path != "." && path != ".." && !paths.contains(&path.to_string())
+            {
                 paths.push(path.to_string());
             }
         }
@@ -236,10 +238,12 @@ fn expand_env_vars_and_tilde(cmd: &str) -> String {
     // 展开环境变量 $VAR 和 ${VAR}，使用正则确保完整匹配
     let re = Regex::new(r#"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"#).unwrap();
 
-    result = re.replace_all(&result, |caps: &regex::Captures| {
-        let var_name = caps.get(1).or_else(|| caps.get(2)).unwrap().as_str();
-        env::var(var_name).unwrap_or_else(|_| caps[0].to_string())
-    }).to_string();
+    result = re
+        .replace_all(&result, |caps: &regex::Captures| {
+            let var_name = caps.get(1).or_else(|| caps.get(2)).unwrap().as_str();
+            env::var(var_name).unwrap_or_else(|_| caps[0].to_string())
+        })
+        .to_string();
 
     result
 }
@@ -299,7 +303,10 @@ fn extract_paths_from_value(value: &Value, paths: &mut Vec<String>) {
         }
         Value::Object(map) => {
             for (key, v) in map {
-                if matches!(key.as_str(), "path" | "file_path" | "directory" | "dir" | "dest" | "destination") {
+                if matches!(
+                    key.as_str(),
+                    "path" | "file_path" | "directory" | "dir" | "dest" | "destination"
+                ) {
                     if let Some(s) = v.as_str() {
                         paths.push(s.to_string());
                     }

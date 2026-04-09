@@ -9,14 +9,14 @@
 //! 4. 大消息自动分片，需合包处理
 //! 5. 处理完事件后返回响应 Frame
 
-use super::api::{get_ws_endpoint, http_client, ClientConfig};
+use super::api::{ClientConfig, get_ws_endpoint, http_client};
 use super::proto::*;
 use crate::types::*;
 use dashmap::DashMap;
 use echo_core::error::{ChannelError, Result};
-use futures::stream::{SplitSink, SplitStream};
 use futures::SinkExt;
 use futures::StreamExt;
+use futures::stream::{SplitSink, SplitStream};
 use rand::Rng;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,9 +41,8 @@ const DEFAULT_RECONNECT_NONCE: u64 = 30;
 const DEFAULT_RECONNECT_COUNT: i32 = -1;
 
 // 类型别名，简化复杂类型签名
-type WsConn = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsConn =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type WsSink = SplitSink<WsConn, Message>;
 type WsRead = SplitStream<WsConn>;
 type SharedSink = Arc<Mutex<WsSink>>;
@@ -156,7 +155,10 @@ impl WsClient {
                         break;
                     }
                 }
-                error!("Feishu WebSocket: failed to reconnect after {} attempts", self.config.reconnect_count);
+                error!(
+                    "Feishu WebSocket: failed to reconnect after {} attempts",
+                    self.config.reconnect_count
+                );
                 break;
             } else {
                 let mut attempt = 0;
@@ -181,10 +183,17 @@ impl WsClient {
     async fn do_reconnect_delay(&self, attempt: i32) {
         if attempt == 0 && self.config.reconnect_nonce > Duration::ZERO {
             let jitter = rand_jitter(self.config.reconnect_nonce);
-            info!("Feishu WebSocket: first reconnect jitter: {}ms", jitter.as_millis());
+            info!(
+                "Feishu WebSocket: first reconnect jitter: {}ms",
+                jitter.as_millis()
+            );
             tokio::time::sleep(jitter).await;
         } else if attempt > 0 {
-            info!("Feishu WebSocket: reconnect attempt {}, waiting {}s", attempt + 1, self.config.reconnect_interval.as_secs());
+            info!(
+                "Feishu WebSocket: reconnect attempt {}, waiting {}s",
+                attempt + 1,
+                self.config.reconnect_interval.as_secs()
+            );
             tokio::time::sleep(self.config.reconnect_interval).await;
         }
     }
@@ -207,7 +216,8 @@ impl WsClient {
             &self.config.domain,
             &self.config.app_id,
             &self.config.app_secret,
-        ).await?;
+        )
+        .await?;
 
         if let Some(config) = client_config {
             self.config.update_from_server(&config);
@@ -225,11 +235,14 @@ impl WsClient {
         info!("Feishu WebSocket: connecting to {}", ws_url);
 
         // 2. 建立 WebSocket 连接，分离读写端
-        let (ws_stream, _) = connect_async(&ws_url)
-            .await
-            .map_err(|e| ChannelError::ConnectionError(format!("WebSocket connect failed: {}", e)))?;
+        let (ws_stream, _) = connect_async(&ws_url).await.map_err(|e| {
+            ChannelError::ConnectionError(format!("WebSocket connect failed: {}", e))
+        })?;
 
-        info!("Feishu WebSocket: connected (conn_id={}, service_id={})", self.conn_id, self.service_id);
+        info!(
+            "Feishu WebSocket: connected (conn_id={}, service_id={})",
+            self.conn_id, self.service_id
+        );
 
         let (write, read) = ws_stream.split();
         let ws_sink: SharedSink = Arc::new(Mutex::new(write));
@@ -272,7 +285,8 @@ impl WsClient {
         loop {
             match stream.next().await {
                 Some(Ok(Message::Binary(bytes))) => {
-                    self.handle_binary_frame(&sink, bytes, handler.clone()).await?;
+                    self.handle_binary_frame(&sink, bytes, handler.clone())
+                        .await?;
                 }
                 Some(Ok(Message::Ping(_))) => {
                     debug!("Feishu WebSocket: received raw ping");
@@ -290,7 +304,9 @@ impl WsClient {
                 Some(Ok(Message::Frame(_))) => {}
                 Some(Err(e)) => {
                     warn!("Feishu WebSocket: read error: {}", e);
-                    return Err(ChannelError::ConnectionError(format!("WebSocket error: {}", e)).into());
+                    return Err(
+                        ChannelError::ConnectionError(format!("WebSocket error: {}", e)).into(),
+                    );
                 }
                 None => {
                     info!("Feishu WebSocket: stream ended");
@@ -400,7 +416,8 @@ impl WsClient {
                     );
                     return Ok(());
                 }
-                self.processed_events.insert(event_mid.clone(), Instant::now());
+                self.processed_events
+                    .insert(event_mid.clone(), Instant::now());
             }
 
             // 定期清理过期的去重缓存
@@ -414,7 +431,10 @@ impl WsClient {
                     warn!("[V3] Feishu WebSocket: async processing error: {:?}", e);
                 }
                 let end = chrono::Utc::now().timestamp_millis();
-                info!("[V3] Feishu WebSocket: async processing done in {}ms", end - start);
+                info!(
+                    "[V3] Feishu WebSocket: async processing done in {}ms",
+                    end - start
+                );
             });
         }
 
@@ -437,17 +457,25 @@ impl WsClient {
     }
 
     /// 合包分片消息（带 TTL 防止内存泄漏）
-    fn combine_fragments(&self, msg_id: &str, sum: i32, seq: i32, payload: Option<Vec<u8>>) -> Option<Option<Vec<u8>>> {
+    fn combine_fragments(
+        &self,
+        msg_id: &str,
+        sum: i32,
+        seq: i32,
+        payload: Option<Vec<u8>>,
+    ) -> Option<Option<Vec<u8>>> {
         let cache_key = msg_id.to_string();
 
         // 清理超时的残缺分片（5 分钟未完成视为丢失）
         let ttl = Duration::from_secs(DEDUP_TTL_SECS);
-        self.fragment_cache.retain(|_, (created, _)| created.elapsed() < ttl);
+        self.fragment_cache
+            .retain(|_, (created, _)| created.elapsed() < ttl);
 
         // 初始化缓存
         if !self.fragment_cache.contains_key(&cache_key) {
             let fragments: Vec<Option<Vec<u8>>> = vec![None; sum as usize];
-            self.fragment_cache.insert(cache_key.clone(), (Instant::now(), fragments));
+            self.fragment_cache
+                .insert(cache_key.clone(), (Instant::now(), fragments));
         }
 
         // 更新分片
@@ -471,12 +499,16 @@ impl WsClient {
 
     /// 异步处理事件
     async fn process_event_async(payload: String, handler: Arc<dyn MessageHandler>) -> Result<()> {
-        let event: serde_json::Value = serde_json::from_str(&payload)
-            .map_err(|e| ChannelError::ConnectionError(format!("Failed to parse event JSON: {}", e)))?;
+        let event: serde_json::Value = serde_json::from_str(&payload).map_err(|e| {
+            ChannelError::ConnectionError(format!("Failed to parse event JSON: {}", e))
+        })?;
 
         let event_type = event["header"]["event_type"].as_str().unwrap_or("");
 
-        debug!("Feishu WebSocket: async processing event type: {}", event_type);
+        debug!(
+            "Feishu WebSocket: async processing event type: {}",
+            event_type
+        );
 
         match event_type {
             "im.message.receive_v1" => {
@@ -489,7 +521,10 @@ impl WsClient {
     }
 
     /// 处理 IM 消息事件
-    async fn process_im_message(event: serde_json::Value, handler: Arc<dyn MessageHandler>) -> Result<()> {
+    async fn process_im_message(
+        event: serde_json::Value,
+        handler: Arc<dyn MessageHandler>,
+    ) -> Result<()> {
         let message = &event["event"]["message"];
         let sender = &event["event"]["sender"];
 
@@ -520,17 +555,17 @@ impl WsClient {
 
         info!(
             "[V3] Feishu WebSocket: processing message from {} in {}: {}",
-            sender_id, chat_id, if text.len() > 100 { &text[..100] } else { &text }
-        );
-
-        let inbound = InboundMessage::new(
-            "feishu",
             sender_id,
             chat_id,
-            chat_type,
-            text,
-            message_id,
+            if text.len() > 100 {
+                &text[..100]
+            } else {
+                &text
+            }
         );
+
+        let inbound =
+            InboundMessage::new("feishu", sender_id, chat_id, chat_type, text, message_id);
 
         match handler.handle(inbound).await {
             Ok(outbound) => {
@@ -578,7 +613,11 @@ impl WsClient {
                                     }
                                 })
                                 .collect();
-                            if text_parts.is_empty() { None } else { Some(text_parts.join(" ")) }
+                            if text_parts.is_empty() {
+                                None
+                            } else {
+                                Some(text_parts.join(" "))
+                            }
                         } else {
                             None
                         }
@@ -597,7 +636,10 @@ impl WsClient {
         original_frame: ProtoFrame,
         success: bool,
     ) -> Result<()> {
-        let msg_id = original_frame.get_header(HEADER_MESSAGE_ID).unwrap_or("").to_string();
+        let msg_id = original_frame
+            .get_header(HEADER_MESSAGE_ID)
+            .unwrap_or("")
+            .to_string();
 
         let mut response_frame = original_frame.clone();
         let code = if success { 0 } else { 500 };
@@ -612,7 +654,10 @@ impl WsClient {
             .await
             .map_err(|e| ChannelError::SendError(format!("Failed to send response: {}", e)))?;
 
-        info!("[V3] Feishu WebSocket: response sent immediately for msg_id={}", msg_id);
+        info!(
+            "[V3] Feishu WebSocket: response sent immediately for msg_id={}",
+            msg_id
+        );
         Ok(())
     }
 }

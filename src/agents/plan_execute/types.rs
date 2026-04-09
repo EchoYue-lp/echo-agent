@@ -338,10 +338,18 @@ impl Plan {
                 let mut has_word_boundary = false;
                 for &pos in &positions {
                     // 检查前一个字符是否是单词边界
-                    let prev_is_boundary = pos == 0 || !desc_lower.chars().nth(pos - 1).map_or(false, |c| c.is_alphanumeric());
+                    let prev_is_boundary = pos == 0
+                        || !desc_lower
+                            .chars()
+                            .nth(pos - 1)
+                            .map_or(false, |c| c.is_alphanumeric());
                     // 检查后一个字符是否是单词边界
                     let next_pos = pos + dep.len();
-                    let next_is_boundary = next_pos >= desc_lower.len() || !desc_lower.chars().nth(next_pos).map_or(false, |c| c.is_alphanumeric());
+                    let next_is_boundary = next_pos >= desc_lower.len()
+                        || !desc_lower
+                            .chars()
+                            .nth(next_pos)
+                            .map_or(false, |c| c.is_alphanumeric());
 
                     if prev_is_boundary && next_is_boundary {
                         has_word_boundary = true;

@@ -1,4 +1,14 @@
 //! demo10_streaming.rs —— 流式输出综合演示
+//!
+//! 展示 Agent 的流式输出能力：
+//! 1. execute_stream() —— 实时获取 Token、工具调用、最终答案
+//! 2. chat_stream() —— 多轮对话流式输出
+//! 3. AgentEvent 事件类型处理
+//!
+//! 运行方式：
+//! ```bash
+//! cargo run --example demo10_streaming
+//! ```
 
 use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::llm::stream_chat;

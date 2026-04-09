@@ -8,8 +8,8 @@ use echo_core::error::{ChannelError, ReactError, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -147,7 +147,9 @@ pub async fn get_ws_endpoint(
     }
 
     let data = resp.data.ok_or_else(|| {
-        ReactError::Channel(ChannelError::AuthError("Endpoint response missing data".to_string()))
+        ReactError::Channel(ChannelError::AuthError(
+            "Endpoint response missing data".to_string(),
+        ))
     })?;
 
     if data.url.is_empty() {
@@ -249,9 +251,7 @@ impl TokenManager {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                ChannelError::NetworkError(format!("Token request failed: {}", e))
-            })?;
+            .map_err(|e| ChannelError::NetworkError(format!("Token request failed: {}", e)))?;
 
         if !res.status().is_success() {
             return Err(ReactError::Channel(ChannelError::AuthError(format!(
@@ -317,7 +317,10 @@ pub async fn send_message(
         "content": content,
     });
 
-    debug!("Feishu: sending message to {} (type={})", receive_id, msg_type);
+    debug!(
+        "Feishu: sending message to {} (type={})",
+        receive_id, msg_type
+    );
 
     let res = client
         .post(&url)
@@ -338,9 +341,10 @@ pub async fn send_message(
         ))));
     }
 
-    let json: serde_json::Value = res.json().await.map_err(|e| {
-        ChannelError::SendError(format!("Send response parse error: {}", e))
-    })?;
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| ChannelError::SendError(format!("Send response parse error: {}", e)))?;
 
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
@@ -371,7 +375,16 @@ pub async fn send_text_message(
     text: &str,
 ) -> Result<String> {
     let content = json!({ "text": text }).to_string();
-    send_message(client, domain, token, receive_id, receive_id_type, "text", &content).await
+    send_message(
+        client,
+        domain,
+        token,
+        receive_id,
+        receive_id_type,
+        "text",
+        &content,
+    )
+    .await
 }
 
 /// 发送卡片消息
@@ -383,7 +396,16 @@ pub async fn send_card_message(
     receive_id_type: &str,
     card_content: &str,
 ) -> Result<String> {
-    send_message(client, domain, token, receive_id, receive_id_type, "interactive", card_content).await
+    send_message(
+        client,
+        domain,
+        token,
+        receive_id,
+        receive_id_type,
+        "interactive",
+        card_content,
+    )
+    .await
 }
 
 /// 回复消息（在话题中回复）
@@ -422,9 +444,10 @@ pub async fn reply_message(
         ))));
     }
 
-    let json: serde_json::Value = res.json().await.map_err(|e| {
-        ChannelError::SendError(format!("Reply response parse error: {}", e))
-    })?;
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| ChannelError::SendError(format!("Reply response parse error: {}", e)))?;
 
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
@@ -475,9 +498,10 @@ pub async fn patch_card_message(
         ))));
     }
 
-    let json: serde_json::Value = res.json().await.map_err(|e| {
-        ChannelError::SendError(format!("Patch response parse error: {}", e))
-    })?;
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| ChannelError::SendError(format!("Patch response parse error: {}", e)))?;
 
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {

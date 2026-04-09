@@ -54,11 +54,7 @@ impl Default for SessionConfig {
                 "重新开始".into(),
             ],
             command_prefix: Some("/".into()),
-            reset_commands: vec![
-                "reset".into(),
-                "clear".into(),
-                "new".into(),
-            ],
+            reset_commands: vec!["reset".into(), "clear".into(), "new".into()],
             reset_reply: "✅ 对话已重置，请开始新的对话。".into(),
         }
     }
@@ -112,7 +108,11 @@ impl SessionConfig {
         let trimmed = text.trim();
 
         // 关键词匹配
-        if self.reset_keywords.iter().any(|kw| trimmed.eq_ignore_ascii_case(kw)) {
+        if self
+            .reset_keywords
+            .iter()
+            .any(|kw| trimmed.eq_ignore_ascii_case(kw))
+        {
             return true;
         }
 
@@ -120,7 +120,11 @@ impl SessionConfig {
         if let Some(ref prefix) = self.command_prefix {
             if let Some(cmd) = trimmed.strip_prefix(prefix.as_str()) {
                 let cmd = cmd.trim();
-                if self.reset_commands.iter().any(|c| cmd.eq_ignore_ascii_case(c)) {
+                if self
+                    .reset_commands
+                    .iter()
+                    .any(|c| cmd.eq_ignore_ascii_case(c))
+                {
                     return true;
                 }
             }

@@ -387,8 +387,13 @@ impl PermissionService {
             ($decision:expr, $reason:expr, $source:expr) => {{
                 let d = $decision;
                 self.record_audit(
-                    tool_name, tool_input, &d, $reason, $source,
-                    pipeline_start, pipeline_start.elapsed(),
+                    tool_name,
+                    tool_input,
+                    &d,
+                    $reason,
+                    $source,
+                    pipeline_start,
+                    pipeline_start.elapsed(),
                 );
                 return Ok(d);
             }};
@@ -442,10 +447,7 @@ impl PermissionService {
             } => {
                 audit_return!(
                     PermissionDecision::Deny {
-                        reason: format!(
-                            "受保护路径 '{}'（匹配规则 '{}'）",
-                            path, matched_pattern
-                        ),
+                        reason: format!("受保护路径 '{}'（匹配规则 '{}'）", path, matched_pattern),
                     },
                     "protected_path",
                     "protected_paths"
@@ -486,9 +488,7 @@ impl PermissionService {
 
         // 6. 模式分发
         let decision = match config.mode {
-            PermissionMode::Auto => {
-                self.check_with_classifier(tool_name, tool_input).await?
-            }
+            PermissionMode::Auto => self.check_with_classifier(tool_name, tool_input).await?,
             PermissionMode::Default => {
                 self.check_with_handler(tool_name, tool_input, permissions)
                     .await?
@@ -617,8 +617,7 @@ impl PermissionService {
             } else {
                 ApprovalScope::Once
             };
-            self.cache
-                .record_approval(tool_name, tool_input, scope);
+            self.cache.record_approval(tool_name, tool_input, scope);
         }
 
         // 处理规则更新
@@ -737,9 +736,7 @@ impl PermissionRequestHandler for DynProviderHandler {
                 })
             }
             HumanLoopResponse::Rejected { reason } => Ok(PermissionResponse::denied(reason)),
-            HumanLoopResponse::Text(text) => {
-                Ok(PermissionResponse::allowed().with_feedback(text))
-            }
+            HumanLoopResponse::Text(text) => Ok(PermissionResponse::allowed().with_feedback(text)),
             HumanLoopResponse::Timeout => {
                 Ok(PermissionResponse::denied(Some("请求超时".to_string())))
             }

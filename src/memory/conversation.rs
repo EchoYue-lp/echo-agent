@@ -159,10 +159,7 @@ pub trait ConversationStore: Send + Sync {
     ) -> BoxFuture<'a, Result<()>>;
 
     /// 删除对话（级联删除消息）
-    fn delete_conversation<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> BoxFuture<'a, Result<()>>;
+    fn delete_conversation<'a>(&'a self, conversation_id: &'a str) -> BoxFuture<'a, Result<()>>;
 
     /// 保存消息（upsert 模式：先删除旧消息，再插入新消息）
     fn save_messages<'a>(
@@ -178,8 +175,5 @@ pub trait ConversationStore: Send + Sync {
     ) -> BoxFuture<'a, Result<Vec<StoredMessage>>>;
 
     /// 获取消息数量
-    fn count_messages<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> BoxFuture<'a, Result<usize>>;
+    fn count_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFuture<'a, Result<usize>>;
 }

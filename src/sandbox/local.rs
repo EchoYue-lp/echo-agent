@@ -176,10 +176,7 @@ impl LocalSandbox {
         // 读取权限：转义路径中的引号防止 sandbox profile 语法破坏
         for path in &self.config.allowed_read_paths {
             let escaped = path.display().to_string().replace('"', "\\\"");
-            profile.push_str(&format!(
-                "(allow file-read* (subpath \"{}\"))\n",
-                escaped
-            ));
+            profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
         }
         // 始终允许读取基本系统路径
         profile.push_str("(allow file-read* (subpath \"/usr\"))\n");
@@ -192,10 +189,7 @@ impl LocalSandbox {
         // 写入权限：转义路径中的引号
         for path in &self.config.allowed_write_paths {
             let escaped = path.display().to_string().replace('"', "\\\"");
-            profile.push_str(&format!(
-                "(allow file-write* (subpath \"{}\"))\n",
-                escaped
-            ));
+            profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", escaped));
         }
         // 允许写 /dev/null
         profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");

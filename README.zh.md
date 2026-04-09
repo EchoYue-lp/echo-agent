@@ -1,16 +1,17 @@
 <div align="center">
 
-# echo-agent
+# 🚀 echo-agent
 
-**为 Rust 打造的可组合、生产级 AI Agent 开发框架**
+**为 Rust 打造的高速 AI Agent 框架 - 零成本抽象 • 内存安全 • 异步原生**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)](https://github.com/your-org/echo-agent)
+[![Version](https://img.shields.io/badge/version-1.3.0-brightgreen)](https://github.com/EchoYue-lp/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20兼容-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
+[![Examples](https://img.shields.io/badge/examples-40%2B-blue)](./examples/)
 
-用 Rust 的**内存安全**、**零成本抽象**和**异步原生并发**构建自主 AI Agent。
+**内存安全 • 零成本抽象 • 异步原生 • 生产就绪**
 
 [English](./README.md) · [文档中心](docs/zh/README.md) · [示例](./examples/)
 
@@ -66,6 +67,40 @@ manager.start_all(handler).await?;  // 完成 —— 你的 Agent 已在 IM 中�
 - **IM 平台接入** —— QQ Bot（WebSocket）和飞书（Webhook）开箱即用
 - **声明式工作流** —— 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
 - **统一重试** —— 一套 `RetryPolicy` 统管所有外部调用（LLM、MCP、A2A、沙箱）
+
+---
+
+## 🏗️ 架构概览
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   用户 / 应用程序                        │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                    ReactAgent                            │
+│  ┌──────────────┐  ┌────────────┐  ┌─────────────────┐  │
+│  │ContextManager│  │ToolManager │  │  SkillManager   │  │
+│  │(压缩)        │  │(执行)      │  │ (技能元数据)    │  │
+│  └──────────────┘  └────────────┘  └─────────────────┘  │
+│                                                         │
+│  ┌──────────────┐  ┌────────────┐  ┌─────────────────┐  │
+│  │  Checkpointer│  │   Store    │  │HumanApprovalMgr │  │
+│  │(会话历史)    │  │(长期记忆)  │  │ (审批门)        │  │
+│  └──────────────┘  └────────────┘  └─────────────────┘  │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │            子代理注册表                           │   │
+│  │  { "数学代理": Arc<AsyncMutex<Box<dyn Agent>>>   │   │
+│  │    "写作代理": ... }                              │   │
+│  └──────────────────────────────────────────────────┘   │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                  LLM 提供方                              │
+│        (OpenAI / DeepSeek / Qwen / Ollama / ...)         │
+└─────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -306,80 +341,170 @@ cargo run --example demo38_im_channels --features channels
 
 ## 核心概念
 
-### 1. Tool —— 一个宏定义一个工具
+echo-agent 围绕几个关键概念构建，支持灵活、生产就绪的 Agent 开发：
+
+### 1. ReAct 引擎 —— Thought → Action → Observation 循环
+echo-agent 的基础是 ReAct（推理 + 执行）模式，内置 Chain-of-Thought 提示。Agent 逐步思考，决定调用哪个工具，观察结果，直到得出最终答案。
+
+```rust
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .system_prompt("你是一个有帮助的助手")
+    .build()?;
+let answer = agent.execute("42 * 1337 等于多少？").await?;
+```
+
+### 2. 工具系统 —— `#[tool]` 宏 + 自动 JSON Schema
+将工具定义为简单的异步函数。`#[tool]` 宏自动生成参数模式、描述和 `TypedTool` 实现。
 
 ```rust
 use echo_agent::{tool, prelude::*};
 
 #[tool(name = "weather", description = "查询城市天气")]
-async fn weather(
-    /// 城市名
-    city: String,
-) -> Result<ToolResult> {
+async fn weather(city: String) -> Result<ToolResult> {
     Ok(ToolResult::success(format!("{city} 晴天")))
 }
 
-// 自动生成: WeatherParams + WeatherTool + impl TypedTool
+// 使用：agent.add_tool(Box::new(WeatherTool));
 ```
 
-### 2. Agent —— 声明式构建
+### 3. 双层记忆 —— Store + Checkpointer
+- **Store**：长期键值存储，支持命名空间隔离
+- **Checkpointer**：会话历史记录，支持重启恢复
 
 ```rust
-use echo_agent::{agent, prelude::*};
-
-let mut agent = agent! {
-    model: "qwen3-max",
-    system_prompt: "你是一个有帮助的助手",
-    tools: [WeatherTool, CalculatorTool],
-    max_iterations: 10,
-}?;
-
-let answer = agent.execute("东京天气如何？").await?;
-```
-
-### 3. 图工作流 —— 编排 Agent 管道
-
-```rust
-let graph = GraphBuilder::new("etl_pipeline")
-    .add_function_node("extract", |state| Box::pin(async move {
-        state.set("data", vec!["hello", "world"]);
-        Ok(())
-    }))
-    .add_function_node("transform", |state| Box::pin(async move {
-        let data: Vec<String> = state.get("data").unwrap_or_default();
-        state.set("result", data.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>());
-        Ok(())
-    }))
-    .set_entry("extract")
-    .add_edge("extract", "transform")
-    .set_finish("transform")
+let store = Arc::new(InMemoryStore::new());
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .with_memory_tools(store)  // 自动注入 remember/recall/search/forget
     .build()?;
-
-let result = graph.run(SharedState::new()).await?;
 ```
 
-### 4. Callback —— 只覆写你需要的方法
+### 4. 多模态消息 —— 文本、图片、文件同消息发送
+发送和接收图片（base64 或 URL）和文件附件，兼容 OpenAI Vision 和 Anthropic API。
 
 ```rust
-use echo_agent::{callback, prelude::*};
+let msg = Message::user_with_image(
+    "这张图片里有什么？",
+    "image/png",
+    base64_data,
+);
+```
 
-struct MyCallback;
+### 5. 上下文压缩 —— 滑动窗口、LLM 摘要、混合模式
+通过可配置的压缩策略管理 Token 限制，保留对话上下文。
 
-#[callback]
-impl MyCallback {
-    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
-        println!("[工具调用] {tool}");
+```rust
+agent.set_compressor(Box::new(SlidingWindowCompressor::new(4096)));
+```
+
+### 6. 统一重试策略 —— 一套策略覆盖所有外部调用
+一次性配置重试、超时和退避，应用于 LLM 调用、MCP 请求、A2A 通信和沙箱执行。
+
+```rust
+let policy = RetryPolicy::new(3, Duration::from_millis(500))
+    .max_delay(Duration::from_secs(30))
+    .jitter(true);
+let response = with_retry(&policy, || llm_client.chat(request)).await?;
+```
+
+### 7. 动态工具管理 —— 对话过程中增/删/换工具
+根据对话阶段或用户需求调整工具集，无需重启 Agent。
+
+```rust
+agent.add_tool(Box::new(SearchWebTool));
+agent.remove_tool("search_web");
+agent.replace_tool(Box::new(SaferExecuteCodeTool));
+```
+
+### 8. 人工介入 —— 关键操作审批门
+通过控制台、Webhook 或 WebSocket 接口，在执行敏感工具前要求人工审批。
+
+```rust
+let approval = ConsoleApproval::new();
+agent.set_human_loop_handler(Box::new(approval));
+```
+
+### 9. 多 Agent 编排 —— Orchestrator + SubAgent 团队
+协调多个专业 Agent，支持上下文隔离和交接协议。
+
+```rust
+let orchestrator = Orchestrator::new();
+orchestrator.register("math", math_agent);
+orchestrator.register("writer", writer_agent);
+```
+
+### 10. 技能系统 —— 渐进式能力披露
+相关工具和提示的包，可按需发现、激活和使用。
+
+```rust
+agent.load_skill("web_research").await?;  // 加载 SKILL.md + 注册工具
+```
+
+### 11. MCP 协议 —— 连接任意 Model Context Protocol 服务器
+通过标准化的 MCP 服务器集成文件系统、数据库、浏览器等资源。
+
+```rust
+let mut mcp = McpManager::new();
+let tools = mcp.connect(McpServerConfig::stdio(
+    "filesystem", "npx", vec!["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+)).await?;
+agent.add_tools(tools);
+```
+
+### 12. Plan-and-Execute —— 执行前显式规划阶段
+Planner Agent 创建任务 DAG，Executor Agent 逐步执行，支持重新规划。
+
+```rust
+let planner = PlanExecuteAgent::new(planner_config, executor_config);
+let result = planner.execute("研究量子计算趋势").await?;
+```
+
+### 13. 流式输出 —— 实时 Token 级输出
+接收 `AgentEvent` 流，包括 Token、工具调用和最终答案的实时事件。
+
+```rust
+let mut stream = agent.execute_stream("解释量子纠缠").await?;
+while let Some(event) = stream.next().await {
+    match event? {
+        AgentEvent::Token(t) => print!("{t}"),
+        AgentEvent::FinalAnswer(a) => { println!("\n{a}"); break; }
+        _ => {}
     }
 }
 ```
 
-### 5. Guard —— 一个函数即护栏
+### 14. 结构化输出 —— LLM 响应转为类型化 Rust 结构体
+使用 JSON Schema 验证从 LLM 响应中提取结构化数据。
 
 ```rust
-use echo_agent::{guard, prelude::*};
+#[derive(Serialize, Deserialize)]
+struct Contact { name: String, email: String, phone: String }
+let contacts: Vec<Contact> = agent.extract("从这段文本中提取联系人...").await?;
+```
 
+### 15. 声明式工作流 —— YAML/JSON 工作流定义
+无需编写 Rust 代码即可定义 Agent 图。
+
+```yaml
+name: research_pipeline
+nodes:
+  - name: researcher
+    type: agent
+    model: qwen3-max
+    input_key: task
+    output_key: research
+edges:
+  - from: researcher
+    to: writer
+```
+
+### 16. 护栏系统 —— 基于规则和 LLM 的内容过滤
+通过可定制的护栏管道在输入和输出时阻止或修改不安全内容。
+
+```rust
 #[guard(name = "length-limit")]
-async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardResult> {
+async fn check_length(content: &str, _: GuardDirection) -> Result<GuardResult> {
     if content.len() > 50000 {
         Ok(GuardResult::Block { reason: "内容过长".into() })
     } else {
@@ -388,37 +513,39 @@ async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardR
 }
 ```
 
-### 6. Streaming —— 实时反馈
+### 17. 图工作流引擎 —— LangGraph 风格状态机
+构建复杂工作流，支持线性管道、条件分支、循环和并行扇出/扇入。
 
 ```rust
-let mut stream = agent.execute_stream("解释量子纠缠").await?;
-while let Some(event) = stream.next().await {
-    match event? {
-        AgentEvent::Token(t)              => print!("{t}"),
-        AgentEvent::ToolCall { name, .. } => println!("\n[→ {name}]"),
-        AgentEvent::FinalAnswer(a)        => { println!("\n{a}"); break; }
-        _ => {}
-    }
-}
+let graph = GraphBuilder::new("etl_pipeline")
+    .add_function_node("extract", |state| Box::pin(async move {
+        state.set("data", vec!["hello", "world"]);
+        Ok(())
+    }))
+    .add_edge("extract", "transform")
+    .build()?;
 ```
 
-### 7. MCP —— 接入任意工具服务器
-
-```rust
-let mut mcp = McpManager::new();
-let tools = mcp.connect(McpServerConfig::stdio(
-    "filesystem",
-    "npx", vec!["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
-)).await?;
-agent.add_tools(tools);
-```
-
-### 8. IM 通道 —— 部署到消息平台
+### 18. IM 通道 —— 将 Agent 部署到消息平台
+通过自动 Token 管理和重连机制，将你的 Agent 连接到 QQ（WebSocket）和飞书（Webhook）。
 
 ```rust
 let mut manager = ChannelManager::new();
 manager.register(Box::new(QqChannel::new(qq_config)?));
-manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
+manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+manager.start_all(handler).await?;
+```
+
+### 19. 宏系统 —— 常见模式的声明式 API
+`#[tool]`、`#[callback]`、`#[guard]`、`#[handler]`、`agent!{}`、`messages![]` 等。
+
+```rust
+#[callback]
+impl MyCallback {
+    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
+        println!("[工具调用] {tool}");
+    }
+}
 ```
 
 ---
@@ -470,8 +597,10 @@ manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A 协议 |
 | [`demo24_topology`](examples/demo24_topology.rs) | 拓扑可视化 |
 | [`demo25_macros`](examples/demo25_macros.rs) | 宏系统综合展示 |
-| [`demo28_sandbox`](examples/demo28_sandbox.rs) | 沙箱代码执行 |
-| [`demo29_workflow`](examples/demo29_workflow.rs) | 图工作流引擎 |
+| [`demo26_provider_factory`](examples/demo26_provider_factory.rs) | 动态 LLM 提供方工厂 |
+| [`demo27_sqlite_memory`](examples/demo27_sqlite_memory.rs) | SQLite 持久化（FTS5 + 向量搜索） |
+| [`demo28_workflow`](examples/demo28_workflow.rs) | Workflow 管道抽象 |
+| [`demo29_sandbox`](examples/demo29_sandbox.rs) | 沙箱代码执行 |
 | [`demo30_mcp_server`](examples/demo30_mcp_server.rs) | MCP 服务端模式 |
 | [`demo31_memory_tools`](examples/demo31_memory_tools.rs) | **记忆工具自动注入** |
 | [`demo32_token_budget`](examples/demo32_token_budget.rs) | **Token 预算管控** |
@@ -481,6 +610,8 @@ manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | **多模态消息** |
 | [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | **YAML/JSON 声明式工作流** |
 | [`demo38_im_channels`](examples/demo38_im_channels.rs) | **IM 平台接入（QQ + 飞书）** |
+| [`demo39_workflow`](examples/demo39_workflow.rs) | **图工作流引擎与 SharedState** |
+| [`demo40_snapshot`](examples/demo40_snapshot.rs) | **Agent 状态快照与回滚** |
 
 ---
 
@@ -517,7 +648,13 @@ manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
 - [流式输出](docs/zh/10-streaming.md)
 - [结构化输出](docs/zh/11-structured-output.md)
 - [Mock 测试](docs/zh/12-mock.md)
+- [多轮对话](docs/zh/13-chat.md)
+- [语义搜索](docs/zh/14-semantic-search.md)
 - [IM 通道](docs/zh/15-im-channels.md)
+- [自我反思 Agent](docs/zh/15-self-reflection.md)
+- [Plan-and-Execute](docs/zh/16-plan-execute.md)
+- [图工作流](docs/zh/17-graph-workflow.md)
+- [护栏系统](docs/zh/18-guard-system.md)
 
 **English**（[`docs/en/`](./docs/en/README.md)）
 
@@ -526,7 +663,7 @@ manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
 ## 参与贡献
 
 ```bash
-git clone https://github.com/your-org/echo-agent
+git clone https://github.com/EchoYue-lp/echo-agent
 cd echo-agent
 cargo build
 cargo test --lib

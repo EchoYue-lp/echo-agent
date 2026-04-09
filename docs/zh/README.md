@@ -30,7 +30,7 @@
 
 | 文档 | 功能模块 | 核心关键词 |
 |------|---------|-----------|
-| [15 - Self-Reflection Agent](15-self-reflection.md) | 自我反思 | 生成 → 评估 → 修正、情景记忆、LlmCritic |
+| [19 - Self-Reflection Agent](19-self-reflection.md) | 自我反思 | 生成 → 评估 → 修正、情景记忆、LlmCritic |
 | [16 - Plan-and-Execute](16-plan-execute.md) | 规划执行 | Planner/Executor、增量重规划、DAG 调度 |
 | [17 - Graph Workflow](17-graph-workflow.md) | 图工作流 | LangGraph 风格、SharedState、条件边、fan-out/fan-in |
 | [18 - Guard 系统](18-guard-system.md) | 护栏系统 | RuleGuard、LlmGuard、输入/输出过滤 |

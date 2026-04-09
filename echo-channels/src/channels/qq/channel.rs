@@ -152,13 +152,20 @@ impl ChannelPlugin for QqChannel {
                 info!("QQ Gateway: connecting...");
                 let connected_at = std::time::Instant::now();
 
-                match super::gateway::connect_to_gateway(ws_url, wrapper.clone(), token.clone()).await
+                match super::gateway::connect_to_gateway(ws_url, wrapper.clone(), token.clone())
+                    .await
                 {
                     Ok(()) => {
-                        warn!("QQ Gateway: connection closed, reconnecting in {}s...", reconnect_delay);
+                        warn!(
+                            "QQ Gateway: connection closed, reconnecting in {}s...",
+                            reconnect_delay
+                        );
                     }
                     Err(e) => {
-                        warn!("QQ Gateway: connection error: {:?}, reconnecting in {}s...", e, reconnect_delay);
+                        warn!(
+                            "QQ Gateway: connection error: {:?}, reconnecting in {}s...",
+                            e, reconnect_delay
+                        );
                     }
                 }
 

@@ -16,7 +16,6 @@ use crate::agents::subagent::executor::{SubagentExecutor, SubagentExecutorConfig
 use crate::compression::ContextManager;
 use crate::error::{LlmError, ReactError, Result};
 use crate::guard::GuardManager;
-use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 #[cfg(feature = "human-loop")]
 #[allow(deprecated)] // HumanApprovalManager kept for backward compatibility
 use crate::human_loop::{HumanApprovalManager, HumanLoopProvider, PermissionService};
@@ -42,6 +41,7 @@ use crate::tools::builtin::plan::PlanTool;
 use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
 };
+use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;

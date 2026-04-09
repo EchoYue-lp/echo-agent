@@ -240,9 +240,7 @@ impl Clone for SessionApprovalCache {
     fn clone(&self) -> Self {
         Self {
             approvals: Arc::new(RwLock::new(self.approvals.read().unwrap().clone())),
-            global_approvals: Arc::new(RwLock::new(
-                self.global_approvals.read().unwrap().clone(),
-            )),
+            global_approvals: Arc::new(RwLock::new(self.global_approvals.read().unwrap().clone())),
             cache_ttl: self.cache_ttl,
             max_entries: self.max_entries,
         }
@@ -349,7 +347,11 @@ mod tests {
     #[test]
     fn test_ttl_entry_valid_before_expiry() {
         let cache = SessionApprovalCache::with_ttl(Duration::from_secs(3600));
-        cache.record_approval("Read", &json!({"path": "/tmp/test"}), ApprovalScope::Session);
+        cache.record_approval(
+            "Read",
+            &json!({"path": "/tmp/test"}),
+            ApprovalScope::Session,
+        );
 
         // 应该立即被缓存（刚添加）
         assert!(cache.is_approved("Read", &json!({"path": "/tmp/test"})));

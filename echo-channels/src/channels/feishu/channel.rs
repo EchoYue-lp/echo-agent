@@ -11,7 +11,10 @@
 //! 4. Bot 更新卡片内容
 //! 5. Bot 添加 "DONE" 表情反应
 
-use super::api::{http_client, TokenManager, send_card_message, reply_message, patch_card_message, add_reaction, FEISHU_API_BASE, LARK_API_BASE, FEISHU_WS_BASE, LARK_WS_BASE};
+use super::api::{
+    FEISHU_API_BASE, FEISHU_WS_BASE, LARK_API_BASE, LARK_WS_BASE, TokenManager, add_reaction,
+    http_client, patch_card_message, reply_message, send_card_message,
+};
 use super::long_poll::WsClient;
 use super::webhook;
 use crate::types::*;
@@ -212,7 +215,9 @@ impl ChannelPlugin for FeishuChannel {
                     &token,
                     msg,
                     running_cards.clone(),
-                ).await {
+                )
+                .await
+                {
                     warn!("Feishu: failed to send message: {:?}", e);
                 }
             }
@@ -247,18 +252,20 @@ impl ChannelPlugin for FeishuChannel {
                 self.task_handle = Some(task_handle);
                 info!("Feishu channel started (long poll mode)");
             }
-            FeishuMode::Webhook { bind, path, verification_token } => {
+            FeishuMode::Webhook {
+                bind,
+                path,
+                verification_token,
+            } => {
                 let bind_addr = bind.clone();
                 let webhook_path = path.clone();
                 let token = verification_token.clone();
 
                 let task_handle = tokio::spawn(async move {
-                    if let Err(e) = webhook::run_webhook_server(
-                        bind_addr,
-                        webhook_path,
-                        wrapper_handler,
-                        token,
-                    ).await {
+                    if let Err(e) =
+                        webhook::run_webhook_server(bind_addr, webhook_path, wrapper_handler, token)
+                            .await
+                    {
                         warn!("Feishu webhook server error: {:?}", e);
                     }
                 });
@@ -326,13 +333,29 @@ async fn send_feishu_message_internal(
             debug!("Feishu: updated card {} for reply_to {}", card_id, reply_to);
         } else {
             // 发送新的卡片回复
-            let card_msg_id = reply_message(http, api_domain, token, reply_to, "interactive", &card_content).await?;
+            let card_msg_id = reply_message(
+                http,
+                api_domain,
+                token,
+                reply_to,
+                "interactive",
+                &card_content,
+            )
+            .await?;
             running_cards.insert(reply_to.clone(), (card_msg_id, std::time::Instant::now()));
             debug!("Feishu: sent card reply to {}", reply_to);
         }
     } else {
         // 发送新消息
-        send_card_message(http, api_domain, token, &msg.to, receive_id_type, &card_content).await?;
+        send_card_message(
+            http,
+            api_domain,
+            token,
+            &msg.to,
+            receive_id_type,
+            &card_content,
+        )
+        .await?;
         debug!("Feishu: sent new card message to {}", msg.to);
     }
 
@@ -355,7 +378,9 @@ impl MessageHandler for FeishuMessageHandler {
     async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage> {
         // 先添加 OK 表情反应
         let token = self.token_manager.get_token().await?;
-        if let Err(e) = add_reaction(&self.http, &self.api_domain, &token, &msg.message_id, "OK").await {
+        if let Err(e) =
+            add_reaction(&self.http, &self.api_domain, &token, &msg.message_id, "OK").await
+        {
             warn!("Feishu: failed to add OK reaction: {:?}", e);
         }
 

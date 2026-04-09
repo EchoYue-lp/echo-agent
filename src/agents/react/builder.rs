@@ -4,7 +4,6 @@ use crate::agent::{AgentCallback, AgentConfig, AgentRole};
 use crate::audit::AuditLogger;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
-use echo_core::circuit_breaker::CircuitBreakerConfig;
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
@@ -14,6 +13,7 @@ use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
 use crate::tools::Tool;
 use crate::tools::permission::PermissionPolicy;
+use echo_core::circuit_breaker::CircuitBreakerConfig;
 use std::sync::Arc;
 
 /// Agent 构建器

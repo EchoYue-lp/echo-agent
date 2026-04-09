@@ -94,8 +94,7 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("\n  共 {} 个通道待启动\n", manager.len());
 
     // 6. 构建会话配置
-    let session_config = SessionConfig::default()
-        .with_timeout_minutes(timeout_minutes);
+    let session_config = SessionConfig::default().with_timeout_minutes(timeout_minutes);
 
     // 7. 启动所有通道 —— 使用框架 SessionHandler 管理会话
     let llm_ref = llm_client.clone();
@@ -103,9 +102,7 @@ async fn main() -> echo_agent::error::Result<()> {
         let llm = llm_ref.clone();
         Arc::new(SessionHandler::new(
             session_config.clone(),
-            move || -> Box<dyn MessageHandler> {
-                Box::new(AgentHandler::new(llm.clone()))
-            },
+            move || -> Box<dyn MessageHandler> { Box::new(AgentHandler::new(llm.clone())) },
         ))
     };
 

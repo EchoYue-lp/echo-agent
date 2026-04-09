@@ -1,4 +1,15 @@
 //! demo16_testing — Mock 测试基础设施示例
+//!
+//! 展示如何在不调用真实 LLM 的情况下测试 Agent 行为：
+//! 1. MockLlmClient —— 预设响应的模拟 LLM 客户端
+//! 2. MockTool —— 预设结果的模拟工具
+//! 3. MockAgent —— 预设回复的模拟 Agent
+//! 4. InMemoryStore / InMemoryCheckpointer —— 内存存储测试
+//!
+//! 运行方式：
+//! ```bash
+//! cargo run --example demo16_testing
+//! ```
 
 use echo_agent::compression::compressor::{
     DefaultSummaryPrompt, SlidingWindowCompressor, SummaryCompressor,

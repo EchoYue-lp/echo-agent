@@ -20,29 +20,29 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
 /// QQ Bot WebSocket opcodes (Discord Gateway 协议)
-const OP_DISPATCH: u32 = 0;           // 事件消息
-const OP_HEARTBEAT: u32 = 1;          // 心跳请求（客户端发送）
-const OP_IDENTIFY: u32 = 2;           // 鉴权（客户端发送）
+const OP_DISPATCH: u32 = 0; // 事件消息
+const OP_HEARTBEAT: u32 = 1; // 心跳请求（客户端发送）
+const OP_IDENTIFY: u32 = 2; // 鉴权（客户端发送）
 #[allow(dead_code)]
-const OP_RESUME: u32 = 6;             // 恢复会话（客户端发送）- 用于断线重连
-const OP_RECONNECT: u32 = 7;          // 重连请求（服务器发送）
-const OP_HELLO: u32 = 10;             // Hello（服务器发送，包含心跳间隔）
-const OP_HEARTBEAT_ACK: u32 = 11;     // 心跳确认（服务器发送）
+const OP_RESUME: u32 = 6; // 恢复会话（客户端发送）- 用于断线重连
+const OP_RECONNECT: u32 = 7; // 重连请求（服务器发送）
+const OP_HELLO: u32 = 10; // Hello（服务器发送，包含心跳间隔）
+const OP_HEARTBEAT_ACK: u32 = 11; // 心跳确认（服务器发送）
 
 /// QQ Bot intents（事件订阅位掩码）
 /// 参考: https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html
 /// 重要：GROUP_AND_C2C_EVENT (1<<25) 包含 QQ 单聊和群聊 @消息事件
-const INTENT_GUILDS: u32 = 1 << 0;                    // 频道事件（默认权限）
-const INTENT_GUILD_MEMBERS: u32 = 1 << 1;             // 频道成员事件（默认权限）
+const INTENT_GUILDS: u32 = 1 << 0; // 频道事件（默认权限）
+const INTENT_GUILD_MEMBERS: u32 = 1 << 1; // 频道成员事件（默认权限）
 #[allow(dead_code)]
-const INTENT_GUILD_MESSAGES: u32 = 1 << 9;            // 频道消息事件（私域机器人）
+const INTENT_GUILD_MESSAGES: u32 = 1 << 9; // 频道消息事件（私域机器人）
 #[allow(dead_code)]
-const INTENT_GUILD_MESSAGE_REACTIONS: u32 = 1 << 10;  // 频道消息表情表态
+const INTENT_GUILD_MESSAGE_REACTIONS: u32 = 1 << 10; // 频道消息表情表态
 #[allow(dead_code)]
-const INTENT_DIRECT_MESSAGE: u32 = 1 << 12;           // 频道私信事件
-const INTENT_GROUP_AND_C2C_EVENT: u32 = 1 << 25;      // QQ 单聊+群聊事件（关键！包含 C2C_MESSAGE_CREATE）
+const INTENT_DIRECT_MESSAGE: u32 = 1 << 12; // 频道私信事件
+const INTENT_GROUP_AND_C2C_EVENT: u32 = 1 << 25; // QQ 单聊+群聊事件（关键！包含 C2C_MESSAGE_CREATE）
 #[allow(dead_code)]
-const INTENT_PUBLIC_GUILD_MESSAGES: u32 = 1 << 30;    // 公域消息事件（频道 @机器人，默认权限）
+const INTENT_PUBLIC_GUILD_MESSAGES: u32 = 1 << 30; // 公域消息事件（频道 @机器人，默认权限）
 
 /// 启动 QQ Gateway 连接 —— 无限循环带重连
 #[allow(dead_code)]
@@ -59,7 +59,10 @@ pub(super) async fn run_gateway_loop(
 
         match connect_to_gateway(wss_url.clone(), handler.clone(), token.clone()).await {
             Ok(()) => {
-                warn!("QQ Gateway: connection closed, reconnecting in {}s...", reconnect_delay);
+                warn!(
+                    "QQ Gateway: connection closed, reconnecting in {}s...",
+                    reconnect_delay
+                );
             }
             Err(e) => {
                 error!("QQ Gateway: connection error: {}", e);
@@ -131,7 +134,14 @@ pub(super) async fn connect_to_gateway(
     loop {
         match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
-                debug!("QQ Gateway: received message: {}", if text.len() > 200 { &text[..200] } else { &text });
+                debug!(
+                    "QQ Gateway: received message: {}",
+                    if text.len() > 200 {
+                        &text[..200]
+                    } else {
+                        &text
+                    }
+                );
 
                 let payload: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
                     ChannelError::Other(format!("QQ Gateway: failed to parse event: {}", e))
@@ -146,11 +156,13 @@ pub(super) async fn connect_to_gateway(
                 match op as u32 {
                     OP_HELLO => {
                         // HELLO: 获取心跳间隔并发送 IDENTIFY
-                        let interval_ms = payload["d"]["heartbeat_interval"]
-                            .as_u64()
-                            .unwrap_or(30000);
+                        let interval_ms =
+                            payload["d"]["heartbeat_interval"].as_u64().unwrap_or(30000);
 
-                        info!("QQ Gateway: HELLO received, heartbeat_interval={}ms", interval_ms);
+                        info!(
+                            "QQ Gateway: HELLO received, heartbeat_interval={}ms",
+                            interval_ms
+                        );
 
                         {
                             let mut interval = heartbeat_interval.lock().await;
@@ -173,7 +185,10 @@ pub(super) async fn connect_to_gateway(
                                 .send(Message::Text(identify.to_string()))
                                 .await
                                 .map_err(|e| {
-                                    ChannelError::ConnectionError(format!("Failed to send IDENTIFY: {}", e))
+                                    ChannelError::ConnectionError(format!(
+                                        "Failed to send IDENTIFY: {}",
+                                        e
+                                    ))
                                 })?;
                         }
 
@@ -189,7 +204,9 @@ pub(super) async fn connect_to_gateway(
                     OP_RECONNECT => {
                         warn!("QQ Gateway: RECONNECT requested");
                         heartbeat_task.abort();
-                        return Err(ChannelError::ConnectionError("Server requested reconnect".to_string()));
+                        return Err(ChannelError::ConnectionError(
+                            "Server requested reconnect".to_string(),
+                        ));
                     }
                     OP_DISPATCH => {
                         // 事件消息（op=0 表示 dispatch event）
@@ -220,7 +237,10 @@ pub(super) async fn connect_to_gateway(
             Some(Err(e)) => {
                 warn!("QQ Gateway: WebSocket read error: {}", e);
                 heartbeat_task.abort();
-                return Err(ChannelError::ConnectionError(format!("WebSocket read error: {}", e)));
+                return Err(ChannelError::ConnectionError(format!(
+                    "WebSocket read error: {}",
+                    e
+                )));
             }
             None => {
                 info!("QQ Gateway: WebSocket stream ended");

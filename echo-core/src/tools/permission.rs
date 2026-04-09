@@ -400,8 +400,7 @@ impl RuleRegistry {
         }
         // Pass 3: Allow — by source priority
         for rule in &self.rules {
-            if matches!(rule.behavior, RuleBehavior::Allow)
-                && rule.matches(tool_name, permissions)
+            if matches!(rule.behavior, RuleBehavior::Allow) && rule.matches(tool_name, permissions)
             {
                 return Some(rule.behavior.clone());
             }

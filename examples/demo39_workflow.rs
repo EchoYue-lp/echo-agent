@@ -1,4 +1,4 @@
-//! demo29_workflow.rs —— 图工作流引擎演示
+//! demo39_workflow.rs —— 图工作流引擎演示
 //!
 //! 展示 Graph + SharedState 的完整能力：
 //! 1. 线性管道（A → B → C）
@@ -10,7 +10,7 @@
 //!
 //! 运行方式：
 //! ```bash
-//! cargo run --example demo29_workflow
+//! cargo run --example demo39_workflow
 //! ```
 
 use echo_agent::workflow::{GraphBuilder, SharedState};
@@ -20,7 +20,7 @@ async fn main() -> echo_agent::error::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "echo_agent=info,demo29_workflow=info".into()),
+                .unwrap_or_else(|_| "echo_agent=info,demo39_workflow=info".into()),
         )
         .init();
 
@@ -51,7 +51,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_snapshot().await?;
 
     println!("\n{}", "=".repeat(64));
-    println!("  demo29 completed");
+    println!("  demo39 completed");
     println!("{}", "=".repeat(64));
 
     Ok(())
@@ -455,7 +455,7 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
 
 fn print_banner() {
     println!("{}", "=".repeat(64));
-    println!("      Echo Agent x Graph Workflow Engine (demo29)");
+    println!("      Echo Agent x Graph Workflow Engine (demo39)");
     println!("      GraphBuilder + SharedState + Conditional + Parallel");
     println!("{}", "=".repeat(64));
     println!();

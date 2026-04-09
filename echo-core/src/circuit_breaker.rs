@@ -64,7 +64,9 @@ pub struct CircuitBreaker {
 impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
-            state: Mutex::new(State::Closed { consecutive_failures: 0 }),
+            state: Mutex::new(State::Closed {
+                consecutive_failures: 0,
+            }),
             config,
         }
     }
@@ -87,7 +89,9 @@ impl CircuitBreaker {
                         timeout_secs = self.config.timeout.as_secs(),
                         "🔁 Circuit breaker timeout elapsed, transitioning to HalfOpen"
                     );
-                    *state = State::HalfOpen { consecutive_successes: 0 };
+                    *state = State::HalfOpen {
+                        consecutive_successes: 0,
+                    };
                     false
                 } else {
                     true
@@ -100,7 +104,9 @@ impl CircuitBreaker {
     pub fn record_success(&self) {
         let mut state = self.state.lock().unwrap();
         match &*state {
-            State::HalfOpen { consecutive_successes } => {
+            State::HalfOpen {
+                consecutive_successes,
+            } => {
                 let new_count = consecutive_successes + 1;
                 if new_count >= self.config.success_threshold {
                     info!(
@@ -108,13 +114,19 @@ impl CircuitBreaker {
                         threshold = self.config.success_threshold,
                         "✅ Circuit breaker recovered, transitioning to Closed"
                     );
-                    *state = State::Closed { consecutive_failures: 0 };
+                    *state = State::Closed {
+                        consecutive_failures: 0,
+                    };
                 } else {
-                    *state = State::HalfOpen { consecutive_successes: new_count };
+                    *state = State::HalfOpen {
+                        consecutive_successes: new_count,
+                    };
                 }
             }
             State::Closed { .. } => {
-                *state = State::Closed { consecutive_failures: 0 };
+                *state = State::Closed {
+                    consecutive_failures: 0,
+                };
             }
             State::Open { .. } => {}
         }
@@ -124,7 +136,9 @@ impl CircuitBreaker {
     pub fn record_failure(&self) {
         let mut state = self.state.lock().unwrap();
         match &*state {
-            State::Closed { consecutive_failures } => {
+            State::Closed {
+                consecutive_failures,
+            } => {
                 let new_count = consecutive_failures + 1;
                 if new_count >= self.config.failure_threshold {
                     warn!(
@@ -132,17 +146,25 @@ impl CircuitBreaker {
                         threshold = self.config.failure_threshold,
                         "🔴 Circuit breaker opened due to consecutive failures"
                     );
-                    *state = State::Open { opened_at: Instant::now() };
+                    *state = State::Open {
+                        opened_at: Instant::now(),
+                    };
                 } else {
-                    *state = State::Closed { consecutive_failures: new_count };
+                    *state = State::Closed {
+                        consecutive_failures: new_count,
+                    };
                 }
             }
             State::HalfOpen { .. } => {
                 warn!("🔴 Circuit breaker re-opened after HalfOpen probe failed");
-                *state = State::Open { opened_at: Instant::now() };
+                *state = State::Open {
+                    opened_at: Instant::now(),
+                };
             }
             State::Open { .. } => {
-                *state = State::Open { opened_at: Instant::now() };
+                *state = State::Open {
+                    opened_at: Instant::now(),
+                };
             }
         }
     }
@@ -161,7 +183,9 @@ impl CircuitBreaker {
     pub fn consecutive_failures(&self) -> u32 {
         let state = self.state.lock().unwrap();
         match &*state {
-            State::Closed { consecutive_failures } => *consecutive_failures,
+            State::Closed {
+                consecutive_failures,
+            } => *consecutive_failures,
             _ => 0,
         }
     }
@@ -233,7 +257,9 @@ mod tests {
     #[test]
     fn test_recovers_after_half_open_successes() {
         let cb = CircuitBreaker::new(fast_config());
-        for _ in 0..3 { cb.record_failure(); }
+        for _ in 0..3 {
+            cb.record_failure();
+        }
         std::thread::sleep(Duration::from_millis(20));
         cb.is_open();
         cb.record_success();
@@ -245,7 +271,9 @@ mod tests {
     #[test]
     fn test_reopens_on_half_open_failure() {
         let cb = CircuitBreaker::new(fast_config());
-        for _ in 0..3 { cb.record_failure(); }
+        for _ in 0..3 {
+            cb.record_failure();
+        }
         std::thread::sleep(Duration::from_millis(20));
         cb.is_open();
         cb.record_failure();

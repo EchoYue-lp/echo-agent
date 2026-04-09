@@ -138,7 +138,10 @@ impl ProtoFrame {
 
     /// 获取指定 Header 的值
     pub fn get_header(&self, key: &str) -> Option<&str> {
-        self.headers.iter().find(|h| h.key == key).map(|h| h.value.as_str())
+        self.headers
+            .iter()
+            .find(|h| h.key == key)
+            .map(|h| h.value.as_str())
     }
 
     /// 获取指定 Header 的整数值
@@ -172,7 +175,13 @@ impl ProtoFrame {
     }
 
     /// 创建响应帧（处理事件后回复）
-    pub fn response(seq_id: u64, service: i32, code: i32, headers: Vec<ProtoHeader>, data: Option<Vec<u8>>) -> Self {
+    pub fn response(
+        seq_id: u64,
+        service: i32,
+        code: i32,
+        headers: Vec<ProtoHeader>,
+        data: Option<Vec<u8>>,
+    ) -> Self {
         let mut frame = Self::new(seq_id, service, FRAME_TYPE_DATA);
         frame.headers = headers;
 
@@ -195,7 +204,10 @@ pub struct HeadersHelper;
 impl HeadersHelper {
     /// 从 headers 列表中获取值
     pub fn get<'a>(headers: &'a [ProtoHeader], key: &str) -> Option<&'a str> {
-        headers.iter().find(|h| h.key == key).map(|h| h.value.as_str())
+        headers
+            .iter()
+            .find(|h| h.key == key)
+            .map(|h| h.value.as_str())
     }
 
     /// 获取整数值

@@ -259,7 +259,8 @@ impl HandoffManager {
             let _ = tx.send(result);
         });
 
-        let output = rx.await
+        let output = rx
+            .await
             .map_err(|_| ReactError::Other("Handoff task failed to complete".to_string()))??;
 
         info!(
@@ -293,7 +294,9 @@ impl HandoffManager {
             let mut target_with_history = target.clone();
             target_with_history.transfer_history = true;
 
-            let result = self.handoff(target_with_history, current_context.clone()).await?;
+            let result = self
+                .handoff(target_with_history, current_context.clone())
+                .await?;
 
             // 为下一个 Agent 更新上下文，保留所有元数据和消息历史
             // 添加本次交互到消息历史

@@ -54,9 +54,9 @@ async fn main() -> Result<()> {
     let _cache = SessionApprovalCache::with_ttl(Duration::from_secs(30 * 60));
 
     // ── 3. 从 Provider 创建 PermissionService ──────────────────────────
-    let permission_service = Arc::new(
-        PermissionService::from_provider(manager.clone() as Arc<dyn echo_agent::human_loop::HumanLoopProvider>)
-    );
+    let permission_service = Arc::new(PermissionService::from_provider(
+        manager.clone() as Arc<dyn echo_agent::human_loop::HumanLoopProvider>
+    ));
 
     // ── 4. 构建 Agent ──────────────────────────────────────────────────
     let system_prompt = r#"你是一个助手，可以使用工具完成任务。

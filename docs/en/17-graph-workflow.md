@@ -330,4 +330,4 @@ let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).aw
 | Parallel processing | ★★★★★ | Fan-out/fan-in |
 | Simple single-agent | ★☆☆☆☆ | Overkill |
 
-See: `examples/demo29_workflow.rs`, `examples/demo34_workflow_stream.rs`, `examples/demo37_declarative_workflow.rs`
+See: `examples/demo39_workflow.rs`, `examples/demo34_workflow_stream.rs`, `examples/demo37_declarative_workflow.rs`

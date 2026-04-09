@@ -1,4 +1,14 @@
 //! demo17_chat.rs —— 多轮对话模式（chat / chat_stream）综合演示
+//!
+//! 展示 Agent 的多轮对话能力：
+//! 1. chat() —— 保留历史上下文的对话
+//! 2. chat_stream() —— 流式多轮对话
+//! 3. reset() —— 清除上下文开始新会话
+//!
+//! 运行方式：
+//! ```bash
+//! cargo run --example demo17_chat
+//! ```
 
 use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::prelude::*;

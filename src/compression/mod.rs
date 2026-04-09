@@ -154,7 +154,11 @@ impl ContextManager {
 
         let excess = self.messages.len() - target;
         // 找到第一条非 system 消息的位置
-        let first_non_system = self.messages.iter().position(|m| m.role != "system").unwrap_or(0);
+        let first_non_system = self
+            .messages
+            .iter()
+            .position(|m| m.role != "system")
+            .unwrap_or(0);
         // 从 first_non_system 开始删除 excess 条消息
         let remove_end = (first_non_system + excess).min(self.messages.len());
         tracing::warn!(
@@ -476,7 +480,7 @@ impl ContextManagerBuilder {
 
 #[cfg(test)]
 mod tests {
-    const MODEL: &str = "qwen3-max";
+    const MODEL: &str = "qwen3.5-plus";
     use super::*;
     use crate::error::Result;
     use crate::llm::DefaultLlmClient;

@@ -113,9 +113,11 @@ impl SharedState {
     /// 如需向后兼容的无返回值 API，使用 [`Self::set_unwrap`]。
     pub fn set<T: Serialize>(&self, key: impl Into<String>, value: T) -> StateResult<()> {
         let key = key.into();
-        let v = serde_json::to_value(value)
-            .map_err(|e| StateError::Serialize(e.to_string()))?;
-        let mut inner = self.inner.write().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let v = serde_json::to_value(value).map_err(|e| StateError::Serialize(e.to_string()))?;
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         inner.values.insert(key, v);
         drop(inner);
         Ok(())
@@ -128,7 +130,9 @@ impl SharedState {
 
     /// 获取值（自动反序列）
     pub fn get<T: for<'de> Deserialize<'de>>(&self, key: &str) -> Option<T> {
-        let Ok(inner) = self.inner.read() else { return None };
+        let Ok(inner) = self.inner.read() else {
+            return None;
+        };
         inner
             .values
             .get(key)
@@ -165,7 +169,10 @@ impl SharedState {
 
     /// 追加消息，返回 Result
     pub fn push_message(&self, msg: Message) -> StateResult<()> {
-        let mut inner = self.inner.write().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         inner.messages.push(msg);
         drop(inner);
         Ok(())
@@ -173,17 +180,26 @@ impl SharedState {
 
     /// 获取所有消息的克隆
     pub fn messages(&self) -> Vec<Message> {
-        self.inner.read().map(|inner| inner.messages.clone()).unwrap_or_default()
+        self.inner
+            .read()
+            .map(|inner| inner.messages.clone())
+            .unwrap_or_default()
     }
 
     /// 获取消息数量
     pub fn message_count(&self) -> usize {
-        self.inner.read().map(|inner| inner.messages.len()).unwrap_or(0)
+        self.inner
+            .read()
+            .map(|inner| inner.messages.len())
+            .unwrap_or(0)
     }
 
     /// 清空消息，返回 Result
     pub fn clear_messages(&self) -> StateResult<()> {
-        let mut inner = self.inner.write().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         inner.messages.clear();
         drop(inner);
         Ok(())
@@ -210,21 +226,26 @@ impl SharedState {
 
     /// 出为 JSON 快照，返回 Result（不再 panic）
     pub fn snapshot(&self) -> StateResult<String> {
-        let inner = self.inner.read().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
-        serde_json::to_string_pretty(&*inner)
-            .map_err(|e| StateError::Serialize(e.to_string()))
+        let inner = self
+            .inner
+            .read()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        serde_json::to_string_pretty(&*inner).map_err(|e| StateError::Serialize(e.to_string()))
     }
 
     /// 便捷方法：导出为 JSON 快照，失败时 unwrap
     pub fn snapshot_unwrap(&self) -> String {
-        self.snapshot().unwrap_or_else(|e| panic!("SharedState::snapshot_unwrap: {e}"))
+        self.snapshot()
+            .unwrap_or_else(|e| panic!("SharedState::snapshot_unwrap: {e}"))
     }
 
     /// 导出为 JSON Value，返回 Result
     pub fn to_json_value(&self) -> StateResult<serde_json::Value> {
-        let inner = self.inner.read().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
-        serde_json::to_value(&*inner)
-            .map_err(|e| StateError::Serialize(e.to_string()))
+        let inner = self
+            .inner
+            .read()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        serde_json::to_value(&*inner).map_err(|e| StateError::Serialize(e.to_string()))
     }
 
     /// 便捷方法：导出为 JSON Value，失败时 unwrap
@@ -243,17 +264,32 @@ impl SharedState {
 
     /// 合并另一个 state 的 values（不覆盖已有 key），返回 Result
     pub fn merge(&self, other: &SharedState) -> StateResult<()> {
-        let other_inner = self.inner.read().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let other_inner = self
+            .inner
+            .read()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         drop(other_inner);
-        let self_inner = self.inner.read().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let self_inner = self
+            .inner
+            .read()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         // SAFETY: need read both locks to prevent deadlock.
         // merge reads from others and writes to self, we re-lock sequentially
         drop(self_inner);
 
-        let other_lock = other.inner.read().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
-        let mut self_lock = self.inner.write().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let other_lock = other
+            .inner
+            .read()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let mut self_lock = self
+            .inner
+            .write()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         for (k, v) in &other_lock.values {
-            self_lock.values.entry(k.clone()).or_insert_with(|| v.clone());
+            self_lock
+                .values
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
         drop(other_lock);
         drop(self_lock);
@@ -262,8 +298,14 @@ impl SharedState {
 
     /// 合并另一个 state 的 values（覆盖已有 key），返回 Result
     pub fn merge_overwrite(&self, other: &SharedState) -> StateResult<()> {
-        let other_lock = other.inner.read().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
-        let mut self_lock = self.inner.write().map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let other_lock = other
+            .inner
+            .read()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
+        let mut self_lock = self
+            .inner
+            .write()
+            .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         for (k, v) in &other_lock.values {
             self_lock.values.insert(k.clone(), v.clone());
         }
@@ -288,7 +330,10 @@ impl std::fmt::Debug for SharedState {
                 .field("messages", &inner.messages.len())
                 .field("current_node", &inner.current_node)
                 .finish(),
-            Err(_) => f.debug_struct("SharedState").field("error", &"lock poisoned").finish(),
+            Err(_) => f
+                .debug_struct("SharedState")
+                .field("error", &"lock poisoned")
+                .finish(),
         }
     }
 }
@@ -329,8 +374,12 @@ mod tests {
     #[test]
     fn test_messages() {
         let state = SharedState::new();
-        state.push_message(Message::user("hello".to_string())).unwrap();
-        state.push_message(Message::assistant("hi".to_string())).unwrap();
+        state
+            .push_message(Message::user("hello".to_string()))
+            .unwrap();
+        state
+            .push_message(Message::assistant("hi".to_string()))
+            .unwrap();
 
         assert_eq!(state.message_count(), 2);
         let msgs = state.messages();
@@ -342,7 +391,9 @@ mod tests {
     fn test_snapshot_restore() {
         let state = SharedState::new();
         state.set("key", "value").unwrap();
-        state.push_message(Message::user("hello".to_string())).unwrap();
+        state
+            .push_message(Message::user("hello".to_string()))
+            .unwrap();
 
         let snap = state.snapshot().unwrap();
         let restored = SharedState::from_snapshot(&snap).unwrap();

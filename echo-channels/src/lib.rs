@@ -36,17 +36,17 @@ pub mod manager;
 pub mod session;
 pub mod types;
 
-pub use channels::qq::channel::{QqChannel, QqConfig};
 pub use channels::feishu::channel::{FeishuChannel, FeishuConfig};
+pub use channels::qq::channel::{QqChannel, QqConfig};
 pub use manager::ChannelManager;
 pub use session::{SessionConfig, SessionFactory, SessionHandler};
 pub use types::*;
 
 pub mod prelude {
-    pub use crate::channels::qq::channel::{QqChannel, QqConfig};
+    pub use crate::ChannelPlugin;
     pub use crate::channels::feishu::channel::{FeishuChannel, FeishuConfig};
+    pub use crate::channels::qq::channel::{QqChannel, QqConfig};
     pub use crate::manager::ChannelManager;
     pub use crate::session::{SessionConfig, SessionFactory, SessionHandler};
     pub use crate::types::*;
-    pub use crate::ChannelPlugin;
 }

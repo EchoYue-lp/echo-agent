@@ -1,4 +1,4 @@
-//! demo28_sandbox.rs —— 三层沙箱执行系统演示
+//! demo29_sandbox.rs —— 三层沙箱执行系统演示
 //!
 //! 展示 Local / Docker / K8s 三层沙箱的完整能力：
 //! 1. 安全策略自动评估
@@ -9,7 +9,7 @@
 //!
 //! 运行方式：
 //! ```bash
-//! cargo run --example demo28_sandbox
+//! cargo run --example demo29_sandbox
 //! ```
 
 use echo_agent::prelude::*;
@@ -20,7 +20,7 @@ async fn main() -> echo_agent::error::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "echo_agent=info,demo28_sandbox=info".into()),
+                .unwrap_or_else(|_| "echo_agent=info,demo29_sandbox=info".into()),
         )
         .init();
 
@@ -47,7 +47,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_resource_limits().await?;
 
     println!("\n{}", "═".repeat(64));
-    println!("  demo28 完成");
+    println!("  demo29 完成");
     println!("{}", "═".repeat(64));
 
     Ok(())
@@ -312,7 +312,7 @@ async fn demo_resource_limits() -> echo_agent::error::Result<()> {
 
 fn print_banner() {
     println!("{}", "═".repeat(64));
-    println!("      Echo Agent × 三层沙箱执行系统 (demo28)");
+    println!("      Echo Agent × 三层沙箱执行系统 (demo29)");
     println!("      Local / Docker / K8s");
     println!("{}", "═".repeat(64));
     println!();

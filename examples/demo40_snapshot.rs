@@ -6,7 +6,7 @@
 //! 3. 手动回滚到之前的对话状态
 //!
 //! ```bash
-//! cargo run --example demo29_snapshot
+//! cargo run --example demo40_snapshot
 //! ```
 
 use echo_agent::prelude::*;

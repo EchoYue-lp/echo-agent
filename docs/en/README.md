@@ -32,7 +32,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 | Doc | Module | Key Concepts |
 |-----|--------|--------------|
-| [15 - Self-Reflection Agent](./15-self-reflection.md) | Self-Reflection | Generate → Critique → Refine, episodic memory, LlmCritic |
+| [19 - Self-Reflection Agent](./19-self-reflection.md) | Self-Reflection | Generate → Critique → Refine, episodic memory, LlmCritic |
 | [16 - Plan-and-Execute](./16-plan-execute.md) | Plan-Execute | Planner/Executor, incremental replanning, DAG scheduling |
 | [17 - Graph Workflow](./17-graph-workflow.md) | Workflow | LangGraph-style, SharedState, conditional edges, fan-out/fan-in |
 | [18 - Guard System](./18-guard-system.md) | Guards | RuleGuard, LlmGuard, input/output filtering |

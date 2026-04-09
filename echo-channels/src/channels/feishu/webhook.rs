@@ -6,7 +6,7 @@
 
 use crate::types::*;
 use axum::response::IntoResponse;
-use axum::{extract::State, routing::post, Router};
+use axum::{Router, extract::State, routing::post};
 use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
@@ -72,11 +72,16 @@ async fn handle_event(
     // 5. 去重检查（飞书 Webhook 超时会重试投递）
     if !message_id.is_empty() {
         if state.processed_events.contains_key(&message_id) {
-            debug!("Feishu webhook: duplicate event, message_id={}, skipping", message_id);
+            debug!(
+                "Feishu webhook: duplicate event, message_id={}, skipping",
+                message_id
+            );
             return axum::Json(json!({})).into_response();
         }
         // 先标记为已处理，再异步处理（防止重试期间重复）
-        state.processed_events.insert(message_id.clone(), Instant::now());
+        state
+            .processed_events
+            .insert(message_id.clone(), Instant::now());
 
         // 定期清理过期缓存
         let ttl = Duration::from_secs(DEDUP_TTL_SECS);
@@ -89,7 +94,10 @@ async fn handle_event(
 
     // 只处理文本消息
     if message_type != "text" {
-        debug!("Feishu webhook: ignoring non-text message: {}", message_type);
+        debug!(
+            "Feishu webhook: ignoring non-text message: {}",
+            message_type
+        );
         return axum::Json(json!({})).into_response();
     }
 
@@ -116,14 +124,8 @@ async fn handle_event(
             ChatType::Direct
         };
 
-        let inbound = InboundMessage::new(
-            "feishu",
-            sender_id,
-            chat_id,
-            chat_type,
-            text,
-            message_id,
-        );
+        let inbound =
+            InboundMessage::new("feishu", sender_id, chat_id, chat_type, text, message_id);
 
         match handler.handle(inbound).await {
             Ok(outbound) => {
@@ -157,21 +159,21 @@ pub(super) async fn run_webhook_server(
         .route(&webhook_path, post(handle_event))
         .with_state(state);
 
-    info!("Feishu webhook server listening on {}{}", bind_addr, webhook_path);
+    info!(
+        "Feishu webhook server listening on {}{}",
+        bind_addr, webhook_path
+    );
 
-    let listener = TcpListener::bind(&bind_addr)
-        .await
-        .map_err(|e| echo_core::error::ChannelError::ConnectionError(format!(
+    let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
+        echo_core::error::ChannelError::ConnectionError(format!(
             "Failed to bind webhook server: {}",
             e
-        )))?;
+        ))
+    })?;
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| echo_core::error::ChannelError::ConnectionError(format!(
-            "Webhook server error: {}",
-            e
-        )))?;
+    axum::serve(listener, app).await.map_err(|e| {
+        echo_core::error::ChannelError::ConnectionError(format!("Webhook server error: {}", e))
+    })?;
 
     Ok(())
 }

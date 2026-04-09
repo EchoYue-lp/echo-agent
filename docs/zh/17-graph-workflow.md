@@ -330,4 +330,4 @@ let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).aw
 | 并行处理 | ★★★★★ | Fan-out/fan-in |
 | 简单单 Agent | ★☆☆☆☆ | 过度设计 |
 
-对应示例：`examples/demo29_workflow.rs`、`examples/demo34_workflow_stream.rs`、`examples/demo37_declarative_workflow.rs`
+对应示例：`examples/demo39_workflow.rs`、`examples/demo34_workflow_stream.rs`、`examples/demo37_declarative_workflow.rs`

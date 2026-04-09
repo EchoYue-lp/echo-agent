@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 pub use echo_core::error::ChannelError;
-use echo_core::error::Result;
 pub use echo_core::error::ReactError;
+use echo_core::error::Result;
 
 // ── 聊天类型 ─────────────────────────────────────────────────────────────────
 

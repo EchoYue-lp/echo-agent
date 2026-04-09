@@ -1,16 +1,16 @@
 <div align="center">
 
-# echo-agent
+# 🚀 echo-agent
 
-**A Composable, Production-Ready AI Agent Framework for Rust**
+**The Complete AI Agent Framework for Rust - Memory Safe, Async-Native, Production Ready**
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)](https://github.com/your-org/echo-agent)
+[![Version](https://img.shields.io/badge/version-1.3.0-brightgreen)](https://github.com/EchoYue-lp/echo-agent)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/async-tokio-blue)](https://tokio.rs/)
 
-Build autonomous AI agents with Rust's **memory safety**, **zero-cost abstractions**, and **async-native concurrency**.
+**Zero-cost abstractions • Memory safe • Async-native • Production ready**
 
 [中文文档](./README.zh.md) · [Documentation](./docs/en/README.md) · [Examples](./examples/)
 
@@ -18,9 +18,9 @@ Build autonomous AI agents with Rust's **memory safety**, **zero-cost abstractio
 
 ---
 
-## Why echo-agent?
+## ✨ Why echo-agent?
 
-Most AI agent frameworks are built in Python. **echo-agent** brings the full power of a modern Agent framework to Rust — matching feature parity with LangGraph, CrewAI, and AutoGen while delivering the performance, reliability, and type safety only Rust can offer.
+Most AI agent frameworks are built in Python. **echo-agent** brings the full power of a modern Agent framework to Rust — matching feature parity with LangGraph, CrewAI, and AutoGen while delivering the **performance, reliability, and type safety** only Rust can offer.
 
 ```rust
 use echo_agent::prelude::*;
@@ -66,6 +66,40 @@ manager.start_all(handler).await?;  // done — your agent now lives in IM
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
 - **Unified retry** — one `RetryPolicy` for all external calls (LLM, MCP, A2A, sandbox)
+
+---
+
+## 🏗️ Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   User / Application                     │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                    ReactAgent                            │
+│  ┌──────────────┐  ┌────────────┐  ┌─────────────────┐  │
+│  │ContextManager│  │ToolManager │  │  SkillManager   │  │
+│  │(compression) │  │(execution) │  │ (Skill metadata)│  │
+│  └──────────────┘  └────────────┘  └─────────────────┘  │
+│                                                         │
+│  ┌──────────────┐  ┌────────────┐  ┌─────────────────┐  │
+│  │  Checkpointer│  │   Store    │  │HumanApprovalMgr │  │
+│  │(session hist)│  │(long-term) │  │ (approval gate) │  │
+│  └──────────────┘  └────────────┘  └─────────────────┘  │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │            SubAgent Registry                      │   │
+│  │  { "math_agent": Arc<AsyncMutex<Box<dyn Agent>>> │   │
+│  │    "writer_agent": ... }                          │   │
+│  └──────────────────────────────────────────────────┘   │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                  LLM Provider                            │
+│        (OpenAI / DeepSeek / Qwen / Ollama / ...)         │
+└─────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -306,80 +340,170 @@ cargo run --example demo38_im_channels --features channels
 
 ## Core Concepts
 
-### 1. Tool — define with a single macro
+echo-agent is built around several key concepts that enable flexible, production-ready agent development:
+
+### 1. ReAct Engine — Thought → Action → Observation loop
+The foundation of echo-agent is the ReAct (Reasoning + Acting) pattern with built-in Chain-of-Thought prompting. Agents think step-by-step, decide which tool to call, observe results, and continue until they reach a final answer.
+
+```rust
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .system_prompt("You are a helpful assistant")
+    .build()?;
+let answer = agent.execute("What is 42 * 1337?").await?;
+```
+
+### 2. Tool System — `#[tool]` macro + auto JSON Schema
+Define tools as simple async functions. The `#[tool]` macro generates parameter schemas, descriptions, and the `TypedTool` implementation automatically.
 
 ```rust
 use echo_agent::{tool, prelude::*};
 
 #[tool(name = "weather", description = "Get weather for a city")]
-async fn weather(
-    /// City name
-    city: String,
-) -> Result<ToolResult> {
+async fn weather(city: String) -> Result<ToolResult> {
     Ok(ToolResult::success(format!("Sunny in {city}")))
 }
 
-// Generates: WeatherParams + WeatherTool + impl TypedTool
+// Use it: agent.add_tool(Box::new(WeatherTool));
 ```
 
-### 2. Agent — build declaratively
+### 3. Dual-layer Memory — Store + Checkpointer
+- **Store**: Long-term key-value storage with namespace isolation
+- **Checkpointer**: Session history preservation across restarts
 
 ```rust
-use echo_agent::{agent, prelude::*};
-
-let mut agent = agent! {
-    model: "qwen3-max",
-    system_prompt: "You are a helpful assistant",
-    tools: [WeatherTool, CalculatorTool],
-    max_iterations: 10,
-}?;
-
-let answer = agent.execute("What's the weather in Tokyo?").await?;
-```
-
-### 3. Graph Workflow — orchestrate agent pipelines
-
-```rust
-let graph = GraphBuilder::new("etl_pipeline")
-    .add_function_node("extract", |state| Box::pin(async move {
-        state.set("data", vec!["hello", "world"]);
-        Ok(())
-    }))
-    .add_function_node("transform", |state| Box::pin(async move {
-        let data: Vec<String> = state.get("data").unwrap_or_default();
-        state.set("result", data.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>());
-        Ok(())
-    }))
-    .set_entry("extract")
-    .add_edge("extract", "transform")
-    .set_finish("transform")
+let store = Arc::new(InMemoryStore::new());
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .with_memory_tools(store)  // auto-injects remember/recall/search/forget
     .build()?;
-
-let result = graph.run(SharedState::new()).await?;
 ```
 
-### 4. Callback — override only what you need
+### 4. Multi-Modal Messages — Text, images, files in one message
+Send and receive images (base64 or URLs) and file attachments alongside text, compatible with OpenAI Vision and Anthropic APIs.
 
 ```rust
-use echo_agent::{callback, prelude::*};
+let msg = Message::user_with_image(
+    "What's in this image?",
+    "image/png",
+    base64_data,
+);
+```
 
-struct MyCallback;
+### 5. Context Compression — Sliding window, LLM summary, hybrid
+Manage token limits with configurable compression strategies that preserve conversation context.
 
-#[callback]
-impl MyCallback {
-    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
-        println!("[tool] {tool}");
+```rust
+agent.set_compressor(Box::new(SlidingWindowCompressor::new(4096)));
+```
+
+### 6. Unified Retry Policy — One policy for all external calls
+Configure retry, timeout, and backoff once, apply to LLM calls, MCP requests, A2A communication, and sandbox execution.
+
+```rust
+let policy = RetryPolicy::new(3, Duration::from_millis(500))
+    .max_delay(Duration::from_secs(30))
+    .jitter(true);
+let response = with_retry(&policy, || llm_client.chat(request)).await?;
+```
+
+### 7. Dynamic Tool Management — Add/remove/replace tools mid-conversation
+Adapt toolset based on conversation phase or user needs without restarting the agent.
+
+```rust
+agent.add_tool(Box::new(SearchWebTool));
+agent.remove_tool("search_web");
+agent.replace_tool(Box::new(SaferExecuteCodeTool));
+```
+
+### 8. Human-in-the-Loop — Approval gates for critical actions
+Require human approval before executing sensitive tools via Console, Webhook, or WebSocket interfaces.
+
+```rust
+let approval = ConsoleApproval::new();
+agent.set_human_loop_handler(Box::new(approval));
+```
+
+### 9. Multi-Agent Orchestration — Orchestrator + SubAgent teams
+Coordinate multiple specialized agents with context isolation and handoff protocols.
+
+```rust
+let orchestrator = Orchestrator::new();
+orchestrator.register("math", math_agent);
+orchestrator.register("writer", writer_agent);
+```
+
+### 10. Skill System — Progressive capability disclosure
+Packages of related tools and prompts that can be discovered, activated, and used on demand.
+
+```rust
+agent.load_skill("web_research").await?;  // loads SKILL.md + registers tools
+```
+
+### 11. MCP Protocol — Connect any Model Context Protocol server
+Integrate filesystem, databases, browsers, and other resources via standardized MCP servers.
+
+```rust
+let mut mcp = McpManager::new();
+let tools = mcp.connect(McpServerConfig::stdio(
+    "filesystem", "npx", vec!["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+)).await?;
+agent.add_tools(tools);
+```
+
+### 12. Plan-and-Execute — Explicit planning phase before execution
+Planner agent creates a task DAG, Executor agent follows it step-by-step with optional replanning.
+
+```rust
+let planner = PlanExecuteAgent::new(planner_config, executor_config);
+let result = planner.execute("Research quantum computing trends").await?;
+```
+
+### 13. Streaming — Real-time token-by-token output
+Receive `AgentEvent` streams including tokens, tool calls, and final answers as they happen.
+
+```rust
+let mut stream = agent.execute_stream("Explain quantum entanglement").await?;
+while let Some(event) = stream.next().await {
+    match event? {
+        AgentEvent::Token(t) => print!("{t}"),
+        AgentEvent::FinalAnswer(a) => { println!("\n{a}"); break; }
+        _ => {}
     }
 }
 ```
 
-### 5. Guard — content filtering in one function
+### 14. Structured Output — LLM responses to typed Rust structs
+Extract structured data from LLM responses using JSON Schema validation.
 
 ```rust
-use echo_agent::{guard, prelude::*};
+#[derive(Serialize, Deserialize)]
+struct Contact { name: String, email: String, phone: String }
+let contacts: Vec<Contact> = agent.extract("Extract contacts from this text...").await?;
+```
 
+### 15. Declarative Workflow — YAML/JSON workflow definitions
+Define agent graphs without writing Rust code.
+
+```yaml
+name: research_pipeline
+nodes:
+  - name: researcher
+    type: agent
+    model: qwen3-max
+    input_key: task
+    output_key: research
+edges:
+  - from: researcher
+    to: writer
+```
+
+### 16. Guard System — Rule-based and LLM-powered content filtering
+Block or modify unsafe content on input and output with customizable guard pipelines.
+
+```rust
 #[guard(name = "length-limit")]
-async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardResult> {
+async fn check_length(content: &str, _: GuardDirection) -> Result<GuardResult> {
     if content.len() > 50000 {
         Ok(GuardResult::Block { reason: "Content too long".into() })
     } else {
@@ -388,37 +512,39 @@ async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardR
 }
 ```
 
-### 6. Streaming — real-time feedback
+### 17. Graph Workflow Engine — LangGraph-style state machines
+Build complex workflows with linear pipelines, conditional branches, loops, and parallel fan-out/fan-in.
 
 ```rust
-let mut stream = agent.execute_stream("Explain quantum entanglement").await?;
-while let Some(event) = stream.next().await {
-    match event? {
-        AgentEvent::Token(t)            => print!("{t}"),
-        AgentEvent::ToolCall { name, .. } => println!("\n[→ {name}]"),
-        AgentEvent::FinalAnswer(a)      => { println!("\n{a}"); break; }
-        _ => {}
-    }
-}
+let graph = GraphBuilder::new("etl_pipeline")
+    .add_function_node("extract", |state| Box::pin(async move {
+        state.set("data", vec!["hello", "world"]);
+        Ok(())
+    }))
+    .add_edge("extract", "transform")
+    .build()?;
 ```
 
-### 7. MCP — plug in any tool server
-
-```rust
-let mut mcp = McpManager::new();
-let tools = mcp.connect(McpServerConfig::stdio(
-    "filesystem",
-    "npx", vec!["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
-)).await?;
-agent.add_tools(tools);
-```
-
-### 8. IM Channels — deploy to messaging platforms
+### 18. IM Channels — Deploy agents to messaging platforms
+Connect your agent to QQ (WebSocket) and Feishu (Webhook) with automatic token management and reconnection.
 
 ```rust
 let mut manager = ChannelManager::new();
 manager.register(Box::new(QqChannel::new(qq_config)?));
-manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
+manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+manager.start_all(handler).await?;
+```
+
+### 19. Macro System — Declarative APIs for common patterns
+`#[tool]`, `#[callback]`, `#[guard]`, `#[handler]`, `agent!{}`, `messages![]` and more.
+
+```rust
+#[callback]
+impl MyCallback {
+    async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &serde_json::Value) {
+        println!("[tool] {tool}");
+    }
+}
 ```
 
 ---
@@ -470,8 +596,10 @@ manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
 | [`demo23_a2a`](examples/demo23_a2a.rs) | A2A protocol |
 | [`demo24_topology`](examples/demo24_topology.rs) | Topology visualization |
 | [`demo25_macros`](examples/demo25_macros.rs) | Macro system showcase |
-| [`demo28_sandbox`](examples/demo28_sandbox.rs) | Sandbox code execution |
-| [`demo29_workflow`](examples/demo29_workflow.rs) | Graph workflow engine |
+| [`demo26_provider_factory`](examples/demo26_provider_factory.rs) | Dynamic LLM provider factory |
+| [`demo27_sqlite_memory`](examples/demo27_sqlite_memory.rs) | SQLite persistence with FTS5 + vector search |
+| [`demo28_workflow`](examples/demo28_workflow.rs) | Workflow pipeline abstraction |
+| [`demo29_sandbox`](examples/demo29_sandbox.rs) | Sandbox code execution |
 | [`demo30_mcp_server`](examples/demo30_mcp_server.rs) | MCP server mode |
 | [`demo31_memory_tools`](examples/demo31_memory_tools.rs) | **Memory tool auto-injection** |
 | [`demo32_token_budget`](examples/demo32_token_budget.rs) | **Token budget control** |
@@ -481,6 +609,8 @@ manager.start_all(|_| Arc::new(MyHandler::new(llm))).await?;
 | [`demo36_multimodal`](examples/demo36_multimodal.rs) | **Multi-modal messages** |
 | [`demo37_declarative_workflow`](examples/demo37_declarative_workflow.rs) | **Declarative YAML/JSON workflows** |
 | [`demo38_im_channels`](examples/demo38_im_channels.rs) | **IM platform integration (QQ + Feishu)** |
+| [`demo39_workflow`](examples/demo39_workflow.rs) | **Graph workflow engine with SharedState** |
+| [`demo40_snapshot`](examples/demo40_snapshot.rs) | **Agent state snapshot and rollback** |
 
 ---
 
@@ -522,7 +652,7 @@ Full docs in [`docs/`](./docs/):
 ## Contributing
 
 ```bash
-git clone https://github.com/your-org/echo-agent
+git clone https://github.com/EchoYue-lp/echo-agent
 cd echo-agent
 cargo build
 cargo test --lib

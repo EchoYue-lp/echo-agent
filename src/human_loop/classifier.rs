@@ -495,16 +495,21 @@ impl<C: LlmClient + ?Sized> LlmClassifier<C> {
                 "{project_type}",
                 context.project_type.as_deref().unwrap_or("unknown"),
             )
-            .replace(
-                "{recent_files}",
-                &context.recent_files.join(", "),
-            )
+            .replace("{recent_files}", &context.recent_files.join(", "))
             .replace(
                 "{risk_context}",
-                &context.risk_context.as_ref().map_or("none".to_string(), |r| format!(
-                    "sensitive_files={}, destructive={}, depth={}, repetition={}",
-                    r.has_sensitive_files, r.is_destructive, r.directory_depth, r.repetition_count
-                )),
+                &context
+                    .risk_context
+                    .as_ref()
+                    .map_or("none".to_string(), |r| {
+                        format!(
+                            "sensitive_files={}, destructive={}, depth={}, repetition={}",
+                            r.has_sensitive_files,
+                            r.is_destructive,
+                            r.directory_depth,
+                            r.repetition_count
+                        )
+                    }),
             )
     }
 

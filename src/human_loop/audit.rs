@@ -251,10 +251,7 @@ impl PermissionAuditSink for LoggingPermissionAuditSink {
                 );
             }
             LogLevel::Trace => {
-                tracing::trace!(
-                    ?entry,
-                    "权限审计"
-                );
+                tracing::trace!(?entry, "权限审计");
             }
         }
     }
@@ -294,7 +291,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_entry(tool: &str, decision: &PermissionDecision, reason: &str, source: &str) -> PermissionAuditEntry {
+    fn make_entry(
+        tool: &str,
+        decision: &PermissionDecision,
+        reason: &str,
+        source: &str,
+    ) -> PermissionAuditEntry {
         PermissionAuditEntry::new(
             tool,
             &json!({}),
@@ -310,8 +312,22 @@ mod tests {
     async fn test_in_memory_sink_record() {
         let sink = InMemoryPermissionAuditSink::new(100);
 
-        sink.record(make_entry("Bash", &PermissionDecision::Allow, "bypass", "bypass_mode")).await;
-        sink.record(make_entry("Read", &PermissionDecision::Deny { reason: "test".into() }, "rule", "rules")).await;
+        sink.record(make_entry(
+            "Bash",
+            &PermissionDecision::Allow,
+            "bypass",
+            "bypass_mode",
+        ))
+        .await;
+        sink.record(make_entry(
+            "Read",
+            &PermissionDecision::Deny {
+                reason: "test".into(),
+            },
+            "rule",
+            "rules",
+        ))
+        .await;
 
         assert_eq!(sink.count(), 2);
     }
@@ -321,7 +337,13 @@ mod tests {
         let sink = InMemoryPermissionAuditSink::new(3);
 
         for i in 0..5 {
-            sink.record(make_entry(&format!("tool{i}"), &PermissionDecision::Allow, "test", "test")).await;
+            sink.record(make_entry(
+                &format!("tool{i}"),
+                &PermissionDecision::Allow,
+                "test",
+                "test",
+            ))
+            .await;
         }
 
         assert_eq!(sink.count(), 3);
@@ -335,7 +357,13 @@ mod tests {
         let sink = InMemoryPermissionAuditSink::new(100);
 
         for i in 0..5 {
-            sink.record(make_entry(&format!("tool{i}"), &PermissionDecision::Allow, "test", "test")).await;
+            sink.record(make_entry(
+                &format!("tool{i}"),
+                &PermissionDecision::Allow,
+                "test",
+                "test",
+            ))
+            .await;
         }
 
         let recent = sink.recent(2);
@@ -348,9 +376,27 @@ mod tests {
     async fn test_in_memory_sink_query() {
         let sink = InMemoryPermissionAuditSink::new(100);
 
-        sink.record(make_entry("Bash", &PermissionDecision::Allow, "cache_hit", "cache")).await;
-        sink.record(make_entry("Bash", &PermissionDecision::Deny { reason: "r".into() }, "rule", "rules")).await;
-        sink.record(make_entry("Read", &PermissionDecision::Allow, "bypass", "bypass")).await;
+        sink.record(make_entry(
+            "Bash",
+            &PermissionDecision::Allow,
+            "cache_hit",
+            "cache",
+        ))
+        .await;
+        sink.record(make_entry(
+            "Bash",
+            &PermissionDecision::Deny { reason: "r".into() },
+            "rule",
+            "rules",
+        ))
+        .await;
+        sink.record(make_entry(
+            "Read",
+            &PermissionDecision::Allow,
+            "bypass",
+            "bypass",
+        ))
+        .await;
 
         let denies = sink.query(|e| e.decision == "deny");
         assert_eq!(denies.len(), 1);
@@ -360,7 +406,13 @@ mod tests {
     #[tokio::test]
     async fn test_in_memory_sink_clear() {
         let sink = InMemoryPermissionAuditSink::new(100);
-        sink.record(make_entry("tool", &PermissionDecision::Allow, "test", "test")).await;
+        sink.record(make_entry(
+            "tool",
+            &PermissionDecision::Allow,
+            "test",
+            "test",
+        ))
+        .await;
         assert_eq!(sink.count(), 1);
 
         sink.clear();
@@ -378,7 +430,8 @@ mod tests {
                 "s",
                 Instant::now(),
                 Duration::ZERO,
-            ).decision,
+            )
+            .decision,
             "allow"
         );
 
@@ -391,7 +444,8 @@ mod tests {
                 "s",
                 Instant::now(),
                 Duration::ZERO,
-            ).decision,
+            )
+            .decision,
             "require_approval"
         );
     }
@@ -406,7 +460,14 @@ mod tests {
             Box::new(sink2.clone()) as _,
         ]);
 
-        composite.record(make_entry("Bash", &PermissionDecision::Allow, "test", "test")).await;
+        composite
+            .record(make_entry(
+                "Bash",
+                &PermissionDecision::Allow,
+                "test",
+                "test",
+            ))
+            .await;
 
         assert_eq!(sink1.count(), 1);
         assert_eq!(sink2.count(), 1);

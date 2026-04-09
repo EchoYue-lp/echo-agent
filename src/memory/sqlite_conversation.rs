@@ -107,31 +107,37 @@ impl ConversationStore for SqliteConversationStore {
             conn.execute(
                 "INSERT INTO conversation (conversation_id, user_id, agent_type, title)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![conv.conversation_id, conv.user_id, conv.agent_type, conv.title],
+                params![
+                    conv.conversation_id,
+                    conv.user_id,
+                    conv.agent_type,
+                    conv.title
+                ],
             )
             .map_err(|e| MemoryError::IoError(format!("插入对话失败: {e}")))?;
 
             let id = conn.last_insert_rowid();
-            let row = conn.query_row(
-                "SELECT id, conversation_id, user_id, agent_type, title, summary,
+            let row = conn
+                .query_row(
+                    "SELECT id, conversation_id, user_id, agent_type, title, summary,
                         compressed_before_id, created_at, updated_at
                  FROM conversation WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok(Conversation {
-                        id: row.get(0)?,
-                        conversation_id: row.get(1)?,
-                        user_id: row.get(2)?,
-                        agent_type: row.get(3)?,
-                        title: row.get(4)?,
-                        summary: row.get(5)?,
-                        compressed_before_id: row.get(6)?,
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                    })
-                },
-            )
-            .map_err(|e| MemoryError::IoError(format!("查询新对话失败: {e}")))?;
+                    params![id],
+                    |row| {
+                        Ok(Conversation {
+                            id: row.get(0)?,
+                            conversation_id: row.get(1)?,
+                            user_id: row.get(2)?,
+                            agent_type: row.get(3)?,
+                            title: row.get(4)?,
+                            summary: row.get(5)?,
+                            compressed_before_id: row.get(6)?,
+                            created_at: row.get(7)?,
+                            updated_at: row.get(8)?,
+                        })
+                    },
+                )
+                .map_err(|e| MemoryError::IoError(format!("查询新对话失败: {e}")))?;
 
             Ok(row)
         })
@@ -232,9 +238,7 @@ impl ConversationStore for SqliteConversationStore {
 
             let mut result = Vec::new();
             for row in rows {
-                result.push(
-                    row.map_err(|e| MemoryError::IoError(format!("读取行失败: {e}")))?,
-                );
+                result.push(row.map_err(|e| MemoryError::IoError(format!("读取行失败: {e}")))?);
             }
             Ok(result)
         })
@@ -263,10 +267,7 @@ impl ConversationStore for SqliteConversationStore {
                 params.push(Box::new(s.to_string()));
             }
             if compressed_before_id.is_some() {
-                sets.push(format!(
-                    "compressed_before_id = ?{}",
-                    params.len() + 1
-                ));
+                sets.push(format!("compressed_before_id = ?{}", params.len() + 1));
                 params.push(Box::new(compressed_before_id.unwrap()));
             }
 
@@ -293,10 +294,7 @@ impl ConversationStore for SqliteConversationStore {
         })
     }
 
-    fn delete_conversation<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> BoxFuture<'a, Result<()>> {
+    fn delete_conversation<'a>(&'a self, conversation_id: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let conn = self.conn.lock().await;
             conn.execute(
@@ -383,18 +381,13 @@ impl ConversationStore for SqliteConversationStore {
 
             let mut result = Vec::new();
             for row in rows {
-                result.push(
-                    row.map_err(|e| MemoryError::IoError(format!("读取消息失败: {e}")))?,
-                );
+                result.push(row.map_err(|e| MemoryError::IoError(format!("读取消息失败: {e}")))?);
             }
             Ok(result)
         })
     }
 
-    fn count_messages<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> BoxFuture<'a, Result<usize>> {
+    fn count_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFuture<'a, Result<usize>> {
         Box::pin(async move {
             let conn = self.conn.lock().await;
             let count: i64 = conn

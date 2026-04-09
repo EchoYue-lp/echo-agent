@@ -10,8 +10,8 @@ use crate::types::ChatType;
 use echo_core::error::{ChannelError, ReactError, Result};
 use reqwest::Client;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -19,7 +19,9 @@ const QQ_API_BASE: &str = "https://api.sgroup.qq.com";
 const QQ_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 
 pub fn reqwest_client() -> Client {
-    Client::builder().build().expect("Failed to create HTTP client")
+    Client::builder()
+        .build()
+        .expect("Failed to create HTTP client")
 }
 
 // ── Token 管理 ────────────────────────────────────────────────────────────────
@@ -88,9 +90,7 @@ impl TokenManager {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                ChannelError::NetworkError(format!("QQ token request failed: {}", e))
-            })?;
+            .map_err(|e| ChannelError::NetworkError(format!("QQ token request failed: {}", e)))?;
 
         if !res.status().is_success() {
             return Err(ReactError::Channel(ChannelError::AuthError(format!(
@@ -106,20 +106,26 @@ impl TokenManager {
         debug!("QQ Bot: token response = {:?}", json);
 
         // QQ API 返回字段可能是 access_token (snake_case) 或 accessToken (camelCase)
-        let token = json.get("accessToken")
+        let token = json
+            .get("accessToken")
             .or_else(|| json.get("access_token"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ReactError::Channel(ChannelError::AuthError(
-                format!("QQ token response missing accessToken, got: {:?}", json)
-            )))?
+            .ok_or_else(|| {
+                ReactError::Channel(ChannelError::AuthError(format!(
+                    "QQ token response missing accessToken, got: {:?}",
+                    json
+                )))
+            })?
             .to_string();
 
         // QQ Token 有效期通常 7200 秒，提前 5 分钟刷新
         // 注意：expires_in 可能是字符串 "7200" 或数字 7200
-        let expires_in = json.get("expiresIn")
+        let expires_in = json
+            .get("expiresIn")
             .or_else(|| json.get("expires_in"))
             .and_then(|v| {
-                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             })
             .unwrap_or(7200);
         let refresh_at = (chrono::Utc::now().timestamp() as u64) + expires_in - 300;
@@ -144,9 +150,9 @@ impl TokenManager {
 pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<String> {
     // QQ Bot API v2 gateway endpoint 尝试多个路径
     let endpoints = [
-        format!("{}/gateway", QQ_API_BASE),       // 无版本号
-        format!("{}/gateway/bot", QQ_API_BASE),   // bot suffix
-        format!("{}/v2/gateway", QQ_API_BASE),    // v2 前缀
+        format!("{}/gateway", QQ_API_BASE),        // 无版本号
+        format!("{}/gateway/bot", QQ_API_BASE),    // bot suffix
+        format!("{}/v2/gateway", QQ_API_BASE),     // v2 前缀
         format!("{}/v2/gateway/bot", QQ_API_BASE), // v2 + bot
     ];
 
@@ -158,9 +164,7 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
             .header("Authorization", format!("QQBot {}", token))
             .send()
             .await
-            .map_err(|e| {
-                ChannelError::NetworkError(format!("QQ gateway request failed: {}", e))
-            })?;
+            .map_err(|e| ChannelError::NetworkError(format!("QQ gateway request failed: {}", e)))?;
 
         let status = res.status();
         if status.is_success() {
@@ -170,13 +174,15 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
 
             debug!("QQ Bot: gateway response = {:?}", json);
 
-            let url = json.get("url")
+            let url = json
+                .get("url")
                 .or_else(|| json.get("gateway_url"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    ReactError::Channel(ChannelError::NetworkError(
-                        format!("QQ gateway response missing url, got: {:?}", json)
-                    ))
+                    ReactError::Channel(ChannelError::NetworkError(format!(
+                        "QQ gateway response missing url, got: {:?}",
+                        json
+                    )))
                 })?
                 .to_string();
 
@@ -185,7 +191,10 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
         }
 
         let error_body = res.text().await.unwrap_or_default();
-        debug!("QQ Gateway: endpoint {} returned status {}, body: {}", endpoint, status, error_body);
+        debug!(
+            "QQ Gateway: endpoint {} returned status {}, body: {}",
+            endpoint, status, error_body
+        );
     }
 
     Err(ReactError::Channel(ChannelError::ApiError {
@@ -241,10 +250,7 @@ pub async fn send_qq_message(
     let status = res.status();
     if !status.is_success() {
         let error_text = res.text().await.unwrap_or_default();
-        warn!(
-            "QQ message send failed (status {}): {}",
-            status, error_text
-        );
+        warn!("QQ message send failed (status {}): {}", status, error_text);
         return Err(ReactError::Channel(ChannelError::SendError(format!(
             "QQ message send failed (status {}): {}",
             status, error_text

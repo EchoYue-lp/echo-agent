@@ -173,20 +173,19 @@ impl ReactAgent {
                 match decision {
                     crate::tools::permission::PermissionDecision::Allow => {}
                     crate::tools::permission::PermissionDecision::Deny { reason } => {
-                        self.log_permission_denied(tool_name, &tool_perms, &reason).await;
-                        return Err(
-                            ReactError::Other(format!("工具 {tool_name} 权限不足: {reason}"))
-                                .into(),
-                        );
+                        self.log_permission_denied(tool_name, &tool_perms, &reason)
+                            .await;
+                        return Err(ReactError::Other(format!(
+                            "工具 {tool_name} 权限不足: {reason}"
+                        ))
+                        .into());
                     }
                     crate::tools::permission::PermissionDecision::RequireApproval => {
                         info!(agent = %agent, tool = %tool_name, "🔐 权限策略要求人工审批");
                         return self.request_human_approval(tool_name, input).await;
                     }
                     crate::tools::permission::PermissionDecision::Ask { suggestions } => {
-                        return self
-                            .handle_ask_decision(tool_name, &suggestions)
-                            .await;
+                        return self.handle_ask_decision(tool_name, &suggestions).await;
                     }
                 }
             }
@@ -270,9 +269,7 @@ impl ReactAgent {
                 .into());
             }
             _ => {
-                return Err(
-                    ReactError::Other(format!("工具 {tool_name} 用户确认超时")).into(),
-                );
+                return Err(ReactError::Other(format!("工具 {tool_name} 用户确认超时")).into());
             }
         }
         Ok(None)
@@ -291,7 +288,11 @@ impl ReactAgent {
     /// 返回 `Ok(Some(modified_args))` 表示用户修改了参数后批准。
     /// 返回 `Ok(None)` 表示用户直接批准。
     #[cfg(feature = "human-loop")]
-    async fn request_human_approval(&self, tool_name: &str, input: &Value) -> Result<Option<Value>> {
+    async fn request_human_approval(
+        &self,
+        tool_name: &str,
+        input: &Value,
+    ) -> Result<Option<Value>> {
         let agent = &self.config.agent_name;
         let approval_start = std::time::Instant::now();
 
@@ -471,8 +472,7 @@ impl ReactAgent {
             if let Some(updated) = hook_result.updated_input {
                 hook_modified_input = updated.clone();
                 if let Value::Object(map) = &updated {
-                    effective_params =
-                        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 }
             }
         }
