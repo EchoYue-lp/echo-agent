@@ -1,15 +1,48 @@
 //! QQ Bot WebSocket Gateway —— 接收消息
 //!
 //! 连接到 QQ 官方 WebSocket Gateway，解析事件并转发到 MessageHandler。
+//!
+//! QQ Bot WebSocket 协议:
+//! 1. 连接后收到 HELLO 事件（包含 heartbeat_interval）
+//! 2. 发送 IDENTIFY（包含 token、intents 等）
+//! 3. 定期发送 HEARTBEAT
+//! 4. 接收消息事件（C2C_MESSAGE_CREATE, GROUP_AT_MESSAGE_CREATE 等）
 
 use crate::types::*;
 use echo_core::error::ChannelError;
 use futures::SinkExt;
 use futures::StreamExt;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
+
+/// QQ Bot WebSocket opcodes (Discord Gateway 协议)
+const OP_DISPATCH: u32 = 0;           // 事件消息
+const OP_HEARTBEAT: u32 = 1;          // 心跳请求（客户端发送）
+const OP_IDENTIFY: u32 = 2;           // 鉴权（客户端发送）
+#[allow(dead_code)]
+const OP_RESUME: u32 = 6;             // 恢复会话（客户端发送）- 用于断线重连
+const OP_RECONNECT: u32 = 7;          // 重连请求（服务器发送）
+const OP_HELLO: u32 = 10;             // Hello（服务器发送，包含心跳间隔）
+const OP_HEARTBEAT_ACK: u32 = 11;     // 心跳确认（服务器发送）
+
+/// QQ Bot intents（事件订阅位掩码）
+/// 参考: https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html
+/// 重要：GROUP_AND_C2C_EVENT (1<<25) 包含 QQ 单聊和群聊 @消息事件
+const INTENT_GUILDS: u32 = 1 << 0;                    // 频道事件（默认权限）
+const INTENT_GUILD_MEMBERS: u32 = 1 << 1;             // 频道成员事件（默认权限）
+#[allow(dead_code)]
+const INTENT_GUILD_MESSAGES: u32 = 1 << 9;            // 频道消息事件（私域机器人）
+#[allow(dead_code)]
+const INTENT_GUILD_MESSAGE_REACTIONS: u32 = 1 << 10;  // 频道消息表情表态
+#[allow(dead_code)]
+const INTENT_DIRECT_MESSAGE: u32 = 1 << 12;           // 频道私信事件
+const INTENT_GROUP_AND_C2C_EVENT: u32 = 1 << 25;      // QQ 单聊+群聊事件（关键！包含 C2C_MESSAGE_CREATE）
+#[allow(dead_code)]
+const INTENT_PUBLIC_GUILD_MESSAGES: u32 = 1 << 30;    // 公域消息事件（频道 @机器人，默认权限）
 
 /// 启动 QQ Gateway 连接 —— 无限循环带重连
 #[allow(dead_code)]
@@ -36,83 +69,192 @@ pub(super) async fn run_gateway_loop(
 
         reconnect_delay = (reconnect_delay * 2).min(max_delay);
 
-        tokio::time::sleep(std::time::Duration::from_secs(reconnect_delay)).await;
+        tokio::time::sleep(Duration::from_secs(reconnect_delay)).await;
     }
 }
 
 pub(super) async fn connect_to_gateway(
     wss_url: String,
     handler: Arc<dyn MessageHandler>,
-    _token: String,
+    token: String,
 ) -> std::result::Result<(), ChannelError> {
-    let (mut ws_stream, _) = connect_async(wss_url.clone())
+    let (ws_stream, _) = connect_async(wss_url.clone())
         .await
         .map_err(|e| ChannelError::ConnectionError(format!("WebSocket connect failed: {}", e)))?;
 
     info!("QQ Gateway: WebSocket connected");
 
+    // 分离 WebSocket 为 sender 和 receiver
+    let (ws_sender, mut ws_receiver) = ws_stream.split();
+
+    // 共享状态
+    let last_seq = Arc::new(Mutex::new(0u64));
+    let heartbeat_interval = Arc::new(Mutex::new(Duration::from_secs(30)));
+    let identified = Arc::new(Mutex::new(false));
+
+    // 启动心跳任务
+    let last_seq_clone = last_seq.clone();
+    let heartbeat_interval_clone = heartbeat_interval.clone();
+    let identified_clone = identified.clone();
+    let ws_sender_clone = Arc::new(Mutex::new(ws_sender));
+    let ws_sender_for_heartbeat = ws_sender_clone.clone();
+
+    let heartbeat_task = tokio::spawn(async move {
+        // 等待 IDENTIFY 完成
+        while !*identified_clone.lock().await {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // 开始心跳循环
+        let interval = *heartbeat_interval_clone.lock().await;
+        let mut timer = tokio::time::interval(interval);
+
+        loop {
+            timer.tick().await;
+
+            let seq = *last_seq_clone.lock().await;
+            let heartbeat = serde_json::json!({
+                "op": OP_HEARTBEAT,
+                "d": seq
+            });
+
+            let mut sender = ws_sender_for_heartbeat.lock().await;
+            if let Err(e) = sender.send(Message::Text(heartbeat.to_string())).await {
+                warn!("QQ Gateway: heartbeat failed: {}", e);
+                break;
+            }
+            debug!("QQ Gateway: heartbeat sent (seq={})", seq);
+        }
+    });
+
+    // 处理消息循环
     loop {
-        match ws_stream.next().await {
-            Some(Ok(msg)) => match msg {
-                Message::Text(text) => {
-                    if let Err(e) = handle_gateway_message(handler.clone(), &text).await {
-                        warn!("QQ Gateway: failed to handle message: {:?}", e);
+        match ws_receiver.next().await {
+            Some(Ok(Message::Text(text))) => {
+                debug!("QQ Gateway: received message: {}", if text.len() > 200 { &text[..200] } else { &text });
+
+                let payload: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                    ChannelError::Other(format!("QQ Gateway: failed to parse event: {}", e))
+                })?;
+
+                let op = payload["op"].as_u64().unwrap_or(0);
+                {
+                    let mut seq = last_seq.lock().await;
+                    *seq = payload["s"].as_u64().unwrap_or(*seq);
+                }
+
+                match op as u32 {
+                    OP_HELLO => {
+                        // HELLO: 获取心跳间隔并发送 IDENTIFY
+                        let interval_ms = payload["d"]["heartbeat_interval"]
+                            .as_u64()
+                            .unwrap_or(30000);
+
+                        info!("QQ Gateway: HELLO received, heartbeat_interval={}ms", interval_ms);
+
+                        {
+                            let mut interval = heartbeat_interval.lock().await;
+                            *interval = Duration::from_millis(interval_ms);
+                        }
+
+                        // 发送 IDENTIFY
+                        let identify = serde_json::json!({
+                            "op": OP_IDENTIFY,
+                            "d": {
+                                "token": format!("QQBot {}", token),
+                                "intents": INTENT_GUILDS | INTENT_GUILD_MEMBERS | INTENT_GROUP_AND_C2C_EVENT,
+                                "shard": [0, 1],
+                            }
+                        });
+
+                        {
+                            let mut sender = ws_sender_clone.lock().await;
+                            sender
+                                .send(Message::Text(identify.to_string()))
+                                .await
+                                .map_err(|e| {
+                                    ChannelError::ConnectionError(format!("Failed to send IDENTIFY: {}", e))
+                                })?;
+                        }
+
+                        info!("QQ Gateway: IDENTIFY sent");
+                        {
+                            let mut id = identified.lock().await;
+                            *id = true;
+                        }
+                    }
+                    OP_HEARTBEAT_ACK => {
+                        debug!("QQ Gateway: heartbeat ACK received");
+                    }
+                    OP_RECONNECT => {
+                        warn!("QQ Gateway: RECONNECT requested");
+                        heartbeat_task.abort();
+                        return Err(ChannelError::ConnectionError("Server requested reconnect".to_string()));
+                    }
+                    OP_DISPATCH => {
+                        // 事件消息（op=0 表示 dispatch event）
+                        if *identified.lock().await {
+                            if let Err(e) = handle_gateway_event(handler.clone(), &payload).await {
+                                warn!("QQ Gateway: failed to handle event: {:?}", e);
+                            }
+                        }
+                    }
+                    _ => {
+                        debug!("QQ Gateway: unknown op code: {}", op);
                     }
                 }
-                Message::Ping(payload) => {
-                    debug!("QQ Gateway: received PING, sending PONG");
-                    if let Err(e) = ws_stream.send(Message::Pong(payload)).await {
-                        warn!("QQ Gateway: failed to send PONG: {}", e);
-                    }
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                debug!("QQ Gateway: received PING, sending PONG");
+                let mut sender = ws_sender_clone.lock().await;
+                if let Err(e) = sender.send(Message::Pong(payload)).await {
+                    warn!("QQ Gateway: failed to send PONG: {}", e);
                 }
-                Message::Pong(_) => {
-                    debug!("QQ Gateway: received PONG");
-                }
-                Message::Close(_) => {
-                    info!("QQ Gateway: received close frame");
-                    return Ok(());
-                }
-                _ => {}
-            },
+            }
+            Some(Ok(Message::Close(_))) => {
+                info!("QQ Gateway: received close frame");
+                heartbeat_task.abort();
+                return Ok(());
+            }
+            Some(Ok(_)) => {}
             Some(Err(e)) => {
                 warn!("QQ Gateway: WebSocket read error: {}", e);
-                return Err(ChannelError::ConnectionError(format!(
-                    "WebSocket read error: {}",
-                    e
-                )));
+                heartbeat_task.abort();
+                return Err(ChannelError::ConnectionError(format!("WebSocket read error: {}", e)));
             }
             None => {
                 info!("QQ Gateway: WebSocket stream ended");
+                heartbeat_task.abort();
                 return Ok(());
             }
         }
     }
 }
 
-/// 解析并处理 Gateway 事件
-async fn handle_gateway_message(
+/// 解析并处理 Gateway 事件（op=0）
+async fn handle_gateway_event(
     handler: Arc<dyn MessageHandler>,
-    text: &str,
+    payload: &serde_json::Value,
 ) -> std::result::Result<(), ChannelError> {
-    let payload: serde_json::Value = serde_json::from_str(text).map_err(|e| {
-        ChannelError::Other(format!("QQ Gateway: failed to parse event: {}", e))
-    })?;
-
-    let event_type = payload["t"]
-        .as_str()
-        .ok_or_else(|| ChannelError::Other("QQ Gateway: missing event type".to_string()))?;
+    let event_type = payload["t"].as_str().unwrap_or("");
 
     debug!("QQ Gateway: event_type={}", event_type);
 
     match event_type {
+        "READY" => {
+            info!("QQ Gateway: READY event received, session established");
+        }
+        "RESUMED" => {
+            info!("QQ Gateway: RESUMED event received");
+        }
         "C2C_MESSAGE_CREATE" | "C2C_MESSAGE_CREATE_WITH_INTENT" => {
-            handle_c2c_message(handler, &payload).await?;
+            handle_c2c_message(handler, payload).await?;
         }
         "GROUP_AT_MESSAGE_CREATE" | "AT_MESSAGE_CREATE" => {
-            handle_group_at_message(handler, &payload).await?;
+            handle_group_at_message(handler, payload).await?;
         }
         _ => {
-            // 忽略不需要的事件（如心跳、群公告等）
+            // 忽略其他事件
         }
     }
 
@@ -160,8 +302,10 @@ async fn handle_group_at_message(
         .as_str()
         .unwrap_or("unknown")
         .to_string();
-    let group_id = data["group"]["id"]
+    // QQ Bot v2 API 中群聊 ID 字段为 group_openid，兼容旧格式 group.id
+    let group_id = data["group_openid"]
         .as_str()
+        .or_else(|| data["group"]["id"].as_str())
         .unwrap_or("")
         .to_string();
     let text = data["content"].as_str().unwrap_or("").to_string();
@@ -190,17 +334,23 @@ async fn dispatch_to_handler(
 ) -> std::result::Result<(), ChannelError> {
     match handler.handle(inbound).await {
         Ok(outbound) => {
-            // 这里实际发送由 ChannelPlugin 负责，但 gateway 层也可以回调回去
-            // 目前先返回 outbound，由上层处理
+            // 使用 chars() 安全截断 UTF-8 字符串
+            let text_preview: String = outbound.text.chars().take(50).collect();
             info!(
                 "Handler returned outbound: to={}, text={}",
                 outbound.to,
-                if outbound.text.len() > 50 {
-                    &outbound.text[..50]
+                if outbound.text.len() > text_preview.len() {
+                    format!("{}...", text_preview)
                 } else {
-                    &outbound.text
+                    text_preview
                 }
             );
+
+            // 发送回复到 QQ
+            if let Err(e) = handler.reply(outbound).await {
+                warn!("Failed to send reply: {:?}", e);
+            }
+
             Ok(())
         }
         Err(e) => {

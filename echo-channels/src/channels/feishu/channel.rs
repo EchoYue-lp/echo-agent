@@ -1,19 +1,42 @@
-//! Feishu ChannelPlugin 实现
+//! Feishu Channel Implementation
+//!
+//! 支持两种模式：
+//! - Long Poll（WebSocket 长连接）：无需公网 IP，纯 Rust 实现
+//! - Webhook：需要公网 IP，HTTP 事件推送
+//!
+//! 消息流程：
+//! 1. 用户发送消息 → bot 添加 "OK" 表情反应
+//! 2. Bot 回复：发送卡片消息
+//! 3. Agent 处理消息并返回结果
+//! 4. Bot 更新卡片内容
+//! 5. Bot 添加 "DONE" 表情反应
 
-use super::api::TokenManager;
+use super::api::{http_client, TokenManager, send_card_message, reply_message, patch_card_message, add_reaction, FEISHU_API_BASE, LARK_API_BASE, FEISHU_WS_BASE, LARK_WS_BASE};
+use super::long_poll::WsClient;
 use super::webhook;
-use super::api::send_feishu_message;
 use crate::types::*;
 use async_trait::async_trait;
-use echo_core::error::ChannelError;
-use echo_core::error::ReactError;
-use echo_core::error::Result;
+use echo_core::error::{ChannelError, ReactError, Result};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ── Config ────────────────────────────────────────────────────────────────────
+
+/// 飞书通道模式
+#[derive(Debug, Clone, Default)]
+pub enum FeishuMode {
+    /// Webhook 模式：需要公网 IP
+    Webhook {
+        bind: String,
+        path: String,
+        verification_token: Option<String>,
+    },
+    /// 长连接模式：无需公网 IP（默认，推荐）
+    #[default]
+    LongPoll,
+}
 
 /// 飞书通道配置
 #[derive(Debug, Clone)]
@@ -22,12 +45,64 @@ pub struct FeishuConfig {
     pub app_id: String,
     /// 飞书 App Secret
     pub app_secret: String,
-    /// Webhook 监听地址（如 "0.0.0.0:8080"）
-    pub webhook_bind: String,
-    /// Webhook 路径（默认 "/webhook"）
-    pub webhook_path: String,
-    /// 可选：飞书 verification_token（用于验证事件来源）
-    pub verification_token: Option<String>,
+    /// API 基础地址（用于发送消息，带 /open-apis）
+    pub api_domain: String,
+    /// WebSocket 基础地址（用于获取 endpoint，不带 /open-apis）
+    pub ws_domain: String,
+    /// 连接模式（默认长连接）
+    pub mode: FeishuMode,
+}
+
+impl FeishuConfig {
+    /// 创建长连接模式配置（国内版飞书）
+    pub fn new_long_poll(app_id: String, app_secret: String) -> Self {
+        Self {
+            app_id,
+            app_secret,
+            api_domain: FEISHU_API_BASE.to_string(),
+            ws_domain: FEISHU_WS_BASE.to_string(),
+            mode: FeishuMode::LongPoll,
+        }
+    }
+
+    /// 创建长连接模式配置（国际版 Lark）
+    pub fn new_long_poll_lark(app_id: String, app_secret: String) -> Self {
+        Self {
+            app_id,
+            app_secret,
+            api_domain: LARK_API_BASE.to_string(),
+            ws_domain: LARK_WS_BASE.to_string(),
+            mode: FeishuMode::LongPoll,
+        }
+    }
+
+    /// 创建 Webhook 模式配置
+    pub fn new_webhook(
+        app_id: String,
+        app_secret: String,
+        bind: String,
+        path: String,
+        verification_token: Option<String>,
+    ) -> Self {
+        Self {
+            app_id,
+            app_secret,
+            api_domain: FEISHU_API_BASE.to_string(),
+            ws_domain: FEISHU_WS_BASE.to_string(),
+            mode: FeishuMode::Webhook {
+                bind,
+                path,
+                verification_token,
+            },
+        }
+    }
+
+    /// 自定义 domain
+    pub fn with_domain(mut self, api_domain: String, ws_domain: String) -> Self {
+        self.api_domain = api_domain;
+        self.ws_domain = ws_domain;
+        self
+    }
 }
 
 // ── Channel ───────────────────────────────────────────────────────────────────
@@ -36,8 +111,11 @@ pub struct FeishuConfig {
 pub struct FeishuChannel {
     config: FeishuConfig,
     token_manager: Option<Arc<TokenManager>>,
+    http: reqwest::Client,
     send_tx: Option<mpsc::Sender<OutboundMessage>>,
-    webhook_handle: Option<JoinHandle<()>>,
+    task_handle: Option<JoinHandle<()>>,
+    /// 消息 ID -> (卡片消息 ID, 创建时间)（用于更新运行中的卡片，带 TTL 防泄漏）
+    running_cards: Arc<dashmap::DashMap<String, (String, std::time::Instant)>>,
 }
 
 impl FeishuChannel {
@@ -51,17 +129,28 @@ impl FeishuChannel {
         Ok(Self {
             config,
             token_manager: None,
+            http: http_client(),
             send_tx: None,
-            webhook_handle: None,
+            task_handle: None,
+            running_cards: Arc::new(dashmap::DashMap::new()),
         })
     }
 
-    fn webhook_path(&self) -> &str {
-        if self.config.webhook_path.is_empty() {
-            "/webhook"
-        } else {
-            &self.config.webhook_path
-        }
+    /// 构建卡片内容（Markdown 格式）
+    fn build_card_content(text: &str) -> String {
+        let card = serde_json::json!({
+            "config": {
+                "wide_screen_mode": true,
+                "update_multi": true
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": text
+                }
+            ]
+        });
+        card.to_string()
     }
 }
 
@@ -80,7 +169,7 @@ impl ChannelPlugin for FeishuChannel {
         CAPS.get_or_init(|| ChannelCapabilities {
             chat_types: &[ChatType::Direct, ChatType::Group],
             supports_media: false,
-            supports_threads: false,
+            supports_threads: true,
         })
     }
 
@@ -91,77 +180,100 @@ impl ChannelPlugin for FeishuChannel {
         let token_manager = Arc::new(TokenManager::new(
             self.config.app_id.clone(),
             self.config.app_secret.clone(),
+            self.config.api_domain.clone(),
         ));
         self.token_manager = Some(token_manager.clone());
 
-        // 2. 获取 token 验证配置
+        // 验证配置（获取 token）
         token_manager.get_token().await?;
 
-        // 3. 启动后台消息发送 task
+        // 2. 启动消息发送任务
         let (send_tx, mut send_rx) = mpsc::channel::<OutboundMessage>(256);
-        let token_manager_clone = token_manager.clone();
+        self.send_tx = Some(send_tx.clone());
+
+        let http = self.http.clone();
+        let api_domain = self.config.api_domain.clone();
+        let token_mgr = token_manager.clone();
+        let running_cards = self.running_cards.clone();
 
         tokio::spawn(async move {
-            loop {
-                if let Some(msg) = send_rx.recv().await {
-                    let token = match token_manager_clone.get_token().await {
-                        Ok(t) => t,
-                        Err(e) => {
-                            warn!("Feishu: failed to get token for sending: {:?}", e);
-                            continue;
-                        }
-                    };
-                    if let Err(e) = send_feishu_message(
-                        &token,
-                        &msg.to,
-                        &msg.chat_type,
-                        &msg.text,
-                    )
-                    .await
-                    {
-                        warn!("Feishu: failed to send message: {:?}", e);
+            while let Some(msg) = send_rx.recv().await {
+                let token = match token_mgr.get_token().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("Feishu: failed to get token: {:?}", e);
+                        continue;
                     }
+                };
+
+                if let Err(e) = send_feishu_message_internal(
+                    &http,
+                    &api_domain,
+                    &token,
+                    msg,
+                    running_cards.clone(),
+                ).await {
+                    warn!("Feishu: failed to send message: {:?}", e);
                 }
             }
         });
 
-        // 4. 创建 wrapper handler 用于 webhook —— 处理后自动调用 send
-        let send_tx_clone = send_tx.clone();
-        self.send_tx = Some(send_tx);
-
+        // 3. 创建 wrapper handler
         let wrapper_handler = Arc::new(FeishuMessageHandler {
             inner: handler,
-            send_tx: send_tx_clone,
+            send_tx: send_tx.clone(),
+            http: self.http.clone(),
+            api_domain: self.config.api_domain.clone(),
+            token_manager: token_manager.clone(),
+            running_cards: self.running_cards.clone(),
         });
 
-        // 5. 启动 Webhook 服务器
-        let bind_addr = self.config.webhook_bind.clone();
-        let webhook_path = self.webhook_path().to_string();
-        let verification_token = self.config.verification_token.clone();
+        // 4. 根据模式启动不同的消息接收服务
+        match &self.config.mode {
+            FeishuMode::LongPoll => {
+                let config = super::long_poll::WsClientConfig::new(
+                    self.config.app_id.clone(),
+                    self.config.app_secret.clone(),
+                    self.config.ws_domain.clone(),
+                );
 
-        let webhook_handle = tokio::spawn(async move {
-            if let Err(e) = webhook::run_webhook_server(
-                bind_addr,
-                webhook_path,
-                wrapper_handler,
-                verification_token,
-            )
-            .await
-            {
-                warn!("Feishu webhook server error: {:?}", e);
+                let task_handle = tokio::spawn(async move {
+                    let mut client = WsClient::new(config);
+                    // WsClient::run() 内部已有完整的重连逻辑，无需外层 loop
+                    if let Err(e) = client.run(wrapper_handler.clone()).await {
+                        warn!("Feishu WebSocket: fatal error: {:?}", e);
+                    }
+                });
+                self.task_handle = Some(task_handle);
+                info!("Feishu channel started (long poll mode)");
             }
-        });
+            FeishuMode::Webhook { bind, path, verification_token } => {
+                let bind_addr = bind.clone();
+                let webhook_path = path.clone();
+                let token = verification_token.clone();
 
-        self.webhook_handle = Some(webhook_handle);
+                let task_handle = tokio::spawn(async move {
+                    if let Err(e) = webhook::run_webhook_server(
+                        bind_addr,
+                        webhook_path,
+                        wrapper_handler,
+                        token,
+                    ).await {
+                        warn!("Feishu webhook server error: {:?}", e);
+                    }
+                });
+                self.task_handle = Some(task_handle);
+                info!("Feishu channel started (webhook on {})", bind);
+            }
+        }
 
-        info!("Feishu channel started (webhook on {})", self.config.webhook_bind);
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping Feishu channel...");
 
-        if let Some(handle) = self.webhook_handle.take() {
+        if let Some(handle) = self.task_handle.take() {
             handle.abort();
         }
 
@@ -174,7 +286,7 @@ impl ChannelPlugin for FeishuChannel {
         if let Some(tx) = &self.send_tx {
             tx.send(msg).await.map_err(|e| {
                 ReactError::Channel(ChannelError::SendError(format!(
-                    "Failed to queue message for sending: {}",
+                    "Failed to queue message: {}",
                     e
                 )))
             })
@@ -186,19 +298,76 @@ impl ChannelPlugin for FeishuChannel {
     }
 }
 
-/// Wrapper: 先调用 inner handler 处理消息，再将结果通过 send_tx 发送
+/// 内部发送消息函数
+async fn send_feishu_message_internal(
+    http: &reqwest::Client,
+    api_domain: &str,
+    token: &str,
+    msg: OutboundMessage,
+    running_cards: Arc<dashmap::DashMap<String, (String, std::time::Instant)>>,
+) -> Result<()> {
+    let receive_id_type = match msg.chat_type {
+        ChatType::Direct => "open_id",
+        ChatType::Group => "chat_id",
+    };
+
+    let card_content = FeishuChannel::build_card_content(&msg.text);
+
+    // 清理超过 1 小时的过期卡片缓存
+    let card_ttl = std::time::Duration::from_secs(3600);
+    running_cards.retain(|_, (_, created)| created.elapsed() < card_ttl);
+
+    // 检查是否有回复目标（thread_ts）
+    if let Some(ref reply_to) = msg.reply_to {
+        // 检查是否有运行中的卡片
+        if let Some(entry) = running_cards.get(reply_to) {
+            let (card_id, _) = entry.value();
+            patch_card_message(http, api_domain, token, card_id, &card_content).await?;
+            debug!("Feishu: updated card {} for reply_to {}", card_id, reply_to);
+        } else {
+            // 发送新的卡片回复
+            let card_msg_id = reply_message(http, api_domain, token, reply_to, "interactive", &card_content).await?;
+            running_cards.insert(reply_to.clone(), (card_msg_id, std::time::Instant::now()));
+            debug!("Feishu: sent card reply to {}", reply_to);
+        }
+    } else {
+        // 发送新消息
+        send_card_message(http, api_domain, token, &msg.to, receive_id_type, &card_content).await?;
+        debug!("Feishu: sent new card message to {}", msg.to);
+    }
+
+    Ok(())
+}
+
+/// Wrapper Handler：处理消息并自动发送回复
 struct FeishuMessageHandler {
     inner: Arc<dyn MessageHandler>,
     send_tx: mpsc::Sender<OutboundMessage>,
+    http: reqwest::Client,
+    api_domain: String,
+    token_manager: Arc<TokenManager>,
+    #[allow(dead_code)]
+    running_cards: Arc<dashmap::DashMap<String, (String, std::time::Instant)>>,
 }
 
 #[async_trait]
 impl MessageHandler for FeishuMessageHandler {
     async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage> {
+        // 先添加 OK 表情反应
+        let token = self.token_manager.get_token().await?;
+        if let Err(e) = add_reaction(&self.http, &self.api_domain, &token, &msg.message_id, "OK").await {
+            warn!("Feishu: failed to add OK reaction: {:?}", e);
+        }
+
+        // 调用 inner handler
         self.inner.handle(msg).await
     }
 
     async fn reply(&self, msg: OutboundMessage) -> Result<()> {
+        // 发送消息前，先发送一个 "Working on it..." 卡片（如果不是最终回复）
+        // 这里简化处理，直接发送
+
+        // 通过 send_tx 发送（会被后台任务处理）
         self.send_tx.send(msg).await.map_err(|e| {
             ReactError::Channel(ChannelError::SendError(format!(
                 "Failed to send reply: {}",

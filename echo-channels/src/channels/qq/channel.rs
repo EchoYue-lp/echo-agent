@@ -27,6 +27,8 @@ pub struct QqConfig {
 /// QQ Bot IM 通道实现
 pub struct QqChannel {
     config: QqConfig,
+    /// 共享 HTTP 客户端（复用连接池）
+    http: reqwest::Client,
     token_manager: Option<Arc<TokenManager>>,
     send_tx: Option<mpsc::Sender<OutboundMessage>>,
     gateway_handle: Option<JoinHandle<()>>,
@@ -42,6 +44,7 @@ impl QqChannel {
 
         Ok(Self {
             config,
+            http: reqwest_client(),
             token_manager: None,
             send_tx: None,
             gateway_handle: None,
@@ -90,7 +93,8 @@ impl ChannelPlugin for QqChannel {
             send_tx: send_tx_clone,
         });
 
-        // 4. 启动 Gateway 连接循环
+        // 4. 启动消息发送 task
+        let http_for_send = self.http.clone();
         let token_manager_clone2 = token_manager.clone();
         let _send_task = tokio::spawn(async move {
             loop {
@@ -103,6 +107,7 @@ impl ChannelPlugin for QqChannel {
                         }
                     };
                     if let Err(e) = send_qq_message(
+                        &http_for_send,
                         &token,
                         &msg.to,
                         &msg.chat_type,
@@ -117,12 +122,15 @@ impl ChannelPlugin for QqChannel {
             }
         });
 
+        // 5. 启动 Gateway 连接循环
+        let http_for_gw = self.http.clone();
         let gateway_handle = tokio::spawn(async move {
             let mut reconnect_delay: u64 = 1;
-            let max_delay: u64 = 60;
+            const MAX_DELAY: u64 = 60;
+            // 连接时间超过此阈值视为稳定，重置退避延迟
+            const STABLE_THRESHOLD_SECS: u64 = 60;
 
             loop {
-                // 获取当前 token
                 let token = match token_manager_clone2.get_token().await {
                     Ok(t) => t,
                     Err(e) => {
@@ -132,8 +140,7 @@ impl ChannelPlugin for QqChannel {
                     }
                 };
 
-                // 获取 gateway URL
-                let ws_url = match get_gateway_url(&token).await {
+                let ws_url = match get_gateway_url(&http_for_gw, &token).await {
                     Ok(u) => u,
                     Err(e) => {
                         warn!("QQ Gateway: failed to get gateway URL: {:?}", e);
@@ -143,6 +150,7 @@ impl ChannelPlugin for QqChannel {
                 };
 
                 info!("QQ Gateway: connecting...");
+                let connected_at = std::time::Instant::now();
 
                 match super::gateway::connect_to_gateway(ws_url, wrapper.clone(), token.clone()).await
                 {
@@ -154,8 +162,13 @@ impl ChannelPlugin for QqChannel {
                     }
                 }
 
-                // 指数退避重连
-                reconnect_delay = (reconnect_delay * 2).min(max_delay);
+                // 连接稳定运行超过阈值则重置退避延迟
+                if connected_at.elapsed().as_secs() >= STABLE_THRESHOLD_SECS {
+                    reconnect_delay = 1;
+                } else {
+                    reconnect_delay = (reconnect_delay * 2).min(MAX_DELAY);
+                }
+
                 tokio::time::sleep(std::time::Duration::from_secs(reconnect_delay)).await;
             }
         });

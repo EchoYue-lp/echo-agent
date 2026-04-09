@@ -17,13 +17,11 @@
 //! };
 //! manager.register(Box::new(QqChannel::new(qq_config)?));
 //!
-//! // 注册飞书
-//! let feishu_config = FeishuConfig {
-//!     app_id: "your-feishu-app-id".into(),
-//!     app_secret: "your-feishu-secret".into(),
-//!     webhook_port: 8080,
-//!     webhook_path: "/feishu/webhook".into(),
-//! };
+//! // 注册飞书（长连接模式，无需公网 IP）
+//! let feishu_config = FeishuConfig::new_long_poll(
+//!     "your-feishu-app-id".into(),
+//!     "your-feishu-secret".into(),
+//! );
 //! manager.register(Box::new(FeishuChannel::new(feishu_config)?));
 //!
 //! // 启动所有通道
@@ -35,17 +33,20 @@
 
 pub mod channels;
 pub mod manager;
+pub mod session;
 pub mod types;
 
 pub use channels::qq::channel::{QqChannel, QqConfig};
 pub use channels::feishu::channel::{FeishuChannel, FeishuConfig};
 pub use manager::ChannelManager;
+pub use session::{SessionConfig, SessionFactory, SessionHandler};
 pub use types::*;
 
 pub mod prelude {
     pub use crate::channels::qq::channel::{QqChannel, QqConfig};
     pub use crate::channels::feishu::channel::{FeishuChannel, FeishuConfig};
     pub use crate::manager::ChannelManager;
+    pub use crate::session::{SessionConfig, SessionFactory, SessionHandler};
     pub use crate::types::*;
     pub use crate::ChannelPlugin;
 }
