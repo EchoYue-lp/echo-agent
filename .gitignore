@@ -1,8 +1,39 @@
+# Build
 /target
+
+# IDE
 /.idea
 /.vscode
 /.classpath
+
+# AI assistants
 /.claude
+
+# Environment & config
 .env
 /Cargo.lock
 /echo-agent.yaml
+
+# SQLite databases
+*.sqlite
+*.sqlite3
+*.db
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor swap/backup files
+*.swp
+*.swo
+*~
+
+# Rust coverage & profiling
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+coverage/
+
+# Debug
+*.pdb
