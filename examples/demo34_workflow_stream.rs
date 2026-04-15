@@ -38,7 +38,7 @@ async fn demo_linear_stream() -> echo_agent::error::Result<()> {
     let graph = GraphBuilder::new("etl_stream")
         .add_function_node("fetch", |state: &SharedState| {
             Box::pin(async move {
-                state.set("records", vec!["Alice", "Bob", "Charlie"]);
+                let _ = state.set("records", vec!["Alice", "Bob", "Charlie"]);
                 Ok(())
             })
         })
@@ -46,15 +46,15 @@ async fn demo_linear_stream() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 let records: Vec<String> = state.get("records").unwrap_or_default();
                 let upper: Vec<String> = records.iter().map(|s| s.to_uppercase()).collect();
-                state.set("processed", upper.len() as i64);
-                state.set("data", upper);
+                let _ = state.set("processed", upper.len() as i64);
+                let _ = state.set("data", upper);
                 Ok(())
             })
         })
         .add_function_node("report", |state: &SharedState| {
             Box::pin(async move {
                 let count: i64 = state.get("processed").unwrap_or(0);
-                state.set("result", format!("ETL complete: {count} records"));
+                let _ = state.set("result", format!("ETL complete: {count} records"));
                 Ok(())
             })
         })
@@ -77,7 +77,7 @@ async fn demo_parallel_stream() -> echo_agent::error::Result<()> {
     let graph = GraphBuilder::new("parallel_stream")
         .add_function_node("start", |state: &SharedState| {
             Box::pin(async move {
-                state.set("text", "Rust is blazingly fast and memory-efficient");
+                let _ = state.set("text", "Rust is blazingly fast and memory-efficient");
                 Ok(())
             })
         })
@@ -85,14 +85,14 @@ async fn demo_parallel_stream() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 let text: String = state.get("text").unwrap_or_default();
                 let keywords: Vec<&str> = text.split_whitespace().filter(|w| w.len() > 4).collect();
-                state.set("keywords", keywords);
+                let _ = state.set("keywords", keywords);
                 Ok(())
             })
         })
         .add_function_node("count", |state: &SharedState| {
             Box::pin(async move {
                 let text: String = state.get("text").unwrap_or_default();
-                state.set("word_count", text.split_whitespace().count() as i64);
+                let _ = state.set("word_count", text.split_whitespace().count() as i64);
                 Ok(())
             })
         })
@@ -100,7 +100,7 @@ async fn demo_parallel_stream() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 let words: i64 = state.get("word_count").unwrap_or(0);
                 let kw: Vec<String> = state.get("keywords").unwrap_or_default();
-                state.set("result", format!("{words} words, keywords: {kw:?}"));
+                let _ = state.set("result", format!("{words} words, keywords: {kw:?}"));
                 Ok(())
             })
         })
@@ -125,13 +125,13 @@ async fn demo_conditional_stream() -> echo_agent::error::Result<()> {
         })
         .add_function_node("approve", |state: &SharedState| {
             Box::pin(async move {
-                state.set("result", "Request approved ✓");
+                let _ = state.set("result", "Request approved ✓");
                 Ok(())
             })
         })
         .add_function_node("reject", |state: &SharedState| {
             Box::pin(async move {
-                state.set("result", "Request rejected ✗");
+                let _ = state.set("result", "Request rejected ✗");
                 Ok(())
             })
         })
@@ -153,7 +153,7 @@ async fn demo_conditional_stream() -> echo_agent::error::Result<()> {
     for (label, score) in [("高分", 85i64), ("低分", 30i64)] {
         println!("  --- {label}（score={score}）---");
         let state = SharedState::new();
-        state.set("score", score);
+        let _ = state.set("score", score);
         let mut stream = graph.run_stream(state).await?;
         while let Some(event) = stream.next().await {
             print_event(&event?);

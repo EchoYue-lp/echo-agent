@@ -40,6 +40,7 @@ ToolManager                      ← 注册表 + 执行器
 扩展工具（开箱即用）：
     ├─ tools/files     ← 文件读写
     ├─ tools/shell     ← Shell 命令执行
+    ├─ tools/web      ← Web 搜索 + 网页获取（feature: web）
     └─ tools/others    ← 数学计算、天气查询等示例工具
 ```
 
@@ -169,5 +170,7 @@ agent.add_tools(vec![
 | `shell` | shell | 执行 Shell 命令 |
 | `add`/`subtract`/... | others | 数学运算（示例） |
 | `get_weather` | others | 天气查询（示例） |
+| `web_search` | web | Web 搜索（需 `web` feature） |
+| `web_fetch` | web | 获取网页内容并转文本（需 `web` feature） |
 
 对应示例：`examples/demo01_tools.rs`、`examples/demo09_file_shell.rs`、`examples/demo13_tool_execution.rs`

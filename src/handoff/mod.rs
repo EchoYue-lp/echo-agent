@@ -5,8 +5,8 @@
 //! # 核心概念
 //!
 //! - [`HandoffTarget`]: 描述要转移到的目标 Agent
-//! - [`HandoffContext`]: 携带的上下文数据（消息历史、元数据等）
-//! - [`HandoffResult`]: 转移执行后的结果
+//! - [`HandoffContext`][]: 携带的上下文数据（消息历史、元数据等）
+//! - [`HandoffResult`][]: 转移执行后的结果
 //! - [`HandoffManager`]: 管理 Agent 注册和 Handoff 执行
 //!
 //! # 示例

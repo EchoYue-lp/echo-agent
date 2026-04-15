@@ -5,9 +5,9 @@
 //! # 核心类型
 //!
 //! - [`Tool`]: 工具接口 trait，所有工具必须实现
-//! - [`ToolManager`]: 工具管理器，负责注册和执行
-//! - [`ToolResult`]: 工具执行结果
-//! - [`ToolExecutionConfig`]: 执行配置（超时、重试、并发）
+//! - [`ToolManager`][]: 工具管理器，负责注册和执行
+//! - [`ToolResult`][]: 工具执行结果
+//! - [`ToolExecutionConfig`][]: 执行配置（超时、重试、并发）
 //!
 //! # 快速开始
 //!
@@ -91,6 +91,12 @@ pub mod files;
 pub mod others;
 pub mod permission;
 pub mod shell;
+
+#[cfg(feature = "web")]
+pub mod web;
+
+#[cfg(feature = "media")]
+pub mod media;
 
 use crate::error::{Result, ToolError};
 use crate::llm::types::ToolDefinition;

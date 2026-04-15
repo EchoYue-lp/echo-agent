@@ -131,7 +131,7 @@ async fn handle_edit_args(req: &HumanLoopRequest) -> Result<HumanLoopResponse> {
     print!("  > ");
     let _ = std::io::stdout().flush();
 
-    let input = read_line_with_timeout(req.timeout.clone()).await?;
+    let input = read_line_with_timeout(req.timeout).await?;
     let trimmed = input.trim();
 
     let new_args = if trimmed.is_empty() {
@@ -156,7 +156,7 @@ async fn handle_edit_args(req: &HumanLoopRequest) -> Result<HumanLoopResponse> {
     print!("  > ");
     let _ = std::io::stdout().flush();
 
-    let scope_input = read_line_with_timeout(req.timeout.clone()).await?;
+    let scope_input = read_line_with_timeout(req.timeout).await?;
     let scope = match scope_input.trim().to_lowercase().as_str() {
         "s" | "session" => ApprovalScope::Session,
         "a" | "all" => ApprovalScope::SessionAllTools,
@@ -241,7 +241,9 @@ async fn read_line_with_timeout(timeout: Option<Duration>) -> Result<String> {
             Err(_) => {
                 println!();
                 println!("  Timeout");
-                Err(crate::error::ReactError::Other("Approval timeout".to_string()).into())
+                Err(crate::error::ReactError::Other(
+                    "Approval timeout".to_string(),
+                ))
             }
         },
         None => read_line().await,

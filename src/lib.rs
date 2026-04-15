@@ -78,6 +78,7 @@ pub mod agent;
 pub mod agents;
 pub mod audit;
 pub mod compression;
+pub mod config;
 pub mod error;
 pub mod guard;
 pub mod llm;
@@ -93,6 +94,8 @@ pub mod workflow;
 
 #[cfg(feature = "a2a")]
 pub mod a2a;
+#[cfg(feature = "channels")]
+pub mod channels;
 #[cfg(feature = "handoff")]
 pub mod handoff;
 #[cfg(feature = "human-loop")]
@@ -128,8 +131,10 @@ pub mod prelude {
         ReactAgentBuilder, Runner,
     };
     pub use crate::agents::react::ReactAgent;
+    // Config
     pub use crate::agents::react::StepType;
     pub use crate::agents::react::structured::StructuredAgent;
+    pub use crate::config::AppConfig;
 
     /// AgentBuilder 是 ReactAgentBuilder 的别名（向后兼容）
     #[allow(deprecated)]
@@ -150,6 +155,14 @@ pub mod prelude {
         DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
     };
     pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, TypedTool};
+
+    // Web Tools
+    #[cfg(feature = "web")]
+    pub use crate::tools::web::{WebFetchTool, WebSearchTool};
+
+    // Media Tools
+    #[cfg(feature = "media")]
+    pub use crate::tools::media::{ImageFetchTool, WebFetchToolEnhanced};
 
     // Compression
     pub use crate::compression::compressor::{
@@ -233,6 +246,9 @@ pub mod advanced {
 
     #[cfg(feature = "mcp")]
     pub use crate::mcp::{McpManager, McpServerConfig, McpTool, TransportConfig};
+
+    #[cfg(feature = "channels")]
+    pub use crate::channels::AgentChannelHandler;
 
     #[cfg(feature = "telemetry")]
     pub use crate::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};

@@ -272,12 +272,11 @@ impl CheckpointStore for FileCheckpointStore {
             .map_err(|e| crate::error::ReactError::Other(format!("Failed to read entry: {}", e)))?
         {
             let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(json) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(cp) = serde_json::from_str::<Checkpoint>(&json) {
-                        infos.push(CheckpointInfo::from(&cp));
-                    }
-                }
+            if path.extension().map(|e| e == "json").unwrap_or(false)
+                && let Ok(json) = tokio::fs::read_to_string(&path).await
+                && let Ok(cp) = serde_json::from_str::<Checkpoint>(&json)
+            {
+                infos.push(CheckpointInfo::from(&cp));
             }
         }
 

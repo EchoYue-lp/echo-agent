@@ -118,16 +118,14 @@ impl Node {
                 input_key,
                 output_key,
             } => {
-                let input = state
-                    .get::<String>(input_key)
-                    .unwrap_or_else(|| String::new());
+                let input = state.get::<String>(input_key).unwrap_or_default();
 
                 let mut agent = agent.lock().await;
                 let output = agent.execute(&input).await?;
 
-                let _ = state.set(output_key, &output);
+                state.set(output_key, &output)?;
                 // 同时追加到消息历史
-                let _ = state.push_message(crate::llm::types::Message::assistant(output));
+                state.push_message(crate::llm::types::Message::assistant(output))?;
                 Ok(())
             }
             NodeAction::Function(f) => f.call(state).await,

@@ -175,6 +175,47 @@ impl ReactAgent {
             tool_manager.register(Box::new(AgentDispatchTool::new(subagents.clone())));
         }
 
+        // 注册媒体工具（图片分析、PDF 处理、Excel、Word）
+        #[cfg(feature = "media")]
+        {
+            use crate::tools::builtin::image::ImageAnalysisTool;
+            use crate::tools::builtin::pdf::{PdfExtractTool, PdfInfoTool};
+            use crate::tools::builtin::excel::{ExcelReadTool, ExcelInfoTool, ExcelToCsvTool};
+            use crate::tools::builtin::word::{WordReadTool, WordInfoTool, WordStructureTool};
+            use crate::tools::builtin::text::{TextReadTool, TextSearchTool, TextStatsTool, TextProcessTool, TextExportTool};
+
+            tool_manager.register(Box::new(ImageAnalysisTool));
+            tool_manager.register(Box::new(PdfExtractTool));
+            tool_manager.register(Box::new(PdfInfoTool));
+            tool_manager.register(Box::new(ExcelReadTool));
+            tool_manager.register(Box::new(ExcelInfoTool));
+            tool_manager.register(Box::new(ExcelToCsvTool));
+            tool_manager.register(Box::new(WordReadTool));
+            tool_manager.register(Box::new(WordInfoTool));
+            tool_manager.register(Box::new(WordStructureTool));
+            tool_manager.register(Box::new(TextReadTool));
+            tool_manager.register(Box::new(TextSearchTool));
+            tool_manager.register(Box::new(TextStatsTool));
+            tool_manager.register(Box::new(TextProcessTool));
+            tool_manager.register(Box::new(TextExportTool));
+        }
+
+        // 注册数据处理工具
+        #[cfg(feature = "data")]
+        {
+            use crate::tools::builtin::data::{
+                DataReadTool, DataFilterTool, DataAggregateTool,
+                DataStatsTool, DataTransformTool, DataExportTool,
+            };
+
+            tool_manager.register(Box::new(DataReadTool));
+            tool_manager.register(Box::new(DataFilterTool));
+            tool_manager.register(Box::new(DataAggregateTool));
+            tool_manager.register(Box::new(DataStatsTool));
+            tool_manager.register(Box::new(DataTransformTool));
+            tool_manager.register(Box::new(DataExportTool));
+        }
+
         let store: Option<Arc<dyn Store>> = if config.enable_memory {
             match FileStore::new(&config.memory_path) {
                 Ok(s) => {

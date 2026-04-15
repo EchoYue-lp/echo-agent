@@ -6,9 +6,9 @@
 //!
 //! - [`LlmClient`]: LLM 客户端 trait
 //! - [`OpenAiClient`]: OpenAI 兼容客户端
-//! - [`ChatRequest`]: 聊天请求
-//! - [`ChatResponse`]: 聊天响应
-//! - [`ChatChunk`]: 流式响应块
+//! - [`ChatRequest`][]: 聊天请求
+//! - [`ChatResponse`][]: 聊天响应
+//! - [`ChatChunk`][]: 流式响应块
 //!
 //! # 示例：简单对话
 //!

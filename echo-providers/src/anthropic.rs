@@ -64,29 +64,29 @@ impl AnthropicClient {
                 continue;
             }
 
-            if msg.role == "assistant" {
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    let mut blocks: Vec<ContentBlock> = Vec::new();
-                    if let Some(ref text) = msg.content {
-                        if !text.is_empty() {
-                            blocks.push(ContentBlock::Text { text: text.clone() });
-                        }
-                    }
-                    for tc in tool_calls {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                        blocks.push(ContentBlock::ToolUse {
-                            id: tc.id.clone(),
-                            name: tc.function.name.clone(),
-                            input,
-                        });
-                    }
-                    messages.push(AnthropicMessage {
-                        role: "assistant".to_string(),
-                        content: AnthropicContent::Blocks(blocks),
-                    });
-                    continue;
+            if msg.role == "assistant"
+                && let Some(ref tool_calls) = msg.tool_calls
+            {
+                let mut blocks: Vec<ContentBlock> = Vec::new();
+                if let Some(ref text) = msg.content
+                    && !text.is_empty()
+                {
+                    blocks.push(ContentBlock::Text { text: text.clone() });
                 }
+                for tc in tool_calls {
+                    let input: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    blocks.push(ContentBlock::ToolUse {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        input,
+                    });
+                }
+                messages.push(AnthropicMessage {
+                    role: "assistant".to_string(),
+                    content: AnthropicContent::Blocks(blocks),
+                });
+                continue;
             }
 
             messages.push(AnthropicMessage {

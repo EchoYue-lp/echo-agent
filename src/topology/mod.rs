@@ -4,9 +4,9 @@
 //!
 //! # 核心概念
 //!
-//! - [`TopologyTracker`]: 全局调用关系追踪器（线程安全）
-//! - [`TopologyNode`]: 图中的节点（Agent）
-//! - [`TopologyEdge`]: 图中的边（调用关系）
+//! - [`TopologyTracker`][]: 全局调用关系追踪器（线程安全）
+//! - [`TopologyNode`][]: 图中的节点（Agent）
+//! - [`TopologyEdge`][]: 图中的边（调用关系）
 //! - [`TopologyCallback`]: Agent 回调，自动记录调用关系
 //!
 //! # 示例

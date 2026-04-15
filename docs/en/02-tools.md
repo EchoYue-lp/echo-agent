@@ -40,6 +40,7 @@ Built-in tools (builtin):
 Extension tools (ready to use):
     ├─ tools/files    ← file read/write
     ├─ tools/shell    ← shell command execution
+    ├─ tools/web      ← web search + page fetch (feature: web)
     └─ tools/others   ← math, weather, etc.
 ```
 
@@ -169,5 +170,7 @@ agent.add_tools(vec![
 | `shell` | shell | Execute shell command |
 | `add` / `subtract` / ... | others | Math operations (examples) |
 | `get_weather` | others | Weather query (example) |
+| `web_search` | web | Web search (requires `web` feature) |
+| `web_fetch` | web | Fetch web page and convert to text (requires `web` feature) |
 
 See: `examples/demo01_tools.rs`, `examples/demo09_file_shell.rs`, `examples/demo13_tool_execution.rs`

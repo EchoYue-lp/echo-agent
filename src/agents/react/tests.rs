@@ -478,8 +478,15 @@ fn react_agent_builder_with_tools() {
         .unwrap();
 
     assert!(agent.config().is_tool_enabled());
-    // FinalAnswerTool + tool1 + tool2 = 3
-    assert_eq!(agent.tool_names().len(), 3);
+    // FinalAnswerTool + 内置工具（数量取决于启用的 feature）+ tool1 + tool2
+    let names = agent.tool_names();
+    assert!(names.iter().any(|n| *n == "tool1"), "应包含 tool1");
+    assert!(names.iter().any(|n| *n == "tool2"), "应包含 tool2");
+    assert!(
+        names.iter().any(|n| *n == "final_answer"),
+        "应包含 final_answer"
+    );
+    assert!(names.len() >= 3, "至少应有 3 个工具");
 }
 
 #[test]

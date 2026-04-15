@@ -611,12 +611,11 @@ fn extract_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {
             if !attr.path().is_ident("doc") {
                 return None;
             }
-            if let syn::Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(expr_lit) = &nv.value {
-                    if let syn::Lit::Str(s) = &expr_lit.lit {
-                        return Some(s.value().trim().to_string());
-                    }
-                }
+            if let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(expr_lit) = &nv.value
+                && let syn::Lit::Str(s) = &expr_lit.lit
+            {
+                return Some(s.value().trim().to_string());
             }
             None
         })

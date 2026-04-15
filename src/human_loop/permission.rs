@@ -36,8 +36,10 @@ use crate::error::Result;
 /// 风险等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum RiskLevel {
     /// 低风险：只读操作
+    #[default]
     Low,
     /// 中等风险：写入操作
     Medium,
@@ -45,12 +47,6 @@ pub enum RiskLevel {
     High,
     /// 危险：不可逆操作
     Critical,
-}
-
-impl Default for RiskLevel {
-    fn default() -> Self {
-        RiskLevel::Low
-    }
 }
 
 impl RiskLevel {

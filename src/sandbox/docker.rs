@@ -153,10 +153,10 @@ impl DockerSandbox {
         }
 
         // 进程限制
-        if let Some(limits) = limits {
-            if let Some(max_procs) = limits.max_processes {
-                args.push(format!("--pids-limit={max_procs}"));
-            }
+        if let Some(limits) = limits
+            && let Some(max_procs) = limits.max_processes
+        {
+            args.push(format!("--pids-limit={max_procs}"));
         }
 
         // 只读根文件系统

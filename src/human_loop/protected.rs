@@ -223,15 +223,15 @@ fn expand_env_vars_and_tilde(cmd: &str) -> String {
     let mut result = cmd.to_string();
 
     // 展开波浪号 ~（仅单独的 ~ 或 ~/）
-    if result.contains('~') {
-        if let Ok(home) = env::var("HOME") {
-            // 替换 ~/ 但不替换 ~username（更复杂，需要 getpwnam）
-            result = result.replace("~/", &format!("{}/", home));
-            // 单独的 ~ 后面没有 /，通常表示家目录
-            result = result.replace(" ~ ", &format!(" {} ", home));
-            if result == "~" {
-                result = home;
-            }
+    if result.contains('~')
+        && let Ok(home) = env::var("HOME")
+    {
+        // 替换 ~/ 但不替换 ~username（更复杂，需要 getpwnam）
+        result = result.replace("~/", &format!("{}/", home));
+        // 单独的 ~ 后面没有 /，通常表示家目录
+        result = result.replace(" ~ ", &format!(" {} ", home));
+        if result == "~" {
+            result = home;
         }
     }
 
@@ -306,10 +306,9 @@ fn extract_paths_from_value(value: &Value, paths: &mut Vec<String>) {
                 if matches!(
                     key.as_str(),
                     "path" | "file_path" | "directory" | "dir" | "dest" | "destination"
-                ) {
-                    if let Some(s) = v.as_str() {
-                        paths.push(s.to_string());
-                    }
+                ) && let Some(s) = v.as_str()
+                {
+                    paths.push(s.to_string());
                 }
                 extract_paths_from_value(v, paths);
             }

@@ -165,12 +165,11 @@ impl Tool for RunSkillScriptTool {
             // Verify resolved path stays within skill directory
             if let (Ok(canonical_skill), Ok(canonical_script)) =
                 (skill_dir.canonicalize(), full_script_path.canonicalize())
+                && !canonical_script.starts_with(&canonical_skill)
             {
-                if !canonical_script.starts_with(&canonical_skill) {
-                    return Ok(ToolResult::error(
-                        "Resolved script path escapes the skill directory".into(),
-                    ));
-                }
+                return Ok(ToolResult::error(
+                    "Resolved script path escapes the skill directory".into(),
+                ));
             }
 
             if !full_script_path.exists() {

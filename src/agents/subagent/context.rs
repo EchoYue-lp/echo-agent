@@ -132,9 +132,8 @@ impl SubagentContext {
         store: Option<Arc<dyn Store>>,
         inheritance: &ContextInheritance,
     ) -> Self {
-        let filtered_tools = if inheritance.inherit_tools.is_some() {
+        let filtered_tools = if let Some(allowed) = &inheritance.inherit_tools {
             // Specific tool list: only inherit named tools
-            let allowed = inheritance.inherit_tools.as_ref().unwrap();
             all_tools
                 .iter()
                 .filter(|t| allowed.iter().any(|a| a == &t.function.name))

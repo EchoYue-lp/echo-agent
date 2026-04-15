@@ -175,7 +175,7 @@ impl Workflow for DagWorkflow {
             let leaf_nodes: Vec<&str> = self
                 .node_order
                 .iter()
-                .filter(|id| successors.get(id.as_str()).map_or(true, |s| s.is_empty()))
+                .filter(|id| successors.get(id.as_str()).is_none_or(|s| s.is_empty()))
                 .map(|s| s.as_str())
                 .collect();
 

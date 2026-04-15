@@ -15,6 +15,8 @@ use tracing::{debug, info, warn};
 use super::events::SubagentEventBus;
 use super::types::{RegisteredSubagent, SubagentDefinition};
 
+type AgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
+
 // ── Agent Factory ─────────────────────────────────────────────────────────────
 
 /// Factory trait for lazy agent instantiation.
@@ -61,7 +63,7 @@ where
 /// - Lifecycle events
 pub struct SubagentRegistry {
     /// Agent instances (compatible with existing SubAgentMap).
-    agents: Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>,
+    agents: AgentMap,
     /// Definitions for each registered agent.
     definitions: Arc<RwLock<HashMap<String, SubagentDefinition>>>,
     /// Factory functions for lazy instantiation.
@@ -78,7 +80,7 @@ impl SubagentRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            agents: Arc::new(RwLock::new(HashMap::new())),
+            agents: AgentMap::new(RwLock::new(HashMap::new())),
             definitions: Arc::new(RwLock::new(HashMap::new())),
             factories: Arc::new(RwLock::new(HashMap::new())),
             instantiating: Arc::new(RwLock::new(HashSet::new())),
@@ -90,7 +92,7 @@ impl SubagentRegistry {
     /// Create with a specific event bus.
     pub fn with_event_bus(event_bus: SubagentEventBus) -> Self {
         Self {
-            agents: Arc::new(RwLock::new(HashMap::new())),
+            agents: AgentMap::new(RwLock::new(HashMap::new())),
             definitions: Arc::new(RwLock::new(HashMap::new())),
             factories: Arc::new(RwLock::new(HashMap::new())),
             instantiating: Arc::new(RwLock::new(HashSet::new())),
@@ -327,7 +329,7 @@ impl SubagentRegistry {
     }
 
     /// Get the underlying agents map (for backward compat).
-    pub fn agents_map(&self) -> Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>> {
+    pub fn agents_map(&self) -> AgentMap {
         self.agents.clone()
     }
 }

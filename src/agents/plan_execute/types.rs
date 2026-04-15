@@ -207,17 +207,14 @@ impl Plan {
                             fix: Some("Remove or fix the dependency reference".to_string()),
                         });
                     }
-                } else if let Ok(idx) = dep.trim_start_matches("step_").parse::<usize>() {
-                    if idx >= self.steps.len() {
-                        issues.push(PlanValidationIssue {
-                            severity: IssueSeverity::Error,
-                            message: format!(
-                                "Step {} depends on non-existent step index {}",
-                                i, idx
-                            ),
-                            fix: Some("Fix the dependency index".to_string()),
-                        });
-                    }
+                } else if let Ok(idx) = dep.trim_start_matches("step_").parse::<usize>()
+                    && idx >= self.steps.len()
+                {
+                    issues.push(PlanValidationIssue {
+                        severity: IssueSeverity::Error,
+                        message: format!("Step {} depends on non-existent step index {}", i, idx),
+                        fix: Some("Fix the dependency index".to_string()),
+                    });
                 }
             }
         }
@@ -274,10 +271,10 @@ impl Plan {
 
             // 移除无效索引引用和无法解析的描述型依赖
             step.dependencies.retain(|d| {
-                if let Some(idx_str) = d.strip_prefix("step_") {
-                    if let Ok(idx) = idx_str.parse::<usize>() {
-                        return idx < steps_len;
-                    }
+                if let Some(idx_str) = d.strip_prefix("step_")
+                    && let Ok(idx) = idx_str.parse::<usize>()
+                {
+                    return idx < steps_len;
                 }
                 // 检查描述型依赖是否可以解析（使用预先计算的结果）
                 *dependency_resolvable.get(d).unwrap_or(&false)
@@ -307,12 +304,11 @@ impl Plan {
     /// 3. 返回匹配的步骤索引，无匹配时返回 None
     fn resolve_dependency(&self, dep: &str) -> Option<usize> {
         // 1. 处理 "step_N" 格式
-        if let Some(idx_str) = dep.strip_prefix("step_") {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                if idx < self.steps.len() {
-                    return Some(idx);
-                }
-            }
+        if let Some(idx_str) = dep.strip_prefix("step_")
+            && let Ok(idx) = idx_str.parse::<usize>()
+            && idx < self.steps.len()
+        {
+            return Some(idx);
         }
 
         // 2. 模糊匹配步骤描述
@@ -342,14 +338,14 @@ impl Plan {
                         || !desc_lower
                             .chars()
                             .nth(pos - 1)
-                            .map_or(false, |c| c.is_alphanumeric());
+                            .is_some_and(|c| c.is_alphanumeric());
                     // 检查后一个字符是否是单词边界
                     let next_pos = pos + dep.len();
                     let next_is_boundary = next_pos >= desc_lower.len()
                         || !desc_lower
                             .chars()
                             .nth(next_pos)
-                            .map_or(false, |c| c.is_alphanumeric());
+                            .is_some_and(|c| c.is_alphanumeric());
 
                     if prev_is_boundary && next_is_boundary {
                         has_word_boundary = true;

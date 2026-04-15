@@ -115,12 +115,11 @@ impl Tool for ReadSkillResourceTool {
             // Verify the resolved path is still under the skill directory
             if let (Ok(canonical_skill), Ok(canonical_resource)) =
                 (skill_dir.canonicalize(), resource_path.canonicalize())
+                && !canonical_resource.starts_with(&canonical_skill)
             {
-                if !canonical_resource.starts_with(&canonical_skill) {
-                    return Ok(ToolResult::error(
-                        "Resolved path escapes the skill directory".into(),
-                    ));
-                }
+                return Ok(ToolResult::error(
+                    "Resolved path escapes the skill directory".into(),
+                ));
             }
 
             if !resource_path.exists() {

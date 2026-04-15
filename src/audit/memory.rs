@@ -66,25 +66,25 @@ impl AuditLogger for InMemoryAuditLogger {
             let mut result: Vec<AuditEvent> = all
                 .iter()
                 .filter(|e| {
-                    if let Some(ref sid) = filter.session_id {
-                        if e.session_id.as_deref() != Some(sid) {
-                            return false;
-                        }
+                    if let Some(ref sid) = filter.session_id
+                        && e.session_id.as_deref() != Some(sid)
+                    {
+                        return false;
                     }
-                    if let Some(ref name) = filter.agent_name {
-                        if &e.agent_name != name {
-                            return false;
-                        }
+                    if let Some(ref name) = filter.agent_name
+                        && &e.agent_name != name
+                    {
+                        return false;
                     }
-                    if let Some(ref from) = filter.from {
-                        if e.timestamp < *from {
-                            return false;
-                        }
+                    if let Some(ref from) = filter.from
+                        && e.timestamp < *from
+                    {
+                        return false;
                     }
-                    if let Some(ref to) = filter.to {
-                        if e.timestamp > *to {
-                            return false;
-                        }
+                    if let Some(ref to) = filter.to
+                        && e.timestamp > *to
+                    {
+                        return false;
                     }
                     true
                 })

@@ -9,21 +9,17 @@ use std::time::Duration;
 /// How a subagent executes relative to its parent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ExecutionMode {
     /// Sync/delegate: parent blocks until subagent returns.
     /// Maps to the existing `AgentDispatchTool` behavior.
+    #[default]
     Sync,
     /// Fork: inherits parent context (system prompt, tools, history),
     /// runs independently with optional timeout.
     Fork,
     /// Teammate: parallel independent agent with message-passing coordination.
     Teammate,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        Self::Sync
-    }
 }
 
 impl std::fmt::Display for ExecutionMode {
@@ -39,20 +35,15 @@ impl std::fmt::Display for ExecutionMode {
 // ── Subagent Kind ─────────────────────────────────────────────────────────────
 
 /// How the subagent definition is sourced.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SubagentKind {
     /// Hard-coded agent provided by the library or application.
+    #[default]
     BuiltIn,
     /// Loaded from a `.md` definition file (similar to skills).
     Custom { path: PathBuf },
     /// Loaded from a plugin or remote registry.
     Plugin { source: String },
-}
-
-impl Default for SubagentKind {
-    fn default() -> Self {
-        Self::BuiltIn
-    }
 }
 
 // ── Subagent Definition ───────────────────────────────────────────────────────

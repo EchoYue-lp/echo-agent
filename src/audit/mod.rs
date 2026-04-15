@@ -4,7 +4,7 @@
 //!
 //! # 核心类型
 //!
-//! - [`AuditEvent`]: 审计事件
+//! - [`AuditEvent`][]: 审计事件
 //! - [`AuditLogger`]: 日志记录器 trait
 //! - [`AuditCallback`]: 基于 `AgentCallback` 的自动审计
 

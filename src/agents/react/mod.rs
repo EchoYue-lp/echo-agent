@@ -201,6 +201,51 @@ impl ReactAgent {
             )));
         }
 
+        // 注册媒体工具（图片分析、PDF 处理、Excel、Word）— 仅在 enable_tool 时
+        if config.enable_tool {
+            #[cfg(feature = "media")]
+            {
+                use crate::tools::builtin::excel::{ExcelInfoTool, ExcelReadTool, ExcelToCsvTool};
+                use crate::tools::builtin::image::ImageAnalysisTool;
+                use crate::tools::builtin::pdf::{PdfExtractTool, PdfInfoTool};
+                use crate::tools::builtin::text::{
+                    TextExportTool, TextProcessTool, TextReadTool, TextSearchTool, TextStatsTool,
+                };
+                use crate::tools::builtin::word::{WordInfoTool, WordReadTool, WordStructureTool};
+
+                tool_manager.register(Box::new(ImageAnalysisTool));
+                tool_manager.register(Box::new(PdfExtractTool));
+                tool_manager.register(Box::new(PdfInfoTool));
+                tool_manager.register(Box::new(ExcelReadTool));
+                tool_manager.register(Box::new(ExcelInfoTool));
+                tool_manager.register(Box::new(ExcelToCsvTool));
+                tool_manager.register(Box::new(WordReadTool));
+                tool_manager.register(Box::new(WordInfoTool));
+                tool_manager.register(Box::new(WordStructureTool));
+                tool_manager.register(Box::new(TextReadTool));
+                tool_manager.register(Box::new(TextSearchTool));
+                tool_manager.register(Box::new(TextStatsTool));
+                tool_manager.register(Box::new(TextProcessTool));
+                tool_manager.register(Box::new(TextExportTool));
+            }
+
+            // 注册数据处理工具
+            #[cfg(feature = "data")]
+            {
+                use crate::tools::builtin::data::{
+                    DataAggregateTool, DataExportTool, DataFilterTool, DataReadTool, DataStatsTool,
+                    DataTransformTool,
+                };
+
+                tool_manager.register(Box::new(DataReadTool));
+                tool_manager.register(Box::new(DataFilterTool));
+                tool_manager.register(Box::new(DataAggregateTool));
+                tool_manager.register(Box::new(DataStatsTool));
+                tool_manager.register(Box::new(DataTransformTool));
+                tool_manager.register(Box::new(DataExportTool));
+            }
+        }
+
         let store: Option<Arc<dyn Store>> = if config.enable_memory {
             match FileStore::new(&config.memory_path) {
                 Ok(s) => {
@@ -270,6 +315,20 @@ impl ReactAgent {
             conversation_store: None,
             circuit_breaker: None,
         }
+    }
+
+    /// 从配置文件创建 Agent
+    ///
+    /// 搜索 `echo-agent.yaml` 并加载配置，自动应用环境变量覆盖。
+    ///
+    /// ```no_run
+    /// use echo_agent::agents::react::ReactAgent;
+    /// let agent = ReactAgent::from_config_file(None);
+    /// ```
+    pub fn from_config_file(path: Option<&str>) -> Self {
+        let mut app_config = crate::config::load_config(path);
+        crate::config::apply_env_overrides(&mut app_config);
+        Self::new(app_config.to_agent_config())
     }
 
     // ── LLM 配置注入 ─────────────────────────────────────────────────────────────
@@ -661,4 +720,219 @@ impl Agent for ReactAgent {
             self.mcp_manager.close_all().await;
         })
     }
+}
+
+// ── ReactAgent 多模态扩展方法 ────────────────────────────────────────────────────
+
+impl ReactAgent {
+    /// 发送带图片 URL 的消息（多模态）
+    ///
+    /// 自动下载图片并转换为 base64 发送给 LLM。
+    /// 部分云厂商（如阿里云 Qwen）不支持直接访问外部 URL，需要下载后转 base64。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// # use echo_agent::prelude::*;
+    /// # async fn test() -> echo_agent::error::Result<()> {
+    /// # let mut agent = ReactAgentBuilder::new().model("qwen3.5-plus").build()?;
+    /// let response = agent.chat_with_image_url(
+    ///     "描述这张图片",
+    ///     "https://example.com/image.jpg"
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn chat_with_image_url(&mut self, text: &str, image_url: &str) -> Result<String> {
+        use crate::llm::types::{ContentPart, ImageUrl, Message};
+
+        // 下载图片并转换为 base64 data URL
+        let data_url = fetch_image_as_base64(image_url).await?;
+
+        let message = Message::user_multimodal(vec![
+            ContentPart::Text {
+                text: text.to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: data_url,
+                    detail: None,
+                },
+            },
+        ]);
+
+        self.chat_multimodal(message).await
+    }
+
+    /// 发送多模态消息
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// # use echo_agent::prelude::*;
+    /// # async fn test() -> echo_agent::error::Result<()> {
+    /// # let mut agent = ReactAgentBuilder::new().model("qwen3.5-plus").build()?;
+    /// use echo_agent::llm::types::{ContentPart, ImageUrl, Message};
+    ///
+    /// let message = Message::user_multimodal(vec![
+    ///     ContentPart::Text { text: "描述这些图片".to_string() },
+    ///     ContentPart::ImageUrl {
+    ///         image_url: ImageUrl {
+    ///             url: "https://example.com/img1.jpg".to_string(),
+    ///             detail: None,
+    ///         },
+    ///     },
+    ///     ContentPart::ImageUrl {
+    ///         image_url: ImageUrl {
+    ///             url: "data:image/png;base64,iVBORw0KG...".to_string(),
+    ///             detail: None,
+    ///         },
+    ///     },
+    /// ]);
+    ///
+    /// let response = agent.chat_multimodal(message).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn chat_multimodal(&mut self, message: crate::llm::types::Message) -> Result<String> {
+        use crate::llm::chat;
+
+        // 确保上下文已初始化（包含 system prompt）
+        if self.context.messages().is_empty() {
+            self.context.push(crate::llm::types::Message::system(
+                self.config.system_prompt.clone(),
+            ));
+        }
+
+        // 添加多模态用户消息
+        self.context.push(message.clone());
+
+        // 准备消息列表
+        let messages = self.context.messages().to_vec();
+
+        // 调用 LLM（不使用工具模式，因为这是直接对话）
+        let response = chat(
+            self.client.clone(),
+            &self.config.model_name,
+            &messages,
+            None,        // temperature
+            None,        // max_tokens
+            Some(false), // stream
+            None,        // tools
+            None,        // tool_choice
+            None,        // response_format
+        )
+        .await?;
+
+        let content = response
+            .choices
+            .first()
+            .and_then(|c| c.message.content.clone())
+            .unwrap_or_default();
+
+        // 添加助手回复到上下文
+        self.context
+            .push(crate::llm::types::Message::assistant(content.clone()));
+
+        Ok(content)
+    }
+
+    /// 执行带图片 URL 的任务（单轮，重置上下文）
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// # use echo_agent::prelude::*;
+    /// # async fn test() -> echo_agent::error::Result<()> {
+    /// # let mut agent = ReactAgentBuilder::new().model("qwen3.5-plus").build()?;
+    /// let response = agent
+    ///     .execute_with_image_url("分析这张停车缴费单", "https://example.com/receipt.jpg")
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn execute_with_image_url(&mut self, task: &str, image_url: &str) -> Result<String> {
+        use crate::llm::types::{ContentPart, ImageUrl, Message};
+
+        // 重置上下文
+        self.reset_messages();
+
+        // 下载图片并转换为 base64
+        let data_url = fetch_image_as_base64(image_url).await?;
+
+        let message = Message::user_multimodal(vec![
+            ContentPart::Text {
+                text: task.to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: data_url,
+                    detail: None,
+                },
+            },
+        ]);
+
+        self.chat_multimodal(message).await
+    }
+}
+
+/// 下载图片并转换为 base64 data URL
+///
+/// 支持检测 Content-Type 并生成正确的 data URI 格式：
+/// `data:image/jpeg;base64,...`
+async fn fetch_image_as_base64(url: &str) -> Result<String> {
+    use crate::error::{ReactError, ToolError};
+    use base64::Engine;
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| {
+            ReactError::Agent(crate::error::AgentError::InitializationFailed(format!(
+                "Failed to build HTTP client: {}",
+                e
+            )))
+        })?;
+
+    let response = client.get(url).send().await.map_err(|e| {
+        ReactError::Tool(ToolError::ExecutionFailed {
+            tool: "fetch_image".to_string(),
+            message: format!("下载图片失败: {}", e),
+        })
+    })?;
+
+    if !response.status().is_success() {
+        return Err(ReactError::Tool(ToolError::ExecutionFailed {
+            tool: "fetch_image".to_string(),
+            message: format!("HTTP 错误: {}", response.status()),
+        }));
+    }
+
+    // 获取 MIME 类型（在消费 response 之前）
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    // 提取主类型（如 image/jpeg -> jpeg）
+    let mime_subtype = content_type.split('/').nth(1).unwrap_or("jpeg");
+
+    // 下载二进制数据
+    let bytes = response.bytes().await.map_err(|e| {
+        ReactError::Tool(ToolError::ExecutionFailed {
+            tool: "fetch_image".to_string(),
+            message: format!("读取图片数据失败: {}", e),
+        })
+    })?;
+
+    // 转换为 base64
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    Ok(format!(
+        "data:image/{};base64,{}",
+        mime_subtype, base64_data
+    ))
 }

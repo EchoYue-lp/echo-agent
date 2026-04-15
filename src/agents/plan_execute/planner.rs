@@ -19,18 +19,13 @@ pub trait Planner: Send + Sync {
 // ── LlmPlanner ───────────────────────────────────────────────────────────────
 
 /// 规划输出模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlannerOutputMode {
     /// 使用 JSON Schema 强制结构化输出（推荐，可靠性最高）
+    #[default]
     JsonSchema,
     /// 使用 JsonObject + 自由文本解析（兼容性更好）
     JsonText,
-}
-
-impl Default for PlannerOutputMode {
-    fn default() -> Self {
-        Self::JsonSchema
-    }
 }
 
 /// 基于 LLM 的 Planner：调用大模型来分解任务
@@ -180,8 +175,7 @@ impl LlmPlanner {
         let steps: Vec<PlanStep> = output
             .steps
             .into_iter()
-            .enumerate()
-            .map(|(_i, step_output)| {
+            .map(|step_output| {
                 // 解析依赖：尝试模糊匹配到步骤索引
                 let deps: Vec<String> = step_output
                     .dependencies
@@ -298,7 +292,7 @@ impl StaticPlanner {
 impl Planner for StaticPlanner {
     fn plan<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<Plan>> {
         Box::pin(async move {
-            let steps = self.steps.iter().map(|s| PlanStep::new(s)).collect();
+            let steps = self.steps.iter().map(PlanStep::new).collect();
             Ok(Plan::new(steps).with_goal(task))
         })
     }

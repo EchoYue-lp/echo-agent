@@ -265,10 +265,10 @@ impl A2AClient {
 
                     for line in event_block.lines() {
                         let line = line.trim();
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if let Some(event) = Self::parse_sse_data(data) {
-                                yield event;
-                            }
+                        if let Some(data) = line.strip_prefix("data: ")
+                            && let Some(event) = Self::parse_sse_data(data)
+                        {
+                            yield event;
                         }
                     }
                 }
@@ -278,11 +278,10 @@ impl A2AClient {
             if !buffer.is_empty() {
                 for line in buffer.lines() {
                     let line = line.trim();
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Some(event) = Self::parse_sse_data(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Some(event) = Self::parse_sse_data(data) {
                             yield event;
                         }
-                    }
                 }
             }
         };

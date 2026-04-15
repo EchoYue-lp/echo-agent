@@ -55,9 +55,30 @@ pub enum LlmError {
 pub enum ToolError {
     NotFound(String),
     MissingParameter(String),
-    InvalidParameter { name: String, message: String },
-    ExecutionFailed { tool: String, message: String },
+    InvalidParameter {
+        name: String,
+        message: String,
+    },
+    ExecutionFailed {
+        tool: String,
+        message: String,
+    },
     Timeout(String),
+    /// 无效路径（路径遍历攻击检测）
+    InvalidPath {
+        path: String,
+        reason: String,
+    },
+    /// 访问被拒绝（不在允许目录范围内）
+    AccessDenied {
+        path: String,
+        reason: String,
+    },
+    /// 文件过大
+    FileTooLarge {
+        size: u64,
+        max: u64,
+    },
 }
 
 /// 解析错误
@@ -213,6 +234,15 @@ impl fmt::Display for ToolError {
                 write!(f, "Tool '{}' execution failed: {}", tool, message)
             }
             ToolError::Timeout(name) => write!(f, "Tool '{}' execution timed out", name),
+            ToolError::InvalidPath { path, reason } => {
+                write!(f, "Invalid path: {} ({})", path, reason)
+            }
+            ToolError::AccessDenied { path, reason } => {
+                write!(f, "Access denied: {} ({})", path, reason)
+            }
+            ToolError::FileTooLarge { size, max } => {
+                write!(f, "File too large: {} bytes (max: {} bytes)", size, max)
+            }
         }
     }
 }

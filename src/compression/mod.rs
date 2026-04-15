@@ -480,7 +480,7 @@ impl ContextManagerBuilder {
 
 #[cfg(test)]
 mod tests {
-    const MODEL: &str = "qwen3.5-plus";
+    const MODEL: &str = "qwen3-max";
     use super::*;
     use crate::error::Result;
     use crate::llm::DefaultLlmClient;

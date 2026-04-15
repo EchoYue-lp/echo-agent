@@ -90,12 +90,12 @@ impl Tool for HandoffTool {
             let mut context = HandoffContext::new().with_source(&self.source_agent);
 
             // 添加额外元数据
-            if let Some(meta) = params.get("metadata") {
-                if let Some(obj) = meta.as_object() {
-                    for (k, v) in obj {
-                        if let Some(val) = v.as_str() {
-                            context = context.with_metadata(k, val);
-                        }
+            if let Some(meta) = params.get("metadata")
+                && let Some(obj) = meta.as_object()
+            {
+                for (k, v) in obj {
+                    if let Some(val) = v.as_str() {
+                        context = context.with_metadata(k, val);
                     }
                 }
             }

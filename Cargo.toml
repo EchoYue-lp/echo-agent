@@ -8,7 +8,7 @@ edition = "2024"
 
 [features]
 default = ["full"]
-full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection", "subagent"]
+full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection", "subagent", "web", "media", "data"]
 a2a = []
 mcp = ["dep:echo_mcp"]
 sqlite = ["dep:rusqlite"]
@@ -21,6 +21,9 @@ tasks = []
 workflow = []
 self-reflection = []
 subagent = []
+web = ["dep:scraper", "dep:html2text", "dep:url"]
+media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs"]
+data = ["dep:polars"]
 channels = ["dep:echo_channels"]
 
 [dependencies]
@@ -54,11 +57,46 @@ opentelemetry = { version = "0.27", features = ["trace"], optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["tonic"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
+scraper = { version = "0.22", optional = true }
+html2text = { version = "0.14", optional = true }
+url = { version = "2", optional = true }
+base64 = "0.22"
+pdf-extract = { version = "0.7", optional = true }
+lopdf = { version = "0.34", optional = true }
+calamine = { version = "0.26", optional = true }
+docx-rs = { version = "0.4", optional = true }
+encoding_rs = { version = "0.8", optional = true }
+polars = { version = "0.46", features = ["lazy", "csv", "json", "parquet", "dtype-full"], optional = true }
 
 [[example]]
 name = "demo27_sqlite_memory"
 required-features = ["sqlite"]
 
 [[example]]
+name = "comprehensive_customer_service"
+required-features = ["sqlite"]
+
+[[example]]
+name = "comprehensive_personal_assistant"
+required-features = ["sqlite"]
+
+[[example]]
+name = "comprehensive_data_analyst"
+required-features = ["sqlite"]
+
+[[example]]
+name = "comprehensive_research_agent"
+required-features = ["sqlite"]
+
+[[example]]
 name = "demo38_im_channels"
 required-features = ["channels"]
+
+[[example]]
+name = "demo41_web_tools"
+required-features = ["web"]
+
+[[example]]
+name = "demo42_browser_mcp"
+path = "examples/demo42_playwright_mcp.rs"
+required-features = ["mcp"]

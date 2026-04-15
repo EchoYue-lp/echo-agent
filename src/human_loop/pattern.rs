@@ -19,11 +19,10 @@ pub fn matches_tool_pattern(pattern: &str, tool_name: &str) -> bool {
         return true;
     }
     // 通配符后缀: "Bash(rm:*)" 匹配 "Bash(rm:rf)"
-    if pattern.ends_with("*)") {
-        let prefix = &pattern[..pattern.len() - 2];
-        if tool_name.starts_with(prefix) {
-            return true;
-        }
+    if let Some(prefix) = pattern.strip_suffix("*)")
+        && tool_name.starts_with(prefix)
+    {
+        return true;
     }
     // 工具前缀: "Bash" 匹配 "Bash(rm:*)"
     if tool_name.starts_with(pattern)

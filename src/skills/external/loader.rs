@@ -302,10 +302,10 @@ fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
 /// If the frontmatter contains a legacy `instructions` field, returns that
 /// instead of the body.
 pub fn extract_instructions(content: &str) -> String {
-    if let Ok(raw) = parse_frontmatter(content) {
-        if let Some(instructions) = raw.instructions {
-            return instructions;
-        }
+    if let Ok(raw) = parse_frontmatter(content)
+        && let Some(instructions) = raw.instructions
+    {
+        return instructions;
     }
 
     let trimmed = content.trim_start();

@@ -100,10 +100,10 @@ impl ReactAgent {
 
         // 3. HumanApprovalManager 回退（向后兼容）
         #[allow(deprecated)]
-        if let Ok(manager) = self.get_approval_manager() {
-            if manager.needs_approval(tool_name) {
-                return true;
-            }
+        if let Ok(manager) = self.get_approval_manager()
+            && manager.needs_approval(tool_name)
+        {
+            return true;
         }
 
         false
@@ -146,9 +146,9 @@ impl ReactAgent {
                 crate::tools::permission::PermissionDecision::Deny { reason } => {
                     self.log_permission_denied(tool_name, &tool_perms, &reason)
                         .await;
-                    return Err(
-                        ReactError::Other(format!("工具 {tool_name} 权限不足: {reason}")).into(),
-                    );
+                    return Err(ReactError::Other(format!(
+                        "工具 {tool_name} 权限不足: {reason}"
+                    )));
                 }
                 crate::tools::permission::PermissionDecision::RequireApproval => {
                     info!(agent = %agent, tool = %tool_name, "🔐 权限服务要求人工审批");
@@ -177,8 +177,7 @@ impl ReactAgent {
                             .await;
                         return Err(ReactError::Other(format!(
                             "工具 {tool_name} 权限不足: {reason}"
-                        ))
-                        .into());
+                        )));
                     }
                     crate::tools::permission::PermissionDecision::RequireApproval => {
                         info!(agent = %agent, tool = %tool_name, "🔐 权限策略要求人工审批");
@@ -253,8 +252,7 @@ impl ReactAgent {
                 {
                     return Err(ReactError::Other(format!(
                         "工具 {tool_name} 用户选择拒绝：{response}"
-                    ))
-                    .into());
+                    )));
                 }
                 info!(agent = %agent, tool = %tool_name, "✅ 用户确认执行");
             }
@@ -265,11 +263,10 @@ impl ReactAgent {
                 return Err(ReactError::Other(format!(
                     "工具 {tool_name} 用户拒绝{}",
                     reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
-                ))
-                .into());
+                )));
             }
             _ => {
-                return Err(ReactError::Other(format!("工具 {tool_name} 用户确认超时")).into());
+                return Err(ReactError::Other(format!("工具 {tool_name} 用户确认超时")));
             }
         }
         Ok(None)
@@ -379,20 +376,25 @@ impl ReactAgent {
                     "用户已拒绝执行工具 {}{}",
                     tool_name,
                     reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
-                ))
-                .into())
+                )))
             }
             HumanLoopResponse::Timeout => {
                 warn!(agent = %agent, tool = %tool_name, "⏰ 审批超时");
-                Err(ReactError::Other(format!("工具 {tool_name} 审批超时，已跳过执行")).into())
+                Err(ReactError::Other(format!(
+                    "工具 {tool_name} 审批超时，已跳过执行"
+                )))
             }
             HumanLoopResponse::Deferred => {
                 warn!(agent = %agent, tool = %tool_name, "⏸️ 用户推迟审批");
-                Err(ReactError::Other(format!("工具 {tool_name} 审批被推迟，已跳过执行")).into())
+                Err(ReactError::Other(format!(
+                    "工具 {tool_name} 审批被推迟，已跳过执行"
+                )))
             }
             HumanLoopResponse::Text(_) => {
                 warn!(agent = %agent, tool = %tool_name, "⚠️ 审批请求收到意外的 Text 响应");
-                Err(ReactError::Other(format!("工具 {tool_name} 审批异常，已跳过执行")).into())
+                Err(ReactError::Other(format!(
+                    "工具 {tool_name} 审批异常，已跳过执行"
+                )))
             }
         }
     }
@@ -485,10 +487,10 @@ impl ReactAgent {
             .await?;
 
         // 如果用户在审批时修改了参数，覆盖工具的实际执行参数
-        if let Some(modified) = approval_modified_args {
-            if let Value::Object(map) = &modified {
-                effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            }
+        if let Some(modified) = approval_modified_args
+            && let Value::Object(map) = &modified
+        {
+            effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         }
 
         let result = self
@@ -633,13 +635,13 @@ impl ReactAgent {
 
         // 熔断器检查：LLM 服务持续不可用时快速失败
         let circuit_breaker = self.circuit_breaker.clone();
-        if let Some(cb) = &circuit_breaker {
-            if cb.is_open() {
-                warn!(agent = %agent, "🔴 熔断器已开启，跳过 LLM 请求");
-                return Err(ReactError::Agent(AgentError::InitializationFailed(
-                    "LLM service unavailable (circuit breaker open)".to_string(),
-                )));
-            }
+        if let Some(cb) = &circuit_breaker
+            && cb.is_open()
+        {
+            warn!(agent = %agent, "🔴 熔断器已开启，跳过 LLM 请求");
+            return Err(ReactError::Agent(AgentError::InitializationFailed(
+                "LLM service unavailable (circuit breaker open)".to_string(),
+            )));
         }
 
         let mut response_result: Result<_> = Err(ReactError::Agent(AgentError::NoResponse));

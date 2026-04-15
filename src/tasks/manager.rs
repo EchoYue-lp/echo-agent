@@ -283,18 +283,18 @@ impl TaskManager {
         let mut newly_ready = Vec::new();
 
         for dep_id in &dependents {
-            if let Some(task) = self.tasks.get(dep_id) {
-                if task.status == TaskStatus::Pending {
-                    // 检查该任务的所有依赖是否都已完成
-                    let all_deps_done = task.dependencies.iter().all(|dep_id| {
-                        self.tasks
-                            .get(dep_id)
-                            .map(|dep| dep.value().status == TaskStatus::Completed)
-                            .unwrap_or(false)
-                    });
-                    if all_deps_done {
-                        newly_ready.push(dep_id.clone());
-                    }
+            if let Some(task) = self.tasks.get(dep_id)
+                && task.status == TaskStatus::Pending
+            {
+                // 检查该任务的所有依赖是否都已完成
+                let all_deps_done = task.dependencies.iter().all(|dep_id| {
+                    self.tasks
+                        .get(dep_id)
+                        .map(|dep| dep.value().status == TaskStatus::Completed)
+                        .unwrap_or(false)
+                });
+                if all_deps_done {
+                    newly_ready.push(dep_id.clone());
                 }
             }
         }

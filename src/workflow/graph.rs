@@ -531,14 +531,14 @@ impl Graph {
             // 检查终止条件
             if current == Self::END || self.finish_nodes.contains(&current) {
                 // 如果是 finish 节点（非 __end__），先执行该节点
-                if current != Self::END {
-                    if let Some(node) = self.nodes.get(&current) {
-                        state.set_current_node(&current);
-                        debug!(graph = %self.name, node = %current, "Executing finish node");
-                        node.execute(&state).await?;
-                        path.push(current.clone());
-                        step_count += 1;
-                    }
+                if current != Self::END
+                    && let Some(node) = self.nodes.get(&current)
+                {
+                    state.set_current_node(&current);
+                    debug!(graph = %self.name, node = %current, "Executing finish node");
+                    node.execute(&state).await?;
+                    path.push(current.clone());
+                    step_count += 1;
                 }
                 info!(
                     graph = %self.name,
@@ -668,14 +668,14 @@ impl Graph {
 
             // 检查终止条件
             if current == Self::END || self.finish_nodes.contains(&current) {
-                if current != Self::END {
-                    if let Some(node) = self.nodes.get(&current) {
-                        state.set_current_node(&current);
-                        debug!(graph = %self.name, node = %current, "Executing finish node");
-                        node.execute(&state).await?;
-                        path.push(current.clone());
-                        step_count += 1;
-                    }
+                if current != Self::END
+                    && let Some(node) = self.nodes.get(&current)
+                {
+                    state.set_current_node(&current);
+                    debug!(graph = %self.name, node = %current, "Executing finish node");
+                    node.execute(&state).await?;
+                    path.push(current.clone());
+                    step_count += 1;
                 }
                 info!(
                     graph = %self.name,
@@ -812,13 +812,13 @@ impl Graph {
             // 如果是从 BeforeNode interrupt 恢复，需要执行当前节点
 
             if current == Self::END || self.finish_nodes.contains(&current) {
-                if current != Self::END {
-                    if let Some(node) = self.nodes.get(&current) {
-                        state.set_current_node(&current);
-                        node.execute(&state).await?;
-                        path.push(current.clone());
-                        step_count += 1;
-                    }
+                if current != Self::END
+                    && let Some(node) = self.nodes.get(&current)
+                {
+                    state.set_current_node(&current);
+                    node.execute(&state).await?;
+                    path.push(current.clone());
+                    step_count += 1;
                 }
                 return Ok(RunUntilInterruptResult::Completed(GraphResult {
                     state,
@@ -930,7 +930,7 @@ impl Graph {
             &state,
             checkpoint.path.clone(),
             checkpoint.step_count,
-            checkpoint.interrupt_type.clone(),
+            checkpoint.interrupt_type,
         );
 
         self.resume(modified_checkpoint, ApprovalDecision::Approved)
@@ -973,23 +973,23 @@ impl Graph {
                 }
 
                 if current == Self::END || self.finish_nodes.contains(&current) {
-                    if current != Self::END {
-                        if let Some(node) = self.nodes.get(&current) {
-                            state_clone.set_current_node(&current);
-                            yield WorkflowEvent::NodeStart {
-                                node_name: current.clone(),
-                                step_index: step_count,
-                            };
-                            let node_start = Instant::now();
-                            node.execute(&state_clone).await?;
-                            yield WorkflowEvent::NodeEnd {
-                                node_name: current.clone(),
-                                step_index: step_count,
-                                elapsed: node_start.elapsed(),
-                            };
-                            path.push(current.clone());
-                            step_count += 1;
-                        }
+                    if current != Self::END
+                        && let Some(node) = self.nodes.get(&current)
+                    {
+                        state_clone.set_current_node(&current);
+                        yield WorkflowEvent::NodeStart {
+                            node_name: current.clone(),
+                            step_index: step_count,
+                        };
+                        let node_start = Instant::now();
+                        node.execute(&state_clone).await?;
+                        yield WorkflowEvent::NodeEnd {
+                            node_name: current.clone(),
+                            step_index: step_count,
+                            elapsed: node_start.elapsed(),
+                        };
+                        path.push(current.clone());
+                        step_count += 1;
                     }
 
                     let final_result = state_clone
@@ -1091,7 +1091,7 @@ impl Graph {
         };
 
         // 取第一条匹配的边
-        for edge in edges {
+        if let Some(edge) = edges.iter().next() {
             match &edge.kind {
                 EdgeKind::Fixed(to) => {
                     if to == Self::END {

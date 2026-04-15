@@ -19,7 +19,7 @@
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// 熔断器配置
 #[derive(Debug, Clone)]
@@ -80,7 +80,10 @@ impl CircuitBreaker {
     ///
     /// 若当前为 Open 且已超过 timeout，自动转入 HalfOpen。
     pub fn is_open(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| {
+            error!("circuit breaker mutex poisoned, recovering: {e}");
+            e.into_inner()
+        });
         match &*state {
             State::Closed { .. } | State::HalfOpen { .. } => false,
             State::Open { opened_at } => {
@@ -102,7 +105,10 @@ impl CircuitBreaker {
 
     /// 记录一次成功调用
     pub fn record_success(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| {
+            error!("circuit breaker mutex poisoned, recovering: {e}");
+            e.into_inner()
+        });
         match &*state {
             State::HalfOpen {
                 consecutive_successes,
@@ -134,7 +140,10 @@ impl CircuitBreaker {
 
     /// 记录一次失败调用
     pub fn record_failure(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| {
+            error!("circuit breaker mutex poisoned, recovering: {e}");
+            e.into_inner()
+        });
         match &*state {
             State::Closed {
                 consecutive_failures,
@@ -171,7 +180,10 @@ impl CircuitBreaker {
 
     /// 获取当前状态描述（用于日志/监控）
     pub fn state_name(&self) -> &'static str {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap_or_else(|e| {
+            error!("circuit breaker mutex poisoned, recovering: {e}");
+            e.into_inner()
+        });
         match &*state {
             State::Closed { .. } => "closed",
             State::Open { .. } => "open",
@@ -181,7 +193,10 @@ impl CircuitBreaker {
 
     /// 获取当前连续失败次数（仅 Closed 状态下有意义）
     pub fn consecutive_failures(&self) -> u32 {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap_or_else(|e| {
+            error!("circuit breaker mutex poisoned, recovering: {e}");
+            e.into_inner()
+        });
         match &*state {
             State::Closed {
                 consecutive_failures,

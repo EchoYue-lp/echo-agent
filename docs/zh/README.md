@@ -34,6 +34,7 @@
 | [16 - Plan-and-Execute](16-plan-execute.md) | 规划执行 | Planner/Executor、增量重规划、DAG 调度 |
 | [17 - Graph Workflow](17-graph-workflow.md) | 图工作流 | LangGraph 风格、SharedState、条件边、fan-out/fan-in |
 | [18 - Guard 系统](18-guard-system.md) | 护栏系统 | RuleGuard、LlmGuard、输入/输出过滤 |
+| [20 - Web 工具](20-web-tools.md) | Web 搜索 / 网页获取 | DuckDuckGo / Brave / Tavily 搜索、HTML→文本 |
 
 ### 知识库
 

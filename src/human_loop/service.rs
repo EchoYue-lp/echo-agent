@@ -62,9 +62,10 @@ use crate::human_loop::protected::{ProtectedPathChecker, ProtectedPathResult};
 /// 审批超时策略
 ///
 /// 当审批请求超过指定超时时间后，决定系统如何处理。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum TimeoutStrategy {
     /// 超时后拒绝执行（默认行为）
+    #[default]
     Reject,
     /// 超时后自动批准
     AutoApprove {
@@ -73,12 +74,6 @@ pub enum TimeoutStrategy {
     },
     /// 超时后升级为人工交互
     Escalate,
-}
-
-impl Default for TimeoutStrategy {
-    fn default() -> Self {
-        Self::Reject
-    }
 }
 
 // ── 权限服务配置 ────────────────────────────────────────────────────────────────
@@ -330,6 +325,7 @@ impl PermissionService {
     }
 
     /// 记录审计条目（fire-and-forget，不阻塞管线）
+    #[allow(clippy::too_many_arguments)]
     fn record_audit(
         &self,
         tool_name: &str,

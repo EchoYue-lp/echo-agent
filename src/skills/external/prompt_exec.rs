@@ -117,7 +117,10 @@ async fn execute_block_commands(content: &str, ctx: &PromptContext) -> String {
 
     // Process in reverse order so byte offsets remain valid
     for cap in matches.into_iter().rev() {
-        let full_match = cap.get(0).unwrap();
+        let full_match = match cap.get(0) {
+            Some(m) => m,
+            None => continue,
+        };
         let command = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
 
         if command.is_empty() {
@@ -143,7 +146,10 @@ async fn execute_inline_commands(content: &str, ctx: &PromptContext) -> String {
     let matches: Vec<_> = re.captures_iter(content).collect();
 
     for cap in matches.into_iter().rev() {
-        let full_match = cap.get(0).unwrap();
+        let full_match = match cap.get(0) {
+            Some(m) => m,
+            None => continue,
+        };
         let command = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
 
         if command.is_empty() {

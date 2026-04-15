@@ -65,8 +65,8 @@ async fn demo_linear_pipeline() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 // Simulate data extraction
                 let data = vec!["hello world", "RUST is great", "Echo Agent"];
-                state.set("raw_data", data);
-                state.set("stage", "extracted");
+                let _ = state.set("raw_data", data);
+                let _ = state.set("stage", "extracted");
                 Ok(())
             })
         })
@@ -74,17 +74,17 @@ async fn demo_linear_pipeline() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 let data: Vec<String> = state.get("raw_data").unwrap_or_default();
                 let transformed: Vec<String> = data.iter().map(|s| s.to_uppercase()).collect();
-                state.set("transformed_data", transformed);
-                state.set("stage", "transformed");
+                let _ = state.set("transformed_data", transformed);
+                let _ = state.set("stage", "transformed");
                 Ok(())
             })
         })
         .add_function_node("load", |state: &SharedState| {
             Box::pin(async move {
                 let data: Vec<String> = state.get("transformed_data").unwrap_or_default();
-                state.set("record_count", data.len() as i64);
-                state.set("stage", "loaded");
-                state.set("result", format!("Loaded {} records", data.len()));
+                let _ = state.set("record_count", data.len() as i64);
+                let _ = state.set("stage", "loaded");
+                let _ = state.set("result", format!("Loaded {} records", data.len()));
                 Ok(())
             })
         })
@@ -126,25 +126,25 @@ async fn demo_conditional() -> echo_agent::error::Result<()> {
                 } else {
                     "low"
                 };
-                state.set("priority", priority);
+                let _ = state.set("priority", priority);
                 Ok(())
             })
         })
         .add_function_node("escalate", |state: &SharedState| {
             Box::pin(async move {
-                state.set("action", "Escalated to on-call engineer");
+                let _ = state.set("action", "Escalated to on-call engineer");
                 Ok(())
             })
         })
         .add_function_node("assign", |state: &SharedState| {
             Box::pin(async move {
-                state.set("action", "Assigned to bug triage queue");
+                let _ = state.set("action", "Assigned to bug triage queue");
                 Ok(())
             })
         })
         .add_function_node("backlog", |state: &SharedState| {
             Box::pin(async move {
-                state.set("action", "Added to backlog");
+                let _ = state.set("action", "Added to backlog");
                 Ok(())
             })
         })
@@ -172,7 +172,7 @@ async fn demo_conditional() -> echo_agent::error::Result<()> {
 
     for (ticket, _expected) in &tickets {
         let state = SharedState::new();
-        state.set("ticket", *ticket);
+        let _ = state.set("ticket", *ticket);
         let result = graph.run(state).await?;
         println!(
             "  Ticket: {:40} -> priority={:6} action={:?}  path={:?}",
@@ -192,9 +192,9 @@ async fn demo_loop() -> echo_agent::error::Result<()> {
     let graph = GraphBuilder::new("refinement_loop")
         .add_function_node("init", |state: &SharedState| {
             Box::pin(async move {
-                state.set("draft", "initial rough draft");
-                state.set("quality_score", 30i64);
-                state.set("iteration", 0i64);
+                let _ = state.set("draft", "initial rough draft");
+                let _ = state.set("quality_score", 30i64);
+                let _ = state.set("iteration", 0i64);
                 Ok(())
             })
         })
@@ -207,9 +207,9 @@ async fn demo_loop() -> echo_agent::error::Result<()> {
                 let new_score = score + 20;
                 let new_iter = iter + 1;
 
-                state.set("quality_score", new_score);
-                state.set("iteration", new_iter);
-                state.set(
+                let _ = state.set("quality_score", new_score);
+                let _ = state.set("iteration", new_iter);
+                let _ = state.set(
                     "draft",
                     format!("refined draft v{} (quality={})", new_iter, new_score),
                 );
@@ -219,7 +219,7 @@ async fn demo_loop() -> echo_agent::error::Result<()> {
         .add_function_node("finalize", |state: &SharedState| {
             Box::pin(async move {
                 let draft: String = state.get("draft").unwrap_or_default();
-                state.set("final_output", format!("FINAL: {}", draft));
+                let _ = state.set("final_output", format!("FINAL: {}", draft));
                 Ok(())
             })
         })
@@ -265,7 +265,7 @@ async fn demo_parallel() -> echo_agent::error::Result<()> {
     let graph = GraphBuilder::new("multi_analysis")
         .add_function_node("prepare", |state: &SharedState| {
             Box::pin(async move {
-                state.set("text", "Rust is a systems programming language focused on safety, speed, and concurrency.");
+                let _ = state.set("text", "Rust is a systems programming language focused on safety, speed, and concurrency.");
                 Ok(())
             })
         })
@@ -273,14 +273,14 @@ async fn demo_parallel() -> echo_agent::error::Result<()> {
             Box::pin(async move {
                 let text: String = state.get("text").unwrap_or_default();
                 let count = text.split_whitespace().count();
-                state.set("word_count", count as i64);
+                let _ = state.set("word_count", count as i64);
                 Ok(())
             })
         })
         .add_function_node("char_count", |state: &SharedState| {
             Box::pin(async move {
                 let text: String = state.get("text").unwrap_or_default();
-                state.set("char_count", text.len() as i64);
+                let _ = state.set("char_count", text.len() as i64);
                 Ok(())
             })
         })
@@ -290,7 +290,7 @@ async fn demo_parallel() -> echo_agent::error::Result<()> {
                 let keywords: Vec<&str> = text.split_whitespace()
                     .filter(|w| w.len() > 5)
                     .collect();
-                state.set("keywords", keywords);
+                let _ = state.set("keywords", keywords);
                 Ok(())
             })
         })
@@ -299,7 +299,7 @@ async fn demo_parallel() -> echo_agent::error::Result<()> {
                 let words: i64 = state.get("word_count").unwrap_or(0);
                 let chars: i64 = state.get("char_count").unwrap_or(0);
                 let keywords: Vec<String> = state.get("keywords").unwrap_or_default();
-                state.set(
+                let _ = state.set(
                     "summary",
                     format!(
                         "Analysis: {} words, {} chars, keywords: {:?}",
@@ -357,7 +357,7 @@ async fn demo_agent_node() -> echo_agent::error::Result<()> {
     let graph = GraphBuilder::new("agent_workflow")
         .add_function_node("prepare_prompt", |state: &SharedState| {
             Box::pin(async move {
-                state.set(
+                let _ = state.set(
                     "task",
                     "Analyze the following metrics: revenue=100M, users=5M, growth=15%",
                 );
@@ -368,7 +368,7 @@ async fn demo_agent_node() -> echo_agent::error::Result<()> {
         .add_function_node("format_report", |state: &SharedState| {
             Box::pin(async move {
                 let analysis: String = state.get("analysis").unwrap_or_default();
-                state.set("report", format!("=== Report ===\n{analysis}\n=== End ==="));
+                let _ = state.set("report", format!("=== Report ===\n{analysis}\n=== End ==="));
                 Ok(())
             })
         })
@@ -403,12 +403,12 @@ async fn demo_agent_node() -> echo_agent::error::Result<()> {
 async fn demo_snapshot() -> echo_agent::error::Result<()> {
     // Run a graph partway
     let state = SharedState::new();
-    state.set("counter", 0i64);
-    state.set("label", "checkpoint demo");
+    let _ = state.set("counter", 0i64);
+    let _ = state.set("label", "checkpoint demo");
 
     // Simulate some work
-    state.set("counter", 42i64);
-    state.push_message(echo_agent::llm::types::Message::user(
+    let _ = state.set("counter", 42i64);
+    let _ = state.push_message(echo_agent::llm::types::Message::user(
         "What is the meaning of life?".to_string(),
     ));
 
@@ -433,10 +433,10 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
 
     // Demonstrate merge
     let other = SharedState::new();
-    other.set("extra", "merged value");
-    other.set("counter", 999i64); // should NOT overwrite
+    let _ = other.set("extra", "merged value");
+    let _ = other.set("counter", 999i64); // should NOT overwrite
 
-    restored.merge(&other);
+    let _ = restored.merge(&other);
     println!("\n  After merge (no overwrite):");
     println!(
         "    counter: {} (preserved)",

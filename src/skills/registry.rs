@@ -305,13 +305,13 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
         if let Ok(mut entries) = tokio::fs::read_dir(&dir_path).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                if path.is_file() {
-                    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                        resources.push(SkillResourceEntry {
-                            relative_path: format!("{}/{}", dir_name, file_name),
-                            kind: *kind,
-                        });
-                    }
+                if path.is_file()
+                    && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+                {
+                    resources.push(SkillResourceEntry {
+                        relative_path: format!("{}/{}", dir_name, file_name),
+                        kind: *kind,
+                    });
                 }
             }
         }
@@ -321,21 +321,19 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
     if let Ok(mut entries) = tokio::fs::read_dir(skill_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name != "SKILL.md"
-                        && (name.ends_with(".md")
-                            || name.ends_with(".txt")
-                            || name.ends_with(".yaml")
-                            || name.ends_with(".yml")
-                            || name.ends_with(".json"))
-                    {
-                        resources.push(SkillResourceEntry {
-                            relative_path: name.to_string(),
-                            kind: SkillResourceKind::Other,
-                        });
-                    }
-                }
+            if path.is_file()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name != "SKILL.md"
+                && (name.ends_with(".md")
+                    || name.ends_with(".txt")
+                    || name.ends_with(".yaml")
+                    || name.ends_with(".yml")
+                    || name.ends_with(".json"))
+            {
+                resources.push(SkillResourceEntry {
+                    relative_path: name.to_string(),
+                    kind: SkillResourceKind::Other,
+                });
             }
         }
     }

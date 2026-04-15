@@ -56,11 +56,12 @@ use tracing::{debug, info, warn};
 use futures::StreamExt;
 
 /// Execution mode for plan steps
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum ExecutionMode {
     /// Sequential execution via the `Executor` trait (default).
     /// Steps are executed one-by-one in dependency order.
     /// Supports incremental replanning on failure.
+    #[default]
     Sequential,
     /// Parallel execution via `TaskExecutor` with a custom execution function.
     /// Independent steps run concurrently, bounded by `max_concurrent`.
@@ -68,12 +69,6 @@ pub enum ExecutionMode {
         execute_fn: TaskExecuteFn,
         max_concurrent: usize,
     },
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
 }
 
 /// Plan-and-Execute Agent

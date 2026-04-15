@@ -160,7 +160,7 @@ where
         }
     }
 
-    Err(last_err.unwrap())
+    Err(last_err.expect("with_retry_if: invariants guarantee last_err is set after retry loop"))
 }
 
 /// 使用给定的重试策略执行异步操作（所有错误均视为可重试）。

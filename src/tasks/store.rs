@@ -224,15 +224,15 @@ impl CheckpointStore for SqliteCheckpointStore {
 
             let mut latest: Option<ExecutionCheckpoint> = None;
             for item in results {
-                if let Ok(ckpt) = serde_json::from_value::<ExecutionCheckpoint>(item.value) {
-                    if ckpt.plan_id.as_deref() == Some(plan_id) {
-                        match &latest {
-                            None => latest = Some(ckpt),
-                            Some(existing) if ckpt.created_at > existing.created_at => {
-                                latest = Some(ckpt);
-                            }
-                            _ => {}
+                if let Ok(ckpt) = serde_json::from_value::<ExecutionCheckpoint>(item.value)
+                    && ckpt.plan_id.as_deref() == Some(plan_id)
+                {
+                    match &latest {
+                        None => latest = Some(ckpt),
+                        Some(existing) if ckpt.created_at > existing.created_at => {
+                            latest = Some(ckpt);
                         }
+                        _ => {}
                     }
                 }
             }

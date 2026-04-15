@@ -78,23 +78,21 @@ impl SessionApprovalCache {
         // 先检查全局审批
         {
             let global = self.global_approvals.read().unwrap();
-            if let Some(recorded_at) = global.get(tool_name) {
-                if self.is_entry_valid(recorded_at) {
-                    return true;
-                }
-                // 过期条目 — 会在 cleanup 中移除，此处直接返回 false
+            if let Some(recorded_at) = global.get(tool_name)
+                && self.is_entry_valid(recorded_at)
+            {
+                return true;
             }
         }
 
         // 再检查参数级审批
         let key = Self::args_key(args);
         let approvals = self.approvals.read().unwrap();
-        if let Some(entries) = approvals.get(tool_name) {
-            if let Some(recorded_at) = entries.get(&key) {
-                if self.is_entry_valid(recorded_at) {
-                    return true;
-                }
-            }
+        if let Some(entries) = approvals.get(tool_name)
+            && let Some(recorded_at) = entries.get(&key)
+            && self.is_entry_valid(recorded_at)
+        {
+            return true;
         }
 
         false
@@ -128,14 +126,13 @@ impl SessionApprovalCache {
                 let mut global = self.global_approvals.write().unwrap();
 
                 // 容量检查
-                if global.len() >= self.max_entries {
-                    if let Some(oldest_key) = global
+                if global.len() >= self.max_entries
+                    && let Some(oldest_key) = global
                         .iter()
                         .min_by_key(|(_, instant)| *instant)
                         .map(|(k, _)| k.clone())
-                    {
-                        global.remove(&oldest_key);
-                    }
+                {
+                    global.remove(&oldest_key);
                 }
                 global.insert(tool_name.to_string(), Instant::now());
             }

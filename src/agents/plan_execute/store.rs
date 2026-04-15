@@ -122,10 +122,9 @@ impl PlanStore for SqlitePlanStore {
             for item in results {
                 if let Ok(plan) =
                     serde_json::from_value::<crate::agents::plan_execute::types::Plan>(item.value)
+                    && plan.slug.as_deref() == Some(slug)
                 {
-                    if plan.slug.as_deref() == Some(slug) {
-                        return Ok(Some(plan));
-                    }
+                    return Ok(Some(plan));
                 }
             }
 

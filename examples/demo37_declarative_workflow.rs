@@ -92,14 +92,14 @@ max_steps: 50
 
     // 测试条件分支：decision=yes → approved
     let state = SharedState::new();
-    state.set("decision", "yes");
+    let _ = state.set("decision", "yes");
     let result = graph.run(state).await?;
     println!("    decision='yes' → path={:?}", result.path);
     assert!(result.path.contains(&"approved".to_string()));
 
     // 测试条件分支：decision=no → rejected
     let state = SharedState::new();
-    state.set("decision", "no");
+    let _ = state.set("decision", "no");
     let result = graph.run(state).await?;
     println!("    decision='no'  → path={:?}", result.path);
     assert!(result.path.contains(&"rejected".to_string()));

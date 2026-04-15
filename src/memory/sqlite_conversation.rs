@@ -10,7 +10,6 @@ use crate::memory::conversation::{
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -192,14 +191,14 @@ impl ConversationStore for SqliteConversationStore {
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             let mut param_idx = 1;
 
-            if filter.user_id.is_some() {
+            if let Some(user_id) = filter.user_id {
                 sql.push_str(&format!(" AND c.user_id = ?{param_idx}"));
-                param_values.push(Box::new(filter.user_id.unwrap()));
+                param_values.push(Box::new(user_id));
                 param_idx += 1;
             }
-            if filter.agent_type.is_some() {
+            if let Some(agent_type) = filter.agent_type {
                 sql.push_str(&format!(" AND c.agent_type = ?{param_idx}"));
-                param_values.push(Box::new(filter.agent_type.unwrap()));
+                param_values.push(Box::new(agent_type));
                 param_idx += 1;
             }
 
@@ -266,9 +265,9 @@ impl ConversationStore for SqliteConversationStore {
                 sets.push(format!("summary = ?{}", params.len() + 1));
                 params.push(Box::new(s.to_string()));
             }
-            if compressed_before_id.is_some() {
+            if let Some(cbid) = compressed_before_id {
                 sets.push(format!("compressed_before_id = ?{}", params.len() + 1));
-                params.push(Box::new(compressed_before_id.unwrap()));
+                params.push(Box::new(cbid));
             }
 
             if sets.is_empty() {

@@ -47,20 +47,15 @@ pub struct StateSnapshot {
 // ── SnapshotPolicy ────────────────────────────────────────────────────────────
 
 /// 自动快照策略
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SnapshotPolicy {
     /// 每轮 ReAct 迭代后自动快照
+    #[default]
     EveryIteration,
     /// 每 N 轮迭代后自动快照
     EveryN(usize),
     /// 仅手动调用 `snapshot()` 时创建
     Manual,
-}
-
-impl Default for SnapshotPolicy {
-    fn default() -> Self {
-        Self::EveryIteration
-    }
 }
 
 // ── SnapshotManager ───────────────────────────────────────────────────────────
@@ -96,7 +91,7 @@ impl SnapshotManager {
     pub fn should_capture(&self, iteration: usize) -> bool {
         match &self.policy {
             SnapshotPolicy::EveryIteration => true,
-            SnapshotPolicy::EveryN(n) => *n > 0 && (iteration + 1) % n == 0,
+            SnapshotPolicy::EveryN(n) => *n > 0 && (iteration + 1).is_multiple_of(*n),
             SnapshotPolicy::Manual => false,
         }
     }

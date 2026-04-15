@@ -153,10 +153,13 @@ impl PermissionDecision {
 /// 参考 Claude Code 的 PERMISSION_RULE_SOURCES 设计。
 /// 在 deny-first 评估中，来源优先级只影响同类型规则（deny/ask/allow）之间的顺序，
 /// deny 规则始终优先于 ask 和 allow 规则。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleSource {
     /// 默认规则（最低优先级）
+    #[default]
     Default = 0,
     /// 本地设置（.echo/settings.local.json）
     LocalSettings = 1,
@@ -170,12 +173,6 @@ pub enum RuleSource {
     CliArg = 5,
     /// 会话临时规则（最高优先级）
     Session = 6,
-}
-
-impl Default for RuleSource {
-    fn default() -> Self {
-        RuleSource::Default
-    }
 }
 
 impl std::fmt::Display for RuleSource {

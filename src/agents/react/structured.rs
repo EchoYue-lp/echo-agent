@@ -84,10 +84,10 @@ fn parse_json_output<T: serde::de::DeserializeOwned>(text: &str) -> Result<T> {
     }
 
     // 尝试提取 markdown 代码块中的 JSON
-    if let Some(json_str) = extract_json_from_markdown(trimmed) {
-        if let Ok(v) = serde_json::from_str::<T>(json_str) {
-            return Ok(v);
-        }
+    if let Some(json_str) = extract_json_from_markdown(trimmed)
+        && let Ok(v) = serde_json::from_str::<T>(json_str)
+    {
+        return Ok(v);
     }
 
     Err(ReactError::Other(format!(

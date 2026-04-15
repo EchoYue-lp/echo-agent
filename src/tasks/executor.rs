@@ -94,8 +94,8 @@ impl TaskExecutorConfig {
 
         let secs = if self.retry_jitter {
             // Full jitter: random in [0, capped]
-            let jitter = fastrand::f64() * capped;
-            jitter
+
+            fastrand::f64() * capped
         } else {
             capped
         };
@@ -390,10 +390,10 @@ impl TaskExecutor {
         let _ = manager.update_task_status(&task_id, TaskStatus::InProgress);
 
         // Call before_execute hook
-        if config.enable_hooks {
-            if let Some(ctx) = manager.create_hook_context(&task_id, current_attempt, None) {
-                hooks.before_execute(&ctx).await;
-            }
+        if config.enable_hooks
+            && let Some(ctx) = manager.create_hook_context(&task_id, current_attempt, None)
+        {
+            hooks.before_execute(&ctx).await;
         }
 
         loop {
@@ -425,12 +425,11 @@ impl TaskExecutor {
                             TaskExecutionResult::timeout(&task_id, timeout_secs, current_attempt);
 
                         // Call on_timeout hook
-                        if config.enable_hooks {
-                            if let Some(ctx) =
+                        if config.enable_hooks
+                            && let Some(ctx) =
                                 manager.create_hook_context(&task_id, current_attempt, None)
-                            {
-                                hooks.on_timeout(&ctx).await;
-                            }
+                        {
+                            hooks.on_timeout(&ctx).await;
                         }
 
                         return result;
@@ -455,12 +454,11 @@ impl TaskExecutor {
                     manager.set_task_result(&task_id, output.clone());
 
                     // Call after_execute hook
-                    if config.enable_hooks {
-                        if let Some(ctx) =
+                    if config.enable_hooks
+                        && let Some(ctx) =
                             manager.create_hook_context(&task_id, current_attempt, None)
-                        {
-                            hooks.after_execute(&ctx, &output).await;
-                        }
+                    {
+                        hooks.after_execute(&ctx, &output).await;
                     }
 
                     return TaskExecutionResult::success(
@@ -633,14 +631,14 @@ impl TaskExecutor {
             // Periodic checkpoint
             if batch_size > 0 {
                 batch_count += 1;
-                if self.config.checkpoint_interval_secs > 0 {
-                    if let Some(ref store) = self.checkpoint_store {
-                        let ckpt = ExecutionCheckpoint::from_manager(None, &self.task_manager);
-                        if let Err(e) = store.save_checkpoint(&ckpt).await {
-                            warn!(error = %e, "Failed to save checkpoint after batch {}", batch_count);
-                        } else {
-                            debug!(batch = batch_count, "Checkpoint saved");
-                        }
+                if self.config.checkpoint_interval_secs > 0
+                    && let Some(ref store) = self.checkpoint_store
+                {
+                    let ckpt = ExecutionCheckpoint::from_manager(None, &self.task_manager);
+                    if let Err(e) = store.save_checkpoint(&ckpt).await {
+                        warn!(error = %e, "Failed to save checkpoint after batch {}", batch_count);
+                    } else {
+                        debug!(batch = batch_count, "Checkpoint saved");
                     }
                 }
             }

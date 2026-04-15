@@ -116,7 +116,7 @@ pub struct HooksDefinition {
 }
 
 /// Result of executing a hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HookResult {
     /// If true, the tool call should be blocked.
     pub block: bool,
@@ -132,20 +132,6 @@ pub struct HookResult {
     pub permission_decision: Option<PermissionDecision>,
     /// Permission mode override (PreToolUse only).
     pub permission_mode_override: Option<PermissionMode>,
-}
-
-impl Default for HookResult {
-    fn default() -> Self {
-        Self {
-            block: false,
-            block_reason: None,
-            updated_input: None,
-            messages: Vec::new(),
-            stop_propagation: false,
-            permission_decision: None,
-            permission_mode_override: None,
-        }
-    }
 }
 
 impl HookResult {

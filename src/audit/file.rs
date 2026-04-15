@@ -40,11 +40,11 @@ impl AuditLogger for FileAuditLogger {
             let line = serde_json::to_string(&event)
                 .map_err(|e| crate::error::ReactError::Other(e.to_string()))?;
 
-            if let Ok(mut guard) = self.writer.lock() {
-                if let Some(writer) = guard.as_mut() {
-                    writeln!(writer, "{}", line)?;
-                    writer.flush()?;
-                }
+            if let Ok(mut guard) = self.writer.lock()
+                && let Some(writer) = guard.as_mut()
+            {
+                writeln!(writer, "{}", line)?;
+                writer.flush()?;
             }
             Ok(())
         })
@@ -62,25 +62,25 @@ impl AuditLogger for FileAuditLogger {
                 }
                 if let Ok(event) = serde_json::from_str::<AuditEvent>(line) {
                     let mut keep = true;
-                    if let Some(ref sid) = filter.session_id {
-                        if event.session_id.as_deref() != Some(sid) {
-                            keep = false;
-                        }
+                    if let Some(ref sid) = filter.session_id
+                        && event.session_id.as_deref() != Some(sid)
+                    {
+                        keep = false;
                     }
-                    if let Some(ref name) = filter.agent_name {
-                        if &event.agent_name != name {
-                            keep = false;
-                        }
+                    if let Some(ref name) = filter.agent_name
+                        && &event.agent_name != name
+                    {
+                        keep = false;
                     }
-                    if let Some(ref from) = filter.from {
-                        if event.timestamp < *from {
-                            keep = false;
-                        }
+                    if let Some(ref from) = filter.from
+                        && event.timestamp < *from
+                    {
+                        keep = false;
                     }
-                    if let Some(ref to) = filter.to {
-                        if event.timestamp > *to {
-                            keep = false;
-                        }
+                    if let Some(ref to) = filter.to
+                        && event.timestamp > *to
+                    {
+                        keep = false;
                     }
                     if keep {
                         events.push(event);

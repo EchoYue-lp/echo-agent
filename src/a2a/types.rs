@@ -318,17 +318,17 @@ impl TaskState {
         if self.is_terminal() {
             return false;
         }
-        match (self, next) {
-            (Self::Submitted, Self::Working) => true,
-            (Self::Submitted, Self::Canceled) => true,
-            (Self::Working, Self::Completed) => true,
-            (Self::Working, Self::Failed) => true,
-            (Self::Working, Self::InputRequired) => true,
-            (Self::Working, Self::Canceled) => true,
-            (Self::InputRequired, Self::Working) => true,
-            (Self::InputRequired, Self::Canceled) => true,
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (Self::Submitted, Self::Working)
+                | (Self::Submitted, Self::Canceled)
+                | (Self::Working, Self::Completed)
+                | (Self::Working, Self::Failed)
+                | (Self::Working, Self::InputRequired)
+                | (Self::Working, Self::Canceled)
+                | (Self::InputRequired, Self::Working)
+                | (Self::InputRequired, Self::Canceled)
+        )
     }
 }
 

@@ -1,10 +1,7 @@
-//! im_channels.rs —— 多 IM 平台接入演示
+//! im_channels.rs —— 多 IM 平台接入演示（使用框架集成）
 //!
-//! 同时启动 QQ Bot 和飞书通道，将消息转交给 Agent 处理。
-//!
-//! 会话管理由框架 SessionHandler 提供：
-//! - 关键词重置：发送 "重置对话"、"新对话"、"/reset" 等触发
-//! - 超时重置：会话空闲超过 SESSION_TIMEOUT_MINUTES（默认 60 分钟）后自动重置
+//! 通过 `AgentChannelHandler` 将 ReactAgent 与 IM 通道桥接，
+//! 自动继承框架的所有能力（工具、记忆、MCP、Skills 等）。
 //!
 //! 使用方法：
 //! ```bash
@@ -18,13 +15,11 @@
 //! cargo run --example demo38_im_channels --features channels
 //! ```
 
-use async_trait::async_trait;
-use echo_agent::agent::Agent;
-use echo_agent::llm::LlmClient;
-use echo_channels::prelude::*;
-use echo_providers::LlmConfig;
+use echo_agent::channels::{
+    AgentChannelHandler, ChannelManager, FeishuChannel, FeishuConfig, MessageHandler, QqChannel,
+    QqConfig, SessionConfig, SessionHandler,
+};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// 默认会话超时（分钟）
 const DEFAULT_SESSION_TIMEOUT_MINUTES: u64 = 60;
@@ -36,12 +31,12 @@ async fn main() -> echo_agent::error::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "echo_agent=warn,echo_channels=info,im_channels=info".into()),
+                .unwrap_or_else(|_| "echo_agent=warn,echo_channels=info".into()),
         )
         .init();
 
     println!("{}", "═".repeat(62));
-    println!("      Echo Agent × IM Channels");
+    println!("      Echo Agent × IM Channels (Framework Integration)");
     println!("{}", "═".repeat(62));
     println!();
 
@@ -53,8 +48,9 @@ async fn main() -> echo_agent::error::Result<()> {
 
     println!("  会话超时: {} 分钟", timeout_minutes);
 
-    // 2. 创建 LLM 客户端
-    let llm_client = create_llm_client()?;
+    // 2. Agent 配置（自动继承工具、记忆等所有能力）
+    let model = std::env::var("MODEL_NAME").unwrap_or_else(|_| "qwen3-max".into());
+    println!("  模型: {}", model);
 
     // 3. 创建 ChannelManager
     let mut manager = ChannelManager::new();
@@ -96,19 +92,27 @@ async fn main() -> echo_agent::error::Result<()> {
     // 6. 构建会话配置
     let session_config = SessionConfig::default().with_timeout_minutes(timeout_minutes);
 
-    // 7. 启动所有通道 —— 使用框架 SessionHandler 管理会话
-    let llm_ref = llm_client.clone();
+    // 7. 使用 AgentChannelHandler 桥接 —— 自动继承全部框架能力
+    let model_ref = model.clone();
     let handler_factory = move |_channel_id: &str| -> Arc<dyn MessageHandler> {
-        let llm = llm_ref.clone();
+        let model = model_ref.clone();
+        let session_config = session_config.clone();
         Arc::new(SessionHandler::new(
-            session_config.clone(),
-            move || -> Box<dyn MessageHandler> { Box::new(AgentHandler::new(llm.clone())) },
+            session_config,
+            move || -> Box<dyn MessageHandler> {
+                Box::new(AgentChannelHandler::standard(
+                    &model,
+                    "im-assistant",
+                    "你是一个友好的助手，请用中文简洁回答。记住我们之前的对话内容。",
+                ))
+            },
         ))
     };
 
     manager.start_all(handler_factory).await?;
 
     println!("  所有通道已启动，等待消息...");
+    println!("  Agent 已自动启用：工具、记忆、MCP 等能力");
     println!("  按 Ctrl+C 停止\n");
 
     // 8. 等待退出信号
@@ -119,78 +123,4 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("  所有通道已关闭。");
 
     Ok(())
-}
-
-// ── AgentHandler ─────────────────────────────────────────────────────────────
-
-/// 单个 Agent 实例的消息处理器
-///
-/// SessionHandler 为每个用户创建一个 AgentHandler，
-/// 内部持有一个 Agent 实例来维护多轮对话。
-struct AgentHandler {
-    agent: Arc<Mutex<Box<dyn Agent>>>,
-}
-
-impl AgentHandler {
-    fn new(llm_client: Arc<dyn LlmClient>) -> Self {
-        use echo_agent::prelude::ReactAgentBuilder;
-
-        let agent: Box<dyn Agent> = Box::new(
-            ReactAgentBuilder::new()
-                .model("deepseek-chat")
-                .system_prompt("你是一个友好的助手，请用中文简洁回答。记住我们之前的对话内容。")
-                .enable_tools()
-                .llm_client(llm_client)
-                .build()
-                .expect("Failed to create agent"),
-        );
-
-        Self {
-            agent: Arc::new(Mutex::new(agent)),
-        }
-    }
-}
-
-#[async_trait]
-impl MessageHandler for AgentHandler {
-    async fn handle(&self, msg: InboundMessage) -> echo_agent::error::Result<OutboundMessage> {
-        let mut agent = self.agent.lock().await;
-        let reply = agent.chat(&msg.text).await?;
-
-        Ok(OutboundMessage::new(
-            &msg.channel_id,
-            &msg.sender_id,
-            msg.chat_type,
-            &reply,
-        ))
-    }
-
-    async fn reply(&self, _msg: OutboundMessage) -> echo_agent::error::Result<()> {
-        Ok(())
-    }
-}
-
-fn create_llm_client() -> echo_agent::error::Result<Arc<dyn LlmClient>> {
-    let base_url = std::env::var("OPENAI_BASE_URL").ok();
-    let api_key = std::env::var("OPENAI_API_KEY").ok();
-
-    if let (Some(base_url), Some(api_key)) = (base_url, api_key) {
-        let config = LlmConfig::new(base_url, api_key, "qwen3-max");
-        let client = config.build_client().map_err(|e| {
-            echo_agent::error::ReactError::Other(format!("Failed to create LLM client: {}", e))
-        })?;
-        return Ok(Arc::from(client));
-    }
-
-    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-        let config = LlmConfig::anthropic(api_key, "claude-sonnet-4-6");
-        let client = config.build_client().map_err(|e| {
-            echo_agent::error::ReactError::Other(format!("Failed to create LLM client: {}", e))
-        })?;
-        return Ok(Arc::from(client));
-    }
-
-    Err(echo_agent::error::ReactError::Other(
-        "未配置 OPENAI_API_KEY 或 ANTHROPIC_API_KEY".to_string(),
-    ))
 }

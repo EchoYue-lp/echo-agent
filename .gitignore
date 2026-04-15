@@ -6,3 +6,6 @@
 .env
 /Cargo.lock
 /echo-agent.yaml
+.DS_Store
+.ISSUES.md
+/.playwright-mcp/
