@@ -27,11 +27,11 @@ data = ["dep:polars"]
 channels = ["dep:echo_channels"]
 
 [dependencies]
-echo_core = { path = "echo-core", features = ["reqwest"] }
-echo_macros = { path = "echo-macros" }
-echo_providers = { path = "echo-providers" }
-echo_mcp = { path = "echo-mcp", optional = true }
-echo_channels = { path = "echo-channels", optional = true }
+echo_core = { version = "1.3.0", path = "echo-core", features = ["reqwest"] }
+echo_macros = { version = "1.3.0", path = "echo-macros" }
+echo_providers = { version = "1.3.0", path = "echo-providers" }
+echo_mcp = { version = "1.3.0", path = "echo-mcp", optional = true }
+echo_channels = { version = "1.3.0", path = "echo-channels", optional = true }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
