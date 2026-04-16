@@ -128,7 +128,10 @@ fn demo_type_system() {
         },
     ]);
 
-    let parts = mixed.content_parts.as_ref().unwrap();
+    let parts = match &mixed.content {
+        MessageContent::Parts(parts) => parts,
+        _ => unreachable!("mixed message should be multimodal"),
+    };
     println!("    parts: {} 个", parts.len());
     for (i, part) in parts.iter().enumerate() {
         match part {
@@ -168,7 +171,7 @@ fn demo_serialization() {
     // 2c. 反序列化纯文本（旧格式）
     let legacy: Message = serde_json::from_str(r#"{"role":"assistant","content":"回复"}"#).unwrap();
     assert!(!legacy.is_multimodal());
-    assert_eq!(legacy.content, Some("回复".to_string()));
+    assert_eq!(legacy.content.as_text_ref(), Some("回复"));
     println!("  [2c] 反序列化旧格式 ✓");
 
     // 2d. 反序列化多模态（新格式）
@@ -181,7 +184,10 @@ fn demo_serialization() {
     }"#;
     let mm: Message = serde_json::from_str(mm_str).unwrap();
     assert!(mm.is_multimodal());
-    assert_eq!(mm.content_parts.as_ref().unwrap().len(), 2);
+    match &mm.content {
+        MessageContent::Parts(parts) => assert_eq!(parts.len(), 2),
+        _ => panic!("expected multimodal content"),
+    }
     println!("  [2d] 反序列化多模态格式 ✓");
 
     // 2e. text_content() 提取

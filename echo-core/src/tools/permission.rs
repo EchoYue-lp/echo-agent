@@ -8,9 +8,11 @@
 //!
 //! 参考 Claude Code 的权限架构设计
 
+#![allow(missing_docs)]
+
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ── 工具权限类型 ───────────────────────────────────────────────────────────────
 
@@ -214,18 +216,30 @@ impl RuleMatcher {
                 if pattern == "*" {
                     return true;
                 }
-                // 精确匹配
+                // Exact match first
                 if tool_name == pattern {
                     return true;
                 }
-                // 通配符后缀: "Bash(rm:*)" 匹配 "Bash(rm:rf)"
+                // Use glob matching for patterns like "Bash(rm:*)"
+                // Only return true on glob match; fall through to prefix check on non-match.
+                #[cfg(feature = "permission")]
+                {
+                    if let Ok(glob) = globset::Glob::new(pattern) {
+                        let matcher = glob.compile_matcher();
+                        if matcher.is_match(tool_name) {
+                            return true;
+                        }
+                    }
+                }
+                // Fallback: handle "prefix*)" patterns without globset.
+                // E.g., "Bash(rm:*)" matches "Bash(rm:rf)".
                 if pattern.ends_with("*)") {
                     let prefix = &pattern[..pattern.len() - 2];
                     if tool_name.starts_with(prefix) {
                         return true;
                     }
                 }
-                // 工具前缀匹配: "Bash" 匹配 "Bash(git:*)"
+                // Fallback: prefix match for "Bash" matching "Bash(git:*)"
                 if tool_name.starts_with(pattern)
                     && tool_name.len() > pattern.len()
                     && tool_name.as_bytes()[pattern.len()] == b'('
@@ -344,6 +358,8 @@ impl PermissionRule {
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
     rules: Vec<PermissionRule>,
+    /// Index for fast exact tool name lookups: tool_name -> list of rule indices
+    tool_index: HashMap<String, Vec<usize>>,
 }
 
 impl RuleRegistry {
@@ -360,6 +376,13 @@ impl RuleRegistry {
             .iter()
             .position(|r| r.source < rule.source)
             .unwrap_or(self.rules.len());
+
+        // Build index entry for exact tool name matches
+        if let RuleMatcher::Tool { name } = &rule.matcher {
+            let entry = self.tool_index.entry(name.clone()).or_default();
+            entry.push(pos);
+        }
+
         self.rules.insert(pos, rule);
     }
 
@@ -379,7 +402,7 @@ impl RuleRegistry {
     ///
     /// 这确保了一个低优先级的 deny 规则永远不会被高优先级的 allow 规则覆盖。
     pub fn check(&self, tool_name: &str, permissions: &[ToolPermission]) -> Option<RuleBehavior> {
-        // Pass 1: Deny — any deny anywhere wins
+        // Pass 1: Deny — any deny anywhere wins (full scan)
         for rule in &self.rules {
             if matches!(rule.behavior, RuleBehavior::Deny { .. })
                 && rule.matches(tool_name, permissions)
@@ -387,7 +410,7 @@ impl RuleRegistry {
                 return Some(rule.behavior.clone());
             }
         }
-        // Pass 2: Ask — by source priority (rules are already sorted)
+        // Pass 2: Ask — by source priority (rules are already sorted by source)
         for rule in &self.rules {
             if matches!(rule.behavior, RuleBehavior::Ask { .. })
                 && rule.matches(tool_name, permissions)
@@ -413,11 +436,19 @@ impl RuleRegistry {
     /// 移除指定来源的所有规则
     pub fn remove_by_source(&mut self, source: RuleSource) {
         self.rules.retain(|r| r.source != source);
+        // Rebuild the tool index
+        self.tool_index.clear();
+        for (i, rule) in self.rules.iter().enumerate() {
+            if let RuleMatcher::Tool { name } = &rule.matcher {
+                self.tool_index.entry(name.clone()).or_default().push(i);
+            }
+        }
     }
 
     /// 清空所有规则
     pub fn clear(&mut self) {
         self.rules.clear();
+        self.tool_index.clear();
     }
 
     /// 获取规则数量

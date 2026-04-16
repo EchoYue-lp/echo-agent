@@ -67,6 +67,7 @@ impl Tool for BrokenTool {
                 success: false,
                 output: String::new(),
                 error: Some("BrokenTool: 服务不可用".to_string()),
+                bytes: None,
             })
         })
     }
@@ -114,12 +115,14 @@ impl Tool for FlakyTool {
                     success: false,
                     output: String::new(),
                     error: Some(format!("服务暂时不可用（第 {call_idx} 次尝试）")),
+                    bytes: None,
                 })
             } else {
                 Ok(ToolResult {
                     success: true,
                     output: format!("{city}：晴，26°C"),
                     error: None,
+                    bytes: None,
                 })
             }
         })

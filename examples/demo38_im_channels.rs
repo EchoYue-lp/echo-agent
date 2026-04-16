@@ -109,7 +109,9 @@ async fn main() -> echo_agent::error::Result<()> {
         ))
     };
 
-    manager.start_all(handler_factory).await?;
+    for result in manager.start_all(handler_factory).await {
+        result?;
+    }
 
     println!("  所有通道已启动，等待消息...");
     println!("  Agent 已自动启用：工具、记忆、MCP 等能力");

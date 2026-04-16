@@ -115,8 +115,14 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
             AgentEvent::ThinkStart => {
                 print!("\n🤔 思考中...");
             }
-            AgentEvent::ThinkEnd { tokens_used } => {
-                println!(" (用了 {} tokens)", tokens_used);
+            AgentEvent::ThinkEnd {
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                println!(
+                    " (prompt={}, completion={})",
+                    prompt_tokens, completion_tokens
+                );
             }
             AgentEvent::ToolCall { name, args } => {
                 println!("\n🔧 调用工具: {}", name);

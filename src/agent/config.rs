@@ -5,12 +5,28 @@ use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
 use std::sync::Arc;
 
-/// Agent 角色，决定其在多 Agent 系统中的职责
+/// Agent 角色枚举，决定其在多 Agent 系统中的职责范围。
+///
+/// # 当前用途
+///
+/// - `Orchestrator`：在 `TaskExecutor::build_execute_fn`（`react/planning.rs`）中使用。
+///   编排者会优先将任务分派给已注册的 SubAgent 执行，而非直接调用 LLM。
+///   适用于多 Agent 协作场景中的"领导者"角色。
+///
+/// - `Worker`（默认）：直接通过 LLM 执行任务，不尝试分派给 SubAgent。
+///   适用于独立执行具体任务的 Agent。
+///
+/// # 注意
+///
+/// 该角色字段目前**仅**在 TaskExecutor 的执行逻辑中影响行为。
+/// 在其他模块（ReactAgent、PlanExecute 等）中不产生额外效果。
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum AgentRole {
-    /// 编排者：负责任务规划、分配和协调子 agent，不持有具体业务工具
+    /// 编排者：负责任务规划、分配和协调子 agent，不持有具体业务工具。
+    /// 在 TaskExecutor 中会优先分派给 SubAgent。
     Orchestrator,
-    /// 执行者：专注于具体任务执行，只携带业务工具，不持有任务管理/子 agent 调度能力
+    /// 执行者（默认）：专注于具体任务执行，只携带业务工具，
+    /// 不持有任务管理/子 agent 调度能力。直接通过 LLM 执行任务。
     #[default]
     Worker,
 }

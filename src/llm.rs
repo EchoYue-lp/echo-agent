@@ -1,6 +1,11 @@
-//! LLM 客户端
+//! LLM façade
 //!
-//! 统一的 LLM 抽象层，支持 OpenAI 兼容 API、自定义实现和 Mock 测试。
+//! 此模块本身不维护独立的 LLM 协议实现，而是作为 façade 统一重导出：
+//! - `echo_core::llm`: 核心 trait 与通用请求/响应类型
+//! - `echo_integration::providers`: provider 实现与配置加载
+//!
+//! 如果调用方需要绕过 façade、直接依赖拆分后的 workspace crate，
+//! 可使用 [`crate::workspace::core::llm`] 与 [`crate::workspace::integration::providers`]。
 //!
 //! # 核心类型
 //!
@@ -53,33 +58,54 @@
 //! # }
 //! ```
 
+/// Direct re-exports from `echo_core::llm`.
+pub mod core {
+    pub use echo_core::llm::*;
+
+    /// Canonical LLM wire types from `echo_core`.
+    pub mod types {
+        pub use echo_core::llm::types::*;
+    }
+}
+
+/// Direct re-exports from `echo_integration::providers`.
+pub mod integration {
+    pub use echo_integration::providers::*;
+}
+
 pub mod types {
-    //! OpenAI Chat Completions API 类型定义
+    //! Compatibility re-export of canonical wire types from `echo_core::llm::types`.
     pub use echo_core::llm::types::*;
 }
 
 pub mod config {
-    //! LLM 配置
-    pub use echo_providers::config::*;
+    //! Compatibility re-export of provider config from `echo_integration`.
+    pub use echo_integration::providers::config::*;
 }
 
 pub mod providers {
-    //! LLM Provider 实现
-    pub use echo_providers::anthropic::AnthropicClient;
-    pub use echo_providers::ollama::OllamaClient;
+    //! Compatibility re-export of provider implementations from `echo_integration`.
+    pub use echo_integration::providers::anthropic::AnthropicClient;
+    pub use echo_integration::providers::ollama::OllamaClient;
+    pub use echo_integration::providers::openai::{DefaultLlmClient, OpenAiClient};
 }
+
+use futures::Stream;
+use reqwest::Client;
+use reqwest::header::HeaderMap;
+use std::sync::Arc;
 
 // Core traits from echo-core
 pub use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 
-// Provider implementations from echo-providers
-pub use echo_providers::openai::{
-    DefaultLlmClient, OpenAiClient, assemble_req_header, chat, stream_chat,
-};
+// Provider implementations from echo_integration::providers
+pub use echo_integration::providers::anthropic::AnthropicClient;
+pub use echo_integration::providers::ollama::OllamaClient;
+pub use echo_integration::providers::openai::{DefaultLlmClient, OpenAiClient};
 
 // Config & Factory
-pub use config::LlmConfig;
-pub use echo_providers::ProviderFactory;
+pub use config::{LlmConfig, LlmProvider};
+pub use echo_integration::providers::ProviderFactory;
 
 // Wire types for internal use
 #[allow(unused_imports)]
@@ -87,3 +113,66 @@ pub(crate) use types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message,
 };
 pub use types::{JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition};
+
+/// Compatibility helper for assembling OpenAI-compatible request headers.
+///
+/// This remains available from the root facade so older call sites can stay on
+/// `echo_agent::llm::*` while the canonical implementation lives in
+/// `echo_integration::providers::openai`.
+pub fn assemble_req_header(model: &config::ModelConfig) -> echo_core::error::Result<HeaderMap> {
+    echo_integration::providers::openai::assemble_req_header(model)
+}
+
+/// Compatibility helper for a one-shot OpenAI-compatible chat completion call.
+#[allow(clippy::too_many_arguments)]
+pub async fn chat(
+    client: Arc<Client>,
+    model_name: &str,
+    messages: &[Message],
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    stream: Option<bool>,
+    tools: Option<Vec<ToolDefinition>>,
+    tool_choice: Option<String>,
+    response_format: Option<ResponseFormat>,
+) -> echo_core::error::Result<ChatCompletionResponse> {
+    echo_integration::providers::openai::chat(
+        client,
+        model_name,
+        messages,
+        temperature,
+        max_tokens,
+        stream,
+        tools,
+        tool_choice,
+        response_format,
+    )
+    .await
+}
+
+/// Compatibility helper for OpenAI-compatible streaming chat completions.
+#[allow(clippy::too_many_arguments)]
+pub async fn stream_chat(
+    client: Arc<Client>,
+    model_name: &str,
+    messages: Vec<Message>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    tools: Option<Vec<ToolDefinition>>,
+    tool_choice: Option<String>,
+    response_format: Option<ResponseFormat>,
+) -> echo_core::error::Result<
+    impl Stream<Item = echo_core::error::Result<ChatCompletionChunk>> + use<>,
+> {
+    echo_integration::providers::openai::stream_chat(
+        client,
+        model_name,
+        messages,
+        temperature,
+        max_tokens,
+        tools,
+        tool_choice,
+        response_format,
+    )
+    .await
+}

@@ -10,6 +10,8 @@
 //! - [`guard`]: 护栏系统 trait 和管理器
 //! - [`audit`]: 审计日志 trait 和事件类型
 
+#![warn(missing_docs)]
+
 pub mod agent;
 pub mod audit;
 pub mod circuit_breaker;

@@ -8,9 +8,11 @@
 //! |-------|------|
 //! | **echo-core** | 核心 trait 与类型（Tool、LlmClient、Agent、Guard、Error） |
 //! | **echo-macros** | 过程宏（`#[tool]`、`#[callback]`、`#[guard]`、`#[handler]` 等） |
-//! | **echo-providers** | LLM 客户端实现（OpenAI、Anthropic、Ollama） |
-//! | **echo-mcp** | MCP 协议客户端（stdio / SSE / HTTP） |
-//! | **echo-agent** | 主 crate —— 重新导出所有子 crate，并提供 Agent 引擎、记忆、技能等 |
+//! | **echo-execution** | 执行层：沙箱、技能、工具管理 |
+//! | **echo-integration** | 外部集成：LLM 客户端、MCP 协议、IM 通道 |
+//! | **echo-state** | 状态层：记忆、压缩、审计 |
+//! | **echo-orchestration** | 编排层：工作流、人工审批、任务规划 |
+//! | **echo-agent** | 主 crate —— 重新导出所有公共 API，提供 builder / runner |
 //!
 //! ## 快速开始
 //!
@@ -53,7 +55,7 @@
 //!
 //! | 模块 | 能力 |
 //! |------|------|
-//! | [`agent`] | ReAct Agent 执行引擎 |
+//! | [`agent`] | Agent 引擎（ReAct / Plan-Execute / Self-Reflection / Subagent） |
 //! | [`llm`] | LLM 客户端（OpenAI / Anthropic / Ollama） |
 //! | [`tools`] | 工具系统（Tool trait、并发限流、超时重试） |
 //! | [`memory`] | 双层记忆（Checkpointer + Store） |
@@ -65,7 +67,7 @@
 //! | [`mcp`] | MCP 协议客户端 |
 //! | [`tasks`] | DAG 任务管理 |
 //! | [`handoff`] | Agent 间 Handoff |
-//! | [`plan_execute`] | Plan-and-Execute 引擎 |
+//! | [`agent::plan_execute`] | Plan-and-Execute 引擎 |
 //! | [`a2a`] | A2A 协议 |
 //! | [`topology`] | Agent 拓扑可视化 |
 //! | [`workflow`] | 图工作流引擎（Graph + SharedState + Sequential/Concurrent/DAG） |
@@ -75,7 +77,6 @@
 // ── 核心模块（始终编译） ─────────────────────────────────────────────────────
 
 pub mod agent;
-pub mod agents;
 pub mod audit;
 pub mod compression;
 pub mod config;
@@ -83,9 +84,11 @@ pub mod error;
 pub mod guard;
 pub mod llm;
 pub mod memory;
+pub mod retry;
 pub mod sandbox;
 pub mod skills;
 pub mod testing;
+pub mod tokenizer;
 pub mod tools;
 pub mod utils;
 pub mod workflow;
@@ -119,6 +122,19 @@ pub use echo_macros::{
     audit_logger, callback, compressor, guard, handler, permission_policy, tool,
 };
 
+/// Direct access to split workspace crates during migration.
+///
+/// This keeps `echo_agent` usable as a facade while still giving callers an
+/// explicit path to the underlying crate APIs when they need to avoid facade
+/// drift or migrate imports incrementally.
+pub mod workspace {
+    pub use echo_core as core;
+    pub use echo_execution as execution;
+    pub use echo_integration as integration;
+    pub use echo_orchestration as orchestration;
+    pub use echo_state as state;
+}
+
 // ── Prelude ──────────────────────────────────────────────────────────────────
 
 /// 常用类型导出
@@ -127,13 +143,10 @@ pub use echo_macros::{
 pub mod prelude {
     // Agent
     pub use crate::agent::{
-        Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken,
-        ReactAgentBuilder, Runner,
+        Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken, ReactAgent,
+        ReactAgentBuilder, Runner, StepType, StructuredAgent,
     };
-    pub use crate::agents::react::ReactAgent;
     // Config
-    pub use crate::agents::react::StepType;
-    pub use crate::agents::react::structured::StructuredAgent;
     pub use crate::config::AppConfig;
 
     /// AgentBuilder 是 ReactAgentBuilder 的别名（向后兼容）
@@ -141,12 +154,11 @@ pub mod prelude {
     pub type AgentBuilder = ReactAgentBuilder;
 
     // LLM
-    pub use crate::llm::config::LlmProvider;
-    pub use crate::llm::providers::{AnthropicClient, OllamaClient};
     pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, ToolCall};
     pub use crate::llm::{
-        ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient, LlmConfig, OpenAiClient,
-        ProviderFactory, ResponseFormat, ToolDefinition,
+        AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient,
+        LlmConfig, LlmProvider, OllamaClient, OpenAiClient, ProviderFactory, ResponseFormat,
+        ToolDefinition,
     };
 
     // Tools
@@ -174,16 +186,16 @@ pub mod prelude {
     };
 
     // Tokenizer
-    pub use echo_core::tokenizer::{HeuristicTokenizer, SimpleTokenizer, Tokenizer};
+    pub use crate::tokenizer::{HeuristicTokenizer, SimpleTokenizer, Tokenizer};
 
     // Memory
     #[cfg(feature = "sqlite")]
     pub use crate::memory::SqliteStore;
-    pub use crate::memory::checkpointer::{Checkpointer, FileCheckpointer, InMemoryCheckpointer};
-    pub use crate::memory::embedder::{Embedder, HttpEmbedder};
-    pub use crate::memory::embedding_store::EmbeddingStore;
-    pub use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
-    pub use crate::memory::store::{FileStore, InMemoryStore, Store, StoreItem};
+    pub use crate::memory::{
+        Checkpointer, Embedder, EmbeddingStore, FileCheckpointer, FileStore, HttpEmbedder,
+        InMemoryCheckpointer, InMemoryStore, SnapshotManager, SnapshotPolicy, StateSnapshot, Store,
+        StoreItem,
+    };
 
     // Skills
     pub use crate::skills::{
@@ -207,9 +219,10 @@ pub mod prelude {
     pub use crate::guard::{Guard, GuardDirection, GuardManager, GuardResult};
 
     // Audit
-    pub use crate::audit::file::FileAuditLogger;
-    pub use crate::audit::memory::InMemoryAuditLogger;
-    pub use crate::audit::{AuditCallback, AuditEvent, AuditEventType, AuditFilter, AuditLogger};
+    pub use crate::audit::{
+        AuditCallback, AuditEvent, AuditEventType, AuditFilter, AuditLogger, FileAuditLogger,
+        InMemoryAuditLogger,
+    };
 
     // Workflow
     pub use crate::workflow::{
@@ -226,7 +239,7 @@ pub mod prelude {
     };
 
     // Retry
-    pub use echo_core::retry::{RetryPolicy, with_retry, with_retry_if};
+    pub use crate::retry::{RetryPolicy, with_retry, with_retry_if};
 
     // Error
     pub use crate::error::Result;
@@ -259,7 +272,7 @@ pub mod advanced {
     };
 
     #[cfg(feature = "plan-execute")]
-    pub use crate::agents::plan_execute::{
+    pub use crate::agent::plan_execute::{
         ExecutionMode, Executor, LlmPlanner, Plan, PlanExecuteAgent, PlanStep, Planner,
         ReactExecutor, SimpleExecutor, StaticPlanner, StepResult, StepStatus,
     };
@@ -280,7 +293,7 @@ pub mod advanced {
     pub use crate::tasks::{Task, TaskManager, TaskStatus};
 
     #[cfg(feature = "self-reflection")]
-    pub use crate::agents::self_reflection::{
+    pub use crate::agent::self_reflection::{
         CompositeCritic, CompositeStrategy, Critic, DefaultRefinementPromptBuilder,
         DefaultReflectionPromptBuilder, InMemoryReflectionStore, LlmCritic,
         RefinementPromptBuilder, ReflectionExperience, ReflectionPromptBuilder, ReflectionRecord,
@@ -289,5 +302,5 @@ pub mod advanced {
     };
 
     #[cfg(all(feature = "self-reflection", feature = "plan-execute"))]
-    pub use crate::agents::self_reflection::ReflectiveExecutor;
+    pub use crate::agent::self_reflection::ReflectiveExecutor;
 }

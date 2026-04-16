@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     ];
     println!("  构建了 {} 条消息:", msgs.len());
     for m in &msgs {
-        println!("    [{}] {}", m.role, m.content.as_deref().unwrap_or(""));
+        println!("    [{}] {}", m.role, m.content.as_text_ref().unwrap_or(""));
     }
 
     // ── 5. tool_params! 宏 ──────────────────────────────────────────────

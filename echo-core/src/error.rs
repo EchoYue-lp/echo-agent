@@ -2,13 +2,16 @@
 //!
 //! 所有公共 API 返回 [`Result<T>`]，底层错误通过 `From` 自动转换为 [`ReactError`]。
 
+#![allow(missing_docs)]
+
 use std::fmt;
+use std::io;
 
 /// 框架顶层错误，聚合所有子系统错误
 #[derive(Debug)]
 pub enum ReactError {
     /// LLM 相关错误
-    Llm(LlmError),
+    Llm(Box<LlmError>),
     /// 工具执行错误
     Tool(ToolError),
     /// 解析错误
@@ -16,11 +19,11 @@ pub enum ReactError {
     /// Agent 执行错误
     Agent(AgentError),
     /// 配置错误
-    Config(ConfigError),
+    Config(Box<ConfigError>),
     /// MCP 相关错误
     Mcp(McpError),
     /// 记忆系统错误
-    Memory(MemoryError),
+    Memory(Box<MemoryError>),
     /// 沙箱错误
     Sandbox(SandboxError),
     /// Channel / IM 集成错误
@@ -38,6 +41,12 @@ pub enum MemoryError {
     SerializationError(String),
     NotFound(String),
     Unsupported(String),
+}
+
+impl From<io::Error> for MemoryError {
+    fn from(err: io::Error) -> Self {
+        MemoryError::IoError(err.to_string())
+    }
 }
 
 /// LLM 相关错误
@@ -87,7 +96,7 @@ pub enum ParseError {
     InvalidThought(String),
     InvalidAction(String),
     InvalidActionInput(String),
-    JsonError(String),
+    JsonError(serde_json::Error),
     UnexpectedFormat(String),
 }
 
@@ -100,6 +109,16 @@ pub enum AgentError {
     Interrupted,
     NoResponse,
     TokenLimitExceeded,
+    /// 权限被拒绝
+    PermissionDenied(String),
+    /// Hook 执行错误
+    HookError(String),
+    /// 子代理执行错误
+    SubagentError(String),
+    /// 执行超时
+    Timeout(String),
+    /// 上下文限制（如 delegation depth, memory limit 等）
+    ContextLimitExceeded(String),
 }
 
 /// MCP 相关错误
@@ -175,7 +194,7 @@ impl fmt::Display for ReactError {
 impl fmt::Display for MemoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MemoryError::IoError(msg) => write!(f, "IO error: {}", msg),
+            MemoryError::IoError(err) => write!(f, "IO error: {}", err),
             MemoryError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
             MemoryError::NotFound(id) => write!(f, "Memory '{}' not found", id),
             MemoryError::Unsupported(op) => write!(f, "Unsupported operation: {}", op),
@@ -253,7 +272,7 @@ impl fmt::Display for ParseError {
             ParseError::InvalidThought(msg) => write!(f, "Invalid Thought: {}", msg),
             ParseError::InvalidAction(msg) => write!(f, "Invalid Action: {}", msg),
             ParseError::InvalidActionInput(msg) => write!(f, "Invalid Action Input: {}", msg),
-            ParseError::JsonError(msg) => write!(f, "JSON parse error: {}", msg),
+            ParseError::JsonError(err) => write!(f, "JSON parse error: {}", err),
             ParseError::UnexpectedFormat(msg) => write!(f, "Unexpected format: {}", msg),
         }
     }
@@ -270,6 +289,11 @@ impl fmt::Display for AgentError {
             AgentError::Interrupted => write!(f, "Execution interrupted"),
             AgentError::NoResponse => write!(f, "No response from LLM"),
             AgentError::TokenLimitExceeded => write!(f, "Token limit exceeded"),
+            AgentError::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
+            AgentError::HookError(msg) => write!(f, "Hook error: {}", msg),
+            AgentError::SubagentError(msg) => write!(f, "Subagent error: {}", msg),
+            AgentError::Timeout(msg) => write!(f, "Timeout: {}", msg),
+            AgentError::ContextLimitExceeded(msg) => write!(f, "Context limit exceeded: {}", msg),
         }
     }
 }
@@ -294,22 +318,22 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::EnvParseError(env_config) => {
-                write!(f, "环境变量解析失败: {}", env_config)
+                write!(f, "Failed to parse environment variable: {}", env_config)
             }
             ConfigError::MissingConfig(model, param) => {
-                write!(f, "模型 {} 缺少必要配置项: {}", model, param)
+                write!(f, "Model '{}' missing required config: {}", model, param)
             }
             ConfigError::EnvFormatError(env_config) => {
-                write!(f, "环境变量格式错误: {}", env_config)
+                write!(f, "Invalid environment variable format: {}", env_config)
             }
             ConfigError::UnMatchConfigError(model, param) => {
-                write!(f, "模型 {} 不匹配的配置项错误: {}", model, param)
+                write!(f, "Model '{}' mismatched config error: {}", model, param)
             }
             ConfigError::NotFindModelError(model) => {
-                write!(f, "未找到该模型配置: {}", model)
+                write!(f, "No configuration found for model: {}", model)
             }
             ConfigError::ConfigFileError(msg) => {
-                write!(f, "配置文件错误: {}", msg)
+                write!(f, "Config file error: {}", msg)
             }
         }
     }
@@ -320,13 +344,13 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ReactError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            ReactError::Llm(e) => Some(e),
+            ReactError::Llm(e) => Some(e.as_ref()),
             ReactError::Tool(e) => Some(e),
             ReactError::Parse(e) => Some(e),
             ReactError::Agent(e) => Some(e),
-            ReactError::Config(e) => Some(e),
+            ReactError::Config(e) => Some(e.as_ref()),
             ReactError::Mcp(e) => Some(e),
-            ReactError::Memory(e) => Some(e),
+            ReactError::Memory(e) => Some(e.as_ref()),
             ReactError::Sandbox(e) => Some(e),
             ReactError::Channel(e) => Some(e),
             ReactError::Io(e) => Some(e),
@@ -357,33 +381,35 @@ impl From<std::io::Error> for ReactError {
 impl From<reqwest::Error> for ReactError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
-            ReactError::Llm(LlmError::NetworkError("Request timeout".to_string()))
+            ReactError::Llm(Box::new(LlmError::NetworkError(
+                "Request timeout".to_string(),
+            )))
         } else if err.is_connect() {
-            ReactError::Llm(LlmError::NetworkError(format!(
+            ReactError::Llm(Box::new(LlmError::NetworkError(format!(
                 "Connection failed: {}",
                 err
-            )))
+            ))))
         } else {
-            ReactError::Llm(LlmError::NetworkError(err.to_string()))
+            ReactError::Llm(Box::new(LlmError::NetworkError(err.to_string())))
         }
     }
 }
 
 impl From<serde_json::Error> for ReactError {
     fn from(err: serde_json::Error) -> Self {
-        ReactError::Parse(ParseError::JsonError(err.to_string()))
+        ReactError::Parse(ParseError::JsonError(err))
     }
 }
 
 impl From<ConfigError> for ReactError {
     fn from(err: ConfigError) -> Self {
-        ReactError::Config(err)
+        ReactError::Config(Box::new(err))
     }
 }
 
 impl From<LlmError> for ReactError {
     fn from(err: LlmError) -> Self {
-        ReactError::Llm(err)
+        ReactError::Llm(Box::new(err))
     }
 }
 
@@ -413,7 +439,7 @@ impl From<McpError> for ReactError {
 
 impl From<MemoryError> for ReactError {
     fn from(err: MemoryError) -> Self {
-        ReactError::Memory(err)
+        ReactError::Memory(Box::new(err))
     }
 }
 

@@ -314,7 +314,7 @@ async fn demo_llm_retry() {
             .map(|resp| {
                 resp.choices
                     .first()
-                    .and_then(|c| c.message.content.clone())
+                    .and_then(|c| c.message.content.as_text())
                     .unwrap_or_default()
             })
         }

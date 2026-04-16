@@ -143,7 +143,7 @@ impl Tool for WebSearchTool {
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
             if query.trim().is_empty() {
-                return Ok(ToolResult::error("搜索关键词不能为空".into()));
+                return Ok(ToolResult::error("搜索关键词不能为空"));
             }
 
             let max_results = parameters

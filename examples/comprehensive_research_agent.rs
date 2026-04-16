@@ -41,6 +41,7 @@ use std::sync::Arc;
 // 结构化输出类型
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 struct ResearchReport {
     topic: String,

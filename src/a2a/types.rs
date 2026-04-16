@@ -5,6 +5,26 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ── JSON-RPC / A2A 常量 ──────────────────────────────────────────────────────
+
+/// JSON-RPC 协议版本
+pub const JSONRPC_VERSION: &str = "2.0";
+
+/// A2A 方法名
+pub const METHOD_SEND: &str = "tasks/send";
+pub const METHOD_SEND_SUBSCRIBE: &str = "tasks/sendSubscribe";
+pub const METHOD_GET: &str = "tasks/get";
+pub const METHOD_CANCEL: &str = "tasks/cancel";
+
+/// A2A 错误码
+pub const ERROR_CODE_PARSE: i64 = -32700;
+pub const ERROR_CODE_METHOD_NOT_FOUND: i64 = -32601;
+pub const ERROR_CODE_INVALID_PARAMS: i64 = -32602;
+pub const ERROR_CODE_TASK_FAILED: i64 = -32000;
+pub const ERROR_CODE_TASK_NOT_FOUND: i64 = -32001;
+pub const ERROR_CODE_TERMINAL_STATE: i64 = -32002;
+pub const ERROR_CODE_INVALID_TRANSITION: i64 = -32003;
+
 // ── Agent Card ───────────────────────────────────────────────────────────────
 
 /// Agent Card — 描述 Agent 的能力和接口（A2A 规范核心类型）
@@ -437,8 +457,9 @@ impl A2AMessage {
 pub struct A2ATaskResponse {
     /// JSON-RPC 版本
     pub jsonrpc: String,
-    /// 请求 ID
-    pub id: String,
+    /// 请求 ID（解析失败时为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// 任务结果
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<A2ATask>,

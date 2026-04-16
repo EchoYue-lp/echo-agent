@@ -44,6 +44,7 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// Create a retry policy with a retry count and base backoff delay.
     pub fn new(max_retries: u32, base_delay: Duration) -> Self {
         Self {
             max_retries,
@@ -53,11 +54,13 @@ impl RetryPolicy {
         }
     }
 
+    /// Set the maximum delay allowed after exponential backoff.
     pub fn max_delay(mut self, delay: Duration) -> Self {
         self.max_delay = delay;
         self
     }
 
+    /// Enable or disable randomized jitter for retry delays.
     pub fn jitter(mut self, enabled: bool) -> Self {
         self.jitter = enabled;
         self
@@ -75,8 +78,10 @@ impl RetryPolicy {
 
     /// 计算第 `attempt` 次重试的等待时间（attempt 从 1 开始）
     pub fn delay_for(&self, attempt: u32) -> Duration {
+        // Cap exponent at 10 to avoid overflow: base_delay * 2^10 = 1024x base_delay.
+        // With a typical base_delay of 500ms, the max pre-capped delay is ~512s.
         let exp = (attempt - 1).min(10);
-        let delay = self.base_delay.saturating_mul(1u32 << exp);
+        let delay = self.base_delay.saturating_mul(2u32.saturating_pow(exp));
         let capped = delay.min(self.max_delay);
 
         if self.jitter && !capped.is_zero() {

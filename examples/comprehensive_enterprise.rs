@@ -273,7 +273,7 @@ async fn demo_plan_execute() -> Result<()> {
     println!("Part 2: Plan-and-Execute 任务编排");
     println!("═══════════════════════════════════════════════════════\n");
 
-    use echo_agent::agents::plan_execute::{Executor, StaticPlanner};
+    use echo_agent::agent::plan_execute::{Executor, StaticPlanner};
 
     struct VerboseExecutor;
 

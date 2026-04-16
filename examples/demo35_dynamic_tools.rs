@@ -125,7 +125,7 @@ fn demo_api_basics() {
     println!("─────────────────────────────────────────────\n");
 
     let config = AgentConfig::minimal("qwen3-max", "phase_agent");
-    let mut agent = echo_agent::agents::react::ReactAgent::new(config);
+    let mut agent = echo_agent::agent::react::ReactAgent::new(config);
 
     // 1.1 初始状态
     println!("  [1.1] 初始工具集");
@@ -185,7 +185,7 @@ fn demo_edge_cases() {
     println!("─────────────────────────────────────────────\n");
 
     let config = AgentConfig::minimal("qwen3-max", "test_agent");
-    let mut agent = echo_agent::agents::react::ReactAgent::new(config);
+    let mut agent = echo_agent::agent::react::ReactAgent::new(config);
 
     // 2.1 移除不存在的工具
     println!("  [2.1] 移除不存在的工具");

@@ -1,6 +1,6 @@
 use futures::future::BoxFuture;
 
-use crate::agents::subagent::executor::SubagentExecutor;
+use crate::agent::subagent::executor::SubagentExecutor;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::agent::CancellationToken;
@@ -84,9 +84,9 @@ impl Tool for AgentDispatchTool {
                     .get("mode")
                     .and_then(|v| v.as_str())
                     .and_then(|m| match m {
-                        "sync" => Some(crate::agents::subagent::ExecutionMode::Sync),
-                        "fork" => Some(crate::agents::subagent::ExecutionMode::Fork),
-                        "teammate" => Some(crate::agents::subagent::ExecutionMode::Teammate),
+                        "sync" => Some(crate::agent::subagent::ExecutionMode::Sync),
+                        "fork" => Some(crate::agent::subagent::ExecutionMode::Fork),
+                        "teammate" => Some(crate::agent::subagent::ExecutionMode::Teammate),
                         _ => None,
                     });
 
@@ -97,7 +97,7 @@ impl Tool for AgentDispatchTool {
                 "Dispatching task to subagent via SubagentExecutor"
             );
 
-            let req = crate::agents::subagent::DispatchRequest {
+            let req = crate::agent::subagent::DispatchRequest {
                 agent_name: agent_name.to_string(),
                 task: task.to_string(),
                 mode_override,

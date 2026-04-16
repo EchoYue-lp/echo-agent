@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 /// 对应 OpenAI Vision / Anthropic 多模态 API 的 content parts 格式。
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(missing_docs)]
 pub enum ContentPart {
     /// 纯文本
     Text { text: String },
@@ -36,13 +37,17 @@ pub struct ImageUrl {
 /// - `Parts([...])` → `[{"type":"text","text":"..."},...]`
 #[derive(Debug, Clone)]
 pub enum MessageContent {
+    /// Plain text content.
     Text(String),
+    /// Multimodal content parts.
     Parts(Vec<ContentPart>),
+    /// Explicitly empty content payload.
+    Empty,
 }
 
 impl Default for MessageContent {
     fn default() -> Self {
-        MessageContent::Text(String::new())
+        MessageContent::Empty
     }
 }
 
@@ -51,6 +56,7 @@ impl Serialize for MessageContent {
         match self {
             MessageContent::Text(s) => serializer.serialize_str(s),
             MessageContent::Parts(parts) => parts.serialize(serializer),
+            MessageContent::Empty => serializer.serialize_str(""),
         }
     }
 }
@@ -59,13 +65,19 @@ impl<'de> Deserialize<'de> for MessageContent {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         match value {
-            serde_json::Value::String(s) => Ok(MessageContent::Text(s)),
+            serde_json::Value::String(s) => {
+                if s.is_empty() {
+                    Ok(MessageContent::Empty)
+                } else {
+                    Ok(MessageContent::Text(s))
+                }
+            }
             serde_json::Value::Array(_) => {
                 let parts: Vec<ContentPart> =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(MessageContent::Parts(parts))
             }
-            _ => Ok(MessageContent::Text(value.to_string())),
+            _ => Ok(MessageContent::Empty),
         }
     }
 }
@@ -95,6 +107,36 @@ impl MessageContent {
                     Some(texts.join(""))
                 }
             }
+            MessageContent::Empty => None,
+        }
+    }
+
+    /// Borrow the text content as a reference (only works for Text variant).
+    pub fn as_text_ref(&self) -> Option<&str> {
+        match self {
+            MessageContent::Text(s) if !s.is_empty() => Some(s),
+            _ => None,
+        }
+    }
+
+    /// 兼容旧版 `Option<String>::as_deref()` 调用点。
+    pub fn as_deref(&self) -> Option<&str> {
+        self.as_text_ref()
+    }
+
+    /// Borrow multimodal parts when the content is stored in `Parts`.
+    pub fn parts(&self) -> Option<&[ContentPart]> {
+        match self {
+            MessageContent::Parts(parts) => Some(parts.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Consume the content and return multimodal parts if present.
+    pub fn into_parts(self) -> Option<Vec<ContentPart>> {
+        match self {
+            MessageContent::Parts(parts) => Some(parts),
+            _ => None,
         }
     }
 }
@@ -103,17 +145,18 @@ impl MessageContent {
 
 /// 对话消息
 ///
-/// `content` 字段支持纯文本 (`String`) 和多模态内容 (`Vec<ContentPart>`) 两种格式，
-/// 序列化时自动选择兼容格式。已有代码通过 `message.content`（`Option<String>`）
-/// 访问文本内容的路径保持不变——使用 [`Message::text_content()`] 获取纯文本。
+/// `content` 字段统一使用 [`MessageContent`] 枚举，支持纯文本和多模态内容。
 #[derive(Debug, Clone, Default)]
 pub struct Message {
+    /// Message role such as `system`, `user`, `assistant`, or `tool`.
     pub role: String,
-    pub content: Option<String>,
-    /// 多模态内容部分（与 `content` 互斥；序列化时输出到 `"content"` 字段）
-    pub content_parts: Option<Vec<ContentPart>>,
+    /// Text or multimodal payload.
+    pub content: MessageContent,
+    /// Optional tool calls emitted by the assistant.
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Optional participant name.
     pub name: Option<String>,
+    /// Optional tool call identifier for tool messages.
     pub tool_call_id: Option<String>,
 }
 
@@ -122,10 +165,12 @@ impl Serialize for Message {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("role", &self.role)?;
-        if let Some(ref parts) = self.content_parts {
-            map.serialize_entry("content", parts)?;
-        } else if let Some(ref content) = self.content {
-            map.serialize_entry("content", content)?;
+        // Serialize content using MessageContent's own serialization
+        if !matches!(&self.content, MessageContent::Empty) {
+            map.serialize_entry("content", &self.content)?;
+        } else if self.tool_calls.is_some() {
+            // assistant with tool_calls but no text content still needs content field
+            map.serialize_entry("content", &serde_json::Value::Null)?;
         }
         if let Some(ref tc) = self.tool_calls {
             map.serialize_entry("tool_calls", tc)?;
@@ -156,20 +201,19 @@ impl<'de> Deserialize<'de> for Message {
             tool_call_id: Option<String>,
         }
         let raw = RawMessage::deserialize(deserializer)?;
-        let (content, content_parts) = match raw.content {
-            Some(serde_json::Value::String(s)) => (Some(s), None),
+        let content = match raw.content {
+            Some(serde_json::Value::String(s)) => MessageContent::Text(s),
             Some(serde_json::Value::Array(arr)) => {
                 let parts: Vec<ContentPart> = serde_json::from_value(serde_json::Value::Array(arr))
                     .map_err(serde::de::Error::custom)?;
-                (None, Some(parts))
+                MessageContent::Parts(parts)
             }
-            Some(other) => (Some(other.to_string()), None),
-            None => (None, None),
+            Some(other) => MessageContent::Text(other.to_string()),
+            None => MessageContent::Empty,
         };
         Ok(Message {
             role: raw.role,
             content,
-            content_parts,
             tool_calls: raw.tool_calls,
             name: raw.name,
             tool_call_id: raw.tool_call_id,
@@ -177,12 +221,12 @@ impl<'de> Deserialize<'de> for Message {
     }
 }
 
+#[allow(missing_docs)]
 impl Message {
     pub fn system(content: String) -> Self {
         Self {
             role: "system".to_string(),
-            content: Some(content),
-            content_parts: None,
+            content: MessageContent::Text(content),
             tool_calls: None,
             name: None,
             tool_call_id: None,
@@ -192,8 +236,7 @@ impl Message {
     pub fn user(content: String) -> Self {
         Self {
             role: "user".to_string(),
-            content: Some(content),
-            content_parts: None,
+            content: MessageContent::Text(content),
             tool_calls: None,
             name: None,
             tool_call_id: None,
@@ -204,8 +247,7 @@ impl Message {
     pub fn user_multimodal(parts: Vec<ContentPart>) -> Self {
         Self {
             role: "user".to_string(),
-            content: None,
-            content_parts: Some(parts),
+            content: MessageContent::Parts(parts),
             tool_calls: None,
             name: None,
             tool_call_id: None,
@@ -257,8 +299,7 @@ impl Message {
     pub fn assistant(content: String) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: Some(content),
-            content_parts: None,
+            content: MessageContent::Text(content),
             tool_calls: None,
             name: None,
             tool_call_id: None,
@@ -268,8 +309,7 @@ impl Message {
     pub fn assistant_with_tools(tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: None,
-            content_parts: None,
+            content: MessageContent::Empty,
             tool_calls: Some(tool_calls),
             name: None,
             tool_call_id: None,
@@ -279,8 +319,7 @@ impl Message {
     pub fn tool_result(tool_call_id: String, name: String, content: String) -> Self {
         Self {
             role: "tool".to_string(),
-            content: Some(content),
-            content_parts: None,
+            content: MessageContent::Text(content),
             tool_calls: None,
             name: Some(name),
             tool_call_id: Some(tool_call_id),
@@ -291,38 +330,23 @@ impl Message {
     ///
     /// 若消息包含多模态内容，则提取并拼接所有 Text 部分。
     pub fn text_content(&self) -> Option<String> {
-        if let Some(ref text) = self.content {
-            if text.is_empty() {
-                None
-            } else {
-                Some(text.clone())
-            }
-        } else if let Some(ref parts) = self.content_parts {
-            let texts: Vec<&str> = parts
-                .iter()
-                .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            if texts.is_empty() {
-                None
-            } else {
-                Some(texts.join(""))
-            }
-        } else {
-            None
-        }
+        self.content.as_text()
+    }
+
+    /// 兼容旧版直接读取 `content_parts` 的调用点。
+    pub fn content_parts(&self) -> Option<&[ContentPart]> {
+        self.content.parts()
     }
 
     /// 检查消息是否包含多模态内容
     pub fn is_multimodal(&self) -> bool {
-        self.content_parts.is_some()
+        matches!(&self.content, MessageContent::Parts(_))
     }
 }
 
 /// LLM 发起的单次工具调用
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct ToolCall {
     pub id: String,
     #[serde(rename = "type")]
@@ -332,6 +356,7 @@ pub struct ToolCall {
 
 /// 工具调用的函数信息
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct FunctionCall {
     pub name: String,
     pub arguments: String,
@@ -339,6 +364,7 @@ pub struct FunctionCall {
 
 /// 结构化输出的 JSON Schema 规格
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct JsonSchemaSpec {
     pub name: String,
     pub schema: serde_json::Value,
@@ -353,12 +379,14 @@ fn default_true() -> bool {
 /// 响应格式控制
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(missing_docs)]
 pub enum ResponseFormat {
     Text,
     JsonObject,
     JsonSchema { json_schema: JsonSchemaSpec },
 }
 
+#[allow(missing_docs)]
 impl ResponseFormat {
     pub fn json_schema(name: impl Into<String>, schema: serde_json::Value) -> Self {
         Self::JsonSchema {
@@ -377,6 +405,7 @@ impl ResponseFormat {
 
 /// OpenAI `/chat/completions` 请求体
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<Message>,
@@ -396,6 +425,7 @@ pub struct ChatCompletionRequest {
 
 /// 发送给 LLM 的工具定义
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
     pub tool_type: String,
@@ -404,12 +434,14 @@ pub struct ToolDefinition {
 
 /// 工具的函数声明
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct FunctionSpec {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
 }
 
+#[allow(missing_docs)]
 impl ToolDefinition {
     pub fn from_tool(tool: &dyn Tool) -> Self {
         Self {
@@ -424,23 +456,25 @@ impl ToolDefinition {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[allow(missing_docs)]
 pub struct ChatCompletionResponse {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub choices: Vec<Choice>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    #[serde(default)]
-    #[serde(flatten)]
-    pub extra: serde_json::Value,
+    /// Extra fields from the response that are not explicitly modeled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct Choice {
     pub message: Message,
     #[serde(default)]
@@ -450,6 +484,7 @@ pub struct Choice {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct Usage {
     #[serde(default)]
     pub prompt_tokens: Option<u32>,
@@ -463,6 +498,7 @@ pub struct Usage {
 
 /// SSE 流式响应的单个 chunk
 #[derive(Debug, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct ChatCompletionChunk {
     #[serde(default)]
     pub id: String,
@@ -471,6 +507,7 @@ pub struct ChatCompletionChunk {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct ChunkChoice {
     pub delta: DeltaMessage,
     #[serde(default)]
@@ -481,6 +518,7 @@ pub struct ChunkChoice {
 
 /// 流式响应中的增量消息体
 #[derive(Debug, Deserialize, Clone, Default)]
+#[allow(missing_docs)]
 pub struct DeltaMessage {
     #[serde(default)]
     pub role: Option<String>,
@@ -492,6 +530,7 @@ pub struct DeltaMessage {
 
 /// 流式工具调用的增量片段
 #[derive(Debug, Deserialize, Clone)]
+#[allow(missing_docs)]
 pub struct DeltaToolCall {
     pub index: u32,
     #[serde(default)]
@@ -504,6 +543,7 @@ pub struct DeltaToolCall {
 
 /// 流式函数调用的增量片段
 #[derive(Debug, Deserialize, Clone, Default)]
+#[allow(missing_docs)]
 pub struct DeltaFunctionCall {
     #[serde(default)]
     pub name: Option<String>,
@@ -653,11 +693,12 @@ mod tests {
         let msg: Message = serde_json::from_value(json).unwrap();
         assert_eq!(msg.role, "user");
         assert!(
-            msg.content.is_none(),
-            "text content should be None for multimodal"
+            matches!(msg.content, MessageContent::Parts(_)),
+            "content should be Parts for multimodal"
         );
-        assert!(msg.content_parts.is_some());
-        assert_eq!(msg.content_parts.as_ref().unwrap().len(), 2);
+        if let MessageContent::Parts(ref parts) = msg.content {
+            assert_eq!(parts.len(), 2);
+        }
     }
 
     #[test]
@@ -693,7 +734,9 @@ mod tests {
         let msg = Message::user_with_image_url("look at this", "https://example.com/photo.jpg");
         assert_eq!(msg.role, "user");
         assert!(msg.is_multimodal());
-        let parts = msg.content_parts.unwrap();
+        let MessageContent::Parts(parts) = &msg.content else {
+            panic!("expected Parts content");
+        };
         assert_eq!(parts.len(), 2);
         match &parts[0] {
             ContentPart::Text { text } => assert_eq!(text, "look at this"),
@@ -714,7 +757,6 @@ mod tests {
             "content": "I am a response"
         });
         let msg: Message = serde_json::from_value(json).unwrap();
-        assert_eq!(msg.content, Some("I am a response".to_string()));
-        assert!(msg.content_parts.is_none());
+        assert_eq!(msg.content.as_text(), Some("I am a response".to_string()));
     }
 }

@@ -150,15 +150,17 @@ impl MockLlmClient {
 
     /// 追加一条网络错误（常用的便捷方法）
     pub fn with_network_error(self, msg: impl Into<String>) -> Self {
-        self.with_error(ReactError::Llm(LlmError::NetworkError(msg.into())))
+        self.with_error(ReactError::Llm(Box::new(LlmError::NetworkError(
+            msg.into(),
+        ))))
     }
 
     /// 追加一条限流错误（429），用于测试重试逻辑
     pub fn with_rate_limit_error(self) -> Self {
-        self.with_error(ReactError::Llm(LlmError::ApiError {
+        self.with_error(ReactError::Llm(Box::new(LlmError::ApiError {
             status: 429,
             message: "Too Many Requests".to_string(),
-        }))
+        })))
     }
 
     /// 已发生的调用总次数
@@ -192,7 +194,7 @@ impl MockLlmClient {
             Some(MockLlmResponse::Content(text)) => Ok(PopResult::Content(text)),
             Some(MockLlmResponse::ToolCalls(calls)) => Ok(PopResult::ToolCalls(calls)),
             Some(MockLlmResponse::Err(e)) => Err(e),
-            None => Err(ReactError::Llm(LlmError::EmptyResponse)),
+            None => Err(ReactError::Llm(Box::new(LlmError::EmptyResponse))),
         }
     }
 }

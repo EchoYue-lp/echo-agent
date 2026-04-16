@@ -172,8 +172,13 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
             AgentEvent::ThinkStart => {
                 println!("  💭 开始推理...");
             }
-            AgentEvent::ThinkEnd { tokens_used } => {
-                println!("  💭 推理结束 (tokens: {tokens_used})");
+            AgentEvent::ThinkEnd {
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                println!(
+                    "  💭 推理结束 (prompt: {prompt_tokens}, completion: {completion_tokens})"
+                );
             }
             AgentEvent::MemoryRecalled { count } if count > 0 => {
                 println!("  🧠 召回 {count} 条记忆");

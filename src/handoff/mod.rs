@@ -230,7 +230,11 @@ impl HandoffManager {
                 let history_summary: Vec<String> = context
                     .messages
                     .iter()
-                    .filter_map(|msg| msg.content.as_ref().map(|c| format!("{}: {}", msg.role, c)))
+                    .filter_map(|msg| {
+                        msg.content
+                            .as_text_ref()
+                            .map(|c| format!("{}: {}", msg.role, c))
+                    })
                     .collect();
                 prompt_parts.push(format!("[对话历史]\n{}", history_summary.join("\n")));
             }
