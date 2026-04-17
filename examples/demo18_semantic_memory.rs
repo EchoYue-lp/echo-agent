@@ -2,10 +2,11 @@
 
 use echo_agent::agent::Agent;
 use echo_agent::memory::store::{InMemoryStore, Store};
-use echo_agent::memory::{EmbeddingStore, HttpEmbedder};
+use echo_agent::memory::{Embedder, EmbeddingStore, HttpEmbedder};
 use echo_agent::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -41,6 +42,12 @@ async fn main() -> echo_agent::error::Result<()> {
 async fn demo_keyword_vs_semantic() -> echo_agent::error::Result<()> {
     println!("  对比「关键词检索」和「语义检索」在跨语言查询上的差异\n");
 
+    let Some(embedder) = load_embedder_from_config() else {
+        println!("  ℹ️  未检测到 embedding 配置，跳过语义搜索对比");
+        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量\n");
+        return Ok(());
+    };
+
     let memories = [
         ("用户偏好深色主题", vec!["偏好", "界面"]),
         ("用户喜欢古典音乐，尤其是肖邦", vec!["偏好", "音乐"]),
@@ -51,7 +58,6 @@ async fn demo_keyword_vs_semantic() -> echo_agent::error::Result<()> {
     let kw_store = Arc::new(InMemoryStore::new());
 
     // 语义 Store
-    let embedder = Arc::new(HttpEmbedder::from_env());
     let inner = Arc::new(InMemoryStore::new());
     let sem_store = Arc::new(EmbeddingStore::new(inner.clone(), embedder));
 
@@ -99,9 +105,14 @@ async fn demo_keyword_vs_semantic() -> echo_agent::error::Result<()> {
 async fn demo_agent_with_semantic_memory() -> echo_agent::error::Result<()> {
     println!("  Agent 使用语义记忆，通过 recall 工具语义检索\n");
 
+    let Some(embedder) = load_embedder_from_config() else {
+        println!("  ℹ️  未检测到 embedding 配置，跳过 recall 语义记忆演示");
+        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量\n");
+        return Ok(());
+    };
+
     // 创建 EmbeddingStore
     let inner = Arc::new(InMemoryStore::new());
-    let embedder = Arc::new(HttpEmbedder::from_env());
     let store = Arc::new(EmbeddingStore::new(inner as Arc<dyn Store>, embedder));
 
     // 预填充记忆
@@ -161,9 +172,13 @@ async fn demo_set_memory_store() -> echo_agent::error::Result<()> {
 
     println!("  ✅ ReactAgent 创建完成（无 Store）");
 
+    let Some(embedder) = load_embedder_from_config() else {
+        println!("  ℹ️  未检测到 embedding 配置，跳过热挂载 EmbeddingStore 演示\n");
+        return Ok(());
+    };
+
     // 运行时挂载 EmbeddingStore
     let inner = Arc::new(InMemoryStore::new());
-    let embedder = Arc::new(HttpEmbedder::from_env());
     let store = Arc::new(EmbeddingStore::new(inner as Arc<dyn Store>, embedder));
 
     agent.set_memory_store(store.clone());
@@ -193,4 +208,11 @@ fn print_banner() {
 fn separator(title: &str) {
     println!("{}", "─".repeat(64));
     println!("{title}\n");
+}
+
+fn load_embedder_from_config() -> Option<Arc<dyn Embedder>> {
+    let cfg = echo_agent::llm::config::Config::get_embedding().ok()?;
+    let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
+        .with_timeout(Duration::from_secs(cfg.timeout_secs));
+    Some(Arc::new(embedder))
 }

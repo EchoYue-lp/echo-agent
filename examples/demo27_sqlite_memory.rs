@@ -16,6 +16,7 @@ use echo_agent::memory::store::Store;
 use echo_agent::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
 const DB_PATH: &str = "/tmp/echo-agent-demo27/memory.db";
 
@@ -262,20 +263,12 @@ async fn demo_namespace_isolation() -> echo_agent::error::Result<()> {
 // ── Part 4: 向量语义检索 ────────────────────────────────────────────────────
 
 async fn demo_semantic_search() -> echo_agent::error::Result<()> {
-    // 检查是否配置了 Embedding 服务
-    let has_embedding = std::env::var("EMBEDDING_APIKEY")
-        .or_else(|_| std::env::var("EMBEDDING_API_KEY"))
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .is_ok();
-
-    if !has_embedding {
-        println!("  ℹ️  未配置 Embedding API Key，跳过向量检索演示");
-        println!("  💡 设置 EMBEDDING_APIKEY / EMBEDDING_API_KEY / OPENAI_API_KEY 后可体验");
+    let Some(embedder) = load_embedder_from_config() else {
+        println!("  ℹ️  未配置 Embedding 服务，跳过向量检索演示");
+        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量");
         println!("     支持 OpenAI、DashScope 等兼容 /v1/embeddings 接口的服务\n");
         return Ok(());
-    }
-
-    let embedder = Arc::new(HttpEmbedder::from_env());
+    };
     let db_path = "/tmp/echo-agent-demo27/memory_vec.db";
     let store = SqliteStore::with_embedder(db_path, embedder)?;
     let ns = &["demo27", "semantic"];
@@ -470,4 +463,11 @@ fn print_banner() {
 fn separator(title: &str) {
     println!("{}", "─".repeat(64));
     println!("{title}\n");
+}
+
+fn load_embedder_from_config() -> Option<Arc<dyn echo_agent::memory::Embedder>> {
+    let cfg = echo_agent::llm::config::Config::get_embedding().ok()?;
+    let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
+        .with_timeout(Duration::from_secs(cfg.timeout_secs));
+    Some(Arc::new(embedder))
 }

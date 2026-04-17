@@ -4,10 +4,11 @@
 //!
 //! # 示例
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use echo_agent::workflow::dsl::StateGraph;
 //! use echo_agent::prelude::*;
 //!
+//! # async fn example() -> echo_agent::error::Result<()> {
 //! let mut sg = StateGraph::new("research_flow");
 //! sg.add_react_node("researcher", |b| {
 //!         b.model("qwen3-max").system_prompt("研究员").enable_tools()
@@ -32,12 +33,15 @@
 //!     .with_input("draft").with_output("final");
 //! sg.entry("researcher").finish("done");
 //! let graph = sg.compile()?;
+//! # Ok(())
+//! # }
 //! ```
 
-use crate::agents::react::builder::ReactAgentBuilder;
+use crate::agent::react::builder::ReactAgentBuilder;
 use crate::error::Result;
-use crate::workflow::graph::{Graph, GraphBuilder};
-use crate::workflow::state::SharedState;
+use crate::workflow::Graph;
+use crate::workflow::GraphBuilder;
+use crate::workflow::SharedState;
 use futures::future::BoxFuture;
 
 // ── Pending node definition ──────────────────────────────────────────────

@@ -12,7 +12,7 @@
 //! cargo run --example demo22_plan_execute
 //! ```
 
-use echo_agent::agents::plan_execute::{Executor, PlanExecuteAgent, StaticPlanner};
+use echo_agent::agent::plan_execute::{Executor, PlanExecuteAgent, StaticPlanner};
 use echo_agent::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -14,6 +14,7 @@ use super::types::*;
 use crate::agent::Agent;
 use crate::error::Result;
 use echo_core::agent::AgentEvent;
+use echo_core::agent::CancellationToken;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -35,22 +36,27 @@ pub struct A2AServer {
     card: AgentCard,
     agent: Arc<Mutex<Box<dyn Agent>>>,
     tasks: Arc<RwLock<HashMap<String, A2ATask>>>,
+    cancel_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
 }
 
 impl A2AServer {
+    /// Create a new A2A server instance.
     pub fn new(card: AgentCard, agent: impl Agent + 'static) -> Self {
         Self {
             card,
             agent: Arc::new(Mutex::new(Box::new(agent))),
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    /// Create an A2A server instance from a boxed agent.
     pub fn from_boxed(card: AgentCard, agent: Box<dyn Agent>) -> Self {
         Self {
             card,
             agent: Arc::new(Mutex::new(agent)),
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -76,11 +82,11 @@ impl A2AServer {
             Ok(req) => req,
             Err(e) => {
                 return serde_json::to_string(&A2ATaskResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: "unknown".to_string(),
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: None,
                     result: None,
                     error: Some(A2AError {
-                        code: -32700,
+                        code: ERROR_CODE_PARSE as i32,
                         message: format!("Parse error: {}", e),
                     }),
                 })
@@ -89,26 +95,26 @@ impl A2AServer {
         };
 
         let response = match request.method.as_str() {
-            "tasks/send" => self.handle_task_send(&request).await,
-            "tasks/get" => self.handle_task_get(&request).await,
-            "tasks/cancel" => self.handle_task_cancel(&request).await,
-            "tasks/sendSubscribe" => A2ATaskResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id,
+            METHOD_SEND => self.handle_task_send(&request).await,
+            METHOD_GET => self.handle_task_get(&request).await,
+            METHOD_CANCEL => self.handle_task_cancel(&request).await,
+            METHOD_SEND_SUBSCRIBE => A2ATaskResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(request.id),
                 result: None,
                 error: Some(A2AError {
-                    code: -32601,
+                    code: ERROR_CODE_METHOD_NOT_FOUND as i32,
                     message:
                         "tasks/sendSubscribe requires SSE transport; use handle_request_stream()"
                             .to_string(),
                 }),
             },
             _ => A2ATaskResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id,
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(request.id),
                 result: None,
                 error: Some(A2AError {
-                    code: -32601,
+                    code: ERROR_CODE_METHOD_NOT_FOUND as i32,
                     message: format!("Method not found: {}", request.method),
                 }),
             },
@@ -137,7 +143,7 @@ impl A2AServer {
         let request: A2ATaskRequest = serde_json::from_str(request_json)
             .map_err(|e| crate::error::ReactError::Other(format!("Parse error: {}", e)))?;
 
-        if request.method != "tasks/sendSubscribe" {
+        if request.method != METHOD_SEND_SUBSCRIBE {
             return Err(crate::error::ReactError::Other(format!(
                 "handle_request_stream only supports tasks/sendSubscribe, got '{}'",
                 request.method
@@ -153,7 +159,7 @@ impl A2AServer {
         let input_text = request.params.message.text_content();
         let user_message = request.params.message.clone();
 
-        info!(task_id = %task_id, "📨 A2A Stream: 收到流式任务请求");
+        info!(task_id = %task_id, "A2A Stream: 收到流式任务请求");
 
         // submitted
         let initial_task = A2ATask {
@@ -168,8 +174,16 @@ impl A2AServer {
             tasks.insert(task_id.clone(), initial_task);
         }
 
+        // Create and store cancellation token
+        let cancel_token = CancellationToken::new();
+        self.cancel_tokens
+            .write()
+            .await
+            .insert(task_id.clone(), cancel_token.clone());
+
         let tasks = self.tasks.clone();
         let agent = self.agent.clone();
+        let cancel_tokens = self.cancel_tokens.clone();
 
         let stream = async_stream::stream! {
             // Event 1: submitted
@@ -198,6 +212,17 @@ impl A2AServer {
                     let mut first_chunk = true;
 
                     while let Some(event_result) = event_stream.next().await {
+                        if cancel_token.is_cancelled() {
+                            let status = A2ATaskStatus::new(TaskState::Canceled);
+                            Self::update_task_state(&tasks, &task_id, TaskState::Canceled, Some(&status)).await;
+                            yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                                task_id: task_id.clone(),
+                                status,
+                                is_final: true,
+                            });
+                            cancel_tokens.write().await.remove(&task_id);
+                            return;
+                        }
                         match event_result {
                             Ok(AgentEvent::Token(token)) => {
                                 accumulated_text.push_str(&token);
@@ -224,7 +249,6 @@ impl A2AServer {
                                 });
                             }
                             Ok(AgentEvent::ToolResult { name, output }) => {
-                                artifact_index += 1;
                                 yield A2AStreamEvent::ArtifactUpdate(TaskArtifactUpdateEvent {
                                     task_id: task_id.clone(),
                                     artifact: A2AArtifact {
@@ -261,12 +285,6 @@ impl A2AServer {
 
                     // completed
                     let result_message = A2AMessage::agent_text(&accumulated_text);
-                    let final_artifact = A2AArtifact {
-                        name: Some("output".to_string()),
-                        index: Some(0),
-                        parts: vec![A2APart::Text { text: accumulated_text }],
-                        append: false,
-                    };
 
                     let completed_status = A2ATaskStatus::with_message(
                         TaskState::Completed,
@@ -278,9 +296,18 @@ impl A2AServer {
                         if let Some(task) = store.get_mut(&task_id) {
                             task.status = completed_status.clone();
                             task.history.push(result_message);
-                            task.artifacts = vec![final_artifact];
+                            if task.artifacts.is_empty() && !accumulated_text.is_empty() {
+                                task.artifacts.push(A2AArtifact {
+                                    name: Some("output".to_string()),
+                                    index: Some(0),
+                                    parts: vec![A2APart::Text { text: accumulated_text }],
+                                    append: false,
+                                });
+                            }
                         }
                     }
+
+                    cancel_tokens.write().await.remove(&task_id);
 
                     info!(task_id = %task_id, "✅ A2A Stream: 任务完成");
 
@@ -312,14 +339,20 @@ impl A2AServer {
     /// 将流式事件格式化为 SSE `data:` 行
     ///
     /// 方便在 HTTP 框架中直接使用：
-    /// ```rust,ignore
-    /// let events = server.handle_request_stream(json).await?;
-    /// let sse = events.map(|e| A2AServer::format_sse_event(&e, "req-1"));
-    /// // 写入 HTTP response body
+    /// ```rust
+    /// use echo_agent::a2a::{A2AServer, A2AStreamEvent, A2ATaskStatus, TaskState, TaskStatusUpdateEvent};
+    ///
+    /// let event = A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+    ///     task_id: "task-1".to_string(),
+    ///     status: A2ATaskStatus::new(TaskState::Working),
+    ///     is_final: false,
+    /// });
+    /// let sse = A2AServer::format_sse_event(&event, "req-1");
+    /// assert!(sse.starts_with("data: "));
     /// ```
     pub fn format_sse_event(event: &A2AStreamEvent, request_id: &str) -> String {
         let response = A2AStreamResponse {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id: request_id.to_string(),
             result: Some(event.clone()),
             error: None,
@@ -341,7 +374,7 @@ impl A2AServer {
 
         let input_text = request.params.message.text_content();
 
-        info!(task_id = %task_id, input_len = input_text.len(), "📨 A2A: 收到任务请求");
+        info!(task_id = %task_id, input_len = input_text.len(), "A2A: 收到任务请求");
 
         // submitted → working
         let task = A2ATask {
@@ -357,13 +390,20 @@ impl A2AServer {
             tasks.insert(task_id.clone(), task);
         }
 
+        // Create and store cancellation token
+        let cancel_token = CancellationToken::new();
+        self.cancel_tokens
+            .write()
+            .await
+            .insert(task_id.clone(), cancel_token.clone());
+
         Self::update_task_state(&self.tasks, &task_id, TaskState::Working, None).await;
 
         // working → completed / failed
         let mut agent = self.agent.lock().await;
         match agent.execute(&input_text).await {
             Ok(output) => {
-                info!(task_id = %task_id, "✅ A2A: 任务执行完成");
+                info!(task_id = %task_id, "A2A: 任务执行完成");
 
                 let result_message = A2AMessage::agent_text(&output);
                 let artifact = A2AArtifact {
@@ -391,15 +431,17 @@ impl A2AServer {
                     tasks.insert(task_id.clone(), completed_task.clone());
                 }
 
+                self.cancel_tokens.write().await.remove(&task_id);
+
                 A2ATaskResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id.clone(),
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: Some(request.id.clone()),
                     result: Some(completed_task),
                     error: None,
                 }
             }
             Err(e) => {
-                warn!(task_id = %task_id, error = %e, "❌ A2A: 任务执行失败");
+                warn!(task_id = %task_id, error = %e, "A2A: 任务执行失败");
 
                 let failed_task = A2ATask {
                     id: task_id.clone(),
@@ -417,12 +459,14 @@ impl A2AServer {
                     tasks.insert(task_id.clone(), failed_task);
                 }
 
+                self.cancel_tokens.write().await.remove(&task_id);
+
                 A2ATaskResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id.clone(),
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: Some(request.id.clone()),
                     result: None,
                     error: Some(A2AError {
-                        code: -32000,
+                        code: ERROR_CODE_TASK_FAILED as i32,
                         message: format!("Task execution failed: {}", e),
                     }),
                 }
@@ -437,11 +481,11 @@ impl A2AServer {
             Some(id) => id.clone(),
             None => {
                 return A2ATaskResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id.clone(),
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: Some(request.id.clone()),
                     result: None,
                     error: Some(A2AError {
-                        code: -32602,
+                        code: ERROR_CODE_INVALID_PARAMS as i32,
                         message: "Missing task id".to_string(),
                     }),
                 };
@@ -451,17 +495,17 @@ impl A2AServer {
         let tasks = self.tasks.read().await;
         match tasks.get(&task_id) {
             Some(task) => A2ATaskResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id.clone(),
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(request.id.clone()),
                 result: Some(task.clone()),
                 error: None,
             },
             None => A2ATaskResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id.clone(),
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(request.id.clone()),
                 result: None,
                 error: Some(A2AError {
-                    code: -32001,
+                    code: ERROR_CODE_TASK_NOT_FOUND as i32,
                     message: format!("Task not found: {}", task_id),
                 }),
             },
@@ -475,11 +519,11 @@ impl A2AServer {
             Some(id) => id.clone(),
             None => {
                 return A2ATaskResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id.clone(),
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: Some(request.id.clone()),
                     result: None,
                     error: Some(A2AError {
-                        code: -32602,
+                        code: ERROR_CODE_INVALID_PARAMS as i32,
                         message: "Missing task id".to_string(),
                     }),
                 };
@@ -490,11 +534,11 @@ impl A2AServer {
         if let Some(task) = tasks.get_mut(&task_id) {
             if task.status.state.is_terminal() {
                 return A2ATaskResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id.clone(),
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: Some(request.id.clone()),
                     result: None,
                     error: Some(A2AError {
-                        code: -32002,
+                        code: ERROR_CODE_TERMINAL_STATE as i32,
                         message: format!(
                             "Task '{}' is in terminal state '{}' and cannot be canceled",
                             task_id, task.status.state
@@ -504,19 +548,25 @@ impl A2AServer {
             }
 
             task.status = A2ATaskStatus::new(TaskState::Canceled);
+
+            // Cancel the token if it exists
+            if let Some(token) = self.cancel_tokens.read().await.get(&task_id) {
+                token.cancel();
+            }
+
             A2ATaskResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id.clone(),
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(request.id.clone()),
                 result: Some(task.clone()),
                 error: None,
             }
         } else {
             A2ATaskResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id.clone(),
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(request.id.clone()),
                 result: None,
                 error: Some(A2AError {
-                    code: -32001,
+                    code: ERROR_CODE_TASK_NOT_FOUND as i32,
                     message: format!("Task not found: {}", task_id),
                 }),
             }
@@ -533,15 +583,42 @@ impl A2AServer {
     ) {
         let mut store = tasks.write().await;
         if let Some(task) = store.get_mut(task_id) {
+            if !task.status.state.can_transition_to(state) {
+                warn!(from = ?task.status.state, to = ?state, "A2A: 非法状态转换，跳过");
+                return;
+            }
             task.status = status.cloned().unwrap_or_else(|| A2ATaskStatus::new(state));
         }
+    }
+
+    /// 清理已完成/失败/取消的任务（由调用方定期调用）
+    pub async fn cleanup_completed_tasks(&self, max_age_secs: u64) {
+        let mut tasks = self.tasks.write().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        tasks.retain(|_, task| {
+            if !task.status.state.is_terminal() {
+                return true;
+            }
+            // Keep task if we can't determine age (no timestamp) or if it's recent
+            if let Some(ts_str) = &task.status.timestamp {
+                // Try parsing as ISO 8601; if parsing fails, keep the task
+                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                    let task_secs = ts.timestamp() as u64;
+                    return now.saturating_sub(task_secs) < max_age_secs;
+                }
+            }
+            true
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::react::builder::ReactAgentBuilder;
+    use crate::agent::react::builder::ReactAgentBuilder;
 
     fn make_request(method: &str, message: &str, task_id: Option<&str>) -> String {
         let params = if let Some(id) = task_id {

@@ -1,7 +1,11 @@
 //! IM 通道集成模块
 //!
-//! 将 `echo_channels` 的 IM 通道插件系统与 `ReactAgent` 框架桥接，
-//! 提供 `AgentChannelHandler` 自动为每个 IM 用户创建具备完整能力的 Agent。
+//! 此模块分成两层：
+//! - `echo_integration::channels` 的直接 façade 重导出
+//! - 根 crate 独有的 `AgentChannelHandler` 薄适配层，用于把 `ReactAgent`
+//!   接到 IM channel 会话模型上
+//!
+//! 如需直接依赖拆分后的 crate，可使用 [`crate::workspace::integration::channels`]。
 //!
 //! # 能力继承
 //!
@@ -18,6 +22,7 @@
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
 //! use echo_agent::channels::*;
+//! use std::sync::Arc;
 //!
 //! # async fn example() -> echo_agent::error::Result<()> {
 //! // 1. 创建 ChannelManager
@@ -45,15 +50,22 @@
 //! };
 //!
 //! // 4. 启动
-//! manager.start_all(handler_factory).await?;
+//! for result in manager.start_all(handler_factory).await {
+//!     result?;
+//! }
 //! # Ok(())
 //! # }
 //! ```
 
-pub use echo_channels::prelude::*;
+/// Direct re-exports from `echo_integration::channels`.
+pub mod integration {
+    pub use echo_integration::channels::*;
+}
+
+pub use echo_integration::channels::prelude::*;
 
 use crate::agent::Agent;
-use crate::agents::react::ReactAgent;
+use crate::agent::react::ReactAgent;
 use crate::prelude::AgentConfig;
 use async_trait::async_trait;
 use std::sync::Arc;

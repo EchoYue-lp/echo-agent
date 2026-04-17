@@ -92,7 +92,7 @@ pub trait Executor: Send + Sync {
 Pre-defined steps:
 
 ```rust
-use echo_agent::agents::plan_execute::StaticPlanner;
+use echo_agent::agent::plan_execute::StaticPlanner;
 
 let planner = StaticPlanner::new(vec![
     "Search for relevant documents",
@@ -106,7 +106,7 @@ let planner = StaticPlanner::new(vec![
 LLM-based dynamic planning:
 
 ```rust
-use echo_agent::agents::plan_execute::LlmPlanner;
+use echo_agent::agent::plan_execute::LlmPlanner;
 
 let planner = LlmPlanner::new("qwen3-max")
     .with_output_mode(PlannerOutputMode::Structured);  // or NaturalLanguage
@@ -121,7 +121,7 @@ let planner = LlmPlanner::new("qwen3-max")
 Wraps any Agent:
 
 ```rust
-use echo_agent::agents::plan_execute::SimpleExecutor;
+use echo_agent::agent::plan_execute::SimpleExecutor;
 
 let agent = ReactAgentBuilder::simple("qwen3-max", "Executor")?;
 let executor = SimpleExecutor::new(agent);
@@ -132,7 +132,7 @@ let executor = SimpleExecutor::new(agent);
 ReAct agent with tools:
 
 ```rust
-use echo_agent::agents::plan_execute::ReactExecutor;
+use echo_agent::agent::plan_execute::ReactExecutor;
 
 let agent = ReactAgentBuilder::new()
     .model("qwen3-max")
@@ -150,7 +150,7 @@ let executor = ReactExecutor::new(agent);
 
 ```rust
 use echo_agent::prelude::*;
-use echo_agent::agents::plan_execute::{PlanExecuteAgent, LlmPlanner, ReactExecutor};
+use echo_agent::agent::plan_execute::{PlanExecuteAgent, LlmPlanner, ReactExecutor};
 
 #[tokio::main]
 async fn main() -> Result<()> {

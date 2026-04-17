@@ -69,6 +69,20 @@ pub struct TopologyNode {
 }
 
 impl TopologyNode {
+    /// 创建一个新的拓扑节点。
+    ///
+    /// # 参数
+    /// - `id`: 节点唯一标识符
+    /// - `node_type`: 节点类型（编排者、工作者、工具等）
+    ///
+    /// # 示例
+    /// ```
+    /// use echo_agent::topology::{TopologyNode, NodeType};
+    ///
+    /// let node = TopologyNode::new("my_agent", NodeType::Worker);
+    /// assert_eq!(node.id, "my_agent");
+    /// assert_eq!(node.node_type, NodeType::Worker);
+    /// ```
     pub fn new(id: impl Into<String>, node_type: NodeType) -> Self {
         let id_str: String = id.into();
         Self {
@@ -79,11 +93,41 @@ impl TopologyNode {
         }
     }
 
+    /// 设置节点的显示标签（不同于 ID）。
+    ///
+    /// # 参数
+    /// - `label`: 显示标签，用于可视化图中显示
+    ///
+    /// # 示例
+    /// ```
+    /// use echo_agent::topology::{TopologyNode, NodeType};
+    ///
+    /// let node = TopologyNode::new("agent_123", NodeType::Worker)
+    ///     .with_label("计算 Agent");
+    /// assert_eq!(node.label, "计算 Agent");
+    /// ```
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
         self
     }
 
+    /// 为节点添加元数据键值对。
+    ///
+    /// 元数据可用于存储额外信息，如 URL、版本、配置等。
+    ///
+    /// # 参数
+    /// - `key`: 元数据键
+    /// - `value`: 元数据值
+    ///
+    /// # 示例
+    /// ```
+    /// use echo_agent::topology::{TopologyNode, NodeType};
+    ///
+    /// let node = TopologyNode::new("web_search", NodeType::Tool)
+    ///     .with_metadata("provider", "DuckDuckGo")
+    ///     .with_metadata("rate_limit", "10/min");
+    /// assert_eq!(node.metadata.get("provider").unwrap(), "DuckDuckGo");
+    /// ```
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
@@ -118,6 +162,15 @@ pub struct TopologyTracker {
 }
 
 impl TopologyTracker {
+    /// 创建一个新的拓扑追踪器实例。
+    ///
+    /// # 示例
+    /// ```
+    /// use echo_agent::topology::TopologyTracker;
+    ///
+    /// let tracker = TopologyTracker::new();
+    /// assert_eq!(tracker.stats().node_count, 0);
+    /// ```
     pub fn new() -> Self {
         Self {
             nodes: RwLock::new(HashMap::new()),
@@ -353,16 +406,22 @@ impl Default for TopologyTracker {
 /// 拓扑数据（用于 JSON 序列化）
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopologyData {
+    /// 图中的所有节点（Agent、工具、服务等）
     pub nodes: Vec<TopologyNode>,
+    /// 图中的所有边（调用关系）
     pub edges: Vec<TopologyEdge>,
+    /// 拓扑统计信息
     pub stats: TopologyStats,
 }
 
 /// 拓扑统计信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyStats {
+    /// 图中的节点总数
     pub node_count: usize,
+    /// 图中的边总数（不同的调用关系数）
     pub edge_count: usize,
+    /// 所有边的调用次数总和
     pub total_calls: u64,
 }
 
@@ -396,6 +455,19 @@ pub struct TopologyCallback {
 }
 
 impl TopologyCallback {
+    /// 创建一个新的拓扑回调实例。
+    ///
+    /// # 参数
+    /// - `tracker`: 拓扑追踪器，用于记录 Agent 调用关系
+    ///
+    /// # 示例
+    /// ```
+    /// use echo_agent::topology::{TopologyTracker, TopologyCallback};
+    /// use std::sync::Arc;
+    ///
+    /// let tracker = Arc::new(TopologyTracker::new());
+    /// let callback = TopologyCallback::new(tracker.clone());
+    /// ```
     pub fn new(tracker: Arc<TopologyTracker>) -> Self {
         Self { tracker }
     }

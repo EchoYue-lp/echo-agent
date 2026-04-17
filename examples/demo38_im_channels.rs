@@ -19,10 +19,8 @@ use echo_agent::channels::{
     AgentChannelHandler, ChannelManager, FeishuChannel, FeishuConfig, MessageHandler, QqChannel,
     QqConfig, SessionConfig, SessionHandler,
 };
+use echo_agent::config::{apply_env_overrides, load_config};
 use std::sync::Arc;
-
-/// 默认会话超时（分钟）
-const DEFAULT_SESSION_TIMEOUT_MINUTES: u64 = 60;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -40,57 +38,75 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("{}", "═".repeat(62));
     println!();
 
+    let mut app_config = load_config(None);
+    apply_env_overrides(&mut app_config);
+
     // 1. 读取会话超时配置
-    let timeout_minutes = std::env::var("SESSION_TIMEOUT_MINUTES")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_SESSION_TIMEOUT_MINUTES);
+    let timeout_minutes = app_config.channels.session.timeout_minutes;
 
     println!("  会话超时: {} 分钟", timeout_minutes);
 
     // 2. Agent 配置（自动继承工具、记忆等所有能力）
-    let model = std::env::var("MODEL_NAME").unwrap_or_else(|_| "qwen3-max".into());
+    let model = app_config.model.name.clone();
     println!("  模型: {}", model);
 
     // 3. 创建 ChannelManager
     let mut manager = ChannelManager::new();
 
-    // 4. 注册 QQ Bot（如果配置了）
-    if let (Ok(app_id), Ok(secret)) = (
-        std::env::var("QQ_APP_ID"),
-        std::env::var("QQ_CLIENT_SECRET"),
-    ) {
-        let qq_config = QqConfig {
-            app_id,
-            client_secret: secret,
-        };
+    // 4. 注册 QQ Bot（优先读取 echo-agent.yaml，环境变量已在 apply_env_overrides 中覆盖）
+    if app_config.channels.qq.enabled
+        && !app_config.channels.qq.app_id.is_empty()
+        && !app_config.channels.qq.client_secret.is_empty()
+    {
+        let qq_config = QqConfig::new(
+            app_config.channels.qq.app_id.clone(),
+            app_config.channels.qq.client_secret.clone(),
+        );
         manager.register(Box::new(QqChannel::new(qq_config)?));
         println!("  [+] 已注册 QQ Bot 通道");
     } else {
-        println!("  [-] 跳过 QQ Bot（未配置 QQ_APP_ID / QQ_CLIENT_SECRET）");
+        println!("  [-] 跳过 QQ Bot（未在 echo-agent.yaml 或环境变量中启用/配置）");
     }
 
-    // 5. 注册飞书（如果配置了）
-    if let (Ok(app_id), Ok(secret)) = (
-        std::env::var("FEISHU_APP_ID"),
-        std::env::var("FEISHU_APP_SECRET"),
-    ) {
-        let feishu_config = FeishuConfig::new_long_poll(app_id, secret);
+    // 5. 注册飞书（优先读取 echo-agent.yaml，环境变量已在 apply_env_overrides 中覆盖）
+    if app_config.channels.feishu.enabled
+        && !app_config.channels.feishu.app_id.is_empty()
+        && !app_config.channels.feishu.app_secret.is_empty()
+    {
+        let feishu_config = match app_config.channels.feishu.mode.as_str() {
+            "webhook" => FeishuConfig::new_webhook(
+                app_config.channels.feishu.app_id.clone(),
+                app_config.channels.feishu.app_secret.clone(),
+                "0.0.0.0:3001".to_string(),
+                "/feishu/webhook".to_string(),
+                None,
+            ),
+            _ => FeishuConfig::new_long_poll(
+                app_config.channels.feishu.app_id.clone(),
+                app_config.channels.feishu.app_secret.clone(),
+            ),
+        };
         manager.register(Box::new(FeishuChannel::new(feishu_config)?));
-        println!("  [+] 已注册飞书通道（长连接模式）");
+        println!(
+            "  [+] 已注册飞书通道（{} 模式）",
+            app_config.channels.feishu.mode
+        );
     } else {
-        println!("  [-] 跳过飞书（未配置 FEISHU_APP_ID / FEISHU_APP_SECRET）");
+        println!("  [-] 跳过飞书（未在 echo-agent.yaml 或环境变量中启用/配置）");
     }
 
     if manager.is_empty() {
-        println!("\n  没有可用的通道，请配置至少一个 IM 平台的环境变量。");
+        println!("\n  没有可用的通道，请在 echo-agent.yaml 或环境变量中配置至少一个 IM 平台。");
         return Ok(());
     }
 
     println!("\n  共 {} 个通道待启动\n", manager.len());
 
     // 6. 构建会话配置
-    let session_config = SessionConfig::default().with_timeout_minutes(timeout_minutes);
+    let session_config = SessionConfig::default()
+        .with_timeout_minutes(timeout_minutes)
+        .with_reset_keywords(app_config.channels.session.reset_keywords.clone())
+        .with_reset_commands(app_config.channels.session.reset_commands.clone());
 
     // 7. 使用 AgentChannelHandler 桥接 —— 自动继承全部框架能力
     let model_ref = model.clone();
@@ -109,7 +125,9 @@ async fn main() -> echo_agent::error::Result<()> {
         ))
     };
 
-    manager.start_all(handler_factory).await?;
+    for result in manager.start_all(handler_factory).await {
+        result?;
+    }
 
     println!("  所有通道已启动，等待消息...");
     println!("  Agent 已自动启用：工具、记忆、MCP 等能力");

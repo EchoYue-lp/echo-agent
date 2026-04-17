@@ -26,7 +26,7 @@ Self-Reflection 通过添加质量门控和迭代改进解决这些问题。
 ## 三组件模型
 
 ```rust
-use echo_agent::agents::self_reflection::{SelfReflectionAgent, LlmCritic};
+use echo_agent::agent::self_reflection::{SelfReflectionAgent, LlmCritic};
 
 // 1. 生成器（Actor）：产生初始输出
 let generator = ReactAgentBuilder::simple("qwen3-max", "技术文档撰写者")?;
@@ -77,7 +77,7 @@ execute(task)
 简单的规则评估：
 
 ```rust
-use echo_agent::agents::self_reflection::StaticCritic;
+use echo_agent::agent::self_reflection::StaticCritic;
 
 let critic = StaticCritic::always_pass();  // 总是通过（测试用）
 let critic = StaticCritic::always_fail();  // 总是失败（测试用）
@@ -92,7 +92,7 @@ let critic = StaticCritic::with_threshold(7.0, |output| {
 基于 LLM 的语义评估：
 
 ```rust
-use echo_agent::agents::self_reflection::LlmCritic;
+use echo_agent::agent::self_reflection::LlmCritic;
 
 let critic = LlmCritic::new("qwen3-max")
     .with_pass_threshold(8.0)
@@ -107,7 +107,7 @@ let critic = LlmCritic::new("qwen3-max")
 组合多个评估器：
 
 ```rust
-use echo_agent::agents::self_reflection::{CompositeCritic, CompositeStrategy};
+use echo_agent::agent::self_reflection::{CompositeCritic, CompositeStrategy};
 
 let critic = CompositeCritic::new()
     .add_critic(Box::new(length_critic))
@@ -148,7 +148,7 @@ pub struct ReflectionExperience {
 
 ```rust
 use echo_agent::prelude::*;
-use echo_agent::agents::self_reflection::{SelfReflectionAgent, LlmCritic};
+use echo_agent::agent::self_reflection::{SelfReflectionAgent, LlmCritic};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -211,8 +211,8 @@ while let Some(event) = stream.next().await {
 将 Self-Reflection 作为 Plan-and-Execute 的执行器：
 
 ```rust
-use echo_agent::agents::plan_execute::{PlanExecuteAgent, LlmPlanner};
-use echo_agent::agents::self_reflection::{SelfReflectionAgent, LlmCritic, ReflectiveExecutor};
+use echo_agent::agent::plan_execute::{PlanExecuteAgent, LlmPlanner};
+use echo_agent::agent::self_reflection::{SelfReflectionAgent, LlmCritic, ReflectiveExecutor};
 
 let generator = ReactAgentBuilder::simple("qwen3-max", "步骤执行器")?;
 let critic = LlmCritic::new("qwen3-max");

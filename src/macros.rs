@@ -7,21 +7,25 @@
 ///
 /// # 示例
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use echo_agent::prelude::*;
+/// use echo_agent::testing::MockTool;
 ///
-/// let mut agent = agent! {
+/// # fn example() -> echo_agent::error::Result<()> {
+/// let mut agent = echo_agent::agent! {
 ///     model: "qwen3-max",
 ///     system_prompt: "你是一个有帮助的助手",
 /// }?;
 ///
 /// // 带工具
-/// let mut agent = agent! {
+/// let mut agent = echo_agent::agent! {
 ///     model: "qwen3-max",
 ///     system_prompt: "你是助手",
-///     tools: [CalculatorTool, WeatherTool],
+///     tools: [MockTool::new("calculator"), MockTool::new("weather")],
 ///     max_iterations: 15,
 /// }?;
+/// # Ok(())
+/// # }
 /// ```
 #[macro_export]
 macro_rules! agent {
@@ -246,7 +250,7 @@ mod tests {
 
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content, Some("你是助手".to_string()));
+        assert_eq!(msgs[0].content.as_text_ref(), Some("你是助手"));
         assert_eq!(msgs[1].role, "user");
         assert_eq!(msgs[2].role, "assistant");
     }

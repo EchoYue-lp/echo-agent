@@ -26,7 +26,7 @@ Self-Reflection solves this by adding a quality gate with iterative improvement.
 ## Three-Component Model
 
 ```rust
-use echo_agent::agents::self_reflection::{SelfReflectionAgent, LlmCritic};
+use echo_agent::agent::self_reflection::{SelfReflectionAgent, LlmCritic};
 
 // 1. Generator (Actor): Produces initial output
 let generator = ReactAgentBuilder::simple("qwen3-max", "Technical writer")?;
@@ -77,7 +77,7 @@ execute(task)
 Simple rule-based evaluation:
 
 ```rust
-use echo_agent::agents::self_reflection::StaticCritic;
+use echo_agent::agent::self_reflection::StaticCritic;
 
 let critic = StaticCritic::always_pass();  // Always passes (for testing)
 let critic = StaticCritic::always_fail();  // Always fails (for testing)
@@ -92,7 +92,7 @@ let critic = StaticCritic::with_threshold(7.0, |output| {
 LLM-based semantic evaluation:
 
 ```rust
-use echo_agent::agents::self_reflection::LlmCritic;
+use echo_agent::agent::self_reflection::LlmCritic;
 
 let critic = LlmCritic::new("qwen3-max")
     .with_pass_threshold(8.0)
@@ -107,7 +107,7 @@ let critic = LlmCritic::new("qwen3-max")
 Combine multiple critics:
 
 ```rust
-use echo_agent::agents::self_reflection::{CompositeCritic, CompositeStrategy};
+use echo_agent::agent::self_reflection::{CompositeCritic, CompositeStrategy};
 
 let critic = CompositeCritic::new()
     .add_critic(Box::new(length_critic))
@@ -148,7 +148,7 @@ Reference these past lessons:
 
 ```rust
 use echo_agent::prelude::*;
-use echo_agent::agents::self_reflection::{SelfReflectionAgent, LlmCritic};
+use echo_agent::agent::self_reflection::{SelfReflectionAgent, LlmCritic};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -211,8 +211,8 @@ while let Some(event) = stream.next().await {
 Use Self-Reflection as the Executor in Plan-and-Execute:
 
 ```rust
-use echo_agent::agents::plan_execute::{PlanExecuteAgent, LlmPlanner};
-use echo_agent::agents::self_reflection::{SelfReflectionAgent, LlmCritic, ReflectiveExecutor};
+use echo_agent::agent::plan_execute::{PlanExecuteAgent, LlmPlanner};
+use echo_agent::agent::self_reflection::{SelfReflectionAgent, LlmCritic, ReflectiveExecutor};
 
 let generator = ReactAgentBuilder::simple("qwen3-max", "Step executor")?;
 let critic = LlmCritic::new("qwen3-max");

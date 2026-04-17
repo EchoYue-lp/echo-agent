@@ -248,6 +248,24 @@ echo-agent/
 在项目根目录创建 `echo-agent.yaml`：
 
 ```yaml
+# Provider / 模型注册表（供 ProviderFactory 和基于配置的 LLM 客户端使用）
+models:
+  qwen3-max:
+    provider: dashscope
+    api_key: ${DASHSCOPE_API_KEY}
+
+  deepseek-chat:
+    provider: deepseek
+    api_key: ${DEEPSEEK_API_KEY}
+
+# Embedding 配置（供语义记忆 / 向量检索示例使用）
+embedding:
+  base_url: https://api.openai.com
+  api_key: ${OPENAI_API_KEY}
+  model: text-embedding-3-small
+  timeout_secs: 30
+
+# 运行时框架配置（供 IM channels 等示例使用）
 model:
   name: qwen3-max
   max_tokens: 4096
@@ -260,6 +278,21 @@ agent:
   enable_tools: true
   enable_memory: true
 
+channels:
+  qq:
+    enabled: false
+    app_id: ${QQ_APP_ID}
+    client_secret: ${QQ_CLIENT_SECRET}
+  feishu:
+    enabled: false
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+    mode: long_poll
+  session:
+    timeout_minutes: 60
+    reset_keywords: ["重置对话", "新对话", "清除记忆"]
+    reset_commands: ["/reset", "/clear", "/new"]
+
 mcp:
   config_path: ./mcp.json
 
@@ -271,12 +304,23 @@ logging:
   level: info
 ```
 
-通过环境变量设置 API Key：
+说明：
+
+- `models:` 用于 `ProviderFactory`、`LlmConfig::from_model()` 以及基于配置的 LLM 客户端。
+- `embedding:` 用于语义记忆 / 向量检索相关示例。
+- `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` 是 `echo_agent::config` 加载的运行时配置。
+
+通过环境变量设置密钥：
 
 ```bash
 export DASHSCOPE_API_KEY=sk-xxx      # 阿里云 Qwen
+export DEEPSEEK_API_KEY=sk-xxx       # DeepSeek
 export OPENAI_API_KEY=sk-xxx         # OpenAI
 export ANTHROPIC_API_KEY=sk-ant-xxx  # Anthropic
+export QQ_APP_ID=your-qq-app-id
+export QQ_CLIENT_SECRET=your-qq-client-secret
+export FEISHU_APP_ID=your-feishu-app-id
+export FEISHU_APP_SECRET=your-feishu-app-secret
 ```
 
 ---

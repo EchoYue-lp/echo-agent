@@ -3,7 +3,7 @@
 //! 演示通过 YAML / JSON 文本声明图工作流结构，
 //! 降低非 Rust 用户的使用门槛：
 //! - `WorkflowDefinition::from_yaml_str()` / `from_json_str()`
-//! - `Graph::from_yaml_str()` / `Graph::from_json_str()`
+//! - `workflow::loader::load_graph_from_yaml_str()` / `load_graph_from_json_str()`
 //! - 支持条件分支、并行 fan-out 等高级拓扑
 //!
 //! ```bash
@@ -11,6 +11,9 @@
 //! ```
 
 use echo_agent::prelude::*;
+use echo_agent::workflow::loader::{
+    WorkflowDefinition, load_graph_from_json_str, load_graph_from_yaml_str,
+};
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -51,7 +54,7 @@ max_steps: 50
 
     // ── 2. 从 YAML 直接构建 Graph ────────────────────────────────────────
     println!("\n[2] Graph::from_yaml_str()");
-    let graph = Graph::from_yaml_str(yaml)?;
+    let graph = load_graph_from_yaml_str(yaml)?;
     println!("    ✓ Graph '{}' built successfully", graph.name);
 
     let state = SharedState::new();
@@ -87,7 +90,7 @@ max_steps: 50
         "finish": ["approved", "rejected"]
     }"#;
 
-    let graph = Graph::from_json_str(json_str)?;
+    let graph = load_graph_from_json_str(json_str)?;
     println!("    ✓ Graph '{}' built from JSON", graph.name);
 
     // 测试条件分支：decision=yes → approved
@@ -175,7 +178,7 @@ edges: []
 entry: nonexistent
 finish: [a]
 "#;
-    let err = Graph::from_yaml_str(missing_entry);
+    let err = load_graph_from_yaml_str(missing_entry);
     assert!(err.is_err());
     println!("    不存在的 entry 节点 → Err ✓");
 

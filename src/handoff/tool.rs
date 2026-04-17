@@ -15,6 +15,7 @@ pub struct HandoffTool {
 }
 
 impl HandoffTool {
+    /// 创建一个新的 HandoffTool 实例。
     pub fn new(manager: Arc<Mutex<HandoffManager>>, source_agent: impl Into<String>) -> Self {
         Self {
             manager,

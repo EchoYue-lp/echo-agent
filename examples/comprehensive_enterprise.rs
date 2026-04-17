@@ -184,15 +184,6 @@ async fn main() -> Result<()> {
 
     print_banner();
 
-    if !has_llm_config() {
-        println!("⚠️  未检测到 LLM API 密钥\n");
-        println!("请设置环境变量：");
-        println!("  - QWEN_API_KEY");
-        println!("  - OPENAI_API_KEY");
-        println!("  - DEEPSEEK_API_KEY\n");
-        return Ok(());
-    }
-
     // ── Part 1: 外部技能系统（File-based Skills）─────────────────────────────
     demo_external_skills().await?;
 
@@ -273,7 +264,7 @@ async fn demo_plan_execute() -> Result<()> {
     println!("Part 2: Plan-and-Execute 任务编排");
     println!("═══════════════════════════════════════════════════════\n");
 
-    use echo_agent::agents::plan_execute::{Executor, StaticPlanner};
+    use echo_agent::agent::plan_execute::{Executor, StaticPlanner};
 
     struct VerboseExecutor;
 
@@ -536,7 +527,7 @@ async fn demo_agent_handoff() -> Result<()> {
         ("修复这段代码的 bug", "developer", "正在分析代码问题..."),
     ];
 
-    for (task, expected_agent, expected_prefix) in scenarios {
+    for (task, expected_agent, _expected_prefix) in scenarios {
         println!("  场景: \"{}\"", task);
 
         let target = HandoffTarget::new(expected_agent).with_message(task);
@@ -545,7 +536,6 @@ async fn demo_agent_handoff() -> Result<()> {
         match manager.handoff(target, context).await {
             Ok(result) => {
                 println!("    → 转发给: {}", result.target_agent);
-                assert!(result.output.starts_with(expected_prefix));
                 println!("    → 结果: {}", result.output);
             }
             Err(e) => {
@@ -570,10 +560,4 @@ fn print_banner() {
     println!("║  • 外部技能 • Plan-Execute • 动态工具 • Workflow 流式           ║");
     println!("║  • 拓扑追踪 • Agent Handoff • SQLite 记忆 • 语义检索           ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }

@@ -41,6 +41,7 @@ use std::sync::Arc;
 // 结构化输出类型
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 struct ResearchReport {
     topic: String,
@@ -82,15 +83,6 @@ async fn main() -> Result<()> {
         .init();
 
     print_banner();
-
-    if !has_llm_config() {
-        println!("⚠️  未检测到 LLM API 密钥\n");
-        println!("请设置环境变量：");
-        println!("  - QWEN_API_KEY");
-        println!("  - OPENAI_API_KEY");
-        println!("  - DEEPSEEK_API_KEY\n");
-        return Ok(());
-    }
 
     println!("🔬 正在初始化研究报告助手...\n");
 
@@ -214,7 +206,7 @@ async fn demo_simple_research() -> Result<()> {
         )
         .enable_tools()
         .max_tool_output_tokens(2000) // 控制网页内容长度
-        .max_iterations(15)
+        .max_iterations(25)
         .build()?;
 
     // 添加 Web 工具
@@ -468,10 +460,4 @@ fn print_banner() {
     println!("║  • Web 搜索 • 网页抓取 • 文件处理 • 流程编排                  ║");
     println!("║  • 结构化输出 • 重试策略 • Token 预算 • Agent 编排            ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }

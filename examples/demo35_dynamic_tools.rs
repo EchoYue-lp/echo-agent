@@ -107,11 +107,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_edge_cases();
 
     // ── Part 3: 实际 Agent 使用场景 ─────────────────────────────────────────────
-    if has_llm_config() {
-        demo_agent_with_dynamic_tools().await?;
-    } else {
-        println!("[跳过 Part 3] 未配置 LLM API 密钥\n");
-    }
+    demo_agent_with_dynamic_tools().await?;
 
     println!("═══ Demo Complete ═══");
     Ok(())
@@ -125,7 +121,7 @@ fn demo_api_basics() {
     println!("─────────────────────────────────────────────\n");
 
     let config = AgentConfig::minimal("qwen3-max", "phase_agent");
-    let mut agent = echo_agent::agents::react::ReactAgent::new(config);
+    let mut agent = echo_agent::agent::react::ReactAgent::new(config);
 
     // 1.1 初始状态
     println!("  [1.1] 初始工具集");
@@ -185,7 +181,7 @@ fn demo_edge_cases() {
     println!("─────────────────────────────────────────────\n");
 
     let config = AgentConfig::minimal("qwen3-max", "test_agent");
-    let mut agent = echo_agent::agents::react::ReactAgent::new(config);
+    let mut agent = echo_agent::agent::react::ReactAgent::new(config);
 
     // 2.1 移除不存在的工具
     println!("  [2.1] 移除不存在的工具");
@@ -317,9 +313,3 @@ async fn demo_agent_with_dynamic_tools() -> echo_agent::error::Result<()> {
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────────
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
-}

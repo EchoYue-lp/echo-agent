@@ -35,11 +35,17 @@ use std::path::PathBuf;
 #[serde(default)]
 #[derive(Default)]
 pub struct AppConfig {
+    /// 模型配置（名称、温度、最大 token 数）
     pub model: ModelConfig,
+    /// Agent 行为配置（系统提示、迭代次数、启用功能）
     pub agent: AgentYamlConfig,
+    /// MCP（模型上下文协议）配置
     pub mcp: McpYamlConfig,
+    /// 即时通讯通道配置（QQ、飞书）
     pub channels: ChannelsConfig,
+    /// 服务端配置（主机、端口）
     pub server: ServerConfig,
+    /// 日志级别配置
     pub logging: LoggingConfig,
 }
 
@@ -63,8 +69,11 @@ impl AppConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// 模型名称（如 "qwen-plus", "gpt-4o", "claude-3.5-sonnet"）
     pub name: String,
+    /// 最大生成 token 数（None 表示使用模型默认值）
     pub max_tokens: Option<u32>,
+    /// 温度参数（0.0 ～ 2.0，None 表示使用模型默认值）
     pub temperature: Option<f32>,
 }
 
@@ -82,12 +91,19 @@ impl Default for ModelConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AgentYamlConfig {
+    /// Agent 名称（用于日志和工具描述）
     pub name: String,
+    /// 系统提示词（影响 Agent 行为风格）
     pub system_prompt: String,
+    /// 最大迭代次数（单轮对话内最多执行多少步思考）
     pub max_iterations: usize,
+    /// 是否启用工具（False 时 Agent 只能进行纯文本对话）
     pub enable_tools: bool,
+    /// 是否启用记忆存储（跨会话记忆）
     pub enable_memory: bool,
+    /// 是否启用人工审批（敏感操作需要用户确认）
     pub enable_human_in_loop: bool,
+    /// 记忆存储路径（SQLite 文件位置）
     pub memory_path: String,
 }
 
@@ -118,8 +134,11 @@ pub struct McpYamlConfig {
 #[serde(default)]
 #[derive(Default)]
 pub struct ChannelsConfig {
+    /// QQ 机器人配置
     pub qq: QqChannelConfig,
+    /// 飞书机器人配置
     pub feishu: FeishuChannelConfig,
+    /// 会话管理配置
     pub session: SessionYamlConfig,
 }
 
@@ -128,8 +147,11 @@ pub struct ChannelsConfig {
 #[serde(default)]
 #[derive(Default)]
 pub struct QqChannelConfig {
+    /// 是否启用 QQ 通道
     pub enabled: bool,
+    /// QQ 开发者平台 App ID
     pub app_id: String,
+    /// QQ 开发者平台 Client Secret
     pub client_secret: String,
 }
 
@@ -137,10 +159,13 @@ pub struct QqChannelConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct FeishuChannelConfig {
+    /// 是否启用飞书通道
     pub enabled: bool,
+    /// 飞书开发者平台 App ID
     pub app_id: String,
+    /// 飞书开发者平台 App Secret
     pub app_secret: String,
-    /// 连接模式: "long_poll" | "webhook"
+    /// 连接模式: "long_poll"（长轮询）或 "webhook"（Webhook 回调）
     pub mode: String,
 }
 
@@ -159,8 +184,11 @@ impl Default for FeishuChannelConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SessionYamlConfig {
+    /// 会话超时时间（分钟），超过此时间后会话自动重置
     pub timeout_minutes: u64,
+    /// 触发会话重置的关键词列表（用户消息包含这些词时会重置会话）
     pub reset_keywords: Vec<String>,
+    /// 触发会话重置的命令列表（用户消息以这些命令开头时会重置会话）
     pub reset_commands: Vec<String>,
 }
 
@@ -186,7 +214,9 @@ impl Default for SessionYamlConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// 监听主机（如 "0.0.0.0" 或 "127.0.0.1"）
     pub host: String,
+    /// 监听端口
     pub port: u16,
 }
 
@@ -203,6 +233,7 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
+    /// 日志级别（"debug", "info", "warn", "error"）
     pub level: String,
 }
 

@@ -131,16 +131,6 @@ async fn main() -> Result<()> {
 
     print_banner();
 
-    // 检查 LLM 配置
-    if !has_llm_config() {
-        println!("⚠️  未检测到 LLM API 密钥");
-        println!("请设置以下环境变量之一：");
-        println!("  - QWEN_API_KEY");
-        println!("  - OPENAI_API_KEY");
-        println!("  - DEEPSEEK_API_KEY\n");
-        return Ok(());
-    }
-
     // ── 1. 创建 SQLite 持久化存储（长期记忆）───────────────────────────────
     let db_path = std::env::temp_dir().join("echo_agent_customer_service.db");
     let store = Arc::new(SqliteStore::new(&db_path)?);
@@ -295,7 +285,8 @@ async fn main() -> Result<()> {
     println!("  相关记忆: {} 条", memories.len());
     for mem in &memories {
         let content = mem.value["content"].as_str().unwrap_or("");
-        println!("    • {}", &content[..content.len().min(80)]);
+        let preview: String = content.chars().take(80).collect();
+        println!("    • {}", preview);
     }
 
     println!("\n═══════════════════════════════════════════════════════");
@@ -353,12 +344,6 @@ fn print_banner() {
     println!("║  • 人工审批 • 审计日志 • 任务规划 • 快照回滚                  ║");
     println!("║  • 多模态支持                                                     ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

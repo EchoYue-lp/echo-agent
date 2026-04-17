@@ -207,12 +207,6 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 3: Skills + ReAct Agent 执行真实任务\n");
 
-    if !has_llm_config() {
-        println!("跳过 Part 3：未检测到 LLM API 密钥");
-        println!("（设置 OPENAI_API_KEY / DEEPSEEK_API_KEY / QWEN_API_KEY 后可启用）");
-        return Ok(());
-    }
-
     let system_prompt = "你是一个全能助手，请使用工具完成用户的请求，不要猜测，一定要调用工具。";
 
     // ── 场景 A: FileSystem Skill ───────────────────────────────────────────
@@ -257,10 +251,4 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
     }
 
     Ok(())
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
-        || std::env::var("QWEN_API_KEY").is_ok()
 }

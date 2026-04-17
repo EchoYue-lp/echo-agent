@@ -45,11 +45,12 @@
 //! }
 //! ```
 
-use crate::agents::react::builder::ReactAgentBuilder;
+use crate::agent::react::builder::ReactAgentBuilder;
 use crate::error::{AgentError, ReactError, Result};
 use crate::llm::config::LlmConfig;
-use crate::workflow::graph::{Graph, GraphBuilder};
-use crate::workflow::state::SharedState;
+use crate::workflow::Graph;
+use crate::workflow::GraphBuilder;
+use crate::workflow::SharedState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -269,37 +270,35 @@ impl WorkflowDefinition {
     }
 }
 
-impl Graph {
-    /// 从 YAML 文件加载图工作流
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// use echo_agent::workflow::Graph;
-    ///
-    /// # fn main() -> echo_agent::error::Result<()> {
-    /// let graph = Graph::from_yaml("workflow.yaml")?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn from_yaml(path: impl AsRef<Path>) -> Result<Self> {
-        WorkflowDefinition::from_yaml(path)?.build_graph()
-    }
+/// 从 YAML 文件加载图工作流
+///
+/// # 示例
+///
+/// ```rust,no_run
+/// use echo_agent::workflow::loader::load_graph_from_yaml;
+///
+/// # fn main() -> echo_agent::error::Result<()> {
+/// let graph = load_graph_from_yaml("workflow.yaml")?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn load_graph_from_yaml(path: impl AsRef<Path>) -> Result<crate::workflow::Graph> {
+    WorkflowDefinition::from_yaml(path)?.build_graph()
+}
 
-    /// 从 JSON 文件加载图工作流
-    pub fn from_json(path: impl AsRef<Path>) -> Result<Self> {
-        WorkflowDefinition::from_json(path)?.build_graph()
-    }
+/// 从 JSON 文件加载图工作流
+pub fn load_graph_from_json(path: impl AsRef<Path>) -> Result<crate::workflow::Graph> {
+    WorkflowDefinition::from_json(path)?.build_graph()
+}
 
-    /// 从 YAML 字符串加载图工作流
-    pub fn from_yaml_str(yaml: &str) -> Result<Self> {
-        WorkflowDefinition::from_yaml_str(yaml)?.build_graph()
-    }
+/// 从 YAML 字符串加载图工作流
+pub fn load_graph_from_yaml_str(yaml: &str) -> Result<crate::workflow::Graph> {
+    WorkflowDefinition::from_yaml_str(yaml)?.build_graph()
+}
 
-    /// 从 JSON 字符串加载图工作流
-    pub fn from_json_str(json: &str) -> Result<Self> {
-        WorkflowDefinition::from_json_str(json)?.build_graph()
-    }
+/// 从 JSON 字符串加载图工作流
+pub fn load_graph_from_json_str(json: &str) -> Result<crate::workflow::Graph> {
+    WorkflowDefinition::from_json_str(json)?.build_graph()
 }
 
 #[cfg(test)]
@@ -373,7 +372,7 @@ entry: hub
 finish:
   - end_node
 "#;
-        let graph = Graph::from_yaml_str(yaml).unwrap();
+        let graph = load_graph_from_yaml_str(yaml).unwrap();
         assert_eq!(graph.name, "simple_graph");
     }
 
@@ -400,7 +399,7 @@ finish:
   - yes_path
   - no_path
 "#;
-        let graph = Graph::from_yaml_str(yaml).unwrap();
+        let graph = load_graph_from_yaml_str(yaml).unwrap();
         assert_eq!(graph.name, "cond_flow");
     }
 
@@ -427,7 +426,7 @@ entry: start
 finish:
   - merge
 "#;
-        let graph = Graph::from_yaml_str(yaml).unwrap();
+        let graph = load_graph_from_yaml_str(yaml).unwrap();
         assert_eq!(graph.name, "parallel_flow");
     }
 }

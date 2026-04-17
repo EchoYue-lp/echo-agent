@@ -207,13 +207,11 @@ impl Tool for WebFetchToolEnhanced {
                 })?;
 
             if url.trim().is_empty() {
-                return Ok(ToolResult::error("URL 不能为空".into()));
+                return Ok(ToolResult::error("URL 不能为空"));
             }
 
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Ok(ToolResult::error(
-                    "URL 必须以 http:// 或 https:// 开头".into(),
-                ));
+                return Ok(ToolResult::error("URL 必须以 http:// 或 https:// 开头"));
             }
 
             let mode = parameters

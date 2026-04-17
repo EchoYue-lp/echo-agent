@@ -42,15 +42,6 @@ async fn main() -> Result<()> {
 
     print_banner();
 
-    if !has_llm_config() {
-        println!("⚠️  未检测到 LLM API 密钥\n");
-        println!("请设置环境变量：");
-        println!("  - QWEN_API_KEY");
-        println!("  - OPENAI_API_KEY");
-        println!("  - DEEPSEEK_API_KEY\n");
-        return Ok(());
-    }
-
     println!("🤖 正在初始化个人智能助手...\n");
 
     // ── Part 1: 长期记忆系统 ───────────────────────────────────────────────────
@@ -326,7 +317,7 @@ async fn demo_multimodal_support() -> Result<()> {
     println!("    回复: {}...\n", preview);
 
     println!("  注意: 实际图片分析需要支持视觉的 LLM 模型");
-    println!("    支持的模型包括: qwen3.5-plus, gpt-4o, gpt-4o-mini 等\n");
+    println!("    支持的模型包括: qwen3-max, gpt-4o, gpt-4o-mini 等\n");
 
     Ok(())
 }
@@ -342,10 +333,4 @@ fn print_banner() {
     println!("║  展示核心能力：                                                 ║");
     println!("║  • 长期记忆 • Agent 编排 • 任务管理 • 多模态支持              ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }

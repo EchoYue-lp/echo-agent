@@ -60,11 +60,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_web_fetch().await;
 
     // Part 7: Agent 集成
-    if has_llm_config() {
-        demo_agent_web_task().await?;
-    } else {
-        println!("跳过 Part 7：未检测到 LLM API 密钥。\n");
-    }
+    demo_agent_web_task().await?;
 
     Ok(())
 }
@@ -271,10 +267,4 @@ fn print_results(results: &[echo_agent::tools::web::providers::SearchResult]) {
         }
         println!();
     }
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }

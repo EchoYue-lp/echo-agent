@@ -19,6 +19,7 @@ pub struct A2AClient {
 }
 
 impl A2AClient {
+    /// Create a new A2A client instance.
     pub fn new() -> Self {
         Self {
             client: Client::new(),
@@ -58,9 +59,11 @@ impl A2AClient {
             .map_err(|e| ReactError::Other(format!("A2A 发现请求失败: {}", e)))?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
             return Err(ReactError::Other(format!(
-                "A2A 发现失败: HTTP {}",
-                response.status()
+                "A2A 发现失败: HTTP {}: {}",
+                status, body
             )));
         }
 
@@ -109,9 +112,9 @@ impl A2AClient {
         session_id: Option<String>,
     ) -> Result<Option<A2ATask>> {
         let request = A2ATaskRequest {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id: uuid::Uuid::new_v4().to_string(),
-            method: "tasks/send".to_string(),
+            method: METHOD_SEND.to_string(),
             params: A2ATaskParams {
                 id: None,
                 session_id,
@@ -206,9 +209,9 @@ impl A2AClient {
         session_id: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = A2AStreamEvent> + Send>>> {
         let request = A2ATaskRequest {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id: uuid::Uuid::new_v4().to_string(),
-            method: "tasks/sendSubscribe".to_string(),
+            method: METHOD_SEND_SUBSCRIBE.to_string(),
             params: A2ATaskParams {
                 id: None,
                 session_id,
@@ -228,9 +231,11 @@ impl A2AClient {
             .map_err(|e| ReactError::Other(format!("A2A 流式请求失败: {}", e)))?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
             return Err(ReactError::Other(format!(
-                "A2A 流式请求失败: HTTP {}",
-                response.status()
+                "A2A 流式请求失败: HTTP {}: {}",
+                status, body
             )));
         }
 
@@ -265,7 +270,7 @@ impl A2AClient {
 
                     for line in event_block.lines() {
                         let line = line.trim();
-                        if let Some(data) = line.strip_prefix("data: ")
+                        if let Some(data) = line.strip_prefix("data:").map(|s| s.trim_start())
                             && let Some(event) = Self::parse_sse_data(data)
                         {
                             yield event;
@@ -278,7 +283,7 @@ impl A2AClient {
             if !buffer.is_empty() {
                 for line in buffer.lines() {
                     let line = line.trim();
-                    if let Some(data) = line.strip_prefix("data: ")
+                    if let Some(data) = line.strip_prefix("data:").map(|s| s.trim_start())
                         && let Some(event) = Self::parse_sse_data(data) {
                             yield event;
                         }
@@ -292,9 +297,9 @@ impl A2AClient {
     /// 查询远程任务状态
     pub async fn get_task(&self, agent_url: &str, task_id: &str) -> Result<Option<A2ATask>> {
         let request = A2ATaskRequest {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id: uuid::Uuid::new_v4().to_string(),
-            method: "tasks/get".to_string(),
+            method: METHOD_GET.to_string(),
             params: A2ATaskParams {
                 id: Some(task_id.to_string()),
                 session_id: None,
@@ -315,15 +320,22 @@ impl A2AClient {
             .await
             .map_err(|e| ReactError::Other(format!("A2A 响应解析失败: {}", e)))?;
 
+        if let Some(error) = task_response.error {
+            return Err(ReactError::Other(format!(
+                "A2A error {}: {}",
+                error.code, error.message
+            )));
+        }
+
         Ok(task_response.result)
     }
 
     /// 取消远程任务
     pub async fn cancel_task(&self, agent_url: &str, task_id: &str) -> Result<Option<A2ATask>> {
         let request = A2ATaskRequest {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id: uuid::Uuid::new_v4().to_string(),
-            method: "tasks/cancel".to_string(),
+            method: METHOD_CANCEL.to_string(),
             params: A2ATaskParams {
                 id: Some(task_id.to_string()),
                 session_id: None,
@@ -343,6 +355,13 @@ impl A2AClient {
             .json()
             .await
             .map_err(|e| ReactError::Other(format!("A2A 响应解析失败: {}", e)))?;
+
+        if let Some(error) = task_response.error {
+            return Err(ReactError::Other(format!(
+                "A2A error {}: {}",
+                error.code, error.message
+            )));
+        }
 
         Ok(task_response.result)
     }

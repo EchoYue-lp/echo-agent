@@ -91,11 +91,6 @@ async fn demo_agent_tasks() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 3: Agent 执行真实任务\n");
 
-    if !has_llm_config() {
-        println!("跳过 Part 3：未检测到 LLM API 密钥。\n");
-        return Ok(());
-    }
-
     let work_dir = "/tmp/echo_agent_demo";
 
     // 使用 AgentBuilder 创建 Agent
@@ -122,10 +117,4 @@ async fn demo_agent_tasks() -> echo_agent::error::Result<()> {
     }
 
     Ok(())
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }

@@ -59,15 +59,19 @@ enum State {
 pub struct CircuitBreaker {
     state: Mutex<State>,
     config: CircuitBreakerConfig,
+    /// Number of requests rejected while in Open state (for monitoring).
+    rejected_count: std::sync::atomic::AtomicU32,
 }
 
 impl CircuitBreaker {
+    /// Create a circuit breaker with an explicit configuration.
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             state: Mutex::new(State::Closed {
                 consecutive_failures: 0,
             }),
             config,
+            rejected_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -76,10 +80,24 @@ impl CircuitBreaker {
         Self::new(CircuitBreakerConfig::default())
     }
 
-    /// 检查熔断器是否处于 Open 状态（应拒绝请求）。
+    /// 纯查询：检查当前是否处于 Open 状态（不改变任何状态）。
     ///
-    /// 若当前为 Open 且已超过 timeout，自动转入 HalfOpen。
+    /// 仅用于监控和日志，不触发状态转换。
     pub fn is_open(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| {
+            error!("circuit breaker mutex poisoned, recovering: {e}");
+            e.into_inner()
+        });
+        matches!(&*state, State::Open { .. })
+    }
+
+    /// 尝试推进状态：若 Open 且已超过 timeout，自动转入 HalfOpen。
+    ///
+    /// 返回 `true` 表示请求应被拒绝（仍处于 Open 状态），
+    /// 返回 `false` 表示可以继续处理（Closed 或 HalfOpen）。
+    ///
+    /// 调用方应在拒绝请求时调用 `record_rejected()` 来更新统计。
+    pub fn try_advance(&self) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| {
             error!("circuit breaker mutex poisoned, recovering: {e}");
             e.into_inner()
@@ -90,7 +108,7 @@ impl CircuitBreaker {
                 if opened_at.elapsed() >= self.config.timeout {
                     info!(
                         timeout_secs = self.config.timeout.as_secs(),
-                        "🔁 Circuit breaker timeout elapsed, transitioning to HalfOpen"
+                        "Circuit breaker timeout elapsed, transitioning to HalfOpen"
                     );
                     *state = State::HalfOpen {
                         consecutive_successes: 0,
@@ -101,6 +119,18 @@ impl CircuitBreaker {
                 }
             }
         }
+    }
+
+    /// 记录一次被拒绝的请求（在 Open 状态下）。
+    pub fn record_rejected(&self) {
+        self.rejected_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 获取被拒绝的请求总数（用于监控）。
+    pub fn rejected_count(&self) -> u32 {
+        self.rejected_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 记录一次成功调用
@@ -265,8 +295,33 @@ mod tests {
         }
         assert!(cb.is_open());
         std::thread::sleep(Duration::from_millis(20));
-        assert!(!cb.is_open());
+        // try_advance transitions from Open to HalfOpen
+        assert!(!cb.try_advance());
         assert_eq!(cb.state_name(), "half_open");
+    }
+
+    #[test]
+    fn test_try_advance_rejects_while_open() {
+        let cb = CircuitBreaker::new(fast_config());
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        // Still within timeout, should reject
+        assert!(cb.try_advance());
+        assert!(cb.is_open());
+    }
+
+    #[test]
+    fn test_rejected_count_tracking() {
+        let cb = CircuitBreaker::new(fast_config());
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.rejected_count(), 0);
+        cb.record_rejected();
+        cb.record_rejected();
+        cb.record_rejected();
+        assert_eq!(cb.rejected_count(), 3);
     }
 
     #[test]
@@ -276,7 +331,7 @@ mod tests {
             cb.record_failure();
         }
         std::thread::sleep(Duration::from_millis(20));
-        cb.is_open();
+        cb.try_advance(); // transition to HalfOpen
         cb.record_success();
         assert_eq!(cb.state_name(), "half_open");
         cb.record_success();
@@ -290,7 +345,7 @@ mod tests {
             cb.record_failure();
         }
         std::thread::sleep(Duration::from_millis(20));
-        cb.is_open();
+        cb.try_advance(); // transition to HalfOpen
         cb.record_failure();
         assert_eq!(cb.state_name(), "open");
     }

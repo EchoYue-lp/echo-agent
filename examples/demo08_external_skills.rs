@@ -40,6 +40,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_4_script_execution().await?;
     demo_5_agent_integration().await?;
     demo_6_new_features().await?;
+    demo_7_xiaohongshu_image_generator().await?;
 
     println!("\n{}", "═".repeat(59));
     println!("All demos completed.");
@@ -457,37 +458,6 @@ async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
     println!("    Activated skill instructions are protected from");
     println!("    compression — they survive context compaction.");
 
-    if has_llm_config() {
-        println!("\n  Executing task with progressive disclosure...\n");
-        let task = "分析一下当前项目的代码量和技术债务情况，给出一个简要的项目健康报告。";
-        println!("  Task: {}\n", task);
-        match agent.execute(task).await {
-            Ok(result) => {
-                println!("  Result:");
-                for line in result.lines() {
-                    println!("  │ {}", line);
-                }
-            }
-            Err(e) => println!("  Error: {}", e),
-        }
-    } else {
-        println!(
-            "\n  [skip] LLM not configured (set OPENAI_API_KEY / DEEPSEEK_API_KEY / QWEN_API_KEY)"
-        );
-        println!("  In a real session the LLM would:");
-        println!("    1. See the compact skill catalog in the system prompt");
-        println!("    2. Call activate_skill(\"project-stats\") for the analysis task");
-        println!("    3. Receive full instructions listing scripts/count_lines.py, etc.");
-        println!(
-            "    4. Call run_skill_script(\"project-stats\", \"scripts/count_lines.py\", \".\")"
-        );
-        println!(
-            "    5. Call run_skill_script(\"project-stats\", \"scripts/find_todos.sh\", \".\")"
-        );
-        println!("    6. Optionally run dep_summary.ts and read references/metrics_guide.md");
-        println!("    7. Synthesize all outputs into a project health report");
-    }
-
     Ok(())
 }
 
@@ -656,8 +626,137 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
     Ok(())
 }
 
-fn has_llm_config() -> bool {
-    std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
-        || std::env::var("QWEN_API_KEY").is_ok()
+// ── Part 7: XiaoHongShu Image Generator ──────────────────────────────────────
+
+/// Demonstrates activating and executing the xiaohongshu-image-generator skill.
+/// Shows: skill discovery → activation → script execution → output verification.
+async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
+    println!("{}", "─".repeat(59));
+    println!("Part 7: XiaoHongShu Image Generator Skill\n");
+
+    let skill_dir = std::path::Path::new("skills/redbook-image-generator-1.0.0");
+    if !skill_dir.exists() {
+        println!("  [skip] redbook-image-generator skill not found");
+        return Ok(());
+    }
+
+    // 7a: Discover & activate
+    println!("  7a. Skill Discovery & Activation");
+    println!("  ──────────────────────────────────");
+    {
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_from_dir("skills").await?;
+
+        let xhs = descriptors
+            .iter()
+            .find(|d| d.name == "xiaohongshu-image-generator");
+
+        match xhs {
+            Some(desc) => {
+                println!("    Name:        {}", desc.name);
+                println!("    Description: {}", desc.description);
+
+                let mut registry = SkillRegistry::new();
+                for desc in descriptors {
+                    registry.register_descriptor(desc);
+                }
+
+                let content = registry.activate("xiaohongshu-image-generator").await?;
+                println!("\n    Instructions ({} chars):", content.instructions.len());
+                for line in content.instructions.lines() {
+                    println!("    │ {}", line);
+                }
+
+                println!("\n    Bundled resources ({}):", content.resources.len());
+                for res in &content.resources {
+                    let icon = match res.kind {
+                        echo_agent::skills::external::SkillResourceKind::Script => "⚡",
+                        echo_agent::skills::external::SkillResourceKind::Reference => "📄",
+                        _ => "📦",
+                    };
+                    println!("      {} [{}] {}", icon, res.kind, res.relative_path);
+                }
+            }
+            None => {
+                println!("    [skip] xiaohongshu-image-generator skill not found in skills/");
+                return Ok(());
+            }
+        }
+    }
+    println!();
+
+    // 7b: Generate cover image
+    println!("  7b. Generate Cover Image");
+    println!("  ─────────────────────────");
+    {
+        let script = "skills/redbook-image-generator-1.0.0/scripts/generate_cover.py";
+        let output_path = "/tmp/xhs_demo_cover.jpg";
+
+        // Check Python + PIL availability
+        let check = tokio::process::Command::new("python3")
+            .arg("-c")
+            .arg("from PIL import Image; print('ok')")
+            .output()
+            .await;
+
+        match check {
+            Ok(out) if out.status.success() => {
+                let title = "今日分享";
+                let subtitle = "打卡第100天";
+                let content = "Rust + AI = 🚀\\n技能系统真好用\\n继续加油！";
+
+                println!("    Title:   {}", title);
+                println!("    Subtitle: {}", subtitle);
+                println!("    Content: {}", content.replace("\\n", " / "));
+
+                let output = tokio::process::Command::new("python3")
+                    .arg(script)
+                    .arg(title)
+                    .arg(subtitle)
+                    .arg(content)
+                    .env("OUTPUT_PATH", output_path)
+                    .output()
+                    .await;
+
+                match output {
+                    Ok(out) if out.status.success() => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        println!("\n    {}", stdout.trim());
+
+                        // Verify image was created
+                        if std::path::Path::new(output_path).exists() {
+                            let meta = std::fs::metadata(output_path)?;
+                            println!("    Image saved: {} ({} bytes)", output_path, meta.len());
+                        }
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        println!(
+                            "    [error] exit code {:?}: {}",
+                            out.status.code(),
+                            stderr.chars().take(300).collect::<String>()
+                        );
+                    }
+                    Err(e) => println!("    [error] failed to run script: {}", e),
+                }
+            }
+            _ => {
+                println!("    [skip] Python PIL not available, using mock output:");
+                println!("    Would generate: {}x{} image", 1080, 1440);
+                println!("    Title:   今日分享");
+                println!("    Subtitle: 打卡第100天");
+                println!("    Content: Rust + AI = 🚀 / 技能系统真好用 / 继续加油！");
+                println!("    Output:  /tmp/xhs_demo_cover.jpg");
+            }
+        }
+    }
+    println!();
+
+    // 7c: Agent integration demo
+    println!("  7c. Agent Integration");
+    println!("  ──────────────────────");
+    {}
+
+    println!();
+    Ok(())
 }

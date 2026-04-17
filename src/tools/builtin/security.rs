@@ -286,7 +286,9 @@ static GLOBAL_SECURITY: OnceLock<Arc<SecurityConfig>> = OnceLock::new();
 /// 安全配置
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
+    /// 路径验证器，限制文件访问范围
     pub path_validator: PathValidator,
+    /// 资源限制（内存、CPU、并发等）
     pub limits: ResourceLimits,
 }
 

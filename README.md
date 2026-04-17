@@ -248,6 +248,24 @@ echo-agent/
 Create `echo-agent.yaml` in your project root:
 
 ```yaml
+# Provider / model registry (used by ProviderFactory and config-backed clients)
+models:
+  qwen3-max:
+    provider: dashscope
+    api_key: ${DASHSCOPE_API_KEY}
+
+  deepseek-chat:
+    provider: deepseek
+    api_key: ${DEEPSEEK_API_KEY}
+
+# Embedding config (used by semantic memory / vector search demos)
+embedding:
+  base_url: https://api.openai.com
+  api_key: ${OPENAI_API_KEY}
+  model: text-embedding-3-small
+  timeout_secs: 30
+
+# Runtime app config (used by examples such as IM channels)
 model:
   name: qwen3-max
   max_tokens: 4096
@@ -260,6 +278,21 @@ agent:
   enable_tools: true
   enable_memory: true
 
+channels:
+  qq:
+    enabled: false
+    app_id: ${QQ_APP_ID}
+    client_secret: ${QQ_CLIENT_SECRET}
+  feishu:
+    enabled: false
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+    mode: long_poll
+  session:
+    timeout_minutes: 60
+    reset_keywords: ["重置对话", "新对话", "清除记忆"]
+    reset_commands: ["/reset", "/clear", "/new"]
+
 mcp:
   config_path: ./mcp.json
 
@@ -271,12 +304,23 @@ logging:
   level: info
 ```
 
-Set API keys via environment variables:
+Notes:
+
+- `models:` is the registry used by `ProviderFactory`, `LlmConfig::from_model()`, and config-backed LLM clients.
+- `embedding:` is used by semantic memory / vector search examples.
+- `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` are the framework runtime settings loaded by `echo_agent::config`.
+
+Set secrets via environment variables:
 
 ```bash
 export DASHSCOPE_API_KEY=sk-xxx      # Alibaba Qwen
+export DEEPSEEK_API_KEY=sk-xxx       # DeepSeek
 export OPENAI_API_KEY=sk-xxx         # OpenAI
 export ANTHROPIC_API_KEY=sk-ant-xxx  # Anthropic
+export QQ_APP_ID=your-qq-app-id
+export QQ_CLIENT_SECRET=your-qq-client-secret
+export FEISHU_APP_ID=your-feishu-app-id
+export FEISHU_APP_SECRET=your-feishu-app-secret
 ```
 
 ---

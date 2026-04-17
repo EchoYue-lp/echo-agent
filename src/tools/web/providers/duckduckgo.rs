@@ -24,6 +24,7 @@ pub struct DuckDuckGoProvider {
 }
 
 impl DuckDuckGoProvider {
+    /// Create a new DuckDuckGo provider instance.
     pub fn new() -> Self {
         let client = Client::builder()
             .user_agent(

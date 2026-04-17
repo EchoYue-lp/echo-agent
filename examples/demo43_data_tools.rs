@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
 3. 给出清晰的结果或建议"#;
 
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3.5-plus")
+        .model("qwen3-max")
         .name("data-agent")
         .system_prompt(system_prompt)
         .enable_tools()

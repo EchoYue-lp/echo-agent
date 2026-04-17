@@ -1,4 +1,4 @@
-# echo-agent 模型配置文件
+# echo-agent 完整示例配置
 #
 # 使用方式（按优先级查找）：
 #   1. 设置环境变量 ECHO_AGENT_CONFIG 指向此文件
@@ -8,25 +8,29 @@
 # 语法说明：
 #   - ${VAR_NAME} 会被解析为对应的环境变量值
 #   - provider 字段可替代 base_url，自动填充已知厂商的默认地址
-#   - model 字段可选，默认使用配置的 key 名称
+#   - models.*.model 字段可选，默认使用配置的 key 名称
 #   - 支持的 provider: openai, anthropic, deepseek, dashscope/qwen/aliyun,
 #                       moonshot/kimi, zhipu/glm, ollama
+#   - 本文件同时包含两类配置：
+#       1) `models` / `embedding`：供 ProviderFactory、语义检索等使用
+#       2) `model` / `agent` / `channels` / `mcp` / `server` / `logging`：
+#          供 `echo_agent::config` 运行时配置使用
 
 models:
   # ── 阿里云百炼（DashScope）──────────────────────────────────────────────
   qwen3-max:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
-    api_key: sk-c93346fdb1c84ab5ab3b416681a512a5
+    api_key: ${DASHSCOPE_API_KEY}
 
   # 使用 provider 快捷方式（等效于上面手动填 base_url）
   qwen3-plus:
-     provider: dashscope
-     api_key: sk-c93346fdb1c84ab5ab3b416681a512a5
+    provider: dashscope
+    api_key: ${DASHSCOPE_API_KEY}
 
   # ── DeepSeek ────────────────────────────────────────────────────────────
   deepseek-chat:
     provider: deepseek
-    api_key: sk-ca71ed0e3c214bb199212bf96b9d76ff
+    api_key: ${DEEPSEEK_API_KEY}
 
   # deepseek-reasoner:
   #   provider: deepseek
@@ -66,3 +70,65 @@ models:
   #   base_url: https://my-proxy.example.com/v1/chat/completions
   #   api_key: ${MY_API_KEY}
   #   model: gpt-4o          # 实际发送给 API 的模型名（默认使用 key）
+
+# ── Embedding（供语义检索 / 向量记忆使用）────────────────────────────────────
+embedding:
+  # 二选一：
+  # 1) 完整 embeddings 端点
+  # endpoint_url: https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
+  # 2) 仅 base URL（会自动追加 /v1/embeddings）
+  base_url: https://api.openai.com
+  api_key: ${OPENAI_API_KEY}
+  model: text-embedding-3-small
+  timeout_secs: 30
+
+# ── Runtime 配置（供 echo_agent::config 使用）───────────────────────────────
+model:
+  name: qwen3-max
+  max_tokens: 4096
+  temperature: 0.7
+
+agent:
+  name: echo-assistant
+  system_prompt: "你是一个智能助手，可以帮助用户回答问题、执行任务。"
+  max_iterations: 10
+  enable_tools: true
+  enable_memory: true
+  enable_human_in_loop: true
+  memory_path: ~/.echo-agent/memory
+
+channels:
+  # QQ Bot 通道
+  qq:
+    enabled: false
+    app_id: ${QQ_APP_ID}
+    client_secret: ${QQ_CLIENT_SECRET}
+
+  # 飞书通道
+  feishu:
+    enabled: false
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+    mode: long_poll   # long_poll | webhook
+
+  # IM 会话配置
+  session:
+    timeout_minutes: 60
+    reset_keywords:
+      - 重置对话
+      - 新对话
+      - 清除记忆
+    reset_commands:
+      - /reset
+      - /clear
+      - /new
+
+mcp:
+  config_path: ./mcp.json
+
+server:
+  host: 0.0.0.0
+  port: 3000
+
+logging:
+  level: info

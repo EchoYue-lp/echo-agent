@@ -1,0 +1,42 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check workspace
+        run: cargo check --workspace
+
+      - name: Cargo check workspace all targets
+        run: cargo check --workspace --all-targets
+
+      - name: Compile tests without running
+        run: cargo test --workspace --no-run
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Cargo fmt check
+        run: cargo fmt --check
+
+      - name: Cargo clippy workspace
+        run: cargo clippy --workspace --all-targets

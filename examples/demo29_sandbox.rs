@@ -244,13 +244,19 @@ async fn demo_manager() -> echo_agent::error::Result<()> {
         Err(e) => println!("  脚本命令 'python3': → 执行失败: {e}"),
     }
 
-    // 危险命令 → 升级到容器（或降级到本地）
+    // 危险命令 → 优先升级到容器；若当前机器无可用 executor，则仅展示错误
     let cmd = SandboxCommand::shell("curl --version 2>/dev/null || echo 'curl not available'");
-    let result = manager.execute(cmd).await?;
-    println!(
-        "  危险命令 'curl': → {} (exit={})",
-        result.sandbox_type, result.exit_code
-    );
+    match manager.execute(cmd).await {
+        Ok(result) => {
+            println!(
+                "  危险命令 'curl': → {} (exit={})",
+                result.sandbox_type, result.exit_code
+            );
+        }
+        Err(e) => {
+            println!("  危险命令 'curl': → 无可用沙箱接管 ({e})");
+        }
+    }
 
     println!();
     Ok(())
@@ -298,11 +304,17 @@ async fn demo_resource_limits() -> echo_agent::error::Result<()> {
         cpu_time_secs: Some(5),
         ..ResourceLimits::strict()
     };
-    let result = manager.execute_with_limits(cmd, limits).await?;
     println!("  限制资源执行:");
-    println!("    exit_code: {}", result.exit_code);
-    println!("    stdout: {}", result.stdout.trim());
-    println!("    耗时: {:?}", result.duration);
+    match manager.execute_with_limits(cmd, limits).await {
+        Ok(result) => {
+            println!("    exit_code: {}", result.exit_code);
+            println!("    stdout: {}", result.stdout.trim());
+            println!("    耗时: {:?}", result.duration);
+        }
+        Err(e) => {
+            println!("    跳过：当前环境无可用沙箱满足资源限制 ({e})");
+        }
+    }
 
     println!();
     Ok(())

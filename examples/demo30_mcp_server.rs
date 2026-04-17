@@ -82,7 +82,7 @@ impl Tool for CalculatorTool {
                 "-" => a - b,
                 "*" => a * b,
                 "/" if b != 0.0 => a / b,
-                "/" => return Ok(ToolResult::error("Division by zero".into())),
+                "/" => return Ok(ToolResult::error("Division by zero")),
                 _ => return Ok(ToolResult::error(format!("Unknown operator: {op}"))),
             };
             Ok(ToolResult::success(format!("{result}")))

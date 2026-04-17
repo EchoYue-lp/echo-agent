@@ -137,15 +137,6 @@ async fn main() -> Result<()> {
 
     print_banner();
 
-    if !has_llm_config() {
-        println!("⚠️  未检测到 LLM API 密钥\n");
-        println!("请设置环境变量：");
-        println!("  - QWEN_API_KEY");
-        println!("  - OPENAI_API_KEY");
-        println!("  - DEEPSEEK_API_KEY\n");
-        return Ok(());
-    }
-
     // ── Part 1: 沙箱执行系统 ───────────────────────────────────────────────────
     demo_sandbox_execution().await?;
 
@@ -487,10 +478,4 @@ fn print_banner() {
     println!("║  • 沙箱执行 • 重试策略 • 护栏系统 • 审计日志                  ║");
     println!("║  • 自定义工具 • 流式输出                                       ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }

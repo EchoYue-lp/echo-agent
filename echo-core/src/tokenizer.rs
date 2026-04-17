@@ -15,6 +15,7 @@
 
 /// Token 计数器抽象
 pub trait Tokenizer: Send + Sync {
+    /// Estimate how many model tokens the input text will consume.
     fn count_tokens(&self, text: &str) -> usize;
 }
 
@@ -24,19 +25,28 @@ impl Tokenizer for Box<dyn Tokenizer> {
     }
 }
 
-/// 改进的启发式 Tokenizer，区分 ASCII 与 CJK 字符
+/// 启发式 Tokenizer，使用字符权重估算 token 数量。
 ///
-/// - ASCII 字符权重 1（约 4 字符 ≈ 1 token）
-/// - CJK 及其他非 ASCII 字符权重 2（约 1-2 字符 ≈ 1 token）
+/// **注意：这是一个粗略估算器，不是精确的 token 计数器。**
+///
+/// 估算规则：
+/// - ASCII 字符权重 1（约 4 字符 = 1 token）
+/// - CJK 及其他非 ASCII 字符权重 2（约 1-2 字符 = 1 token）
 /// - 总权重 / 4 得到估算 token 数
+/// - 空字符串返回 0
 ///
-/// 相比 `字节数 / 4`，对中日韩内容的精度提升约 40-60%。
+/// 相比 `字节数 / 4`，对中日韩内容的精度提升约 40-60%，
+/// 但仍不应用于需要精确 token 计数的场景（如配额管理、计费等）。
+/// 对于精确计数，请使用 tiktoken 或模型原生 tokenizer。
 pub struct HeuristicTokenizer;
 
 impl Tokenizer for HeuristicTokenizer {
     fn count_tokens(&self, text: &str) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
         let weight: usize = text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-        (weight / 4).max(1)
+        weight / 4
     }
 }
 
@@ -77,7 +87,7 @@ mod tests {
     #[test]
     fn test_heuristic_empty() {
         let t = HeuristicTokenizer;
-        assert_eq!(t.count_tokens(""), 1); // min 1
+        assert_eq!(t.count_tokens(""), 0); // empty string returns 0
     }
 
     #[test]
