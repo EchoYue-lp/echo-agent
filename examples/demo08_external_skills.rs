@@ -458,37 +458,6 @@ async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
     println!("    Activated skill instructions are protected from");
     println!("    compression — they survive context compaction.");
 
-    if has_llm_config() {
-        println!("\n  Executing task with progressive disclosure...\n");
-        let task = "分析一下当前项目的代码量和技术债务情况，给出一个简要的项目健康报告。";
-        println!("  Task: {}\n", task);
-        match agent.execute(task).await {
-            Ok(result) => {
-                println!("  Result:");
-                for line in result.lines() {
-                    println!("  │ {}", line);
-                }
-            }
-            Err(e) => println!("  Error: {}", e),
-        }
-    } else {
-        println!(
-            "\n  [skip] LLM not configured (set OPENAI_API_KEY / DEEPSEEK_API_KEY / QWEN_API_KEY)"
-        );
-        println!("  In a real session the LLM would:");
-        println!("    1. See the compact skill catalog in the system prompt");
-        println!("    2. Call activate_skill(\"project-stats\") for the analysis task");
-        println!("    3. Receive full instructions listing scripts/count_lines.py, etc.");
-        println!(
-            "    4. Call run_skill_script(\"project-stats\", \"scripts/count_lines.py\", \".\")"
-        );
-        println!(
-            "    5. Call run_skill_script(\"project-stats\", \"scripts/find_todos.sh\", \".\")"
-        );
-        println!("    6. Optionally run dep_summary.ts and read references/metrics_guide.md");
-        println!("    7. Synthesize all outputs into a project health report");
-    }
-
     Ok(())
 }
 
@@ -786,53 +755,8 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
     // 7c: Agent integration demo
     println!("  7c. Agent Integration");
     println!("  ──────────────────────");
-    {
-        if has_llm_config() {
-            let mut agent = ReactAgentBuilder::new()
-                .model("qwen3-max")
-                .name("xhs-demo-agent")
-                .system_prompt("你是一个小红书内容创作助手，能根据主题生成配图。")
-                .enable_tools()
-                .build()?;
-
-            let skills_dir = std::path::Path::new("skills");
-            let discovered = agent
-                .discover_skills(&[DiscoveryScope::Custom(skills_dir.into())])
-                .await?;
-
-            println!("    Discovered skills: {:?}", discovered);
-
-            let task = "帮我生成一张小红书配图，主题是「AI编程效率提升」，副标题是「用Rust构建Agent」，内容是：AI让编程更高效、技能系统按需加载、Progressive Disclosure设计模式";
-            println!("    Task: {}\n", task);
-
-            match agent.execute(task).await {
-                Ok(result) => {
-                    println!("    Result:");
-                    for line in result.lines() {
-                        println!("    │ {}", line);
-                    }
-                }
-                Err(e) => println!("    Error: {}", e),
-            }
-        } else {
-            println!("    [skip] LLM not configured");
-            println!("    In a real session the LLM would:");
-            println!("      1. See 'xiaohongshu-image-generator' in the skill catalog");
-            println!("      2. Call activate_skill(\"xiaohongshu-image-generator\")");
-            println!("      3. Receive full instructions with script usage");
-            println!("      4. Call run_skill_script(\"xiaohongshu-image-generator\", \\");
-            println!("           \"scripts/generate_cover.py\", \"AI编程效率提升\" \\");
-            println!("           \"用Rust构建Agent\" \"AI让编程更高效\\\\n技能系统按需加载\")");
-            println!("      5. Return the generated image path to the user");
-        }
-    }
+    {}
 
     println!();
     Ok(())
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
-        || std::env::var("QWEN_API_KEY").is_ok()
 }

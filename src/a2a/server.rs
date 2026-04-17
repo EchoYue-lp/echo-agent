@@ -40,6 +40,7 @@ pub struct A2AServer {
 }
 
 impl A2AServer {
+    /// Create a new A2A server instance.
     pub fn new(card: AgentCard, agent: impl Agent + 'static) -> Self {
         Self {
             card,
@@ -49,6 +50,7 @@ impl A2AServer {
         }
     }
 
+    /// Create an A2A server instance from a boxed agent.
     pub fn from_boxed(card: AgentCard, agent: Box<dyn Agent>) -> Self {
         Self {
             card,

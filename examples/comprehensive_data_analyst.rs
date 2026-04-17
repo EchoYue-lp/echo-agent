@@ -26,6 +26,7 @@ use echo_agent::workflow::{GraphBuilder, SharedState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 结构化输出类型
@@ -74,14 +75,6 @@ async fn main() -> Result<()> {
 
     print_banner();
 
-    if !has_llm_config() {
-        println!("⚠️  未检测到 LLM API 密钥\n");
-        println!("请设置环境变量：");
-        println!("  - QWEN_API_KEY");
-        println!("  - EMBEDDING_APIKEY (可选，用于语义搜索)\n");
-        return Ok(());
-    }
-
     println!("📊 正在初始化智能数据分析助手...\n");
 
     // ── Part 1: 语义搜索存储 ─────────────────────────────────────────────────────
@@ -115,17 +108,11 @@ async fn demo_semantic_storage() -> Result<()> {
     println!("Part 1: 语义搜索存储");
     println!("═══════════════════════════════════════════════════════\n");
 
-    // 检查是否设置了 Embedding API key
-    let has_embedding_key =
-        std::env::var("EMBEDDING_APIKEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok();
-
-    if !has_embedding_key {
-        println!("  [跳过] 未设置 EMBEDDING_APIKEY 或 OPENAI_API_KEY，跳过语义搜索演示\n");
+    let Some(embedder) = load_embedder_from_config() else {
+        println!("  [跳过] 未检测到 embedding 配置，跳过语义搜索演示");
+        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量\n");
         return Ok(());
-    }
-
-    // 初始化 Embedder
-    let embedder: Arc<dyn echo_agent::memory::Embedder> = Arc::new(HttpEmbedder::from_env());
+    };
 
     let db_path = std::env::temp_dir().join("echo_agent_data_analyst.db");
     let sqlite_store = Arc::new(SqliteStore::with_embedder(&db_path, embedder.clone())?);
@@ -528,8 +515,9 @@ fn print_banner() {
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 }
 
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
+fn load_embedder_from_config() -> Option<Arc<dyn echo_agent::memory::Embedder>> {
+    let cfg = echo_agent::llm::config::Config::get_embedding().ok()?;
+    let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
+        .with_timeout(Duration::from_secs(cfg.timeout_secs));
+    Some(Arc::new(embedder))
 }

@@ -30,11 +30,17 @@ pub struct SubagentHookContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubagentRetryDecision {
     /// Retry the dispatch after a delay.
-    Retry { delay_secs: u64 },
+    Retry {
+        /// Delay in seconds before retrying.
+        delay_secs: u64,
+    },
     /// Fail and propagate the error.
     Fail,
     /// Delegate to an alternative subagent.
-    Delegate { alternative_agent: String },
+    Delegate {
+        /// Name of the alternative subagent to delegate to.
+        alternative_agent: String,
+    },
 }
 
 // ── Subagent Hooks Trait ──────────────────────────────────────────────────────
@@ -128,26 +134,41 @@ pub struct SubagentHookRegistry {
 }
 
 impl SubagentHookRegistry {
+    /// Create an empty hook registry.
     pub fn new() -> Self {
         Self { hooks: Vec::new() }
     }
 
+    /// Create a hook registry pre-configured with logging hooks.
     pub fn with_logging() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(LoggingSubagentHooks));
         registry
     }
 
+    /// Register a hook implementation.
+    ///
+    /// # 参数
+    /// * `hook` - Hook implementation to add.
     pub fn register(&mut self, hook: Arc<dyn SubagentHooks>) {
         self.hooks.push(hook);
     }
 
+    /// Call `before_dispatch` on all registered hooks.
+    ///
+    /// # 参数
+    /// * `ctx` - Hook context.
     pub async fn before_dispatch(&self, ctx: &SubagentHookContext) {
         for hook in &self.hooks {
             hook.before_dispatch(ctx).await;
         }
     }
 
+    /// Call `after_dispatch` on all registered hooks.
+    ///
+    /// # 参数
+    /// * `ctx` - Hook context.
+    /// * `result` - Subagent execution result.
     pub async fn after_dispatch(&self, ctx: &SubagentHookContext, result: &SubagentResult) {
         for hook in &self.hooks {
             hook.after_dispatch(ctx, result).await;
@@ -169,16 +190,22 @@ impl SubagentHookRegistry {
         SubagentRetryDecision::Fail
     }
 
+    /// Call `on_cancelled` on all registered hooks.
+    ///
+    /// # 参数
+    /// * `ctx` - Hook context.
     pub async fn on_cancelled(&self, ctx: &SubagentHookContext) {
         for hook in &self.hooks {
             hook.on_cancelled(ctx).await;
         }
     }
 
+    /// Check if the registry contains any hooks.
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
     }
 
+    /// Get the number of registered hooks.
     pub fn len(&self) -> usize {
         self.hooks.len()
     }

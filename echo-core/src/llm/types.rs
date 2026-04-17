@@ -10,14 +10,24 @@ use serde::{Deserialize, Serialize};
 /// 对应 OpenAI Vision / Anthropic 多模态 API 的 content parts 格式。
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(missing_docs)]
 pub enum ContentPart {
     /// 纯文本
-    Text { text: String },
+    Text {
+        /// 文本内容
+        text: String,
+    },
     /// 图片（Base64 编码或 URL）
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl {
+        /// 图片 URL 或 Base64 数据
+        image_url: ImageUrl,
+    },
     /// 文件附件（内联 Base64）
-    File { name: String, content: String },
+    File {
+        /// 文件名
+        name: String,
+        /// 文件内容（Base64 编码）
+        content: String,
+    },
 }
 
 /// 图片 URL 或 Base64 数据
@@ -221,8 +231,8 @@ impl<'de> Deserialize<'de> for Message {
     }
 }
 
-#[allow(missing_docs)]
 impl Message {
+    /// 创建系统消息
     pub fn system(content: String) -> Self {
         Self {
             role: "system".to_string(),
@@ -233,6 +243,7 @@ impl Message {
         }
     }
 
+    /// 创建用户消息
     pub fn user(content: String) -> Self {
         Self {
             role: "user".to_string(),
@@ -296,6 +307,7 @@ impl Message {
         ])
     }
 
+    /// 创建助手消息
     pub fn assistant(content: String) -> Self {
         Self {
             role: "assistant".to_string(),
@@ -306,6 +318,7 @@ impl Message {
         }
     }
 
+    /// 创建包含工具调用的助手消息
     pub fn assistant_with_tools(tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: "assistant".to_string(),
@@ -316,6 +329,7 @@ impl Message {
         }
     }
 
+    /// 创建工具结果消息
     pub fn tool_result(tool_call_id: String, name: String, content: String) -> Self {
         Self {
             role: "tool".to_string(),
@@ -346,28 +360,33 @@ impl Message {
 
 /// LLM 发起的单次工具调用
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct ToolCall {
+    /// 工具调用的唯一标识符
     pub id: String,
+    /// 工具调用类型，通常为 "function"
     #[serde(rename = "type")]
     pub call_type: String,
+    /// 函数调用详情
     pub function: FunctionCall,
 }
 
 /// 工具调用的函数信息
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct FunctionCall {
+    /// 函数名称
     pub name: String,
+    /// 函数参数（JSON 字符串）
     pub arguments: String,
 }
 
 /// 结构化输出的 JSON Schema 规格
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct JsonSchemaSpec {
+    /// JSON Schema 名称
     pub name: String,
+    /// JSON Schema 定义
     pub schema: serde_json::Value,
+    /// 是否严格验证（默认 true）
     #[serde(default = "default_true")]
     pub strict: bool,
 }
@@ -379,15 +398,20 @@ fn default_true() -> bool {
 /// 响应格式控制
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(missing_docs)]
 pub enum ResponseFormat {
+    /// 纯文本响应
     Text,
+    /// JSON 对象响应
     JsonObject,
-    JsonSchema { json_schema: JsonSchemaSpec },
+    /// 符合 JSON Schema 的响应
+    JsonSchema {
+        /// JSON Schema 规格
+        json_schema: JsonSchemaSpec,
+    },
 }
 
-#[allow(missing_docs)]
 impl ResponseFormat {
+    /// 创建 JSON Schema 响应格式
     pub fn json_schema(name: impl Into<String>, schema: serde_json::Value) -> Self {
         Self::JsonSchema {
             json_schema: JsonSchemaSpec {
@@ -398,6 +422,7 @@ impl ResponseFormat {
         }
     }
 
+    /// 检查是否为 JSON 响应格式
     pub fn is_json(&self) -> bool {
         matches!(self, Self::JsonObject | Self::JsonSchema { .. })
     }
@@ -405,44 +430,54 @@ impl ResponseFormat {
 
 /// OpenAI `/chat/completions` 请求体
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct ChatCompletionRequest {
+    /// 模型名称
     pub model: String,
+    /// 对话消息列表
     pub messages: Vec<Message>,
+    /// 可选工具定义列表
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
+    /// 工具调用策略（如 "auto", "none", 或具体工具名）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<String>,
+    /// 采样温度（0.0-2.0）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// 最大生成 token 数
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// 是否启用流式响应
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// 响应格式控制
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
 }
 
 /// 发送给 LLM 的工具定义
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct ToolDefinition {
+    /// 工具类型，通常为 "function"
     #[serde(rename = "type")]
     pub tool_type: String,
+    /// 函数规格
     pub function: FunctionSpec,
 }
 
 /// 工具的函数声明
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct FunctionSpec {
+    /// 函数名称
     pub name: String,
+    /// 函数描述
     pub description: String,
+    /// 函数参数 JSON Schema
     pub parameters: serde_json::Value,
 }
 
-#[allow(missing_docs)]
 impl ToolDefinition {
+    /// 从 Tool trait 对象创建工具定义
     pub fn from_tool(tool: &dyn Tool) -> Self {
         Self {
             tool_type: "function".to_string(),
@@ -455,41 +490,52 @@ impl ToolDefinition {
     }
 }
 
+/// OpenAI 聊天补全响应
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-#[allow(missing_docs)]
 pub struct ChatCompletionResponse {
+    /// 响应 ID
     #[serde(default)]
     pub id: String,
+    /// 候选响应列表
     #[serde(default)]
     pub choices: Vec<Choice>,
+    /// 创建时间戳（秒）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<u64>,
+    /// 模型名称
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Token 使用统计
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Extra fields from the response that are not explicitly modeled.
+    /// 响应中的额外字段（未显式建模）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
 }
 
+/// 候选响应
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct Choice {
+    /// 消息内容
     pub message: Message,
+    /// 结束原因（如 "stop", "length", "tool_calls" 等）
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// 候选索引
     #[serde(default)]
     pub index: Option<u32>,
 }
 
+/// Token 使用统计
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct Usage {
+    /// 提示 token 数
     #[serde(default)]
     pub prompt_tokens: Option<u32>,
+    /// 补全 token 数
     #[serde(default)]
     pub completion_tokens: Option<u32>,
+    /// 总 token 数
     #[serde(default)]
     pub total_tokens: Option<u32>,
 }
@@ -498,55 +544,65 @@ pub struct Usage {
 
 /// SSE 流式响应的单个 chunk
 #[derive(Debug, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct ChatCompletionChunk {
+    /// 响应 ID
     #[serde(default)]
     pub id: String,
+    /// 候选响应列表
     #[serde(default)]
     pub choices: Vec<ChunkChoice>,
 }
 
+/// 流式候选响应
 #[derive(Debug, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct ChunkChoice {
+    /// 增量消息内容
     pub delta: DeltaMessage,
+    /// 结束原因
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// 候选索引
     #[serde(default)]
     pub index: u32,
 }
 
 /// 流式响应中的增量消息体
 #[derive(Debug, Deserialize, Clone, Default)]
-#[allow(missing_docs)]
 pub struct DeltaMessage {
+    /// 角色（首次出现时）
     #[serde(default)]
     pub role: Option<String>,
+    /// 内容增量
     #[serde(default)]
     pub content: Option<String>,
+    /// 工具调用增量
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
 }
 
 /// 流式工具调用的增量片段
 #[derive(Debug, Deserialize, Clone)]
-#[allow(missing_docs)]
 pub struct DeltaToolCall {
+    /// 工具调用索引
     pub index: u32,
+    /// 工具调用 ID（逐步出现）
     #[serde(default)]
     pub id: Option<String>,
+    /// 工具调用类型（逐步出现）
     #[serde(rename = "type", default)]
     pub call_type: Option<String>,
+    /// 函数调用增量
     #[serde(default)]
     pub function: Option<DeltaFunctionCall>,
 }
 
 /// 流式函数调用的增量片段
 #[derive(Debug, Deserialize, Clone, Default)]
-#[allow(missing_docs)]
 pub struct DeltaFunctionCall {
+    /// 函数名称（逐步出现）
     #[serde(default)]
     pub name: Option<String>,
+    /// 函数参数（逐步出现）
     #[serde(default)]
     pub arguments: Option<String>,
 }

@@ -38,6 +38,10 @@ pub struct LlmPlanner {
 }
 
 impl LlmPlanner {
+    /// 创建基于 LLM 的规划器
+    ///
+    /// # 参数
+    /// * `model` - 用于规划任务的 LLM 模型标识符
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
@@ -282,6 +286,10 @@ pub struct StaticPlanner {
 }
 
 impl StaticPlanner {
+    /// 创建静态规划器，使用预定义的步骤列表
+    ///
+    /// # 参数
+    /// * `steps` - 预定义步骤列表（字符串或可转换为字符串的类型）
     pub fn new(steps: Vec<impl Into<String>>) -> Self {
         Self {
             steps: steps.into_iter().map(|s| s.into()).collect(),

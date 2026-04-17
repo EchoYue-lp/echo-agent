@@ -2,8 +2,6 @@
 //!
 //! 所有公共 API 返回 [`Result<T>`]，底层错误通过 `From` 自动转换为 [`ReactError`]。
 
-#![allow(missing_docs)]
-
 use std::fmt;
 use std::io;
 
@@ -37,9 +35,13 @@ pub enum ReactError {
 /// 记忆系统错误
 #[derive(Debug)]
 pub enum MemoryError {
+    /// I/O 错误
     IoError(String),
+    /// 序列化错误
     SerializationError(String),
+    /// 记忆未找到
     NotFound(String),
+    /// 不支持的操作
     Unsupported(String),
 }
 
@@ -52,40 +54,65 @@ impl From<io::Error> for MemoryError {
 /// LLM 相关错误
 #[derive(Debug)]
 pub enum LlmError {
+    /// 网络错误
     NetworkError(String),
-    ApiError { status: u16, message: String },
+    /// API 错误（状态码和消息）
+    ApiError {
+        /// HTTP 状态码
+        status: u16,
+        /// 错误消息
+        message: String,
+    },
+    /// 无效响应
     InvalidResponse(String),
+    /// 空响应
     EmptyResponse,
+    /// 序列化错误
     SerializationError(String),
 }
 
 /// 工具执行错误
 #[derive(Debug)]
 pub enum ToolError {
+    /// 工具未找到
     NotFound(String),
+    /// 缺少参数
     MissingParameter(String),
+    /// 无效参数
     InvalidParameter {
+        /// 参数名称
         name: String,
+        /// 错误消息
         message: String,
     },
+    /// 工具执行失败
     ExecutionFailed {
+        /// 工具名称
         tool: String,
+        /// 错误消息
         message: String,
     },
+    /// 执行超时
     Timeout(String),
     /// 无效路径（路径遍历攻击检测）
     InvalidPath {
+        /// 被拒绝的路径
         path: String,
+        /// 拒绝原因
         reason: String,
     },
     /// 访问被拒绝（不在允许目录范围内）
     AccessDenied {
+        /// 被拒绝的路径
         path: String,
+        /// 拒绝原因
         reason: String,
     },
     /// 文件过大
     FileTooLarge {
+        /// 文件大小（字节）
         size: u64,
+        /// 允许的最大文件大小（字节）
         max: u64,
     },
 }
@@ -93,21 +120,32 @@ pub enum ToolError {
 /// 解析错误
 #[derive(Debug)]
 pub enum ParseError {
+    /// 无效的 Thought 格式
     InvalidThought(String),
+    /// 无效的 Action 格式
     InvalidAction(String),
+    /// 无效的 Action 输入
     InvalidActionInput(String),
+    /// JSON 解析错误
     JsonError(serde_json::Error),
+    /// 意外的格式
     UnexpectedFormat(String),
 }
 
 /// Agent 执行错误
 #[derive(Debug)]
 pub enum AgentError {
+    /// 超过最大迭代次数
     MaxIterationsExceeded(usize),
+    /// 无可用工具
     NoToolsAvailable,
+    /// 初始化失败
     InitializationFailed(String),
+    /// 执行被中断
     Interrupted,
+    /// LLM 无响应
     NoResponse,
+    /// Token 数量超限
     TokenLimitExceeded,
     /// 权限被拒绝
     PermissionDenied(String),
@@ -124,10 +162,15 @@ pub enum AgentError {
 /// MCP 相关错误
 #[derive(Debug)]
 pub enum McpError {
+    /// 连接失败
     ConnectionFailed(String),
+    /// 初始化失败
     InitializationFailed(String),
+    /// 协议错误
     ProtocolError(String),
+    /// 工具调用失败
     ToolCallFailed(String),
+    /// 传输通道关闭
     TransportClosed,
 }
 
@@ -151,23 +194,41 @@ pub enum SandboxError {
 /// Channel / IM 集成错误
 #[derive(Debug)]
 pub enum ChannelError {
+    /// 网络错误
     NetworkError(String),
-    ApiError { status: u16, message: String },
+    /// API 错误（状态码和消息）
+    ApiError {
+        /// HTTP 状态码
+        status: u16,
+        /// 错误消息
+        message: String,
+    },
+    /// 认证错误
     AuthError(String),
+    /// 连接错误
     ConnectionError(String),
+    /// 发送错误
     SendError(String),
+    /// 无效配置
     InvalidConfig(String),
+    /// 其他错误
     Other(String),
 }
 
 /// 配置错误
 #[derive(Debug)]
 pub enum ConfigError {
+    /// 环境变量解析错误
     EnvParseError(String),
+    /// 缺少配置项
     MissingConfig(String, String),
+    /// 环境变量格式错误
     EnvFormatError(String),
+    /// 配置不匹配
     UnMatchConfigError(String, String),
+    /// 未找到模型配置
     NotFindModelError(String),
+    /// 配置文件错误
     ConfigFileError(String),
 }
 

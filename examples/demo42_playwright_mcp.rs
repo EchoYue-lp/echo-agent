@@ -63,12 +63,7 @@ async fn main() -> echo_agent::error::Result<()> {
     // demo_tool_discovery(&mcp_config).await?;
 
     // Part 2: Agent 集成浏览器任务
-    if has_llm_config() {
-        demo_agent_browser_task(&mcp_config).await?;
-    } else {
-        println!("{}", "─".repeat(55));
-        println!("跳过 Part 2：未检测到 LLM API 密钥。\n");
-    }
+    demo_agent_browser_task(&mcp_config).await?;
 
     Ok(())
 }
@@ -166,9 +161,3 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
-}

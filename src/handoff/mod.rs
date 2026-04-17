@@ -63,6 +63,7 @@ pub struct HandoffTarget {
 }
 
 impl HandoffTarget {
+    /// 创建一个新的 HandoffTarget 指向指定 Agent。
     pub fn new(agent_name: impl Into<String>) -> Self {
         Self {
             agent_name: agent_name.into(),
@@ -98,6 +99,7 @@ pub struct HandoffContext {
 }
 
 impl HandoffContext {
+    /// 创建一个新的 HandoffContext（默认值）。
     pub fn new() -> Self {
         Self::default()
     }
@@ -144,6 +146,7 @@ pub struct HandoffManager {
 }
 
 impl HandoffManager {
+    /// 创建一个新的 HandoffManager 实例。
     pub fn new() -> Self {
         Self {
             agents: HashMap::new(),

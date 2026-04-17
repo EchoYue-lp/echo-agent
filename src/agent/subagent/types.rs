@@ -41,9 +41,15 @@ pub enum SubagentKind {
     #[default]
     BuiltIn,
     /// Loaded from a `.md` definition file (similar to skills).
-    Custom { path: PathBuf },
+    Custom {
+        /// Path to the definition file.
+        path: PathBuf,
+    },
     /// Loaded from a plugin or remote registry.
-    Plugin { source: String },
+    Plugin {
+        /// Source identifier (e.g., plugin name or registry URL).
+        source: String,
+    },
 }
 
 // ── Subagent Definition ───────────────────────────────────────────────────────
@@ -87,6 +93,10 @@ pub struct SubagentDefinition {
 
 impl SubagentDefinition {
     /// Create a minimal Sync-mode built-in definition.
+    ///
+    /// # 参数
+    /// * `name` - Unique name for discovery and dispatch.
+    /// * `description` - Human-readable description exposed to the LLM.
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -107,6 +117,12 @@ impl SubagentDefinition {
     }
 
     /// Convenience: a Sync-mode definition for backward-compatible registration.
+    ///
+    /// # 参数
+    /// * `name` - Unique name for discovery and dispatch.
+    ///
+    /// # 说明
+    /// 自动生成描述为 "Subagent {name}"。
     pub fn simple_sync(name: impl Into<String>) -> Self {
         let name = name.into();
         Self::new(name.clone(), format!("Subagent {}", name))
@@ -135,6 +151,12 @@ pub struct SubagentResult {
 }
 
 impl SubagentResult {
+    /// Create a result for a synchronous (blocking) subagent execution.
+    ///
+    /// # 参数
+    /// * `agent_name` - Name of the agent that produced the result.
+    /// * `output` - Final output text from the agent.
+    /// * `duration` - Execution duration.
     pub fn sync_result(agent_name: &str, output: String, duration: Duration) -> Self {
         Self {
             agent_name: agent_name.to_string(),
@@ -147,6 +169,13 @@ impl SubagentResult {
         }
     }
 
+    /// Create a result for a forked (non-blocking) subagent execution.
+    ///
+    /// # 参数
+    /// * `agent_name` - Name of the agent that produced the result.
+    /// * `output` - Final output text from the agent.
+    /// * `duration` - Execution duration.
+    /// * `iterations` - Number of iterations used by the agent.
     pub fn fork_result(
         agent_name: &str,
         output: String,
@@ -170,6 +199,7 @@ impl SubagentResult {
 /// A read-only snapshot of a registered subagent.
 #[derive(Debug, Clone)]
 pub struct RegisteredSubagent {
+    /// Subagent definition.
     pub definition: SubagentDefinition,
     /// Whether the agent instance is currently available (factory or pre-built).
     pub has_instance: bool,

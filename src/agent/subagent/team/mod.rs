@@ -92,6 +92,12 @@ pub struct Team {
 
 impl Team {
     /// Create a new team with a leader.
+    ///
+    /// # 参数
+    /// * `id` - Unique team identifier.
+    /// * `name` - Human-readable team name.
+    /// * `leader_name` - Name of the leader agent (must be added later via `add_member`).
+    /// * `config` - Team configuration.
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -110,6 +116,12 @@ impl Team {
     }
 
     /// Add a member to the team.
+    ///
+    /// # 参数
+    /// * `name` - Member name (must be unique within the team).
+    /// * `role` - Role of the member (leader, worker, reviewer).
+    /// * `agent` - Agent instance.
+    /// * `definition` - Subagent definition.
     pub fn add_member(
         &mut self,
         name: &str,
@@ -132,21 +144,39 @@ impl Team {
     }
 
     /// Get a member by name.
+    ///
+    /// # 参数
+    /// * `name` - Member name.
+    ///
+    /// # 返回
+    /// Reference to the team member if found, `None` otherwise.
     pub fn get_member(&self, name: &str) -> Option<&TeamMember> {
         self.members.get(name)
     }
 
     /// Get a member's mailbox sender (for sending messages).
+    ///
+    /// # 参数
+    /// * `name` - Member name.
+    ///
+    /// # 返回
+    /// Mailbox sender for the member if found, `None` otherwise.
     pub fn get_mailbox_sender(&self, name: &str) -> Option<mailbox::MailboxSender> {
         self.members.get(name).map(|m| m.mailbox.sender())
     }
 
     /// List all member names.
+    ///
+    /// # 返回
+    /// Vector of member names.
     pub fn member_names(&self) -> Vec<String> {
         self.members.keys().cloned().collect()
     }
 
     /// List worker names.
+    ///
+    /// # 返回
+    /// Vector of names of members with `TeamRole::Worker` role.
     pub fn worker_names(&self) -> Vec<String> {
         self.members
             .iter()
@@ -156,16 +186,25 @@ impl Team {
     }
 
     /// Number of members.
+    ///
+    /// # 返回
+    /// Count of team members.
     pub fn len(&self) -> usize {
         self.members.len()
     }
 
     /// Check if the team has no members.
+    ///
+    /// # 返回
+    /// `true` if the team has zero members.
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
 
     /// Get all members (for iteration).
+    ///
+    /// # 返回
+    /// Iterator over team member references.
     pub fn members(&self) -> impl Iterator<Item = &TeamMember> {
         self.members.values()
     }

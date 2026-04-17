@@ -195,6 +195,7 @@ impl FailingMockAgent {
         }
     }
 
+    /// 获取该 Mock Agent 被调用的次数。
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }

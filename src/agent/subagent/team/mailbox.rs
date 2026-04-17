@@ -14,21 +14,35 @@ use crate::error::{ReactError, Result};
 pub enum MessageKind {
     /// Leader assigns a task to a teammate.
     TaskAssigned {
+        /// Task description.
         task: String,
+        /// Context data for the task.
         context: HashMap<String, String>,
     },
     /// Teammate reports a task result.
     TaskResult {
+        /// Task description.
         task: String,
+        /// Result output.
         result: String,
+        /// Whether the task succeeded.
         success: bool,
     },
     /// Teammate requests clarification.
-    Query { question: String },
+    Query {
+        /// Question text.
+        question: String,
+    },
     /// Leader responds to a query.
-    QueryResponse { answer: String },
+    QueryResponse {
+        /// Answer text.
+        answer: String,
+    },
     /// Status update from teammate.
-    Status { message: String },
+    Status {
+        /// Status message.
+        message: String,
+    },
     /// Cancellation notice.
     Cancelled,
 }
@@ -47,6 +61,12 @@ pub struct MailboxMessage {
 }
 
 impl MailboxMessage {
+    /// Create a new mailbox message with current timestamp.
+    ///
+    /// # 参数
+    /// * `from` - Sender agent name.
+    /// * `to` - Recipient agent name.
+    /// * `kind` - Message kind.
     pub fn new(from: impl Into<String>, to: impl Into<String>, kind: MessageKind) -> Self {
         Self {
             from: from.into(),
@@ -129,6 +149,10 @@ pub struct MailboxSender {
 }
 
 impl MailboxSender {
+    /// Send a message through the mailbox.
+    ///
+    /// # 参数
+    /// * `msg` - Message to send.
     pub async fn send(&self, msg: MailboxMessage) -> Result<()> {
         self.tx
             .send(msg)

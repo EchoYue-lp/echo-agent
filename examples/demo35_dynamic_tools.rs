@@ -107,11 +107,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_edge_cases();
 
     // ── Part 3: 实际 Agent 使用场景 ─────────────────────────────────────────────
-    if has_llm_config() {
-        demo_agent_with_dynamic_tools().await?;
-    } else {
-        println!("[跳过 Part 3] 未配置 LLM API 密钥\n");
-    }
+    demo_agent_with_dynamic_tools().await?;
 
     println!("═══ Demo Complete ═══");
     Ok(())
@@ -317,9 +313,3 @@ async fn demo_agent_with_dynamic_tools() -> echo_agent::error::Result<()> {
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────────
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
-}

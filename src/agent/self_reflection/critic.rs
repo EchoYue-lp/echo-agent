@@ -38,6 +38,16 @@ pub struct StaticCritic {
 }
 
 impl StaticCritic {
+    /// 创建静态评估器
+    ///
+    /// # 参数
+    /// * `score` - 评估分数（范围通常为 0.0-10.0）
+    /// * `passed` - 是否通过评估
+    /// * `feedback` - 评估反馈文本
+    ///
+    /// # 说明
+    /// 静态评估器忽略任务内容和回答，始终返回相同的评估结果。
+    /// 主要用于测试或模拟特定评估场景。
     pub fn new(score: f64, passed: bool, feedback: impl Into<String>) -> Self {
         Self {
             score,
@@ -47,6 +57,13 @@ impl StaticCritic {
         }
     }
 
+    /// 设置改进建议列表
+    ///
+    /// # 参数
+    /// * `suggestions` - 改进建议字符串列表，用于指导回答优化
+    ///
+    /// # 说明
+    /// 建议会随评估结果返回，供反思阶段参考使用。
     pub fn with_suggestions(mut self, suggestions: Vec<String>) -> Self {
         self.suggestions = suggestions;
         self
@@ -96,6 +113,15 @@ pub struct ThresholdCritic<C: Critic> {
 }
 
 impl<C: Critic> ThresholdCritic<C> {
+    /// 创建阈值评估器
+    ///
+    /// # 参数
+    /// * `inner` - 内部评估器，用于实际评分和生成反馈
+    /// * `threshold` - 通过阈值，评分 ≥ threshold 时结果标记为通过
+    ///
+    /// # 说明
+    /// 阈值评估器会调用内部评估器获取评分和反馈，然后根据阈值重新计算通过状态。
+    /// 这允许对现有评估器进行阈值调整而无需修改其内部逻辑。
     pub fn new(inner: C, threshold: f64) -> Self {
         Self { inner, threshold }
     }

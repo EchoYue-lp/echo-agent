@@ -13,7 +13,6 @@ pub use tokio_util::sync::CancellationToken;
 /// 覆盖 Agent 生命周期的各个阶段，便于实现进度条、日志、UI 更新等。
 #[derive(Debug)]
 #[non_exhaustive]
-#[allow(missing_docs)]
 pub enum AgentEvent {
     // ── LLM 交互 ──────────────────────────────────────────────────────────
     /// LLM 正在生成 token（流式）
@@ -21,60 +20,114 @@ pub enum AgentEvent {
     /// LLM 推理开始
     ThinkStart,
     /// LLM 推理结束
-    #[allow(missing_docs)]
     ThinkEnd {
+        /// 提示词消耗的 token 数量
         prompt_tokens: usize,
+        /// 补全消耗的 token 数量
         completion_tokens: usize,
     },
 
     // ── 工具调用 ──────────────────────────────────────────────────────────
     /// 准备调用工具
-    ToolCall { name: String, args: Value },
+    ToolCall {
+        /// 工具名称
+        name: String,
+        /// 工具参数（JSON 格式）
+        args: Value,
+    },
     /// 工具执行完毕
-    ToolResult { name: String, output: String },
+    ToolResult {
+        /// 工具名称
+        name: String,
+        /// 工具执行结果（字符串格式）
+        output: String,
+    },
     /// 工具执行出错
-    ToolError { name: String, error: String },
+    ToolError {
+        /// 工具名称
+        name: String,
+        /// 错误信息
+        error: String,
+    },
 
     // ── 步骤级事件 ────────────────────────────────────────────────────────
     /// Plan-and-Execute 引擎生成了计划
-    PlanGenerated { steps: Vec<String> },
+    PlanGenerated {
+        /// 计划步骤描述列表
+        steps: Vec<String>,
+    },
     /// 计划步骤开始执行
     StepStart {
+        /// 步骤索引（0-based）
         step_index: usize,
+        /// 步骤描述
         description: String,
     },
     /// 计划步骤执行结束
-    StepEnd { step_index: usize, success: bool },
+    StepEnd {
+        /// 步骤索引（0-based）
+        step_index: usize,
+        /// 步骤执行是否成功
+        success: bool,
+    },
 
     // ── 护栏 & 安全 ──────────────────────────────────────────────────────
     /// 护栏被触发
-    GuardTriggered { guard: String, blocked: bool },
+    GuardTriggered {
+        /// 护栏名称
+        guard: String,
+        /// 是否被阻断
+        blocked: bool,
+    },
 
     // ── 记忆 & 编排 ──────────────────────────────────────────────────────
     /// 长期记忆已召回
-    MemoryRecalled { count: usize },
+    MemoryRecalled {
+        /// 召回的记忆条目数量
+        count: usize,
+    },
     /// Agent 间 Handoff 开始
-    HandoffStart { from: String, to: String },
+    HandoffStart {
+        /// 来源 Agent 名称
+        from: String,
+        /// 目标 Agent 名称
+        to: String,
+    },
     /// Agent 间 Handoff 结束
-    HandoffEnd { to: String },
+    HandoffEnd {
+        /// 目标 Agent 名称
+        to: String,
+    },
 
     // ── 自省反思 ──────────────────────────────────────────────────────────
     /// 反思迭代开始
-    ReflectionStart { iteration: usize },
+    ReflectionStart {
+        /// 当前迭代次数（从 1 开始）
+        iteration: usize,
+    },
     /// 反思迭代结束
     ReflectionEnd {
+        /// 迭代次数（从 1 开始）
         iteration: usize,
+        /// 反思评分（0.0-1.0）
         score: f64,
+        /// 是否通过反思
         passed: bool,
     },
     /// 评估者生成了评价结果
     CritiqueGenerated {
+        /// 评价分数（0.0-1.0）
         score: f64,
+        /// 是否通过评估
         passed: bool,
+        /// 评估反馈文本
         feedback: String,
     },
     /// 正在基于反思修正回答
-    Refining { iteration: usize },
+    Refining {
+        /// 当前迭代次数（从 1 开始）
+        iteration: usize,
+    },
 
     // ── 终态 ──────────────────────────────────────────────────────────────
     /// 最终回答
@@ -121,12 +174,17 @@ impl AgentEvent {
 
 /// LLM 响应解析后的步骤类型
 #[derive(Debug)]
-#[allow(missing_docs)]
+/// LLM 响应解析后的步骤类型
 pub enum StepType {
+    /// 思考步骤（内部推理）
     Thought(String),
+    /// 工具调用步骤
     Call {
+        /// 工具调用 ID（唯一标识符）
         tool_call_id: String,
+        /// 函数名称
         function_name: String,
+        /// 函数参数（JSON 格式）
         arguments: Value,
     },
 }

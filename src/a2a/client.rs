@@ -19,6 +19,7 @@ pub struct A2AClient {
 }
 
 impl A2AClient {
+    /// Create a new A2A client instance.
     pub fn new() -> Self {
         Self {
             client: Client::new(),

@@ -27,6 +27,14 @@ pub struct CompositeCritic {
 }
 
 impl CompositeCritic {
+    /// 创建组合评估器
+    ///
+    /// # 参数
+    /// * `strategy` - 组合策略，决定如何聚合多个 Critic 的评估结果
+    ///
+    /// # 默认配置
+    /// * 通过阈值：7.0
+    /// * 初始 Critic 列表为空（需通过 `add_critic` 添加）
     pub fn new(strategy: CompositeStrategy) -> Self {
         Self {
             critics: Vec::new(),
@@ -35,11 +43,28 @@ impl CompositeCritic {
         }
     }
 
+    /// 添加评估器到组合
+    ///
+    /// # 参数
+    /// * `critic` - 要添加的评估器实例，需实现 `Critic` trait
+    ///
+    /// # 说明
+    /// 可以链式调用多次，添加多个评估器。
     pub fn add_critic(mut self, critic: impl Critic + 'static) -> Self {
         self.critics.push(Box::new(critic));
         self
     }
 
+    /// 设置通过阈值
+    ///
+    /// # 参数
+    /// * `threshold` - 评估通过的最低分数（范围 0.0-10.0）
+    ///
+    /// # 说明
+    /// 对于 `CompositeStrategy::Average`、`Minimum`、`Weighted` 策略，
+    /// 聚合后的分数 ≥ threshold 时评估结果为通过。
+    /// 对于 `CompositeStrategy::AllMustPass`，阈值仅影响评分显示，
+    /// 实际通过逻辑要求所有子评估器都通过。
     pub fn with_pass_threshold(mut self, threshold: f64) -> Self {
         self.pass_threshold = threshold;
         self

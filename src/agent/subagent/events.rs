@@ -13,45 +13,77 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 128;
 #[derive(Debug, Clone, Serialize)]
 pub enum SubagentEvent {
     /// A subagent was registered.
-    Registered { name: String },
+    Registered {
+        /// Name of the subagent that was registered.
+        name: String,
+    },
     /// A subagent was unregistered.
-    Unregistered { name: String },
+    Unregistered {
+        /// Name of the subagent that was unregistered.
+        name: String,
+    },
     /// Dispatch started.
     DispatchStarted {
+        /// Name of the parent agent that initiated the dispatch.
         parent: String,
+        /// Name of the subagent being dispatched to.
         agent: String,
+        /// Execution mode (e.g., `ExecutionMode::Parallel`).
         mode: ExecutionMode,
+        /// Task description being dispatched.
         task: String,
     },
     /// Dispatch completed successfully.
     DispatchCompleted {
+        /// Name of the parent agent that initiated the dispatch.
         parent: String,
+        /// Name of the subagent that completed the task.
         agent: String,
+        /// Duration of the dispatch in milliseconds.
         duration_ms: u64,
     },
     /// Dispatch failed.
     DispatchFailed {
+        /// Name of the parent agent that initiated the dispatch.
         parent: String,
+        /// Name of the subagent that failed.
         agent: String,
+        /// Error message describing the failure.
         error: String,
     },
     /// Dispatch was cancelled.
-    DispatchCancelled { parent: String, agent: String },
+    DispatchCancelled {
+        /// Name of the parent agent that cancelled the dispatch.
+        parent: String,
+        /// Name of the subagent whose dispatch was cancelled.
+        agent: String,
+    },
     /// A team was created.
     TeamCreated {
+        /// Unique identifier for the team.
         team_id: String,
+        /// Names of subagents assigned to the team.
         members: Vec<String>,
     },
     /// A team was dissolved.
-    TeamDissolved { team_id: String },
+    TeamDissolved {
+        /// Unique identifier for the team that was dissolved.
+        team_id: String,
+    },
 }
 
 /// Sync event listener trait.
 pub trait SubagentEventListener: Send + Sync {
+    /// Handle a subagent lifecycle event.
+    ///
+    /// # 参数
+    /// * `event` - The event to handle.
     fn on_event(&self, event: &SubagentEvent);
 }
 
 /// Logging listener — emits tracing events.
+///
+/// Implements `SubagentEventListener` to log events via `tracing::info!`.
 pub struct LoggingSubagentListener;
 
 impl SubagentEventListener for LoggingSubagentListener {
@@ -120,10 +152,15 @@ pub struct SubagentEventBus {
 }
 
 impl SubagentEventBus {
+    /// Create a new event bus with default capacity.
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CHANNEL_CAPACITY)
     }
 
+    /// Create a new event bus with the specified channel capacity.
+    ///
+    /// # 参数
+    /// * `capacity` - Maximum number of events to buffer before dropping old ones.
     pub fn with_capacity(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self {
@@ -150,6 +187,7 @@ impl SubagentEventBus {
         let _ = self.tx.send(Arc::new(event));
     }
 
+    /// Get the current number of active subscribers to the async event stream.
     pub fn subscriber_count(&self) -> usize {
         self.tx.receiver_count()
     }

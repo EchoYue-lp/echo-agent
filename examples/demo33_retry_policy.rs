@@ -262,11 +262,6 @@ async fn demo_llm_retry() {
     println!("Part 5: 实际 LLM 调用重试演示");
     println!("─────────────────────────────────────────────\n");
 
-    if !has_llm_config() {
-        println!("  [跳过] 未配置 LLM API 密钥\n");
-        return;
-    }
-
     use echo_agent::llm::chat;
     use echo_agent::llm::types::Message;
 
@@ -366,10 +361,4 @@ fn demo_best_practices() {
     println!("        llm_max_retries: 3,");
     println!("        llm_retry_delay_ms: 500,");
     println!("    }}\n");
-}
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
 }

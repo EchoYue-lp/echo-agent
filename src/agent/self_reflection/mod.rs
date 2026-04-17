@@ -83,6 +83,17 @@ pub struct SelfReflectionAgent<C: Critic> {
 }
 
 impl<C: Critic> SelfReflectionAgent<C> {
+    /// 创建 Self-Reflection Agent
+    ///
+    /// # 参数
+    /// * `name` - Agent 名称（用于标识和日志记录）
+    /// * `generator` - 生成器 Agent（如 ReactAgent），负责生成初始响应
+    /// * `critic` - 评估器（Critic），负责评估生成质量并提供反馈
+    ///
+    /// # 默认配置
+    /// * 最大反思次数：3
+    /// * 通过阈值：7.0（评分 ≥ 7.0 视为通过）
+    /// * 情景记忆容量：10 条经验
     pub fn new(name: impl Into<String>, generator: impl Agent + 'static, critic: C) -> Self {
         Self {
             name: name.into(),
@@ -543,6 +554,14 @@ pub struct ReflectiveExecutor {
 
 #[cfg(feature = "plan-execute")]
 impl ReflectiveExecutor {
+    /// 创建 ReflectiveExecutor
+    ///
+    /// # 参数
+    /// * `agent` - 已配置好的 SelfReflectionAgent（需使用 LlmCritic 作为评估器）
+    ///
+    /// # 说明
+    /// 用于将 Self-Reflection Agent 适配为 Plan-and-Execute 架构中的 Executor，
+    /// 使其能够作为 PlanStep 的执行器使用。
     pub fn new(agent: SelfReflectionAgent<LlmCritic>) -> Self {
         Self { agent }
     }

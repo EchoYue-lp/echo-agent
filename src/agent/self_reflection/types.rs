@@ -19,9 +19,13 @@ pub struct Critique {
 /// 评估结果结构化输出（LLM JSON 解析用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CritiqueOutput {
+    /// 质量评分（0.0 - 10.0）
     pub score: f64,
+    /// 是否通过质量阈值
     pub passed: bool,
+    /// 详细反馈
     pub feedback: String,
+    /// 改进建议
     #[serde(default)]
     pub suggestions: Vec<String>,
 }
@@ -70,6 +74,14 @@ pub struct ReflectionExperience {
 }
 
 impl ReflectionExperience {
+    /// 创建反思经验记录
+    ///
+    /// # 参数
+    /// * `lesson` - 从错误中总结的经验教训（正面表述）
+    /// * `error_pattern` - 观察到的错误模式（负面表述）
+    ///
+    /// # 说明
+    /// 自动生成唯一 ID，初始使用次数为 0，任务类别为空。
     pub fn new(lesson: impl Into<String>, error_pattern: impl Into<String>) -> Self {
         Self {
             id: format!("exp_{}", uuid::Uuid::new_v4().as_simple()),
@@ -80,6 +92,13 @@ impl ReflectionExperience {
         }
     }
 
+    /// 设置任务类别
+    ///
+    /// # 参数
+    /// * `category` - 任务类别标识符，用于经验检索时的分类过滤
+    ///
+    /// # 说明
+    /// 设置后，该经验在后续检索时可按类别进行过滤，提高相关性。
     pub fn with_category(mut self, category: impl Into<String>) -> Self {
         self.task_category = Some(category.into());
         self

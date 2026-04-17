@@ -37,6 +37,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [17 - Graph Workflow](./17-graph-workflow.md) | Workflow | LangGraph-style, SharedState, conditional edges, fan-out/fan-in |
 | [18 - Guard System](./18-guard-system.md) | Guards | RuleGuard, LlmGuard, input/output filtering |
 | [20 - Web Tools](./20-web-tools.md) | Web Search / Fetch | DuckDuckGo / Brave / Tavily search, HTML→text |
+| [21 - Common Tools](./21-common-tools.md) | Tool Guide | Web search, web fetch, browser automation, data tools |
 
 ### Knowledge Base
 

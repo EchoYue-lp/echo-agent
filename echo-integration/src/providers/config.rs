@@ -385,6 +385,8 @@ fn detect_provider_from_url(url: &str) -> LlmProvider {
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     models: HashMap<String, ModelEntry>,
+    #[serde(default)]
+    embedding: Option<EmbeddingEntry>,
 }
 
 /// 单个模型的配置条目
@@ -401,6 +403,25 @@ struct ModelEntry {
     /// 内置 Provider 名称（如 "openai"、"deepseek"），自动填充 base_url
     #[serde(default)]
     provider: Option<String>,
+}
+
+/// Embedding 配置条目
+#[derive(Debug, Deserialize)]
+struct EmbeddingEntry {
+    /// 完整 embeddings 端点 URL（与 `base_url` 二选一）
+    #[serde(default)]
+    endpoint_url: Option<String>,
+    /// 基础 URL（自动追加 `/v1/embeddings`）
+    #[serde(default)]
+    base_url: Option<String>,
+    /// API 密钥
+    api_key: String,
+    /// 实际发送给 API 的模型名称
+    #[serde(default)]
+    model: Option<String>,
+    /// 超时时间（秒）
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 // ── 内部配置类型 ─────────────────────────────────────────────────────────────
@@ -423,6 +444,21 @@ pub struct ModelConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub models: HashMap<String, ModelConfig>,
+    #[serde(default)]
+    pub embedding: Option<EmbeddingConfig>,
+}
+
+/// Embedding 运行时配置
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EmbeddingConfig {
+    /// Embeddings 接口完整 URL
+    pub url: String,
+    /// API 密钥
+    pub api_key: String,
+    /// 模型名称
+    pub model: String,
+    /// 超时时间（秒）
+    pub timeout_secs: u64,
 }
 
 /// 缓存的加载结果：`Ok(Config)` 或 `Err(描述)`。
@@ -552,7 +588,38 @@ impl Config {
             }
         }
 
-        Ok(Some(Config { models }))
+        let embedding = match file.embedding {
+            Some(entry) => {
+                let url = match (entry.endpoint_url.as_deref(), entry.base_url.as_deref()) {
+                    (Some(url), _) => resolve_env_ref(url),
+                    (None, Some(base)) => {
+                        let resolved = resolve_env_ref(base);
+                        format!("{}/v1/embeddings", resolved.trim_end_matches('/'))
+                    }
+                    (None, None) => {
+                        return Err(ConfigError::MissingConfig(
+                            "embedding".to_string(),
+                            "endpoint_url 或 base_url".to_string(),
+                        )
+                        .into());
+                    }
+                };
+
+                Some(EmbeddingConfig {
+                    url,
+                    api_key: resolve_env_ref(&entry.api_key),
+                    model: entry
+                        .model
+                        .as_deref()
+                        .map(resolve_env_ref)
+                        .unwrap_or_else(|| "text-embedding-3-small".to_string()),
+                    timeout_secs: entry.timeout_secs.unwrap_or(30),
+                })
+            }
+            None => None,
+        };
+
+        Ok(Some(Config { models, embedding }))
     }
 
     /// 从环境变量加载（兼容旧格式 `AGENT_MODEL_<ID>_*`）
@@ -616,7 +683,10 @@ impl Config {
             );
         }
 
-        Ok(Self { models })
+        Ok(Self {
+            models,
+            embedding: env_embedding_config(),
+        })
     }
 
     // ── 公共查询 API ─────────────────────────────────────────────────────────
@@ -672,6 +742,25 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// 获取 embedding 配置
+    pub fn get_embedding() -> Result<EmbeddingConfig> {
+        let config = Self::load_cached()?;
+        config.embedding.clone().ok_or_else(|| {
+            ConfigError::MissingConfig(
+                "embedding".to_string(),
+                "请在 echo-agent.yaml 中配置 embedding 段，或设置 EMBEDDING_* 环境变量".to_string(),
+            )
+            .into()
+        })
+    }
+
+    /// 检查 embedding 配置是否存在
+    pub fn has_embedding() -> bool {
+        Self::load_cached()
+            .map(|config| config.embedding.is_some())
+            .unwrap_or(false)
+    }
+
     /// 向后兼容：`from_env` 是 `load` 的别名
     pub fn from_env() -> Result<Self> {
         Self::load()
@@ -713,6 +802,43 @@ fn resolve_env_ref(value: &str) -> String {
     }
 
     result
+}
+
+fn env_embedding_config() -> Option<EmbeddingConfig> {
+    let (url, has_url) = if let Ok(u) = std::env::var("EMBEDDING_BASEURL") {
+        (u, true)
+    } else if let Ok(base) = std::env::var("EMBEDDING_API_URL") {
+        (
+            format!("{}/v1/embeddings", base.trim_end_matches('/')),
+            true,
+        )
+    } else {
+        (String::new(), false)
+    };
+
+    let api_key = std::env::var("EMBEDDING_APIKEY")
+        .or_else(|_| std::env::var("EMBEDDING_API_KEY"))
+        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        .unwrap_or_default();
+
+    if !has_url && api_key.is_empty() {
+        return None;
+    }
+
+    Some(EmbeddingConfig {
+        url: if has_url {
+            url
+        } else {
+            "https://api.openai.com/v1/embeddings".to_string()
+        },
+        api_key,
+        model: std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "text-embedding-3-small".to_string()),
+        timeout_secs: std::env::var("EMBEDDING_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30),
+    })
 }
 
 // ── 单元测试 ─────────────────────────────────────────────────────────────────
@@ -809,6 +935,27 @@ models:
     }
 
     #[test]
+    fn test_config_from_yaml_with_embedding() {
+        let yaml = r#"
+models:
+  test-model:
+    provider: openai
+    api_key: sk-test
+embedding:
+  base_url: https://api.openai.com
+  api_key: ${TEST_EMBED_KEY}
+  model: text-embedding-3-small
+  timeout_secs: 45
+"#;
+        unsafe { std::env::set_var("TEST_EMBED_KEY", "embed-key") };
+        let file: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let entry = file.embedding.expect("embedding should exist");
+        assert_eq!(entry.base_url.as_deref(), Some("https://api.openai.com"));
+        assert_eq!(resolve_env_ref(&entry.api_key), "embed-key");
+        unsafe { std::env::remove_var("TEST_EMBED_KEY") };
+    }
+
+    #[test]
     fn test_to_model_config() {
         let config = LlmConfig::new("https://example.com", "sk-test", "model-1");
         let mc = config.to_model_config();
@@ -886,5 +1033,26 @@ models:
 "#;
         let file: ConfigFile = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(file.models.len(), 3);
+    }
+
+    #[test]
+    fn test_env_embedding_config() {
+        unsafe {
+            std::env::set_var("EMBEDDING_API_URL", "https://api.openai.com");
+            std::env::set_var("EMBEDDING_API_KEY", "sk-embed");
+            std::env::set_var("EMBEDDING_MODEL", "text-embedding-3-small");
+            std::env::set_var("EMBEDDING_TIMEOUT", "12");
+        }
+        let cfg = env_embedding_config().expect("embedding config should be detected");
+        assert_eq!(cfg.url, "https://api.openai.com/v1/embeddings");
+        assert_eq!(cfg.api_key, "sk-embed");
+        assert_eq!(cfg.model, "text-embedding-3-small");
+        assert_eq!(cfg.timeout_secs, 12);
+        unsafe {
+            std::env::remove_var("EMBEDDING_API_URL");
+            std::env::remove_var("EMBEDDING_API_KEY");
+            std::env::remove_var("EMBEDDING_MODEL");
+            std::env::remove_var("EMBEDDING_TIMEOUT");
+        }
     }
 }

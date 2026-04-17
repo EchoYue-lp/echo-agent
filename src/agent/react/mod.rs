@@ -82,6 +82,20 @@ pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
 
 // ── ReactAgent 结构体 ─────────────────────────────────────────────────────────
 
+/// ReAct（Reasoning + Acting）Agent 实现
+///
+/// 基于 ReAct 范式的自主 Agent，支持工具调用、任务规划、子代理调度、
+/// 长期记忆、思维链、上下文压缩等核心功能。
+///
+/// # 核心组件
+///
+/// - **配置管理**：通过 `AgentConfig` 控制 Agent 行为和能力
+/// - **上下文管理**：维护对话历史，支持自动压缩和 token 计数
+/// - **工具管理**：注册、发现和执行工具，支持权限控制和沙箱执行
+/// - **子代理系统**：支持 Sync/Fork/Teammate 三种调度模式
+/// - **记忆系统**：长期记忆存储和检索
+/// - **技能系统**：代码和文件技能管理
+/// - **Hook 系统**：工具调用拦截和修改
 pub struct ReactAgent {
     pub(crate) config: AgentConfig,
     /// 上下文管理器：维护对话历史，并在 token 超限时自动触发压缩
@@ -151,6 +165,22 @@ impl ReactAgent {
     /// 工具调用场景下自动注入的思维链引导语。
     const COT_INSTRUCTION: &'static str = "在调用工具之前，先用文字简述你的分析思路和执行计划。";
 
+    /// 创建新的 ReAct Agent 实例
+    ///
+    /// # 参数
+    /// * `config` - Agent 运行时配置
+    ///
+    /// # 返回值
+    /// 初始化完成的 `ReactAgent` 实例
+    ///
+    /// # 说明
+    /// 该方法会根据配置初始化所有核心组件，包括：
+    /// - 上下文管理器
+    /// - 工具管理器（根据配置启用工具）
+    /// - 子代理系统（根据配置启用子代理调度）
+    /// - 记忆系统（根据配置启用长期记忆）
+    /// - 技能注册表
+    /// - Hook 系统
     pub fn new(config: AgentConfig) -> Self {
         let system_prompt = if config.enable_tool && config.enable_cot {
             format!(

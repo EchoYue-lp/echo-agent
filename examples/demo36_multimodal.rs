@@ -9,7 +9,7 @@
 //! # 前置条件
 //!
 //! 设置 LLM API 密钥（支持视觉的模型）：
-//! - QWEN_API_KEY（推荐，qwen3.5-plus 支持视觉）
+//! - QWEN_API_KEY（推荐，qwen3-max 支持视觉）
 //! - OPENAI_API_KEY（gpt-4o / gpt-4o-mini）
 //!
 //! # 运行方式
@@ -43,13 +43,7 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_serialization();
 
     // ── Part 3: LLM 图片分析（需要 API Key）────────────────────────────────────
-    if has_llm_config() {
-        demo_llm_image_analysis().await?;
-    } else {
-        println!("\n[跳过 Part 3-5] 未检测到 LLM API 密钥");
-        println!("设置 QWEN_API_KEY 或 OPENAI_API_KEY 后可体验完整功能\n");
-        return Ok(());
-    }
+    demo_llm_image_analysis().await?;
 
     // ── Part 4: Chat 模式连续对话 ─────────────────────────────────────────────
     demo_chat_mode().await?;
@@ -221,7 +215,7 @@ async fn demo_llm_image_analysis() -> echo_agent::error::Result<()> {
 专注于提取图片中的关键信息，如文字、数字、物体等。"#;
 
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3.5-plus") // 使用支持视觉的模型
+        .model("qwen3-max") // 使用支持视觉的模型
         .name("multimodal-agent")
         .system_prompt(system_prompt)
         .build()?;
@@ -255,7 +249,7 @@ async fn demo_chat_mode() -> echo_agent::error::Result<()> {
     println!("─────────────────────────────────────────────\n");
 
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3.5-plus")
+        .model("qwen3-max")
         .name("multimodal-agent")
         .system_prompt("你是一个多模态智能助手，可以分析图片并回答相关问题。")
         .build()?;
@@ -281,7 +275,7 @@ async fn demo_multiple_images() -> echo_agent::error::Result<()> {
     println!("─────────────────────────────────────────────\n");
 
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3.5-plus")
+        .model("qwen3-max")
         .name("multimodal-agent")
         .system_prompt("你是一个多模态智能助手，可以分析图片并回答相关问题。")
         .build()?;
@@ -329,9 +323,3 @@ async fn demo_multiple_images() -> echo_agent::error::Result<()> {
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────────
-
-fn has_llm_config() -> bool {
-    std::env::var("QWEN_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("DEEPSEEK_API_KEY").is_ok()
-}

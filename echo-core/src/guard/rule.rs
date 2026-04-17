@@ -87,6 +87,7 @@ pub struct RuleGuardBuilder {
 }
 
 impl RuleGuardBuilder {
+    /// 创建新的规则护栏构建器
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -131,6 +132,7 @@ impl RuleGuardBuilder {
         self
     }
 
+    /// 构建规则护栏
     pub fn build(self) -> RuleGuard {
         RuleGuard {
             guard_name: self.name,

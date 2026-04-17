@@ -23,6 +23,15 @@ pub struct LlmCritic {
 }
 
 impl LlmCritic {
+    /// 创建 LLM 评估器
+    ///
+    /// # 参数
+    /// * `model` - LLM 模型标识符，用于质量评估
+    ///
+    /// # 默认配置
+    /// * 系统提示：多维度质量评估专家（准确性、完整性、清晰度、实用性）
+    /// * 通过阈值：7.0（评分 ≥ 7.0 视为通过）
+    /// * HTTP 客户端：新建的 `reqwest::Client`
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),

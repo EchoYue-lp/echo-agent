@@ -26,12 +26,20 @@ pub struct ReactExecutor {
 }
 
 impl ReactExecutor {
+    /// 从实现 Agent trait 的类型创建 ReactExecutor
+    ///
+    /// # 参数
+    /// * `agent` - 用于执行步骤的 Agent 实例
     pub fn new(agent: impl Agent + 'static) -> Self {
         Self {
             agent: Box::new(agent),
         }
     }
 
+    /// 从已装箱的 Agent trait 对象创建 ReactExecutor
+    ///
+    /// # 参数
+    /// * `agent` - 已装箱的 Agent trait 对象
     pub fn from_boxed(agent: Box<dyn Agent>) -> Self {
         Self { agent }
     }
@@ -76,6 +84,10 @@ pub struct SimpleExecutor {
 }
 
 impl SimpleExecutor {
+    /// 从实现 Agent trait 的类型创建 SimpleExecutor
+    ///
+    /// # 参数
+    /// * `agent` - 用于执行步骤的 Agent 实例
     pub fn new(agent: impl Agent + 'static) -> Self {
         Self {
             agent: Box::new(agent),

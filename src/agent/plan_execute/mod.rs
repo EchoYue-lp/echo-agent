@@ -66,7 +66,9 @@ pub enum ExecutionMode {
     /// Parallel execution via `TaskExecutor` with a custom execution function.
     /// Independent steps run concurrently, bounded by `max_concurrent`.
     Parallel {
+        /// 任务执行函数，用于并行执行计划步骤
         execute_fn: TaskExecuteFn,
+        /// 最大并发任务数量限制
         max_concurrent: usize,
     },
 }
@@ -85,6 +87,36 @@ pub struct PlanExecuteAgent<P: Planner, E: Executor> {
 }
 
 impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
+    /// 创建 Plan-and-Execute Agent 实例
+    ///
+    /// # 参数
+    /// * `name` - Agent 名称
+    /// * `planner` - 规划器实例，实现 `Planner` trait
+    /// * `executor` - 执行器实例，实现 `Executor` trait
+    ///
+    /// # 返回值
+    /// 新的 `PlanExecuteAgent` 实例
+    ///
+    /// # 默认配置
+    /// - 最大重规划次数：3
+    /// - 启用重规划：是
+    /// - 执行模式：顺序执行（`ExecutionMode::Sequential`）
+    ///
+    /// # 示例
+    /// ```rust
+    /// use echo_agent::agent::plan_execute::{PlanExecuteAgent, LlmPlanner, ReactExecutor};
+    /// use echo_agent::agent::ReactAgentBuilder;
+    ///
+    /// let planner = LlmPlanner::new("qwen3-max");
+    /// let executor_agent = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .name("executor")
+    ///     .system_prompt("你是一个任务执行助手")
+    ///     .enable_tools()
+    ///     .build()?;
+    /// let executor = ReactExecutor::new(executor_agent);
+    /// let agent = PlanExecuteAgent::new("plan_agent", planner, executor);
+    /// ```
     pub fn new(name: impl Into<String>, planner: P, executor: E) -> Self {
         Self {
             name: name.into(),
@@ -96,11 +128,36 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
         }
     }
 
+    /// 设置最大重规划次数
+    ///
+    /// # 参数
+    /// * `n` - 最大重规划次数
+    ///
+    /// # 返回值
+    /// 返回 `Self` 以便链式调用
+    ///
+    /// # 说明
+    /// 当步骤执行失败时，Agent 会尝试重新规划受影响的下游步骤。
+    /// 该方法限制重规划的最大次数，避免无限循环。
+    ///
+    /// # 默认值
+    /// 默认最大重规划次数为 3。
     pub fn max_replans(mut self, n: usize) -> Self {
         self.max_replans = n;
         self
     }
 
+    /// 禁用重规划功能
+    ///
+    /// # 返回值
+    /// 返回 `Self` 以便链式调用
+    ///
+    /// # 说明
+    /// 禁用重规划后，当步骤执行失败时，Agent 不会尝试重新规划，
+    /// 而是直接返回错误。适用于对执行稳定性要求较高的场景。
+    ///
+    /// # 默认值
+    /// 默认启用重规划功能。
     pub fn disable_replan(mut self) -> Self {
         self.enable_replan = false;
         self

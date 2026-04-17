@@ -8,8 +8,6 @@
 //!
 //! 参考 Claude Code 的权限架构设计
 
-#![allow(missing_docs)]
-
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,10 +17,15 @@ use std::collections::{HashMap, HashSet};
 /// 工具权限类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolPermission {
+    /// 读取文件/目录权限
     Read,
+    /// 写入文件/目录权限
     Write,
+    /// 网络访问权限
     Network,
+    /// 执行命令/代码权限
     Execute,
+    /// 敏感操作权限（如访问密钥、环境变量等）
     Sensitive,
 }
 
@@ -124,22 +127,31 @@ pub enum PermissionDecision {
     /// 允许执行
     Allow,
     /// 拒绝执行
-    Deny { reason: String },
+    Deny {
+        /// 拒绝原因
+        reason: String,
+    },
     /// 需要用户审批
     RequireApproval,
     /// 需要用户审批并提供建议
-    Ask { suggestions: Vec<String> },
+    Ask {
+        /// 建议列表
+        suggestions: Vec<String>,
+    },
 }
 
 impl PermissionDecision {
+    /// 检查是否为允许决策
     pub fn is_allowed(&self) -> bool {
         matches!(self, PermissionDecision::Allow)
     }
 
+    /// 检查是否为拒绝决策
     pub fn is_denied(&self) -> bool {
         matches!(self, PermissionDecision::Deny { .. })
     }
 
+    /// 检查是否需要用户审批
     pub fn requires_approval(&self) -> bool {
         matches!(
             self,

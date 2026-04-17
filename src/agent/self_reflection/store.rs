@@ -38,6 +38,11 @@ pub struct InMemoryReflectionStore {
 }
 
 impl InMemoryReflectionStore {
+    /// 创建内存存储实例
+    ///
+    /// # 说明
+    /// 内存存储用于测试和开发环境，数据仅保存在内存中，
+    /// 进程退出后数据丢失。
     pub fn new() -> Self {
         Self {
             reflections: Arc::new(RwLock::new(std::collections::HashMap::new())),

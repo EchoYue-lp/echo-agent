@@ -9,6 +9,7 @@
 //!
 //! File-based skills follow the [agentskills.io specification](https://agentskills.io/specification).
 
+/// Built-in skills provided by the Echo Agent framework.
 pub mod builtin;
 
 // Re-export all types from echo_execution::skills

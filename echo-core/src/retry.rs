@@ -77,7 +77,13 @@ impl RetryPolicy {
     }
 
     /// 计算第 `attempt` 次重试的等待时间（attempt 从 1 开始）
+    ///
+    /// 注意：attempt=0 表示首次执行（无延迟），返回 Duration::ZERO
     pub fn delay_for(&self, attempt: u32) -> Duration {
+        // 首次执行无延迟
+        if attempt == 0 {
+            return Duration::ZERO;
+        }
         // Cap exponent at 10 to avoid overflow: base_delay * 2^10 = 1024x base_delay.
         // With a typical base_delay of 500ms, the max pre-capped delay is ~512s.
         let exp = (attempt - 1).min(10);

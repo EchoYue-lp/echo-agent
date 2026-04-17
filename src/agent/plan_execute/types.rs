@@ -63,6 +63,10 @@ fn now_secs() -> u64 {
 }
 
 impl Plan {
+    /// 创建新计划
+    ///
+    /// # 参数
+    /// * `steps` - 计划步骤列表
     pub fn new(steps: Vec<PlanStep>) -> Self {
         let now = now_secs();
         Self {
@@ -78,6 +82,10 @@ impl Plan {
         }
     }
 
+    /// 设置计划目标描述
+    ///
+    /// # 参数
+    /// * `goal` - 计划目标描述
     pub fn with_goal(mut self, goal: impl Into<String>) -> Self {
         self.goal = Some(goal.into());
         self
@@ -487,6 +495,10 @@ pub struct PlanStep {
 }
 
 impl PlanStep {
+    /// 创建新步骤
+    ///
+    /// # 参数
+    /// * `description` - 步骤描述
     pub fn new(description: impl Into<String>) -> Self {
         Self {
             description: description.into(),
@@ -497,16 +509,37 @@ impl PlanStep {
         }
     }
 
+    /// 设置预期输入描述
+    ///
+    /// # 参数
+    /// * `input` - 预期输入描述
     pub fn with_expected_input(mut self, input: impl Into<String>) -> Self {
         self.expected_input = Some(input.into());
         self
     }
 
+    /// 设置预期输出描述
+    ///
+    /// # 参数
+    /// * `output` - 预期输出描述
     pub fn with_expected_output(mut self, output: impl Into<String>) -> Self {
         self.expected_output = Some(output.into());
         self
     }
 
+    /// 设置步骤的依赖关系
+    ///
+    /// # 参数
+    /// * `deps` - 依赖的步骤标识符列表，格式为 `"step_N"`（其中 N 为步骤索引）或步骤描述关键词
+    ///            （后者在规划阶段会被自动解析为对应的步骤索引）
+    ///
+    /// # 示例
+    /// ```
+    /// use crate::agent::plan_execute::types::PlanStep;
+    ///
+    /// let step = PlanStep::new("优化数据库查询")
+    ///     .with_dependencies(vec!["step_0".to_string(), "step_1".to_string()]);
+    /// ```
     pub fn with_dependencies(mut self, deps: Vec<String>) -> Self {
         self.dependencies = deps;
         self

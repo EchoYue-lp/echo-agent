@@ -84,6 +84,15 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    /// 创建新的 Agent 配置
+    ///
+    /// # 参数
+    /// * `model_name` - 使用的 LLM 模型名称（对应配置中的模型标识）
+    /// * `agent_name` - Agent 的名称，用于标识和日志输出
+    /// * `system_prompt` - 系统提示词，定义 Agent 的角色和能力
+    ///
+    /// # 返回值
+    /// 返回默认配置的 AgentConfig 实例，后续可通过链式调用进一步配置
     pub fn new(model_name: &str, agent_name: &str, system_prompt: &str) -> Self {
         Self {
             model_name: model_name.to_string(),
@@ -164,71 +173,157 @@ impl AgentConfig {
 
     // ── 原有 Builder 方法 ──────────────────────────────────────────────────────────
 
+    /// 设置 Agent 角色
+    ///
+    /// # 参数
+    /// * `role` - Agent 角色（`AgentRole::Orchestrator` 或 `AgentRole::Worker`）
+    ///
+    /// # 说明
+    /// - `Orchestrator`：编排者角色，负责任务规划、分配和协调子 agent
+    /// - `Worker`：执行者角色，专注于具体任务执行
     pub fn role(mut self, role: AgentRole) -> Self {
         self.role = role;
         self
     }
 
+    /// 启用或禁用工具调用功能
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 启用工具调用，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用后 Agent 可以调用已注册的业务工具（如数学计算、文件操作等）
     pub fn enable_tool(mut self, enabled: bool) -> Self {
         self.enable_tool = enabled;
         self
     }
 
+    /// 启用或禁用任务规划能力
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 启用任务规划，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用后 Agent 可以使用 `plan`、`create_task`、`update_task` 等任务管理工具
     pub fn enable_task(mut self, enabled: bool) -> Self {
         self.enable_task = enabled;
         self
     }
 
+    /// 启用或禁用人工介入（Human-in-the-Loop）功能
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 启用人机交互，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用后 Agent 在需要审批或确认时可以通过 `human_in_loop` 工具请求人工介入
     pub fn enable_human_in_loop(mut self, enabled: bool) -> Self {
         self.enable_human_in_loop = enabled;
         self
     }
 
+    /// 启用或禁用子代理调度功能
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 启用子代理调度，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用后 Agent 可以使用 `agent_tool` 工具调度其他子 Agent 执行任务
     pub fn enable_subagent(mut self, enabled: bool) -> Self {
         self.enable_subagent = enabled;
         self
     }
 
+    /// 设置工具白名单
+    ///
+    /// # 参数
+    /// * `tools` - 允许调用的工具名称列表
+    ///
+    /// # 说明
+    /// - 如果列表为空，则不限制，可调用所有已注册工具
+    /// - 如果列表非空，则只能调用列表中的工具
     pub fn allowed_tools(mut self, tools: Vec<String>) -> Self {
         self.allowed_tools.extend(tools);
         self
     }
 
+    /// 获取工具白名单
+    ///
+    /// # 返回值
+    /// 返回当前允许调用的工具名称切片
     pub fn get_allowed_tools(&self) -> &[String] {
         &self.allowed_tools
     }
 
+    /// 检查工具调用功能是否启用
+    ///
+    /// # 返回值
+    /// `true` 表示工具调用已启用，`false` 表示已禁用
     pub fn is_tool_enabled(&self) -> bool {
         self.enable_tool
     }
 
+    /// 检查任务规划能力是否启用
+    ///
+    /// # 返回值
+    /// `true` 表示任务规划已启用，`false` 表示已禁用
     pub fn is_task_enabled(&self) -> bool {
         self.enable_task
     }
 
+    /// 检查人工介入（Human-in-the-Loop）功能是否启用
+    ///
+    /// # 返回值
+    /// `true` 表示人工介入功能已启用，`false` 表示已禁用
     pub fn is_human_in_loop_enabled(&self) -> bool {
         self.enable_human_in_loop
     }
 
+    /// 检查子代理调度功能是否启用
+    ///
+    /// # 返回值
+    /// `true` 表示子代理调度功能已启用，`false` 表示已禁用
     pub fn is_subagent_enabled(&self) -> bool {
         self.enable_subagent
     }
 
+    /// 启用或禁用详细日志输出
+    ///
+    /// # 参数
+    /// * `verbose` - `true` 启用详细日志，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用后 Agent 会输出更详细的执行过程日志
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
         self
     }
 
+    /// 设置最大迭代轮次
+    ///
+    /// # 参数
+    /// * `max_iterations` - 最大迭代次数，防止死循环
+    ///
+    /// # 说明
+    /// Agent 在执行过程中最多进行指定次数的迭代，超过此限制会终止执行
     pub fn max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
         self
     }
 
+    /// 设置 Agent 名称
+    ///
+    /// # 参数
+    /// * `agent_name` - Agent 的名称，用于标识和日志输出
     pub fn agent_name(mut self, agent_name: &str) -> Self {
         self.agent_name = agent_name.to_string();
         self
     }
 
+    /// 设置 LLM 模型名称
+    ///
+    /// # 参数
+    /// * `model_name` - 使用的 LLM 模型名称（对应配置中的模型标识）
     pub fn model_name(mut self, model_name: &str) -> Self {
         self.model_name = model_name.to_string();
         self
@@ -239,130 +334,264 @@ impl AgentConfig {
         self.model_name = model_name.to_string();
     }
 
+    /// 设置系统提示词
+    ///
+    /// # 参数
+    /// * `system_prompt` - 系统提示词，定义 Agent 的角色和能力
     pub fn system_prompt(mut self, system_prompt: &str) -> Self {
         self.system_prompt = system_prompt.to_string();
         self
     }
 
+    /// 设置上下文 token 上限
+    ///
+    /// # 参数
+    /// * `limit` - 上下文 token 上限，超过时自动触发压缩（`usize::MAX` 表示不限制）
     pub fn token_limit(mut self, limit: usize) -> Self {
         self.token_limit = limit;
         self
     }
 
+    /// 添加 Agent 回调
+    ///
+    /// # 参数
+    /// * `callback` - 实现了 `AgentCallback` trait 的回调实例
+    ///
+    /// # 说明
+    /// 回调会在 Agent 执行过程中触发不同事件时被调用，用于监控、日志记录等
     pub fn with_callback(mut self, callback: Arc<dyn AgentCallback>) -> Self {
         self.callbacks.push(callback);
         self
     }
 
+    /// 设置 LLM 调用失败后最大重试次数
+    ///
+    /// # 参数
+    /// * `retries` - 最大重试次数（0 = 不重试，默认 3）
     pub fn llm_max_retries(mut self, retries: usize) -> Self {
         self.llm_max_retries = retries;
         self
     }
 
+    /// 设置 LLM 重试初始等待时间
+    ///
+    /// # 参数
+    /// * `delay_ms` - 初始等待时间（毫秒），指数退避翻倍（默认 500）
     pub fn llm_retry_delay_ms(mut self, delay_ms: u64) -> Self {
         self.llm_retry_delay_ms = delay_ms;
         self
     }
 
+    /// 启用或禁用工具错误反馈
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 启用工具错误反馈，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用后，工具执行失败时将错误信息回传给 LLM，而非直接让 Agent 失败
     pub fn tool_error_feedback(mut self, enabled: bool) -> Self {
         self.tool_error_feedback = enabled;
         self
     }
 
+    /// 获取会话标识
+    ///
+    /// # 返回值
+    /// 会话标识的引用，如果没有设置则返回 `None`
+    ///
+    /// # 说明
+    /// 会话标识用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文
     pub fn get_session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
 
+    /// 获取 LLM 调用失败后最大重试次数
+    ///
+    /// # 返回值
+    /// 最大重试次数
     pub fn get_llm_max_retries(&self) -> usize {
         self.llm_max_retries
     }
 
+    /// 获取 LLM 重试初始等待时间
+    ///
+    /// # 返回值
+    /// 初始等待时间（毫秒）
     pub fn get_llm_retry_delay_ms(&self) -> u64 {
         self.llm_retry_delay_ms
     }
 
+    /// 获取工具错误反馈设置状态
+    ///
+    /// # 返回值
+    /// `true` 表示工具错误反馈已启用，`false` 表示已禁用
     pub fn get_tool_error_feedback(&self) -> bool {
         self.tool_error_feedback
     }
 
+    /// 获取最大迭代轮次
+    ///
+    /// # 返回值
+    /// 最大迭代次数
     pub fn get_max_iterations(&self) -> usize {
         self.max_iterations
     }
 
+    /// 获取上下文 token 上限
+    ///
+    /// # 返回值
+    /// 上下文 token 上限，`usize::MAX` 表示不限制
     pub fn get_token_limit(&self) -> usize {
         self.token_limit
     }
 
+    /// 检查思维链（CoT）是否启用
+    ///
+    /// # 返回值
+    /// `true` 表示思维链已启用，`false` 表示已禁用
     pub fn is_cot_enabled(&self) -> bool {
         self.enable_cot
     }
 
+    /// 检查长期记忆是否启用
+    ///
+    /// # 返回值
+    /// `true` 表示长期记忆已启用，`false` 表示已禁用
     pub fn is_memory_enabled(&self) -> bool {
         self.enable_memory
     }
 
+    /// 获取长期记忆存储文件路径
+    ///
+    /// # 返回值
+    /// 长期记忆存储文件路径
     pub fn get_memory_path(&self) -> &str {
         &self.memory_path
     }
 
+    /// 获取检查点文件路径
+    ///
+    /// # 返回值
+    /// 检查点文件路径
     pub fn get_checkpointer_path(&self) -> &str {
         &self.checkpointer_path
     }
 
+    /// 获取工具执行配置
+    ///
+    /// # 返回值
+    /// 工具执行配置的引用（包含超时、重试策略、并行并发度等设置）
     pub fn get_tool_execution(&self) -> &crate::tools::ToolExecutionConfig {
         &self.tool_execution
     }
 
+    /// 获取结构化输出格式
+    ///
+    /// # 返回值
+    /// 结构化输出格式的引用，如果没有设置则返回 `None`
     pub fn get_response_format(&self) -> Option<&crate::llm::ResponseFormat> {
         self.response_format.as_ref()
     }
 
+    /// 获取 LLM 模型名称
+    ///
+    /// # 返回值
+    /// LLM 模型名称
     pub fn get_model_name(&self) -> &str {
         &self.model_name
     }
 
+    /// 获取系统提示词
+    ///
+    /// # 返回值
+    /// 系统提示词
     pub fn get_system_prompt(&self) -> &str {
         &self.system_prompt
     }
 
+    /// 获取 Agent 名称
+    ///
+    /// # 返回值
+    /// Agent 名称
     pub fn get_agent_name(&self) -> &str {
         &self.agent_name
     }
 
+    /// 检查是否启用详细日志输出
+    ///
+    /// # 返回值
+    /// `true` 表示详细日志已启用，`false` 表示已禁用
     pub fn is_verbose(&self) -> bool {
         self.verbose
     }
 
+    /// 启用或禁用思维链（CoT）
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 启用思维链，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用思维链后，Agent 会在系统提示词中注入 CoT 相关指令
     pub fn enable_cot(mut self, enabled: bool) -> Self {
         self.enable_cot = enabled;
         self
     }
 
+    /// 启用或禁用长期记忆
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 启用长期记忆，`false` 禁用
+    ///
+    /// # 说明
+    /// 启用长期记忆后，Agent 可以使用 remember/recall/forget 工具，并支持上下文自动注入
     pub fn enable_memory(mut self, enabled: bool) -> Self {
         self.enable_memory = enabled;
         self
     }
 
+    /// 设置长期记忆存储文件路径
+    ///
+    /// # 参数
+    /// * `path` - 长期记忆存储文件路径
     pub fn memory_path(mut self, path: &str) -> Self {
         self.memory_path = path.to_string();
         self
     }
 
+    /// 设置会话标识
+    ///
+    /// # 参数
+    /// * `id` - 会话标识
+    ///
+    /// # 说明
+    /// 会话标识用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文
     pub fn session_id(mut self, id: &str) -> Self {
         self.session_id = Some(id.to_string());
         self
     }
 
+    /// 设置检查点文件路径
+    ///
+    /// # 参数
+    /// * `path` - 检查点文件路径
     pub fn checkpointer_path(mut self, path: &str) -> Self {
         self.checkpointer_path = path.to_string();
         self
     }
 
+    /// 设置工具执行配置
+    ///
+    /// # 参数
+    /// * `config` - 工具执行配置（包含超时、重试策略、并行并发度等设置）
     pub fn tool_execution(mut self, config: ToolExecutionConfig) -> Self {
         self.tool_execution = config;
         self
     }
 
+    /// 设置结构化输出格式
+    ///
+    /// # 参数
+    /// * `fmt` - 结构化输出格式
     pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
         self.response_format = Some(fmt);
         self
@@ -374,6 +603,10 @@ impl AgentConfig {
         self
     }
 
+    /// 获取单次工具输出的最大 token 数
+    ///
+    /// # 返回值
+    /// 最大 token 数，`None` 表示不限制
     pub fn get_max_tool_output_tokens(&self) -> Option<usize> {
         self.max_tool_output_tokens
     }
@@ -384,6 +617,10 @@ impl AgentConfig {
         self
     }
 
+    /// 获取主动压缩阈值比例
+    ///
+    /// # 返回值
+    /// 压缩阈值比例（0.0–1.0），默认 0.2
     pub fn get_compress_threshold_ratio(&self) -> f64 {
         self.compress_threshold_ratio
     }

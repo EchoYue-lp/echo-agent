@@ -1,7 +1,5 @@
 //! 护栏系统核心 trait 和类型
 
-#![allow(missing_docs)]
-
 #[cfg(feature = "guard")]
 pub mod llm;
 #[cfg(feature = "guard")]
@@ -16,9 +14,13 @@ use tokio_util::sync::CancellationToken;
 /// 护栏检查方向
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardDirection {
+    /// 用户输入方向检查
     Input,
+    /// 模型输出方向检查
     Output,
+    /// 工具输入参数检查
     ToolInput,
+    /// 工具输出结果检查
     ToolOutput,
 }
 
@@ -38,10 +40,12 @@ impl std::fmt::Display for GuardDirection {
 pub enum GuardResult {
     Pass,
     Block {
+        /// 阻断原因
         reason: String,
     },
     /// Multiple warnings collected from all guards.
     Warn {
+        /// 警告原因列表
         reasons: Vec<String>,
     },
 }
@@ -54,8 +58,14 @@ impl GuardResult {
 
 /// 护栏 trait
 pub trait Guard: Send + Sync {
+    /// 获取护栏名称
     fn name(&self) -> &str;
 
+    /// 检查内容
+    ///
+    /// # 参数
+    /// * `content` - 待检查的内容
+    /// * `direction` - 检查方向
     fn check<'a>(
         &'a self,
         content: &'a str,
@@ -75,18 +85,22 @@ impl Default for GuardManager {
 }
 
 impl GuardManager {
+    /// 创建空的护栏管理器
     pub fn new() -> Self {
         Self { guards: Vec::new() }
     }
 
+    /// 添加护栏
     pub fn add(&mut self, guard: Arc<dyn Guard>) {
         self.guards.push(guard);
     }
 
+    /// 从护栏列表创建管理器
     pub fn from_guards(guards: Vec<Arc<dyn Guard>>) -> Self {
         Self { guards }
     }
 
+    /// 检查是否为空（未添加任何护栏）
     pub fn is_empty(&self) -> bool {
         self.guards.is_empty()
     }

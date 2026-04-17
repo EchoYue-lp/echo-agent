@@ -90,7 +90,9 @@
 //! # }
 //! ```
 
+/// Built-in tools (security, think, etc.)
 pub mod builtin;
+/// File manipulation tools
 pub mod files;
 pub mod permission;
 pub mod shell;

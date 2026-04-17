@@ -17,6 +17,7 @@ pub mod security;
 #[cfg(feature = "tasks")]
 pub(crate) mod task;
 pub(crate) mod text;
+/// Think tool for reasoning and reflection.
 pub mod think;
 #[cfg(feature = "media")]
 pub(crate) mod word;

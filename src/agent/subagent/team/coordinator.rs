@@ -29,8 +29,11 @@ pub enum TaskState {
 /// Tracks the state of a single task within a team.
 #[derive(Debug, Clone)]
 pub struct TaskAssignment {
+    /// Task description (original input).
     pub task: String,
+    /// Name of the teammate currently assigned, if any.
     pub assigned_to: Option<String>,
+    /// Current execution state.
     pub state: TaskState,
     /// How many times this task has been (re)assigned.
     pub attempts: u32,

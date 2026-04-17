@@ -31,6 +31,7 @@ use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
 use tracing::info;
 
+/// Tool for internal reasoning and reflection.
 pub struct ThinkTool;
 
 impl Tool for ThinkTool {

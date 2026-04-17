@@ -12,17 +12,26 @@ pub const JSONRPC_VERSION: &str = "2.0";
 
 /// A2A 方法名
 pub const METHOD_SEND: &str = "tasks/send";
+/// Subscribe to task updates.
 pub const METHOD_SEND_SUBSCRIBE: &str = "tasks/sendSubscribe";
+/// Get task status.
 pub const METHOD_GET: &str = "tasks/get";
+/// Cancel a running task.
 pub const METHOD_CANCEL: &str = "tasks/cancel";
 
 /// A2A 错误码
 pub const ERROR_CODE_PARSE: i64 = -32700;
+/// Method not found.
 pub const ERROR_CODE_METHOD_NOT_FOUND: i64 = -32601;
+/// Invalid parameters.
 pub const ERROR_CODE_INVALID_PARAMS: i64 = -32602;
+/// Task execution failed.
 pub const ERROR_CODE_TASK_FAILED: i64 = -32000;
+/// Task not found.
 pub const ERROR_CODE_TASK_NOT_FOUND: i64 = -32001;
+/// Task is already in terminal state.
 pub const ERROR_CODE_TERMINAL_STATE: i64 = -32002;
+/// Invalid state transition.
 pub const ERROR_CODE_INVALID_TRANSITION: i64 = -32003;
 
 // ── Agent Card ───────────────────────────────────────────────────────────────
@@ -122,56 +131,67 @@ pub struct AgentCardBuilder {
 }
 
 impl AgentCardBuilder {
+    /// Set the description of the agent.
     pub fn description(mut self, desc: impl Into<String>) -> Self {
         self.description = Some(desc.into());
         self
     }
 
+    /// Set the version of the agent.
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
     }
 
+    /// Set the provider information of the agent.
     pub fn provider(mut self, provider: AgentProvider) -> Self {
         self.provider = Some(provider);
         self
     }
 
+    /// Add a single skill to the agent.
     pub fn skill(mut self, skill: AgentSkill) -> Self {
         self.skills.push(skill);
         self
     }
 
+    /// Add multiple skills to the agent.
     pub fn skills(mut self, skills: Vec<AgentSkill>) -> Self {
         self.skills.extend(skills);
         self
     }
 
+    /// Set the default input modes (content types) supported by the agent.
     pub fn input_modes(mut self, modes: Vec<impl Into<String>>) -> Self {
         self.default_input_modes = modes.into_iter().map(|m| m.into()).collect();
         self
     }
 
+    /// Set the default output modes (content types) supported by the agent.
     pub fn output_modes(mut self, modes: Vec<impl Into<String>>) -> Self {
         self.default_output_modes = modes.into_iter().map(|m| m.into()).collect();
         self
     }
 
+    /// Set authentication configuration for the agent.
     pub fn authentication(mut self, auth: AgentAuthentication) -> Self {
         self.authentication = Some(auth);
         self
     }
 
+    /// Enable streaming capability for the agent.
     pub fn streaming(mut self) -> Self {
         self.capabilities.streaming = true;
         self
     }
 
+    /// Enable push notifications capability for the agent.
     pub fn push_notifications(mut self) -> Self {
         self.capabilities.push_notifications = true;
         self
     }
 
+    /// Build the AgentCard with the configured fields.
     pub fn build(self) -> AgentCard {
         AgentCard {
             name: self.name,
@@ -199,6 +219,7 @@ pub struct AgentProvider {
 }
 
 impl AgentProvider {
+    /// Create a new AgentProvider with the given organization name.
     pub fn new(organization: impl Into<String>) -> Self {
         Self {
             organization: organization.into(),
@@ -206,6 +227,7 @@ impl AgentProvider {
         }
     }
 
+    /// Set the URL for the agent provider.
     pub fn with_url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
@@ -237,6 +259,7 @@ pub struct AgentSkill {
 }
 
 impl AgentSkill {
+    /// Create a new AgentSkill with the given name and description.
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
         let name_str: String = name.into();
         Self {
@@ -250,11 +273,13 @@ impl AgentSkill {
         }
     }
 
+    /// Add examples to the skill.
     pub fn with_examples(mut self, examples: Vec<impl Into<String>>) -> Self {
         self.examples = examples.into_iter().map(|e| e.into()).collect();
         self
     }
 
+    /// Add tags to the skill.
     pub fn with_tags(mut self, tags: Vec<impl Into<String>>) -> Self {
         self.tags = tags.into_iter().map(|t| t.into()).collect();
         self
@@ -411,12 +436,17 @@ pub struct A2AMessage {
 pub enum A2APart {
     /// 文本内容
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        /// 文本内容
+        text: String,
+    },
     /// 文件内容
     #[serde(rename = "file")]
     File {
+        /// MIME type of the file.
         #[serde(rename = "mimeType")]
         mime_type: String,
+        /// Base64-encoded file data.
         data: String,
     },
 }
@@ -502,6 +532,7 @@ pub struct A2ATaskStatus {
 }
 
 impl A2ATaskStatus {
+    /// Create a new task status with the given state and current timestamp.
     pub fn new(state: TaskState) -> Self {
         Self {
             state,
@@ -510,6 +541,7 @@ impl A2ATaskStatus {
         }
     }
 
+    /// Create a new task status with the given state and message.
     pub fn with_message(state: TaskState, message: A2AMessage) -> Self {
         Self {
             state,
@@ -539,7 +571,9 @@ pub struct A2AArtifact {
 /// A2A 错误
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct A2AError {
+    /// 错误码
     pub code: i32,
+    /// 错误消息
     pub message: String,
 }
 
@@ -590,10 +624,14 @@ pub struct TaskArtifactUpdateEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct A2AStreamResponse {
+    /// JSON-RPC 版本
     pub jsonrpc: String,
+    /// 请求 ID
     pub id: String,
+    /// 事件结果
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<A2AStreamEvent>,
+    /// 错误信息
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<A2AError>,
 }
