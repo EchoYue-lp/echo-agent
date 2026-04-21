@@ -128,20 +128,25 @@ impl Tool for FlakyTool {
 async fn demo_default() -> Result<()> {
     println!("配置：ToolExecutionConfig::default()\n");
 
-    // 使用 AgentBuilder 创建 Agent
-    let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
-        .name("agent_default")
-        .system_prompt("你是一个计算助手。用数学工具完成计算。")
-        .enable_tools()
-        .build()?;
+    let config = AgentConfig::new(
+        "qwen3-max",
+        "agent_default",
+        "你是一个计算助手。用数学工具完成计算。",
+    )
+    .tool_execution(ToolExecutionConfig::default());
+    assert_eq!(config.get_tool_execution().timeout_ms, 30_000);
+    let mut agent = ReactAgent::new(config);
 
     agent.add_tool(Box::new(AddTool));
 
-    match agent.execute("计算 15 + 27").await {
-        Ok(ans) => println!("✅ 结果：{}", ans),
-        Err(e) => println!("❌ 错误：{}", e),
+    let ans = agent.execute("计算 15 + 27").await?;
+    if !ans.contains("42") {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo13 验收失败：默认工具执行未得到 42，实际输出: {ans}"
+        ))
+        .into());
     }
+    println!("✅ 结果：{}", ans);
     Ok(())
 }
 
@@ -150,19 +155,28 @@ async fn demo_default() -> Result<()> {
 async fn demo_timeout() -> Result<()> {
     println!("配置：timeout_ms = 1_500\n");
 
-    let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
-        .name("agent_timeout")
-        .system_prompt("你是一个计算助手。slow_add 很慢，add 正常。")
-        .enable_tools()
-        .build()?;
+    let config = AgentConfig::new(
+        "qwen3-max",
+        "agent_timeout",
+        "你是一个计算助手。必须使用 slow_add 完成计算。",
+    )
+    .tool_execution(ToolExecutionConfig {
+        timeout_ms: 1_500,
+        ..ToolExecutionConfig::default()
+    });
+    assert_eq!(config.get_tool_execution().timeout_ms, 1_500);
+    let mut agent = ReactAgent::new(config);
 
     agent.add_tool(Box::new(SlowTool { delay_secs: 3 }));
-    agent.add_tool(Box::new(AddTool));
 
     match agent.execute("用 slow_add 计算 100 + 200").await {
-        Ok(ans) => println!("✅ 结果：{}", ans),
-        Err(e) => println!("❌ 错误：{}", e),
+        Ok(ans) => {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo13 验收失败：超时配置未生效，实际成功返回: {ans}"
+            ))
+            .into());
+        }
+        Err(e) => println!("✅ 超时符合预期：{}", e),
     }
     Ok(())
 }
@@ -172,19 +186,39 @@ async fn demo_timeout() -> Result<()> {
 async fn demo_retry() -> Result<()> {
     println!("配置：retry_on_fail = true, max_retries = 2\n");
 
-    let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
-        .name("agent_retry")
-        .system_prompt("你是一个计算助手。用 flaky_multiply 完成计算。")
-        .enable_tools()
-        .build()?;
+    let config = AgentConfig::new(
+        "qwen3-max",
+        "agent_retry",
+        "你是一个计算助手。用 flaky_multiply 完成计算。",
+    )
+    .tool_execution(ToolExecutionConfig {
+        retry_on_fail: true,
+        max_retries: 2,
+        retry_delay_ms: 50,
+        ..ToolExecutionConfig::default()
+    });
+    assert!(config.get_tool_execution().retry_on_fail);
+    let mut agent = ReactAgent::new(config);
 
-    agent.add_tool(Box::new(FlakyTool::new(2)));
+    let tool = FlakyTool::new(2);
+    let call_count = tool.call_count.clone();
+    agent.add_tool(Box::new(tool));
 
-    match agent.execute("用 flaky_multiply 计算 7 × 8").await {
-        Ok(ans) => println!("✅ 结果：{}", ans),
-        Err(e) => println!("❌ 错误：{}", e),
+    let ans = agent.execute("用 flaky_multiply 计算 7 × 8").await?;
+    if !ans.contains("56") {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo13 验收失败：重试后未得到正确结果 56，实际输出: {ans}"
+        ))
+        .into());
     }
+    if call_count.load(Ordering::SeqCst) < 3 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo13 验收失败：工具重试次数不足，实际调用 {} 次",
+            call_count.load(Ordering::SeqCst)
+        ))
+        .into());
+    }
+    println!("✅ 结果：{}", ans);
     Ok(())
 }
 
@@ -193,19 +227,24 @@ async fn demo_retry() -> Result<()> {
 async fn demo_concurrency() -> Result<()> {
     println!("配置：max_concurrency = 2\n");
 
-    let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
-        .name("agent_concurrency")
-        .system_prompt("你是一个任务调度助手。")
-        .enable_tools()
-        .build()?;
+    let config = AgentConfig::new("qwen3-max", "agent_concurrency", "你是一个任务调度助手。")
+        .tool_execution(ToolExecutionConfig {
+            max_concurrency: Some(2),
+            ..ToolExecutionConfig::default()
+        });
+    assert_eq!(config.get_tool_execution().max_concurrency, Some(2));
+    let mut agent = ReactAgent::new(config);
 
     agent.add_tool(Box::new(AddTool));
 
-    match agent.execute("计算 1 + 2").await {
-        Ok(ans) => println!("✅ 结果：{}", ans),
-        Err(e) => println!("❌ 错误：{}", e),
+    let ans = agent.execute("计算 1 + 2").await?;
+    if !ans.contains('3') {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo13 验收失败：并发配置场景下基础工具执行失败: {ans}"
+        ))
+        .into());
     }
+    println!("✅ 结果：{}", ans);
     Ok(())
 }
 

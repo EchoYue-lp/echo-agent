@@ -41,6 +41,7 @@ pub struct ReactAgentBuilder {
     store: Option<Arc<dyn Store>>,
     checkpointer: Option<Arc<dyn Checkpointer>>,
     session_id: Option<String>,
+    conversation_id: Option<String>,
     #[cfg(feature = "human-loop")]
     approval_provider: Option<Arc<dyn HumanLoopProvider>>,
     #[cfg(feature = "human-loop")]
@@ -85,6 +86,7 @@ impl ReactAgentBuilder {
             store: None,
             checkpointer: None,
             session_id: None,
+            conversation_id: None,
             #[cfg(feature = "human-loop")]
             approval_provider: None,
             #[cfg(feature = "human-loop")]
@@ -379,15 +381,24 @@ impl ReactAgentBuilder {
     }
 
     /// 设置 Checkpointer（使用已设置的 session_id）
-    /// 需要先调用 session_id() 设置会话标识
+    /// 需要先调用 session_id() 设置线程标识
     pub fn checkpointer_only(mut self, checkpointer: Arc<dyn Checkpointer>) -> Self {
         self.checkpointer = Some(checkpointer);
         self
     }
 
-    /// 设置 session_id（会话标识）
+    /// 设置 session_id（线程标识）
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// 设置 conversation_id（历史投影标识）
+    ///
+    /// 与 `session_id` 不同，`conversation_id` 仅用于 `ConversationStore`
+    /// 的 transcript/history 投影；如果启用了对话历史持久化，应显式设置它。
+    pub fn conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
+        self.conversation_id = Some(conversation_id.into());
         self
     }
 
@@ -493,6 +504,9 @@ impl ReactAgentBuilder {
 
         if let Some(session_id) = &self.session_id {
             config = config.session_id(session_id);
+        }
+        if let Some(conversation_id) = &self.conversation_id {
+            config = config.conversation_id(conversation_id);
         }
 
         // 当用户通过 with_memory_tools(store) 传入自定义 Store 时，

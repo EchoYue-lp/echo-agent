@@ -22,10 +22,10 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("═══════════════════════════════════════════════════════\n");
 
     // Part 1: 静态能力展示
-    demo_skill_overview();
+    demo_skill_overview()?;
 
     // Part 2: Shell 安全策略验证
-    demo_shell_safety();
+    demo_shell_safety()?;
 
     // Part 3: Agent 真实执行
     demo_agent_tasks().await?;
@@ -35,7 +35,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
 // ── Part 1: Skill 元数据展示 ─────────────────────────────────────────────────
 
-fn demo_skill_overview() {
+fn demo_skill_overview() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 1: Skill 能力概览\n");
 
@@ -50,6 +50,12 @@ fn demo_skill_overview() {
 
     for (label, skill) in &skills {
         let tools = skill.tools();
+        if tools.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo09 验收失败：{label} 未暴露任何工具"
+            ))
+            .into());
+        }
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         println!("  [{label}]");
         println!("    名称: {}", skill.name());
@@ -57,11 +63,12 @@ fn demo_skill_overview() {
         println!("    工具: {:?}", names);
         println!();
     }
+    Ok(())
 }
 
 // ── Part 2: Shell 安全策略验证 ───────────────────────────────────────────────
 
-fn demo_shell_safety() {
+fn demo_shell_safety() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 2: Shell 三级安全策略验证\n");
 
@@ -75,6 +82,18 @@ fn demo_shell_safety() {
 
     for (cmd, desc) in cases {
         let safety = tool.check_command_safety(cmd);
+        match (*cmd, &safety) {
+            ("ls -la /tmp", CommandSafety::Safe)
+            | ("git status", CommandSafety::Safe)
+            | ("rm -rf /tmp/test", CommandSafety::RequiresApproval(_))
+            | ("sudo rm -rf /", CommandSafety::Dangerous(_)) => {}
+            _ => {
+                return Err(echo_agent::error::ReactError::Other(format!(
+                    "demo09 验收失败：命令 `{cmd}` 的安全等级判断异常"
+                ))
+                .into());
+            }
+        }
         let (icon, label) = match &safety {
             CommandSafety::Safe => ("✅", "Safe"),
             CommandSafety::RequiresApproval(_) => ("⚠️ ", "NeedApproval"),
@@ -83,6 +102,7 @@ fn demo_shell_safety() {
         println!("  {icon} [{label}] {desc}: `{cmd}`");
     }
     println!();
+    Ok(())
 }
 
 // ── Part 3: Agent 真实任务执行 ───────────────────────────────────────────────
@@ -111,10 +131,22 @@ async fn demo_agent_tasks() -> echo_agent::error::Result<()> {
     );
     println!("任务: {task}\n");
 
-    match agent.execute(&task).await {
-        Ok(result) => println!("✓ 结果:\n{result}\n"),
-        Err(e) => println!("✗ 失败: {e}\n"),
+    let result = agent.execute(&task).await?;
+    let note_path = format!("{work_dir}/notes.md");
+    let content = tokio::fs::read_to_string(&note_path).await?;
+    if !content.contains("项目笔记") || !content.contains("完成了文件工具的实现") {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo09 验收失败：Agent 未正确写入文件 `{note_path}`"
+        ))
+        .into());
     }
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo09 验收失败：Agent 返回空结果".to_string(),
+        )
+        .into());
+    }
+    println!("✓ 结果:\n{result}\n");
 
     Ok(())
 }

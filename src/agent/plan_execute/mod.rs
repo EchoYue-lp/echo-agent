@@ -104,18 +104,23 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     ///
     /// # 示例
     /// ```rust
-    /// use echo_agent::agent::plan_execute::{PlanExecuteAgent, LlmPlanner, ReactExecutor};
-    /// use echo_agent::agent::ReactAgentBuilder;
+    /// use echo_agent::agent::plan_execute::{PlanExecuteAgent, SimpleExecutor, StaticPlanner};
+    /// use echo_agent::agent::Agent;
+    /// use echo_agent::testing::MockAgent;
     ///
-    /// let planner = LlmPlanner::new("qwen3-max");
-    /// let executor_agent = ReactAgentBuilder::new()
-    ///     .model("qwen3-max")
-    ///     .name("executor")
-    ///     .system_prompt("你是一个任务执行助手")
-    ///     .enable_tools()
-    ///     .build()?;
-    /// let executor = ReactExecutor::new(executor_agent);
-    /// let agent = PlanExecuteAgent::new("plan_agent", planner, executor);
+    /// # #[tokio::main]
+    /// # async fn main() -> echo_agent::error::Result<()> {
+    /// let planner = StaticPlanner::new(vec!["分析问题", "给出结论"]);
+    /// let executor = SimpleExecutor::new(
+    ///     MockAgent::new("executor")
+    ///         .with_response("已完成步骤 1")
+    ///         .with_response("已完成步骤 2"),
+    /// );
+    /// let mut agent = PlanExecuteAgent::new("plan_agent", planner, executor);
+    /// let result = agent.execute("帮我分析这个问题").await?;
+    /// assert!(!result.trim().is_empty());
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(name: impl Into<String>, planner: P, executor: E) -> Self {
         Self {

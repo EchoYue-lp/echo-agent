@@ -133,8 +133,14 @@ async fn main() -> Result<()> {
             如果当天天气下雨，则商场总价会打85折。\
             请问我还剩多少？",
         )
-        .await;
+        .await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo04 验收失败：SubAgent 编排示例返回空结果".to_string(),
+        )
+        .into());
+    }
 
-    println!("\n✅ 最终结果:\n{:?}", result);
+    println!("\n✅ 最终结果:\n{}", result);
     Ok(())
 }

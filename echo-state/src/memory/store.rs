@@ -73,6 +73,51 @@ impl StoreItem {
     }
 }
 
+/// 检索模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchMode {
+    /// 仅关键词检索
+    Keyword,
+    /// 仅语义检索
+    Semantic,
+    /// 关键词 + 语义混合检索
+    Hybrid,
+}
+
+/// 统一检索请求
+#[derive(Debug, Clone, Copy)]
+pub struct SearchQuery<'a> {
+    pub text: &'a str,
+    pub limit: usize,
+    pub mode: SearchMode,
+}
+
+impl<'a> SearchQuery<'a> {
+    pub fn keyword(text: &'a str, limit: usize) -> Self {
+        Self {
+            text,
+            limit,
+            mode: SearchMode::Keyword,
+        }
+    }
+
+    pub fn semantic(text: &'a str, limit: usize) -> Self {
+        Self {
+            text,
+            limit,
+            mode: SearchMode::Semantic,
+        }
+    }
+
+    pub fn hybrid(text: &'a str, limit: usize) -> Self {
+        Self {
+            text,
+            limit,
+            mode: SearchMode::Hybrid,
+        }
+    }
+}
+
 // ── Store trait ───────────────────────────────────────────────────────────────
 
 /// 长期记忆的统一存储接口
@@ -100,6 +145,29 @@ pub trait Store: Send + Sync {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
 
+    /// 统一检索入口。
+    ///
+    /// 默认仅支持关键词检索；语义/混合检索由具体实现显式覆盖。
+    fn search_with<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        query: SearchQuery<'a>,
+    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move {
+            match query.mode {
+                SearchMode::Keyword => self.search(namespace, query.text, query.limit).await,
+                SearchMode::Semantic => Err(MemoryError::Unsupported(
+                    "semantic search is not supported by this Store".to_string(),
+                )
+                .into()),
+                SearchMode::Hybrid => Err(MemoryError::Unsupported(
+                    "hybrid search is not supported by this Store".to_string(),
+                )
+                .into()),
+            }
+        })
+    }
+
     /// 删除指定 key，返回是否存在并删除
     fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>>;
 
@@ -108,21 +176,6 @@ pub trait Store: Send + Sync {
         &'a self,
         prefix: Option<&'a [&'a str]>,
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>>;
-
-    /// 是否支持语义（向量）搜索。[`EmbeddingStore`](super::EmbeddingStore) 返回 `true`，其余返回 `false`。
-    fn supports_semantic_search(&self) -> bool {
-        false
-    }
-
-    /// 语义检索：若实现类支持向量搜索则执行余弦相似度检索，否则回退到关键词 [`search`](Store::search)。
-    fn semantic_search<'a>(
-        &'a self,
-        namespace: &'a [&'a str],
-        query: &'a str,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
-        self.search(namespace, query, limit)
-    }
 }
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
@@ -703,8 +756,12 @@ mod tests {
     }
 
     #[test]
-    fn test_store_supports_semantic_search_default() {
+    fn test_store_semantic_search_default_is_unsupported() {
         let store = InMemoryStore::new();
-        assert!(!store.supports_semantic_search());
+        let err = futures::executor::block_on(
+            store.search_with(&["user", "memories"], SearchQuery::semantic("Rust", 5)),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("semantic search"));
     }
 }

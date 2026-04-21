@@ -1,4 +1,4 @@
-//! demo44: 数据处理工具演示（Excel / CSV / Word / Text）
+//! demo43: 数据处理工具演示（Excel / CSV / Word / Text）
 //!
 //! 展示内置的数据处理能力：
 //! - Excel 文件读取和导出
@@ -7,7 +7,7 @@
 //! - CSV/JSON/Parquet 数据处理
 //!
 //! ```bash
-//! cargo run --example demo44_data_tools --features full
+//! cargo run --example demo43_data_tools --features full
 //! ```
 
 use echo_agent::error::Result;
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     println!("═══════════════════════════════════════════════════════\n");
 
     // 创建测试文件
-    create_test_files();
+    create_test_files()?;
 
     let system_prompt = r#"你是一个数据处理助手，具备以下能力：
 1. Excel 文件读取（.xlsx/.xls/.xlsb/.ods）
@@ -64,14 +64,14 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    match agent.execute(&task).await {
-        Ok(result) => {
-            println!("✓ 结果:\n{}\n", result);
-        }
-        Err(e) => {
-            println!("⚠️ 错误: {}\n", e);
-        }
+    let result = agent.execute(&task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo43 验收失败：Excel 处理返回空结果".to_string(),
+        )
+        .into());
     }
+    println!("✓ 结果:\n{}\n", result);
 
     // ── Part 2: 文本文件处理 ─────────────────────────────────────────────
     println!("───────────────────────────────────────────────────────");
@@ -91,14 +91,14 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    match agent.execute(&task).await {
-        Ok(result) => {
-            println!("✓ 结果:\n{}\n", result);
-        }
-        Err(e) => {
-            println!("⚠️ 错误: {}\n", e);
-        }
+    let result = agent.execute(&task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo43 验收失败：文本处理返回空结果".to_string(),
+        )
+        .into());
     }
+    println!("✓ 结果:\n{}\n", result);
 
     // ── Part 3: CSV 数据处理 ─────────────────────────────────────────────
     println!("───────────────────────────────────────────────────────");
@@ -118,14 +118,14 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    match agent.execute(&task).await {
-        Ok(result) => {
-            println!("✓ 结果:\n{}\n", result);
-        }
-        Err(e) => {
-            println!("⚠️ 错误: {}\n", e);
-        }
+    let result = agent.execute(&task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo43 验收失败：CSV 处理返回空结果".to_string(),
+        )
+        .into());
     }
+    println!("✓ 结果:\n{}\n", result);
 
     // ── Part 4: Word 文档处理 ────────────────────────────────────────────
     println!("───────────────────────────────────────────────────────");
@@ -151,14 +151,14 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    match agent.execute(task).await {
-        Ok(result) => {
-            println!("✓ 结果:\n{}\n", result);
-        }
-        Err(e) => {
-            println!("⚠️ 错误: {}\n", e);
-        }
+    let result = agent.execute(task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo43 验收失败：综合数据处理返回空结果".to_string(),
+        )
+        .into());
     }
+    println!("✓ 结果:\n{}\n", result);
 
     println!("═══════════════════════════════════════════════════════");
     println!("    Demo 完成");
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
 }
 
 /// 创建测试文件
-fn create_test_files() {
+fn create_test_files() -> Result<()> {
     // 创建测试文本文件
     let text_content = r#"Echo Agent 数据处理工具演示文档
 
@@ -196,7 +196,7 @@ fn create_test_files() {
 Echo Agent 提供了强大的数据处理能力，适合各种数据分析场景。
 "#;
 
-    fs::write("/tmp/echo_test_text.txt", text_content).ok();
+    fs::write("/tmp/echo_test_text.txt", text_content)?;
 
     // 创建测试 CSV 文件
     let csv_content = "name,age,salary,department
@@ -209,16 +209,17 @@ Echo Agent 提供了强大的数据处理能力，适合各种数据分析场景
 吴九,27,14000,销售部
 郑十,33,20000,管理部";
 
-    fs::write("/tmp/echo_test_data.csv", csv_content).ok();
+    fs::write("/tmp/echo_test_data.csv", csv_content)?;
 
     // 创建真正的 Excel 文件（xlsx 格式）
-    create_test_xlsx();
+    create_test_xlsx()?;
 
     println!("测试文件已创建:");
     println!("  - /tmp/echo_test_text.txt");
     println!("  - /tmp/echo_test_data.csv");
     println!("  - /tmp/echo_test_excel.xlsx");
     println!();
+    Ok(())
 }
 
 /// 清理测试文件
@@ -231,7 +232,7 @@ fn cleanup_test_files() {
 }
 
 /// 创建真正的 xlsx 测试文件（通过 base64 解码嵌入的最小有效 xlsx）
-fn create_test_xlsx() {
+fn create_test_xlsx() -> Result<()> {
     use base64::Engine;
     let xlsx_base64 = "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";
 
@@ -239,7 +240,6 @@ fn create_test_xlsx() {
         .decode(xlsx_base64)
         .expect("Invalid base64 xlsx data");
 
-    if let Err(e) = fs::write("/tmp/echo_test_excel.xlsx", bytes) {
-        println!("创建测试 Excel 文件失败: {}", e);
-    }
+    fs::write("/tmp/echo_test_excel.xlsx", bytes)?;
+    Ok(())
 }

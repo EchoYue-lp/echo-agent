@@ -12,6 +12,7 @@ use super::{
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
+use futures::future::BoxFuture;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -28,6 +29,48 @@ pub struct SandboxManager {
     policy: SandboxPolicy,
     /// 是否允许降级执行
     allow_fallback: bool,
+}
+
+impl SandboxExecutor for SandboxManager {
+    fn name(&self) -> &str {
+        "manager"
+    }
+
+    fn isolation_level(&self) -> IsolationLevel {
+        self.available_levels()
+            .into_iter()
+            .max()
+            .unwrap_or(IsolationLevel::None)
+    }
+
+    fn is_available(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
+        Box::pin(async move { SandboxManager::execute(self, command).await })
+    }
+
+    fn execute_with_limits(
+        &self,
+        command: SandboxCommand,
+        limits: ResourceLimits,
+    ) -> BoxFuture<'_, Result<ExecutionResult>> {
+        Box::pin(async move { SandboxManager::execute_with_limits(self, command, limits).await })
+    }
+
+    fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.local.cleanup().await?;
+            if let Some(docker) = &self.docker {
+                docker.cleanup().await?;
+            }
+            if let Some(k8s) = &self.k8s {
+                k8s.cleanup().await?;
+            }
+            Ok(())
+        })
+    }
 }
 
 impl SandboxManager {
@@ -107,7 +150,7 @@ impl SandboxManager {
         command: SandboxCommand,
         limits: ResourceLimits,
     ) -> Result<ExecutionResult> {
-        let required_level = self.policy.evaluate(&command);
+        let required_level = self.policy.evaluate_with_limits(&command, Some(&limits));
         self.execute_at_level(command, required_level, Some(limits))
             .await
     }
@@ -122,15 +165,24 @@ impl SandboxManager {
         // 选择满足要求的最佳执行器
         let executor = self.select_executor(required)?;
 
-        // 降级前校验：执行器实际隔离级别必须 >= 所需级别
+        // 当允许 fallback 时，可能会选择低于所需隔离级别的执行器。
         let actual = executor.isolation_level();
         if actual < required {
-            return Err(echo_core::error::ReactError::Sandbox(
-                SandboxError::PermissionDenied(format!(
-                    "Cannot downgrade from {} to {}: no executor meets the required isolation level",
-                    required, actual
-                )),
-            ));
+            if !self.allow_fallback {
+                return Err(echo_core::error::ReactError::Sandbox(
+                    SandboxError::PermissionDenied(format!(
+                        "Cannot downgrade from {} to {}: no executor meets the required isolation level",
+                        required, actual
+                    )),
+                ));
+            }
+
+            warn!(
+                required = %required,
+                actual = %actual,
+                executor = executor.name(),
+                "Falling back to lower isolation executor"
+            );
         }
 
         info!(
@@ -148,43 +200,32 @@ impl SandboxManager {
 
     /// 选择最佳执行器
     ///
-    /// 优先选择满足隔离级别要求的执行器（K8s > Docker > Local）。
+    /// 优先选择满足隔离级别要求的最轻量执行器（Local -> Docker -> K8s）。
     /// 如果没有执行器满足要求，根据 `allow_fallback` 决定：
-    /// - `true`: 返回最佳可用执行器（实际隔离级别可能低于要求）
+    /// - `true`: 返回可用执行器中隔离最强的一层（实际隔离级别可能低于要求）
     /// - `false`: 返回错误
-    ///
-    /// 注意：`execute_at_level` 会在调用后验证实际隔离级别是否满足要求，
-    /// 因此 `allow_fallback=true` 时，调用方需自行处理降级逻辑。
     fn select_executor(
         &self,
         required: IsolationLevel,
     ) -> std::result::Result<Arc<dyn SandboxExecutor>, echo_core::error::ReactError> {
-        // 优先尝试最高隔离级别的执行器
-        // MicroVM (K8s) >= Container (Docker) >= OsSandbox/Process/None (Local)
-
-        // 如果 K8s 可用且满足要求
-        if let Some(ref k8s) = self.k8s {
-            if k8s.isolation_level() >= required {
-                return Ok(k8s.clone());
-            }
-        }
-
-        // 如果 Docker 可用且满足要求
-        if let Some(ref docker) = self.docker {
-            if docker.isolation_level() >= required {
-                return Ok(docker.clone());
-            }
-        }
-
-        // Local 如果满足要求
+        // 优先选择满足要求的最轻量执行器，避免把低风险命令路由到更重的层。
         if self.local.isolation_level() >= required {
             return Ok(self.local.clone());
+        }
+        if let Some(ref docker) = self.docker
+            && docker.isolation_level() >= required
+        {
+            return Ok(docker.clone());
+        }
+        if let Some(ref k8s) = self.k8s
+            && k8s.isolation_level() >= required
+        {
+            return Ok(k8s.clone());
         }
 
         // 没有执行器满足要求
         if self.allow_fallback {
-            // 降级：返回最佳可用执行器（隔离级别低于要求）
-            // 调用方（execute_at_level）会根据安全策略决定是否允许降级执行
+            // 降级时选择可用执行器中隔离最强的一层。
             let best_available: Arc<dyn SandboxExecutor> = if let Some(ref k8s) = self.k8s {
                 k8s.clone()
             } else if let Some(ref docker) = self.docker {
@@ -225,7 +266,7 @@ impl SandboxManager {
         }
 
         if self.k8s.is_some() {
-            levels.push(IsolationLevel::MicroVM);
+            levels.push(IsolationLevel::Orchestrated);
         }
 
         levels
@@ -245,7 +286,7 @@ mod tests {
         assert!(levels.contains(&IsolationLevel::None));
         assert!(levels.contains(&IsolationLevel::Process));
         assert!(!levels.contains(&IsolationLevel::Container));
-        assert!(!levels.contains(&IsolationLevel::MicroVM));
+        assert!(!levels.contains(&IsolationLevel::Orchestrated));
     }
 
     #[tokio::test]
@@ -288,5 +329,46 @@ mod tests {
         let cmd = SandboxCommand::shell("echo safe");
         let result = manager.execute(cmd).await.unwrap();
         assert!(result.success());
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_limits_uses_limit_aware_policy() {
+        let mut manager = SandboxManager::local_only();
+        manager.set_policy(SandboxPolicy::default());
+
+        let err = manager
+            .execute_with_limits(
+                SandboxCommand::shell("echo safe"),
+                ResourceLimits {
+                    network: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("Isolation level"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_limits_falls_back_when_enabled() {
+        let mut manager = SandboxManager::local_only();
+        manager.set_policy(SandboxPolicy::default());
+        manager.set_allow_fallback(true);
+
+        let result = manager
+            .execute_with_limits(
+                SandboxCommand::shell("echo downgraded"),
+                ResourceLimits {
+                    network: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success());
+        assert_eq!(result.stdout.trim(), "downgraded");
+        assert_eq!(result.sandbox_type, "local");
     }
 }

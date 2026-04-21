@@ -95,7 +95,7 @@ The core design principle: don't load everything at once. Instead, content is re
 | **Tier 1: Catalog** | name + description (frontmatter) | Auto-scanned at startup | ~50-100 / skill |
 | **Tier 2: Activation** | Full instructions + resource listing | LLM calls `activate_skill` | <5000 / skill |
 | **Tier 3a: Resources** | Reference file contents | LLM calls `read_skill_resource` | On demand |
-| **Tier 3b: Scripts** | Python/Bash/TS script execution | LLM calls `run_skill_script` | On demand |
+| **Tier 3b: Scripts** | Python/Bash/TS/PowerShell script execution | LLM calls `run_skill_script` | On demand |
 
 ### SKILL.md Format (agentskills.io standard)
 
@@ -152,9 +152,14 @@ Skill directory: ${SKILL_DIR}
 | `license` | | SPDX license identifier |
 | `shell` | | Shell for inline commands: `bash` (default) or `powershell` |
 | `paths` | | Conditional activation file glob patterns (e.g., `["*.py"]`) |
-| `allowed-tools` | | Restrict which tools this skill may use |
+| `allowed-tools` | | Declare preferred/allowed tools for this skill |
 | `hooks` | | PreToolUse / PostToolUse hook definitions |
 | `metadata` | | Arbitrary key-value pairs (author, version, tags, etc.) |
+
+Hook action types inside `hooks`:
+- `command`: execute a command, with JSON hook context on stdin
+- `prompt`: inject guidance back into the agent context
+- `permission`: return `allow` / `deny` / `ask` to override permission flow
 
 ### Inline Command Execution
 
@@ -175,6 +180,14 @@ rustc --version
 → After activation: `rustc 1.93.0 (254b59607 2026-01-19)`
 
 **Security**: MCP-sourced skills **never execute** inline commands (untrusted remote content).
+
+When inline commands or hook commands fall back to direct process spawning (no `SandboxManager`
+configured), the runtime now:
+- clears inherited environment variables before applying a minimal whitelist (`PATH`, `SKILL_DIR`, `SESSION_ID`)
+- uses best-effort timeout termination via `kill_on_drop(true)`
+
+This fallback is suitable for demos and local development, but production setups should still
+prefer a configured `SandboxManager`.
 
 ### Variable Substitution
 
@@ -231,6 +244,10 @@ After discovery, three progressive disclosure tools are automatically registered
 | `read_skill_resource` | Read reference files |
 | `run_skill_script` | Execute Python/Bash/TS/PowerShell scripts |
 
+If the same agent later calls `discover_skills()` again and finds additional file-based skills,
+these three tools are refreshed so their shared registry and available-skill view stay aligned
+with the latest discovery result.
+
 ---
 
 ## Hooks System
@@ -280,6 +297,10 @@ Skills can intercept tool calls via Hooks for security auditing, logging, input/
 | `updatedInput` | Modified tool input (PreToolUse only) |
 | `continue` | `false` to stop further hooks |
 
+If multiple matching hooks emit a `permission_mode_override`, the runtime keeps the
+last non-empty override. Permission decisions themselves still follow the stricter
+priority order (`deny > ask > allow`).
+
 ### Example: YAML Definition
 
 ```yaml
@@ -309,7 +330,8 @@ hooks:
 
 ## Conditional Activation
 
-Skills with `paths` are only surfaced/activated when matching files are touched:
+Skills with `paths` are always discoverable in the catalog, but runtime activation is
+guarded by a matching `context_path`:
 
 ```yaml
 paths:
@@ -319,11 +341,25 @@ paths:
 
 The catalog shows: `- python-linter: ... [activates for: *.py, tests/**]`
 
+At activation time, call:
+
+```json
+{
+  "name": "python-linter",
+  "context_path": "tests/test_api.py"
+}
+```
+
+If `context_path` is missing or doesn't match the declared globs, `activate_skill`
+returns an error instead of loading the skill.
+
 ---
 
 ## Tool Permission Restriction
 
-`allowed-tools` restricts which tools a skill may use. The constraint is injected into the activation prompt:
+`allowed-tools` declares the preferred/allowed tools for a skill. The constraint is injected
+into the activation prompt, and the built-in progressive-disclosure tools also enforce it at
+runtime:
 
 ```yaml
 allowed-tools:
@@ -331,6 +367,9 @@ allowed-tools:
   - run_skill_script
   - Bash
 ```
+
+In particular, `read_skill_resource` and `run_skill_script` reject calls when the activated
+skill's whitelist does not include them.
 
 ---
 
@@ -348,6 +387,10 @@ allowed-tools:
 | `.rb` | `ruby` | `ruby` |
 
 Interpreters are invoked directly (not via `sh -c` / `cmd /C`) to prevent shell injection.
+
+Additional runtime guarantees:
+- the `script` path must be relative and must canonicalize under the activated skill directory
+- malformed `args` strings are rejected instead of being silently treated as one opaque argument
 
 ---
 

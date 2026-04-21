@@ -65,8 +65,14 @@ async fn main() -> Result<()> {
             "我有 1200 元。买了 8 个 18 元的本子、12 支 9 元的笔、3 个 120 元的玩具、1 件 400 元外套。\
             先计算原价总和，再对总价打 95 折，最后算剩余金额。",
         )
-        .await;
+        .await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo02 验收失败：任务规划示例返回空结果".to_string(),
+        )
+        .into());
+    }
 
-    println!("\n✅ 最终结果:\n{:?}", result);
+    println!("\n✅ 最终结果:\n{}", result);
     Ok(())
 }

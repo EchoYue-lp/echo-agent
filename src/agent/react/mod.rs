@@ -28,6 +28,7 @@ use crate::memory::store::{FileStore, Store};
 use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
+use crate::skills::registry::SharedRegistry;
 #[cfg(feature = "tasks")]
 use crate::tasks::TaskManager;
 use crate::tools::ToolManager;
@@ -43,6 +44,8 @@ use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
 };
 use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+#[cfg(feature = "human-loop")]
+use echo_core::tools::permission::PermissionRule;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -118,11 +121,13 @@ pub struct ReactAgent {
     approval_provider: Arc<dyn HumanLoopProvider>,
     /// Skill 注册表：管理 code-based 和 file-based skills
     skill_registry: SkillRegistry,
+    /// Shared registry used by progressive-disclosure skill tools.
+    pub(crate) progressive_skill_registry: Option<SharedRegistry>,
     /// Hook registry for skill-defined tool call interception
     pub(crate) hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
     /// 长期记忆 Store，通过 `remember`/`recall`/`forget` 工具访问
     store: Option<Arc<dyn Store>>,
-    /// 短期会话 Checkpointer，按 session_id 持久化对话历史
+    /// 线程状态存储，按 session_id 持久化 runtime source of truth
     checkpointer: Option<Arc<dyn Checkpointer>>,
     #[cfg(feature = "mcp")]
     mcp_manager: McpManager,
@@ -133,11 +138,14 @@ pub struct ReactAgent {
     /// 统一权限服务：整合 mode/rules/hooks/classifier/handler
     #[cfg(feature = "human-loop")]
     pub(crate) permission_service: Option<Arc<PermissionService>>,
+    /// 在同步 setup 阶段登记、等待在异步运行阶段刷入 PermissionService 的规则
+    #[cfg(feature = "human-loop")]
+    pub(crate) pending_permission_rules: std::sync::Mutex<Vec<PermissionRule>>,
     /// 审计日志记录器
     pub(crate) audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
     /// 状态快照管理器，支持每轮迭代自动快照和回滚
     pub(crate) snapshot_manager: Option<SnapshotManager>,
-    /// 对话持久化 Store，支持对话保存、恢复和历史管理
+    /// 对话历史投影 Store，用于 transcript/history 持久化与浏览
     pub(crate) conversation_store: Option<Arc<dyn crate::memory::conversation::ConversationStore>>,
     /// 熔断器：LLM 持续不可用时快速失败，防止无效重试
     pub(crate) circuit_breaker: Option<Arc<CircuitBreaker>>,
@@ -338,6 +346,7 @@ impl ReactAgent {
             #[cfg(feature = "human-loop")]
             approval_provider,
             skill_registry: SkillRegistry::new(),
+            progressive_skill_registry: None,
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             store,
             checkpointer,
@@ -347,6 +356,8 @@ impl ReactAgent {
             permission_policy: None,
             #[cfg(feature = "human-loop")]
             permission_service: None,
+            #[cfg(feature = "human-loop")]
+            pending_permission_rules: std::sync::Mutex::new(Vec::new()),
             audit_logger: None,
             snapshot_manager: None,
             conversation_store: None,
@@ -459,15 +470,35 @@ impl ReactAgent {
         self.store.as_ref()
     }
 
-    /// 注入 Checkpointer 并绑定 session_id，启用跨进程会话恢复
+    /// 注入线程状态存储并绑定 session_id，启用跨进程线程恢复
     pub fn set_checkpointer(&mut self, checkpointer: Arc<dyn Checkpointer>, session_id: String) {
         self.checkpointer = Some(checkpointer);
         self.config.session_id = Some(session_id);
     }
 
-    /// 获取当前 Checkpointer 的只读引用
+    /// `set_checkpointer()` 的语义化别名。
+    pub fn set_thread_store(&mut self, store: Arc<dyn Checkpointer>, session_id: String) {
+        self.set_checkpointer(store, session_id);
+    }
+
+    /// 获取当前线程状态存储的只读引用
     pub fn checkpointer(&self) -> Option<&Arc<dyn Checkpointer>> {
         self.checkpointer.as_ref()
+    }
+
+    /// `checkpointer()` 的语义化别名。
+    pub fn thread_store(&self) -> Option<&Arc<dyn Checkpointer>> {
+        self.checkpointer()
+    }
+
+    /// 设置对话历史投影使用的 conversation_id。
+    pub fn set_conversation_id(&mut self, conversation_id: impl Into<String>) {
+        self.config.conversation_id = Some(conversation_id.into());
+    }
+
+    /// 获取当前对话历史投影的 conversation_id。
+    pub fn conversation_id(&self) -> Option<&str> {
+        self.config.get_conversation_id()
     }
 
     /// 获取当前对话历史消息（只读）
@@ -559,6 +590,15 @@ impl ReactAgent {
 
     /// 设置沙箱管理器，为 skill 脚本执行提供安全隔离
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+        self.skill_registry.set_sandbox_manager(manager.clone());
+        if let Some(shared) = &self.progressive_skill_registry
+            && let Ok(mut registry) = shared.try_write()
+        {
+            registry.set_sandbox_manager(manager.clone());
+        }
+        if let Ok(mut hooks) = self.hook_registry.try_write() {
+            hooks.set_sandbox_manager(manager.clone());
+        }
         self.sandbox_manager = Some(manager);
     }
 
@@ -638,9 +678,13 @@ impl ReactAgent {
 
     // ── 对话持久化 ──────────────────────────────────────────────────────────────
 
-    /// 设置对话持久化 Store
+    /// 设置对话历史投影 Store
     ///
-    /// 启用后，对话将自动保存到 Store，支持跨会话恢复。
+    /// 启用后，Agent 会在持久化线程状态的同时，将当前 transcript 投影到
+    /// `ConversationStore` 中，供历史浏览与产品层查询使用。
+    ///
+    /// 注意：该功能要求显式设置独立的 `conversation_id`；
+    /// `session_id` 仅用于线程状态恢复，不再作为历史投影的回退标识。
     pub fn set_conversation_store(
         &mut self,
         store: Arc<dyn crate::memory::conversation::ConversationStore>,
@@ -680,7 +724,7 @@ impl Drop for ReactAgent {
             // Only spawn cleanup when a Tokio runtime is available.
             let mcp_mgr = std::mem::replace(&mut self.mcp_manager, crate::mcp::McpManager::new());
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let _ = handle.spawn(async move {
+                handle.spawn(async move {
                     mcp_mgr.close_all().await;
                 });
             }

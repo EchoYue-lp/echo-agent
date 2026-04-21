@@ -1,7 +1,7 @@
 //! demo18_semantic_memory.rs —— Store 语义搜索（向量检索）综合演示
 
 use echo_agent::agent::Agent;
-use echo_agent::memory::store::{InMemoryStore, Store};
+use echo_agent::memory::store::{InMemoryStore, SearchQuery, Store};
 use echo_agent::memory::{Embedder, EmbeddingStore, HttpEmbedder};
 use echo_agent::prelude::*;
 use serde_json::json;
@@ -42,11 +42,7 @@ async fn main() -> echo_agent::error::Result<()> {
 async fn demo_keyword_vs_semantic() -> echo_agent::error::Result<()> {
     println!("  对比「关键词检索」和「语义检索」在跨语言查询上的差异\n");
 
-    let Some(embedder) = load_embedder_from_config() else {
-        println!("  ℹ️  未检测到 embedding 配置，跳过语义搜索对比");
-        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量\n");
-        return Ok(());
-    };
+    let embedder = load_verified_embedder_from_config().await?;
 
     let memories = [
         ("用户偏好深色主题", vec!["偏好", "界面"]),
@@ -81,7 +77,15 @@ async fn demo_keyword_vs_semantic() -> echo_agent::error::Result<()> {
 
     for (query, desc) in &queries {
         let kw_hits = kw_store.search(ns, query, 3).await?;
-        let sem_hits = sem_store.semantic_search(ns, query, 3).await?;
+        let sem_hits = sem_store
+            .search_with(ns, SearchQuery::semantic(query, 3))
+            .await?;
+        if sem_hits.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo18 验收失败：语义查询 `{query}` 没有命中"
+            ))
+            .into());
+        }
 
         println!("  🔍 查询: \"{query}\"  ({desc})");
         println!(
@@ -105,11 +109,7 @@ async fn demo_keyword_vs_semantic() -> echo_agent::error::Result<()> {
 async fn demo_agent_with_semantic_memory() -> echo_agent::error::Result<()> {
     println!("  Agent 使用语义记忆，通过 recall 工具语义检索\n");
 
-    let Some(embedder) = load_embedder_from_config() else {
-        println!("  ℹ️  未检测到 embedding 配置，跳过 recall 语义记忆演示");
-        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量\n");
-        return Ok(());
-    };
+    let embedder = load_verified_embedder_from_config().await?;
 
     // 创建 EmbeddingStore
     let inner = Arc::new(InMemoryStore::new());
@@ -149,10 +149,14 @@ async fn demo_agent_with_semantic_memory() -> echo_agent::error::Result<()> {
 
     // 执行任务
     println!("  👤 用户: 帮我推荐适合数据科学研究的 Rust 库");
-    match agent.execute("帮我推荐适合数据科学研究的 Rust 库").await {
-        Ok(answer) => println!("  🤖 Agent: {answer}\n"),
-        Err(e) => println!("  ❌ 错误: {e}\n"),
+    let answer = agent.execute("帮我推荐适合数据科学研究的 Rust 库").await?;
+    if answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo18 验收失败：Agent 语义记忆回答为空".to_string(),
+        )
+        .into());
     }
+    println!("  🤖 Agent: {answer}\n");
 
     Ok(())
 }
@@ -172,10 +176,7 @@ async fn demo_set_memory_store() -> echo_agent::error::Result<()> {
 
     println!("  ✅ ReactAgent 创建完成（无 Store）");
 
-    let Some(embedder) = load_embedder_from_config() else {
-        println!("  ℹ️  未检测到 embedding 配置，跳过热挂载 EmbeddingStore 演示\n");
-        return Ok(());
-    };
+    let embedder = load_verified_embedder_from_config().await?;
 
     // 运行时挂载 EmbeddingStore
     let inner = Arc::new(InMemoryStore::new());
@@ -183,12 +184,15 @@ async fn demo_set_memory_store() -> echo_agent::error::Result<()> {
 
     agent.set_memory_store(store.clone());
     println!("  ✅ EmbeddingStore 已挂载");
-
-    if let Some(s) = agent.store() {
-        println!(
-            "  ✅ store.supports_semantic_search() = {}",
-            s.supports_semantic_search()
-        );
+    let names = agent.tool_names();
+    if !names.iter().any(|name| *name == "remember")
+        || !names.iter().any(|name| *name == "recall")
+        || !names.iter().any(|name| *name == "forget")
+    {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo18 验收失败：热挂载 EmbeddingStore 后记忆工具未完整注册".to_string(),
+        )
+        .into());
     }
 
     println!("\n  ℹ️  接下来 Agent 的 remember/recall 工具将使用向量检索");
@@ -215,4 +219,19 @@ fn load_embedder_from_config() -> Option<Arc<dyn Embedder>> {
     let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
         .with_timeout(Duration::from_secs(cfg.timeout_secs));
     Some(Arc::new(embedder))
+}
+
+async fn load_verified_embedder_from_config() -> echo_agent::error::Result<Arc<dyn Embedder>> {
+    let embedder = load_embedder_from_config().ok_or_else(|| {
+        echo_agent::error::ReactError::Other("demo18 验收失败：缺少 embedding 配置".to_string())
+    })?;
+    embedder
+        .embed("demo18 semantic memory health check")
+        .await
+        .map_err(|e| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo18 验收失败：embedding 健康检查失败: {e}"
+            ))
+        })?;
+    Ok(embedder)
 }

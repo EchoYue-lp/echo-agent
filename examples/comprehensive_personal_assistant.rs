@@ -23,6 +23,7 @@ use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
 use echo_agent::tasks::{Task, TaskManager, TaskStatus};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -44,8 +45,11 @@ async fn main() -> Result<()> {
 
     println!("🤖 正在初始化个人智能助手...\n");
 
+    let db_path = personal_assistant_db_path();
+    cleanup_sqlite_files(&db_path);
+
     // ── Part 1: 长期记忆系统 ───────────────────────────────────────────────────
-    demo_long_term_memory().await?;
+    demo_long_term_memory(&db_path).await?;
 
     // ── Part 2: Agent 编排协作 ─────────────────────────────────────────────────
     demo_agent_orchestration().await?;
@@ -60,6 +64,8 @@ async fn main() -> Result<()> {
     println!("              综合示例演示完成！");
     println!("═══════════════════════════════════════════════════════");
 
+    cleanup_sqlite_files(&db_path);
+
     Ok(())
 }
 
@@ -67,13 +73,12 @@ async fn main() -> Result<()> {
 // Part 1: 长期记忆系统
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn demo_long_term_memory() -> Result<()> {
+async fn demo_long_term_memory(db_path: &Path) -> Result<()> {
     println!("═══════════════════════════════════════════════════════");
     println!("Part 1: 长期记忆系统");
     println!("═══════════════════════════════════════════════════════\n");
 
-    let db_path = std::env::temp_dir().join("echo_agent_personal_assistant.db");
-    let store = Arc::new(SqliteStore::new(&db_path)?);
+    let store = Arc::new(SqliteStore::new(db_path)?);
     let ns = &["personal_assistant", "profile"];
 
     println!("  📁 数据库路径: {}\n", db_path.display());
@@ -130,15 +135,25 @@ async fn demo_long_term_memory() -> Result<()> {
     println!("  🔍 记忆检索测试:\n");
 
     // 获取用户资料
-    if let Some(item) = store.get(ns, "user_profile").await? {
-        println!("    用户资料:");
-        println!("      兴趣: {:?}", item.value["interests"]);
-        println!("      目标: {:?}", item.value["goals"]);
-        println!();
-    }
+    let Some(item) = store.get(ns, "user_profile").await? else {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：无法读取 user_profile".to_string(),
+        )
+        .into());
+    };
+    println!("    用户资料:");
+    println!("      兴趣: {:?}", item.value["interests"]);
+    println!("      目标: {:?}", item.value["goals"]);
+    println!();
 
     // 搜索相关对话
     let search_results = store.search(ns, "Rust", 3).await?;
+    if search_results.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：长期记忆检索没有命中 Rust 对话".to_string(),
+        )
+        .into());
+    }
     println!("    关于「Rust」的对话:");
     for item in &search_results {
         let summary = item.value["summary"].as_str().unwrap_or("");
@@ -215,16 +230,16 @@ async fn demo_agent_orchestration() -> Result<()> {
 
     println!("  执行中...\n");
 
-    match coordinator.execute(task).await {
-        Ok(result) => {
-            let preview: String = result.chars().take(300).collect();
-            println!("  ✓ 协作完成:\n");
-            println!("  {}\n... (内容已截断)", preview);
-        }
-        Err(e) => {
-            println!("  ✗ 执行失败: {}\n", e);
-        }
+    let result = coordinator.execute(task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：个人助手编排结果为空".to_string(),
+        )
+        .into());
     }
+    let preview: String = result.chars().take(300).collect();
+    println!("  ✓ 协作完成:\n");
+    println!("  {}\n... (内容已截断)", preview);
 
     Ok(())
 }
@@ -255,6 +270,14 @@ async fn demo_task_management() -> Result<()> {
 
     // 列出所有任务
     let all_tasks = manager.get_all_tasks();
+    if all_tasks.len() != tasks.len() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：任务数不匹配，预期 {} 实际 {}",
+            tasks.len(),
+            all_tasks.len()
+        ))
+        .into());
+    }
     println!("  任务列表:\n");
     for task in &all_tasks {
         let status_icon = match &task.status {
@@ -278,12 +301,22 @@ async fn demo_task_management() -> Result<()> {
     println!("  ✓ 更新了任务状态\n");
 
     // 获取特定任务
-    if let Some(task) = manager.get_task("task-003") {
-        println!("  当前进行中: {} ({})\n", task.description, task.id);
-    }
+    let Some(task) = manager.get_task("task-003") else {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：无法读取 task-003".to_string(),
+        )
+        .into());
+    };
+    println!("  当前进行中: {} ({})\n", task.description, task.id);
 
     // 进度统计
     let (completed, total) = manager.get_progress();
+    if completed != 1 || total != 3 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：任务进度不符合预期（completed={completed}, total={total}）"
+        ))
+        .into());
+    }
     println!("  进度: {}/{} 任务已完成\n", completed, total);
 
     Ok(())
@@ -313,6 +346,12 @@ async fn demo_multimodal_support() -> Result<()> {
     // 纯文本对话
     println!("  [纯文本对话]");
     let response = agent.chat("你好，请介绍一下自己").await?;
+    if response.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：多模态 Agent 的文本对话返回空结果".to_string(),
+        )
+        .into());
+    }
     let preview: String = response.chars().take(100).collect();
     println!("    回复: {}...\n", preview);
 
@@ -333,4 +372,17 @@ fn print_banner() {
     println!("║  展示核心能力：                                                 ║");
     println!("║  • 长期记忆 • Agent 编排 • 任务管理 • 多模态支持              ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
+}
+
+fn personal_assistant_db_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "echo_agent_personal_assistant_{}.db",
+        std::process::id()
+    ))
+}
+
+fn cleanup_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }

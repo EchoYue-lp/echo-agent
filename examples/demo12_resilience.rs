@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     print_banner();
 
     sep("Part 1: tool_error_feedback = false（旧行为）");
-    demo_feedback_off().await;
+    demo_feedback_off().await?;
 
     sep("Part 2: tool_error_feedback = true（新行为，默认）");
     demo_feedback_on().await?;
@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     demo_flaky_tool().await?;
 
     sep("Part 4: llm_max_retries 开关对比");
-    demo_llm_retry_config();
+    demo_llm_retry_config()?;
 
     println!("\n{}", "═".repeat(64));
     println!("  demo12 完成");
@@ -198,7 +198,7 @@ impl AgentCallback for SimpleLog {
 
 // ── Part 1 ──────────────────────────────────────────────────────────────────────
 
-async fn demo_feedback_off() {
+async fn demo_feedback_off() -> Result<()> {
     println!("  配置：tool_error_feedback = false\n");
 
     // 使用 AgentBuilder 创建 Agent
@@ -209,15 +209,22 @@ async fn demo_feedback_off() {
         .enable_tools()
         .max_iterations(4)
         .callback(Arc::new(SimpleLog { label: "NO-FB" }))
-        .build()
-        .unwrap();
+        .build()?;
 
     agent.add_tool(Box::new(BrokenTool));
 
     match agent.execute("请调用 broken_tool 并报告结果。").await {
-        Ok(answer) => println!("\n  ⚠️  意外成功: {answer}"),
-        Err(e) => println!("\n  ✅ 符合预期 —— Agent 因工具失败而中断: {e}"),
+        Ok(answer) => {
+            return Err(ReactError::Other(format!(
+                "demo12 验收失败：tool_error_feedback=false 时意外成功: {answer}"
+            ))
+            .into());
+        }
+        Err(e) => {
+            println!("\n  ✅ 符合预期 —— Agent 因工具失败而中断: {e}");
+        }
     }
+    Ok(())
 }
 
 // ── Part 2 ──────────────────────────────────────────────────────────────────────
@@ -241,6 +248,12 @@ async fn demo_feedback_on() -> echo_agent::error::Result<()> {
     let answer = agent
         .execute("先调用 broken_tool，失败后换用 add 计算 3+4。")
         .await?;
+    if !answer.contains('7') {
+        return Err(ReactError::Other(format!(
+            "demo12 验收失败：tool_error_feedback=true 未恢复到正确结果: {answer}"
+        ))
+        .into());
+    }
     println!("\n  ✅ 任务成功完成: {answer}");
     Ok(())
 }
@@ -263,14 +276,29 @@ async fn demo_flaky_tool() -> echo_agent::error::Result<()> {
     agent.add_tool(Box::new(FlakyTool::new(2)));
 
     let answer = agent.execute("查询北京的实时天气。").await?;
+    if !answer.contains("北京") {
+        return Err(ReactError::Other(format!(
+            "demo12 验收失败：FlakyTool 恢复后的结果不包含目标城市: {answer}"
+        ))
+        .into());
+    }
     println!("\n  ✅ 任务成功完成: {answer}");
     Ok(())
 }
 
 // ── Part 4 ──────────────────────────────────────────────────────────────────────
 
-fn demo_llm_retry_config() {
+fn demo_llm_retry_config() -> Result<()> {
     println!("  LLM 重试配置对比：\n");
+    let no_retry = AgentConfig::new("model", "agent", "prompt").llm_max_retries(0);
+    let retrying = AgentConfig::new("model", "agent", "prompt")
+        .llm_max_retries(3)
+        .llm_retry_delay_ms(500);
+    if no_retry.get_llm_max_retries() != 0 || retrying.get_llm_max_retries() != 3 {
+        return Err(
+            ReactError::Other("demo12 验收失败：LLM 重试配置未正确生效".to_string()).into(),
+        );
+    }
     println!("  ── llm_max_retries = 0（关闭重试）──");
     println!("     LLM 调用失败 → 立即返回 Err");
     println!();
@@ -278,6 +306,7 @@ fn demo_llm_retry_config() {
     println!("     调用失败 → 等 500ms → 重试 1");
     println!("     再失败  → 等 1000ms → 重试 2");
     println!("     再失败  → 等 2000ms → 重试 3");
+    Ok(())
 }
 
 // ── 辅助 ────────────────────────────────────────────────────────────────────────

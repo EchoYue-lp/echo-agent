@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
 use glob;
@@ -162,6 +163,57 @@ impl SkillDescriptor {
         }
         warnings
     }
+
+    /// Check whether a touched file path satisfies this skill's conditional activation rules.
+    ///
+    /// Skills without `paths` are always considered a match.
+    pub fn matches_context_path(&self, context_path: &str) -> bool {
+        if self.paths.is_empty() {
+            return true;
+        }
+
+        let normalized = context_path.replace('\\', "/");
+        let trimmed = normalized.trim_start_matches("./");
+        let file_name = Path::new(trimmed)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(trimmed);
+
+        self.paths.iter().any(|pattern| {
+            glob::Pattern::new(pattern).ok().is_some_and(|glob| {
+                glob.matches(trimmed) || glob.matches(&normalized) || glob.matches(file_name)
+            })
+        })
+    }
+
+    /// Check whether the descriptor permits use of a given tool name.
+    ///
+    /// Empty `allowed_tools` means unrestricted. Match semantics mirror hook/tool
+    /// matching so exact names, globs, and `Bash` -> `Bash(git:*)` prefix variants
+    /// behave consistently.
+    pub fn permits_tool(&self, tool_name: &str) -> bool {
+        if self.allowed_tools.is_empty() {
+            return true;
+        }
+
+        self.allowed_tools
+            .iter()
+            .any(|matcher| tool_matcher(matcher, tool_name))
+    }
+}
+
+fn tool_matcher(matcher: &str, tool_name: &str) -> bool {
+    if matcher == "*" || matcher == tool_name {
+        return true;
+    }
+    if let Ok(pattern) = glob::Pattern::new(matcher)
+        && pattern.matches(tool_name)
+    {
+        return true;
+    }
+    tool_name.starts_with(matcher)
+        && tool_name.len() > matcher.len()
+        && tool_name.as_bytes()[matcher.len()] == b'('
 }
 
 // -- Tier 2: SkillContent (full instructions, loaded on activation) --
@@ -207,8 +259,9 @@ impl SkillContent {
 
         if !self.descriptor.allowed_tools.is_empty() {
             block.push_str(&format!(
-                "\n\n<allowed_tools>\nThis skill only permits the following tools: {}\n\
-                 Do NOT use other tools while working within this skill's scope.\n</allowed_tools>",
+                "\n\n<allowed_tools>\nThis skill declares the following preferred/allowed tools: {}\n\
+                 Runtime enforcement currently applies to the built-in skill tools such as \
+                 read_skill_resource and run_skill_script.\n</allowed_tools>",
                 self.descriptor.allowed_tools.join(", ")
             ));
         }
@@ -621,5 +674,22 @@ mod tests {
         let d = make_desc_with_paths(vec!["**"]);
         let warnings = d.validate_paths();
         assert!(warnings.iter().any(|w| w.contains("overly broad")));
+    }
+
+    #[test]
+    fn test_matches_context_path() {
+        let d = make_desc_with_paths(vec!["*.py", "tests/**"]);
+        assert!(d.matches_context_path("main.py"));
+        assert!(d.matches_context_path("./tests/unit/test_demo.rs"));
+        assert!(!d.matches_context_path("src/main.rs"));
+    }
+
+    #[test]
+    fn test_permits_tool() {
+        let mut d = make_desc_with_paths(vec![]);
+        d.allowed_tools = vec!["read_skill_resource".into(), "Bash(*)".into()];
+        assert!(d.permits_tool("read_skill_resource"));
+        assert!(d.permits_tool("Bash(git:status)"));
+        assert!(!d.permits_tool("run_skill_script"));
     }
 }

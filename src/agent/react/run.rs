@@ -15,6 +15,9 @@ use crate::guard::GuardDirection;
 use crate::human_loop::{HumanLoopRequest, HumanLoopResponse};
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
 use crate::llm::{chat, stream_chat};
+use crate::memory::checkpointer::ThreadState;
+use crate::memory::conversation::{NewConversation, project_messages};
+use crate::memory::store::SearchQuery;
 use crate::tools::ToolParameters;
 use futures::StreamExt;
 use futures::future::join_all;
@@ -32,6 +35,22 @@ pub(crate) enum StreamMode {
     Execute,
     /// 多轮对话模式：保留上下文，不重置
     Chat,
+}
+
+#[derive(Clone, Default)]
+struct HookMessageBatches {
+    pre: Vec<String>,
+    post: Vec<String>,
+}
+
+struct ToolExecutionOutcome {
+    output: String,
+    hook_messages: HookMessageBatches,
+}
+
+struct ToolExecutionFailure {
+    error: ReactError,
+    hook_messages: HookMessageBatches,
 }
 
 /// 统一 LLM 重试逻辑：指数退避 + 抖动 + 熔断器更新
@@ -93,6 +112,23 @@ where
 
 impl ReactAgent {
     #[cfg(feature = "human-loop")]
+    pub(crate) async fn flush_pending_permission_rules(
+        &self,
+        service: &crate::human_loop::PermissionService,
+    ) {
+        let pending = match self.pending_permission_rules.lock() {
+            Ok(mut guard) if !guard.is_empty() => std::mem::take(&mut *guard),
+            Ok(_) => return,
+            Err(e) => {
+                warn!("pending_permission_rules lock poisoned: {}", e);
+                return;
+            }
+        };
+
+        service.add_rules(pending).await;
+    }
+
+    #[cfg(feature = "human-loop")]
     #[allow(deprecated)]
     fn get_approval_manager(
         &self,
@@ -112,6 +148,7 @@ impl ReactAgent {
     async fn tool_needs_approval(&self, tool_name: &str) -> bool {
         // 1. PermissionService 统一管线（快速路径：不触发 handler）
         if let Some(service) = &self.permission_service {
+            self.flush_pending_permission_rules(service).await;
             let mode = service.mode().await;
             // BypassPermissions / Auto / DontAsk 模式不需要串行等待审批
             if matches!(
@@ -191,6 +228,7 @@ impl ReactAgent {
 
         // ── Phase 0: PermissionService 统一管线 ──
         if let Some(service) = &self.permission_service {
+            self.flush_pending_permission_rules(service).await;
             let tool_perms = self
                 .tool_manager
                 .get_tool(tool_name)
@@ -493,18 +531,127 @@ impl ReactAgent {
             .push(Message::system(self.config.system_prompt.clone()));
     }
 
-    /// 执行工具，保留工具返回的真实错误信息
-    pub(crate) async fn execute_tool(&self, tool_name: &str, input: &Value) -> Result<String> {
-        let agent = &self.config.agent_name;
+    async fn restore_thread_context(&mut self) {
+        let agent = self.config.agent_name.clone();
+        if let (Some(cp), Some(tid)) = (&self.checkpointer, &self.config.session_id) {
+            match cp.get_state(tid).await {
+                Ok(Some(state)) => {
+                    info!(agent = %agent, session_id = %tid, "🔄 从线程状态恢复会话");
+                    self.context.set_messages(state.messages);
+                }
+                Ok(None) => {
+                    debug!(agent = %agent, session_id = %tid, "新会话，从空上下文开始");
+                    self.reset_messages();
+                }
+                Err(e) => {
+                    warn!(agent = %agent, error = %e, "⚠️ 线程状态加载失败，从空上下文开始");
+                    self.reset_messages();
+                }
+            }
+        } else {
+            self.reset_messages();
+        }
+    }
+
+    async fn recall_long_term_memories(
+        &self,
+        query: &str,
+    ) -> crate::error::Result<Vec<crate::memory::store::StoreItem>> {
+        let Some(store) = &self.store else {
+            return Ok(vec![]);
+        };
+        let agent_name = self.config.agent_name.clone();
+        let ns = vec![agent_name.as_str(), "memories"];
+        match store.search_with(&ns, SearchQuery::hybrid(query, 5)).await {
+            Ok(items) => Ok(items),
+            Err(err) if format!("{err}").contains("hybrid search") => {
+                store.search(&ns, query, 5).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn sync_conversation_projection(&self) {
+        let Some(store) = &self.conversation_store else {
+            return;
+        };
+        let Some(conversation_id) = self.config.get_conversation_id() else {
+            warn!(
+                agent = %self.config.agent_name,
+                "⚠️ 已配置 ConversationStore，但缺少 conversation_id，跳过历史投影"
+            );
+            return;
+        };
+
+        let new_conversation = NewConversation {
+            conversation_id: conversation_id.to_string(),
+            user_id: "default".to_string(),
+            agent_type: Some("react".to_string()),
+            title: None,
+        };
+
+        let result = async {
+            store.ensure_conversation(new_conversation).await?;
+            let projected = project_messages(conversation_id, self.context.messages())?;
+            store.save_messages(conversation_id, &projected).await
+        }
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent = %self.config.agent_name,
+                conversation_id = %conversation_id,
+                error = %e,
+                "⚠️ 对话历史投影保存失败"
+            );
+        }
+    }
+
+    async fn persist_runtime_state(&self) {
+        if let (Some(cp), Some(tid)) = (&self.checkpointer, self.config.session_id.clone()) {
+            let state = ThreadState::from_messages(self.context.messages().to_vec());
+            match cp.put_state(&tid, state).await {
+                Ok(cid) => {
+                    debug!(agent = %self.config.agent_name, session_id = %tid, checkpoint_id = %cid, "🔖 线程状态已保存")
+                }
+                Err(e) => {
+                    warn!(agent = %self.config.agent_name, error = %e, "⚠️ 线程状态保存失败")
+                }
+            }
+        }
+        self.sync_conversation_projection().await;
+    }
+
+    fn inject_hook_messages(&mut self, tool_name: &str, phase: &str, messages: &[String]) {
+        for message in messages {
+            self.context.push(Message::system(format!(
+                "[Skill Hook:{phase}:{tool_name}]\n{message}"
+            )));
+        }
+    }
+
+    fn apply_hook_messages(&mut self, tool_name: &str, hook_messages: &HookMessageBatches) {
+        self.inject_hook_messages(tool_name, "pre", &hook_messages.pre);
+        self.inject_hook_messages(tool_name, "post", &hook_messages.post);
+    }
+
+    async fn execute_tool_feedback_raw(
+        &self,
+        tool_name: &str,
+        input: &Value,
+        soften_errors: bool,
+    ) -> std::result::Result<ToolExecutionOutcome, ToolExecutionFailure> {
+        let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
         let params: ToolParameters = if let Value::Object(map) = input {
             map.clone().into_iter().collect()
         } else {
             HashMap::new()
         };
+        let mut hook_messages = HookMessageBatches::default();
 
         for cb in &callbacks {
-            cb.on_tool_start(agent, tool_name, input).await;
+            cb.on_tool_start(&agent, tool_name, input).await;
         }
 
         info!(agent = %agent, tool = %tool_name, "🔧 开始执行工具");
@@ -525,14 +672,20 @@ impl ReactAgent {
                 let guard = self.hook_registry.read().await;
                 guard.clone()
             };
-            let hook_result = hook_reg.run_pre_tool_use(tool_name, input).await;
+            let hook_result = hook_reg
+                .run_pre_tool_use(tool_name, input, self.config.get_session_id().unwrap_or(""))
+                .await;
+            hook_messages.pre = hook_result.messages.clone();
 
             if hook_result.block {
                 let reason = hook_result
                     .block_reason
                     .unwrap_or_else(|| "blocked by skill hook".into());
                 info!(agent = %agent, tool = %tool_name, reason = %reason, "Hook blocked tool");
-                return Ok(format!("Tool {} blocked by hook: {}", tool_name, reason));
+                return Ok(ToolExecutionOutcome {
+                    output: format!("Tool {} blocked by hook: {}", tool_name, reason),
+                    hook_messages,
+                });
             }
 
             if let Some(updated) = hook_result.updated_input {
@@ -548,7 +701,11 @@ impl ReactAgent {
         // 返回用户在审批时修改的参数（如有）
         let approval_modified_args = self
             .check_tool_approval(tool_name, &hook_modified_input)
-            .await?;
+            .await
+            .map_err(|error| ToolExecutionFailure {
+                error,
+                hook_messages: hook_messages.clone(),
+            })?;
 
         // 如果用户在审批时修改了参数，覆盖工具的实际执行参数
         if let Some(modified) = approval_modified_args
@@ -560,7 +717,11 @@ impl ReactAgent {
         let result = self
             .tool_manager
             .execute_tool(tool_name, effective_params)
-            .await?;
+            .await
+            .map_err(|error| ToolExecutionFailure {
+                error,
+                hook_messages: hook_messages.clone(),
+            })?;
 
         // ── PostToolUse hooks ──
         let is_hook_post = {
@@ -573,9 +734,15 @@ impl ReactAgent {
                 let guard = self.hook_registry.read().await;
                 guard.clone()
             };
-            let _post_result = hook_reg
-                .run_post_tool_use(tool_name, input, &result.output)
+            let post_result = hook_reg
+                .run_post_tool_use(
+                    tool_name,
+                    input,
+                    &result.output,
+                    self.config.get_session_id().unwrap_or(""),
+                )
                 .await;
+            hook_messages.post = post_result.messages;
         }
 
         if result.success {
@@ -586,15 +753,21 @@ impl ReactAgent {
             if let Some(guard_output) = self.check_tool_output_guard(&result.output).await {
                 debug!(agent = %agent, tool = %tool_name, "🛡️ 工具输出经护栏过滤");
                 for cb in callbacks.iter() {
-                    cb.on_tool_end(agent, tool_name, &guard_output).await;
+                    cb.on_tool_end(&agent, tool_name, &guard_output).await;
                 }
-                return Ok(guard_output);
+                return Ok(ToolExecutionOutcome {
+                    output: guard_output,
+                    hook_messages,
+                });
             }
 
             for cb in callbacks.iter() {
-                cb.on_tool_end(agent, tool_name, &result.output).await;
+                cb.on_tool_end(&agent, tool_name, &result.output).await;
             }
-            Ok(result.output)
+            Ok(ToolExecutionOutcome {
+                output: result.output,
+                hook_messages,
+            })
         } else {
             let error_msg = result
                 .error
@@ -606,9 +779,44 @@ impl ReactAgent {
                 message: error_msg,
             });
             for cb in &callbacks {
-                cb.on_tool_error(agent, tool_name, &err).await;
+                cb.on_tool_error(&agent, tool_name, &err).await;
             }
-            Err(err)
+            if soften_errors && tool_name != TOOL_FINAL_ANSWER {
+                warn!(
+                    agent = %agent,
+                    tool = %tool_name,
+                    error = %err,
+                    "⚠️ 工具错误已转为观测值回传 LLM"
+                );
+                Ok(ToolExecutionOutcome {
+                    output: format!(
+                        "[工具执行失败] {err}\n提示：请根据错误信息调整参数后重试，或换用其他工具。"
+                    ),
+                    hook_messages,
+                })
+            } else {
+                Err(ToolExecutionFailure {
+                    error: err,
+                    hook_messages,
+                })
+            }
+        }
+    }
+
+    /// 执行工具，保留工具返回的真实错误信息
+    pub(crate) async fn execute_tool(&mut self, tool_name: &str, input: &Value) -> Result<String> {
+        match self
+            .execute_tool_feedback_raw(tool_name, input, false)
+            .await
+        {
+            Ok(outcome) => {
+                self.apply_hook_messages(tool_name, &outcome.hook_messages);
+                Ok(outcome.output)
+            }
+            Err(failure) => {
+                self.apply_hook_messages(tool_name, &failure.hook_messages);
+                Err(failure.error)
+            }
         }
     }
 
@@ -672,24 +880,22 @@ impl ReactAgent {
     /// `final_answer` 工具始终保持原始错误语义，不会被软化。
     /// 工具输出会经过 `truncate_tool_output` 进行 token 预算截断。
     pub(crate) async fn execute_tool_feedback(
-        &self,
+        &mut self,
         tool_name: &str,
         input: &Value,
     ) -> Result<String> {
-        match self.execute_tool(tool_name, input).await {
-            Ok(result) => Ok(self.truncate_tool_output(result)),
-            Err(e) if self.config.tool_error_feedback && tool_name != TOOL_FINAL_ANSWER => {
-                warn!(
-                    agent = %self.config.agent_name,
-                    tool = %tool_name,
-                    error = %e,
-                    "⚠️ 工具错误已转为观测值回传 LLM"
-                );
-                Ok(format!(
-                    "[工具执行失败] {e}\n提示：请根据错误信息调整参数后重试，或换用其他工具。"
-                ))
+        match self
+            .execute_tool_feedback_raw(tool_name, input, self.config.tool_error_feedback)
+            .await
+        {
+            Ok(outcome) => {
+                self.apply_hook_messages(tool_name, &outcome.hook_messages);
+                Ok(self.truncate_tool_output(outcome.output))
             }
-            Err(e) => Err(e),
+            Err(failure) => {
+                self.apply_hook_messages(tool_name, &failure.hook_messages);
+                Err(failure.error)
+            }
         }
     }
 
@@ -852,13 +1058,15 @@ impl ReactAgent {
             (Vec::<(String, String, Value)>::new(), tool_calls);
 
         // Execute non-approval tools concurrently
-        let concurrent_results: Vec<Result<String>> = if concurrent_tools.is_empty() {
+        let concurrent_results: Vec<
+            std::result::Result<ToolExecutionOutcome, ToolExecutionFailure>,
+        > = if concurrent_tools.is_empty() {
             Vec::new()
         } else {
             let futures: Vec<_> = concurrent_tools
                 .iter()
                 .map(|(_, name, args)| {
-                    self.execute_tool_feedback(name, args)
+                    self.execute_tool_feedback_raw(name, args, self.config.tool_error_feedback)
                         .instrument(info_span!("tool_execute", tool.name = %name))
                 })
                 .collect();
@@ -870,7 +1078,16 @@ impl ReactAgent {
         for ((tool_call_id, function_name, _), result) in
             concurrent_tools.into_iter().zip(concurrent_results)
         {
-            let result = result?;
+            let result = match result {
+                Ok(outcome) => {
+                    self.apply_hook_messages(&function_name, &outcome.hook_messages);
+                    outcome.output
+                }
+                Err(failure) => {
+                    self.apply_hook_messages(&function_name, &failure.hook_messages);
+                    return Err(failure.error);
+                }
+            };
             self.context.push(Message::tool_result(
                 tool_call_id,
                 function_name.clone(),
@@ -908,28 +1125,7 @@ impl ReactAgent {
     /// 直接执行（无规划）：重置/恢复上下文，然后进入 ReAct 循环
     pub(crate) async fn run_direct(&mut self, task: &str) -> Result<String> {
         let agent = self.config.agent_name.clone();
-
-        if let (Some(cp), Some(tid)) = (&self.checkpointer, &self.config.session_id) {
-            match cp.get(tid).await {
-                Ok(Some(checkpoint)) => {
-                    info!(agent = %agent, session_id = %tid, checkpoint_id = %checkpoint.checkpoint_id, "🔄 从 Checkpoint 恢复会话");
-                    self.context.clear();
-                    for msg in checkpoint.messages {
-                        self.context.push(msg);
-                    }
-                }
-                Ok(None) => {
-                    debug!(agent = %agent, session_id = %tid, "新会话，从空上下文开始");
-                    self.reset_messages();
-                }
-                Err(e) => {
-                    warn!(agent = %agent, error = %e, "⚠️ Checkpoint 加载失败，从空上下文开始");
-                    self.reset_messages();
-                }
-            }
-        } else {
-            self.reset_messages();
-        }
+        self.restore_thread_context().await;
 
         info!(agent = %agent, "🧠 Agent 开始执行任务");
         debug!(
@@ -993,29 +1189,25 @@ impl ReactAgent {
             }
         }
 
-        if let Some(store) = &self.store {
-            let agent_name = self.config.agent_name.clone();
-            let ns = vec![agent_name.as_str(), "memories"];
-            match store.semantic_search(&ns, message, 5).await {
-                Ok(items) if !items.is_empty() => {
-                    debug!(agent = %agent, count = items.len(), "📚 注入相关长期记忆");
-                    let mut lines = vec!["[相关历史记忆]".to_string()];
-                    for (i, item) in items.iter().enumerate() {
-                        let content_str = item
-                            .value
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .map(String::from)
-                            .unwrap_or_else(|| item.value.to_string());
-                        lines.push(format!("{}. {}", i + 1, content_str));
-                    }
-                    lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
-                    self.context.push(Message::user(lines.join("\n")));
+        match self.recall_long_term_memories(message).await {
+            Ok(items) if !items.is_empty() => {
+                debug!(agent = %agent, count = items.len(), "📚 注入相关长期记忆");
+                let mut lines = vec!["[相关历史记忆]".to_string()];
+                for (i, item) in items.iter().enumerate() {
+                    let content_str = item
+                        .value
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| item.value.to_string());
+                    lines.push(format!("{}. {}", i + 1, content_str));
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(agent = %agent, error = %e, "⚠️ 长期记忆检索失败，跳过注入");
-                }
+                lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+                self.context.push(Message::user(lines.join("\n")));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(agent = %agent, error = %e, "⚠️ 长期记忆检索失败，跳过注入");
             }
         }
 
@@ -1070,18 +1262,7 @@ impl ReactAgent {
                 }
                 info!(agent = %agent, "🏁 执行完毕");
 
-                if let (Some(cp), Some(tid)) = (&self.checkpointer, self.config.session_id.clone())
-                {
-                    let messages = self.context.messages().to_vec();
-                    match cp.put(&tid, messages).await {
-                        Ok(cid) => {
-                            debug!(agent = %agent, session_id = %tid, checkpoint_id = %cid, "🔖 Checkpoint 已保存")
-                        }
-                        Err(e) => {
-                            warn!(agent = %agent, error = %e, "⚠️ Checkpoint 保存失败")
-                        }
-                    }
-                }
+                self.persist_runtime_state().await;
 
                 return Ok(answer);
             }
@@ -1105,32 +1286,7 @@ impl ReactAgent {
     pub(crate) async fn prepare_stream_context(&mut self, mode: StreamMode, input: &str) -> usize {
         match mode {
             StreamMode::Execute => {
-                self.reset_messages();
-
-                // 从 checkpoint 恢复（如果存在）
-                if let (Some(cp), Some(tid)) = (&self.checkpointer, &self.config.session_id) {
-                    match cp.get(tid).await {
-                        Ok(Some(checkpoint)) => {
-                            info!(
-                                agent = %self.config.agent_name,
-                                session_id = %tid,
-                                "🔄 从 Checkpoint 恢复会话（流式）"
-                            );
-                            self.context.clear();
-                            for msg in checkpoint.messages {
-                                self.context.push(msg);
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                agent = %self.config.agent_name,
-                                error = %e,
-                                "⚠️ Checkpoint 加载失败"
-                            );
-                        }
-                    }
-                }
+                self.restore_thread_context().await;
             }
             StreamMode::Chat => {
                 // 多轮对话模式：不重置上下文
@@ -1139,26 +1295,22 @@ impl ReactAgent {
 
         // 注入相关长期记忆
         let mut recalled = 0usize;
-        if let Some(store) = &self.store {
-            let agent_name = self.config.agent_name.clone();
-            let ns = vec![agent_name.as_str(), "memories"];
-            if let Ok(items) = store.semantic_search(&ns, input, 5).await
-                && !items.is_empty()
-            {
-                recalled = items.len();
-                let mut lines = vec!["[相关历史记忆]".to_string()];
-                for (i, item) in items.iter().enumerate() {
-                    let content_str = item
-                        .value
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .unwrap_or_else(|| item.value.to_string());
-                    lines.push(format!("{}. {}", i + 1, content_str));
-                }
-                lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
-                self.context.push(Message::user(lines.join("\n")));
+        if let Ok(items) = self.recall_long_term_memories(input).await
+            && !items.is_empty()
+        {
+            recalled = items.len();
+            let mut lines = vec!["[相关历史记忆]".to_string()];
+            for (i, item) in items.iter().enumerate() {
+                let content_str = item
+                    .value
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| item.value.to_string());
+                lines.push(format!("{}. {}", i + 1, content_str));
             }
+            lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+            self.context.push(Message::user(lines.join("\n")));
         }
 
         // 推送用户消息
@@ -1290,16 +1442,7 @@ impl ReactAgent {
 
     /// 保存 checkpoint（用于 chat 模式）
     pub(crate) async fn save_checkpoint(&self) {
-        if let (Some(cp), Some(tid)) = (&self.checkpointer, self.config.session_id.clone()) {
-            let messages = self.context.messages().to_vec();
-            if let Err(e) = cp.put(&tid, messages).await {
-                tracing::warn!(
-                    agent = %self.config.agent_name,
-                    error = %e,
-                    "⚠️ Checkpoint 保存失败"
-                );
-            }
-        }
+        self.persist_runtime_state().await;
     }
 
     /// 流式执行的统一入口
@@ -1419,10 +1562,7 @@ impl ReactAgent {
                             }
                             info!(agent = %agent, "🏁 流式执行完成");
 
-                            // Chat 模式保存 checkpoint
-                            if mode == StreamMode::Chat {
-                                self.save_checkpoint().await;
-                            }
+                            self.save_checkpoint().await;
 
                             yield AgentEvent::FinalAnswer(result);
                             done = true;
@@ -1444,10 +1584,7 @@ impl ReactAgent {
                     }
                     self.context.push(Message::assistant(content_buffer.clone()));
 
-                    // Chat 模式保存 checkpoint
-                    if mode == StreamMode::Chat {
-                        self.save_checkpoint().await;
-                    }
+                    self.save_checkpoint().await;
 
                     yield AgentEvent::FinalAnswer(content_buffer);
                     return;

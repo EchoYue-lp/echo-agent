@@ -33,6 +33,7 @@ use echo_agent::tool;
 use futures::StreamExt;
 use serde_json::json;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -41,6 +42,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 static TICKET_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+#[derive(Default)]
+struct ChatRunSummary {
+    final_answer: String,
+    tool_calls: Vec<String>,
+}
 
 #[tool(name = "query_order", description = "查询订单状态")]
 async fn query_order(
@@ -131,8 +138,10 @@ async fn main() -> Result<()> {
 
     print_banner();
 
+    let db_path = customer_service_db_path();
+    cleanup_sqlite_files(&db_path);
+
     // ── 1. 创建 SQLite 持久化存储（长期记忆）───────────────────────────────
-    let db_path = std::env::temp_dir().join("echo_agent_customer_service.db");
     let store = Arc::new(SqliteStore::new(&db_path)?);
     let ns = &["customer_service", "memories"];
 
@@ -163,7 +172,7 @@ async fn main() -> Result<()> {
 
     // ── 3. 创建审批服务（退款需要人工批准）──────────────────────────────────
     let audit_sink = Arc::new(InMemoryPermissionAuditSink::new(100));
-    let permission_service = Arc::new(PermissionService::new().with_audit_sink(audit_sink));
+    let permission_service = Arc::new(PermissionService::new().with_audit_sink(audit_sink.clone()));
 
     // ── 4. 创建护栏（敏感词过滤）────────────────────────────────────────────
     let input_guard = Arc::new(
@@ -210,30 +219,39 @@ async fn main() -> Result<()> {
 
     // 示例对话 1：普通查询（使用流式输出）
     println!("📞 客户: 我的订单 ORD-2024-001234 到哪了？");
-    stream_chat(&mut agent, "我的订单 ORD-2024-001234 到哪了？").await?;
+    let order_summary = stream_chat(&mut agent, "我的订单 ORD-2024-001234 到哪了？").await?;
+    ensure_tool_called(&order_summary, "query_order", "订单查询")?;
     println!();
 
     // 示例对话 2：库存查询（使用记忆）
     println!("📞 客户: Rust 编程语言还有货吗？");
-    stream_chat(&mut agent, "Rust 编程语言还有货吗？").await?;
+    let inventory_summary = stream_chat(&mut agent, "Rust 编程语言还有货吗？").await?;
+    ensure_tool_called(&inventory_summary, "check_inventory", "库存查询")?;
     println!();
 
     // 示例对话 3：复杂问题（触发任务规划）
     println!("📞 客户: 我想退单，但订单已经发货了，怎么办？");
-    stream_chat(
+    let shipping_summary = stream_chat(
         &mut agent,
         "我想退单，但订单 ORD-2024-001234 已经发货了，怎么办？",
     )
     .await?;
+    if shipping_summary.final_answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：发货退单场景没有生成最终答复".to_string(),
+        )
+        .into());
+    }
     println!();
 
     // 示例对话 4：需要退款（触发人工审批）
     println!("📞 客户: 商品有质量问题，我要退款 100 元");
-    stream_chat(
+    let refund_summary = stream_chat(
         &mut agent,
         "我收到的商品有质量问题，订单号 ORD-2024-001234，我要退款 100 元",
     )
     .await?;
+    ensure_tool_called(&refund_summary, "process_refund", "退款申请")?;
     println!();
 
     // ── 7. 展示审计日志 ───────────────────────────────────────────────────────
@@ -242,6 +260,11 @@ async fn main() -> Result<()> {
     println!("───────────────────────────────────────────────────────\n");
 
     let audit_events = audit_logger.query(AuditFilter::default()).await?;
+    if audit_events.is_empty() {
+        return Err(
+            echo_agent::error::ReactError::Other("综合验收失败：审计日志为空".to_string()).into(),
+        );
+    }
     for (i, event) in audit_events.iter().take(10).enumerate() {
         println!(
             "  [{}] {:?} - {}",
@@ -266,6 +289,12 @@ async fn main() -> Result<()> {
     println!("───────────────────────────────────────────────────────\n");
 
     let snapshots = agent.snapshots();
+    if snapshots.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：未生成任何会话快照".to_string(),
+        )
+        .into());
+    }
     println!("  当前会话快照数: {}", snapshots.len());
     for (i, snap) in snapshots.iter().take(3).enumerate() {
         println!(
@@ -282,6 +311,12 @@ async fn main() -> Result<()> {
     println!("───────────────────────────────────────────────────────\n");
 
     let memories: Vec<_> = store.search(ns, "政策", 5).await?;
+    if memories.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：长期记忆检索没有命中政策内容".to_string(),
+        )
+        .into());
+    }
     println!("  相关记忆: {} 条", memories.len());
     for mem in &memories {
         let content = mem.value["content"].as_str().unwrap_or("");
@@ -293,6 +328,15 @@ async fn main() -> Result<()> {
     println!("              综合示例演示完成！");
     println!("═══════════════════════════════════════════════════════");
 
+    if audit_sink.count() == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：权限审计未记录任何事件".to_string(),
+        )
+        .into());
+    }
+
+    cleanup_sqlite_files(&db_path);
+
     Ok(())
 }
 
@@ -300,8 +344,9 @@ async fn main() -> Result<()> {
 // 辅助函数
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<()> {
+async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<ChatRunSummary> {
     let mut stream = agent.chat_stream(message).await?;
+    let mut summary = ChatRunSummary::default();
 
     print!("🤖 客服: ");
     std::io::stdout().flush().ok();
@@ -309,10 +354,12 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<()> {
     while let Some(event) = stream.next().await {
         match event? {
             AgentEvent::Token(token) => {
+                summary.final_answer.push_str(&token);
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             }
             AgentEvent::ToolCall { name, args: _ } => {
+                summary.tool_calls.push(name.clone());
                 print!("\n   🔧 [工具: {}]\n", name);
                 std::io::stdout().flush().ok();
             }
@@ -332,7 +379,14 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<()> {
         }
     }
 
-    Ok(())
+    if summary.final_answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：客服对话没有产生最终答复".to_string(),
+        )
+        .into());
+    }
+
+    Ok(summary)
 }
 
 fn print_banner() {
@@ -344,6 +398,29 @@ fn print_banner() {
     println!("║  • 人工审批 • 审计日志 • 任务规划 • 快照回滚                  ║");
     println!("║  • 多模态支持                                                     ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
+}
+
+fn ensure_tool_called(summary: &ChatRunSummary, tool_name: &str, scenario: &str) -> Result<()> {
+    if !summary.tool_calls.iter().any(|name| name == tool_name) {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：{scenario} 场景未调用 `{tool_name}`"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn customer_service_db_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "echo_agent_customer_service_{}.db",
+        std::process::id()
+    ))
+}
+
+fn cleanup_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -71,6 +71,8 @@ pub struct AgentConfig {
     pub(crate) memory_path: String,
     /// 会话标识，用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文。
     pub(crate) session_id: Option<String>,
+    /// 对话标识，用于 ConversationStore 持久化 transcript/history 投影。
+    pub(crate) conversation_id: Option<String>,
     /// Checkpointer 文件路径（默认 `~/.echo-agent/checkpoints.json`）
     pub(crate) checkpointer_path: String,
     /// 结构化输出格式（None = 默认文本）
@@ -116,6 +118,7 @@ impl AgentConfig {
             enable_memory: false,
             memory_path: "~/.echo-agent/store.json".to_string(),
             session_id: None,
+            conversation_id: None,
             checkpointer_path: "~/.echo-agent/checkpoints.json".to_string(),
             response_format: None,
             max_tool_output_tokens: None,
@@ -405,6 +408,18 @@ impl AgentConfig {
         self.session_id.as_deref()
     }
 
+    /// 获取对话标识
+    ///
+    /// # 返回值
+    /// 对话标识的引用，如果没有设置则返回 `None`
+    ///
+    /// # 说明
+    /// 对话标识用于 `ConversationStore` 中的 transcript/history 投影；
+    /// 它与用于恢复线程状态的 `session_id` 是两个独立概念。
+    pub fn get_conversation_id(&self) -> Option<&str> {
+        self.conversation_id.as_deref()
+    }
+
     /// 获取 LLM 调用失败后最大重试次数
     ///
     /// # 返回值
@@ -570,6 +585,19 @@ impl AgentConfig {
         self
     }
 
+    /// 设置对话标识
+    ///
+    /// # 参数
+    /// * `id` - 对话标识
+    ///
+    /// # 说明
+    /// 对话标识用于 `ConversationStore` 持久化 transcript/history 投影，
+    /// 与 `session_id` 不同，它不承担线程状态恢复职责。
+    pub fn conversation_id(mut self, id: &str) -> Self {
+        self.conversation_id = Some(id.to_string());
+        self
+    }
+
     /// 设置检查点文件路径
     ///
     /// # 参数
@@ -718,6 +746,14 @@ mod tests {
         let config = AgentConfig::new("model", "agent", "prompt").session_id("session-123");
 
         assert_eq!(config.get_session_id(), Some("session-123"));
+    }
+
+    #[test]
+    fn test_agent_config_conversation_id() {
+        let config =
+            AgentConfig::new("model", "agent", "prompt").conversation_id("conversation-123");
+
+        assert_eq!(config.get_conversation_id(), Some("conversation-123"));
     }
 
     #[test]

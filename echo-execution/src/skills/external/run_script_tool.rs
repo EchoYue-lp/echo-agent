@@ -16,7 +16,8 @@
 //! | Unknown / dangerous | Docker container |
 //!
 //! If no `SandboxManager` is configured, falls back to bare process spawning
-//! (for simple demos / tests).
+//! with a minimal environment whitelist (`env_clear()` + PATH / SKILL_DIR / SESSION_ID)
+//! and best-effort timeout termination (`kill_on_drop(true)`).
 //!
 //! ## Cross-platform interpreter detection
 //!
@@ -32,10 +33,11 @@
 //! ## Security model
 //!
 //! - Only scripts from **activated** skills can be run
-//! - Path traversal (`..`) is rejected
+//! - Script paths must be relative and must canonicalize under the activated skill directory
 //! - Interpreter is invoked directly (no shell wrapping)
 //! - Configurable timeout (default 30 seconds)
 //! - Full sandbox integration with policy-based routing
+//! - Malformed `args` strings are rejected instead of being silently reinterpreted
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,8 +47,8 @@ use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::sandbox::{SandboxCommand, SandboxManager};
+use crate::skills::minimal_env;
 use crate::skills::registry::SkillRegistry;
-use crate::skills::{is_path_safe, minimal_env};
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
@@ -136,9 +138,14 @@ impl Tool for RunSkillScriptTool {
                 .unwrap_or("")
                 .to_string();
 
-            if !is_path_safe(Path::new(""), Path::new(&script_path)) {
+            let script_relative_path = Path::new(&script_path);
+            if script_relative_path.is_absolute()
+                || script_relative_path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
                 return Ok(ToolResult::error(
-                    "Path traversal ('..') is not allowed in script paths",
+                    "Script path must be a relative path inside the activated skill directory",
                 ));
             }
 
@@ -161,6 +168,15 @@ impl Tool for RunSkillScriptTool {
                 }
             };
 
+            if !descriptor.permits_tool(self.name()) {
+                return Ok(ToolResult::error(format!(
+                    "Skill '{}' does not permit tool '{}'; allowed-tools: {}",
+                    skill_name,
+                    self.name(),
+                    descriptor.allowed_tools.join(", ")
+                )));
+            }
+
             let skill_dir = match descriptor.location.parent() {
                 Some(d) => d.to_path_buf(),
                 None => {
@@ -171,19 +187,33 @@ impl Tool for RunSkillScriptTool {
                 }
             };
 
-            let full_script_path = skill_dir.join(&script_path);
+            let canonical_skill_dir = match skill_dir.canonicalize() {
+                Ok(path) => path,
+                Err(e) => {
+                    return Ok(ToolResult::error(format!(
+                        "Cannot canonicalize skill directory for '{}': {}",
+                        skill_name, e
+                    )));
+                }
+            };
+            let full_script_path = canonical_skill_dir.join(script_relative_path);
+            let canonical_script_path = match full_script_path.canonicalize() {
+                Ok(path) => path,
+                Err(e) => {
+                    return Ok(ToolResult::error(format!(
+                        "Cannot canonicalize script '{}': {}",
+                        script_path, e
+                    )));
+                }
+            };
 
-            // Verify resolved path stays within skill directory
-            if let (Ok(canonical_skill), Ok(canonical_script)) =
-                (skill_dir.canonicalize(), full_script_path.canonicalize())
-                && !canonical_script.starts_with(&canonical_skill)
-            {
+            if !canonical_script_path.starts_with(&canonical_skill_dir) {
                 return Ok(ToolResult::error(
                     "Resolved script path escapes the skill directory",
                 ));
             }
 
-            if !full_script_path.exists() {
+            if !canonical_script_path.exists() {
                 return Ok(ToolResult::error(format!(
                     "Script not found: {} (in skill '{}')",
                     script_path, skill_name
@@ -195,19 +225,17 @@ impl Tool for RunSkillScriptTool {
 
             // Build argument list: [prefix_args...] <script_path> [user_args...]
             let mut all_args: Vec<String> = invocation.prefix_args.iter().cloned().collect();
-            all_args.push(full_script_path.display().to_string());
+            all_args.push(canonical_script_path.display().to_string());
             if !args_str.is_empty() {
-                if let Some(parsed) = shlex::split(&args_str) {
-                    all_args.extend(parsed);
-                } else {
-                    // Fallback: treat the whole string as a single argument
-                    all_args.push(args_str);
-                }
+                let parsed =
+                    shlex::split(&args_str).ok_or_else(|| ToolError::InvalidParameter {
+                        name: "args".to_string(),
+                        message: "Malformed script arguments: unmatched quotes or escapes"
+                            .to_string(),
+                    })?;
+                all_args.extend(parsed);
             }
 
-            let canonical_skill_dir = skill_dir
-                .canonicalize()
-                .unwrap_or_else(|_| skill_dir.clone());
             let timeout = std::time::Duration::from_secs(self.timeout_secs);
 
             // -- Sandbox execution path --
@@ -238,6 +266,7 @@ impl Tool for RunSkillScriptTool {
                 cmd.arg(arg);
             }
             cmd.current_dir(&canonical_skill_dir);
+            cmd.kill_on_drop(true);
 
             // Use minimal environment to avoid leaking sensitive variables
             let env = minimal_env(
@@ -245,6 +274,7 @@ impl Tool for RunSkillScriptTool {
                 "", // no session_id needed for script execution
                 std::collections::HashMap::new(),
             );
+            cmd.env_clear();
             for (k, v) in env {
                 cmd.env(k, v);
             }
@@ -478,6 +508,9 @@ fn format_execution_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::external::types::SkillDescriptor;
+    use crate::skills::registry::SkillRegistry;
+    use std::collections::HashMap;
 
     #[test]
     fn test_resolve_python() {
@@ -569,10 +602,68 @@ mod tests {
     }
 
     #[test]
+    fn test_shlex_split_malformed() {
+        assert!(shlex::split(r#"--name "unterminated"#).is_none());
+    }
+
+    #[test]
     fn test_invocation_no_longer_has_shell_prefix() {
         let inv = Invocation::simple("python3");
         assert_eq!(inv.program, "python3");
         assert!(inv.prefix_args.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_skill_script_enforces_allowed_tools() {
+        let root =
+            std::env::temp_dir().join(format!("echo-skill-script-test-{}", std::process::id()));
+        let skill_dir = root.join("locked-skill");
+        tokio::fs::create_dir_all(skill_dir.join("scripts"))
+            .await
+            .unwrap();
+        tokio::fs::write(skill_dir.join("SKILL.md"), "body")
+            .await
+            .unwrap();
+        tokio::fs::write(skill_dir.join("scripts/test.py"), "print('hi')\n")
+            .await
+            .unwrap();
+
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(SkillDescriptor {
+            name: "locked-skill".into(),
+            description: "desc".into(),
+            location: skill_dir.join("SKILL.md"),
+            license: None,
+            compatibility: None,
+            metadata: HashMap::new(),
+            allowed_tools: vec!["read_skill_resource".into()],
+            shell: None,
+            paths: vec![],
+            hooks: None,
+        });
+        registry.mark_activated("locked-skill");
+
+        let tool = RunSkillScriptTool::new(Arc::new(RwLock::new(registry)));
+        let result = tool
+            .execute(
+                [
+                    ("skill_name".to_string(), json!("locked-skill")),
+                    ("script".to_string(), json!("scripts/test.py")),
+                ]
+                .into(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .unwrap_or_default()
+                .contains("does not permit tool 'run_skill_script'")
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[cfg(target_os = "windows")]

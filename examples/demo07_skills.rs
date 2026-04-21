@@ -119,10 +119,10 @@ async fn main() -> Result<()> {
     println!("═══════════════════════════════════════════════════════\n");
 
     // Part 1: 展示 Skill 基础元数据（不需要 LLM）
-    demo_skill_metadata();
+    demo_skill_metadata()?;
 
     // Part 2: 安装并查询 Skills（不需要 LLM）
-    demo_skill_installation();
+    demo_skill_installation()?;
 
     // Part 3: 通过 Skill 驱动 Agent 执行真实任务（需要 LLM 配置）
     demo_agent_with_skills().await?;
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
 }
 
 /// Part 1: 直接查看各 Skill 的元数据
-fn demo_skill_metadata() {
+fn demo_skill_metadata() -> Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 1: 查看内置 Skill 元数据\n");
 
@@ -141,6 +141,13 @@ fn demo_skill_metadata() {
     ];
 
     for skill in &skills {
+        if skill.tools().is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo07 验收失败：Skill `{}` 未注册任何工具",
+                skill.name()
+            ))
+            .into());
+        }
         println!("  Skill: {}", skill.name());
         println!("    描述: {}", skill.description());
         let tools = skill.tools();
@@ -156,10 +163,11 @@ fn demo_skill_metadata() {
         );
         println!();
     }
+    Ok(())
 }
 
 /// Part 2: 向 Agent 安装 Skills 并查询状态
-fn demo_skill_installation() {
+fn demo_skill_installation() -> Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 2: 安装 Skills 到 Agent，查询状态\n");
 
@@ -168,8 +176,7 @@ fn demo_skill_installation() {
         .name("demo-agent")
         .system_prompt("你是一个多功能助手。")
         .enable_tools()
-        .build()
-        .unwrap();
+        .build()?;
 
     println!("安装前：");
     println!("  已安装 Skill 数量: {}", agent.skill_count());
@@ -200,6 +207,14 @@ fn demo_skill_installation() {
         );
     }
     println!();
+    if agent.skill_count() != 2 || !agent.has_skill("filesystem") || agent.has_skill("nonexistent")
+    {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo07 验收失败：Skill 安装或查询结果不符合预期".to_string(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Part 3: 真实 Agent 执行（需要 LLM）
@@ -212,6 +227,7 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
     // ── 场景 A: FileSystem Skill ───────────────────────────────────────────
     println!("场景 A: FileSystem Skill —— 文件读写操作\n");
     {
+        let path = "/tmp/skills_demo.txt";
         let mut agent = ReactAgentBuilder::new()
             .model("qwen3-max")
             .name("file-agent")
@@ -222,15 +238,21 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
 
         let task = "在 /tmp/skills_demo.txt 写入内容 'Hello from echo-agent Skills!'，然后读取它并确认内容正确";
         println!("任务: {}", task);
-        match agent.execute(task).await {
-            Ok(result) => println!("✓ 结果: {}\n", result),
-            Err(e) => println!("✗ 失败: {}\n", e),
+        let result = agent.execute(task).await?;
+        let content = tokio::fs::read_to_string(path).await?;
+        if !content.contains("Hello from echo-agent Skills!") || result.trim().is_empty() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo07 验收失败：FileSystem Skill 未完成文件读写".to_string(),
+            )
+            .into());
         }
+        println!("✓ 结果: {}\n", result);
     }
 
     // ── 场景 B: 多 Skill 组合 ─────────────────────────────────────────────
     println!("场景 B: 多 Skill 组合 —— 文本处理 + 文件写入\n");
     {
+        let path = "/tmp/uppercase_test.txt";
         let mut agent = ReactAgentBuilder::new()
             .model("qwen3-max")
             .name("multi-skill-agent")
@@ -244,10 +266,15 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
 
         let task = "把 'hello world' 转成大写，然后写入 /tmp/uppercase_test.txt";
         println!("任务: {}", task);
-        match agent.execute(task).await {
-            Ok(result) => println!("✓ 结果: {}\n", result),
-            Err(e) => println!("✗ 失败: {}\n", e),
+        let result = agent.execute(task).await?;
+        let content = tokio::fs::read_to_string(path).await?;
+        if !content.contains("HELLO WORLD") || result.trim().is_empty() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo07 验收失败：多 Skill 组合未写入预期大写内容".to_string(),
+            )
+            .into());
         }
+        println!("✓ 结果: {}\n", result);
     }
 
     Ok(())

@@ -356,5 +356,24 @@ Agent about to execute tool "delete_file"
 
 ## Example Files
 
-- `examples/demo03_approval.rs` — Basic approval example
+- `examples/demo03_approval.rs` — dual-path example: covers both LLM-triggered `human_in_loop` input requests and permission confirmation for a sensitive tool
+- `examples/demo05_compressor.rs` — real `add_need_appeal_tool()` path: validates the approval-tool flow through `PermissionService` and approval events
 - `examples/demo20_audit.rs` — Audit logging + permission example
+
+## `add_need_appeal_tool()` Semantics
+
+`ReactAgent::add_need_appeal_tool()` is intentionally a synchronous registration API so it can be
+used during agent setup.
+
+When the agent has a `PermissionService`, it does not call `block_on()` to mutate rules inline.
+Instead it:
+
+1. registers the tool immediately;
+2. buffers the corresponding approval `PermissionRule` internally;
+3. flushes the buffered rule into `PermissionService` right before the next async permission check
+   (for example in `tool_needs_approval` or `check_tool_approval`).
+
+This design avoids nested blocking inside an active Tokio runtime.
+
+If no `PermissionService` is configured, the method falls back to the legacy
+`HumanApprovalManager` marker path for backward compatibility.

@@ -5,7 +5,11 @@
 //! 2. 本地沙箱执行（OS 原生隔离）
 //! 3. Docker 容器沙箱（如可用）
 //! 4. SandboxManager 自动路由
-//! 5. 资源限制与超时控制
+//! 5. 资源限制与 wall-clock timeout 控制
+//!
+//! 说明：
+//! - `ResourceLimits::cpu_time_secs` 当前表示执行超时（wall-clock），不是 CPU 配额
+//! - K8s 路径会显式删除临时 Pod；当 `network=false` 时仅记录能力告警，不保证逐 Pod 断网
 //!
 //! 运行方式：
 //! ```bash
@@ -183,14 +187,21 @@ async fn demo_docker_sandbox() -> echo_agent::error::Result<()> {
     println!("  隔离级别: {}\n", sandbox.isolation_level());
 
     if !available {
-        println!("  ⚠️  Docker 不可用，跳过容器沙箱演示");
-        println!("  💡 安装 Docker Desktop 后可体验容器级隔离\n");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo29 验收失败：Docker 不可用，无法验证容器沙箱".to_string(),
+        )
+        .into());
     }
 
     // Docker 执行
     let cmd = SandboxCommand::shell("echo 'Hello from Docker!' && cat /etc/os-release | head -2");
     let result = sandbox.execute(cmd).await?;
+    if !result.success() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo29 验收失败：Docker shell 执行失败".to_string(),
+        )
+        .into());
+    }
     println!("  Docker Shell:");
     println!("    stdout: {}", result.stdout.trim());
     println!("    沙箱类型: {}", result.sandbox_type);
@@ -200,6 +211,12 @@ async fn demo_docker_sandbox() -> echo_agent::error::Result<()> {
     println!();
     let cmd = SandboxCommand::code("python", "import sys; print(f'Python {sys.version}')");
     let result = sandbox.execute(cmd).await?;
+    if !result.success() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo29 验收失败：Docker Python 执行失败".to_string(),
+        )
+        .into());
+    }
     println!("  Docker Python:");
     println!("    {}", result.stdout.trim());
 
@@ -208,6 +225,12 @@ async fn demo_docker_sandbox() -> echo_agent::error::Result<()> {
     let cmd = SandboxCommand::shell("echo 'limited execution'");
     let limits = ResourceLimits::strict();
     let result = sandbox.execute_with_limits(cmd, limits).await?;
+    if !result.success() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo29 验收失败：Docker 资源限制执行失败".to_string(),
+        )
+        .into());
+    }
     println!("  资源受限执行:");
     println!(
         "    exit_code: {}, stdout: {}",
@@ -234,29 +257,20 @@ async fn demo_manager() -> echo_agent::error::Result<()> {
 
     // 脚本命令 → 可能升级到 OS 沙箱
     let cmd = SandboxCommand::shell("python3 -c 'print(2+2)'");
-    let result = manager.execute(cmd).await;
-    match result {
-        Ok(r) => println!(
-            "  脚本命令 'python3': → {} ({})",
-            r.sandbox_type,
-            r.stdout.trim()
-        ),
-        Err(e) => println!("  脚本命令 'python3': → 执行失败: {e}"),
-    }
+    let result = manager.execute(cmd).await?;
+    println!(
+        "  脚本命令 'python3': → {} ({})",
+        result.sandbox_type,
+        result.stdout.trim()
+    );
 
-    // 危险命令 → 优先升级到容器；若当前机器无可用 executor，则仅展示错误
+    // 危险命令 → 优先升级到更强隔离；若允许 fallback，当前机器也可能回退到较弱执行层
     let cmd = SandboxCommand::shell("curl --version 2>/dev/null || echo 'curl not available'");
-    match manager.execute(cmd).await {
-        Ok(result) => {
-            println!(
-                "  危险命令 'curl': → {} (exit={})",
-                result.sandbox_type, result.exit_code
-            );
-        }
-        Err(e) => {
-            println!("  危险命令 'curl': → 无可用沙箱接管 ({e})");
-        }
-    }
+    let result = manager.execute(cmd).await?;
+    println!(
+        "  危险命令 'curl': → {} (exit={})",
+        result.sandbox_type, result.exit_code
+    );
 
     println!();
     Ok(())
@@ -267,12 +281,12 @@ async fn demo_manager() -> echo_agent::error::Result<()> {
 async fn demo_resource_limits() -> echo_agent::error::Result<()> {
     let manager = SandboxManager::auto_detect().await;
 
-    println!("  ResourceLimits 预设:\n");
+    println!("  ResourceLimits 预设（cpu_time_secs = wall-clock timeout）:\n");
 
     let default_limits = ResourceLimits::default();
     println!("  Default:");
     println!(
-        "    CPU: {}s, Memory: {} MB, Output: {} KB, Processes: {}, Network: {}",
+        "    Timeout: {}s, Memory: {} MB, Output: {} KB, Processes: {}, Network: {}",
         default_limits.cpu_time_secs.unwrap_or(0),
         default_limits.memory_bytes.unwrap_or(0) / 1024 / 1024,
         default_limits.max_output_bytes.unwrap_or(0) / 1024,
@@ -283,7 +297,7 @@ async fn demo_resource_limits() -> echo_agent::error::Result<()> {
     let strict_limits = ResourceLimits::strict();
     println!("  Strict:");
     println!(
-        "    CPU: {}s, Memory: {} MB, Output: {} KB, Processes: {}, Network: {}",
+        "    Timeout: {}s, Memory: {} MB, Output: {} KB, Processes: {}, Network: {}",
         strict_limits.cpu_time_secs.unwrap_or(0),
         strict_limits.memory_bytes.unwrap_or(0) / 1024 / 1024,
         strict_limits.max_output_bytes.unwrap_or(0) / 1024,
@@ -294,7 +308,7 @@ async fn demo_resource_limits() -> echo_agent::error::Result<()> {
     let unrestricted = ResourceLimits::unrestricted();
     println!("  Unrestricted:");
     println!(
-        "    CPU: {:?}, Memory: {:?}, Network: {}\n",
+        "    Timeout: {:?}, Memory: {:?}, Network: {}\n",
         unrestricted.cpu_time_secs, unrestricted.memory_bytes, unrestricted.network,
     );
 
@@ -305,16 +319,10 @@ async fn demo_resource_limits() -> echo_agent::error::Result<()> {
         ..ResourceLimits::strict()
     };
     println!("  限制资源执行:");
-    match manager.execute_with_limits(cmd, limits).await {
-        Ok(result) => {
-            println!("    exit_code: {}", result.exit_code);
-            println!("    stdout: {}", result.stdout.trim());
-            println!("    耗时: {:?}", result.duration);
-        }
-        Err(e) => {
-            println!("    跳过：当前环境无可用沙箱满足资源限制 ({e})");
-        }
-    }
+    let result = manager.execute_with_limits(cmd, limits).await?;
+    println!("    exit_code: {}", result.exit_code);
+    println!("    stdout: {}", result.stdout.trim());
+    println!("    耗时: {:?}", result.duration);
 
     println!();
     Ok(())

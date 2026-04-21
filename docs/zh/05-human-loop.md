@@ -356,5 +356,20 @@ Agent 准备执行工具 "delete_file"
 
 ## 示例文件
 
-- `examples/demo03_approval.rs` — 基础审批示例
+- `examples/demo03_approval.rs` — 双场景示例：既覆盖 LLM 主动调用 `human_in_loop` 请求额外输入，也覆盖敏感工具触发权限确认
+- `examples/demo05_compressor.rs` — `add_need_appeal_tool()` 真实路径示例：通过需要审批的工具验证 `PermissionService` / 审批事件链路
 - `examples/demo20_audit.rs` — 审计日志 + 权限模型示例
+
+## `add_need_appeal_tool()` 行为说明
+
+`ReactAgent::add_need_appeal_tool()` 是一个同步注册 API，适合在 Agent 初始化阶段直接调用。
+
+当 Agent 已配置 `PermissionService` 时，它不会在当前线程里同步 `block_on` 写规则，而是：
+
+1. 先注册工具本身；
+2. 把“该工具需要人工审批”的 `PermissionRule` 暂存到内部缓冲区；
+3. 在后续第一次异步权限检查（如 `tool_needs_approval` / `check_tool_approval`）前，再安全地刷入 `PermissionService`。
+
+这样做是为了避免在运行中的 Tokio runtime 内部发生嵌套阻塞。
+
+如果 Agent 没有配置 `PermissionService`，则会回退到旧的 `HumanApprovalManager` 标记路径，仅用于兼容旧行为。

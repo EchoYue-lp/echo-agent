@@ -32,9 +32,11 @@ use echo_agent::skills::builtin::FileSystemSkill;
 use echo_agent::tools::web::{WebFetchTool, WebSearchTool};
 use echo_agent::workflow::{GraphBuilder, SharedState};
 use futures::StreamExt;
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -42,7 +44,8 @@ use std::sync::Arc;
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ResearchReport {
     topic: String,
     summary: String,
@@ -52,14 +55,16 @@ struct ResearchReport {
     recommendations: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TechComparison {
     languages: Vec<LanguageInfo>,
     winner: String,
     reason: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct LanguageInfo {
     name: String,
     pros: Vec<String>,
@@ -86,8 +91,11 @@ async fn main() -> Result<()> {
 
     println!("🔬 正在初始化研究报告助手...\n");
 
+    let db_path = research_db_path();
+    cleanup_sqlite_files(&db_path);
+
     // ── Part 0: 研究历史存储（SQLite 长期记忆）──────────────────────────────────────
-    demo_research_memory().await?;
+    demo_research_memory(&db_path).await?;
 
     // ── Part 1: 单 Agent 简单研究任务 ───────────────────────────────────────────────
     demo_simple_research().await?;
@@ -105,6 +113,8 @@ async fn main() -> Result<()> {
     println!("              综合示例演示完成！");
     println!("═══════════════════════════════════════════════════════");
 
+    cleanup_sqlite_files(&db_path);
+
     Ok(())
 }
 
@@ -112,13 +122,12 @@ async fn main() -> Result<()> {
 // Part 0: 研究历史存储（SQLite 长期记忆）
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn demo_research_memory() -> Result<()> {
+async fn demo_research_memory(db_path: &Path) -> Result<()> {
     println!("═══════════════════════════════════════════════════════");
     println!("Part 0: 研究历史存储（SQLite 长期记忆）");
     println!("═══════════════════════════════════════════════════════\n");
 
-    let db_path = std::env::temp_dir().join("echo_agent_research.db");
-    let store = Arc::new(SqliteStore::new(&db_path)?);
+    let store = Arc::new(SqliteStore::new(db_path)?);
     let ns = &["research", "history"];
 
     println!("  📁 数据库路径: {}\n", db_path.display());
@@ -156,6 +165,12 @@ async fn demo_research_memory() -> Result<()> {
     println!("  🔍 全文检索测试:");
 
     let results: Vec<_> = store.search(ns, "Rust async", 5).await?;
+    if results.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：研究历史全文检索没有命中".to_string(),
+        )
+        .into());
+    }
     for (i, item) in results.iter().enumerate() {
         println!(
             "    [{}] {} - {}",
@@ -173,11 +188,21 @@ async fn demo_research_memory() -> Result<()> {
 
     // 演示获取单条记录
     let record = store.get(ns, "rust_2024").await?;
-    if let Some(item) = record {
-        println!("  📄 获取单条记录 (rust_2024):");
-        println!("    主题: {}", item.value["topic"]);
-        println!("    研究日期: {}", item.value["researched_at"]);
-        println!();
+    let Some(item) = record else {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：无法读取 rust_2024 研究记录".to_string(),
+        )
+        .into());
+    };
+    println!("  📄 获取单条记录 (rust_2024):");
+    println!("    主题: {}", item.value["topic"]);
+    println!("    研究日期: {}", item.value["researched_at"]);
+    println!();
+    if item.value["topic"] != "Rust 语言 2024 年发展" {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：研究记录内容不符合预期".to_string(),
+        )
+        .into());
     }
 
     Ok(())
@@ -219,12 +244,21 @@ async fn demo_simple_research() -> Result<()> {
     println!("执行中...\n");
 
     let mut stream = agent.execute_stream(task).await?;
+    let mut used_search = false;
+    let mut used_fetch = false;
+    let mut final_answer = String::new();
 
     while let Some(event) = stream.next().await {
         match event? {
             AgentEvent::ThinkStart => print!("🤔 "),
             AgentEvent::ThinkEnd { .. } => println!(),
             AgentEvent::ToolCall { name, .. } => {
+                if name == "web_search" {
+                    used_search = true;
+                }
+                if name == "web_fetch" {
+                    used_fetch = true;
+                }
                 println!("🔧 使用工具: {}", name);
             }
             AgentEvent::ToolResult { output, .. } => {
@@ -232,12 +266,26 @@ async fn demo_simple_research() -> Result<()> {
                 println!("   ✓ 结果: {}...", preview);
             }
             AgentEvent::Token(token) => {
+                final_answer.push_str(&token);
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             }
             AgentEvent::FinalAnswer(_) => println!(),
             _ => {}
         }
+    }
+
+    if !used_search || !used_fetch {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：单 Agent 研究未完整使用 web_search/web_fetch（search={used_search}, fetch={used_fetch}）"
+        ))
+        .into());
+    }
+    if final_answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：单 Agent 研究返回空答案".to_string(),
+        )
+        .into());
     }
 
     println!();
@@ -296,14 +344,21 @@ async fn demo_workflow_research() -> Result<()> {
     let _ = state.set("topic", topic.to_string());
 
     let result = graph.run(state).await?;
+    if result.steps != 3 || result.path.len() != 3 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：研究工作流执行结果不符合预期（steps={}, path={:?}）",
+            result.steps, result.path
+        ))
+        .into());
+    }
+    let analysis = result.state.get::<String>("analysis").ok_or_else(|| {
+        echo_agent::error::ReactError::Other("综合验收失败：研究工作流未产出 analysis".to_string())
+    })?;
 
     println!("  ✓ 工作流完成");
     println!("    路径: {:?}", result.path);
     println!("    步骤数: {}", result.steps);
-    println!(
-        "    分析结果: {}\n",
-        result.state.get::<String>("analysis").unwrap()
-    );
+    println!("    分析结果: {}\n", analysis);
 
     Ok(())
 }
@@ -326,45 +381,28 @@ async fn demo_structured_extraction() -> Result<()> {
 
     println!("📝 任务: 技术选型对比分析\n");
 
-    let schema = ResponseFormat::json_schema(
-        "tech_comparison",
-        json!({
-            "type": "object",
-            "properties": {
-                "languages": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "pros": {"type": "array", "items": {"type": "string"}},
-                            "cons": {"type": "array", "items": {"type": "string"}}
-                        }
-                    }
-                },
-                "winner": {"type": "string"},
-                "reason": {"type": "string"}
-            }
-        }),
-    );
+    let schema = typed_response_format::<TechComparison>("tech_comparison");
 
     let prompt = "对比 Go、Rust、Python 三种语言在后端开发中的优劣，并给出推荐。";
 
     println!("  问题: {}\n", prompt);
 
-    match agent.extract::<TechComparison>(prompt, schema).await {
-        Ok(result) => {
-            println!("  ✓ 结构化提取成功:\n");
-            println!("  推荐语言: {}", result.winner);
-            println!("  推荐理由: {}", result.reason);
-            println!("\n  对比语言:");
-            for lang in &result.languages {
-                println!("    • {} (优势: {})", lang.name, lang.pros.join(", "));
-            }
-        }
-        Err(e) => {
-            println!("  ✗ 提取失败: {}\n", e);
-        }
+    let result: TechComparison = agent.extract(prompt, schema).await?;
+    if result.languages.is_empty()
+        || result.winner.trim().is_empty()
+        || result.reason.trim().is_empty()
+    {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：结构化技术对比结果不完整".to_string(),
+        )
+        .into());
+    }
+    println!("  ✓ 结构化提取成功:\n");
+    println!("  推荐语言: {}", result.winner);
+    println!("  推荐理由: {}", result.reason);
+    println!("\n  对比语言:");
+    for lang in &result.languages {
+        println!("    • {} (优势: {})", lang.name, lang.pros.join(", "));
     }
 
     Ok(())
@@ -432,18 +470,18 @@ async fn demo_multi_agent_research() -> Result<()> {
 
     println!("执行中...\n");
 
-    match orchestrator.execute(task).await {
-        Ok(result) => {
-            println!("✓ 研究完成!\n");
-            println!("═══════════════════════════════════════════════════════");
-            println!("最终报告:");
-            println!("═══════════════════════════════════════════════════════");
-            println!("{}\n", result);
-        }
-        Err(e) => {
-            println!("✗ 执行失败: {}\n", e);
-        }
+    let result = orchestrator.execute(task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：多 Agent 协作研究返回空报告".to_string(),
+        )
+        .into());
     }
+    println!("✓ 研究完成!\n");
+    println!("═══════════════════════════════════════════════════════");
+    println!("最终报告:");
+    println!("═══════════════════════════════════════════════════════");
+    println!("{}\n", result);
 
     Ok(())
 }
@@ -460,4 +498,20 @@ fn print_banner() {
     println!("║  • Web 搜索 • 网页抓取 • 文件处理 • 流程编排                  ║");
     println!("║  • 结构化输出 • 重试策略 • Token 预算 • Agent 编排            ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
+}
+
+fn typed_response_format<T: JsonSchema>(name: &str) -> ResponseFormat {
+    let schema = schema_for!(T);
+    let schema_value = serde_json::to_value(schema).expect("schema should serialize");
+    ResponseFormat::json_schema(name, schema_value)
+}
+
+fn research_db_path() -> PathBuf {
+    std::env::temp_dir().join(format!("echo_agent_research_{}.db", std::process::id()))
+}
+
+fn cleanup_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }

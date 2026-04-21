@@ -49,15 +49,15 @@ async fn main() -> echo_agent::error::Result<()> {
     demo_provider_overview();
 
     // Part 2 ~ 4: 三个搜索引擎独立演示
-    demo_duckduckgo_search().await;
-    demo_brave_search().await;
-    demo_tavily_search().await;
+    demo_duckduckgo_search().await?;
+    demo_brave_search().await?;
+    demo_tavily_search().await?;
 
     // Part 5: 自动选择策略
-    demo_auto_search().await;
+    demo_auto_search().await?;
 
     // Part 6: WebFetch 页面获取
-    demo_web_fetch().await;
+    demo_web_fetch().await?;
 
     // Part 7: Agent 集成
     demo_agent_web_task().await?;
@@ -98,7 +98,7 @@ fn demo_provider_overview() {
 
 // ── Part 2: DuckDuckGo 搜索 ───────────────────────────────────────────────────
 
-async fn demo_duckduckgo_search() {
+async fn demo_duckduckgo_search() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 2: DuckDuckGo 搜索（免费，无需 API Key）\n");
 
@@ -107,57 +107,61 @@ async fn demo_duckduckgo_search() {
     println!("  搜索: \"{query}\"\n");
 
     let provider = DuckDuckGoProvider::new();
-    match provider.search(query, 3).await {
-        Ok(results) => print_results(&results),
-        Err(e) => println!("  搜索失败: {e}\n"),
-    }
+    let results = provider.search(query, 3).await?;
+    ensure_search_results("DuckDuckGo", &results)?;
+    print_results(&results);
+    Ok(())
 }
 
 // ── Part 3: Brave Search ──────────────────────────────────────────────────────
 
-async fn demo_brave_search() {
+async fn demo_brave_search() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 3: Brave Search 搜索\n");
 
     let Some(provider) = BraveSearchProvider::from_env() else {
-        println!("  跳过：未配置 BRAVE_SEARCH_API_KEY\n");
-        return;
+        return Err(echo_agent::error::ReactError::Other(
+            "demo41 验收失败：未配置 BRAVE_SEARCH_API_KEY".to_string(),
+        )
+        .into());
     };
 
     let query = "Rust programming language";
     println!("  Provider: Brave Search");
     println!("  搜索: \"{query}\"\n");
 
-    match provider.search(query, 3).await {
-        Ok(results) => print_results(&results),
-        Err(e) => println!("  搜索失败: {e}\n"),
-    }
+    let results = provider.search(query, 3).await?;
+    ensure_search_results("Brave", &results)?;
+    print_results(&results);
+    Ok(())
 }
 
 // ── Part 4: Tavily 搜索 ──────────────────────────────────────────────────────
 
-async fn demo_tavily_search() {
+async fn demo_tavily_search() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 4: Tavily 搜索（AI 优化）\n");
 
     let Some(provider) = TavilyProvider::from_env() else {
-        println!("  跳过：未配置 TAVILY_API_KEY\n");
-        return;
+        return Err(echo_agent::error::ReactError::Other(
+            "demo41 验收失败：未配置 TAVILY_API_KEY".to_string(),
+        )
+        .into());
     };
 
     let query = "Rust programming language";
     println!("  Provider: Tavily");
     println!("  搜索: \"{query}\"\n");
 
-    match provider.search(query, 3).await {
-        Ok(results) => print_results(&results),
-        Err(e) => println!("  搜索失败: {e}\n"),
-    }
+    let results = provider.search(query, 3).await?;
+    ensure_search_results("Tavily", &results)?;
+    print_results(&results);
+    Ok(())
 }
 
 // ── Part 5: 自动选择策略 ─────────────────────────────────────────────────────
 
-async fn demo_auto_search() {
+async fn demo_auto_search() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 5: 自动选择策略（Tavily > Brave > DuckDuckGo）\n");
 
@@ -172,22 +176,22 @@ async fn demo_auto_search() {
     params.insert("query".to_string(), serde_json::json!(query));
     params.insert("max_results".to_string(), serde_json::json!(3));
 
-    match tool.execute(params).await {
-        Ok(result) => {
-            if result.success {
-                println!("{}", result.output);
-            } else {
-                println!("  搜索失败: {:?}", result.error);
-            }
-        }
-        Err(e) => println!("  执行错误: {e}"),
+    let result = tool.execute(params).await?;
+    if !result.success || result.output.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo41 验收失败：auto search 执行失败: {:?}",
+            result.error
+        ))
+        .into());
     }
+    println!("{}", result.output);
     println!();
+    Ok(())
 }
 
 // ── Part 6: WebFetch 页面获取 ────────────────────────────────────────────────
 
-async fn demo_web_fetch() {
+async fn demo_web_fetch() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(55));
     println!("Part 6: WebFetch 页面获取\n");
 
@@ -200,21 +204,21 @@ async fn demo_web_fetch() {
     params.insert("url".to_string(), serde_json::json!(url));
     params.insert("max_length".to_string(), serde_json::json!(500));
 
-    match tool.execute(params).await {
-        Ok(result) => {
-            if result.success {
-                let preview: String = result.output.chars().take(500).collect();
-                println!("  {preview}");
-                if result.output.len() > 500 {
-                    println!("  ... (共 {} 字符)", result.output.len());
-                }
-            } else {
-                println!("  获取失败: {:?}", result.error);
-            }
-        }
-        Err(e) => println!("  执行错误: {e}"),
+    let result = tool.execute(params).await?;
+    if !result.success || result.output.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo41 验收失败：web fetch 执行失败: {:?}",
+            result.error
+        ))
+        .into());
+    }
+    let preview: String = result.output.chars().take(500).collect();
+    println!("  {preview}");
+    if result.output.len() > 500 {
+        println!("  ... (共 {} 字符)", result.output.len());
     }
     println!();
+    Ok(())
 }
 
 // ── Part 7: Agent 集成 ───────────────────────────────────────────────────────
@@ -243,10 +247,14 @@ async fn demo_agent_web_task() -> echo_agent::error::Result<()> {
     let task = "搜索 Rust 2024 edition 有什么新特性，并总结关键变化";
     println!("  任务: {task}\n");
 
-    match agent.execute(task).await {
-        Ok(result) => println!("✓ 结果:\n{result}\n"),
-        Err(e) => println!("✗ 失败: {e}\n"),
+    let result = agent.execute(task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo41 验收失败：Agent Web 任务返回空结果".to_string(),
+        )
+        .into());
     }
+    println!("✓ 结果:\n{result}\n");
 
     Ok(())
 }
@@ -267,4 +275,17 @@ fn print_results(results: &[echo_agent::tools::web::providers::SearchResult]) {
         }
         println!();
     }
+}
+
+fn ensure_search_results(
+    provider: &str,
+    results: &[echo_agent::tools::web::providers::SearchResult],
+) -> echo_agent::error::Result<()> {
+    if results.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo41 验收失败：{provider} 搜索没有返回任何结果"
+        ))
+        .into());
+    }
+    Ok(())
 }

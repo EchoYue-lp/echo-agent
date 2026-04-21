@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
 │                                                         │
 │  ┌──────────────┐  ┌────────────┐  ┌─────────────────┐  │
 │  │  Checkpointer│  │   Store    │  │HumanApprovalMgr │  │
-│  │ (会话持久化) │  │(长期记忆)  │  │  (审批 Guard)   │  │
+│  │ (线程恢复)   │  │(长期记忆)  │  │  (审批 Guard)   │  │
 │  └──────────────┘  └────────────┘  └─────────────────┘  │
 │                                                         │
 │  ┌──────────────────────────────────────────────────┐   │
@@ -136,11 +136,15 @@ async fn main() -> Result<()> {
 | 人工介入 | `enable_human_in_loop` | `false` |
 | Chain-of-Thought 提示词 | `enable_cot` | `true` |
 | 上下文压缩 | 通过 `set_compressor()` | 无 |
-| 会话持久化 | `session_id` + `checkpointer_path` | 无 |
+| 线程持久化 / 恢复 | `session_id` + `checkpointer_path` | 无 |
+| transcript/history 投影 | `conversation_id` + `ConversationStore` | 无 |
 
 ---
 
 ## 示例文件
+
+所有示例按 `验收样例`、`条件验收样例`、`教学示例` 三类维护。
+完整分层清单和维护规则见 `examples/README.md`。
 
 | 示例 | 演示功能 |
 |------|---------|

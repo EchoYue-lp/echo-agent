@@ -199,6 +199,11 @@ impl HookRegistry {
         self
     }
 
+    /// Attach or replace the sandbox manager for executing hook commands.
+    pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+        self.sandbox = Some(manager);
+    }
+
     /// Register hooks from a skill.
     pub fn register(&mut self, skill_name: &str, skill_dir: &str, definition: HooksDefinition) {
         if definition.pre_tool_use.is_empty() && definition.post_tool_use.is_empty() {
@@ -225,9 +230,20 @@ impl HookRegistry {
     }
 
     /// Execute all matching PreToolUse hooks.
-    pub async fn run_pre_tool_use(&self, tool_name: &str, tool_input: &Value) -> HookResult {
-        self.run_hooks(HookEvent::PreToolUse, tool_name, tool_input, None)
-            .await
+    pub async fn run_pre_tool_use(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        session_id: &str,
+    ) -> HookResult {
+        self.run_hooks(
+            HookEvent::PreToolUse,
+            tool_name,
+            tool_input,
+            None,
+            session_id,
+        )
+        .await
     }
 
     /// Execute all matching PostToolUse hooks.
@@ -236,12 +252,14 @@ impl HookRegistry {
         tool_name: &str,
         tool_input: &Value,
         tool_output: &str,
+        session_id: &str,
     ) -> HookResult {
         self.run_hooks(
             HookEvent::PostToolUse,
             tool_name,
             tool_input,
             Some(tool_output),
+            session_id,
         )
         .await
     }
@@ -252,10 +270,16 @@ impl HookRegistry {
         tool_name: &str,
         tool_input: &Value,
         tool_output: Option<&str>,
+        session_id: &str,
     ) -> HookResult {
         let mut combined = HookResult::default();
+        let mut skill_names: Vec<&str> = self.skills.keys().map(String::as_str).collect();
+        skill_names.sort_unstable();
 
-        for (skill_name, registered) in &self.skills {
+        for skill_name in skill_names {
+            let Some(registered) = self.skills.get(skill_name) else {
+                continue;
+            };
             let rules = match event {
                 HookEvent::PreToolUse => &registered.definition.pre_tool_use,
                 HookEvent::PostToolUse => &registered.definition.post_tool_use,
@@ -281,6 +305,7 @@ impl HookRegistry {
                         tool_name,
                         tool_input,
                         tool_output,
+                        session_id,
                         self.sandbox.as_ref(),
                     )
                     .await;
@@ -331,6 +356,7 @@ async fn execute_action(
     tool_name: &str,
     tool_input: &Value,
     tool_output: Option<&str>,
+    session_id: &str,
     sandbox: Option<&Arc<SandboxManager>>,
 ) -> HookResult {
     match action {
@@ -347,6 +373,7 @@ async fn execute_action(
                 tool_name,
                 tool_input,
                 tool_output,
+                session_id,
                 sandbox,
             )
             .await
@@ -397,6 +424,7 @@ async fn execute_command_hook(
     tool_name: &str,
     tool_input: &Value,
     tool_output: Option<&str>,
+    session_id: &str,
     sandbox: Option<&Arc<SandboxManager>>,
 ) -> HookResult {
     // Variable substitution in command
@@ -424,7 +452,7 @@ async fn execute_command_hook(
         }
 
         // Use minimal environment
-        let env = minimal_hook_env(skill_dir, "");
+        let env = minimal_hook_env(skill_dir, session_id);
         for (k, v) in env {
             sandbox_cmd = sandbox_cmd.with_env(k, v);
         }
@@ -454,6 +482,7 @@ async fn execute_command_hook(
     for arg in &args {
         cmd.arg(arg);
     }
+    cmd.kill_on_drop(true);
 
     if !skill_dir.is_empty() && Path::new(skill_dir).exists() {
         cmd.current_dir(skill_dir);
@@ -464,7 +493,8 @@ async fn execute_command_hook(
     cmd.stderr(std::process::Stdio::piped());
 
     // Use minimal environment to avoid leaking sensitive variables
-    let env = minimal_hook_env(skill_dir, "");
+    let env = minimal_hook_env(skill_dir, session_id);
+    cmd.env_clear();
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -486,11 +516,8 @@ async fn execute_command_hook(
         drop(stdin);
     }
 
-    // Spawn a task to wait for the child; this lets us cancel and kill on timeout
-    let wait_task = tokio::spawn(async move { child.wait_with_output().await });
-
-    match tokio::time::timeout(timeout, wait_task).await {
-        Ok(Ok(Ok(output))) => {
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -500,13 +527,8 @@ async fn execute_command_hook(
 
             parse_hook_output(&stdout, output.status.code().unwrap_or(-1))
         }
-        Ok(Ok(Err(e))) => {
-            warn!(command = %command, error = %e, "Hook command execution error");
-            HookResult::default()
-        }
         Ok(Err(e)) => {
-            // Spawn task panicked
-            warn!(command = %command, error = %e, "Hook command wait task panicked");
+            warn!(command = %command, error = %e, "Hook command execution error");
             HookResult::default()
         }
         Err(_) => {
@@ -515,10 +537,6 @@ async fn execute_command_hook(
                 timeout_secs = timeout_secs,
                 "Hook command timed out"
             );
-            // The task is still running in background; it will complete but
-            // we already returned the timeout result.
-            // For proper kill, we'd need to keep the child handle,
-            // but wait_with_output consumes it.
             HookResult::default()
         }
     }
@@ -722,6 +740,9 @@ fn merge_result(combined: &mut HookResult, incoming: HookResult) {
             combined.permission_decision = Some(new_decision);
         }
     }
+    // permission_mode_override is intentionally "last non-none wins".
+    // This keeps hook composition predictable without mixing it into the
+    // deny > ask > allow decision priority matrix above.
     if incoming.permission_mode_override.is_some() {
         combined.permission_mode_override = incoming.permission_mode_override;
     }
@@ -847,7 +868,7 @@ PostToolUse:
         };
         registry.register("test", "/tmp", def);
 
-        let result = registry.run_pre_tool_use("Read", &json!({})).await;
+        let result = registry.run_pre_tool_use("Read", &json!({}), "").await;
         assert!(result.messages.is_empty());
     }
 
@@ -866,7 +887,7 @@ PostToolUse:
         registry.register("security", "/tmp", def);
 
         let result = registry
-            .run_pre_tool_use("Bash", &json!({"command": "ls"}))
+            .run_pre_tool_use("Bash", &json!({"command": "ls"}), "")
             .await;
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0], "Verify the command is safe");
@@ -892,7 +913,7 @@ PostToolUse:
         registry.register("test", "/tmp", def);
 
         let result = registry
-            .run_pre_tool_use("Bash", &json!({"command": "ls"}))
+            .run_pre_tool_use("Bash", &json!({"command": "ls"}), "")
             .await;
         assert!(!result.block);
     }
@@ -966,10 +987,75 @@ PostToolUse:
         registry.register("security", "/tmp", def);
 
         let result = registry
-            .run_pre_tool_use("Bash", &json!({"command": "rm -rf"}))
+            .run_pre_tool_use("Bash", &json!({"command": "rm -rf"}), "")
             .await;
         assert!(result.block);
         assert!(result.has_permission_decision());
+    }
+
+    #[tokio::test]
+    async fn test_hook_command_receives_session_id() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        let mut registry = HookRegistry::new();
+        let def = HooksDefinition {
+            pre_tool_use: vec![HookRule {
+                matcher: "Bash".into(),
+                hooks: vec![HookAction::Command {
+                    command: r#"printf '{"updatedInput":{"session_id":"%s"}}' "$SESSION_ID""#
+                        .into(),
+                    shell: None,
+                    timeout: 5,
+                }],
+            }],
+            post_tool_use: vec![],
+        };
+        registry.register("session-skill", "/tmp", def);
+
+        let result = registry
+            .run_pre_tool_use("Bash", &json!({"command": "ls"}), "sess-123")
+            .await;
+        assert_eq!(
+            result.updated_input,
+            Some(json!({"session_id": "sess-123"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hook_registry_runs_in_deterministic_skill_name_order() {
+        let mut registry = HookRegistry::new();
+        registry.register(
+            "z-skill",
+            "/tmp",
+            HooksDefinition {
+                pre_tool_use: vec![HookRule {
+                    matcher: "Bash".into(),
+                    hooks: vec![HookAction::Prompt {
+                        prompt: "from-z".into(),
+                    }],
+                }],
+                post_tool_use: vec![],
+            },
+        );
+        registry.register(
+            "a-skill",
+            "/tmp",
+            HooksDefinition {
+                pre_tool_use: vec![HookRule {
+                    matcher: "Bash".into(),
+                    hooks: vec![HookAction::Prompt {
+                        prompt: "from-a".into(),
+                    }],
+                }],
+                post_tool_use: vec![],
+            },
+        );
+
+        let result = registry
+            .run_pre_tool_use("Bash", &json!({"command": "ls"}), "")
+            .await;
+        assert_eq!(result.messages, vec!["from-a", "from-z"]);
     }
 
     #[test]
@@ -1014,6 +1100,38 @@ PostToolUse:
             combined.permission_decision.clone().unwrap(),
             PermissionDecision::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn test_merge_result_permission_mode_override_last_wins() {
+        let mut combined = HookResult {
+            permission_mode_override: Some(PermissionMode::Auto),
+            ..HookResult::default()
+        };
+
+        merge_result(
+            &mut combined,
+            HookResult {
+                permission_mode_override: Some(PermissionMode::Plan),
+                ..HookResult::default()
+            },
+        );
+        assert_eq!(
+            combined.permission_mode_override,
+            Some(PermissionMode::Plan)
+        );
+
+        merge_result(
+            &mut combined,
+            HookResult {
+                permission_mode_override: None,
+                ..HookResult::default()
+            },
+        );
+        assert_eq!(
+            combined.permission_mode_override,
+            Some(PermissionMode::Plan)
+        );
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! 本地沙箱执行器
 //!
-//! 使用操作系统原生隔离机制执行命令：
+//! 使用本地进程执行命令，并在支持的平台启用操作系统原生隔离：
 //! - **macOS**: `sandbox-exec` (Seatbelt)
-//! - **Linux**: 进程级隔离 + 资源限制（rlimit）
+//! - **Linux**: 当前仍是进程级隔离 + 资源限制（尚未接入 `bubblewrap`）
 //! - **其他**: 仅进程隔离（超时 + 输出截断）
+//! - 支持通过 `SandboxCommand::stdin` 传入标准输入
 //!
 //! 这是最轻量的沙箱层，适合受信代码和只读操作。
 
@@ -16,6 +17,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Instant;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// 本地沙箱配置
@@ -38,7 +40,7 @@ pub struct LocalConfig {
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
-            enable_os_sandbox: cfg!(target_os = "macos") || cfg!(target_os = "linux"),
+            enable_os_sandbox: cfg!(target_os = "macos"),
             allowed_read_paths: vec![PathBuf::from("/usr"), PathBuf::from("/bin")],
             allowed_write_paths: vec![],
             allow_network: false,
@@ -60,9 +62,13 @@ impl LocalSandbox {
         Self { config }
     }
 
+    fn effective_os_sandbox_enabled(&self) -> bool {
+        self.config.enable_os_sandbox && cfg!(target_os = "macos")
+    }
+
     /// 构建 shell 命令
     fn build_shell_command(&self, cmd: &str, sandbox_cmd: &SandboxCommand) -> Command {
-        let mut command = if self.config.enable_os_sandbox && cfg!(target_os = "macos") {
+        let mut command = if self.effective_os_sandbox_enabled() {
             // macOS: 使用 sandbox-exec
             let profile = self.build_seatbelt_profile();
             let mut c = Command::new("sandbox-exec");
@@ -94,7 +100,7 @@ impl LocalSandbox {
         args: &[String],
         sandbox_cmd: &SandboxCommand,
     ) -> Command {
-        let mut command = if self.config.enable_os_sandbox && cfg!(target_os = "macos") {
+        let mut command = if self.effective_os_sandbox_enabled() {
             let profile = self.build_seatbelt_profile();
             let mut c = Command::new("sandbox-exec");
             c.arg("-p").arg(profile).arg(program);
@@ -138,7 +144,7 @@ impl LocalSandbox {
             }
         };
 
-        let mut command = if self.config.enable_os_sandbox && cfg!(target_os = "macos") {
+        let mut command = if self.effective_os_sandbox_enabled() {
             let profile = self.build_seatbelt_profile();
             let mut c = Command::new("sandbox-exec");
             c.arg("-p")
@@ -213,23 +219,36 @@ impl LocalSandbox {
         &self,
         mut command: Command,
         timeout: std::time::Duration,
+        stdin: Option<&str>,
     ) -> Result<ExecutionResult> {
+        if stdin.is_some() {
+            command.stdin(std::process::Stdio::piped());
+        }
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
+        command.kill_on_drop(true);
 
         let start = Instant::now();
 
-        let child = command.spawn().map_err(|e| {
+        let mut child = command.spawn().map_err(|e| {
             echo_core::error::ReactError::Sandbox(SandboxError::StartFailed(format!(
                 "Failed to spawn process: {e}"
             )))
         })?;
 
-        let wait_task = tokio::spawn(async move { child.wait_with_output().await });
+        if let Some(input) = stdin
+            && let Some(mut child_stdin) = child.stdin.take()
+        {
+            child_stdin.write_all(input.as_bytes()).await.map_err(|e| {
+                echo_core::error::ReactError::Sandbox(SandboxError::IoError(format!(
+                    "Failed to write stdin: {e}"
+                )))
+            })?;
+        }
 
         // 等待并超时处理
-        match tokio::time::timeout(timeout, wait_task).await {
-            Ok(Ok(Ok(output))) => {
+        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => {
                 let duration = start.elapsed();
                 let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -254,11 +273,8 @@ impl LocalSandbox {
                     timed_out: false,
                 })
             }
-            Ok(Ok(Err(e))) => Err(echo_core::error::ReactError::Sandbox(
-                SandboxError::IoError(format!("Process IO error: {e}")),
-            )),
             Ok(Err(e)) => Err(echo_core::error::ReactError::Sandbox(
-                SandboxError::IoError(format!("Process wait task failed: {e}")),
+                SandboxError::IoError(format!("Process IO error: {e}")),
             )),
             Err(_) => {
                 let duration = start.elapsed();
@@ -281,7 +297,7 @@ impl SandboxExecutor for LocalSandbox {
     }
 
     fn isolation_level(&self) -> IsolationLevel {
-        if self.config.enable_os_sandbox {
+        if self.effective_os_sandbox_enabled() {
             IsolationLevel::OsSandbox
         } else {
             IsolationLevel::Process
@@ -290,30 +306,17 @@ impl SandboxExecutor for LocalSandbox {
 
     fn is_available(&self) -> BoxFuture<'_, bool> {
         Box::pin(async {
-            if self.config.enable_os_sandbox {
-                // macOS: 检查 sandbox-exec 是否可用
-                if cfg!(target_os = "macos") {
-                    Command::new("sandbox-exec")
-                        .arg("-n")
-                        .arg("default")
-                        .arg("true")
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .await
-                        .map(|s| s.success())
-                        .unwrap_or(false)
-                } else {
-                    // Linux: 检查 bwrap（bubblewrap）是否可用
-                    Command::new("bwrap")
-                        .arg("--version")
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .await
-                        .map(|s| s.success())
-                        .unwrap_or(false)
-                }
+            if self.effective_os_sandbox_enabled() {
+                Command::new("sandbox-exec")
+                    .arg("-n")
+                    .arg("default")
+                    .arg("true")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false)
             } else {
                 true
             }
@@ -332,7 +335,8 @@ impl SandboxExecutor for LocalSandbox {
                     .build_code_command(language, code, &command)
                     .map_err(echo_core::error::ReactError::Sandbox)?,
             };
-            self.run_command(cmd, timeout).await
+            self.run_command(cmd, timeout, command.stdin.as_deref())
+                .await
         })
     }
 
@@ -441,12 +445,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_local_sandbox_stdin() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+
+        let cmd = SandboxCommand::shell("read value; echo $value").with_stdin("from-stdin\n");
+        let result = sandbox.execute(cmd).await.unwrap();
+        assert!(result.success());
+        assert_eq!(result.stdout.trim(), "from-stdin");
+    }
+
+    #[tokio::test]
     async fn test_local_sandbox_is_available() {
         let sandbox = LocalSandbox::new(LocalConfig {
             enable_os_sandbox: false,
             ..Default::default()
         });
         assert!(sandbox.is_available().await);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_reports_process_isolation_without_os_sandbox_backend() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: true,
+            ..Default::default()
+        });
+        assert_eq!(sandbox.isolation_level(), IsolationLevel::Process);
     }
 
     #[cfg(target_os = "macos")]

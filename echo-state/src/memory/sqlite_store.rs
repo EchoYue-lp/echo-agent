@@ -30,17 +30,19 @@
 //! // FTS5 全文检索
 //! let items = store.search(&["alice", "memories"], "深色 主题", 5).await?;
 //!
-//! // 带向量检索（需要 Embedder）
+//! // 带混合检索（需要 Embedder）
 //! use echo_state::memory::{Embedder, HttpEmbedder};
 //! let embedder: Arc<dyn Embedder> = Arc::new(HttpEmbedder::from_env());
 //! let store = Arc::new(SqliteStore::with_embedder("~/.echo-agent/memory.db", embedder)?);
-//! let items = store.semantic_search(&["alice", "memories"], "主题偏好", 5).await?;
+//! let items = store
+//!     .search_with(&["alice", "memories"], echo_state::memory::SearchQuery::hybrid("主题偏好", 5))
+//!     .await?;
 //! # Ok(())
 //! # }
 //! ```
 
 use super::embedder::Embedder;
-use super::store::{Store, StoreItem};
+use super::store::{SearchMode, SearchQuery, Store, StoreItem};
 use crate::util::{expand_tilde, memory_io_error};
 use echo_core::error::{MemoryError, Result};
 use futures::future::BoxFuture;
@@ -292,6 +294,94 @@ impl SqliteStore {
                 }
             }
         }
+        Ok(results)
+    }
+
+    async fn semantic_search_impl(
+        &self,
+        namespace: &[&str],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<StoreItem>> {
+        let Some(ref embedder) = self.embedder else {
+            return Err(MemoryError::Unsupported(
+                "semantic search requires an embedder-backed SqliteStore".to_string(),
+            )
+            .into());
+        };
+
+        let ns_key = namespace.join("/");
+
+        let query_vec = match embedder.embed(query).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "⚠️ 查询嵌入计算失败，回退到 FTS5 检索");
+                return self.search(namespace, query, limit).await;
+            }
+        };
+
+        let scored = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn
+                .prepare("SELECT key, vector FROM store_vectors WHERE namespace = ?1")
+                .map_err(|e| memory_io_error("查询向量表失败", e))?;
+
+            let mut scored: Vec<(f32, String)> = stmt
+                .query_map(params![ns_key], |row| {
+                    let key: String = row.get(0)?;
+                    let bytes: Vec<u8> = row.get(1)?;
+                    Ok((key, bytes))
+                })
+                .map_err(|e| memory_io_error("查询向量失败", e))?
+                .filter_map(|r| r.ok())
+                .map(|(key, bytes)| {
+                    let vec = Self::bytes_to_vec(&bytes);
+                    let score = Self::cosine_similarity(&query_vec, &vec);
+                    (score, key)
+                })
+                .collect();
+
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(limit);
+            scored
+        };
+
+        if scored.is_empty() {
+            debug!(ns = %ns_key, "向量索引为空，回退到 FTS5 检索");
+            return self.search(namespace, query, limit).await;
+        }
+
+        debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
+
+        let conn = self.conn.lock().await;
+        let mut results = Vec::with_capacity(scored.len());
+        for (score, key) in scored {
+            let row = conn.query_row(
+                "SELECT value, created_at, updated_at FROM store_items
+                 WHERE namespace = ?1 AND key = ?2",
+                params![ns_key, key],
+                |row| {
+                    let value_str: String = row.get(0)?;
+                    let created_at: i64 = row.get(1)?;
+                    let updated_at: i64 = row.get(2)?;
+                    Ok((value_str, created_at, updated_at))
+                },
+            );
+
+            if let Ok((value_str, created_at, updated_at)) = row
+                && let Ok(value) = serde_json::from_str::<Value>(&value_str)
+            {
+                results.push(StoreItem {
+                    namespace: namespace.iter().map(|s| s.to_string()).collect(),
+                    key,
+                    value,
+                    created_at: created_at as u64,
+                    updated_at: updated_at as u64,
+                    score: Some(score),
+                });
+            }
+        }
+
         Ok(results)
     }
 }
@@ -564,98 +654,58 @@ impl Store for SqliteStore {
         })
     }
 
-    fn supports_semantic_search(&self) -> bool {
-        self.embedder.is_some()
-    }
-
-    fn semantic_search<'a>(
+    fn search_with<'a>(
         &'a self,
         namespace: &'a [&'a str],
-        query: &'a str,
-        limit: usize,
+        query: SearchQuery<'a>,
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
-            let Some(ref embedder) = self.embedder else {
-                return self.search(namespace, query, limit).await;
-            };
-
-            let ns_key = namespace.join("/");
-
-            // 计算查询向量
-            let query_vec = match embedder.embed(query).await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(error = %e, "⚠️ 查询嵌入计算失败，回退到 FTS5 检索");
-                    return self.search(namespace, query, limit).await;
+            match query.mode {
+                SearchMode::Keyword => self.search(namespace, query.text, query.limit).await,
+                SearchMode::Semantic => {
+                    self.semantic_search_impl(namespace, query.text, query.limit)
+                        .await
                 }
-            };
-
-            // 读取向量并计算相似度（在一个同步块中完成，避免 Send 问题）
-            let scored = {
-                let conn = self.conn.lock().await;
-                let mut stmt = conn
-                    .prepare("SELECT key, vector FROM store_vectors WHERE namespace = ?1")
-                    .map_err(|e| memory_io_error("查询向量表失败", e))?;
-
-                let mut scored: Vec<(f32, String)> = stmt
-                    .query_map(params![ns_key], |row| {
-                        let key: String = row.get(0)?;
-                        let bytes: Vec<u8> = row.get(1)?;
-                        Ok((key, bytes))
-                    })
-                    .map_err(|e| memory_io_error("查询向量失败", e))?
-                    .filter_map(|r| r.ok())
-                    .map(|(key, bytes)| {
-                        let vec = Self::bytes_to_vec(&bytes);
-                        let score = Self::cosine_similarity(&query_vec, &vec);
-                        (score, key)
-                    })
-                    .collect();
-
-                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                scored.truncate(limit);
-                scored
-                // conn, stmt dropped here
-            };
-
-            if scored.is_empty() {
-                debug!(ns = %ns_key, "向量索引为空，回退到 FTS5 检索");
-                return self.search(namespace, query, limit).await;
-            }
-
-            debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
-
-            // 按匹配 key 取出完整条目
-            let conn = self.conn.lock().await;
-            let mut results = Vec::with_capacity(scored.len());
-            for (score, key) in scored {
-                let row = conn.query_row(
-                    "SELECT value, created_at, updated_at FROM store_items
-                     WHERE namespace = ?1 AND key = ?2",
-                    params![ns_key, key],
-                    |row| {
-                        let value_str: String = row.get(0)?;
-                        let created_at: i64 = row.get(1)?;
-                        let updated_at: i64 = row.get(2)?;
-                        Ok((value_str, created_at, updated_at))
-                    },
-                );
-
-                if let Ok((value_str, created_at, updated_at)) = row {
-                    if let Ok(value) = serde_json::from_str::<Value>(&value_str) {
-                        results.push(StoreItem {
-                            namespace: namespace.iter().map(|s| s.to_string()).collect(),
-                            key,
-                            value,
-                            created_at: created_at as u64,
-                            updated_at: updated_at as u64,
-                            score: Some(score),
-                        });
+                SearchMode::Hybrid => {
+                    let mut merged: std::collections::HashMap<String, StoreItem> =
+                        std::collections::HashMap::new();
+                    for item in self.search(namespace, query.text, query.limit).await? {
+                        merged.insert(item.key.clone(), item);
                     }
+                    match self
+                        .semantic_search_impl(namespace, query.text, query.limit)
+                        .await
+                    {
+                        Ok(items) => {
+                            for item in items {
+                                merged
+                                    .entry(item.key.clone())
+                                    .and_modify(|existing| {
+                                        let incoming = item.score.unwrap_or_default();
+                                        if incoming > existing.score.unwrap_or_default() {
+                                            *existing = item.clone();
+                                        }
+                                    })
+                                    .or_insert(item);
+                            }
+                        }
+                        Err(err)
+                            if format!("{err}").contains(
+                                "semantic search requires an embedder-backed SqliteStore",
+                            ) => {}
+                        Err(err) => return Err(err),
+                    }
+                    let mut items: Vec<StoreItem> = merged.into_values().collect();
+                    items.sort_by(|a, b| {
+                        b.score
+                            .unwrap_or_default()
+                            .partial_cmp(&a.score.unwrap_or_default())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    items.truncate(query.limit);
+                    Ok(items)
                 }
             }
-
-            Ok(results)
         })
     }
 }
@@ -834,13 +884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_supports_semantic_search() {
-        let store = temp_db();
-        assert!(!store.supports_semantic_search());
-    }
-
-    #[tokio::test]
-    async fn test_semantic_search_fallback_to_fts() {
+    async fn test_semantic_search_without_embedder_is_unsupported() {
         let store = temp_db();
         let ns = &["test", "fallback"];
 
@@ -849,9 +893,11 @@ mod tests {
             .await
             .unwrap();
 
-        // 无 embedder 时，semantic_search 应回退到 FTS5
-        let results = store.semantic_search(ns, "Rust", 5).await.unwrap();
-        assert!(!results.is_empty());
+        let err = store
+            .search_with(ns, SearchQuery::semantic("Rust", 5))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("semantic search"));
     }
 
     #[tokio::test]
@@ -863,8 +909,6 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(4));
         let store = SqliteStore::with_embedder(dir.join("test.db"), embedder).unwrap();
 
-        assert!(store.supports_semantic_search());
-
         let ns = &["test", "vec"];
         store
             .put(ns, "k1", json!({"content": "Rust programming"}))
@@ -875,7 +919,10 @@ mod tests {
             .await
             .unwrap();
 
-        let results = store.semantic_search(ns, "Rust", 5).await.unwrap();
+        let results = store
+            .search_with(ns, SearchQuery::semantic("Rust", 5))
+            .await
+            .unwrap();
         assert!(!results.is_empty());
         assert!(results[0].score.is_some());
     }

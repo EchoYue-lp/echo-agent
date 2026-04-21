@@ -1,6 +1,8 @@
+use crate::sandbox::SandboxExecutor;
 use crate::skills::Skill;
 use crate::tools::Tool;
 use crate::tools::shell::ShellTool;
+use std::sync::Arc;
 
 /// Shell 命令执行技能
 ///
@@ -58,6 +60,18 @@ impl Skill for ShellSkill {
         } else {
             ShellTool::new()
         };
+        vec![Box::new(tool)]
+    }
+
+    fn tools_with_sandbox(&self, sandbox: Option<Arc<dyn SandboxExecutor>>) -> Vec<Box<dyn Tool>> {
+        let mut tool = if self.permissive {
+            ShellTool::new_permissive()
+        } else {
+            ShellTool::new()
+        };
+        if let Some(sandbox) = sandbox {
+            tool = tool.with_sandbox(sandbox);
+        }
         vec![Box::new(tool)]
     }
 

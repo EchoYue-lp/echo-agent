@@ -27,19 +27,19 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // ── Part 1: provider:model 简写格式 ─────────────────────────────────────
     separator("Part 1: provider:model 简写格式");
-    demo_provider_model_shorthand();
+    demo_provider_model_shorthand()?;
 
     // ── Part 2: 从配置文件加载 ───────────────────────────────────────────────
     separator("Part 2: 从配置文件/环境变量加载");
-    demo_from_config_file();
+    demo_from_config_file()?;
 
     // ── Part 3: LlmConfig 手动构建 + build_client ────────────────────────────
     separator("Part 3: LlmConfig 手动构建");
-    demo_from_llm_config();
+    demo_from_llm_config()?;
 
     // ── Part 4: 自动 Provider 检测 ──────────────────────────────────────────
     separator("Part 4: 自动 Provider 类型检测");
-    demo_auto_provider_detection();
+    demo_auto_provider_detection()?;
 
     // ── Part 5: 实际对话测试 ─────────────────────────────────────────────────
     separator("Part 5: 通过 ProviderFactory 创建 Agent 并对话");
@@ -54,7 +54,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
 // ── Part 1 ──────────────────────────────────────────────────────────────────
 
-fn demo_provider_model_shorthand() {
+fn demo_provider_model_shorthand() -> echo_agent::error::Result<()> {
     println!("  使用 ProviderFactory::create(\"provider:model\") 快速创建客户端\n");
 
     // 列出支持的 Provider
@@ -73,22 +73,17 @@ fn demo_provider_model_shorthand() {
     ];
 
     for (config_str, desc) in &configs {
-        match ProviderFactory::create(config_str) {
-            Ok(client) => {
-                println!("  ✅ \"{config_str}\" → {} ({})", client.model_name(), desc);
-            }
-            Err(e) => {
-                println!("  ⚠️  \"{config_str}\" → 创建失败: {e} ({desc})");
-            }
-        }
+        let client = ProviderFactory::create(config_str)?;
+        println!("  ✅ \"{config_str}\" → {} ({})", client.model_name(), desc);
     }
 
     println!();
+    Ok(())
 }
 
 // ── Part 2 ──────────────────────────────────────────────────────────────────
 
-fn demo_from_config_file() {
+fn demo_from_config_file() -> echo_agent::error::Result<()> {
     println!("  使用 ProviderFactory::create(\"model_name\") 从配置文件加载\n");
 
     // 尝试从配置文件加载（可能失败，取决于用户是否有配置文件）
@@ -100,24 +95,25 @@ fn demo_from_config_file() {
     // 列出已配置的模型
     let models = echo_agent::llm::config::Config::list_models();
     if models.is_empty() {
-        println!("  ℹ️  未找到配置文件或无可用模型配置");
-        println!("  💡 提示：创建 echo-agent.yaml 文件添加模型配置\n");
+        return Err(echo_agent::error::ReactError::Other(
+            "demo26 验收失败：未找到可用模型配置".to_string(),
+        )
+        .into());
     } else {
         println!("  已配置的模型: {:?}\n", models);
         // 尝试用第一个模型创建客户端
         let model = &models[0];
-        match ProviderFactory::create(model) {
-            Ok(client) => println!("  ✅ \"{}\" → {}", model, client.model_name()),
-            Err(e) => println!("  ⚠️  \"{}\" → {}", model, e),
-        }
+        let client = ProviderFactory::create(model)?;
+        println!("  ✅ \"{}\" → {}", model, client.model_name());
     }
 
     println!();
+    Ok(())
 }
 
 // ── Part 3 ──────────────────────────────────────────────────────────────────
 
-fn demo_from_llm_config() {
+fn demo_from_llm_config() -> echo_agent::error::Result<()> {
     println!("  使用 LlmConfig 手动构建后调用 ProviderFactory::from_config()\n");
 
     // 各种 LlmConfig 快捷构造器
@@ -142,26 +138,21 @@ fn demo_from_llm_config() {
     ];
 
     for (config, constructor) in &configs {
-        match ProviderFactory::from_config(config) {
-            Ok(client) => {
-                println!(
-                    "  ✅ {constructor:<30} → model={}, provider={:?}",
-                    client.model_name(),
-                    config.provider,
-                );
-            }
-            Err(e) => {
-                println!("  ⚠️  {constructor} → {e}");
-            }
-        }
+        let client = ProviderFactory::from_config(config)?;
+        println!(
+            "  ✅ {constructor:<30} → model={}, provider={:?}",
+            client.model_name(),
+            config.provider,
+        );
     }
 
     println!();
+    Ok(())
 }
 
 // ── Part 4 ──────────────────────────────────────────────────────────────────
 
-fn demo_auto_provider_detection() {
+fn demo_auto_provider_detection() -> echo_agent::error::Result<()> {
     println!("  LlmConfig::from_model() 自动检测 provider 类型\n");
     println!("  当配置文件中指定了 provider 字段时直接使用；");
     println!("  否则根据 base_url 自动推断：\n");
@@ -185,18 +176,31 @@ fn demo_auto_provider_detection() {
 
     // 演示 Anthropic 配置的 provider 自动设置
     let anthropic_config = LlmConfig::anthropic("sk-ant-test", "claude-sonnet-4-6");
+    if anthropic_config.provider != LlmProvider::Anthropic {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo26 验收失败：anthropic provider 自动检测错误".to_string(),
+        )
+        .into());
+    }
     println!(
         "  LlmConfig::anthropic() → provider = {:?}",
         anthropic_config.provider
     );
 
     let ollama_config = LlmConfig::ollama("llama3");
+    if ollama_config.provider != LlmProvider::Ollama {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo26 验收失败：ollama provider 自动检测错误".to_string(),
+        )
+        .into());
+    }
     println!(
         "  LlmConfig::ollama()    → provider = {:?}",
         ollama_config.provider
     );
 
     println!();
+    Ok(())
 }
 
 // ── Part 5 ──────────────────────────────────────────────────────────────────
@@ -209,9 +213,10 @@ async fn demo_agent_with_factory() -> echo_agent::error::Result<()> {
     let model_name = if !models.is_empty() {
         models[0].clone()
     } else {
-        println!("  ℹ️  无配置文件，跳过实际对话测试");
-        println!("  💡 创建 echo-agent.yaml 配置模型后可体验完整流程");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo26 验收失败：无配置文件，无法验证 ProviderFactory + Agent 对话".to_string(),
+        )
+        .into());
     };
 
     println!("  使用模型: {model_name}\n");
@@ -230,10 +235,14 @@ async fn demo_agent_with_factory() -> echo_agent::error::Result<()> {
         .build()?;
 
     println!("  👤 用户: 用一句话介绍 Rust 语言");
-    match agent.execute("用一句话介绍 Rust 语言").await {
-        Ok(answer) => println!("  🤖 Agent: {answer}"),
-        Err(e) => println!("  ⚠️  执行出错: {e}"),
+    let answer = agent.execute("用一句话介绍 Rust 语言").await?;
+    if answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo26 验收失败：ProviderFactory Agent 对话返回空答案".to_string(),
+        )
+        .into());
     }
+    println!("  🤖 Agent: {answer}");
 
     Ok(())
 }

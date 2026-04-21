@@ -3,13 +3,18 @@
 //! 提供 Local / Docker / K8s 三种隔离级别的代码执行环境，
 //! 统一通过 [`SandboxExecutor`] trait 抽象，由 [`SandboxManager`] 自动选择最佳执行层。
 //!
+//! 当前实现约定：
+//! - [`ResourceLimits::cpu_time_secs`] 表示 wall-clock timeout，而不是 CPU request / quota
+//! - [`SandboxCommand::stdin`] 会透传到 Local / Docker / K8s 三个执行器
+//! - K8s 执行器会显式删除临时 Pod；`network=false` 目前只会记录能力告警，不能像 Docker 一样逐 Pod 强制断网
+//!
 //! ## 架构
 //!
 //! | 层 | 实现 | 隔离强度 | 开销 | 适用场景 |
 //! |----|------|----------|------|----------|
 //! | Local | [`LocalSandbox`] | OS 级（namespace/sandbox-exec） | 极低 | 开发调试、受信操作 |
 //! | Docker | [`DockerSandbox`] | 容器级（namespace + cgroups） | 中等 | 不可信代码、环境隔离 |
-//! | K8s | [`K8sSandbox`] | Pod/微VM 级 | 较高 | 大规模并发、企业级 |
+//! | K8s | [`K8sSandbox`] | 编排工作负载级（Pod） | 较高 | 大规模并发、企业级 |
 //!
 //! ## 快速上手
 //!
@@ -85,7 +90,9 @@ pub fn default_language_image(lang: &str) -> Option<&'static str> {
 
 /// 为命令选择合适的镜像（通用逻辑）。
 ///
-/// 按优先级：语言精确匹配 -> 语言前缀匹配 -> 默认镜像
+/// 按优先级：语言精确匹配 -> 语言前缀匹配 -> 默认镜像。
+/// 对 `CommandKind::Shell`，如果首个 token 看起来像路径（包含 `/` 或 `\`），
+/// 则直接回退到默认镜像，避免把宿主机路径误判成语言标识。
 pub fn select_image_for_command(
     command: &SandboxCommand,
     language_images: &HashMap<String, String>,
@@ -104,7 +111,14 @@ pub fn select_image_for_command(
             default_image.to_string()
         }
         CommandKind::Shell(cmd) => {
-            let base = cmd.split_whitespace().next().unwrap_or("");
+            let raw = cmd.split_whitespace().next().unwrap_or("");
+            if raw.contains('/') || raw.contains('\\') {
+                return default_image.to_string();
+            }
+            let base = std::path::Path::new(raw)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(raw);
             if let Some(img) = language_images.get(base) {
                 return img.clone();
             }
@@ -175,8 +189,8 @@ pub enum IsolationLevel {
     OsSandbox = 2,
     /// 容器隔离（Docker / Podman）
     Container = 3,
-    /// 微VM 隔离（Kata / Firecracker / gVisor）
-    MicroVM = 4,
+    /// 编排工作负载隔离（例如临时 K8s Pod；可由底层运行时进一步强化）
+    Orchestrated = 4,
 }
 
 impl std::fmt::Display for IsolationLevel {
@@ -186,7 +200,7 @@ impl std::fmt::Display for IsolationLevel {
             IsolationLevel::Process => write!(f, "process"),
             IsolationLevel::OsSandbox => write!(f, "os-sandbox"),
             IsolationLevel::Container => write!(f, "container"),
-            IsolationLevel::MicroVM => write!(f, "micro-vm"),
+            IsolationLevel::Orchestrated => write!(f, "orchestrated"),
         }
     }
 }
@@ -203,6 +217,8 @@ pub struct SandboxCommand {
     /// 执行超时
     pub timeout: Duration,
     /// 标准输入
+    ///
+    /// 当前会透传到 Local / Docker / K8s 三个执行器。
     pub stdin: Option<String>,
 }
 
@@ -320,7 +336,9 @@ impl ExecutionResult {
 /// 资源限制
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
-    /// 最大 CPU 时间（秒）
+    /// 最大执行时间（秒，按 wall-clock timeout 处理）
+    ///
+    /// 该字段用于统一超时语义，不等价于容器 / K8s 的 CPU request 或 CPU quota。
     pub cpu_time_secs: Option<u64>,
     /// 最大内存（字节）
     pub memory_bytes: Option<u64>,
@@ -375,5 +393,32 @@ impl ResourceLimits {
             read_only_paths: vec![],
             writable_paths: vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_select_image_shell_path_uses_default_image() {
+        let mut language_images = HashMap::new();
+        language_images.insert("python3".to_string(), "python:3.12-slim".to_string());
+
+        let cmd = SandboxCommand::shell("/usr/bin/python3 script.py");
+        let image = select_image_for_command(&cmd, &language_images, "ubuntu:22.04");
+
+        assert_eq!(image, "ubuntu:22.04");
+    }
+
+    #[test]
+    fn test_select_image_shell_binary_name_mapping() {
+        let mut language_images = HashMap::new();
+        language_images.insert("python3".to_string(), "python:3.12-slim".to_string());
+
+        let cmd = SandboxCommand::shell("python3 script.py");
+        let image = select_image_for_command(&cmd, &language_images, "ubuntu:22.04");
+
+        assert_eq!(image, "python:3.12-slim");
     }
 }

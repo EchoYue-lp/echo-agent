@@ -11,6 +11,7 @@ from PIL import Image, ImageFont, ImageDraw
 TITLE = ""
 SUBTITLE = ""
 CONTENT = ""
+CLI_OUTPUT_PATH = ""
 
 # 解析参数
 if len(sys.argv) > 1:
@@ -19,6 +20,8 @@ if len(sys.argv) > 2:
     SUBTITLE = sys.argv[2]
 if len(sys.argv) > 3:
     CONTENT = sys.argv[3].replace("\\n", "\n")
+if len(sys.argv) > 4:
+    CLI_OUTPUT_PATH = sys.argv[4]
 
 # 配置
 WIDTH, HEIGHT = 1080, 1440
@@ -30,7 +33,7 @@ def _default_output_path():
     return str(Path.cwd() / "xhs_cover.jpg")
 
 
-OUTPUT_PATH = _default_output_path()
+OUTPUT_PATH = CLI_OUTPUT_PATH or os.environ.get("OUTPUT_PATH") or _default_output_path()
 
 
 def _find_cjk_font():

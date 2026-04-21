@@ -80,7 +80,8 @@ AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
     .enable_memory(true)        // enable long-term memory (Store + remember/recall/forget tools)
     .enable_human_in_loop(true) // enable human approval gate
     .enable_cot(true)           // enable Chain-of-Thought prompt injection (default: true)
-    .session_id("session-001")  // bind to session ID (persists conversation via Checkpointer)
+    .session_id("thread-001")   // thread ID for Checkpointer restore/resume
+    .conversation_id("conv-001")// optional transcript/history projection ID
     .token_limit(8192)          // context token limit (auto-compress when exceeded)
     .max_iterations(30)         // max iterations (prevents infinite loops)
     .verbose(true)              // print detailed execution logs

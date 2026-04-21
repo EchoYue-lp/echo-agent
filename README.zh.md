@@ -723,6 +723,9 @@ agent.set_circuit_breaker(cb_config);
 
 ## 示例
 
+所有示例现在按 `验收样例`、`条件验收样例`、`教学示例` 三类维护。
+完整分层清单和维护规则见 `examples/README.md`。
+
 | # | 示例 | 演示内容 |
 |---|------|---------|
 | 01 | [`demo01_tools`](examples/demo01_tools.rs) | `#[tool]` 宏自定义工具 |

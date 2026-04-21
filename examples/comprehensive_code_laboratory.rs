@@ -181,27 +181,40 @@ async fn demo_sandbox_execution() -> Result<()> {
 
     println!("  测试沙箱执行:\n");
 
+    let mut success_count = 0usize;
     for (desc, cmd) in test_cases {
         println!("  [{}] {}", desc, cmd);
 
         match sandbox.execute(SandboxCommand::shell(cmd)).await {
             Ok(result) => {
                 if result.success() {
+                    success_count += 1;
                     println!("    ✓ 执行成功: {}", result.stdout.trim());
                 } else {
-                    println!(
-                        "    ✗ 执行失败 (exit code {}): {}",
+                    return Err(echo_agent::error::ReactError::Other(format!(
+                        "综合验收失败：沙箱命令 `{cmd}` 执行失败 (exit code {}): {}",
                         result.exit_code,
                         result.stderr.trim()
-                    );
+                    ))
+                    .into());
                 }
                 println!("    耗时: {:?}", result.duration);
             }
             Err(e) => {
-                println!("    ✗ 执行错误: {}", e);
+                return Err(echo_agent::error::ReactError::Other(format!(
+                    "综合验收失败：沙箱命令 `{cmd}` 执行错误: {e}"
+                ))
+                .into());
             }
         }
         println!();
+    }
+
+    if success_count != 3 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：仅有 {success_count} 个沙箱命令成功"
+        ))
+        .into());
     }
 
     Ok(())
@@ -247,18 +260,15 @@ async fn demo_retry_policy() -> Result<()> {
 
     println!("  模拟不稳定API调用:\n");
 
-    match with_retry(&policy, unstable_api).await {
-        Ok(result) => {
-            println!(
-                "    ✓ 成功: {} (经过 {} 次尝试)",
-                result,
-                attempt.load(Ordering::SeqCst)
-            );
-        }
-        Err(e) => {
-            println!("    ✗ 失败: {}", e);
-        }
+    let result = with_retry(&policy, unstable_api).await?;
+    let attempts = attempt.load(Ordering::SeqCst);
+    if result != "API响应成功" || attempts != 4 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：重试结果不符合预期（result={result}, attempts={attempts}）"
+        ))
+        .into());
     }
+    println!("    ✓ 成功: {} (经过 {} 次尝试)", result, attempts);
     println!();
 
     Ok(())
@@ -303,17 +313,28 @@ async fn demo_guard_system() -> Result<()> {
         ("超长: 长内容检测", &long_content),
     ];
 
+    let mut blocked = 0usize;
+    let mut passed = 0usize;
     for (desc, input) in test_inputs {
         println!("  [测试] {}", desc);
         match input_guard.check(input, GuardDirection::Input).await {
             Ok(_) => {
+                passed += 1;
                 println!("    ✓ 通过: 内容检查");
             }
             Err(e) => {
+                blocked += 1;
                 println!("    🚫 阻止: {}", e);
             }
         }
         println!();
+    }
+
+    if passed != 1 || blocked != 3 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：护栏结果不符合预期（passed={passed}, blocked={blocked}）"
+        ))
+        .into());
     }
 
     Ok(())
@@ -370,6 +391,13 @@ async fn demo_audit_logging() -> Result<()> {
     // 查询审计日志
     use echo_agent::audit::AuditFilter;
     let audit_events = logger.query(AuditFilter::default()).await?;
+    if audit_events.len() != 3 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：审计日志条数不符合预期（{}）",
+            audit_events.len()
+        ))
+        .into());
+    }
 
     println!("  审计日志记录:\n");
     for (i, event) in audit_events.iter().enumerate() {
@@ -441,12 +469,22 @@ print(f"Fibonacci(10) = {result}")
     println!("  执行中...\n");
 
     let mut stream = agent.execute_stream(task).await?;
+    let mut used_syntax = false;
+    let mut used_analysis = false;
+    let mut used_execution = false;
+    let mut final_answer = String::new();
 
     while let Some(event) = stream.next().await {
         match event? {
             AgentEvent::ThinkStart => print!("🤔 "),
             AgentEvent::ThinkEnd { .. } => println!(),
             AgentEvent::ToolCall { name, .. } => {
+                match name.as_str() {
+                    "check_syntax" => used_syntax = true,
+                    "analyze_code" => used_analysis = true,
+                    "execute_python" => used_execution = true,
+                    _ => {}
+                }
                 println!("🔧 使用工具: {}", name);
             }
             AgentEvent::ToolResult { output, .. } => {
@@ -454,11 +492,25 @@ print(f"Fibonacci(10) = {result}")
                 println!("   ✓ 结果: {}...", preview);
             }
             AgentEvent::Token(token) => {
+                final_answer.push_str(&token);
                 print!("{}", token);
             }
             AgentEvent::FinalAnswer(_) => println!(),
             _ => {}
         }
+    }
+
+    if !used_syntax || !used_analysis || !used_execution {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：综合代码分析未完整调用工具（syntax={used_syntax}, analyze={used_analysis}, execute={used_execution}）"
+        ))
+        .into());
+    }
+    if final_answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：综合代码分析返回空答案".to_string(),
+        )
+        .into());
     }
 
     println!();

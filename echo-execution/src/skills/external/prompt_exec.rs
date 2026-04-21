@@ -246,16 +246,16 @@ async fn run_command_sandboxed(
     }
 }
 
-/// Execute a command directly with minimal environment and proper kill on timeout.
+/// Execute a command directly with minimal environment.
 ///
 /// # ⚠️ 警告：Fallback 路径的限制
 ///
 /// 此函数是 `run_command` 的 fallback 路径，仅在无 `SandboxManager` 时使用。
 /// 它有以下限制：
 ///
-/// **超时孤儿进程**：由于 `cmd.output()` 拥有子进程的所有权，超时时无法显式 kill。
-/// 进程会变成孤儿进程，由操作系统最终回收。对于需要严格超时控制的生产环境，
-/// 请务必配置 `SandboxManager`（通过 `PromptContext::sandbox` 字段）。
+/// direct fallback 会使用 `kill_on_drop(true)` 配合 `timeout(...)` 尽力终止超时子进程，
+/// 但生产环境仍建议优先配置 `SandboxManager`（通过 `PromptContext::sandbox` 字段），
+/// 以获得更强的隔离、资源限制和统一清理。
 ///
 /// **适用场景**：仅建议用于简单 demo、测试、或无沙箱依赖的开发环境。
 ///
@@ -268,6 +268,7 @@ async fn run_command_direct(command: &str, ctx: &PromptContext) -> String {
     for arg in &shell_cmd.args {
         cmd.arg(arg);
     }
+    cmd.kill_on_drop(true);
 
     if !ctx.skill_dir.is_empty() && Path::new(&ctx.skill_dir).exists() {
         cmd.current_dir(&ctx.skill_dir);
@@ -308,9 +309,6 @@ async fn run_command_direct(command: &str, ctx: &PromptContext) -> String {
                 timeout_secs = ctx.timeout.as_secs(),
                 "Inline skill command timed out"
             );
-            // cmd.output() owns the child, so we can't kill it explicitly on timeout.
-            // The spawned process will be orphaned and eventually reaped by the OS.
-            // For proper kill, use the sandbox path.
             format!("[timeout after {}s]", ctx.timeout.as_secs())
         }
     }
@@ -406,6 +404,7 @@ pub fn find_git_bash_path() -> Option<String> {
 /// Set minimal environment variables for a subprocess.
 /// Only passes cleaned PATH, SKILL_DIR, and SESSION_ID.
 fn set_minimal_cmd_env(cmd: &mut tokio::process::Command, ctx: &PromptContext) {
+    cmd.env_clear();
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
@@ -516,5 +515,33 @@ mod tests {
         let result = process_skill_content(content, &ctx).await;
         assert!(result.contains("/tmp/test-skill"));
         assert!(result.contains("1.0.0"));
+    }
+
+    #[tokio::test]
+    async fn test_inline_command_does_not_inherit_unlisted_env() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+
+        let key = "ECHO_EXECUTION_TEST_SECRET";
+        let secret = "super-secret-value";
+        // Test-only process env mutation for validating env_clear() behavior.
+        unsafe {
+            std::env::set_var(key, secret);
+        }
+
+        let ctx = test_ctx();
+        let content = format!("secret=!`printf %s \"${key}\"`");
+        let result = execute_inline_commands(&content, &ctx).await;
+
+        assert!(
+            !result.contains(secret),
+            "unexpected leaked env in: {}",
+            result
+        );
+
+        unsafe {
+            std::env::remove_var(key);
+        }
     }
 }

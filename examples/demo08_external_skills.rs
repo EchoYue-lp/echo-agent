@@ -9,7 +9,7 @@
 //! | Variable substitution | `${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}` |
 //! | Hooks | PreToolUse/PostToolUse interception |
 //! | Conditional activation | `paths` frontmatter for file-triggered skills |
-//! | `allowed-tools` | Restrict available tools per skill |
+//! | `allowed-tools` | Declare allowed tools per skill; runtime-enforced for built-in skill tools |
 //!
 //! # Run
 //! ```bash
@@ -18,7 +18,14 @@
 
 use echo_agent::prelude::*;
 use echo_agent::skills::external::loader::{DiscoveryScope, SkillLoader};
+use echo_agent::skills::external::resource_tool::ReadSkillResourceTool;
+use echo_agent::skills::external::run_script_tool::RunSkillScriptTool;
+use echo_agent::skills::external::types::SkillDescriptor;
 use echo_agent::skills::registry::SkillRegistry;
+use echo_agent::skills::registry::shared_registry;
+use echo_agent::tools::Tool;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -58,16 +65,43 @@ async fn demo_1_discovery() -> echo_agent::error::Result<()> {
 
     let skills_dir = std::path::Path::new("skills");
     if !skills_dir.exists() {
-        println!("  [skip] ./skills/ directory not found");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：缺少 ./skills/ 目录".to_string(),
+        )
+        .into());
     }
 
     let mut loader = SkillLoader::new();
     let descriptors = loader.discover_from_dir(skills_dir).await?;
+    if descriptors.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：未发现任何外部技能".to_string(),
+        )
+        .into());
+    }
+    if !descriptors.iter().any(|d| d.name == "project-stats")
+        || !descriptors
+            .iter()
+            .any(|d| d.name == "xiaohongshu-image-generator")
+    {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：缺少关键技能 project-stats 或 xiaohongshu-image-generator"
+                .to_string(),
+        )
+        .into());
+    }
 
     println!("  Discovered {} skills:\n", descriptors.len());
 
     for desc in &descriptors {
+        if !desc.validate_name().is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo08 验收失败：技能 `{}` 名称校验未通过: {:?}",
+                desc.name,
+                desc.validate_name()
+            ))
+            .into());
+        }
         println!("  {} {}", "●", desc.name);
         println!("    description: {}", desc.description);
         println!(
@@ -123,23 +157,25 @@ async fn demo_2_catalog() -> echo_agent::error::Result<()> {
         registry.register_descriptor(desc);
     }
 
-    match registry.catalog_prompt() {
-        Some(catalog) => {
-            println!(
-                "  Catalog ({} skills, {} chars):\n",
-                registry.descriptor_count(),
-                catalog.len()
-            );
-            for line in catalog.lines() {
-                println!("  │ {}", line);
-            }
-            println!("\n  ↑ This is the ONLY text injected at startup.");
-            println!("    Full instructions are loaded on-demand via activate_skill.");
-        }
-        None => {
-            println!("  No skills discovered, catalog is empty.");
-        }
+    let catalog = registry.catalog_prompt().ok_or_else(|| {
+        echo_agent::error::ReactError::Other("demo08 验收失败：catalog_prompt 为空".to_string())
+    })?;
+    if !catalog.contains("activate_skill") || !catalog.contains("project-stats") {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：catalog 缺少关键技能说明或激活指引".to_string(),
+        )
+        .into());
     }
+    println!(
+        "  Catalog ({} skills, {} chars):\n",
+        registry.descriptor_count(),
+        catalog.len()
+    );
+    for line in catalog.lines() {
+        println!("  │ {}", line);
+    }
+    println!("\n  ↑ This is the ONLY text injected at startup.");
+    println!("    Full instructions are loaded on-demand via activate_skill.");
 
     println!();
     Ok(())
@@ -157,8 +193,10 @@ async fn demo_3_activation() -> echo_agent::error::Result<()> {
     let descriptors = loader.discover_from_dir("skills").await?;
 
     if descriptors.is_empty() {
-        println!("  [skip] No skills to activate");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：没有可激活的技能".to_string(),
+        )
+        .into());
     }
 
     let mut registry = SkillRegistry::new();
@@ -181,6 +219,12 @@ async fn demo_3_activation() -> echo_agent::error::Result<()> {
     assert!(!registry.is_activated(&skill_name));
 
     let content = registry.activate(&skill_name).await?;
+    if content.instructions.trim().is_empty() || content.resources.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo08 验收失败：技能 `{skill_name}` 激活后 instructions/resources 不完整"
+        ))
+        .into());
+    }
 
     println!("  Instructions ({} chars):", content.instructions.len());
     for line in content.instructions.lines().take(12) {
@@ -202,14 +246,14 @@ async fn demo_3_activation() -> echo_agent::error::Result<()> {
     }
 
     assert!(registry.is_activated(&skill_name));
-    println!(
-        "\n  Dedup: activate again → {}",
-        if registry.mark_activated(&skill_name) {
-            "new (bug!)"
-        } else {
-            "already activated ✓ (skipped, no wasted tokens)"
-        }
-    );
+    let dedup = registry.mark_activated(&skill_name);
+    if dedup {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo08 验收失败：技能 `{skill_name}` 重复激活去重失效"
+        ))
+        .into());
+    }
+    println!("\n  Dedup: activate again → already activated ✓ (skipped, no wasted tokens)");
 
     println!();
     Ok(())
@@ -218,67 +262,77 @@ async fn demo_3_activation() -> echo_agent::error::Result<()> {
 // ── Part 4: Script Execution ─────────────────────────────────────────────────
 
 /// Tier 3b: Execute scripts from the skill's scripts/ directory.
-/// Shows Python, Bash, and TS script execution with automatic interpreter detection.
+/// Validates the actual `run_skill_script` tool path instead of bypassing it.
 async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(59));
     println!("Part 4: Script Execution (Tier 3b — run_skill_script)\n");
 
-    let scripts_dir = std::path::Path::new("skills/project-stats/scripts");
+    let skill_dir = std::path::Path::new("skills/project-stats");
+    let scripts_dir = skill_dir.join("scripts");
     if !scripts_dir.exists() {
-        println!("  [skip] project-stats skill not found");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：缺少 project-stats/scripts".to_string(),
+        )
+        .into());
     }
 
     let project_dir = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
 
+    let mut loader = SkillLoader::new();
+    let descriptors = loader.discover_from_dir("skills").await?;
+    let mut registry = SkillRegistry::new();
+    for desc in descriptors {
+        registry.register_descriptor(desc);
+    }
+    if registry.get_descriptor("project-stats").is_none() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：未发现 project-stats 技能".to_string(),
+        )
+        .into());
+    }
+    registry.activate("project-stats").await?;
+    let shared = shared_registry(registry);
+    let tool = RunSkillScriptTool::new(shared)
+        .with_sandbox_manager(Arc::new(echo_agent::sandbox::SandboxManager::local_only()));
+
     // 4a: Python script (count lines)
     println!("  4a. Python: count_lines.py");
     println!("  ─────────────────────────");
     {
-        let output = tokio::process::Command::new("python3")
-            .arg("skills/project-stats/scripts/count_lines.py")
-            .arg(&project_dir)
-            .output()
-            .await;
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                    let summary = &json["summary"];
-                    println!(
-                        "    Files: {}, Lines: {}, Code: {}, Languages: {}",
-                        summary["total_files"],
-                        summary["total_lines"],
-                        summary["code_lines"],
-                        summary["languages_detected"]
-                    );
-                    if let Some(langs) = json["languages"].as_array() {
-                        println!("    Top languages:");
-                        for lang in langs.iter().take(5) {
-                            println!(
-                                "      {:>5.1}%  {} ({} files, {} lines)",
-                                lang["percentage"].as_f64().unwrap_or(0.0),
-                                lang["language"].as_str().unwrap_or("?"),
-                                lang["files"],
-                                lang["code_lines"]
-                            );
-                        }
-                    }
-                } else {
-                    println!("    {}", stdout.chars().take(200).collect::<String>());
-                }
-            }
-            Ok(out) => {
+        let json = run_skill_script_json(
+            &tool,
+            "project-stats",
+            "scripts/count_lines.py",
+            &project_dir,
+        )
+        .await?;
+        let summary = &json["summary"];
+        if summary["total_files"].as_u64().unwrap_or(0) == 0 {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：count_lines.py 未返回有效文件统计".to_string(),
+            )
+            .into());
+        }
+        println!(
+            "    Files: {}, Lines: {}, Code: {}, Languages: {}",
+            summary["total_files"],
+            summary["total_lines"],
+            summary["code_lines"],
+            summary["languages_detected"]
+        );
+        if let Some(langs) = json["languages"].as_array() {
+            println!("    Top languages:");
+            for lang in langs.iter().take(5) {
                 println!(
-                    "    [error] exit code {:?}: {}",
-                    out.status.code(),
-                    String::from_utf8_lossy(&out.stderr)
+                    "      {:>5.1}%  {} ({} files, {} lines)",
+                    lang["percentage"].as_f64().unwrap_or(0.0),
+                    lang["language"].as_str().unwrap_or("?"),
+                    lang["files"],
+                    lang["code_lines"]
                 );
             }
-            Err(e) => println!("    [skip] python3 not available: {}", e),
         }
     }
 
@@ -288,43 +342,24 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
     println!("  4b. Bash: find_todos.sh");
     println!("  ───────────────────────");
     {
-        let output = tokio::process::Command::new("bash")
-            .arg("skills/project-stats/scripts/find_todos.sh")
-            .arg(&project_dir)
-            .output()
-            .await;
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                    let summary = &json["summary"];
-                    println!(
-                        "    Total markers: {} (TODO={}, FIXME={}, HACK={}, XXX={})",
-                        summary["total"],
-                        summary["TODO"],
-                        summary["FIXME"],
-                        summary["HACK"],
-                        summary["XXX"]
-                    );
-                } else {
-                    for line in stdout.lines().take(5) {
-                        println!("    {}", line);
-                    }
-                }
-            }
-            Ok(out) => {
-                println!(
-                    "    [error] exit code {:?}: {}",
-                    out.status.code(),
-                    String::from_utf8_lossy(&out.stderr)
-                        .chars()
-                        .take(200)
-                        .collect::<String>()
-                );
-            }
-            Err(e) => println!("    [skip] bash not available: {}", e),
+        let json = run_skill_script_json(
+            &tool,
+            "project-stats",
+            "scripts/find_todos.sh",
+            &project_dir,
+        )
+        .await?;
+        let summary = &json["summary"];
+        if summary["total"].as_u64().is_none() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：find_todos.sh 未返回 summary.total".to_string(),
+            )
+            .into());
         }
+        println!(
+            "    Total markers: {} (TODO={}, FIXME={}, HACK={}, XXX={})",
+            summary["total"], summary["TODO"], summary["FIXME"], summary["HACK"], summary["XXX"]
+        );
     }
 
     println!();
@@ -333,50 +368,31 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
     println!("  4c. TypeScript: dep_summary.ts");
     println!("  ──────────────────────────────");
     {
-        // Detect best TS runtime (same logic as RunSkillScriptTool)
-        let (runtime, args) = detect_ts_runtime_for_demo();
-        println!("    Using runtime: {}", runtime);
-
-        let mut cmd = tokio::process::Command::new(&runtime);
-        for arg in &args {
-            cmd.arg(arg);
+        let json = run_skill_script_json(
+            &tool,
+            "project-stats",
+            "scripts/dep_summary.ts",
+            &project_dir,
+        )
+        .await?;
+        let total = json["total_dependencies"].as_u64().unwrap_or(0);
+        if total == 0 {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：dep_summary.ts 未返回依赖统计".to_string(),
+            )
+            .into());
         }
-        cmd.arg("skills/project-stats/scripts/dep_summary.ts");
-        cmd.arg(&project_dir);
-
-        match tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await {
-            Ok(Ok(out)) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                    let total = json["total_dependencies"].as_u64().unwrap_or(0);
-                    println!("    Total dependencies: {}", total);
-                    if let Some(managers) = json["managers"].as_array() {
-                        for mgr in managers {
-                            println!(
-                                "    {} ({}): {} direct, {} dev",
-                                mgr["manager"].as_str().unwrap_or("?"),
-                                mgr["file"].as_str().unwrap_or("?"),
-                                mgr["direct_count"],
-                                mgr["dev_count"]
-                            );
-                        }
-                    }
-                } else {
-                    for line in stdout.lines().take(5) {
-                        println!("    {}", line);
-                    }
-                }
-            }
-            Ok(Ok(out)) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
+        println!("    Total dependencies: {}", total);
+        if let Some(managers) = json["managers"].as_array() {
+            for mgr in managers {
                 println!(
-                    "    [error] exit {:?}: {}",
-                    out.status.code(),
-                    stderr.chars().take(200).collect::<String>()
+                    "    {} ({}): {} direct, {} dev",
+                    mgr["manager"].as_str().unwrap_or("?"),
+                    mgr["file"].as_str().unwrap_or("?"),
+                    mgr["direct_count"],
+                    mgr["dev_count"]
                 );
             }
-            Ok(Err(e)) => println!("    [skip] {} not available: {}", runtime, e),
-            Err(_) => println!("    [timeout] script took too long"),
         }
     }
 
@@ -384,24 +400,91 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
     Ok(())
 }
 
-/// Detect the best TypeScript runtime for the demo.
-fn detect_ts_runtime_for_demo() -> (String, Vec<String>) {
-    for cmd in &["bun", "deno"] {
-        if std::process::Command::new(cmd)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return if *cmd == "deno" {
-                ("deno".into(), vec!["run".into(), "--allow-read".into()])
-            } else {
-                (cmd.to_string(), vec![])
-            };
-        }
+async fn run_skill_script_json(
+    tool: &RunSkillScriptTool,
+    skill_name: &str,
+    script: &str,
+    arg: &str,
+) -> echo_agent::error::Result<serde_json::Value> {
+    let params = HashMap::from([
+        ("skill_name".to_string(), serde_json::json!(skill_name)),
+        ("script".to_string(), serde_json::json!(script)),
+        ("args".to_string(), serde_json::json!(arg)),
+    ]);
+
+    let result = tool.execute(params).await?;
+    if !result.success {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo08 验收失败：run_skill_script({}, {}) 执行失败: {}",
+            skill_name,
+            script,
+            result.error.unwrap_or_else(|| "unknown error".to_string())
+        ))
+        .into());
     }
-    ("npx".into(), vec!["tsx".into()])
+
+    let json_body = extract_script_stdout(&result.output).ok_or_else(|| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo08 验收失败：run_skill_script({}, {}) 返回格式不符合 <script_output> 协议",
+            skill_name, script
+        ))
+    })?;
+
+    serde_json::from_str::<serde_json::Value>(json_body).map_err(|e| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo08 验收失败：run_skill_script({}, {}) 输出不是合法 JSON: {} | {}",
+            skill_name,
+            script,
+            e,
+            json_body.lines().take(5).collect::<Vec<_>>().join(" | ")
+        ))
+        .into()
+    })
+}
+
+async fn run_skill_script_stdout(
+    tool: &RunSkillScriptTool,
+    skill_name: &str,
+    script: &str,
+    args: &str,
+) -> echo_agent::error::Result<String> {
+    let params = HashMap::from([
+        ("skill_name".to_string(), serde_json::json!(skill_name)),
+        ("script".to_string(), serde_json::json!(script)),
+        ("args".to_string(), serde_json::json!(args)),
+    ]);
+
+    let result = tool.execute(params).await?;
+    let stdout = extract_script_stdout(&result.output).ok_or_else(|| {
+        echo_agent::error::ReactError::Other(format!(
+            "demo08 验收失败：run_skill_script({}, {}) 返回格式不符合 <script_output> 协议",
+            skill_name, script
+        ))
+    })?;
+
+    if !result.success {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo08 验收失败：run_skill_script({}, {}) 执行失败: {} | {}",
+            skill_name,
+            script,
+            result.error.unwrap_or_else(|| "unknown error".to_string()),
+            stdout.lines().take(5).collect::<Vec<_>>().join(" | ")
+        ))
+        .into());
+    }
+
+    Ok(stdout.to_string())
+}
+
+fn extract_script_stdout(output: &str) -> Option<&str> {
+    let start = output.find(">\n")?;
+    let end = output.rfind("</script_output>")?;
+    let body = output[start + 2..end].trim();
+    let body = body
+        .split_once("\n<stderr>")
+        .map(|(stdout, _)| stdout)
+        .unwrap_or(body);
+    Some(body.trim())
 }
 
 // ── Part 5: Full Agent Integration ───────────────────────────────────────────
@@ -413,8 +496,10 @@ async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
 
     let skills_dir = std::path::Path::new("skills");
     if !skills_dir.exists() {
-        println!("  [skip] ./skills/ directory not found");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：缺少 ./skills/ 目录".to_string(),
+        )
+        .into());
     }
 
     let mut agent = ReactAgentBuilder::new()
@@ -427,6 +512,12 @@ async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
     let discovered = agent
         .discover_skills(&[DiscoveryScope::Custom(skills_dir.into())])
         .await?;
+    if discovered.is_empty() || agent.skill_count() == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：Agent 未发现任何外部技能".to_string(),
+        )
+        .into());
+    }
 
     println!("  Discovered skills: {:?}", discovered);
     println!("  Total skill count: {}", agent.skill_count());
@@ -446,6 +537,12 @@ async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
     println!("\n  Progressive disclosure tools:");
     for (name, purpose) in &tool_checks {
         let registered = tools.iter().any(|t| *t == *name);
+        if !registered {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo08 验收失败：Agent 未自动注册技能工具 `{name}`"
+            ))
+            .into());
+        }
         println!(
             "    {:<24} {} {}",
             name,
@@ -488,6 +585,16 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
 
         let template = "Skill at ${SKILL_DIR}\nSession: ${SESSION_ID}\nTarget: ${1}, Flags: ${2}\nAll: ${ARGUMENTS}";
         let result = process_skill_content(template, &ctx).await;
+        if !result.contains("/home/user/skills/my-skill")
+            || !result.contains("session-abc12345")
+            || !result.contains("src/")
+            || !result.contains("--verbose")
+        {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：变量替换结果不完整".to_string(),
+            )
+            .into());
+        }
         for line in result.lines() {
             println!("    {}", line);
         }
@@ -506,6 +613,12 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
 
         let content = "Host OS: !`uname -s 2>/dev/null || echo unknown`\nRust version:\n```!\nrustc --version 2>/dev/null || echo 'not installed'\n```";
         let result = process_skill_content(content, &ctx).await;
+        if result.contains("!`") || result.contains("```!") || !result.contains("Host OS:") {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：inline shell execution 未正确展开".to_string(),
+            )
+            .into());
+        }
         for line in result.lines() {
             println!("    {}", line);
         }
@@ -523,6 +636,12 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
 
         let content = "Safe text. Dangerous: !`rm -rf /` more text";
         let result = process_skill_content(content, &ctx).await;
+        if !result.contains("!`rm -rf /`") {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：MCP 来源内容不应执行 inline command".to_string(),
+            )
+            .into());
+        }
         println!("    Input:  {}", content);
         println!("    Output: {}", result);
         println!("    (MCP skills never execute inline commands)");
@@ -553,22 +672,40 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
         registry.register("security-guard", "/tmp/security", def);
 
         let pre = registry
-            .run_pre_tool_use("Bash", &serde_json::json!({"command": "git status"}))
+            .run_pre_tool_use("Bash", &serde_json::json!({"command": "git status"}), "")
             .await;
+        if pre.messages.is_empty() || pre.block {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：PreToolUse hook 未按预期触发".to_string(),
+            )
+            .into());
+        }
         println!("    PreToolUse(Bash) → messages: {:?}", pre.messages);
         println!("    PreToolUse(Bash) → blocked:  {}", pre.block);
 
         let pre_read = registry
-            .run_pre_tool_use("Read", &serde_json::json!({"path": "/etc/passwd"}))
+            .run_pre_tool_use("Read", &serde_json::json!({"path": "/etc/passwd"}), "")
             .await;
+        if !pre_read.messages.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：Hook matcher 错误命中了 Read".to_string(),
+            )
+            .into());
+        }
         println!(
             "    PreToolUse(Read) → messages: {:?} (no match)",
             pre_read.messages
         );
 
         let post = registry
-            .run_post_tool_use("Read", &serde_json::json!({}), "file content here")
+            .run_post_tool_use("Read", &serde_json::json!({}), "file content here", "")
             .await;
+        if post.messages.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：PostToolUse wildcard hook 未触发".to_string(),
+            )
+            .into());
+        }
         println!(
             "    PostToolUse(Read) → messages: {:?} (wildcard match)",
             post.messages
@@ -582,6 +719,16 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
     {
         let mut loader = SkillLoader::new();
         let descriptors = loader.discover_from_dir("skills").await?;
+        let constrained_count = descriptors
+            .iter()
+            .filter(|desc| !desc.paths.is_empty() || !desc.allowed_tools.is_empty())
+            .count();
+        if constrained_count == 0 {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：未发现带 paths/allowed-tools 约束的技能".to_string(),
+            )
+            .into());
+        }
 
         for desc in &descriptors {
             if !desc.paths.is_empty() || !desc.allowed_tools.is_empty() {
@@ -594,6 +741,114 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
                 }
             }
         }
+
+        let mut registry = SkillRegistry::new();
+        for desc in descriptors {
+            registry.register_descriptor(desc);
+        }
+        let shared = shared_registry(registry);
+        let tool = echo_agent::skills::external::activate_tool::ActivateSkillTool::new(
+            shared,
+            vec!["python-linter".to_string()],
+        );
+
+        let denied = tool
+            .execute(HashMap::from([(
+                "name".to_string(),
+                serde_json::json!("python-linter"),
+            )]))
+            .await?;
+        if denied.success
+            || !denied
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("context_path")
+        {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：conditional activation 未要求 context_path".to_string(),
+            )
+            .into());
+        }
+        println!("      Missing context_path → blocked ✓");
+
+        let allowed = tool
+            .execute(HashMap::from([
+                ("name".to_string(), serde_json::json!("python-linter")),
+                ("context_path".to_string(), serde_json::json!("demo.py")),
+            ]))
+            .await?;
+        if !allowed.success {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo08 验收失败：conditional activation 匹配路径后仍未放行: {}",
+                allowed.error.unwrap_or_default()
+            ))
+            .into());
+        }
+        println!("      Matching context_path=demo.py → activated ✓");
+
+        let temp_root =
+            std::env::temp_dir().join(format!("echo-demo08-locked-skill-{}", std::process::id()));
+        let locked_dir = temp_root.join("locked-skill");
+        tokio::fs::create_dir_all(locked_dir.join("references")).await?;
+        tokio::fs::create_dir_all(locked_dir.join("scripts")).await?;
+        tokio::fs::write(locked_dir.join("SKILL.md"), "Locked skill body").await?;
+        tokio::fs::write(locked_dir.join("references/guide.md"), "hello").await?;
+        tokio::fs::write(locked_dir.join("scripts/test.py"), "print('hi')\n").await?;
+
+        let mut locked_registry = SkillRegistry::new();
+        locked_registry.register_descriptor(SkillDescriptor {
+            name: "locked-skill".into(),
+            description: "Demo skill with a narrow allowed-tools whitelist".into(),
+            location: locked_dir.join("SKILL.md"),
+            license: None,
+            compatibility: None,
+            metadata: HashMap::new(),
+            allowed_tools: vec!["read_skill_resource".into()],
+            shell: None,
+            paths: vec![],
+            hooks: None,
+        });
+        locked_registry.mark_activated("locked-skill");
+        let locked_shared = shared_registry(locked_registry);
+
+        let read_tool = ReadSkillResourceTool::new(locked_shared.clone());
+        let read_result = read_tool
+            .execute(HashMap::from([
+                ("skill_name".to_string(), serde_json::json!("locked-skill")),
+                ("path".to_string(), serde_json::json!("references/guide.md")),
+            ]))
+            .await?;
+        if !read_result.success {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo08 验收失败：allowed-tools 已允许 read_skill_resource，但运行时仍拒绝: {}",
+                read_result.error.unwrap_or_default()
+            ))
+            .into());
+        }
+        println!("      allowed-tools permits read_skill_resource → allowed ✓");
+
+        let run_tool = RunSkillScriptTool::new(locked_shared);
+        let run_result = run_tool
+            .execute(HashMap::from([
+                ("skill_name".to_string(), serde_json::json!("locked-skill")),
+                ("script".to_string(), serde_json::json!("scripts/test.py")),
+            ]))
+            .await?;
+        if run_result.success
+            || !run_result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("does not permit tool 'run_skill_script'")
+        {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：allowed-tools 未真正拦截 run_skill_script".to_string(),
+            )
+            .into());
+        }
+        println!("      allowed-tools blocks run_skill_script → denied ✓");
+        let _ = tokio::fs::remove_dir_all(temp_root).await;
     }
     println!();
 
@@ -609,17 +864,27 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
             registry.register_descriptor(desc);
         }
 
-        if registry.get_descriptor("project-stats").is_some() {
-            let content = registry.activate("project-stats").await?;
-            println!("    After activation, instructions contain resolved values:");
-            for line in content.instructions.lines().take(8) {
-                println!("    │ {}", line);
-            }
-            if content.instructions.lines().count() > 8 {
-                println!("    │ ...");
-            }
-            println!("    (${{SKILL_DIR}} and !`uname -s` have been replaced with actual values)");
+        if registry.get_descriptor("project-stats").is_none() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：缺少 project-stats 技能".to_string(),
+            )
+            .into());
         }
+        let content = registry.activate("project-stats").await?;
+        if content.instructions.contains("${SKILL_DIR}") || content.instructions.contains("!`") {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：激活后的 instructions 仍保留未展开占位符/命令".to_string(),
+            )
+            .into());
+        }
+        println!("    After activation, instructions contain resolved values:");
+        for line in content.instructions.lines().take(8) {
+            println!("    │ {}", line);
+        }
+        if content.instructions.lines().count() > 8 {
+            println!("    │ ...");
+        }
+        println!("    (${{SKILL_DIR}} and !`uname -s` have been replaced with actual values)");
     }
 
     println!();
@@ -636,8 +901,10 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
 
     let skill_dir = std::path::Path::new("skills/redbook-image-generator-1.0.0");
     if !skill_dir.exists() {
-        println!("  [skip] redbook-image-generator skill not found");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo08 验收失败：缺少 redbook-image-generator-1.0.0 技能目录".to_string(),
+        )
+        .into());
     }
 
     // 7a: Discover & activate
@@ -651,36 +918,44 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
             .iter()
             .find(|d| d.name == "xiaohongshu-image-generator");
 
-        match xhs {
-            Some(desc) => {
-                println!("    Name:        {}", desc.name);
-                println!("    Description: {}", desc.description);
+        let desc = xhs.ok_or_else(|| {
+            echo_agent::error::ReactError::Other(
+                "demo08 验收失败：skills/ 中未发现 xiaohongshu-image-generator".to_string(),
+            )
+        })?;
+        println!("    Name:        {}", desc.name);
+        println!("    Description: {}", desc.description);
 
-                let mut registry = SkillRegistry::new();
-                for desc in descriptors {
-                    registry.register_descriptor(desc);
-                }
+        let mut registry = SkillRegistry::new();
+        for desc in descriptors {
+            registry.register_descriptor(desc);
+        }
 
-                let content = registry.activate("xiaohongshu-image-generator").await?;
-                println!("\n    Instructions ({} chars):", content.instructions.len());
-                for line in content.instructions.lines() {
-                    println!("    │ {}", line);
-                }
+        let content = registry.activate("xiaohongshu-image-generator").await?;
+        if content.instructions.trim().is_empty()
+            || !content
+                .resources
+                .iter()
+                .any(|res| res.relative_path.contains("generate_cover.py"))
+        {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：小红书封面技能激活结果不完整".to_string(),
+            )
+            .into());
+        }
+        println!("\n    Instructions ({} chars):", content.instructions.len());
+        for line in content.instructions.lines() {
+            println!("    │ {}", line);
+        }
 
-                println!("\n    Bundled resources ({}):", content.resources.len());
-                for res in &content.resources {
-                    let icon = match res.kind {
-                        echo_agent::skills::external::SkillResourceKind::Script => "⚡",
-                        echo_agent::skills::external::SkillResourceKind::Reference => "📄",
-                        _ => "📦",
-                    };
-                    println!("      {} [{}] {}", icon, res.kind, res.relative_path);
-                }
-            }
-            None => {
-                println!("    [skip] xiaohongshu-image-generator skill not found in skills/");
-                return Ok(());
-            }
+        println!("\n    Bundled resources ({}):", content.resources.len());
+        for res in &content.resources {
+            let icon = match res.kind {
+                echo_agent::skills::external::SkillResourceKind::Script => "⚡",
+                echo_agent::skills::external::SkillResourceKind::Reference => "📄",
+                _ => "📦",
+            };
+            println!("      {} [{}] {}", icon, res.kind, res.relative_path);
         }
     }
     println!();
@@ -689,73 +964,107 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
     println!("  7b. Generate Cover Image");
     println!("  ─────────────────────────");
     {
-        let script = "skills/redbook-image-generator-1.0.0/scripts/generate_cover.py";
-        let output_path = "/tmp/xhs_demo_cover.jpg";
-
-        // Check Python + PIL availability
-        let check = tokio::process::Command::new("python3")
-            .arg("-c")
-            .arg("from PIL import Image; print('ok')")
-            .output()
-            .await;
-
-        match check {
-            Ok(out) if out.status.success() => {
-                let title = "今日分享";
-                let subtitle = "打卡第100天";
-                let content = "Rust + AI = 🚀\\n技能系统真好用\\n继续加油！";
-
-                println!("    Title:   {}", title);
-                println!("    Subtitle: {}", subtitle);
-                println!("    Content: {}", content.replace("\\n", " / "));
-
-                let output = tokio::process::Command::new("python3")
-                    .arg(script)
-                    .arg(title)
-                    .arg(subtitle)
-                    .arg(content)
-                    .env("OUTPUT_PATH", output_path)
-                    .output()
-                    .await;
-
-                match output {
-                    Ok(out) if out.status.success() => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        println!("\n    {}", stdout.trim());
-
-                        // Verify image was created
-                        if std::path::Path::new(output_path).exists() {
-                            let meta = std::fs::metadata(output_path)?;
-                            println!("    Image saved: {} ({} bytes)", output_path, meta.len());
-                        }
-                    }
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        println!(
-                            "    [error] exit code {:?}: {}",
-                            out.status.code(),
-                            stderr.chars().take(300).collect::<String>()
-                        );
-                    }
-                    Err(e) => println!("    [error] failed to run script: {}", e),
-                }
-            }
-            _ => {
-                println!("    [skip] Python PIL not available, using mock output:");
-                println!("    Would generate: {}x{} image", 1080, 1440);
-                println!("    Title:   今日分享");
-                println!("    Subtitle: 打卡第100天");
-                println!("    Content: Rust + AI = 🚀 / 技能系统真好用 / 继续加油！");
-                println!("    Output:  /tmp/xhs_demo_cover.jpg");
-            }
+        let mut loader = SkillLoader::new();
+        let descriptors = loader.discover_from_dir("skills").await?;
+        let mut registry = SkillRegistry::new();
+        for desc in descriptors {
+            registry.register_descriptor(desc);
         }
+        registry.activate("xiaohongshu-image-generator").await?;
+        let shared = shared_registry(registry);
+        let tool = RunSkillScriptTool::new(shared)
+            .with_sandbox_manager(Arc::new(echo_agent::sandbox::SandboxManager::local_only()));
+
+        let title = "今日分享";
+        let subtitle = "打卡第100天";
+        let content = "Rust + AI = 🚀\\n技能系统真好用\\n继续加油！";
+        let output_path = std::env::temp_dir().join("xhs_demo_cover.jpg");
+        let args = format!(
+            "\"{}\" \"{}\" \"{}\" \"{}\"",
+            title,
+            subtitle,
+            content,
+            output_path.display()
+        );
+
+        println!("    Title:    {}", title);
+        println!("    Subtitle: {}", subtitle);
+        println!("    Content:  {}", content.replace("\\n", " / "));
+
+        let output = run_skill_script_stdout(
+            &tool,
+            "xiaohongshu-image-generator",
+            "scripts/generate_cover.py",
+            &args,
+        )
+        .await?;
+        println!("\n    {}", output.trim());
+
+        if !output_path.exists() {
+            let lower = output.to_ascii_lowercase();
+            if lower.contains("no module named") || lower.contains("cannot import name") {
+                return Err(echo_agent::error::ReactError::Other(
+                    "demo08 验收失败：缺少 Pillow/PIL 运行时依赖，无法验证封面图生成".to_string(),
+                )
+                .into());
+            }
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：generate_cover.py 未生成输出图片".to_string(),
+            )
+            .into());
+        }
+
+        let meta = std::fs::metadata(&output_path)?;
+        if meta.len() == 0 {
+            let _ = std::fs::remove_file(&output_path);
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：封面图文件大小为 0".to_string(),
+            )
+            .into());
+        }
+        println!(
+            "    Image saved: {} ({} bytes)",
+            output_path.display(),
+            meta.len()
+        );
+        let _ = std::fs::remove_file(&output_path);
     }
     println!();
 
     // 7c: Agent integration demo
     println!("  7c. Agent Integration");
     println!("  ──────────────────────");
-    {}
+    {
+        let mut agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .name("xhs-skill-agent")
+            .system_prompt("你是一个会使用技能的助手。")
+            .enable_tools()
+            .build()?;
+        let discovered = agent
+            .discover_skills(&[DiscoveryScope::Custom(
+                std::path::Path::new("skills").into(),
+            )])
+            .await?;
+        if !discovered
+            .iter()
+            .any(|name| name == "xiaohongshu-image-generator")
+        {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：Agent 集成后未发现 xiaohongshu-image-generator".to_string(),
+            )
+            .into());
+        }
+        let tools = agent.list_tools();
+        if !tools.iter().any(|t| *t == "activate_skill") {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo08 验收失败：Agent 集成后缺少 activate_skill 工具".to_string(),
+            )
+            .into());
+        }
+        println!("    Agent discovered skills: {:?}", discovered);
+        println!("    Agent registered tools: {:?}", tools);
+    }
 
     println!();
     Ok(())

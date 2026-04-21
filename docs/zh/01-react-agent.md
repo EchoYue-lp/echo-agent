@@ -80,7 +80,8 @@ AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
     .enable_memory(true)        // 启用长期记忆（Store + remember/recall/forget 工具）
     .enable_human_in_loop(true) // 启用人工介入
     .enable_cot(true)           // 启用 Chain-of-Thought 引导语（默认 true）
-    .session_id("session-001")  // 绑定会话 ID（配合 Checkpointer 持久化对话历史）
+    .session_id("thread-001")   // 线程 ID：用于 Checkpointer 恢复/续接
+    .conversation_id("conv-001")// 可选：用于 transcript/history 投影
     .token_limit(8192)          // 上下文 token 上限（超限自动压缩）
     .max_iterations(30)         // 最大迭代次数（防止死循环）
     .verbose(true)              // 打印详细执行日志

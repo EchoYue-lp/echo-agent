@@ -5,11 +5,11 @@
 //! | 层次 | 实现 | 作用域 |
 //! |------|------|--------|
 //! | 短期上下文 | [`compression::ContextManager`] | 单次 `execute()` 内 |
-//! | 短期持久化 | [`Checkpointer`] / [`FileCheckpointer`] | 跨进程恢复同一会话 |
-//! | 对话历史 | [`ConversationStore`] / `SqliteConversationStore` | 对话持久化、恢复、多用户隔离 |
+//! | 线程状态 | [`Checkpointer`] / [`FileCheckpointer`] | 跨进程恢复同一线程 |
+//! | 对话历史 | [`ConversationStore`] / `SqliteConversationStore` | transcript 投影、历史浏览、多用户隔离 |
 //! | 长期记忆 | [`Store`] / [`FileStore`] / `SqliteStore` | 跨会话、跨用户共享 |
 //!
-//! ## 会话持久化（Checkpointer）
+//! ## 线程状态持久化（Checkpointer）
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -71,10 +71,13 @@ pub mod sqlite_conversation;
 pub mod sqlite_store;
 pub mod store;
 
-pub use checkpointer::{Checkpoint, Checkpointer, FileCheckpointer, InMemoryCheckpointer};
+pub use checkpointer::Checkpointer as ThreadStore;
+pub use checkpointer::{
+    Checkpoint, Checkpointer, FileCheckpointer, InMemoryCheckpointer, ThreadState,
+};
 pub use conversation::{
     Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
-    StoredMessage,
+    StoredMessage, project_message, project_messages,
 };
 pub use embedder::{Embedder, HttpEmbedder};
 pub use embedding_store::EmbeddingStore;
@@ -83,7 +86,7 @@ pub use snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
 pub use sqlite_conversation::SqliteConversationStore;
 #[cfg(feature = "sqlite")]
 pub use sqlite_store::SqliteStore;
-pub use store::{FileStore, InMemoryStore, Store, StoreItem};
+pub use store::{FileStore, InMemoryStore, SearchMode, SearchQuery, Store, StoreItem};
 
 /// 测试用嵌入器（仅在测试时可见）
 #[cfg(test)]

@@ -5,6 +5,7 @@
 //! - cgroups 资源限制
 //! - 网络隔离
 //! - 挂载控制
+//! - 显式 label + 清理路径，避免孤立容器长期残留
 //!
 //! 需要宿主机安装 Docker Engine。
 
@@ -16,9 +17,13 @@ use echo_core::error::Result;
 use echo_core::error::SandboxError;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+const SANDBOX_LABEL: &str = "echo-sandbox=true";
+const DOCKER_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Docker 沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,9 +46,8 @@ pub struct DockerConfig {
     pub extra_args: Vec<String>,
 }
 
-/// 缓存 Docker 可用性检查结果
-static DOCKER_AVAILABLE_CACHE: AtomicBool = AtomicBool::new(false);
-static DOCKER_CHECKED: AtomicBool = AtomicBool::new(false);
+/// 缓存 Docker 可用性检查结果（短 TTL，避免一次失败后永久陈旧）
+static DOCKER_CHECK_CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
 
 /// 危险 Docker 参数，即使配置中有也应当过滤掉
 const DANGEROUS_DOCKER_ARGS: &[&str] = &[
@@ -94,9 +98,14 @@ impl DockerSandbox {
 
     /// 检测 Docker 是否安装且可用（带缓存）
     async fn check_docker() -> bool {
-        if DOCKER_CHECKED.load(Ordering::Relaxed) {
-            return DOCKER_AVAILABLE_CACHE.load(Ordering::Relaxed);
+        let cache = DOCKER_CHECK_CACHE.get_or_init(|| Mutex::new(None));
+        if let Ok(guard) = cache.lock()
+            && let Some((checked_at, available)) = *guard
+            && checked_at.elapsed() < DOCKER_CACHE_TTL
+        {
+            return available;
         }
+
         let available = Command::new("docker")
             .arg("info")
             .stdout(std::process::Stdio::null())
@@ -105,8 +114,9 @@ impl DockerSandbox {
             .await
             .map(|s| s.success())
             .unwrap_or(false);
-        DOCKER_AVAILABLE_CACHE.store(available, Ordering::Relaxed);
-        DOCKER_CHECKED.store(true, Ordering::Relaxed);
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some((Instant::now(), available));
+        }
         available
     }
 
@@ -119,17 +129,18 @@ impl DockerSandbox {
         )
     }
 
-    /// 构建 docker run 命令行参数
-    fn build_docker_args(
+    /// 构建 docker create 命令行参数（不含 `docker` 可执行文件本身）。
+    ///
+    /// 这里直接面向 `docker create` 组装参数，而不是先拼 `docker run`
+    /// 再反推 image / command 边界，避免 create/start 路径漂移。
+    fn build_docker_create_args(
         &self,
         command: &SandboxCommand,
         limits: Option<&ResourceLimits>,
-    ) -> Vec<String> {
-        let mut args = vec!["run".to_string()];
-
-        if self.config.auto_remove {
-            args.push("--rm".to_string());
-        }
+    ) -> Result<Vec<String>> {
+        let mut args = vec!["create".to_string()];
+        args.push("--label".to_string());
+        args.push(SANDBOX_LABEL.to_string());
 
         // 网络隔离
         let network_allowed = limits
@@ -181,20 +192,16 @@ impl DockerSandbox {
         // 挂载卷（limits 中的路径），需验证安全性
         if let Some(limits) = limits {
             for path in &limits.read_only_paths {
-                Self::validate_mount_paths(&[path.clone()])
-                    .map_err(|e| {
-                        echo_core::error::ReactError::Sandbox(SandboxError::PermissionDenied(e))
-                    })
-                    .unwrap();
+                Self::validate_mount_paths(&[path.clone()]).map_err(|e| {
+                    echo_core::error::ReactError::Sandbox(SandboxError::PermissionDenied(e))
+                })?;
                 args.push("-v".to_string());
                 args.push(format!("{}:{}:ro", path.display(), path.display()));
             }
             for path in &limits.writable_paths {
-                Self::validate_mount_paths(&[path.clone()])
-                    .map_err(|e| {
-                        echo_core::error::ReactError::Sandbox(SandboxError::PermissionDenied(e))
-                    })
-                    .unwrap();
+                Self::validate_mount_paths(&[path.clone()]).map_err(|e| {
+                    echo_core::error::ReactError::Sandbox(SandboxError::PermissionDenied(e))
+                })?;
                 args.push("-v".to_string());
                 args.push(format!("{}:{}", path.display(), path.display()));
             }
@@ -215,8 +222,9 @@ impl DockerSandbox {
 
         // 镜像
         args.push(self.select_image(command));
+        args.extend(Self::build_inner_command(command));
 
-        args
+        Ok(args)
     }
 
     /// 验证挂载路径，拒绝敏感目录
@@ -261,7 +269,7 @@ impl DockerSandbox {
     /// 清理所有带有 echo-sandbox 标签的容器
     pub async fn cleanup_sandbox_containers() -> Result<()> {
         let output = Command::new("docker")
-            .args(["ps", "-aq", "--filter", "label=echo-sandbox=true"])
+            .args(["ps", "-aq", "--filter", &format!("label={SANDBOX_LABEL}")])
             .output()
             .await
             .map_err(|e| {
@@ -280,6 +288,13 @@ impl DockerSandbox {
             }
         }
         Ok(())
+    }
+
+    async fn remove_container(container_id: &str) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", container_id])
+            .output()
+            .await;
     }
 }
 
@@ -309,24 +324,12 @@ impl SandboxExecutor for DockerSandbox {
             }
 
             let timeout = command.timeout;
-            let mut docker_args = self.build_docker_args(&command, None);
-            docker_args.extend(Self::build_inner_command(&command));
+            let docker_args = self.build_docker_create_args(&command, None)?;
 
             let start = Instant::now();
 
-            // 先 create 容器获取 ID，再 start 执行，以便超时时能 kill
-            let mut create_args = vec!["create".to_string()];
-            // 从 docker_args 中分离镜像和命令：前部分是 run 参数，最后是镜像+命令
-            let image_idx = docker_args
-                .iter()
-                .position(|a| !a.starts_with("-"))
-                .unwrap_or(docker_args.len() - 3);
-            let image_and_cmd = &docker_args[image_idx..];
-            create_args.extend(docker_args[..image_idx].iter().cloned());
-            create_args.extend(image_and_cmd.iter().cloned());
-
             let output = Command::new("docker")
-                .args(&create_args)
+                .args(&docker_args)
                 .output()
                 .await
                 .map_err(|e| {
@@ -345,24 +348,37 @@ impl SandboxExecutor for DockerSandbox {
 
             // 启动并等待结果
             let mut start_cmd = Command::new("docker");
+            let attach_flag = if command.stdin.is_some() { "-ai" } else { "-a" };
             start_cmd
-                .args(["start", "-a", &container_id])
+                .args(["start", attach_flag, &container_id])
+                .stdin(if command.stdin.is_some() {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
 
-            let child = start_cmd.spawn().map_err(|e| {
+            let mut child = start_cmd.spawn().map_err(|e| {
                 echo_core::error::ReactError::Sandbox(SandboxError::StartFailed(format!(
                     "Failed to start docker container: {e}"
                 )))
             })?;
 
+            if let Some(input) = command.stdin.as_deref()
+                && let Some(mut stdin) = child.stdin.take()
+            {
+                stdin.write_all(input.as_bytes()).await.map_err(|e| {
+                    echo_core::error::ReactError::Sandbox(SandboxError::IoError(format!(
+                        "Failed to write docker stdin: {e}"
+                    )))
+                })?;
+            }
+
             match tokio::time::timeout(timeout, child.wait_with_output()).await {
                 Ok(Ok(output)) => {
                     // 清理容器
-                    let _ = Command::new("docker")
-                        .args(["rm", "-f", &container_id])
-                        .output()
-                        .await;
+                    Self::remove_container(&container_id).await;
 
                     Ok(ExecutionResult {
                         exit_code: output.status.code().unwrap_or(-1),
@@ -374,10 +390,7 @@ impl SandboxExecutor for DockerSandbox {
                     })
                 }
                 Ok(Err(e)) => {
-                    let _ = Command::new("docker")
-                        .args(["rm", "-f", &container_id])
-                        .output()
-                        .await;
+                    Self::remove_container(&container_id).await;
                     Err(echo_core::error::ReactError::Sandbox(
                         SandboxError::IoError(format!("Docker IO error: {e}")),
                     ))
@@ -388,10 +401,7 @@ impl SandboxExecutor for DockerSandbox {
                         .args(["kill", &container_id])
                         .output()
                         .await;
-                    let _ = Command::new("docker")
-                        .args(["rm", "-f", &container_id])
-                        .output()
-                        .await;
+                    Self::remove_container(&container_id).await;
 
                     Ok(ExecutionResult {
                         exit_code: -1,
@@ -423,23 +433,12 @@ impl SandboxExecutor for DockerSandbox {
                 .map(std::time::Duration::from_secs)
                 .unwrap_or(command.timeout);
 
-            let mut docker_args = self.build_docker_args(&command, Some(&limits));
-            docker_args.extend(Self::build_inner_command(&command));
+            let docker_args = self.build_docker_create_args(&command, Some(&limits))?;
 
             let start = Instant::now();
 
-            // 先 create 容器获取 ID
-            let mut create_args = vec!["create".to_string()];
-            let image_idx = docker_args
-                .iter()
-                .position(|a| !a.starts_with("-"))
-                .unwrap_or(docker_args.len() - 3);
-            let image_and_cmd = &docker_args[image_idx..];
-            create_args.extend(docker_args[..image_idx].iter().cloned());
-            create_args.extend(image_and_cmd.iter().cloned());
-
             let output = Command::new("docker")
-                .args(&create_args)
+                .args(&docker_args)
                 .output()
                 .await
                 .map_err(|e| {
@@ -457,23 +456,36 @@ impl SandboxExecutor for DockerSandbox {
             }
 
             let mut start_cmd = Command::new("docker");
+            let attach_flag = if command.stdin.is_some() { "-ai" } else { "-a" };
             start_cmd
-                .args(["start", "-a", &container_id])
+                .args(["start", attach_flag, &container_id])
+                .stdin(if command.stdin.is_some() {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
 
-            let child = start_cmd.spawn().map_err(|e| {
+            let mut child = start_cmd.spawn().map_err(|e| {
                 echo_core::error::ReactError::Sandbox(SandboxError::StartFailed(format!(
                     "Failed to start docker container: {e}"
                 )))
             })?;
 
+            if let Some(input) = command.stdin.as_deref()
+                && let Some(mut stdin) = child.stdin.take()
+            {
+                stdin.write_all(input.as_bytes()).await.map_err(|e| {
+                    echo_core::error::ReactError::Sandbox(SandboxError::IoError(format!(
+                        "Failed to write docker stdin: {e}"
+                    )))
+                })?;
+            }
+
             match tokio::time::timeout(timeout, child.wait_with_output()).await {
                 Ok(Ok(output)) => {
-                    let _ = Command::new("docker")
-                        .args(["rm", "-f", &container_id])
-                        .output()
-                        .await;
+                    Self::remove_container(&container_id).await;
 
                     let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -500,10 +512,7 @@ impl SandboxExecutor for DockerSandbox {
                     })
                 }
                 Ok(Err(e)) => {
-                    let _ = Command::new("docker")
-                        .args(["rm", "-f", &container_id])
-                        .output()
-                        .await;
+                    Self::remove_container(&container_id).await;
                     Err(echo_core::error::ReactError::Sandbox(
                         SandboxError::IoError(format!("Docker IO error: {e}")),
                     ))
@@ -513,10 +522,7 @@ impl SandboxExecutor for DockerSandbox {
                         .args(["kill", &container_id])
                         .output()
                         .await;
-                    let _ = Command::new("docker")
-                        .args(["rm", "-f", &container_id])
-                        .output()
-                        .await;
+                    Self::remove_container(&container_id).await;
 
                     Ok(ExecutionResult {
                         exit_code: -1,
@@ -566,8 +572,11 @@ mod tests {
     fn test_docker_args_security() {
         let sandbox = DockerSandbox::new(DockerConfig::default());
         let cmd = SandboxCommand::shell("echo test");
-        let args = sandbox.build_docker_args(&cmd, None);
+        let args = sandbox.build_docker_create_args(&cmd, None).unwrap();
 
+        assert_eq!(args.first().map(String::as_str), Some("create"));
+        assert!(args.contains(&"--label".to_string()));
+        assert!(args.contains(&SANDBOX_LABEL.to_string()));
         assert!(args.contains(&"--cap-drop=ALL".to_string()));
         assert!(args.contains(&"--security-opt=no-new-privileges".to_string()));
         assert!(args.contains(&"--network=none".to_string()));
@@ -582,7 +591,9 @@ mod tests {
             network: true,
             ..Default::default()
         };
-        let args = sandbox.build_docker_args(&cmd, Some(&limits));
+        let args = sandbox
+            .build_docker_create_args(&cmd, Some(&limits))
+            .unwrap();
 
         assert!(args.contains(&"--pids-limit=16".to_string()));
         // network=true in limits overrides config
@@ -601,5 +612,17 @@ mod tests {
         let cmd = SandboxCommand::code("python", "print('hi')");
         let inner = DockerSandbox::build_inner_command(&cmd);
         assert_eq!(inner, vec!["python3", "-c", "print('hi')"]);
+    }
+
+    #[test]
+    fn test_docker_args_include_full_command() {
+        let sandbox = DockerSandbox::new(DockerConfig::default());
+        let cmd = SandboxCommand::program("python3", vec!["-V".to_string()]);
+        let args = sandbox.build_docker_create_args(&cmd, None).unwrap();
+
+        assert_eq!(args.first().map(String::as_str), Some("create"));
+        assert!(args.contains(&"python3".to_string()));
+        assert!(args.contains(&"-V".to_string()));
+        assert!(!args.contains(&"run".to_string()));
     }
 }

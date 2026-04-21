@@ -17,7 +17,6 @@ use crate::skills::external::activate_tool::ActivateSkillTool;
 use crate::skills::external::loader::{DiscoveryScope, SkillLoader};
 use crate::skills::external::resource_tool::ReadSkillResourceTool;
 use crate::skills::external::run_script_tool::RunSkillScriptTool;
-use crate::skills::registry::SharedRegistry;
 use crate::skills::{Skill, SkillInfo};
 use crate::tools::Tool;
 use std::sync::Arc;
@@ -71,39 +70,58 @@ impl ReactAgent {
     }
 
     /// Register a tool that requires human approval before execution.
+    ///
+    /// This API is intentionally synchronous so it can be used during agent setup.
+    /// When a `PermissionService` is present, the approval rule is first buffered in
+    /// `pending_permission_rules` and then flushed at the next async permission check.
+    /// This avoids calling `block_on()` inside a running Tokio runtime.
+    ///
+    /// If no `PermissionService` is configured, the method falls back to the legacy
+    /// `HumanApprovalManager` marker path for backward compatibility.
     pub fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>) {
         #[cfg(feature = "human-loop")]
         if self.config.enable_human_in_loop {
             let tool_name = tool.name().to_string();
             self.add_tool(tool);
 
-            // 优先添加到 PermissionService 规则
-            if let Some(service) = &self.permission_service {
-                use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
-                let rule = PermissionRule {
-                    matcher: RuleMatcher::Pattern {
-                        pattern: tool_name.clone(),
-                    },
-                    behavior: echo_core::tools::permission::RuleBehavior::Ask {
-                        suggestions: vec!["允许".to_string(), "拒绝".to_string()],
-                    },
-                    source: RuleSource::Session,
-                    description: Some(format!("工具 {} 需要人工审批", tool_name)),
-                };
-                // 同步添加规则（PermissionService 内部用 RwLock，这里用 block_on）
-                let service = service.clone();
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async { service.add_rule(rule).await });
+            use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
+            let rule = PermissionRule {
+                matcher: RuleMatcher::Pattern {
+                    pattern: tool_name.clone(),
+                },
+                behavior: echo_core::tools::permission::RuleBehavior::Ask {
+                    suggestions: vec!["允许".to_string(), "拒绝".to_string()],
+                },
+                source: RuleSource::Session,
+                description: Some(format!("工具 {} 需要人工审批", tool_name)),
+            };
+
+            // add_need_appeal_tool 是同步 API，不能在运行中的 Tokio runtime 里 block_on。
+            // 这里先登记规则，等到后续异步执行阶段再安全刷入 PermissionService。
+            if let Ok(mut pending) = self.pending_permission_rules.lock() {
+                pending.push(rule);
             } else {
+                warn!(
+                    agent = %self.config.agent_name,
+                    tool = %tool_name,
+                    "pending_permission_rules lock poisoned"
+                );
+            }
+
+            if self.permission_service.is_none() {
                 // 回退到旧的 HumanApprovalManager
                 #[allow(deprecated)]
-                self.human_in_loop
-                    .write()
-                    .map_err(|e| {
-                        warn!("human_in_loop lock poisoned: {}", e);
-                    })
-                    .map(|mut guard| guard.mark_need_approval(tool_name))
-                    .ok();
+                match self.human_in_loop.write() {
+                    Ok(mut guard) => guard.mark_need_approval(tool_name),
+                    Err(e) => {
+                        warn!(
+                            agent = %self.config.agent_name,
+                            tool = %tool_name,
+                            "human_in_loop lock poisoned: {}",
+                            e
+                        );
+                    }
+                }
             }
             return;
         }
@@ -241,7 +259,11 @@ impl ReactAgent {
             return;
         }
 
-        let tools = skill.tools();
+        let sandbox = self
+            .sandbox_manager
+            .as_ref()
+            .map(|manager| manager.clone() as Arc<dyn crate::sandbox::SandboxExecutor>);
+        let tools = skill.tools_with_sandbox(sandbox);
         let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
 
         for tool in tools {
@@ -305,8 +327,26 @@ impl ReactAgent {
         // This is separate from `self.skill_registry` (which tracks code-based skills).
         // The shared registry holds descriptors + activation state, accessed by
         // both ActivateSkillTool and ReadSkillResourceTool during async execution.
-        let tool_registry = {
-            let mut reg = crate::skills::SkillRegistry::new();
+        let shared = if let Some(existing) = &self.progressive_skill_registry {
+            existing.clone()
+        } else {
+            let reg = Arc::new(RwLock::new(crate::skills::SkillRegistry::new()));
+            if let Some(ref manager) = self.sandbox_manager {
+                if let Ok(mut guard) = reg.try_write() {
+                    guard.set_sandbox_manager(manager.clone());
+                }
+                self.skill_registry.set_sandbox_manager(manager.clone());
+            }
+            self.progressive_skill_registry = Some(reg.clone());
+            reg
+        };
+
+        {
+            let mut reg = shared.write().await;
+            if let Some(ref manager) = self.sandbox_manager {
+                reg.set_sandbox_manager(manager.clone());
+                self.skill_registry.set_sandbox_manager(manager.clone());
+            }
             for desc in descriptors {
                 if self.skill_registry.is_installed(&desc.name) {
                     warn!(
@@ -316,6 +356,8 @@ impl ReactAgent {
                     );
                     continue;
                 }
+
+                let legacy = loader.get_legacy_instructions(&desc.name).cloned();
 
                 // Register hooks from frontmatter if present
                 if let Some(hooks_def) = &desc.hooks {
@@ -329,11 +371,11 @@ impl ReactAgent {
                 }
 
                 names.push(desc.name.clone());
-                self.skill_registry.register_descriptor(desc.clone());
-                reg.register_descriptor(desc);
+                self.skill_registry
+                    .register_descriptor_with_legacy(desc.clone(), legacy.clone());
+                reg.register_descriptor_with_legacy(desc, legacy);
             }
-            reg
-        };
+        }
 
         if names.is_empty() {
             return Ok(names);
@@ -348,29 +390,28 @@ impl ReactAgent {
                 .update_system(self.config.system_prompt.clone());
         }
 
-        // Register progressive disclosure tools with shared registry
+        // Register progressive disclosure tools with shared registry.
+        // We refresh these tool instances on every discovery pass so their internal
+        // registry and available skill name list stay in sync with newly discovered
+        // skills across repeated `discover_skills()` calls.
         let available_names = self.skill_registry.available_names();
-        if self.tool_manager.get_tool("activate_skill").is_none() {
-            let shared: SharedRegistry = Arc::new(RwLock::new(tool_registry));
 
-            self.tool_manager.register(Box::new(ActivateSkillTool::new(
-                shared.clone(),
-                available_names,
-            )));
-            self.tool_manager
-                .register(Box::new(ReadSkillResourceTool::new(shared.clone())));
+        self.replace_tool(Box::new(ActivateSkillTool::new(
+            shared.clone(),
+            available_names,
+        )));
+        self.replace_tool(Box::new(ReadSkillResourceTool::new(shared.clone())));
 
-            let mut script_tool = RunSkillScriptTool::new(shared);
-            if let Some(ref manager) = self.sandbox_manager {
-                script_tool = script_tool.with_sandbox_manager(manager.clone());
-            }
-            self.tool_manager.register(Box::new(script_tool));
-
-            // Protect activated skill content from context compaction.
-            // Messages containing <skill_content will survive compression passes.
-            self.context
-                .add_protected_marker("<skill_content".to_string());
+        let mut script_tool = RunSkillScriptTool::new(shared);
+        if let Some(ref manager) = self.sandbox_manager {
+            script_tool = script_tool.with_sandbox_manager(manager.clone());
         }
+        self.replace_tool(Box::new(script_tool));
+
+        // Protect activated skill content from context compaction.
+        // Messages containing <skill_content will survive compression passes.
+        self.context
+            .add_protected_marker("<skill_content".to_string());
 
         info!(
             agent = %self.config.agent_name,
@@ -508,8 +549,23 @@ impl ReactAgent {
     ///
     /// # 示例
     /// ```rust
-    /// let mut agent = ReactAgent::new(...);
-    /// let clients = agent.load_mcp_from_file("mcp_servers.json").await?;
+    /// use echo_agent::prelude::*;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> echo_agent::error::Result<()> {
+    /// let path = std::env::temp_dir().join(format!(
+    ///     "echo-agent-doctest-mcp-{}.json",
+    ///     std::process::id()
+    /// ));
+    /// std::fs::write(&path, r#"{"mcpServers":{}}"#)?;
+    ///
+    /// let config = AgentConfig::new("qwen3-max", "mcp_agent", "You are a helpful assistant");
+    /// let mut agent = ReactAgent::new(config);
+    /// let clients = agent.load_mcp_from_file(&path).await?;
+    /// assert!(clients.is_empty());
+    /// let _ = std::fs::remove_file(&path);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn load_mcp_from_file(
         &mut self,

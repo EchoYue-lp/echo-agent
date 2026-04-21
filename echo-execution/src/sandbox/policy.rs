@@ -129,7 +129,7 @@ impl SandboxPolicy {
             SecurityLevel::Trusted => IsolationLevel::None,
             SecurityLevel::Standard => IsolationLevel::Process,
             SecurityLevel::Strict => IsolationLevel::Container,
-            SecurityLevel::Maximum => IsolationLevel::MicroVM,
+            SecurityLevel::Maximum => IsolationLevel::Orchestrated,
         };
 
         if !self.auto_escalate {

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::sandbox::SandboxManager;
 use crate::skills::SkillInfo;
 use crate::skills::external::prompt_exec::{PromptContext, SkillSource, process_skill_content};
 use crate::skills::external::types::{
@@ -47,6 +48,9 @@ pub struct SkillRegistry {
 
     /// Session identifier for variable substitution in skill content.
     session_id: String,
+
+    /// Optional sandbox manager used when activating local skills with inline commands.
+    sandbox: Option<Arc<SandboxManager>>,
 }
 
 impl SkillRegistry {
@@ -58,6 +62,7 @@ impl SkillRegistry {
             legacy_instructions: HashMap::new(),
             activated: HashSet::new(),
             code_skills: HashMap::new(),
+            sandbox: None,
         }
     }
 
@@ -70,6 +75,26 @@ impl SkillRegistry {
             warn!("Skill '{}': {}", descriptor.name, warning);
         }
         self.descriptors.insert(descriptor.name.clone(), descriptor);
+    }
+
+    /// Register a discovered file-based skill descriptor and its legacy instructions.
+    pub fn register_descriptor_with_legacy(
+        &mut self,
+        descriptor: SkillDescriptor,
+        legacy_instructions: Option<String>,
+    ) {
+        if let Some(legacy) = legacy_instructions
+            && !legacy.trim().is_empty()
+        {
+            self.legacy_instructions
+                .insert(descriptor.name.clone(), legacy);
+        }
+        self.register_descriptor(descriptor);
+    }
+
+    /// Attach a sandbox manager used for inline command execution during activation.
+    pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
+        self.sandbox = Some(manager);
     }
 
     /// Get a descriptor by name.
@@ -157,7 +182,9 @@ impl SkillRegistry {
     /// 1. Reads the `SKILL.md` body
     /// 2. Falls back to legacy frontmatter `instructions` if body is empty
     /// 3. Substitutes variables (`${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}`, etc.)
-    /// 4. Executes inline commands (`` !`cmd` `` and `` ```! cmd ``` ``)
+    /// 4. Executes inline commands (`` !`cmd` `` and `` ```! cmd ``` ``),
+    ///    using the configured sandbox path when available, or the direct fallback
+    ///    with minimal env + best-effort timeout termination otherwise
     /// 5. Enumerates bundled resources
     pub async fn activate_with_args(
         &mut self,
@@ -207,6 +234,7 @@ impl SkillRegistry {
             arguments: args.to_vec(),
             shell: descriptor.shell.clone(),
             source,
+            sandbox: self.sandbox.clone(),
             ..Default::default()
         };
         let instructions = process_skill_content(&raw_instructions, &ctx).await;
@@ -307,7 +335,7 @@ fn extract_body(content: &str) -> String {
             .trim_start_matches('\n')
             .to_string()
     } else {
-        content.to_string()
+        String::new()
     }
 }
 
@@ -376,6 +404,7 @@ pub type SkillManager = SkillRegistry;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     fn make_descriptor(name: &str, desc: &str) -> SkillDescriptor {
@@ -408,6 +437,63 @@ mod tests {
         assert_eq!(reg.descriptor_count(), 1);
         assert!(reg.get_descriptor("code-review").is_some());
         assert!(reg.is_installed("code-review"));
+    }
+
+    #[test]
+    fn test_register_descriptor_with_legacy() {
+        let mut reg = SkillRegistry::new();
+        reg.register_descriptor_with_legacy(
+            make_descriptor("legacy-skill", "Legacy"),
+            Some("Use legacy instructions.".to_string()),
+        );
+
+        assert_eq!(
+            reg.legacy_instructions
+                .get("legacy-skill")
+                .map(String::as_str),
+            Some("Use legacy instructions.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activate_falls_back_to_legacy_instructions() {
+        let root = std::env::temp_dir().join(format!(
+            "echo-skill-registry-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let skill_dir = root.join("legacy-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: legacy-skill\ndescription: Legacy skill\n---\n",
+        )
+        .unwrap();
+
+        let mut reg = SkillRegistry::new();
+        reg.register_descriptor_with_legacy(
+            SkillDescriptor {
+                name: "legacy-skill".into(),
+                description: "Legacy skill".into(),
+                location: skill_dir.join("SKILL.md"),
+                license: None,
+                compatibility: None,
+                metadata: HashMap::new(),
+                allowed_tools: vec![],
+                shell: None,
+                paths: vec![],
+                hooks: None,
+            },
+            Some("Use the legacy body".to_string()),
+        );
+
+        let content = reg
+            .activate_with_args("legacy-skill", &[], SkillSource::Local)
+            .await
+            .unwrap();
+        assert!(content.instructions.contains("Use the legacy body"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -471,6 +557,13 @@ mod tests {
         let content = "# Just markdown\n\nNo frontmatter here.";
         let body = extract_body(content);
         assert_eq!(body, content);
+    }
+
+    #[test]
+    fn test_extract_body_malformed_frontmatter_returns_empty() {
+        let content = "---\nname: test\ndescription: missing terminator\n# Instructions";
+        let body = extract_body(content);
+        assert!(body.is_empty());
     }
 
     #[test]

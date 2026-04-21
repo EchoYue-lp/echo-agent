@@ -21,6 +21,7 @@ use echo_agent::channels::{
 };
 use echo_agent::config::{apply_env_overrides, load_config};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -52,6 +53,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // 3. 创建 ChannelManager
     let mut manager = ChannelManager::new();
+    let mut registered = Vec::new();
 
     // 4. 注册 QQ Bot（优先读取 echo-agent.yaml，环境变量已在 apply_env_overrides 中覆盖）
     if app_config.channels.qq.enabled
@@ -63,9 +65,8 @@ async fn main() -> echo_agent::error::Result<()> {
             app_config.channels.qq.client_secret.clone(),
         );
         manager.register(Box::new(QqChannel::new(qq_config)?));
+        registered.push("qq");
         println!("  [+] 已注册 QQ Bot 通道");
-    } else {
-        println!("  [-] 跳过 QQ Bot（未在 echo-agent.yaml 或环境变量中启用/配置）");
     }
 
     // 5. 注册飞书（优先读取 echo-agent.yaml，环境变量已在 apply_env_overrides 中覆盖）
@@ -87,26 +88,41 @@ async fn main() -> echo_agent::error::Result<()> {
             ),
         };
         manager.register(Box::new(FeishuChannel::new(feishu_config)?));
+        registered.push("feishu");
         println!(
             "  [+] 已注册飞书通道（{} 模式）",
             app_config.channels.feishu.mode
         );
-    } else {
-        println!("  [-] 跳过飞书（未在 echo-agent.yaml 或环境变量中启用/配置）");
     }
 
     if manager.is_empty() {
-        println!("\n  没有可用的通道，请在 echo-agent.yaml 或环境变量中配置至少一个 IM 平台。");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo38 验收失败：没有可用的 IM 通道配置，请至少启用并完整配置一个通道".to_string(),
+        )
+        .into());
     }
 
     println!("\n  共 {} 个通道待启动\n", manager.len());
+    if manager.len() != registered.len() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo38 验收失败：注册通道数不一致，manager={}, recorded={}",
+            manager.len(),
+            registered.len()
+        ))
+        .into());
+    }
 
     // 6. 构建会话配置
     let session_config = SessionConfig::default()
         .with_timeout_minutes(timeout_minutes)
         .with_reset_keywords(app_config.channels.session.reset_keywords.clone())
         .with_reset_commands(app_config.channels.session.reset_commands.clone());
+    if timeout_minutes == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo38 验收失败：session timeout_minutes 不能为 0".to_string(),
+        )
+        .into());
+    }
 
     // 7. 使用 AgentChannelHandler 桥接 —— 自动继承全部框架能力
     let model_ref = model.clone();
@@ -125,16 +141,24 @@ async fn main() -> echo_agent::error::Result<()> {
         ))
     };
 
-    for result in manager.start_all(handler_factory).await {
+    let start_results = manager.start_all(handler_factory).await;
+    if start_results.len() != manager.len() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo38 验收失败：启动结果数与通道数不一致，results={}, manager={}",
+            start_results.len(),
+            manager.len()
+        ))
+        .into());
+    }
+    for result in start_results {
         result?;
     }
 
-    println!("  所有通道已启动，等待消息...");
+    println!("  所有通道已启动: {:?}", manager.channel_ids());
     println!("  Agent 已自动启用：工具、记忆、MCP 等能力");
-    println!("  按 Ctrl+C 停止\n");
+    println!("  进入短暂运行窗口后自动关闭\n");
 
-    // 8. 等待退出信号
-    tokio::signal::ctrl_c().await.ok();
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     println!("\n  正在关闭...");
     manager.stop_all().await?;

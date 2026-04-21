@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     println!("═══ Unified Retry Policy Demo ═══\n");
 
     // ── Part 1: RetryPolicy 构建 ───────────────────────────────────────────────
@@ -53,12 +53,13 @@ async fn main() {
     demo_with_retry_if().await;
 
     // ── Part 5: 实际 LLM 调用重试演示 ──────────────────────────────────────────
-    demo_llm_retry().await;
+    demo_llm_retry().await?;
 
     // ── Part 6: 推荐使用模式 ───────────────────────────────────────────────────
     demo_best_practices();
 
     println!("\n═══ Demo Complete ═══");
+    Ok(())
 }
 
 // ── Part 1: RetryPolicy 构建 ─────────────────────────────────────────────────────
@@ -257,7 +258,7 @@ async fn demo_with_retry_if() {
 
 // ── Part 5: 实际 LLM 调用重试演示 ─────────────────────────────────────────────
 
-async fn demo_llm_retry() {
+async fn demo_llm_retry() -> Result<()> {
     println!("─────────────────────────────────────────────");
     println!("Part 5: 实际 LLM 调用重试演示");
     println!("─────────────────────────────────────────────\n");
@@ -272,9 +273,15 @@ async fn demo_llm_retry() {
 
     let call_count = Arc::new(AtomicU32::new(0));
     let c = call_count.clone();
-    let _url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| {
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions".to_string()
-    });
+    if std::env::var("OPENAI_API_KEY").is_err()
+        && std::env::var("DEEPSEEK_API_KEY").is_err()
+        && std::env::var("QWEN_API_KEY").is_err()
+    {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo33 验收失败：未检测到任何 LLM API 密钥".to_string(),
+        )
+        .into());
+    }
 
     // 模拟带重试的 LLM 调用
     let policy = RetryPolicy::new(3, Duration::from_millis(500)).jitter(true);
@@ -284,7 +291,7 @@ async fn demo_llm_retry() {
         let client = client.clone();
         async move {
             let n = c.fetch_add(1, Ordering::SeqCst);
-            println!("    → 第 {} 次 LLM 调用...", n);
+            println!("    → 第 {} 次 LLM 调用...", n + 1);
 
             // 前两次模拟失败
             if n < 2 {
@@ -318,12 +325,23 @@ async fn demo_llm_retry() {
 
     match result {
         Ok(answer) => {
+            if answer.trim().is_empty() {
+                return Err(echo_agent::error::ReactError::Other(
+                    "demo33 验收失败：LLM 重试最终返回空答案".to_string(),
+                )
+                .into());
+            }
             println!("    ✓ 最终成功: {}\n", answer);
         }
         Err(e) => {
-            println!("    ✗ 失败: {}\n", e);
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo33 验收失败：LLM 重试最终失败: {}",
+                e
+            ))
+            .into());
         }
     }
+    Ok(())
 }
 
 // ── Part 6: 推荐使用模式 ───────────────────────────────────────────────────────

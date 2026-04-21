@@ -2,11 +2,11 @@
 
 ## What It Is
 
-echo-agent's memory system has two independent layers, each solving a different granularity of "remembering":
+echo-agent's memory system has two core layers, each solving a different granularity of "remembering":
 
 | Layer | Interface | Analogy | Problem Solved |
 |-------|-----------|---------|----------------|
-| **Short-term** | `Checkpointer` | Voice recorder | Resume interrupted conversations across sessions |
+| **Short-term** | `Checkpointer` | Voice recorder | Resume interrupted threads across process restarts |
 | **Long-term** | `Store` | Notebook | Retain domain knowledge and user preferences across sessions |
 
 This design directly mirrors LangGraph's two-tier architecture: `Checkpointer` (short-term) and `Store` (long-term).
@@ -19,7 +19,7 @@ This design directly mirrors LangGraph's two-tier architecture: `Checkpointer` (
 
 An LLM's context window vanishes after each request ends. Without a Checkpointer, a long task interrupted halfway requires starting over, and a user wanting to continue yesterday's conversation must repeat themselves.
 
-The Checkpointer automatically saves the full message history to disk at the end of each conversation turn. The next time an Agent is launched with the same `session_id`, it automatically restores the previous context — providing **conversation continuity**.
+The Checkpointer automatically saves the runtime thread state at the end of each conversation turn. The next time an Agent is launched with the same `session_id`, it automatically restores the previous context — providing **thread continuity**.
 
 ### How It Works
 
@@ -48,12 +48,13 @@ use echo_agent::prelude::*;
 
 // Option 1: Auto-managed via AgentConfig (recommended)
 let config = AgentConfig::new("qwen3-max", "assistant", "You are an assistant")
-    .session_id("user-alice-session-1")       // specify session ID
+    .session_id("user-alice-thread-1")        // thread ID for Checkpointer restore
+    .conversation_id("conv-alice-2026-001")  // optional: transcript/history projection ID
     .checkpointer_path("./checkpoints.json"); // persistence file path
 
 let mut agent = ReactAgent::new(config);
 // First run: saves session history to file
-// Subsequent runs (same session_id): automatically restores previous conversation
+// Subsequent runs (same session_id): automatically restores previous thread state
 let _ = agent.execute("Hello").await?;
 
 // Option 2: Direct Checkpointer API (for auditing, cross-agent reads, etc.)
@@ -75,7 +76,7 @@ cp.delete_session("user-alice-session-1").await?;
 
 ### Problem It Solves
 
-The Checkpointer saves the "conversation process" (message stream), but many pieces of information shouldn't be stored as a conversation — they need to persist in a structured way:
+The Checkpointer saves the runtime thread state (message stream + execution continuity), but many pieces of information shouldn't be stored as raw conversation state — they need to persist in a structured way:
 - User preferences ("prefers classical music")
 - Domain knowledge ("project codename is OMEGA")
 - Task results ("analysis: Fibonacci first 10 terms are...")
@@ -167,13 +168,13 @@ Day 1:
   agent → remember("Alice loves jazz music")  ← stored in Store (persists forever)
   session ends → Checkpointer saves conversation history
 
-Day 2, same session resumed:
+Day 2, same thread resumed:
   Checkpointer restores: agent knows what was said on Day 1
   user:  "Recommend a song"
   agent → recall("music preferences") → "Alice loves jazz music"
   → Recommends Miles Davis
 
-Day 3, brand new session:
+Day 3, brand new thread:
   Checkpointer: no matching session_id → empty message history
   user:  "Recommend a song"
   agent → recall("music preferences") → "Alice loves jazz music" (Store still exists!)
@@ -195,7 +196,7 @@ let store = InMemoryStore::new();
 
 ## Context Isolation
 
-Each Agent has an independent Store namespace and Checkpointer session_id:
+Each Agent has an independent Store namespace and Checkpointer `session_id`:
 
 ```
 Main Agent    session_id = "main-001"     namespace = ["main_agent", "memories"]
@@ -204,7 +205,18 @@ SubAgent B    session_id = "sub-b-001"    namespace = ["sub_b", "memories"]
 ```
 
 - SubAgent A cannot read SubAgent B's memories (different namespace)
-- SubAgent A cannot see the main Agent's conversation history (different session_id)
+- SubAgent A cannot see the main Agent's thread state (different session_id)
 - The main Agent holds the `Store` and `Checkpointer` objects and can explicitly read any session or namespace (for auditing)
+
+---
+
+## Transcript Projection
+
+`ConversationStore` is separate from `Checkpointer`.
+
+- `session_id`: runtime thread identity, used only for restore/resume
+- `conversation_id`: product/history identity, used only when projecting transcript/history into `ConversationStore`
+
+If you enable a `ConversationStore`, set `conversation_id` explicitly. It no longer falls back to `session_id`.
 
 See: `examples/demo14_memory_isolation.rs`

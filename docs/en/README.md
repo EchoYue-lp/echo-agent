@@ -141,11 +141,15 @@ async fn main() -> Result<()> {
 | Human-in-the-loop | `enable_human_in_loop` | `false` |
 | Chain-of-Thought prompt | `enable_cot` | `true` |
 | Context compression | via `set_compressor()` | none |
-| Session persistence | `session_id` + `checkpointer_path` | none |
+| Thread persistence / resume | `session_id` + `checkpointer_path` | none |
+| Transcript/history projection | `conversation_id` + `ConversationStore` | none |
 
 ---
 
 ## Example Files
+
+Examples are maintained under three contracts: `Acceptance`, `Conditional acceptance`, and `Teaching`.
+See `examples/README.md` for the full classification and upkeep rules.
 
 | Example | Demonstrates |
 |---------|-------------|

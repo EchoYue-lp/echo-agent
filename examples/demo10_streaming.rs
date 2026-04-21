@@ -129,6 +129,7 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
     let mut event_stream = agent
         .execute_stream("列举三个 Rust 语言最显著的特点，每点一句话。")
         .await?;
+    let mut final_answer = String::new();
 
     print!("  🤖 Agent: ");
     std::io::stdout().flush().ok();
@@ -139,9 +140,25 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::FinalAnswer(_) => println!(),
+            AgentEvent::FinalAnswer(answer) => {
+                final_answer = answer;
+                println!();
+            }
+            AgentEvent::ToolError { name, error } => {
+                return Err(echo_agent::error::ReactError::Other(format!(
+                    "demo10 验收失败：文本流式执行中工具 `{name}` 出错: {error}"
+                ))
+                .into());
+            }
             _ => {}
         }
+    }
+
+    if final_answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo10 验收失败：文本流式执行未产生最终答案".to_string(),
+        )
+        .into());
     }
 
     Ok(())
@@ -166,6 +183,7 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
     println!("  任务: {task}\n");
 
     let mut event_stream = agent.execute_stream(task).await?;
+    let mut final_answer = String::new();
 
     while let Some(event_result) = event_stream.next().await {
         match event_result? {
@@ -193,7 +211,14 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
             AgentEvent::ToolResult { name, output } => {
                 println!("  📤 工具结果: [{name}] → {}", truncate(&output, 60));
             }
+            AgentEvent::ToolError { name, error } => {
+                return Err(echo_agent::error::ReactError::Other(format!(
+                    "demo10 验收失败：工具流式执行中 `{name}` 出错: {error}"
+                ))
+                .into());
+            }
             AgentEvent::FinalAnswer(answer) => {
+                final_answer = answer.clone();
                 println!("\n  ✅ 最终答案: {}", truncate(&answer, 80));
             }
             AgentEvent::Cancelled => {
@@ -201,6 +226,13 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
             }
             _ => {}
         }
+    }
+
+    if final_answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo10 验收失败：工具流式执行未产生最终答案".to_string(),
+        )
+        .into());
     }
 
     Ok(())

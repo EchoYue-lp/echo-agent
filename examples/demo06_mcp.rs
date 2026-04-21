@@ -41,9 +41,10 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // ── 检查 npx 是否可用 ────────────────────────────────────────────────────
     if !npx_available() {
-        eprintln!("\n[错误] 未找到 npx，请先安装 Node.js: https://nodejs.org/");
-        eprintln!("安装完成后重新运行: cargo run --example demo06_mcp\n");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo06 验收失败：未找到 npx，请先安装 Node.js".to_string(),
+        )
+        .into());
     }
 
     println!("═══════════════════════════════════════════════════════");
@@ -92,15 +93,20 @@ async fn demo_raw_mcp_call() -> echo_agent::error::Result<()> {
             .call_tool("list_directory", serde_json::json!({ "path": "/tmp" }))
             .await;
 
-        match result {
-            Ok(r) => {
-                let text = echo_agent::mcp::McpClient::content_to_text(&r.content);
-                println!("工具返回结果:\n{}", text);
-            }
-            Err(e) => {
-                println!("工具调用失败（可能目录不存在）: {}", e);
-            }
+        let r = result?;
+        let text = echo_agent::mcp::McpClient::content_to_text(&r.content);
+        if text.trim().is_empty() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo06 验收失败：list_directory 返回空结果".to_string(),
+            )
+            .into());
         }
+        println!("工具返回结果:\n{}", text);
+    } else {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo06 验收失败：未获取到 filesystem MCP 客户端".to_string(),
+        )
+        .into());
     }
 
     manager.close_all().await;
@@ -114,9 +120,10 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
         && std::env::var("DEEPSEEK_API_KEY").is_err()
         && std::env::var("QWEN_API_KEY").is_err()
     {
-        println!("跳过 Part 2：未检测到 LLM API 密钥");
-        println!("（设置 OPENAI_API_KEY / DEEPSEEK_API_KEY / QWEN_API_KEY 后可启用）");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo06 验收失败：未检测到任何 LLM API 密钥".to_string(),
+        )
+        .into());
     }
 
     let mut manager = McpManager::new();
@@ -148,14 +155,14 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
 
     println!("\n任务: {}\n", task);
 
-    match agent.execute(task).await {
-        Ok(result) => {
-            println!("\n✓ 任务完成！\n{}", result);
-        }
-        Err(e) => {
-            println!("\n✗ 执行失败: {}", e);
-        }
+    let result = agent.execute(task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo06 验收失败：Agent + MCP 返回空结果".to_string(),
+        )
+        .into());
     }
+    println!("\n✓ 任务完成！\n{}", result);
 
     // 关闭所有 MCP 连接
     manager.close_all().await;

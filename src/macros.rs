@@ -53,6 +53,9 @@ macro_rules! agent {
     (@build $b:expr, session_id: $v:expr, $($rest:tt)*) => {
         $crate::agent!(@build $b.session_id($v), $($rest)*)
     };
+    (@build $b:expr, conversation_id: $v:expr, $($rest:tt)*) => {
+        $crate::agent!(@build $b.conversation_id($v), $($rest)*)
+    };
     (@build $b:expr, enable_memory: $v:expr, $($rest:tt)*) => {
         $crate::agent!(@build { if $v { $b.enable_memory() } else { $b } }, $($rest)*)
     };

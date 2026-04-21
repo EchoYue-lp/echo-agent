@@ -166,6 +166,11 @@ async fn demo_log_callback() -> echo_agent::error::Result<()> {
     println!("  任务: {task}\n");
 
     let answer = agent.execute(task).await?;
+    if answer.trim().is_empty() {
+        return Err(
+            ReactError::Other("demo11 验收失败：日志回调示例返回空答案".to_string()).into(),
+        );
+    }
     println!("\n  最终答案: {answer}");
 
     Ok(())
@@ -260,8 +265,19 @@ async fn demo_metrics_callback() -> echo_agent::error::Result<()> {
     println!("  任务: {task}\n");
 
     let answer = agent.execute(task).await?;
+    if answer.trim().is_empty() {
+        return Err(
+            ReactError::Other("demo11 验收失败：指标回调示例返回空答案".to_string()).into(),
+        );
+    }
     println!("\n  最终答案: {answer}\n");
     metrics.print_report();
+    if metrics.tool_calls.load(Ordering::Relaxed) == 0 {
+        return Err(ReactError::Other(
+            "demo11 验收失败：MetricsCallback 未记录到任何工具调用".to_string(),
+        )
+        .into());
+    }
 
     Ok(())
 }
@@ -290,6 +306,7 @@ async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
     println!("  任务: {task}\n");
 
     let mut stream = agent.execute_stream(task).await?;
+    let mut final_answer = String::new();
 
     while let Some(ev) = stream.next().await {
         match ev? {
@@ -303,7 +320,14 @@ async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
             AgentEvent::ToolResult { name, output } => {
                 println!("  [ToolResult] [{name}] {}", truncate(&output, 60));
             }
+            AgentEvent::ToolError { name, error } => {
+                return Err(ReactError::Other(format!(
+                    "demo11 验收失败：流式回调示例中工具 `{name}` 出错: {error}"
+                ))
+                .into());
+            }
             AgentEvent::FinalAnswer(ans) => {
+                final_answer = ans.clone();
                 println!("\n  [FinalAnswer] {}", truncate(&ans, 80));
             }
             AgentEvent::Cancelled => {
@@ -315,6 +339,12 @@ async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
 
     println!("\n  --- Metrics ---");
     metrics.print_report();
+    if final_answer.trim().is_empty() || metrics.tool_calls.load(Ordering::Relaxed) == 0 {
+        return Err(ReactError::Other(
+            "demo11 验收失败：流式回调示例未得到最终答案或未记录工具调用".to_string(),
+        )
+        .into());
+    }
 
     Ok(())
 }

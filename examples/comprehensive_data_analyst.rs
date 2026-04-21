@@ -6,7 +6,7 @@
 //!
 //! | 功能模块 | 实现方式 |
 //! |---------|---------|
-//! | 语义搜索 | `EmbeddingStore` + `HttpEmbedder` 跨语言检索 |
+//! | 语义搜索 | `SqliteStore` + `HttpEmbedder` 语义检索 |
 //! | 持久化存储 | `SqliteStore` 保存分析历史 |
 //! | 结构化输出 | `extract<T>()` 提取统计数据 |
 //! | 文件处理 | `FileSystemSkill` + 数据解析工具 |
@@ -17,14 +17,17 @@
 //!
 //! ```bash
 //! # 基础运行（需要 LLM API Key + Embedding API）
-//! QWEN_API_KEY=your_key EMBEDDING_APIKEY=your_key cargo run --example comprehensive_data_analyst --features "sqlite web"
+//! QWEN_API_KEY=your_key EMBEDDING_APIKEY=your_key cargo run --example comprehensive_data_analyst --features sqlite
 //! ```
 
-use echo_agent::memory::{EmbeddingStore, HttpEmbedder, SqliteStore};
+use echo_agent::memory::store::Store;
+use echo_agent::memory::{Embedder, HttpEmbedder, SearchQuery, SqliteStore};
 use echo_agent::prelude::*;
 use echo_agent::workflow::{GraphBuilder, SharedState};
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +35,8 @@ use std::time::Duration;
 // 结构化输出类型
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SalesAnalysis {
     period: String,
     total_revenue: f64,
@@ -42,14 +46,16 @@ struct SalesAnalysis {
     recommendations: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProductSale {
     name: String,
     quantity: i32,
     revenue: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DataQualityReport {
     total_rows: i32,
     null_count: i32,
@@ -77,8 +83,11 @@ async fn main() -> Result<()> {
 
     println!("📊 正在初始化智能数据分析助手...\n");
 
+    let db_path = data_analyst_db_path();
+    cleanup_sqlite_files(&db_path);
+
     // ── Part 1: 语义搜索存储 ─────────────────────────────────────────────────────
-    demo_semantic_storage().await?;
+    demo_semantic_storage(&db_path).await?;
 
     // ── Part 2: 结构化数据分析 ───────────────────────────────────────────────────
     demo_structured_analysis().await?;
@@ -90,11 +99,13 @@ async fn main() -> Result<()> {
     demo_processing_pipeline().await?;
 
     // ── Part 5: 历史分析检索 ─────────────────────────────────────────────────────
-    demo_history_retrieval().await?;
+    demo_history_retrieval(&db_path).await?;
 
     println!("\n═══════════════════════════════════════════════════════");
     println!("              综合示例演示完成！");
     println!("═══════════════════════════════════════════════════════");
+
+    cleanup_sqlite_files(&db_path);
 
     Ok(())
 }
@@ -103,20 +114,15 @@ async fn main() -> Result<()> {
 // Part 1: 语义搜索存储
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn demo_semantic_storage() -> Result<()> {
+async fn demo_semantic_storage(db_path: &Path) -> Result<()> {
     println!("═══════════════════════════════════════════════════════");
     println!("Part 1: 语义搜索存储");
     println!("═══════════════════════════════════════════════════════\n");
 
-    let Some(embedder) = load_embedder_from_config() else {
-        println!("  [跳过] 未检测到 embedding 配置，跳过语义搜索演示");
-        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量\n");
-        return Ok(());
-    };
-
-    let db_path = std::env::temp_dir().join("echo_agent_data_analyst.db");
-    let sqlite_store = Arc::new(SqliteStore::with_embedder(&db_path, embedder.clone())?);
-    let embedding_store = Arc::new(EmbeddingStore::new(sqlite_store.clone(), embedder));
+    let store = Arc::new(SqliteStore::with_embedder(
+        db_path,
+        load_verified_embedder_from_config().await?,
+    )?);
 
     let ns = &["data_analyst", "reports"];
 
@@ -134,10 +140,10 @@ async fn demo_semantic_storage() -> Result<()> {
         (
             "customer_churn",
             json!({
-                "content": "Customer churn analysis shows 5% decrease due to improved support",
+                "content": "客户流失分析显示，由于客服支持改善，流失率下降了5%",
                 "period": "2024 Q1",
                 "type": "客户流失分析",
-                "tags": ["churn", "support"]
+                "tags": ["流失", "客服", "支持"]
             }),
         ),
         (
@@ -151,11 +157,11 @@ async fn demo_semantic_storage() -> Result<()> {
     ];
 
     for (key, value) in &reports {
-        embedding_store.put(ns, key, value.clone()).await?;
+        store.put(ns, key, value.clone()).await?;
     }
 
     println!(
-        "  ✓ 已存储 {} 条分析报告（支持跨语言检索）\n",
+        "  ✓ 已存储 {} 条分析报告（用于验证语义检索）\n",
         reports.len()
     );
 
@@ -163,33 +169,46 @@ async fn demo_semantic_storage() -> Result<()> {
     println!("  🔍 语义搜索测试:\n");
 
     let queries = [
-        ("销售数据", "中文查询「销售数据」"),
-        ("revenue growth", "英文查询「收入增长」"),
-        ("产品表现", "中文查询「产品表现」"),
+        (
+            "销售增长主要来自新产品线",
+            "中文语义查询「销售增长主要来自新产品线」",
+        ),
+        (
+            "客服支持改善降低了客户流失",
+            "中文语义查询「客服支持改善降低了客户流失」",
+        ),
+        ("产品B需要改进", "中文语义查询「产品B需要改进」"),
     ];
 
     for (query, desc) in &queries {
-        let results = embedding_store.semantic_search(ns, query, 3).await?;
+        let keyword_hits = store.search(ns, query, 3).await?;
+        let results = store
+            .search_with(ns, SearchQuery::semantic(query, 3))
+            .await?;
         println!("    查询: \"{}\" ({})", query, desc);
+        println!("      关键词命中: {}", keyword_hits.len());
 
         if results.is_empty() {
-            println!("      → 无结果");
-        } else {
-            for (i, item) in results.iter().take(2).enumerate() {
-                let content = item.value["content"]
-                    .as_str()
-                    .unwrap_or("")
-                    .chars()
-                    .take(50)
-                    .collect::<String>();
-                println!(
-                    "      [{}] {} (相似度: {:.2}) - {}...",
-                    i + 1,
-                    item.key,
-                    item.score.unwrap_or(0.0),
-                    content
-                );
-            }
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "语义检索验收失败：查询 `{query}` 没有命中，说明 embedding 索引或语义检索链路不可用"
+            ))
+            .into());
+        }
+
+        for (i, item) in results.iter().take(2).enumerate() {
+            let content = item.value["content"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(50)
+                .collect::<String>();
+            println!(
+                "      [{}] {} (相似度: {:.2}) - {}...",
+                i + 1,
+                item.key,
+                item.score.unwrap_or(0.0),
+                content
+            );
         }
         println!();
     }
@@ -215,32 +234,18 @@ async fn demo_structured_analysis() -> Result<()> {
 
     println!("  📋 分析任务: Q1 销售数据分析\n");
 
-    let schema = ResponseFormat::json_schema(
-        "sales_analysis",
-        json!({
-            "type": "object",
-            "properties": {
-                "period": {"type": "string"},
-                "total_revenue": {"type": "number"},
-                "growth_rate": {"type": "number"},
-                "top_products": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "quantity": {"type": "integer"},
-                            "revenue": {"type": "number"}
-                        }
-                    }
-                },
-                "insights": {"type": "array", "items": {"type": "string"}},
-                "recommendations": {"type": "array", "items": {"type": "string"}}
-            }
-        }),
-    );
+    let schema = typed_response_format::<SalesAnalysis>("sales_analysis");
 
-    let prompt = r#"请分析以下Q1销售数据，并生成结构化报告：
+    let prompt = r#"请分析以下 Q1 销售数据，并返回一个严格匹配 schema 的 JSON 对象。
+不要输出 Markdown，不要省略任何字段。
+
+字段要求：
+- period: 字符串，例如 "2024 Q1"
+- total_revenue: 数字，总销售额
+- growth_rate: 数字，使用小数表达增长率，例如 18% 写成 0.18
+- top_products: 数组，元素必须包含 name / quantity / revenue
+- insights: 字符串数组，至少 3 条
+- recommendations: 字符串数组，至少 2 条
 
 产品销售数据：
 - 产品A: 1200件，单价¥200，销售额¥240,000
@@ -252,40 +257,34 @@ async fn demo_structured_analysis() -> Result<()> {
 相比去年同期增长: 18%
 
 请给出：
-1. 销售额排名前3的产品
-2. 至少3条关键洞察
-3. 至少2条改进建议"#;
+1. 销售额排名前 3 的产品
+2. 至少 3 条关键洞察
+3. 至少 2 条改进建议"#;
 
-    match agent.extract::<SalesAnalysis>(prompt, schema).await {
-        Ok(analysis) => {
-            println!("  ✓ 结构化分析完成:\n");
-            println!("    分析周期: {}", analysis.period);
-            println!("    总销售额: ¥{:.2}", analysis.total_revenue);
-            println!("    增长率: {:.1}%", analysis.growth_rate * 100.0);
-            println!("\n    热销产品 TOP 3:");
-            for (i, product) in analysis.top_products.iter().take(3).enumerate() {
-                println!(
-                    "      {}. {} - {}件, ¥{:.2}",
-                    i + 1,
-                    product.name,
-                    product.quantity,
-                    product.revenue
-                );
-            }
-            println!("\n    关键洞察:");
-            for insight in &analysis.insights {
-                println!("      • {}", insight);
-            }
-            println!("\n    改进建议:");
-            for rec in &analysis.recommendations {
-                println!("      • {}", rec);
-            }
-            println!();
-        }
-        Err(e) => {
-            println!("  ✗ 分析失败: {}\n", e);
-        }
+    let analysis: SalesAnalysis = agent.extract(prompt, schema).await?;
+    println!("  ✓ 结构化分析完成:\n");
+    println!("    分析周期: {}", analysis.period);
+    println!("    总销售额: ¥{:.2}", analysis.total_revenue);
+    println!("    增长率: {:.1}%", analysis.growth_rate * 100.0);
+    println!("\n    热销产品 TOP 3:");
+    for (i, product) in analysis.top_products.iter().take(3).enumerate() {
+        println!(
+            "      {}. {} - {}件, ¥{:.2}",
+            i + 1,
+            product.name,
+            product.quantity,
+            product.revenue
+        );
     }
+    println!("\n    关键洞察:");
+    for insight in &analysis.insights {
+        println!("      • {}", insight);
+    }
+    println!("\n    改进建议:");
+    for rec in &analysis.recommendations {
+        println!("      • {}", rec);
+    }
+    println!();
 
     Ok(())
 }
@@ -313,51 +312,38 @@ async fn demo_data_quality_check() -> Result<()> {
     println!("    - 重复: 检测到25个重复用户");
     println!("    - 格式: phone字段有80个不符合格式\n");
 
-    let schema = ResponseFormat::json_schema(
-        "data_quality",
-        json!({
-            "type": "object",
-            "properties": {
-                "total_rows": {"type": "integer"},
-                "null_count": {"type": "integer"},
-                "duplicate_count": {"type": "integer"},
-                "quality_score": {"type": "number"},
-                "issues": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                }
-            }
-        }),
-    );
+    let schema = typed_response_format::<DataQualityReport>("data_quality");
 
-    let prompt = "请评估以下用户数据集的质量：
+    let prompt = "请评估以下用户数据集的质量，并返回一个严格匹配 schema 的 JSON 对象。
+不要输出 Markdown，不要省略任何字段。
+
+字段要求：
+- total_rows: 总行数
+- null_count: 全部空值数量
+- duplicate_count: 重复记录数量
+- quality_score: 0 到 100 的数字
+- issues: 主要问题的字符串数组
+
+请把 phone 格式错误和 age 异常值归纳进 issues，而不是创建额外字段。
 
 用户数据集 users.csv:
 - 总行数: 10,000
 - email字段空值: 150个
 - phone字段格式错误: 80个
 - 重复用户记录: 25个
-- age字段异常值(>150): 5个
+- age字段异常值(>150): 5个";
 
-请计算质量分数(0-100)，并列出主要问题。";
-
-    match agent.extract::<DataQualityReport>(prompt, schema).await {
-        Ok(report) => {
-            println!("  ✓ 质量检查完成:\n");
-            println!("    数据行数: {}", report.total_rows);
-            println!("    空值数量: {}", report.null_count);
-            println!("    重复数量: {}", report.duplicate_count);
-            println!("    质量分数: {:.1}/100", report.quality_score);
-            println!("\n    发现的问题:");
-            for issue in &report.issues {
-                println!("      • {}", issue);
-            }
-            println!();
-        }
-        Err(e) => {
-            println!("  ✗ 检查失败: {}\n", e);
-        }
+    let report: DataQualityReport = agent.extract(prompt, schema).await?;
+    println!("  ✓ 质量检查完成:\n");
+    println!("    数据行数: {}", report.total_rows);
+    println!("    空值数量: {}", report.null_count);
+    println!("    重复数量: {}", report.duplicate_count);
+    println!("    质量分数: {:.1}/100", report.quality_score);
+    println!("\n    发现的问题:");
+    for issue in &report.issues {
+        println!("      • {}", issue);
     }
+    println!();
 
     Ok(())
 }
@@ -435,13 +421,15 @@ async fn demo_processing_pipeline() -> Result<()> {
 // Part 5: 历史分析检索
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn demo_history_retrieval() -> Result<()> {
+async fn demo_history_retrieval(db_path: &Path) -> Result<()> {
     println!("═══════════════════════════════════════════════════════");
     println!("Part 5: 历史分析检索");
     println!("══════════════════════════━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    let db_path = std::env::temp_dir().join("echo_agent_data_analyst.db");
-    let store = Arc::new(SqliteStore::new(&db_path)?);
+    let store = Arc::new(SqliteStore::with_embedder(
+        db_path,
+        load_verified_embedder_from_config().await?,
+    )?);
     let ns = &["data_analyst", "history"];
 
     // 存储分析历史
@@ -481,11 +469,19 @@ async fn demo_history_retrieval() -> Result<()> {
     // 检索相关历史
     println!("  🔍 检索相关历史:\n");
 
-    let queries = ["促销活动", "customer growth", "销售增长"];
+    let queries = ["季节性促销活动效果", "新客户增长情况", "客户满意度提升"];
 
     for query in &queries {
-        let results: Vec<_> = store.search(ns, query, 2).await?;
+        let keyword_hits = store.search(ns, query, 2).await?;
+        let results = store.search_with(ns, SearchQuery::hybrid(query, 2)).await?;
         println!("    查询: \"{}\"", query);
+        println!("      关键词命中: {}", keyword_hits.len());
+        if results.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "历史检索验收失败：查询 `{query}` 没有命中，说明历史检索链路不可用"
+            ))
+            .into());
+        }
         for (i, item) in results.iter().enumerate() {
             let content = item.value["content"]
                 .as_str()
@@ -515,9 +511,42 @@ fn print_banner() {
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 }
 
-fn load_embedder_from_config() -> Option<Arc<dyn echo_agent::memory::Embedder>> {
-    let cfg = echo_agent::llm::config::Config::get_embedding().ok()?;
+fn typed_response_format<T: JsonSchema>(name: &str) -> ResponseFormat {
+    let schema = schema_for!(T);
+    let schema_value = serde_json::to_value(schema).expect("schema should serialize");
+    ResponseFormat::json_schema(name, schema_value)
+}
+
+fn data_analyst_db_path() -> PathBuf {
+    std::env::temp_dir().join(format!("echo_agent_data_analyst_{}.db", std::process::id()))
+}
+
+fn cleanup_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
+}
+
+fn load_embedder_from_config() -> Result<Arc<dyn Embedder>> {
+    let cfg = echo_agent::llm::config::Config::get_embedding().map_err(|e| {
+        echo_agent::error::ReactError::Other(format!(
+            "缺少 embedding 配置，无法完成综合验收示例: {e}"
+        ))
+    })?;
     let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
         .with_timeout(Duration::from_secs(cfg.timeout_secs));
-    Some(Arc::new(embedder))
+    Ok(Arc::new(embedder))
+}
+
+async fn load_verified_embedder_from_config() -> Result<Arc<dyn Embedder>> {
+    let embedder = load_embedder_from_config()?;
+    embedder
+        .embed("echo-agent embedding health check")
+        .await
+        .map_err(|e| {
+            echo_agent::error::ReactError::Other(format!(
+                "embedding 服务健康检查失败，无法完成综合验收示例: {e}"
+            ))
+        })?;
+    Ok(embedder)
 }

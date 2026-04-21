@@ -94,7 +94,7 @@ agent.add_skill(Box::new(ResearchSkill));
 | **Tier 1: 目录** | 名称 + 描述（frontmatter） | 启动时自动扫描 | ~50-100 / skill |
 | **Tier 2: 激活** | 完整指引 + 资源列表 | LLM 调用 `activate_skill` | <5000 / skill |
 | **Tier 3a: 资源** | 参考文件内容 | LLM 调用 `read_skill_resource` | 按需 |
-| **Tier 3b: 脚本** | Python/Bash/TS 脚本执行 | LLM 调用 `run_skill_script` | 按需 |
+| **Tier 3b: 脚本** | Python/Bash/TS/PowerShell 脚本执行 | LLM 调用 `run_skill_script` | 按需 |
 
 ### SKILL.md 格式（agentskills.io 标准）
 
@@ -151,9 +151,14 @@ hooks:
 | `license` | | SPDX 许可标识 |
 | `shell` | | 内联命令使用的 Shell：`bash`（默认）或 `powershell` |
 | `paths` | | 条件激活的文件 glob 模式（如 `["*.py"]`） |
-| `allowed-tools` | | 限定此 Skill 可使用的工具列表 |
+| `allowed-tools` | | 声明此 Skill 偏好/允许使用的工具列表 |
 | `hooks` | | PreToolUse / PostToolUse 钩子定义 |
 | `metadata` | | 任意键值对（author, version, tags 等） |
+
+`hooks` 内可用的 action 类型：
+- `command`：执行命令，stdin 会收到 JSON 格式的 hook 上下文
+- `prompt`：向 Agent 上下文注入额外提示
+- `permission`：直接返回 `allow` / `deny` / `ask`，覆盖权限决策流程
 
 ### 内联命令执行
 
@@ -174,6 +179,12 @@ rustc --version
 → 激活后变为：`rustc 1.93.0 (254b59607 2026-01-19)`
 
 **安全限制**：MCP 来源的 Skill **永远不执行**内联命令（远程不可信内容）。
+
+当内联命令或 hook 命令回退到直接进程执行（未配置 `SandboxManager`）时，运行时现在会：
+- 先清空继承环境变量，再只注入最小白名单（`PATH`、`SKILL_DIR`、`SESSION_ID`）
+- 通过 `kill_on_drop(true)` 做超时后的 best-effort 终止
+
+这条 fallback 更适合 demo 和本地开发；生产环境仍建议优先配置 `SandboxManager`。
 
 ### 变量替换
 
@@ -230,6 +241,9 @@ let skills = agent.load_skills_from_dir("./skills").await?;
 | `read_skill_resource` | 读取参考文件 |
 | `run_skill_script` | 执行 Python/Bash/TS/PowerShell 脚本 |
 
+如果同一个 Agent 后续再次调用 `discover_skills()` 发现了新的 file-based skill，
+这三个工具会被刷新，以便它们内部共享的 registry 和可选技能列表始终与最新发现结果保持一致。
+
 ---
 
 ## Hooks 系统
@@ -279,6 +293,9 @@ Skill 可以通过 Hooks 拦截工具调用，实现安全审查、日志记录�
 | `updatedInput` | 修改后的工具输入（仅 PreToolUse） |
 | `continue` | `false` 停止后续 Hook 执行 |
 
+如果多个匹配的 hook 同时返回 `permission_mode_override`，运行时会保留最后一个非空覆盖值。
+而权限决策本身仍然遵循更严格的优先级（`deny > ask > allow`）。
+
 ### 示例：YAML 定义
 
 ```yaml
@@ -308,7 +325,8 @@ hooks:
 
 ## 条件激活
 
-带 `paths` 字段的 Skill 仅在匹配文件被访问时激活：
+带 `paths` 字段的 Skill 仍会出现在 catalog 中，但运行时激活会要求提供匹配的
+`context_path`：
 
 ```yaml
 paths:
@@ -318,11 +336,24 @@ paths:
 
 目录中会标注：`- python-linter: ... [activates for: *.py, tests/**]`
 
+激活时需要类似这样调用：
+
+```json
+{
+  "name": "python-linter",
+  "context_path": "tests/test_api.py"
+}
+```
+
+如果缺少 `context_path`，或它不匹配声明的 glob，`activate_skill` 会直接报错，
+而不是继续加载该 skill。
+
 ---
 
 ## 工具权限限制
 
-`allowed-tools` 限定 Skill 可使用的工具，激活时自动注入约束提示：
+`allowed-tools` 用来声明 Skill 偏好/允许使用的工具。该约束会在激活时注入提示，
+同时内建的渐进式披露工具也会在运行时执行校验：
 
 ```yaml
 allowed-tools:
@@ -330,6 +361,9 @@ allowed-tools:
   - run_skill_script
   - Bash
 ```
+
+其中 `read_skill_resource` 和 `run_skill_script` 会在运行时检查白名单；如果当前
+skill 没有允许对应工具，调用会被直接拒绝。
 
 ---
 
@@ -347,6 +381,10 @@ allowed-tools:
 | `.rb` | `ruby` | `ruby` |
 
 直接调用解释器（不通过 `sh -c` / `cmd /C`），避免 Shell 注入风险。
+
+另外还有两条运行时保证：
+- `script` 路径必须是相对路径，并且规范化后仍位于已激活 skill 的目录内
+- 畸形 `args`（如未闭合引号）会直接报错，而不是静默当作一个整体参数继续执行
 
 ---
 

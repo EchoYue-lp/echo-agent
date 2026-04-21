@@ -114,6 +114,15 @@ impl Tool for ReadSkillResourceTool {
                 }
             };
 
+            if !descriptor.permits_tool(self.name()) {
+                return Ok(ToolResult::error(format!(
+                    "Skill '{}' does not permit tool '{}'; allowed-tools: {}",
+                    skill_name,
+                    self.name(),
+                    descriptor.allowed_tools.join(", ")
+                )));
+            }
+
             let skill_dir = match descriptor.location.parent() {
                 Some(d) => d,
                 None => {
@@ -209,3 +218,65 @@ fn is_path_traversal_safe(path: &std::path::Path) -> bool {
 // Backward compatibility alias
 #[deprecated(note = "Use ReadSkillResourceTool instead")]
 pub type LoadSkillResourceTool = ReadSkillResourceTool;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::external::types::SkillDescriptor;
+    use crate::skills::registry::SkillRegistry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn read_skill_resource_enforces_allowed_tools() {
+        let root =
+            std::env::temp_dir().join(format!("echo-skill-resource-test-{}", std::process::id()));
+        let skill_dir = root.join("locked-skill");
+        tokio::fs::create_dir_all(skill_dir.join("references"))
+            .await
+            .unwrap();
+        tokio::fs::write(skill_dir.join("SKILL.md"), "body")
+            .await
+            .unwrap();
+        tokio::fs::write(skill_dir.join("references/guide.md"), "hello")
+            .await
+            .unwrap();
+
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(SkillDescriptor {
+            name: "locked-skill".into(),
+            description: "desc".into(),
+            location: skill_dir.join("SKILL.md"),
+            license: None,
+            compatibility: None,
+            metadata: HashMap::new(),
+            allowed_tools: vec!["run_skill_script".into()],
+            shell: None,
+            paths: vec![],
+            hooks: None,
+        });
+        registry.mark_activated("locked-skill");
+
+        let tool = ReadSkillResourceTool::new(Arc::new(RwLock::new(registry)));
+        let result = tool
+            .execute(
+                [
+                    ("skill_name".to_string(), json!("locked-skill")),
+                    ("path".to_string(), json!("references/guide.md")),
+                ]
+                .into(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .unwrap_or_default()
+                .contains("does not permit tool 'read_skill_resource'")
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+}

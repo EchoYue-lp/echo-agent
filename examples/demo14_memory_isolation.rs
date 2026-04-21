@@ -13,9 +13,10 @@ const CHECKPOINT_PATH: &str = "/tmp/echo-agent-demo14/checkpoints.json";
 
 const NS_MATH: [&str; 2] = ["math_agent", "memories"];
 const NS_WRITER: [&str; 2] = ["writer_agent", "memories"];
-const SESSION_MATH: &str = "math-agent-session-1";
-const SESSION_WRITER: &str = "writer-agent-session-1";
-const SESSION_MAIN: &str = "main-agent-session-1";
+// `session_id` here means runtime thread identity for Checkpointer restore.
+const SESSION_MATH: &str = "math-agent-thread-1";
+const SESSION_WRITER: &str = "writer-agent-thread-1";
+const SESSION_MAIN: &str = "main-agent-thread-1";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,9 +33,9 @@ async fn main() -> Result<()> {
         Arc::new(FileCheckpointer::new(CHECKPOINT_PATH)?);
 
     // Part 1: Store 命名空间隔离
-    demo_store_namespace_isolation(shared_store.clone()).await;
+    demo_store_namespace_isolation(shared_store.clone()).await?;
 
-    // Part 2: 独立 Agent 会话隔离
+    // Part 2: 独立 Agent 线程隔离
     demo_session_isolation(shared_checkpointer.clone()).await?;
 
     // Part 3: 多 Agent 上下文隔离
@@ -49,7 +50,7 @@ async fn main() -> Result<()> {
 
 // ── Part 1 ─────────────────────────────────────────────────────────────────────
 
-async fn demo_store_namespace_isolation(store: Arc<dyn Store>) {
+async fn demo_store_namespace_isolation(store: Arc<dyn Store>) -> Result<()> {
     println!("╔═══════════════════════════════════════════════════════╗");
     println!("║   Part 1: Store 命名空间隔离                          ║");
     println!("╚═══════════════════════════════════════════════════════╝\n");
@@ -75,17 +76,24 @@ async fn demo_store_namespace_isolation(store: Arc<dyn Store>) {
     println!("✅ writer_agent → 写入 1 条记忆\n");
 
     let writer_hits = store.search(&NS_WRITER, "机密", 10).await.unwrap();
+    if !writer_hits.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo14 验收失败：writer_agent 跨 namespace 搜到了 math_agent 的机密数据".to_string(),
+        )
+        .into());
+    }
     println!(
         "🔍 writer_agent 搜索 [机密]：{} 条命中 ✅ (跨 namespace 数据不可见)\n",
         writer_hits.len()
     );
+    Ok(())
 }
 
 // ── Part 2 ─────────────────────────────────────────────────────────────────────
 
 async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<()> {
     println!("╔═══════════════════════════════════════════════════════╗");
-    println!("║   Part 2: Checkpointer 会话隔离                       ║");
+    println!("║   Part 2: Checkpointer 线程隔离                       ║");
     println!("╚═══════════════════════════════════════════════════════╝\n");
 
     // 使用 AgentBuilder 创建 Agent
@@ -98,11 +106,14 @@ async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<(
         .checkpointer_only(checkpointer.clone())
         .build()?;
 
-    let math_result = math_agent.execute("斐波那契数列第6项是多少？").await;
-    println!(
-        "▶ math_agent 答案: {}\n",
-        math_result.unwrap_or_else(|e| e.to_string())
-    );
+    let math_result = math_agent.execute("斐波那契数列第6项是多少？").await?;
+    if math_result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo14 验收失败：math_agent 返回空答案".to_string(),
+        )
+        .into());
+    }
+    println!("▶ math_agent 答案: {}\n", math_result);
 
     let mut writer_agent = ReactAgentBuilder::new()
         .model(MODEL)
@@ -113,13 +124,26 @@ async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<(
         .checkpointer_only(checkpointer.clone())
         .build()?;
 
-    let writer_result = writer_agent.execute("用一句话描述秋天。").await;
-    println!(
-        "▶ writer_agent 答案: {}\n",
-        writer_result.unwrap_or_else(|e| e.to_string())
-    );
+    let writer_result = writer_agent.execute("用一句话描述秋天。").await?;
+    if writer_result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo14 验收失败：writer_agent 返回空答案".to_string(),
+        )
+        .into());
+    }
+    println!("▶ writer_agent 答案: {}\n", writer_result);
 
-    println!("📋 已保存会话: {:?}", checkpointer.list_sessions().await?);
+    let sessions = checkpointer.list_sessions().await?;
+    if !sessions.contains(&SESSION_MATH.to_string())
+        || !sessions.contains(&SESSION_WRITER.to_string())
+    {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo14 验收失败：保存的线程列表不完整: {:?}",
+            sessions
+        ))
+        .into());
+    }
+    println!("📋 已保存线程: {:?}", sessions);
 
     Ok(())
 }
@@ -180,11 +204,20 @@ async fn demo_context_isolation_multi_agent(checkpointer: Arc<dyn Checkpointer>)
 
     let result = main_agent
         .execute("让数学专家计算 7 * 8，然后汇总结果。")
-        .await;
-    match result {
-        Ok(answer) => println!("\n✅ 主 Agent 最终答案:\n{}\n", answer),
-        Err(e) => println!("\n⚠️  执行出错: {}\n", e),
+        .await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo14 验收失败：主 Agent 返回空答案".to_string(),
+        )
+        .into());
     }
+    if result.contains("PROJECT-OMEGA") {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo14 验收失败：主 Agent 输出泄漏了系统提示中的机密信息".to_string(),
+        )
+        .into());
+    }
+    println!("\n✅ 主 Agent 最终答案:\n{}\n", result);
 
     println!("💡 关键结论：SubAgent 看不到主 Agent 的机密信息");
 

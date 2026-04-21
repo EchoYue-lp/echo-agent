@@ -1,4 +1,4 @@
-//! demo43_browser_skill.rs —— Playwright MCP 浏览器集成演示
+//! demo42_browser_mcp.rs —— Playwright MCP 浏览器集成演示
 //!
 //! 展示 echo-agent 通过 MCP 配置文件连接 Playwright MCP 服务端，
 //! 使用浏览器自动化能力（导航、快照、截图、点击等）。
@@ -28,7 +28,7 @@
 //! cp examples/mcp.json.example mcp.json
 //!
 //! # 2. 运行示例
-//! cargo run --example demo43_browser_skill --features mcp
+//! cargo run --example demo42_browser_mcp --features mcp
 //! ```
 
 use echo_agent::mcp::McpConfigFile;
@@ -54,9 +54,10 @@ async fn main() -> echo_agent::error::Result<()> {
     let mcp_config = if mcp_config_path.exists() {
         McpConfigFile::from_file(mcp_config_path)?
     } else {
-        eprintln!("⚠️  未找到 mcp.json 配置文件");
-        eprintln!("请先复制配置文件: cp examples/mcp.json.example mcp.json");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo42 验收失败：未找到 mcp.json 配置文件".to_string(),
+        )
+        .into());
     };
 
     // Part 1: MCP 工具发现
@@ -92,6 +93,12 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
 
     // 从配置文件加载 MCP 服务端
     let clients = agent.load_mcp_from_file("mcp.json").await?;
+    if clients.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo42 验收失败：未连接到任何 Playwright MCP 服务端".to_string(),
+        )
+        .into());
+    }
 
     println!("✓ Agent 已创建，包含浏览器工具");
     println!("  已连接 MCP 服务端数: {}", clients.len());
@@ -101,6 +108,9 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
 
     // 使用 execute_stream 获取实时事件
     let mut stream = agent.execute_stream(task).await?;
+    let mut tool_calls = 0usize;
+    let mut final_answer = String::new();
+    let mut tool_errors = 0usize;
 
     while let Some(event) = stream.next().await {
         match event? {
@@ -120,6 +130,7 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                 );
             }
             AgentEvent::ToolCall { name, args } => {
+                tool_calls += 1;
                 println!("\n🔧 调用工具: {}", name);
                 let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
                 // 只显示前 200 字符的参数
@@ -138,10 +149,12 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                 }
             }
             AgentEvent::ToolError { name, error } => {
+                tool_errors += 1;
                 println!("\n❌ 工具错误: {}", name);
                 println!("   错误: {}", error);
             }
             AgentEvent::FinalAnswer(answer) => {
+                final_answer = answer.clone();
                 println!("\n═══════════════════════════════════════════════════════");
                 println!("最终答案:");
                 println!("{}", answer);
@@ -155,6 +168,14 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                 // 其他事件暂时忽略
             }
         }
+    }
+
+    if tool_calls == 0 || final_answer.trim().is_empty() || tool_errors > 0 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "demo42 验收失败：浏览器任务未完成（tool_calls={tool_calls}, tool_errors={tool_errors}, final_answer_empty={})",
+            final_answer.trim().is_empty(),
+        ))
+        .into());
     }
 
     Ok(())

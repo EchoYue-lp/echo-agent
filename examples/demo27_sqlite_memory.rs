@@ -15,10 +15,9 @@
 use echo_agent::memory::store::Store;
 use echo_agent::prelude::*;
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-
-const DB_PATH: &str = "/tmp/echo-agent-demo27/memory.db";
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -32,48 +31,52 @@ async fn main() -> echo_agent::error::Result<()> {
         .init();
 
     // 准备目录
-    tokio::fs::create_dir_all("/tmp/echo-agent-demo27")
-        .await
-        .ok();
+    let db_path = demo27_db_path();
+    if let Some(parent) = db_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    cleanup_sqlite_files(&db_path);
 
     print_banner();
 
     // Part 1: 基本 CRUD
     separator("Part 1: 基本 CRUD 操作");
-    demo_crud().await?;
+    demo_crud(&db_path).await?;
 
     // Part 2: FTS5 全文检索
     separator("Part 2: FTS5 全文检索");
-    demo_fts5_search().await?;
+    demo_fts5_search(&db_path).await?;
 
     // Part 3: 命名空间隔离
     separator("Part 3: 命名空间隔离");
-    demo_namespace_isolation().await?;
+    demo_namespace_isolation(&db_path).await?;
 
     // Part 4: 向量语义检索
     separator("Part 4: 向量语义检索（需要 Embedding 服务）");
-    demo_semantic_search().await?;
+    demo_semantic_search(&db_path).await?;
 
     // Part 5: 与 Agent 集成
     separator("Part 5: SqliteStore × Agent 集成");
-    demo_agent_integration().await?;
+    demo_agent_integration(&db_path).await?;
 
     // Part 6: 持久化验证
     separator("Part 6: 持久化验证");
-    demo_persistence().await?;
+    demo_persistence(&db_path).await?;
 
     println!("\n{}", "═".repeat(64));
     println!("  demo27 完成");
-    println!("  数据库文件: {DB_PATH}");
+    println!("  数据库文件: {}", db_path.display());
     println!("{}", "═".repeat(64));
+
+    cleanup_sqlite_files(&db_path);
 
     Ok(())
 }
 
 // ── Part 1: CRUD ────────────────────────────────────────────────────────────
 
-async fn demo_crud() -> echo_agent::error::Result<()> {
-    let store = SqliteStore::new(DB_PATH)?;
+async fn demo_crud(db_path: &Path) -> echo_agent::error::Result<()> {
+    let store = SqliteStore::new(db_path)?;
     let ns = &["demo27", "crud"];
 
     // 写入
@@ -105,13 +108,17 @@ async fn demo_crud() -> echo_agent::error::Result<()> {
 
     // 读取
     let item = store.get(ns, "user-pref-001").await?;
-    if let Some(item) = item {
-        println!(
-            "  ✅ get: key={}, value={}",
-            item.key,
-            serde_json::to_string(&item.value).unwrap_or_default()
-        );
-    }
+    let Some(item) = item else {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：CRUD get 未读取到 user-pref-001".to_string(),
+        )
+        .into());
+    };
+    println!(
+        "  ✅ get: key={}, value={}",
+        item.key,
+        serde_json::to_string(&item.value).unwrap_or_default()
+    );
 
     // 更新（upsert）
     store
@@ -133,9 +140,21 @@ async fn demo_crud() -> echo_agent::error::Result<()> {
 
     // 删除
     let deleted = store.delete(ns, "user-pref-001").await?;
+    if !deleted {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：删除 user-pref-001 返回 false".to_string(),
+        )
+        .into());
+    }
     println!("  ✅ delete: user-pref-001, found={deleted}");
 
     let gone = store.get(ns, "user-pref-001").await?;
+    if gone.is_some() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：delete 后仍能读取到 user-pref-001".to_string(),
+        )
+        .into());
+    }
     println!("  ✅ get after delete: {:?}", gone.map(|i| i.key));
 
     println!();
@@ -144,8 +163,8 @@ async fn demo_crud() -> echo_agent::error::Result<()> {
 
 // ── Part 2: FTS5 ────────────────────────────────────────────────────────────
 
-async fn demo_fts5_search() -> echo_agent::error::Result<()> {
-    let store = SqliteStore::new(DB_PATH)?;
+async fn demo_fts5_search(db_path: &Path) -> echo_agent::error::Result<()> {
+    let store = SqliteStore::new(db_path)?;
     let ns = &["demo27", "fts5"];
 
     // 写入测试数据
@@ -187,6 +206,12 @@ async fn demo_fts5_search() -> echo_agent::error::Result<()> {
 
     for (query, desc) in &queries {
         let results = store.search(ns, query, 3).await?;
+        if results.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo27 验收失败：FTS5 查询 `{query}` 没有命中"
+            ))
+            .into());
+        }
         println!("  🔍 \"{query}\" ({desc}):");
         if results.is_empty() {
             println!("     无结果");
@@ -208,8 +233,8 @@ async fn demo_fts5_search() -> echo_agent::error::Result<()> {
 
 // ── Part 3: 命名空间隔离 ────────────────────────────────────────────────────
 
-async fn demo_namespace_isolation() -> echo_agent::error::Result<()> {
-    let store = SqliteStore::new(DB_PATH)?;
+async fn demo_namespace_isolation(db_path: &Path) -> echo_agent::error::Result<()> {
+    let store = SqliteStore::new(db_path)?;
 
     // 不同用户写入同 key
     store
@@ -244,6 +269,12 @@ async fn demo_namespace_isolation() -> echo_agent::error::Result<()> {
 
     // Bob 搜索 Alice 的内容
     let cross_search = store.search(&["bob", "memories"], "Alice", 10).await?;
+    if !cross_search.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：namespace 隔离失效，Bob 搜到了 Alice 的内容".to_string(),
+        )
+        .into());
+    }
     println!(
         "\n  🔍 Bob 搜索 \"Alice\": {} 条命中 ✅ (跨 namespace 不可见)",
         cross_search.len()
@@ -262,21 +293,11 @@ async fn demo_namespace_isolation() -> echo_agent::error::Result<()> {
 
 // ── Part 4: 向量语义检索 ────────────────────────────────────────────────────
 
-async fn demo_semantic_search() -> echo_agent::error::Result<()> {
-    let Some(embedder) = load_embedder_from_config() else {
-        println!("  ℹ️  未配置 Embedding 服务，跳过向量检索演示");
-        println!("  💡 请在 echo-agent.yaml 中添加 embedding 段，或设置 EMBEDDING_* 环境变量");
-        println!("     支持 OpenAI、DashScope 等兼容 /v1/embeddings 接口的服务\n");
-        return Ok(());
-    };
-    let db_path = "/tmp/echo-agent-demo27/memory_vec.db";
-    let store = SqliteStore::with_embedder(db_path, embedder)?;
+async fn demo_semantic_search(db_path: &Path) -> echo_agent::error::Result<()> {
+    let store = SqliteStore::with_embedder(db_path, load_verified_embedder_from_config().await?)?;
     let ns = &["demo27", "semantic"];
 
-    println!(
-        "  supports_semantic_search = {}\n",
-        store.supports_semantic_search()
-    );
+    println!("  hybrid/semantic search 已启用（embedder 已配置）\n");
 
     // 写入中文记忆
     let memories = [
@@ -302,7 +323,15 @@ async fn demo_semantic_search() -> echo_agent::error::Result<()> {
     ];
 
     for (query, desc) in &queries {
-        let results = store.semantic_search(ns, query, 2).await?;
+        let results = store
+            .search_with(ns, echo_agent::memory::SearchQuery::semantic(query, 2))
+            .await?;
+        if results.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo27 验收失败：语义查询 `{query}` 没有命中"
+            ))
+            .into());
+        }
         println!("  🧠 \"{query}\" ({desc}):");
         for item in &results {
             println!(
@@ -319,7 +348,15 @@ async fn demo_semantic_search() -> echo_agent::error::Result<()> {
     println!("  📊 对比：关键词检索 vs 语义检索\n");
     let query = "music preference";
     let kw_results = store.search(ns, query, 2).await?;
-    let sem_results = store.semantic_search(ns, query, 2).await?;
+    let sem_results = store
+        .search_with(ns, echo_agent::memory::SearchQuery::semantic(query, 2))
+        .await?;
+    if sem_results.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：语义检索对比查询没有命中".to_string(),
+        )
+        .into());
+    }
     println!("  🔍 \"{query}\"");
     println!(
         "     关键词检索: {} 条命中 {}",
@@ -338,18 +375,19 @@ async fn demo_semantic_search() -> echo_agent::error::Result<()> {
 
 // ── Part 5: Agent 集成 ──────────────────────────────────────────────────────
 
-async fn demo_agent_integration() -> echo_agent::error::Result<()> {
+async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()> {
     let models = echo_agent::llm::config::Config::list_models();
     if models.is_empty() {
-        println!("  ℹ️  无模型配置，跳过 Agent 集成测试");
-        println!("  💡 创建 echo-agent.yaml 配置模型后可体验\n");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：缺少模型配置，无法验证 Agent 集成".to_string(),
+        )
+        .into());
     }
 
     let model_name = &models[0];
     println!("  使用模型: {model_name}\n");
 
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::new(DB_PATH)?);
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::new(db_path)?);
     let ns = &["agent_demo", "memories"];
 
     // 预填充记忆
@@ -381,10 +419,14 @@ async fn demo_agent_integration() -> echo_agent::error::Result<()> {
     agent.set_memory_store(store);
 
     println!("  👤 用户: 推荐一个适合我的数据库方案");
-    match agent.execute("推荐一个适合我的数据库方案").await {
-        Ok(answer) => println!("  🤖 Agent: {answer}"),
-        Err(e) => println!("  ⚠️  执行出错: {e}"),
+    let answer = agent.execute("推荐一个适合我的数据库方案").await?;
+    if answer.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo27 验收失败：Agent 集成回答为空".to_string(),
+        )
+        .into());
     }
+    println!("  🤖 Agent: {answer}");
 
     println!();
     Ok(())
@@ -392,14 +434,14 @@ async fn demo_agent_integration() -> echo_agent::error::Result<()> {
 
 // ── Part 6: 持久化验证 ──────────────────────────────────────────────────────
 
-async fn demo_persistence() -> echo_agent::error::Result<()> {
+async fn demo_persistence(db_path: &Path) -> echo_agent::error::Result<()> {
     println!("  验证 SQLite 数据跨实例持久化\n");
 
     let ns = &["demo27", "persist"];
 
     // 实例 1：写入数据
     {
-        let store = SqliteStore::new(DB_PATH)?;
+        let store = SqliteStore::new(db_path)?;
         store
             .put(
                 ns,
@@ -413,22 +455,27 @@ async fn demo_persistence() -> echo_agent::error::Result<()> {
 
     // 实例 2：重新打开数据库，验证数据还在
     {
-        let store = SqliteStore::new(DB_PATH)?;
+        let store = SqliteStore::new(db_path)?;
         let item = store.get(ns, "persist-key").await?;
-        match item {
-            Some(item) => {
-                println!(
-                    "  ✅ 实例 2: 读取成功 → {}",
-                    item.value["content"].as_str().unwrap_or("")
-                );
-            }
-            None => {
-                println!("  ❌ 实例 2: 数据丢失！");
-            }
-        }
+        let Some(item) = item else {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo27 验收失败：跨实例持久化数据丢失".to_string(),
+            )
+            .into());
+        };
+        println!(
+            "  ✅ 实例 2: 读取成功 → {}",
+            item.value["content"].as_str().unwrap_or("")
+        );
 
         // FTS5 索引也能跨实例
         let results = store.search(ns, "记忆 保留", 5).await?;
+        if results.is_empty() {
+            return Err(echo_agent::error::ReactError::Other(
+                "demo27 验收失败：跨实例 FTS5 检索没有命中".to_string(),
+            )
+            .into());
+        }
         println!(
             "  ✅ 实例 2: FTS5 搜索 \"记忆 保留\" → {} 条命中",
             results.len()
@@ -439,7 +486,7 @@ async fn demo_persistence() -> echo_agent::error::Result<()> {
     }
 
     // 打印数据库文件大小
-    if let Ok(meta) = std::fs::metadata(DB_PATH) {
+    if let Ok(meta) = std::fs::metadata(db_path) {
         println!(
             "\n  📁 数据库文件大小: {:.1} KB",
             meta.len() as f64 / 1024.0
@@ -470,4 +517,30 @@ fn load_embedder_from_config() -> Option<Arc<dyn echo_agent::memory::Embedder>> 
     let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
         .with_timeout(Duration::from_secs(cfg.timeout_secs));
     Some(Arc::new(embedder))
+}
+
+async fn load_verified_embedder_from_config()
+-> echo_agent::error::Result<Arc<dyn echo_agent::memory::Embedder>> {
+    let embedder = load_embedder_from_config().ok_or_else(|| {
+        echo_agent::error::ReactError::Other("demo27 验收失败：缺少 embedding 配置".to_string())
+    })?;
+    embedder
+        .embed("demo27 sqlite memory health check")
+        .await
+        .map_err(|e| {
+            echo_agent::error::ReactError::Other(format!(
+                "demo27 验收失败：embedding 健康检查失败: {e}"
+            ))
+        })?;
+    Ok(embedder)
+}
+
+fn demo27_db_path() -> PathBuf {
+    std::env::temp_dir().join(format!("echo-agent-demo27-{}.db", std::process::id()))
+}
+
+fn cleanup_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }

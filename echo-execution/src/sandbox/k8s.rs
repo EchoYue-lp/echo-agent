@@ -2,10 +2,12 @@
 //!
 //! 通过 `kubectl` CLI 在 K8s 集群中创建临时 Pod 执行代码：
 //! - Pod 级隔离（SecurityContext + ResourceQuota）
-//! - 自动清理（ttlSecondsAfterFinished）
+//! - 显式删除临时 Pod（success / error / timeout 都会走清理）
 //! - 支持 Pod SecurityPolicy / SecurityStandards
 //!
 //! 适用于大规模并发和企业级部署。需要 `kubectl` 已配置集群访问。
+//! 当前实现不会像 Docker 一样逐 Pod 强制断网；当 `ResourceLimits.network=false`
+//! 时，会保留默认网络行为并输出能力告警。
 
 use super::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
@@ -16,7 +18,9 @@ use echo_core::error::SandboxError;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tracing::warn;
 
 /// K8s 沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +41,10 @@ pub struct K8sConfig {
     pub memory_request: String,
     /// Memory limit（如 "256Mi"）
     pub memory_limit: String,
-    /// Pod 自动清理时间（秒）
+    /// 预留的集群侧清理时间（秒）
+    ///
+    /// 当前执行路径使用显式 `kubectl delete` 清理临时 Pod，
+    /// 该字段保留给未来可能的 Job/TTL 控制策略。
     pub ttl_seconds: u32,
     /// 节点选择器
     pub node_selector: std::collections::HashMap<String, String>,
@@ -116,11 +123,30 @@ impl K8sSandbox {
                     "node" | "javascript" | "js" => ("node", "-e"),
                     "ruby" => ("ruby", "-e"),
                     "perl" => ("perl", "-e"),
+                    "php" => ("php", "-r"),
                     _ => ("sh", "-c"),
                 };
                 vec![interpreter.to_string(), flag.to_string(), code.clone()]
             }
         }
+    }
+
+    async fn delete_pod(&self, pod_name: &str) {
+        let _ = Command::new("kubectl")
+            .args([
+                "delete",
+                "pod",
+                pod_name,
+                "-n",
+                &self.config.namespace,
+                "--grace-period=0",
+                "--force",
+                "--ignore-not-found=true",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
     }
 
     /// 生成 Pod JSON spec 并通过 kubectl run 执行
@@ -132,18 +158,13 @@ impl K8sSandbox {
         let pod_name = format!("echo-sandbox-{}", uuid::Uuid::new_v4().simple());
         let image = self.select_image(command);
         let inner_cmd = Self::build_inner_command(command);
-        let timeout = command.timeout;
+        let timeout = limits
+            .and_then(|l| l.cpu_time_secs)
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(command.timeout);
 
         // 根据 limits 动态设置资源
         let (cpu_req, cpu_lim, mem_req, mem_lim) = if let Some(l) = limits {
-            let cr = l
-                .cpu_time_secs
-                .map(|s| format!("{s}"))
-                .unwrap_or(self.config.cpu_request.clone());
-            let cl = l
-                .cpu_time_secs
-                .map(|s| format!("{}", s * 2))
-                .unwrap_or(self.config.cpu_limit.clone());
             let mr = l
                 .memory_bytes
                 .map(|b| format!("{b}"))
@@ -152,7 +173,12 @@ impl K8sSandbox {
                 .memory_bytes
                 .map(|b| format!("{}", b * 2))
                 .unwrap_or(self.config.memory_limit.clone());
-            (cr, cl, mr, ml)
+            (
+                self.config.cpu_request.clone(),
+                self.config.cpu_limit.clone(),
+                mr,
+                ml,
+            )
         } else {
             (
                 self.config.cpu_request.clone(),
@@ -162,6 +188,15 @@ impl K8sSandbox {
             )
         };
 
+        if let Some(l) = limits
+            && !l.network
+        {
+            warn!(
+                pod = %pod_name,
+                "K8sSandbox cannot fully disable per-pod network access; continuing with cluster defaults"
+            );
+        }
+
         // 构建 kubectl run 命令
         let mut args = vec![
             "run".to_string(),
@@ -169,9 +204,15 @@ impl K8sSandbox {
             format!("--image={image}"),
             format!("--namespace={}", self.config.namespace),
             "--restart=Never".to_string(),
-            "--rm".to_string(),
             "--attach".to_string(),
-            "--stdin=false".to_string(),
+            format!(
+                "--stdin={}",
+                if command.stdin.is_some() {
+                    "true"
+                } else {
+                    "false"
+                }
+            ),
             format!("--requests=cpu={cpu_req},memory={mem_req}"),
             format!("--limits=cpu={cpu_lim},memory={mem_lim}"),
         ];
@@ -211,7 +252,7 @@ impl K8sSandbox {
                         }
                     }],
                     "automountServiceAccountToken": false,
-                    "ttlSecondsAfterFinished": self.config.ttl_seconds
+                    "enableServiceLinks": false
                 }
             })
             .to_string(),
@@ -224,45 +265,53 @@ impl K8sSandbox {
 
         let mut cmd = Command::new("kubectl");
         cmd.args(&args);
+        cmd.stdin(if command.stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        });
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
         let start = Instant::now();
 
-        let child = cmd.spawn().map_err(|e| {
+        let mut child = cmd.spawn().map_err(|e| {
             echo_core::error::ReactError::Sandbox(SandboxError::StartFailed(format!(
                 "Failed to run kubectl: {e}"
             )))
         })?;
 
+        if let Some(input) = command.stdin.as_deref()
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(input.as_bytes()).await.map_err(|e| {
+                echo_core::error::ReactError::Sandbox(SandboxError::IoError(format!(
+                    "Failed to write kubectl stdin: {e}"
+                )))
+            })?;
+        }
+
         match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => Ok(ExecutionResult {
-                exit_code: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                duration: start.elapsed(),
-                sandbox_type: "k8s".to_string(),
-                timed_out: false,
-            }),
-            Ok(Err(e)) => Err(echo_core::error::ReactError::Sandbox(
-                SandboxError::IoError(format!("kubectl IO error: {e}")),
-            )),
+            Ok(Ok(output)) => {
+                self.delete_pod(&pod_name).await;
+                Ok(ExecutionResult {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    duration: start.elapsed(),
+                    sandbox_type: "k8s".to_string(),
+                    timed_out: false,
+                })
+            }
+            Ok(Err(e)) => {
+                self.delete_pod(&pod_name).await;
+                Err(echo_core::error::ReactError::Sandbox(
+                    SandboxError::IoError(format!("kubectl IO error: {e}")),
+                ))
+            }
             Err(_) => {
                 // 超时时删除 Pod 并等待确认
-                let _ = Command::new("kubectl")
-                    .args([
-                        "delete",
-                        "pod",
-                        &pod_name,
-                        "-n",
-                        &self.config.namespace,
-                        "--grace-period=0",
-                        "--force",
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .await;
+                self.delete_pod(&pod_name).await;
 
                 Ok(ExecutionResult {
                     exit_code: -1,
@@ -325,7 +374,7 @@ impl SandboxExecutor for K8sSandbox {
     }
 
     fn isolation_level(&self) -> IsolationLevel {
-        IsolationLevel::MicroVM
+        IsolationLevel::Orchestrated
     }
 
     fn is_available(&self) -> BoxFuture<'_, bool> {
@@ -382,5 +431,12 @@ mod tests {
         let cmd = SandboxCommand::program("ls", vec!["-la".to_string()]);
         let inner = K8sSandbox::build_inner_command(&cmd);
         assert_eq!(inner, vec!["ls", "-la"]);
+    }
+
+    #[test]
+    fn test_inner_command_php() {
+        let cmd = SandboxCommand::code("php", "echo 'hi';");
+        let inner = K8sSandbox::build_inner_command(&cmd);
+        assert_eq!(inner, vec!["php", "-r", "echo 'hi';"]);
     }
 }

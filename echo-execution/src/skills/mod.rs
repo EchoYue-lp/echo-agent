@@ -16,6 +16,9 @@ pub mod registry;
 use echo_core::tools::Tool;
 use std::collections::HashMap;
 use std::path::{Component, Path};
+use std::sync::Arc;
+
+use crate::sandbox::SandboxExecutor;
 
 // -- Convenience re-exports --
 
@@ -27,8 +30,8 @@ pub use echo_core::error::{ReactError, Result, ToolError};
 ///
 /// Uses `Path::components` to detect `ParentDir` ("..") components,
 /// which is more robust than string-level `contains("..")` checks.
-/// Returns `false` if any component is `ParentDir` or if the resolved
-/// path would escape the base directory.
+/// Returns `false` if any component is `ParentDir`, if `sub` is absolute,
+/// or if either side cannot be canonicalized into a path that stays under `base`.
 pub fn is_path_safe(base: &Path, sub: &Path) -> bool {
     // Reject any ParentDir component in the relative path
     for component in sub.components() {
@@ -37,22 +40,26 @@ pub fn is_path_safe(base: &Path, sub: &Path) -> bool {
         }
     }
 
+    if sub.is_absolute() {
+        return false;
+    }
+
     // Verify resolved path stays under base
     if let (Ok(canonical_base), Ok(canonical_sub)) =
         (base.canonicalize(), base.join(sub).canonicalize())
     {
         canonical_sub.starts_with(&canonical_base)
     } else {
-        // If canonicalize fails on base, accept the simple component check
-        sub.components().all(|c| !matches!(c, Component::ParentDir))
+        false
     }
 }
 
 /// Return a minimal environment for subprocess execution.
 ///
 /// Only includes PATH (cleaned) and explicitly passed variables.
-/// This prevents leaking sensitive environment variables (e.g., AWS keys,
-/// API tokens, credentials) to child processes.
+///
+/// Callers must combine this helper with `Command::env_clear()` before adding
+/// the returned entries; the helper itself only constructs the whitelist map.
 pub fn minimal_env(
     skill_dir: &str,
     session_id: &str,
@@ -78,6 +85,9 @@ pub fn minimal_env(
 }
 
 /// Return minimal env for hook execution (skill dir + session only).
+///
+/// As with [`minimal_env`], callers should clear inherited environment
+/// variables before applying this whitelist.
 pub fn minimal_hook_env(skill_dir: &str, session_id: &str) -> HashMap<String, String> {
     let mut env = HashMap::new();
     if let Ok(path) = std::env::var("PATH") {
@@ -115,6 +125,14 @@ pub trait Skill: Send + Sync {
     ///
     /// Each call should return fresh `Box<dyn Tool>` instances.
     fn tools(&self) -> Vec<Box<dyn Tool>>;
+
+    /// Tools provided by this skill, optionally wired to a sandbox-capable executor.
+    ///
+    /// Most skills can ignore the sandbox and fall back to `tools()`. Skills that
+    /// execute code or shell commands may override this to attach the executor.
+    fn tools_with_sandbox(&self, _sandbox: Option<Arc<dyn SandboxExecutor>>) -> Vec<Box<dyn Tool>> {
+        self.tools()
+    }
 
     /// Optional text appended to the agent's system prompt when this skill is installed.
     fn system_prompt_injection(&self) -> Option<String> {
@@ -168,11 +186,21 @@ mod tests {
 
     #[test]
     fn test_is_path_safe_basic() {
-        let base = Path::new("/tmp/skill");
-        assert!(is_path_safe(base, Path::new("scripts/run.py")));
-        assert!(is_path_safe(base, Path::new("README.md")));
-        assert!(!is_path_safe(base, Path::new("../secret.txt")));
-        assert!(!is_path_safe(base, Path::new("foo/../../escape")));
+        let base =
+            std::env::temp_dir().join(format!("echo-execution-skill-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("scripts")).unwrap();
+        std::fs::write(base.join("scripts/run.py"), "print('ok')").unwrap();
+        std::fs::write(base.join("README.md"), "docs").unwrap();
+
+        assert!(is_path_safe(&base, Path::new("scripts/run.py")));
+        assert!(is_path_safe(&base, Path::new("README.md")));
+        assert!(!is_path_safe(&base, Path::new("../secret.txt")));
+        assert!(!is_path_safe(&base, Path::new("foo/../../escape")));
+        assert!(!is_path_safe(&base, Path::new("/etc/passwd")));
+        assert!(!is_path_safe(&base, Path::new("missing.py")));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

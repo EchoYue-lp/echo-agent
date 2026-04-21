@@ -723,6 +723,9 @@ agent.set_circuit_breaker(cb_config);
 
 ## Examples
 
+Examples are classified into `Acceptance`, `Conditional acceptance`, and `Teaching` contracts.
+See `examples/README.md` for the full bucketed inventory and maintenance rules.
+
 | # | Example | Demonstrates |
 |---|---------|-------------|
 | 01 | [`demo01_tools`](examples/demo01_tools.rs) | Custom tools with `#[tool]` |

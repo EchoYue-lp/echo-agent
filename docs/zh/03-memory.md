@@ -2,11 +2,11 @@
 
 ## 是什么
 
-echo-agent 的记忆系统分为两个相互独立的层次，分别解决不同粒度的"记住"问题：
+echo-agent 的记忆系统分为两个核心层次，分别解决不同粒度的"记住"问题：
 
 | 层次 | 接口 | 类比 | 解决的问题 |
 |------|------|------|-----------|
-| **短期记忆** | `Checkpointer` | 录音机 | 同一会话中断后可续接对话 |
+| **短期记忆** | `Checkpointer` | 录音机 | 同一线程在进程重启后可恢复执行上下文 |
 | **长期记忆** | `Store` | 笔记本 | 跨会话保留领域知识和用户偏好 |
 
 这一设计直接对应 LangGraph 的 `Checkpointer`（短期）和 `Store`（长期）两层架构。
@@ -19,7 +19,7 @@ echo-agent 的记忆系统分为两个相互独立的层次，分别解决不同
 
 LLM 的上下文窗口在每次请求结束后就消失了。如果 Agent 在处理长任务时被中断，或者用户想在明天继续昨天的对话，没有 Checkpointer 就需要从头开始。
 
-Checkpointer 在每轮对话结束后自动将完整消息历史保存到磁盘（或内存），下次使用同一 `session_id` 启动时自动恢复，实现**对话连续性**。
+Checkpointer 在每轮对话结束后自动将运行时线程状态保存到磁盘（或内存），下次使用同一 `session_id` 启动时自动恢复，实现**线程连续性**。
 
 ### 工作原理
 
@@ -48,12 +48,13 @@ use echo_agent::prelude::*;
 
 // 方式一：通过 AgentConfig 自动管理（推荐）
 let config = AgentConfig::new("qwen3-max", "assistant", "你是一个助手")
-    .session_id("user-alice-session-1")      // 指定会话 ID
+    .session_id("user-alice-thread-1")       // 线程 ID：用于 Checkpointer 恢复
+    .conversation_id("conv-alice-2026-001") // 可选：用于历史 transcript 投影
     .checkpointer_path("./checkpoints.json"); // 持久化文件路径
 
 let mut agent = ReactAgent::new(config);
-// 首次运行：保存会话历史到文件
-// 再次运行（同 session_id）：自动恢复上次的对话历史
+// 首次运行：保存线程状态到文件
+// 再次运行（同 session_id）：自动恢复上次的线程状态
 let _ = agent.execute("你好").await?;
 
 // 方式二：手动操作 Checkpointer（用于审计、跨 Agent 读取等）
@@ -78,7 +79,7 @@ cp.delete_session("user-alice-session-1").await?;
 
 ### 解决什么问题
 
-Checkpointer 保存的是"对话过程"（消息流），但很多信息不应该以对话形式存储，而是需要以结构化的方式持久保存，例如：
+Checkpointer 保存的是运行时线程状态（消息流和执行连续性），但很多信息不应该以原始对话形式存储，而是需要以结构化方式持久保存，例如：
 - 用户偏好（"偏好古典音乐"）
 - 领域知识（"项目代号是 OMEGA"）
 - 任务成果（"分析结果：斐波那契前10项为..."）
@@ -172,15 +173,15 @@ let namespaces = store.list_namespaces(None).await?;
 用户第 1 天：
   user: "我叫张三，喜欢古典音乐"
   agent → remember("张三喜欢古典音乐")  ← 存入 Store（跨会话永久保存）
-  session 结束 → Checkpointer 保存对话历史
+  session 结束 → Checkpointer 保存线程状态
 
-第 2 天，同一会话继续：
+第 2 天，同一线程继续：
   Checkpointer 恢复：agent 知道昨天说了什么（"帮我写一首诗" 等历史消息）
   user: "推荐一首曲子"
   agent → recall("音乐偏好") → "张三喜欢古典音乐"
   → 推荐巴赫的哥德堡变奏曲
 
-第 3 天，全新会话：
+第 3 天，全新线程：
   Checkpointer: 没有此 session_id → 空的消息历史（不知道第 1 天说了什么）
   user: "推荐一首曲子"
   agent → recall("音乐偏好") → "张三喜欢古典音乐"（Store 还在！）
@@ -205,7 +206,7 @@ let store = InMemoryStore::new();
 
 ## 上下文隔离
 
-每个 Agent 都有独立的 Store namespace 和 Checkpointer session_id：
+每个 Agent 都有独立的 Store namespace 和 Checkpointer `session_id`：
 
 ```
 主 Agent    session_id = "main-001"     namespace = ["main_agent", "memories"]
@@ -214,7 +215,18 @@ SubAgent B  session_id = "sub-b-001"    namespace = ["sub_b", "memories"]
 ```
 
 - SubAgent A 无法读取 SubAgent B 的记忆（不同 namespace）
-- SubAgent A 无法看到主 Agent 的对话历史（不同 session_id）
+- SubAgent A 无法看到主 Agent 的线程状态（不同 session_id）
 - 主 Agent 持有 `Store` 和 `Checkpointer` 对象，可以显式跨 namespace / session 读取（用于审计）
+
+---
+
+## 历史投影
+
+`ConversationStore` 与 `Checkpointer` 是分开的：
+
+- `session_id`：运行时线程标识，只用于恢复 / 续接
+- `conversation_id`：产品层历史标识，只用于把 transcript/history 投影到 `ConversationStore`
+
+如果启用了 `ConversationStore`，应显式设置 `conversation_id`。它已经不再回退使用 `session_id`。
 
 对应示例：`examples/demo14_memory_isolation.rs`

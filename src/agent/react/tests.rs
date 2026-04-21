@@ -2,7 +2,12 @@ use super::ReactAgent;
 use crate::agent::Agent;
 use crate::agent::config::AgentConfig;
 use crate::llm::types::Message;
+use crate::sandbox::SandboxManager;
+use crate::skills::builtin::shell::ShellSkill;
+use crate::skills::external::loader::DiscoveryScope;
+use crate::skills::hooks::{HookAction, HookRule, HooksDefinition};
 use crate::testing::{FailingMockAgent, MockAgent, MockTool};
+use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -547,6 +552,36 @@ fn react_agent_builder_session_id() {
     assert_eq!(agent.config().get_session_id(), Some("session-123"));
 }
 
+#[test]
+fn react_agent_builder_conversation_id() {
+    let agent = crate::agent::ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .conversation_id("conversation-123")
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        agent.config().get_conversation_id(),
+        Some("conversation-123")
+    );
+}
+
+#[test]
+fn react_agent_builder_split_thread_and_conversation_ids() {
+    let agent = crate::agent::ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .session_id("thread-123")
+        .conversation_id("conversation-123")
+        .build()
+        .unwrap();
+
+    assert_eq!(agent.config().get_session_id(), Some("thread-123"));
+    assert_eq!(
+        agent.config().get_conversation_id(),
+        Some("conversation-123")
+    );
+}
+
 // ── ReactAgent 配置预设测试 ───────────────────────────────────────────────────────
 
 #[test]
@@ -778,6 +813,247 @@ fn react_agent_no_human_in_loop_without_flag() {
     // 不启用 human_in_loop 时，工具不应被注册
     let tool_names = agent.tool_names();
     assert!(!tool_names.iter().any(|n| *n == "human_in_loop"));
+}
+
+#[tokio::test]
+async fn add_need_appeal_tool_does_not_nest_runtime_with_permission_service() {
+    let provider = Arc::new(crate::human_loop::HumanLoopManager::new());
+    let service = Arc::new(crate::human_loop::PermissionService::from_provider(
+        provider.clone() as Arc<dyn crate::human_loop::HumanLoopProvider>,
+    ));
+
+    let config = AgentConfig::minimal("model", "agent").enable_human_in_loop(true);
+    let mut agent = ReactAgent::new(config);
+    agent.set_permission_service(service.clone());
+
+    // 修复前这里会在 async 上下文中触发 Handle::current().block_on(...) panic。
+    agent.add_need_appeal_tool(Box::new(MockTool::new("dangerous_tool")));
+
+    agent.flush_pending_permission_rules(service.as_ref()).await;
+
+    let rules = service.all_rules().await;
+    assert!(rules.iter().any(|rule| {
+        matches!(
+            &rule.matcher,
+            echo_core::tools::permission::RuleMatcher::Pattern { pattern }
+                if pattern == "dangerous_tool"
+        )
+    }));
+}
+
+#[tokio::test]
+async fn discover_skills_refreshes_activate_skill_registry() {
+    let base =
+        std::env::temp_dir().join(format!("echo-agent-skill-refresh-{}", std::process::id()));
+    let dir1 = base.join("skills-a").join("skill-one");
+    let dir2 = base.join("skills-b").join("skill-two");
+    tokio::fs::create_dir_all(&dir1).await.unwrap();
+    tokio::fs::create_dir_all(&dir2).await.unwrap();
+
+    tokio::fs::write(
+        dir1.join("SKILL.md"),
+        "---\nname: skill-one\ndescription: first skill\n---\n\nUse skill one.\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        dir2.join("SKILL.md"),
+        "---\nname: skill-two\ndescription: second skill\n---\n\nUse skill two.\n",
+    )
+    .await
+    .unwrap();
+
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+
+    agent
+        .discover_skills(&[DiscoveryScope::Custom(base.join("skills-a"))])
+        .await
+        .unwrap();
+
+    let first_params = agent
+        .tool_manager
+        .get_tool("activate_skill")
+        .expect("activate_skill should be registered")
+        .parameters()
+        .to_string();
+    assert!(first_params.contains("skill-one"));
+    assert!(!first_params.contains("skill-two"));
+
+    let first_activation = agent
+        .tool_manager
+        .execute_tool(
+            "activate_skill",
+            [("name".to_string(), json!("skill-one"))].into(),
+        )
+        .await
+        .unwrap();
+    assert!(first_activation.success);
+    assert!(first_activation.output.contains("Use skill one."));
+
+    agent
+        .discover_skills(&[DiscoveryScope::Custom(base.join("skills-b"))])
+        .await
+        .unwrap();
+
+    let second_params = agent
+        .tool_manager
+        .get_tool("activate_skill")
+        .expect("activate_skill should stay registered")
+        .parameters()
+        .to_string();
+    assert!(second_params.contains("skill-one"));
+    assert!(second_params.contains("skill-two"));
+
+    let repeat_activation = agent
+        .tool_manager
+        .execute_tool(
+            "activate_skill",
+            [("name".to_string(), json!("skill-one"))].into(),
+        )
+        .await
+        .unwrap();
+    assert!(repeat_activation.success);
+    assert!(repeat_activation.output.contains("already activated"));
+
+    let second_activation = agent
+        .tool_manager
+        .execute_tool(
+            "activate_skill",
+            [("name".to_string(), json!("skill-two"))].into(),
+        )
+        .await
+        .unwrap();
+    assert!(second_activation.success);
+    assert!(second_activation.output.contains("Use skill two."));
+
+    let _ = tokio::fs::remove_dir_all(base).await;
+}
+
+#[tokio::test]
+async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    agent.add_tool(Box::new(
+        MockTool::new("test_tool").with_response("tool ok"),
+    ));
+
+    let mut hooks = agent.hook_registry.write().await;
+    hooks.register(
+        "hook-skill",
+        "/tmp",
+        HooksDefinition {
+            pre_tool_use: vec![HookRule {
+                matcher: "test_tool".into(),
+                hooks: vec![HookAction::Prompt {
+                    prompt: "pre-hook guidance".into(),
+                }],
+            }],
+            post_tool_use: vec![HookRule {
+                matcher: "test_tool".into(),
+                hooks: vec![HookAction::Prompt {
+                    prompt: "post-hook guidance".into(),
+                }],
+            }],
+        },
+    );
+    drop(hooks);
+
+    let result = agent.execute_tool("test_tool", &json!({})).await.unwrap();
+    assert_eq!(result, "tool ok");
+
+    let messages: Vec<String> = agent
+        .get_messages()
+        .iter()
+        .filter_map(|m| m.content.as_text_ref().map(str::to_string))
+        .collect();
+    assert!(messages.iter().any(|m| m.contains("pre-hook guidance")));
+    assert!(messages.iter().any(|m| m.contains("post-hook guidance")));
+}
+
+#[tokio::test]
+async fn shell_skill_uses_agent_sandbox_manager_when_present() {
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    agent.set_sandbox_manager(Arc::new(SandboxManager::local_only()));
+    agent.add_skill(Box::new(ShellSkill::new()));
+
+    let result = agent
+        .execute_tool("shell", &json!({"command": "echo sandboxed"}))
+        .await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().contains("sandboxed"));
+}
+
+#[tokio::test]
+async fn activate_skill_enforces_context_path_for_conditional_skills() {
+    let base = std::env::temp_dir().join(format!(
+        "echo-agent-conditional-skill-{}",
+        std::process::id()
+    ));
+    let skill_dir = base.join("python-linter");
+    tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+    tokio::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: python-linter\ndescription: Lint Python files\npaths:\n  - \"*.py\"\n---\n\nLint the current Python file.\n",
+    )
+    .await
+    .unwrap();
+
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    agent
+        .discover_skills(&[DiscoveryScope::Custom(base.clone())])
+        .await
+        .unwrap();
+
+    let missing = agent
+        .tool_manager
+        .execute_tool(
+            "activate_skill",
+            [("name".to_string(), json!("python-linter"))].into(),
+        )
+        .await
+        .unwrap();
+    assert!(!missing.success);
+    assert!(missing.error.unwrap_or_default().contains("context_path"));
+
+    let mismatch = agent
+        .tool_manager
+        .execute_tool(
+            "activate_skill",
+            [
+                ("name".to_string(), json!("python-linter")),
+                ("context_path".to_string(), json!("src/main.rs")),
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    assert!(!mismatch.success);
+    assert!(
+        mismatch
+            .error
+            .unwrap_or_default()
+            .contains("cannot be activated")
+    );
+
+    let matched = agent
+        .tool_manager
+        .execute_tool(
+            "activate_skill",
+            [
+                ("name".to_string(), json!("python-linter")),
+                ("context_path".to_string(), json!("app.py")),
+            ]
+            .into(),
+        )
+        .await
+        .unwrap();
+    assert!(matched.success);
+    assert!(matched.output.contains("Lint the current Python file."));
+
+    let _ = tokio::fs::remove_dir_all(base).await;
 }
 
 // ── Agent 任务规划工具测试 ───────────────────────────────────────────────────────

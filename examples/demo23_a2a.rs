@@ -113,6 +113,13 @@ async fn main() -> echo_agent::error::Result<()> {
         serde_json::to_string_pretty(&request).unwrap()
     );
     let response = server.handle_request(&request.to_string()).await;
+    let response_json: serde_json::Value = serde_json::from_str(&response)?;
+    if response_json.get("result").is_none() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo23 验收失败：A2A 同步请求未返回 result".to_string(),
+        )
+        .into());
+    }
     println!("\n响应: {}\n", response);
 
     // ── 5. 流式任务演示 ──────────────────────────────────────
@@ -130,47 +137,50 @@ async fn main() -> echo_agent::error::Result<()> {
         }
     });
 
-    match server
+    let mut event_stream = server
         .handle_request_stream(&stream_request.to_string())
-        .await
-    {
-        Ok(mut event_stream) => {
-            while let Some(event) = event_stream.next().await {
-                match &event {
-                    A2AStreamEvent::StatusUpdate(e) => {
-                        println!("[状态] {} (final={})", e.status.state, e.is_final);
-                        if e.is_final {
-                            break;
-                        }
-                    }
-                    A2AStreamEvent::ArtifactUpdate(e) => {
-                        let text: String = e
-                            .artifact
-                            .parts
-                            .iter()
-                            .filter_map(|p| match p {
-                                A2APart::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect();
-                        let label = if e.artifact.append {
-                            "追加"
-                        } else {
-                            "新建"
-                        };
-                        println!(
-                            "[产出 #{} {}] {}",
-                            e.artifact.index.unwrap_or(0),
-                            label,
-                            text
-                        );
-                    }
+        .await?;
+    let mut saw_final = false;
+    let mut artifact_updates = 0usize;
+    while let Some(event) = event_stream.next().await {
+        match &event {
+            A2AStreamEvent::StatusUpdate(e) => {
+                println!("[状态] {} (final={})", e.status.state, e.is_final);
+                if e.is_final {
+                    saw_final = true;
+                    break;
                 }
             }
+            A2AStreamEvent::ArtifactUpdate(e) => {
+                artifact_updates += 1;
+                let text: String = e
+                    .artifact
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        A2APart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let label = if e.artifact.append {
+                    "追加"
+                } else {
+                    "新建"
+                };
+                println!(
+                    "[产出 #{} {}] {}",
+                    e.artifact.index.unwrap_or(0),
+                    label,
+                    text
+                );
+            }
         }
-        Err(e) => {
-            println!("流式请求失败: {}", e);
-        }
+    }
+    if !saw_final && artifact_updates == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo23 验收失败：A2A 流式请求既没有终态也没有任何产出".to_string(),
+        )
+        .into());
     }
 
     // ── 6. A2A Client 使用 ───────────────────────────────────

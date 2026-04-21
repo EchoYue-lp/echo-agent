@@ -11,7 +11,7 @@
 use futures::future::BoxFuture;
 
 use crate::error::ToolError;
-use crate::memory::store::{Store, StoreItem};
+use crate::memory::store::{SearchQuery, Store, StoreItem};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -300,11 +300,12 @@ impl Tool for ForgetTool {
 
 // ── SearchMemoryTool ─────────────────────────────────────────────────────────
 
-/// 在持久化 Store 中进行语义搜索（基于 embedding 相似度）
+/// 在持久化 Store 中进行混合搜索（关键词 + embedding）
 ///
-/// 与 `RecallTool`（关键词搜索）不同，本工具走
-/// [`Store::semantic_search`]，对接 EmbeddingStore 时可利用向量相似度
-/// 获得更精准的召回结果。当 Store 不支持语义搜索时自动降级为关键词搜索。
+/// 与 `RecallTool`（仅关键词搜索）不同，本工具优先走
+/// [`Store::search_with`] 的 `Hybrid` 模式，对接支持 embedding 的 Store 时
+/// 可同时利用向量相似度和关键词匹配；当底层 Store 不支持混合搜索时，
+/// 会显式回退到关键词搜索。
 pub struct SearchMemoryTool {
     pub store: Arc<dyn Store>,
     pub namespace: Vec<String>,
@@ -326,9 +327,9 @@ impl Tool for SearchMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "使用语义搜索在持久记忆库中查找最相关的历史记忆。\
-         支持自然语言查询，可按语义相似度匹配而非仅关键词匹配。\
-         当底层 Store 支持 embedding 时效果最佳。"
+        "使用混合检索在持久记忆库中查找最相关的历史记忆。\
+         支持自然语言查询，优先结合关键词与语义相似度进行召回。\
+         当底层 Store 不支持混合检索时会回退到关键词搜索。"
     }
 
     fn parameters(&self) -> Value {
@@ -366,19 +367,29 @@ impl Tool for SearchMemoryTool {
                 .map(|n| n.clamp(1, 20) as usize)
                 .unwrap_or(5);
 
-            debug!(query = %query, limit = limit, "🔎 search_memory 语义搜索 Store");
+            debug!(query = %query, limit = limit, "🔎 search_memory 混合检索 Store");
 
             let ns: Vec<&str> = self.ns_refs();
-            let items = self.store.semantic_search(&ns, query, limit).await?;
+            let items = match self
+                .store
+                .search_with(&ns, SearchQuery::hybrid(query, limit))
+                .await
+            {
+                Ok(items) => items,
+                Err(err) if format!("{err}").contains("hybrid search") => {
+                    self.store.search(&ns, query, limit).await?
+                }
+                Err(err) => return Err(err),
+            };
 
             if items.is_empty() {
                 return Ok(ToolResult::success(format!(
-                    "未找到与「{}」语义相关的记忆。",
+                    "未找到与「{}」相关的记忆。",
                     query
                 )));
             }
 
-            let mut lines = vec![format!("语义搜索找到 {} 条相关记忆：", items.len())];
+            let mut lines = vec![format!("混合检索找到 {} 条相关记忆：", items.len())];
             for (i, item) in items.iter().enumerate() {
                 lines.push(format!(
                     "{}. [ID:{}] {}",

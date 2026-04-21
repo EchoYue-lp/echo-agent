@@ -1,6 +1,6 @@
-//! 短期会话记忆持久化（Checkpointer）
+//! 短期线程状态持久化（Checkpointer）
 //!
-//! 按 `session_id` 将对话历史序列化到存储后端，支持跨进程恢复同一会话。
+//! 按 `session_id` 将运行时线程状态序列化到存储后端，支持跨进程恢复同一线程。
 //!
 //! ## 内置实现
 //!
@@ -29,6 +29,7 @@ use echo_core::error::{MemoryError, Result};
 use echo_core::llm::types::Message;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,8 +47,47 @@ pub struct Checkpoint {
     pub checkpoint_id: String,
     /// 该时刻的完整消息历史
     pub messages: Vec<Message>,
+    /// 父级快照 ID，用于表示 checkpoint lineage。
+    #[serde(default)]
+    pub parent_checkpoint_id: Option<String>,
+    /// 与该线程状态一起持久化的摘要信息。
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// 自定义元数据（如执行阶段、来源、标签）。
+    #[serde(default)]
+    pub metadata: Option<Value>,
     /// 创建时间（Unix 秒）
     pub created_at: u64,
+}
+
+/// 线程级运行时状态。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThreadState {
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+impl ThreadState {
+    pub fn from_messages(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            summary: None,
+            metadata: None,
+        }
+    }
+}
+
+impl Checkpoint {
+    pub fn thread_state(&self) -> ThreadState {
+        ThreadState {
+            messages: self.messages.clone(),
+            summary: self.summary.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
 }
 
 // ── Checkpointer trait ────────────────────────────────────────────────────────
@@ -74,6 +114,20 @@ pub trait Checkpointer: Send + Sync {
 
     /// 列出所有已存在的 session_id
     fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>>;
+
+    /// 保存完整线程状态，默认退化为仅保存消息列表。
+    fn put_state<'a>(
+        &'a self,
+        session_id: &'a str,
+        state: ThreadState,
+    ) -> BoxFuture<'a, Result<String>> {
+        self.put(session_id, state.messages)
+    }
+
+    /// 获取最新线程状态，默认从最新 checkpoint 中恢复。
+    fn get_state<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<ThreadState>>> {
+        Box::pin(async move { Ok(self.get(session_id).await?.map(|cp| cp.thread_state())) })
+    }
 }
 
 // ── InMemoryCheckpointer ──────────────────────────────────────────────────────
@@ -140,6 +194,9 @@ impl Checkpointer for InMemoryCheckpointer {
                 session_id: session_id.to_string(),
                 checkpoint_id: checkpoint_id.clone(),
                 messages,
+                parent_checkpoint_id: None,
+                summary: None,
+                metadata: None,
                 created_at: now_secs(),
             };
             self.data
@@ -187,6 +244,32 @@ impl Checkpointer for InMemoryCheckpointer {
 
     fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>> {
         Box::pin(async move { Ok(self.data.read().await.keys().cloned().collect()) })
+    }
+
+    fn put_state<'a>(
+        &'a self,
+        session_id: &'a str,
+        state: ThreadState,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let checkpoint_id = new_checkpoint_id();
+            let checkpoint = Checkpoint {
+                session_id: session_id.to_string(),
+                checkpoint_id: checkpoint_id.clone(),
+                messages: state.messages,
+                parent_checkpoint_id: None,
+                summary: state.summary,
+                metadata: state.metadata,
+                created_at: now_secs(),
+            };
+            self.data
+                .write()
+                .await
+                .entry(session_id.to_string())
+                .or_default()
+                .push(checkpoint);
+            Ok(checkpoint_id)
+        })
     }
 }
 
@@ -294,6 +377,9 @@ impl Checkpointer for FileCheckpointer {
                 session_id: session_id.to_string(),
                 checkpoint_id: checkpoint_id.clone(),
                 messages,
+                parent_checkpoint_id: None,
+                summary: None,
+                metadata: None,
                 created_at: now_secs(),
             };
             info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "🔖 保存 Checkpoint");
@@ -347,6 +433,34 @@ impl Checkpointer for FileCheckpointer {
 
     fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>> {
         Box::pin(async move { Ok(self.data.read().await.keys().cloned().collect()) })
+    }
+
+    fn put_state<'a>(
+        &'a self,
+        session_id: &'a str,
+        state: ThreadState,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let checkpoint_id = new_checkpoint_id();
+            let checkpoint = Checkpoint {
+                session_id: session_id.to_string(),
+                checkpoint_id: checkpoint_id.clone(),
+                messages: state.messages,
+                parent_checkpoint_id: None,
+                summary: state.summary,
+                metadata: state.metadata,
+                created_at: now_secs(),
+            };
+            info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "🔖 保存线程状态");
+            {
+                let mut data = self.data.write().await;
+                data.entry(session_id.to_string())
+                    .or_default()
+                    .push(checkpoint);
+            }
+            self.flush().await?;
+            Ok(checkpoint_id)
+        })
     }
 }
 
@@ -472,6 +586,9 @@ mod tests {
             session_id: "test-session".to_string(),
             checkpoint_id: "cp-123".to_string(),
             messages: vec![Message::user("test".to_string())],
+            parent_checkpoint_id: None,
+            summary: None,
+            metadata: None,
             created_at: 1234567890,
         };
 

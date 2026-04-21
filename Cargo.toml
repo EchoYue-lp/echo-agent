@@ -3,7 +3,7 @@ members = [".", "echo-core", "echo-macros", "echo-execution", "echo-integration"
 
 [package]
 name = "echo_agent"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 
 [features]
@@ -27,12 +27,12 @@ data = ["dep:polars"]
 channels = []
 
 [dependencies]
-echo_core = { version = "1.3.0", path = "echo-core", features = ["reqwest", "guard"] }
-echo_macros = { version = "1.3.0", path = "echo-macros" }
-echo_execution = { version = "1.3.0", path = "echo-execution" }
-echo_integration = { version = "1.3.0", path = "echo-integration" }
-echo_state = { version = "1.3.0", path = "echo-state" }
-echo_orchestration = { version = "1.3.0", path = "echo-orchestration" }
+echo_core = { version = "1.4.0", path = "echo-core", features = ["reqwest", "guard"] }
+echo_macros = { version = "1.4.0", path = "echo-macros" }
+echo_execution = { version = "1.4.0", path = "echo-execution" }
+echo_integration = { version = "1.4.0", path = "echo-integration" }
+echo_state = { version = "1.4.0", path = "echo-state" }
+echo_orchestration = { version = "1.4.0", path = "echo-orchestration" }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }

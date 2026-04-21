@@ -48,6 +48,10 @@ impl CodeQualityTool {
             call_count: Arc::new(AtomicUsize::new(0)),
         }
     }
+
+    fn counter(&self) -> Arc<AtomicUsize> {
+        self.call_count.clone()
+    }
 }
 
 impl Tool for CodeQualityTool {
@@ -116,7 +120,21 @@ impl Tool for CodeQualityTool {
 }
 
 /// CI/CD 状态检查工具
-struct CiCheckTool;
+struct CiCheckTool {
+    call_count: Arc<AtomicUsize>,
+}
+
+impl CiCheckTool {
+    fn new() -> Self {
+        Self {
+            call_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn counter(&self) -> Arc<AtomicUsize> {
+        self.call_count.clone()
+    }
+}
 
 impl Tool for CiCheckTool {
     fn name(&self) -> &str {
@@ -144,6 +162,7 @@ impl Tool for CiCheckTool {
         &self,
         params: ToolParameters,
     ) -> BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
             let pipeline = params
                 .get("pipeline")
@@ -220,9 +239,10 @@ async fn demo_external_skills() -> Result<()> {
 
     let skills_dir = std::path::Path::new("skills");
     if !skills_dir.exists() {
-        println!("  [跳过] ./skills/ 目录不存在");
-        println!("  提示: 创建 skills/ 目录并添加 SKILL.md 文件以启用此功能\n");
-        return Ok(());
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：缺少 skills/ 目录，无法验证外部技能系统".to_string(),
+        )
+        .into());
     }
 
     let mut agent = ReactAgentBuilder::new()
@@ -238,11 +258,30 @@ async fn demo_external_skills() -> Result<()> {
         .discover_skills(&[DiscoveryScope::Custom(skills_dir.into())])
         .await?;
 
+    if discovered.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：未发现任何外部技能".to_string(),
+        )
+        .into());
+    }
+
     println!("  ✓ 发现 {} 个技能:", discovered.len());
     println!("  ✓ 总技能数: {}", agent.skill_count());
 
     // 列出已注册的工具
     let tools = agent.list_tools();
+    let registered_skill_tools = tools
+        .iter()
+        .filter(|tool| {
+            tool.starts_with("activate_") || tool.starts_with("read_") || tool.starts_with("run_")
+        })
+        .count();
+    if registered_skill_tools == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：发现了技能但未注册任何 skill 相关工具".to_string(),
+        )
+        .into());
+    }
     println!("  ✓ 自动注册工具: {} 个", tools.len());
 
     for tool in &tools {
@@ -297,14 +336,14 @@ async fn demo_plan_execute() -> Result<()> {
 
     println!("  任务: {}\n", task);
 
-    match agent.execute(task).await {
-        Ok(result) => {
-            println!("\n  ✓ 最终结果:\n  {}\n", result);
-        }
-        Err(e) => {
-            println!("\n  ✗ 执行失败: {}\n", e);
-        }
+    let result = agent.execute(task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：Plan-and-Execute 返回空结果".to_string(),
+        )
+        .into());
     }
+    println!("\n  ✓ 最终结果:\n  {}\n", result);
 
     Ok(())
 }
@@ -327,7 +366,9 @@ async fn demo_dynamic_tools() -> Result<()> {
         .build()?;
 
     // Phase 1: 开发阶段工具
-    agent.add_tool(Box::new(CodeQualityTool::new()));
+    let quality_tool = CodeQualityTool::new();
+    let quality_counter = quality_tool.counter();
+    agent.add_tool(Box::new(quality_tool));
 
     println!("  Phase 1: 开发阶段");
     println!("  可用工具: {:?}\n", agent.tool_names());
@@ -336,28 +377,66 @@ async fn demo_dynamic_tools() -> Result<()> {
 
     println!("  任务: {}\n", task1);
 
-    match agent.execute(task1).await {
-        Ok(result) => println!("  ✓ 结果: {}\n", result),
-        Err(e) => println!("  ✗ 失败: {}\n", e),
+    let result1 = agent.execute(task1).await?;
+    if result1.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：开发阶段任务返回空结果".to_string(),
+        )
+        .into());
     }
+    if quality_counter.load(Ordering::SeqCst) == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：开发阶段未实际调用 code_quality 工具".to_string(),
+        )
+        .into());
+    }
+    println!("  ✓ 结果: {}\n", result1);
 
     // Phase 2: 切换到运维阶段工具
     println!("  ─────────────────────────────────────────────────");
     println!("  Phase 2: 运维阶段（切换工具）\n");
 
     agent.remove_tool("code_quality");
-    agent.add_tool(Box::new(CiCheckTool));
+    let ci_tool = CiCheckTool::new();
+    let ci_counter = ci_tool.counter();
+    agent.add_tool(Box::new(ci_tool));
 
     println!("  可用工具: {:?}\n", agent.tool_names());
+    if agent
+        .tool_names()
+        .iter()
+        .any(|name| *name == "code_quality")
+    {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：切换工具后 code_quality 仍然存在".to_string(),
+        )
+        .into());
+    }
+    if !agent.tool_names().iter().any(|name| *name == "ci_check") {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：切换工具后 ci_check 未注册".to_string(),
+        )
+        .into());
+    }
 
     let task2 = "检查 main 管道的 CI/CD 状态";
 
     println!("  任务: {}\n", task2);
 
-    match agent.execute(task2).await {
-        Ok(result) => println!("  ✓ 结果: {}\n", result),
-        Err(e) => println!("  ✗ 失败: {}\n", e),
+    let result2 = agent.execute(task2).await?;
+    if result2.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：运维阶段任务返回空结果".to_string(),
+        )
+        .into());
     }
+    if ci_counter.load(Ordering::SeqCst) == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：运维阶段未实际调用 ci_check 工具".to_string(),
+        )
+        .into());
+    }
+    println!("  ✓ 结果: {}\n", result2);
 
     Ok(())
 }
@@ -415,6 +494,8 @@ async fn demo_workflow_stream() -> Result<()> {
 
     let state = SharedState::new();
     let mut stream = graph.run_stream(state).await?;
+    let mut completed = false;
+    let mut completed_steps = 0usize;
 
     while let Some(event) = stream.next().await {
         match event? {
@@ -434,12 +515,21 @@ async fn demo_workflow_stream() -> Result<()> {
                 elapsed,
                 ..
             } => {
+                completed = true;
+                completed_steps = total_steps;
                 println!("\n  ✓ 流水线执行完成");
                 println!("  总步骤数: {}", total_steps);
                 println!("  总耗时: {:?}", elapsed);
             }
             _ => {}
         }
+    }
+
+    if !completed || completed_steps != 4 {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "综合验收失败：Workflow 未按预期完成（completed={completed}, steps={completed_steps}）"
+        ))
+        .into());
     }
 
     println!();
@@ -474,7 +564,13 @@ async fn demo_topology_tracking() -> Result<()> {
     let task = "检查这段代码的质量";
     println!("  任务: {}\n", task);
 
-    let _ = agent.execute(task).await;
+    let result = agent.execute(task).await?;
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：拓扑追踪任务返回空结果".to_string(),
+        )
+        .into());
+    }
 
     // 显示拓扑图
     println!("  拓扑图 (Mermaid 格式):\n");
@@ -486,6 +582,12 @@ async fn demo_topology_tracking() -> Result<()> {
     println!("    节点数: {}", stats.node_count);
     println!("    边数: {}", stats.edge_count);
     println!("    总调用: {}", stats.total_calls);
+    if stats.total_calls == 0 || stats.node_count == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：TopologyTracker 未记录任何调用".to_string(),
+        )
+        .into());
+    }
 
     println!();
 
@@ -520,6 +622,12 @@ async fn demo_agent_handoff() -> Result<()> {
     manager.register("analyst", analyst);
 
     println!("  已注册 Agent: {:?}\n", manager.registered_agents());
+    if manager.registered_agents().len() != 2 {
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：HandoffManager 注册的 Agent 数量不正确".to_string(),
+        )
+        .into());
+    }
 
     // 场景：技术问题转给开发者，业务问题转给分析师
     let scenarios = vec![
@@ -533,15 +641,22 @@ async fn demo_agent_handoff() -> Result<()> {
         let target = HandoffTarget::new(expected_agent).with_message(task);
         let context = HandoffContext::new().with_source("user");
 
-        match manager.handoff(target, context).await {
-            Ok(result) => {
-                println!("    → 转发给: {}", result.target_agent);
-                println!("    → 结果: {}", result.output);
-            }
-            Err(e) => {
-                println!("    → 错误: {}", e);
-            }
+        let result = manager.handoff(target, context).await?;
+        if result.target_agent != expected_agent {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "综合验收失败：handoff 目标错误，预期 `{expected_agent}`，实际 `{}`",
+                result.target_agent
+            ))
+            .into());
         }
+        if result.output.trim().is_empty() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "综合验收失败：handoff 到 `{expected_agent}` 返回空结果"
+            ))
+            .into());
+        }
+        println!("    → 转发给: {}", result.target_agent);
+        println!("    → 结果: {}", result.output);
         println!();
     }
 

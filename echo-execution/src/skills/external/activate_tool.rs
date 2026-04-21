@@ -44,7 +44,8 @@ impl Tool for ActivateSkillTool {
 
     fn description(&self) -> &str {
         "Activate a skill to load its full instructions and available resources. \
-         Call this when a task matches one of the available skills listed in the system prompt."
+         Call this when a task matches one of the available skills listed in the system prompt. \
+         For skills with `paths` constraints, also provide `context_path` for the touched file."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -65,6 +66,11 @@ impl Tool for ActivateSkillTool {
                     "type": "string",
                     "description": "Optional arguments to pass to the skill (space-separated). \
                                     Available inside skill content as ${ARGUMENTS}, ${1}, ${2}, etc."
+                },
+                "context_path": {
+                    "type": "string",
+                    "description": "Optional touched file path for conditional activation. \
+                                    Required when the target skill declares `paths` constraints."
                 }
             },
             "required": ["name"]
@@ -88,7 +94,33 @@ impl Tool for ActivateSkillTool {
                 .map(String::from)
                 .collect();
 
+            let context_path = parameters
+                .get("context_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+
             let mut registry = self.registry.write().await;
+
+            if let Some(descriptor) = registry.get_descriptor(&name)
+                && !descriptor.paths.is_empty()
+            {
+                let Some(path) = context_path.as_deref() else {
+                    return Ok(ToolResult::error(format!(
+                        "Skill '{}' requires a matching context_path because it declares activation paths: {}",
+                        name,
+                        descriptor.paths.join(", ")
+                    )));
+                };
+
+                if !descriptor.matches_context_path(path) {
+                    return Ok(ToolResult::error(format!(
+                        "Skill '{}' cannot be activated for context_path '{}'; expected one of: {}",
+                        name,
+                        path,
+                        descriptor.paths.join(", ")
+                    )));
+                }
+            }
 
             if registry.is_activated(&name) {
                 return Ok(ToolResult::success(format!(

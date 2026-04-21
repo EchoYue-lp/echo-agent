@@ -1,6 +1,8 @@
 //! 对话持久化 Store
 //!
 //! 提供对话历史的结构化存储，支持多用户、多 Agent 隔离。
+//! 该层是面向产品与历史浏览的 transcript/read-model 仓库，
+//! 不作为 runtime 恢复的 source of truth。
 //! 内置 SQLite 实现（`SqliteConversationStore`），可替换为其他后端。
 //!
 //! ## 快速上手
@@ -37,7 +39,9 @@
 //! # }
 //! ```
 
+use chrono::Utc;
 use echo_core::error::Result;
+use echo_core::llm::types::Message;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
@@ -177,4 +181,59 @@ pub trait ConversationStore: Send + Sync {
 
     /// 获取消息数量
     fn count_messages<'a>(&'a self, conversation_id: &'a str) -> BoxFuture<'a, Result<usize>>;
+
+    /// 若不存在则创建对话，存在时返回已有记录。
+    fn ensure_conversation<'a>(
+        &'a self,
+        conv: NewConversation,
+    ) -> BoxFuture<'a, Result<Conversation>> {
+        Box::pin(async move {
+            let conversation_id = conv.conversation_id.clone();
+            if let Some(existing) = self.get_conversation(&conversation_id).await? {
+                Ok(existing)
+            } else {
+                self.create_conversation(conv).await
+            }
+        })
+    }
+}
+
+/// 将运行时 Message 列表投影为可持久化的 transcript 记录。
+pub fn project_messages(conversation_id: &str, messages: &[Message]) -> Result<Vec<StoredMessage>> {
+    messages
+        .iter()
+        .map(|message| project_message(conversation_id, message))
+        .collect()
+}
+
+/// 将单条运行时 Message 投影为 transcript 记录。
+pub fn project_message(conversation_id: &str, message: &Message) -> Result<StoredMessage> {
+    let tool_calls_json = message
+        .tool_calls
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
+    let tool_result_json = if message.role == "tool" {
+        Some(
+            serde_json::json!({
+                "tool_call_id": message.tool_call_id,
+                "name": message.name,
+            })
+            .to_string(),
+        )
+    } else {
+        None
+    };
+
+    Ok(StoredMessage {
+        id: None,
+        conversation_id: conversation_id.to_string(),
+        role: message.role.clone(),
+        content: message.text_content(),
+        attachments_json: None,
+        tool_calls_json,
+        tool_result_json,
+        created_at: Utc::now().to_rfc3339(),
+    })
 }

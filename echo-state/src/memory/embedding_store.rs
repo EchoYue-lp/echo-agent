@@ -1,7 +1,7 @@
 //! 向量增强 Store（EmbeddingStore）
 //!
 //! 在任意 [`Store`] 实现外包装一层向量索引，透传所有 KV 操作，
-//! 覆盖 [`semantic_search`](Store::semantic_search) 以提供余弦相似度检索。
+//! 并通过 [`Store::search_with`] 提供语义/混合检索能力。
 //!
 //! ## 存储分层
 //!
@@ -31,7 +31,7 @@
 //! ```
 
 use super::embedder::Embedder;
-use super::store::{Store, StoreItem};
+use super::store::{SearchMode, SearchQuery, Store, StoreItem};
 use crate::util::expand_tilde;
 use echo_core::error::{MemoryError, Result};
 use futures::future::BoxFuture;
@@ -198,6 +198,55 @@ impl EmbeddingStore {
     pub async fn flush_vector_index(&self) -> Result<()> {
         self.flush_index().await
     }
+
+    async fn semantic_search_impl(
+        &self,
+        namespace: &[&str],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<StoreItem>> {
+        let ns_key = namespace.join("/");
+
+        let query_vec = match self.embedder.embed(query).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "⚠️ 查询嵌入计算失败，回退到关键词检索");
+                return self.inner.search(namespace, query, limit).await;
+            }
+        };
+
+        let scored: Vec<(f32, String)> = {
+            let index = self.index.read().await;
+            let Some(ns_vecs) = index.get_namespace(&ns_key) else {
+                debug!(ns = %ns_key, "向量索引为空，回退到关键词检索");
+                drop(index);
+                return self.inner.search(namespace, query, limit).await;
+            };
+            let mut scored: Vec<(f32, String)> = ns_vecs
+                .iter()
+                .take(self.max_candidates)
+                .map(|(key, vec)| (cosine_similarity(&query_vec, vec), key.clone()))
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(limit);
+            scored
+        };
+
+        if scored.is_empty() {
+            return Ok(vec![]);
+        }
+
+        debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
+
+        let mut results = Vec::with_capacity(scored.len());
+        for (score, key) in scored {
+            if let Ok(Some(mut item)) = self.inner.get(namespace, &key).await {
+                item.score = Some(score);
+                results.push(item);
+            }
+        }
+        Ok(results)
+    }
 }
 
 impl Store for EmbeddingStore {
@@ -265,61 +314,52 @@ impl Store for EmbeddingStore {
         Box::pin(async move { self.inner.list_namespaces(prefix).await })
     }
 
-    fn supports_semantic_search(&self) -> bool {
-        true
-    }
-
-    fn semantic_search<'a>(
+    fn search_with<'a>(
         &'a self,
         namespace: &'a [&'a str],
-        query: &'a str,
-        limit: usize,
+        query: SearchQuery<'a>,
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
-            let ns_key = namespace.join("/");
-
-            // 计算查询向量，失败时回退到关键词检索
-            let query_vec = match self.embedder.embed(query).await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(error = %e, "⚠️ 查询嵌入计算失败，回退到关键词检索");
-                    return self.inner.search(namespace, query, limit).await;
+            match query.mode {
+                SearchMode::Keyword => self.inner.search(namespace, query.text, query.limit).await,
+                SearchMode::Semantic => {
+                    self.semantic_search_impl(namespace, query.text, query.limit)
+                        .await
                 }
-            };
-
-            // 余弦相似度打分（限制最多加载 max_candidates 个向量，避免 OOM）
-            let scored: Vec<(f32, String)> = {
-                let index = self.index.read().await;
-                let Some(ns_vecs) = index.get_namespace(&ns_key) else {
-                    debug!(ns = %ns_key, "向量索引为空，回退到关键词检索");
-                    drop(index);
-                    return self.inner.search(namespace, query, limit).await;
-                };
-                let mut scored: Vec<(f32, String)> = ns_vecs
-                    .iter()
-                    .take(self.max_candidates)
-                    .map(|(key, vec)| (cosine_similarity(&query_vec, vec), key.clone()))
-                    .collect();
-                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                scored.truncate(limit);
-                scored
-            };
-
-            if scored.is_empty() {
-                return Ok(vec![]);
-            }
-
-            debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
-
-            // 按匹配 key 取出完整条目
-            let mut results = Vec::with_capacity(scored.len());
-            for (score, key) in scored {
-                if let Ok(Some(mut item)) = self.inner.get(namespace, &key).await {
-                    item.score = Some(score);
-                    results.push(item);
+                SearchMode::Hybrid => {
+                    let mut merged: HashMap<String, StoreItem> = HashMap::new();
+                    for item in self
+                        .semantic_search_impl(namespace, query.text, query.limit)
+                        .await?
+                    {
+                        merged.insert(item.key.clone(), item);
+                    }
+                    for item in self
+                        .inner
+                        .search(namespace, query.text, query.limit)
+                        .await?
+                    {
+                        merged
+                            .entry(item.key.clone())
+                            .and_modify(|existing| {
+                                let incoming = item.score.unwrap_or_default();
+                                if incoming > existing.score.unwrap_or_default() {
+                                    *existing = item.clone();
+                                }
+                            })
+                            .or_insert(item);
+                    }
+                    let mut items: Vec<StoreItem> = merged.into_values().collect();
+                    items.sort_by(|a, b| {
+                        b.score
+                            .unwrap_or_default()
+                            .partial_cmp(&a.score.unwrap_or_default())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    items.truncate(query.limit);
+                    Ok(items)
                 }
             }
-            Ok(results)
         })
     }
 }
@@ -372,12 +412,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_supports_semantic_search() {
-        let store = make_store().await;
-        assert!(store.supports_semantic_search());
-    }
-
-    #[tokio::test]
     async fn test_put_and_semantic_search() {
         let store = make_store().await;
         let ns = &["test", "ns"];
@@ -391,7 +425,10 @@ mod tests {
             .await
             .unwrap();
 
-        let results = store.semantic_search(ns, "Rust", 5).await.unwrap();
+        let results = store
+            .search_with(ns, SearchQuery::semantic("Rust", 5))
+            .await
+            .unwrap();
         assert!(!results.is_empty());
         assert!(results[0].score.is_some());
     }

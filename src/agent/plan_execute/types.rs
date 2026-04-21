@@ -531,14 +531,14 @@ impl PlanStep {
     ///
     /// # 参数
     /// * `deps` - 依赖的步骤标识符列表，格式为 `"step_N"`（其中 N 为步骤索引）或步骤描述关键词
-    ///            （后者在规划阶段会被自动解析为对应的步骤索引）
     ///
     /// # 示例
-    /// ```
-    /// use crate::agent::plan_execute::types::PlanStep;
+    /// ```rust
+    /// use echo_agent::agent::plan_execute::PlanStep;
     ///
     /// let step = PlanStep::new("优化数据库查询")
     ///     .with_dependencies(vec!["step_0".to_string(), "step_1".to_string()]);
+    /// let _ = step;
     /// ```
     pub fn with_dependencies(mut self, deps: Vec<String>) -> Self {
         self.dependencies = deps;
