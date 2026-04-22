@@ -314,6 +314,10 @@ impl Store for EmbeddingStore {
         Box::pin(async move { self.inner.list_namespaces(prefix).await })
     }
 
+    fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move { self.inner.list(namespace).await })
+    }
+
     fn search_with<'a>(
         &'a self,
         namespace: &'a [&'a str],

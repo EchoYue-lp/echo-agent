@@ -51,16 +51,13 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 // ── SqliteStore ─────────────────────────────────────────────────────────────
 
 /// SQLite 持久化 Store，支持 FTS5 全文检索与可选向量搜索
 pub struct SqliteStore {
-    conn: Mutex<Connection>,
     embedder: Option<Arc<dyn Embedder>>,
-    #[allow(dead_code)]
     path: PathBuf,
 }
 
@@ -81,17 +78,7 @@ impl SqliteStore {
             std::fs::create_dir_all(parent).map_err(|e| memory_io_error("创建目录失败", e))?;
         }
 
-        let conn =
-            Connection::open(&path).map_err(|e| memory_io_error("打开 SQLite 数据库失败", e))?;
-
-        // 性能优化
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA cache_size=10000;
-             PRAGMA temp_store=MEMORY;",
-        )
-        .map_err(|e| memory_io_error("SQLite PRAGMA 设置失败", e))?;
+        let conn = Self::open_connection_at(&path)?;
 
         Self::init_tables(&conn)?;
 
@@ -106,11 +93,24 @@ impl SqliteStore {
             "🗄️ SqliteStore 初始化"
         );
 
-        Ok(Self {
-            conn: Mutex::new(conn),
-            embedder,
-            path,
-        })
+        Ok(Self { embedder, path })
+    }
+
+    fn open_connection_at(path: &Path) -> Result<Connection> {
+        let conn =
+            Connection::open(path).map_err(|e| memory_io_error("打开 SQLite 数据库失败", e))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=10000;
+             PRAGMA temp_store=MEMORY;",
+        )
+        .map_err(|e| memory_io_error("SQLite PRAGMA 设置失败", e))?;
+        Ok(conn)
+    }
+
+    fn open_connection(&self) -> Result<Connection> {
+        Self::open_connection_at(&self.path)
     }
 
     fn init_tables(conn: &Connection) -> Result<()> {
@@ -321,7 +321,7 @@ impl SqliteStore {
         };
 
         let scored = {
-            let conn = self.conn.lock().await;
+            let conn = self.open_connection()?;
             let mut stmt = conn
                 .prepare("SELECT key, vector FROM store_vectors WHERE namespace = ?1")
                 .map_err(|e| memory_io_error("查询向量表失败", e))?;
@@ -353,7 +353,7 @@ impl SqliteStore {
 
         debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
 
-        let conn = self.conn.lock().await;
+        let conn = self.open_connection()?;
         let mut results = Vec::with_capacity(scored.len());
         for (score, key) in scored {
             let row = conn.query_row(
@@ -401,7 +401,7 @@ impl Store for SqliteStore {
             let now = now_secs() as i64;
 
             {
-                let mut conn = self.conn.lock().await;
+                let mut conn = self.open_connection()?;
 
                 // Wrap main table write, FTS update, and vector table update in a transaction.
                 // If any step fails, the whole transaction rolls back.
@@ -442,7 +442,7 @@ impl Store for SqliteStore {
                 match embedder.embed(&search_text).await {
                     Ok(vec) => {
                         let bytes = Self::vec_to_bytes(&vec);
-                        let conn = self.conn.lock().await;
+                        let conn = self.open_connection()?;
                         conn.execute(
                             "INSERT INTO store_vectors (namespace, key, vector)
                              VALUES (?1, ?2, ?3)
@@ -469,7 +469,7 @@ impl Store for SqliteStore {
     ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
         Box::pin(async move {
             let ns_key = namespace.join("/");
-            let conn = self.conn.lock().await;
+            let conn = self.open_connection()?;
 
             let result = conn.query_row(
                 "SELECT value, created_at, updated_at FROM store_items
@@ -510,7 +510,7 @@ impl Store for SqliteStore {
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
             let ns_key = namespace.join("/");
-            let conn = self.conn.lock().await;
+            let conn = self.open_connection()?;
 
             // FTS5 查询语法：将空格分隔的词用 OR 连接
             let keywords: Vec<&str> = query
@@ -548,25 +548,42 @@ impl Store for SqliteStore {
                 .collect()
             };
 
-            // FTS5 无结果时回退到 LIKE 模糊匹配（适用于 CJK 等非拉丁文字）
+            // FTS5 无结果时回退到 LIKE 模糊匹配（适用于 CJK 等非拉丁文字）。
+            // 对多关键词查询，按单个关键词分别匹配，而不是要求原文包含整段连续子串。
             if matched_keys.is_empty() {
                 debug!(namespace = %ns_key, query = %query, "FTS5 无结果，回退到 LIKE 模糊匹配");
-                let like_pattern = format!("%{}%", query.replace('%', "\\%"));
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT f.key FROM store_fts f
-                         WHERE f.namespace = ?1 AND f.content LIKE ?2
-                         LIMIT ?3",
-                    )
-                    .map_err(|e| memory_io_error("LIKE 查询准备失败", e))?;
+                let mut fallback_keys = Vec::new();
+                for keyword in &keywords {
+                    let like_pattern = format!("%{}%", keyword.replace('%', "\\%"));
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT f.key FROM store_fts f
+                             WHERE f.namespace = ?1 AND f.content LIKE ?2
+                             LIMIT ?3",
+                        )
+                        .map_err(|e| memory_io_error("LIKE 查询准备失败", e))?;
 
-                let fallback_keys: Vec<String> = stmt
-                    .query_map(params![ns_key, like_pattern, limit as i64], |row| {
-                        row.get::<_, String>(0)
-                    })
-                    .map_err(|e| memory_io_error("LIKE 查询失败", e))?
-                    .filter_map(|r| r.ok())
-                    .collect();
+                    let current_limit = (limit.saturating_sub(fallback_keys.len())).max(1) as i64;
+                    let keyword_keys = stmt
+                        .query_map(params![ns_key, like_pattern, current_limit], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .map_err(|e| memory_io_error("LIKE 查询失败", e))?
+                        .filter_map(|r| r.ok());
+
+                    for key in keyword_keys {
+                        if !fallback_keys.iter().any(|existing| existing == &key) {
+                            fallback_keys.push(key);
+                            if fallback_keys.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+
+                    if fallback_keys.len() >= limit {
+                        break;
+                    }
+                }
 
                 return self.fetch_items(&conn, namespace, &ns_key, &fallback_keys, None);
             }
@@ -590,7 +607,7 @@ impl Store for SqliteStore {
     fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
             let ns_key = namespace.join("/");
-            let conn = self.conn.lock().await;
+            let conn = self.open_connection()?;
 
             let affected = conn
                 .execute(
@@ -621,7 +638,7 @@ impl Store for SqliteStore {
         prefix: Option<&'a [&'a str]>,
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
         Box::pin(async move {
-            let conn = self.conn.lock().await;
+            let conn = self.open_connection()?;
 
             let namespaces: Vec<Vec<String>> = match prefix {
                 Some(p) => {
@@ -651,6 +668,37 @@ impl Store for SqliteStore {
             };
 
             Ok(namespaces)
+        })
+    }
+
+    fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let conn = self.open_connection()?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT namespace, key, value, created_at, updated_at \
+                     FROM store_items WHERE namespace = ?1",
+                )
+                .map_err(|e| memory_io_error("list items failed", e))?;
+            let items = stmt
+                .query_map(params![ns_key], |row| {
+                    let ns_str: String = row.get(0)?;
+                    let namespace: Vec<String> = ns_str.split('/').map(String::from).collect();
+                    Ok(StoreItem {
+                        namespace,
+                        key: row.get(1)?,
+                        value: serde_json::from_str(&row.get::<_, String>(2)?)
+                            .unwrap_or(Value::Null),
+                        created_at: row.get::<_, i64>(3)? as u64,
+                        updated_at: row.get::<_, i64>(4)? as u64,
+                        score: None,
+                    })
+                })
+                .map_err(|e| memory_io_error("list items failed", e))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(items)
         })
     }
 
@@ -837,6 +885,44 @@ mod tests {
         assert!(!results.is_empty());
         // "dark" only appears in k1
         assert_eq!(results[0].key, "k1");
+    }
+
+    #[tokio::test]
+    async fn test_fts5_like_fallback_supports_cjk_spaced_keywords() {
+        let store = temp_db();
+        let ns = &["search", "cjk"];
+
+        store
+            .put(ns, "k1", json!({"content": "这条记忆会在数据库关闭后保留"}))
+            .await
+            .unwrap();
+
+        let results = store.search(ns, "记忆 保留", 5).await.unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].key, "k1");
+    }
+
+    #[tokio::test]
+    async fn test_fts5_persists_across_store_instances() {
+        let dir = std::env::temp_dir().join(format!("echo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let ns = &["persist", "fts"];
+
+        {
+            let store = SqliteStore::new(&db_path).unwrap();
+            store
+                .put(ns, "k1", json!({"content": "这条记忆会在数据库关闭后保留"}))
+                .await
+                .unwrap();
+        }
+
+        {
+            let store = SqliteStore::new(&db_path).unwrap();
+            let results = store.search(ns, "记忆 保留", 5).await.unwrap();
+            assert!(!results.is_empty());
+            assert_eq!(results[0].key, "k1");
+        }
     }
 
     #[tokio::test]

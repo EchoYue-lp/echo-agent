@@ -5,6 +5,7 @@ use crate::llm::ToolDefinition;
 use crate::llm::types::Message;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use futures::stream::StreamExt as _;
 use serde_json::Value;
 pub use tokio_util::sync::CancellationToken;
 
@@ -236,13 +237,36 @@ pub trait Agent: Send + Sync {
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>>;
 
     /// Execute a task with cooperative cancellation support.
+    ///
+    /// The default implementation wraps [`Self::execute_stream`] with a
+    /// cancellation-aware wrapper. When `cancel` is triggered, the stream
+    /// yields [`AgentEvent::Cancelled`] and terminates.
     fn execute_stream_with_cancel<'a>(
         &'a mut self,
         task: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let _ = cancel;
-        self.execute_stream(task)
+        Box::pin(async move {
+            let mut stream = self.execute_stream(task).await?;
+            let wrapped = async_stream::try_stream! {
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            yield AgentEvent::Cancelled;
+                            break;
+                        }
+                        next = stream.next() => {
+                            match next {
+                                Some(event) => yield event?,
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            };
+
+            Ok(Box::pin(wrapped) as BoxStream<'a, Result<AgentEvent>>)
+        })
     }
 
     /// Alias of [`Self::execute`] for chat-centric call sites.
@@ -259,13 +283,36 @@ pub trait Agent: Send + Sync {
     }
 
     /// Chat streaming variant with cooperative cancellation support.
+    ///
+    /// The default implementation wraps [`Self::chat_stream`] with a
+    /// cancellation-aware wrapper. When `cancel` is triggered, the stream
+    /// yields [`AgentEvent::Cancelled`] and terminates.
     fn chat_stream_with_cancel<'a>(
         &'a mut self,
         message: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let _ = cancel;
-        self.chat_stream(message)
+        Box::pin(async move {
+            let mut stream = self.chat_stream(message).await?;
+            let wrapped = async_stream::try_stream! {
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            yield AgentEvent::Cancelled;
+                            break;
+                        }
+                        next = stream.next() => {
+                            match next {
+                                Some(event) => yield event?,
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            };
+
+            Ok(Box::pin(wrapped) as BoxStream<'a, Result<AgentEvent>>)
+        })
     }
 
     /// Reset in-memory conversational state.

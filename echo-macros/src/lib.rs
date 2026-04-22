@@ -1,7 +1,18 @@
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{FnArg, ImplItem, ItemFn, ItemImpl, LitStr, Pat, ReturnType, parse_macro_input};
+
+fn echo_agent_crate_path() -> syn::Result<syn::Path> {
+    match crate_name("echo_agent").map_err(|e| syn::Error::new(Span::call_site(), e.to_string()))? {
+        FoundCrate::Itself => Ok(syn::parse_quote!(::echo_agent)),
+        FoundCrate::Name(name) => {
+            let ident = syn::Ident::new(&name, Span::call_site());
+            Ok(syn::parse_quote!(::#ident))
+        }
+    }
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // #[tool] — 从 async fn 生成 TypedTool 实现
@@ -105,6 +116,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let echo_agent = echo_agent_crate_path()?;
     let tool_name = &attrs.name;
     let tool_desc = &attrs.description;
     let fn_name = &func.sig.ident;
@@ -126,10 +138,10 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
         quote! {}
     } else {
         let perms = attrs.permissions.iter().map(|p| {
-            quote! { ::echo_agent::tools::permission::ToolPermission::#p }
+            quote! { #echo_agent::tools::permission::ToolPermission::#p }
         });
         quote! {
-            fn permissions(&self) -> Vec<::echo_agent::tools::permission::ToolPermission> {
+            fn permissions(&self) -> Vec<#echo_agent::tools::permission::ToolPermission> {
                 vec![#(#perms),*]
             }
         }
@@ -143,13 +155,13 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 
         pub struct #struct_name;
 
-        impl ::echo_agent::tools::TypedTool for #struct_name {
+        impl #echo_agent::tools::TypedTool for #struct_name {
             type Params = #params_name;
 
             fn name(&self) -> &str { #tool_name }
             fn description(&self) -> &str { #tool_desc }
 
-            fn execute_typed(&self, params: #params_name) -> ::futures::future::BoxFuture<'_, ::echo_agent::error::Result<::echo_agent::tools::ToolResult>> {
+            fn execute_typed(&self, params: #params_name) -> ::futures::future::BoxFuture<'_, #echo_agent::error::Result<#echo_agent::tools::ToolResult>> {
                 Box::pin(async move {
                     let #params_name { #(#param_names),* } = params;
                     #body
@@ -196,11 +208,12 @@ pub fn callback(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn callback_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
+    let echo_agent = echo_agent_crate_path()?;
     let self_ty = &input.self_ty;
     let method_impls = impl_block_to_boxfuture_methods(&input, "()")?;
 
     Ok(quote! {
-        impl ::echo_agent::agent::AgentCallback for #self_ty {
+        impl #echo_agent::agent::AgentCallback for #self_ty {
             #(#method_impls)*
         }
     })
@@ -262,6 +275,7 @@ pub fn guard(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn guard_impl(attrs: NameAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let echo_agent = echo_agent_crate_path()?;
     let guard_name = &attrs.name;
     let struct_name = format_ident!("{}Guard", to_pascal_case(&guard_name.replace('-', "_")));
     require_return_type(&func)?;
@@ -270,14 +284,14 @@ fn guard_impl(attrs: NameAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
     Ok(quote! {
         pub struct #struct_name;
 
-        impl ::echo_agent::guard::Guard for #struct_name {
+        impl #echo_agent::guard::Guard for #struct_name {
             fn name(&self) -> &str { #guard_name }
 
             fn check<'a>(
                 &'a self,
                 content: &'a str,
-                direction: ::echo_agent::guard::GuardDirection,
-            ) -> ::futures::future::BoxFuture<'a, ::echo_agent::error::Result<::echo_agent::guard::GuardResult>> {
+                direction: #echo_agent::guard::GuardDirection,
+            ) -> ::futures::future::BoxFuture<'a, #echo_agent::error::Result<#echo_agent::guard::GuardResult>> {
                 Box::pin(async move #body)
             }
         }
@@ -321,11 +335,12 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn handler_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
+    let echo_agent = echo_agent_crate_path()?;
     let self_ty = &input.self_ty;
     let method_impls = extract_boxfuture_methods_with_return(&input)?;
 
     Ok(quote! {
-        impl ::echo_agent::human_loop::HumanLoopHandler for #self_ty {
+        impl #echo_agent::human_loop::HumanLoopHandler for #self_ty {
             #(#method_impls)*
         }
     })
@@ -359,6 +374,7 @@ pub fn compressor(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn compressor_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let echo_agent = echo_agent_crate_path()?;
     let fn_name = &func.sig.ident;
     let struct_name = format_ident!("{}Compressor", to_pascal_case(&fn_name.to_string()));
     require_return_type(&func)?;
@@ -367,11 +383,11 @@ fn compressor_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     Ok(quote! {
         pub struct #struct_name;
 
-        impl ::echo_agent::compression::ContextCompressor for #struct_name {
+        impl #echo_agent::compression::ContextCompressor for #struct_name {
             fn compress(
                 &self,
-                input: ::echo_agent::compression::CompressionInput,
-            ) -> ::futures::future::BoxFuture<'_, ::echo_agent::error::Result<::echo_agent::compression::CompressionOutput>> {
+                input: #echo_agent::compression::CompressionInput,
+            ) -> ::futures::future::BoxFuture<'_, #echo_agent::error::Result<#echo_agent::compression::CompressionOutput>> {
                 Box::pin(async move #body)
             }
         }
@@ -403,6 +419,7 @@ pub fn permission_policy(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn permission_policy_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let echo_agent = echo_agent_crate_path()?;
     let fn_name = &func.sig.ident;
     let struct_name = format_ident!("{}Policy", to_pascal_case(&fn_name.to_string()));
     require_return_type(&func)?;
@@ -411,12 +428,12 @@ fn permission_policy_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream>
     Ok(quote! {
         pub struct #struct_name;
 
-        impl ::echo_agent::tools::permission::PermissionPolicy for #struct_name {
+        impl #echo_agent::tools::permission::PermissionPolicy for #struct_name {
             fn check<'a>(
                 &'a self,
                 tool_name: &'a str,
-                permissions: &'a [::echo_agent::tools::permission::ToolPermission],
-            ) -> ::futures::future::BoxFuture<'a, ::echo_agent::tools::permission::PermissionDecision> {
+                permissions: &'a [#echo_agent::tools::permission::ToolPermission],
+            ) -> ::futures::future::BoxFuture<'a, #echo_agent::tools::permission::PermissionDecision> {
                 Box::pin(async move #body)
             }
         }
@@ -460,11 +477,12 @@ pub fn audit_logger(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn audit_logger_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
+    let echo_agent = echo_agent_crate_path()?;
     let self_ty = &input.self_ty;
     let method_impls = extract_boxfuture_methods_with_return(&input)?;
 
     Ok(quote! {
-        impl ::echo_agent::audit::AuditLogger for #self_ty {
+        impl #echo_agent::audit::AuditLogger for #self_ty {
             #(#method_impls)*
         }
     })

@@ -103,7 +103,29 @@ impl TokenManager {
             ChannelError::NetworkError(format!("QQ token response parse error: {}", e))
         })?;
 
-        debug!("QQ Bot: token response = {:?}", json);
+        // Redact access_token in debug logs
+        let redacted = {
+            let j = json.clone();
+            if let Some(obj) = j.as_object() {
+                let mut redacted_obj = obj.clone();
+                if redacted_obj.contains_key("accessToken") {
+                    redacted_obj.insert(
+                        "accessToken".to_string(),
+                        serde_json::Value::String("***REDACTED***".to_string()),
+                    );
+                }
+                if redacted_obj.contains_key("access_token") {
+                    redacted_obj.insert(
+                        "access_token".to_string(),
+                        serde_json::Value::String("***REDACTED***".to_string()),
+                    );
+                }
+                serde_json::Value::Object(redacted_obj)
+            } else {
+                json.clone()
+            }
+        };
+        debug!("QQ Bot: token response = {:?}", redacted);
 
         // QQ API 返回字段可能是 access_token (snake_case) 或 accessToken (camelCase)
         let token = json
@@ -111,10 +133,25 @@ impl TokenManager {
             .or_else(|| json.get("access_token"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ReactError::Channel(ChannelError::AuthError(format!(
-                    "QQ token response missing accessToken, got: {:?}",
-                    json
-                )))
+                // Redact token from error message
+                let err_msg = format!("QQ token response missing accessToken, got: {:?}", {
+                    let j = json.clone();
+                    if let Some(obj) = j.as_object() {
+                        let mut redacted_obj = obj.clone();
+                        for key in &[
+                            "accessToken",
+                            "access_token",
+                            "clientSecret",
+                            "client_secret",
+                        ] {
+                            redacted_obj.remove(*key);
+                        }
+                        serde_json::Value::Object(redacted_obj)
+                    } else {
+                        json.clone()
+                    }
+                });
+                ReactError::Channel(ChannelError::AuthError(err_msg))
             })?
             .to_string();
 

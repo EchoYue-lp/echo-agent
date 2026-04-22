@@ -8,50 +8,11 @@
 use futures::future::BoxFuture;
 use serde_json::Value;
 
-use super::security::{ResourceLimits, SecurityConfig, create_safe_regex};
+use super::security::{SecurityConfig, create_safe_regex};
 use crate::error::{Result, ToolError};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
 const TOOL_NAME: &str = "text_tools";
-
-/// 验证文件路径并返回规范化的路径
-fn validate_file_path(path_str: &str, limits: &ResourceLimits) -> Result<std::path::PathBuf> {
-    let path = std::path::Path::new(path_str);
-
-    // 1. 检查是否为绝对路径
-    if !path.is_absolute() {
-        return Err(ToolError::InvalidPath {
-            path: path_str.to_string(),
-            reason: "路径必须是绝对路径".to_string(),
-        }
-        .into());
-    }
-
-    // 2. 检查文件是否存在
-    if !path.exists() {
-        return Err(ToolError::ExecutionFailed {
-            tool: TOOL_NAME.to_string(),
-            message: "文件不存在".to_string(),
-        }
-        .into());
-    }
-
-    // 3. 检查文件大小
-    let metadata = std::fs::metadata(path).map_err(|e| ToolError::ExecutionFailed {
-        tool: TOOL_NAME.to_string(),
-        message: format!("获取文件信息失败: {}", e),
-    })?;
-
-    if metadata.len() > limits.max_file_size {
-        return Err(ToolError::FileTooLarge {
-            size: metadata.len(),
-            max: limits.max_file_size,
-        }
-        .into());
-    }
-
-    Ok(path.to_path_buf())
-}
 
 /// 文本文件读取工具
 pub struct TextReadTool;
@@ -111,7 +72,7 @@ impl Tool for TextReadTool {
             let _encoding = parameters.get("encoding").and_then(|v| v.as_str());
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(file_path, &security.limits)?;
+            let path = security.validate_file(file_path)?;
 
             // 读取文件
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
@@ -223,7 +184,7 @@ impl Tool for TextSearchTool {
                 .unwrap_or(false);
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(file_path, &security.limits)?;
+            let path = security.validate_file(file_path)?;
 
             // 读取文件
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
@@ -340,7 +301,7 @@ impl Tool for TextStatsTool {
                 .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(file_path, &security.limits)?;
+            let path = security.validate_file(file_path)?;
 
             // 读取文件
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
@@ -445,7 +406,7 @@ impl Tool for TextProcessTool {
                 .unwrap_or(10) as usize;
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(file_path, &security.limits)?;
+            let path = security.validate_file(file_path)?;
 
             // 读取文件
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
@@ -553,7 +514,7 @@ impl Tool for TextExportTool {
             let operation = parameters.get("operation").and_then(|v| v.as_str());
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(input_file, &security.limits)?;
+            let path = security.validate_file(input_file)?;
 
             // 读取文件
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
@@ -581,7 +542,7 @@ impl Tool for TextExportTool {
             }
 
             // 创建输出目录
-            let output_path = std::path::Path::new(output_file);
+            let output_path = security.validate_output_file(output_file)?;
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),

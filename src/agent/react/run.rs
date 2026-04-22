@@ -14,7 +14,7 @@ use crate::guard::GuardDirection;
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopRequest, HumanLoopResponse};
 use crate::llm::types::{FunctionCall, Message, ToolCall as LlmToolCall};
-use crate::llm::{chat, stream_chat};
+use crate::llm::{ChatRequest, chat, stream_chat};
 use crate::memory::checkpointer::ThreadState;
 use crate::memory::conversation::{NewConversation, project_messages};
 use crate::memory::store::SearchQuery;
@@ -24,6 +24,7 @@ use futures::future::join_all;
 use futures::stream::BoxStream;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 // ── 流式执行模式 ─────────────────────────────────────────────────────────────
@@ -108,6 +109,47 @@ where
     }
 
     result
+}
+
+fn compute_concurrent_tool_batch_timeout(
+    config: &crate::tools::ToolExecutionConfig,
+    tool_count: usize,
+    max_concurrency: Option<usize>,
+) -> Option<Duration> {
+    if tool_count == 0 || config.timeout_ms == 0 {
+        return None;
+    }
+
+    let attempts_per_tool = if config.retry_on_fail {
+        u64::from(config.max_retries) + 1
+    } else {
+        1
+    };
+
+    let retry_delay_total_ms = if config.retry_on_fail {
+        (1..=config.max_retries)
+            .map(|attempt| config.retry_delay_ms * (1u64 << u64::from((attempt - 1).min(5))))
+            .sum::<u64>()
+    } else {
+        0
+    };
+
+    let per_wave_budget_ms = config
+        .timeout_ms
+        .saturating_mul(attempts_per_tool)
+        .saturating_add(retry_delay_total_ms);
+
+    let waves = match max_concurrency {
+        Some(0) | None => 1,
+        Some(limit) => tool_count.div_ceil(limit) as u64,
+    };
+
+    let grace_ms = 250u64.saturating_mul(waves);
+    Some(Duration::from_millis(
+        per_wave_budget_ms
+            .saturating_mul(waves)
+            .saturating_add(grace_ms),
+    ))
 }
 
 impl ReactAgent {
@@ -524,6 +566,56 @@ impl ReactAgent {
         }
     }
 
+    async fn log_user_input_audit(&self, content: &str) {
+        if let Some(al) = &self.audit_logger {
+            let event = crate::audit::AuditEvent::now(
+                self.config.session_id.clone(),
+                self.config.agent_name.clone(),
+                crate::audit::AuditEventType::UserInput {
+                    content: content.to_string(),
+                },
+            );
+            let _ = al.log(event).await;
+        }
+    }
+
+    async fn log_tool_call_audit(
+        &self,
+        tool: &str,
+        input: &Value,
+        output: &str,
+        success: bool,
+        duration_ms: u64,
+    ) {
+        if let Some(al) = &self.audit_logger {
+            let event = crate::audit::AuditEvent::now(
+                self.config.session_id.clone(),
+                self.config.agent_name.clone(),
+                crate::audit::AuditEventType::ToolCall {
+                    tool: tool.to_string(),
+                    input: input.clone(),
+                    output: output.to_string(),
+                    success,
+                    duration_ms,
+                },
+            );
+            let _ = al.log(event).await;
+        }
+    }
+
+    async fn log_final_answer_audit(&self, content: &str) {
+        if let Some(al) = &self.audit_logger {
+            let event = crate::audit::AuditEvent::now(
+                self.config.session_id.clone(),
+                self.config.agent_name.clone(),
+                crate::audit::AuditEventType::FinalAnswer {
+                    content: content.to_string(),
+                },
+            );
+            let _ = al.log(event).await;
+        }
+    }
+
     /// 重置消息历史，仅保留 system prompt，确保每次执行互不干扰
     pub(crate) fn reset_messages(&mut self) {
         self.context.clear();
@@ -714,6 +806,7 @@ impl ReactAgent {
             effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         }
 
+        let execution_start = std::time::Instant::now();
         let result = self
             .tool_manager
             .execute_tool(tool_name, effective_params)
@@ -722,6 +815,7 @@ impl ReactAgent {
                 error,
                 hook_messages: hook_messages.clone(),
             })?;
+        let duration_ms = execution_start.elapsed().as_millis() as u64;
 
         // ── PostToolUse hooks ──
         let is_hook_post = {
@@ -755,6 +849,8 @@ impl ReactAgent {
                 for cb in callbacks.iter() {
                     cb.on_tool_end(&agent, tool_name, &guard_output).await;
                 }
+                self.log_tool_call_audit(tool_name, input, &guard_output, true, duration_ms)
+                    .await;
                 return Ok(ToolExecutionOutcome {
                     output: guard_output,
                     hook_messages,
@@ -764,6 +860,8 @@ impl ReactAgent {
             for cb in callbacks.iter() {
                 cb.on_tool_end(&agent, tool_name, &result.output).await;
             }
+            self.log_tool_call_audit(tool_name, input, &result.output, true, duration_ms)
+                .await;
             Ok(ToolExecutionOutcome {
                 output: result.output,
                 hook_messages,
@@ -776,11 +874,13 @@ impl ReactAgent {
             warn!(agent = %agent, tool = %tool_name, error = %error_msg, "💥 工具执行失败");
             let err = ReactError::from(ToolError::ExecutionFailed {
                 tool: tool_name.to_string(),
-                message: error_msg,
+                message: error_msg.clone(),
             });
             for cb in &callbacks {
                 cb.on_tool_error(&agent, tool_name, &err).await;
             }
+            self.log_tool_call_audit(tool_name, input, &error_msg, false, duration_ms)
+                .await;
             if soften_errors && tool_name != TOOL_FINAL_ANSWER {
                 warn!(
                     agent = %agent,
@@ -923,6 +1023,8 @@ impl ReactAgent {
         let client = self.client.clone();
         let model_name = self.config.model_name.clone();
         let response_format = self.config.response_format.clone();
+        let temperature = self.config.temperature;
+        let max_tokens = self.config.max_tokens;
 
         // 熔断器检查
         let circuit_breaker = self.circuit_breaker.clone();
@@ -935,36 +1037,53 @@ impl ReactAgent {
             )));
         }
 
-        let response_result =
+        let message = if let Some(llm_client) = self.llm_client.clone() {
+            let request = ChatRequest {
+                messages: messages.clone(),
+                temperature: self.config.temperature,
+                max_tokens: self.config.max_tokens,
+                tools: Some(tools.clone()),
+                tool_choice: None,
+                response_format: response_format.clone(),
+            };
             retry_llm_call(&agent, max_retries, retry_delay, &circuit_breaker, || {
-                let client = client.clone();
-                let model_name = model_name.as_str();
-                let messages = &messages;
-                let tools = tools.clone();
-                let response_format = response_format.clone();
-                async move {
-                    chat(
-                        client,
-                        model_name,
-                        messages,
-                        Some(0.7),
-                        Some(8192u32),
-                        Some(false),
-                        Some(tools),
-                        None,
-                        response_format,
-                    )
-                    .await
-                }
+                let llm_client = llm_client.clone();
+                let request = request.clone();
+                async move { llm_client.chat(request).await.map(|resp| resp.message) }
             })
-            .await;
+            .await?
+        } else {
+            let response_result =
+                retry_llm_call(&agent, max_retries, retry_delay, &circuit_breaker, || {
+                    let client = client.clone();
+                    let model_name = model_name.as_str();
+                    let messages = &messages;
+                    let tools = tools.clone();
+                    let response_format = response_format.clone();
+                    async move {
+                        chat(
+                            client,
+                            model_name,
+                            messages,
+                            temperature,
+                            max_tokens,
+                            Some(false),
+                            Some(tools),
+                            None,
+                            response_format,
+                        )
+                        .await
+                    }
+                })
+                .await;
 
-        let message = response_result?
-            .choices
-            .first()
-            .ok_or(ReactError::Agent(AgentError::NoResponse))?
-            .message
-            .clone();
+            response_result?
+                .choices
+                .first()
+                .ok_or(ReactError::Agent(AgentError::NoResponse))?
+                .message
+                .clone()
+        };
 
         if let Some(tool_calls) = &message.tool_calls {
             self.context.push(message.clone());
@@ -1026,9 +1145,9 @@ impl ReactAgent {
             return Ok(last_thought.filter(|s| !s.is_empty()));
         }
 
+        let max_concurrency = self.tool_manager.max_concurrency();
         if tool_calls.len() > 1 {
             let tool_names: Vec<&str> = tool_calls.iter().map(|(_, n, _)| n.as_str()).collect();
-            let max_concurrency = self.tool_manager.max_concurrency();
             info!(
                 agent = %agent,
                 tools = ?tool_names,
@@ -1070,7 +1189,26 @@ impl ReactAgent {
                         .instrument(info_span!("tool_execute", tool.name = %name))
                 })
                 .collect();
-            join_all(futures).await
+            let batch_timeout = compute_concurrent_tool_batch_timeout(
+                &self.config.tool_execution,
+                futures.len(),
+                max_concurrency,
+            );
+
+            if let Some(timeout) = batch_timeout {
+                match tokio::time::timeout(timeout, join_all(futures)).await {
+                    Ok(results) => results,
+                    Err(_) => {
+                        return Err(ToolError::Timeout(format!(
+                            "parallel tool batch exceeded total timeout after {:?}",
+                            timeout
+                        ))
+                        .into());
+                    }
+                }
+            } else {
+                join_all(futures).await
+            }
         };
 
         // Push concurrent results to context
@@ -1189,6 +1327,8 @@ impl ReactAgent {
             }
         }
 
+        self.log_user_input_audit(message).await;
+
         match self.recall_long_term_memories(message).await {
             Ok(items) if !items.is_empty() => {
                 debug!(agent = %agent, count = items.len(), "📚 注入相关长期记忆");
@@ -1262,6 +1402,7 @@ impl ReactAgent {
                 }
                 info!(agent = %agent, "🏁 执行完毕");
 
+                self.log_final_answer_audit(&answer).await;
                 self.persist_runtime_state().await;
 
                 return Ok(answer);
@@ -1336,6 +1477,8 @@ impl ReactAgent {
         let client = self.client.clone();
         let model_name = self.config.model_name.clone();
         let response_format = self.config.response_format.clone();
+        let temperature = self.config.temperature;
+        let max_tokens = self.config.max_tokens;
 
         info!(agent = %agent, model = %model_name, "📡 创建 LLM 流式请求");
 
@@ -1352,8 +1495,8 @@ impl ReactAgent {
                         client,
                         &model_name,
                         messages,
-                        Some(0.7),
-                        Some(8192u32),
+                        temperature,
+                        max_tokens,
                         tools_for_stream,
                         None,
                         response_format,
@@ -1473,6 +1616,8 @@ impl ReactAgent {
                 yield AgentEvent::MemoryRecalled { count: recalled };
             }
 
+            self.log_user_input_audit(&input).await;
+
             for iteration in 0..self.config.max_iterations {
                 for cb in &callbacks {
                     cb.on_iteration(&agent, iteration).await;
@@ -1557,11 +1702,13 @@ impl ReactAgent {
                         ));
 
                         if function_name == TOOL_FINAL_ANSWER {
+                            self.auto_snapshot(iteration);
                             for cb in &callbacks {
                                 cb.on_final_answer(&agent, &result).await;
                             }
                             info!(agent = %agent, "🏁 流式执行完成");
 
+                            self.log_final_answer_audit(&result).await;
                             self.save_checkpoint().await;
 
                             yield AgentEvent::FinalAnswer(result);
@@ -1573,6 +1720,8 @@ impl ReactAgent {
                     if done {
                         return;
                     }
+
+                    self.auto_snapshot(iteration);
                 } else if !content_buffer.is_empty() {
                     // 纯文本响应
                     let think_steps = vec![StepType::Thought(content_buffer.clone())];
@@ -1584,6 +1733,8 @@ impl ReactAgent {
                     }
                     self.context.push(Message::assistant(content_buffer.clone()));
 
+                    self.auto_snapshot(iteration);
+                    self.log_final_answer_audit(&content_buffer).await;
                     self.save_checkpoint().await;
 
                     yield AgentEvent::FinalAnswer(content_buffer);
@@ -1599,5 +1750,45 @@ impl ReactAgent {
         };
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_concurrent_tool_batch_timeout;
+    use crate::tools::ToolExecutionConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn test_compute_concurrent_tool_batch_timeout_scales_by_waves() {
+        let config = ToolExecutionConfig {
+            timeout_ms: 1_000,
+            retry_on_fail: true,
+            max_retries: 2,
+            retry_delay_ms: 200,
+            max_concurrency: Some(2),
+        };
+
+        let timeout = compute_concurrent_tool_batch_timeout(&config, 5, config.max_concurrency);
+        assert_eq!(
+            timeout,
+            Some(Duration::from_millis((1_000 * 3 + (200 + 400)) * 3 + 750))
+        );
+    }
+
+    #[test]
+    fn test_compute_concurrent_tool_batch_timeout_disabled_when_per_tool_timeout_is_zero() {
+        let config = ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: true,
+            max_retries: 3,
+            retry_delay_ms: 200,
+            max_concurrency: Some(4),
+        };
+
+        assert_eq!(
+            compute_concurrent_tool_batch_timeout(&config, 8, config.max_concurrency),
+            None
+        );
     }
 }

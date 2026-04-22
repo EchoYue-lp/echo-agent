@@ -17,7 +17,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 /// 本地沙箱配置
@@ -215,6 +215,8 @@ impl LocalSandbox {
     }
 
     /// 执行命令并收集输出
+    ///
+    /// 超时时显式 kill + wait 清理子进程，避免僵尸/孤儿进程残留。
     async fn run_command(
         &self,
         mut command: Command,
@@ -236,36 +238,34 @@ impl LocalSandbox {
             )))
         })?;
 
-        if let Some(input) = stdin
-            && let Some(mut child_stdin) = child.stdin.take()
-        {
-            child_stdin.write_all(input.as_bytes()).await.map_err(|e| {
-                echo_core::error::ReactError::Sandbox(SandboxError::IoError(format!(
-                    "Failed to write stdin: {e}"
-                )))
-            })?;
+        // 写入 stdin 并处理写入失败时的进程清理
+        if let Some(input) = stdin {
+            if let Some(mut child_stdin) = child.stdin.take() {
+                if let Err(e) = child_stdin.write_all(input.as_bytes()).await {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(echo_core::error::ReactError::Sandbox(
+                        SandboxError::IoError(format!("Failed to write stdin: {e}")),
+                    ));
+                }
+                // 关闭 stdin 发送 EOF
+                drop(child_stdin);
+            }
         }
 
-        // 等待并超时处理
-        match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                let duration = start.elapsed();
-                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // 提前取出 stdout/stderr 管道，避免 child.wait() 消耗后无法读取
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
 
-                // 截断过长输出
-                let max = self.config.max_output_bytes;
-                if stdout.len() > max {
-                    stdout.truncate(max);
-                    stdout.push_str("\n... [output truncated]");
-                }
-                if stderr.len() > max {
-                    stderr.truncate(max);
-                    stderr.push_str("\n... [output truncated]");
-                }
+        // 使用 &mut self 等待，保留 Child 句柄的控制权
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => {
+                let duration = start.elapsed();
+                let stdout = read_pipe_output(stdout_pipe, self.config.max_output_bytes).await;
+                let stderr = read_pipe_output(stderr_pipe, self.config.max_output_bytes).await;
 
                 Ok(ExecutionResult {
-                    exit_code: output.status.code().unwrap_or(-1),
+                    exit_code: status.code().unwrap_or(-1),
                     stdout,
                     stderr,
                     duration,
@@ -273,10 +273,18 @@ impl LocalSandbox {
                     timed_out: false,
                 })
             }
-            Ok(Err(e)) => Err(echo_core::error::ReactError::Sandbox(
-                SandboxError::IoError(format!("Process IO error: {e}")),
-            )),
+            Ok(Err(e)) => {
+                // wait() 自身失败 — 清理进程
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                Err(echo_core::error::ReactError::Sandbox(
+                    SandboxError::IoError(format!("Process wait error: {e}")),
+                ))
+            }
             Err(_) => {
+                // 超时 — 显式 kill + wait 确保进程完全终止并被收割
+                let _ = child.kill().await;
+                let _ = child.wait().await;
                 let duration = start.elapsed();
                 Ok(ExecutionResult {
                     exit_code: -1,
@@ -289,6 +297,27 @@ impl LocalSandbox {
             }
         }
     }
+}
+
+/// 从管道句柄中读取全部输出，并截断超过 max_bytes 的部分。
+async fn read_pipe_output<R: AsyncReadExt + Unpin>(
+    mut pipe: Option<R>,
+    max_bytes: usize,
+) -> String {
+    let Some(ref mut reader) = pipe else {
+        return String::new();
+    };
+    let cap = max_bytes.min(4096);
+    let mut buf = Vec::with_capacity(cap);
+    if reader.read_to_end(&mut buf).await.is_err() {
+        return String::new();
+    }
+    let mut s = String::from_utf8_lossy(&buf).to_string();
+    if s.len() > max_bytes {
+        s.truncate(max_bytes);
+        s.push_str("\n... [output truncated]");
+    }
+    s
 }
 
 impl SandboxExecutor for LocalSandbox {
@@ -464,6 +493,52 @@ mod tests {
             ..Default::default()
         });
         assert!(sandbox.is_available().await);
+    }
+
+    #[tokio::test]
+    async fn test_timeout_no_zombie_process() {
+        // 验证超时后子进程被完全清理（无僵尸/孤儿进程残留）
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+
+        // 获取当前 sleep 进程数
+        let _pid = std::process::id();
+        let count_before = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &format!("ps -o pid= -o comm= | grep -c '[s]leep' || echo 0"),
+            ])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(0);
+
+        let cmd =
+            SandboxCommand::shell("sleep 9999").with_timeout(std::time::Duration::from_millis(200));
+        let result = sandbox.execute(cmd).await.unwrap();
+        assert!(result.timed_out);
+
+        // 等待一小段时间确保进程被收割
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let count_after = std::process::Command::new("sh")
+            .args(["-c", "ps -o pid= -o comm= | grep -c '[s]leep' || echo 0"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(0);
+
+        // 超时后不应增加 sleep 进程数
+        assert!(
+            count_after <= count_before,
+            "Found {} sleep processes after timeout (was {})",
+            count_after,
+            count_before
+        );
     }
 
     #[cfg(target_os = "linux")]

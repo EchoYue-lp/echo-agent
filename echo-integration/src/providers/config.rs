@@ -1,6 +1,6 @@
 //! LLM 配置加载
 //!
-//! 支持两种配置方式（按优先级）：
+//! 通过 YAML 配置文件加载模型与 embedding 配置。
 //!
 //! ## 1. YAML 配置文件（推荐）
 //!
@@ -21,14 +21,6 @@
 //!     api_key: ${OPENAI_API_KEY}
 //! ```
 //!
-//! ## 2. 环境变量（兼容旧格式）
-//!
-//! ```text
-//! AGENT_MODEL_<ID>_MODEL=gpt-4o
-//! AGENT_MODEL_<ID>_BASEURL=https://api.openai.com/v1/chat/completions
-//! AGENT_MODEL_<ID>_APIKEY=sk-...
-//! ```
-
 use echo_core::error::{ConfigError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,9 +97,9 @@ impl LlmConfig {
         }
     }
 
-    /// 从配置文件或环境变量加载指定模型的配置
+    /// 从配置文件加载指定模型的配置
     ///
-    /// 查找顺序：YAML 配置文件 → 环境变量（`AGENT_MODEL_*`）
+    /// 查找顺序：YAML 配置文件
     ///
     /// 自动识别 provider 类型：如果配置中指定了 `provider` 字段则直接使用，
     /// 否则根据 `base_url` 自动推断（Anthropic / Ollama / OpenAI 兼容）。
@@ -280,7 +272,7 @@ impl ProviderFactory {
     /// - `anthropic` → `ANTHROPIC_API_KEY`
     /// - `openai` → `OPENAI_API_KEY`
     /// - `deepseek` → `DEEPSEEK_API_KEY`
-    /// - `dashscope`/`qwen` → `DASHSCOPE_API_KEY`
+    /// - `dashscope`/`qwen` → `DASHSCOPE_API_KEY` / `QWEN_API_KEY`
     /// - `moonshot` → `MOONSHOT_API_KEY`
     /// - `zhipu` → `ZHIPU_API_KEY`
     /// - `ollama` → 无需 API key
@@ -296,6 +288,16 @@ impl ProviderFactory {
         })?;
 
         let api_key = Self::env_api_key(provider);
+        if api_key.trim().is_empty() && !matches!(provider.to_lowercase().as_str(), "ollama") {
+            return Err(ConfigError::MissingConfig(
+                format!("{provider}:{model}"),
+                format!(
+                    "缺少 API key，请设置以下任一环境变量: {}",
+                    provider_env_var_names(provider).join(", ")
+                ),
+            )
+            .into());
+        }
         let llm_provider = parse_provider(provider);
 
         let config = LlmConfig {
@@ -309,17 +311,17 @@ impl ProviderFactory {
 
     /// 根据 provider 名称获取对应的环境变量 API key
     fn env_api_key(provider: &str) -> String {
-        let env_var = match provider.to_lowercase().as_str() {
-            "anthropic" => "ANTHROPIC_API_KEY",
-            "openai" => "OPENAI_API_KEY",
-            "deepseek" => "DEEPSEEK_API_KEY",
-            "dashscope" | "qwen" | "aliyun" => "DASHSCOPE_API_KEY",
-            "moonshot" | "kimi" => "MOONSHOT_API_KEY",
-            "zhipu" | "glm" => "ZHIPU_API_KEY",
+        let env_vars: &[&str] = match provider.to_lowercase().as_str() {
+            "anthropic" => &["ANTHROPIC_API_KEY"],
+            "openai" => &["OPENAI_API_KEY"],
+            "deepseek" => &["DEEPSEEK_API_KEY"],
+            "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+            "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+            "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
             "ollama" => return String::new(),
             _ => return String::new(),
         };
-        std::env::var(env_var).unwrap_or_default()
+        first_present_env(env_vars).unwrap_or_default()
     }
 
     /// 列出所有支持的 provider 名称
@@ -445,7 +447,11 @@ pub struct ModelConfig {
 pub struct Config {
     pub models: HashMap<String, ModelConfig>,
     #[serde(default)]
+    invalid_models: HashMap<String, String>,
+    #[serde(default)]
     pub embedding: Option<EmbeddingConfig>,
+    #[serde(default)]
+    invalid_embedding: Option<String>,
 }
 
 /// Embedding 运行时配置
@@ -467,22 +473,22 @@ pub struct EmbeddingConfig {
 static MODEL_CONFIG: OnceLock<std::result::Result<Config, String>> = OnceLock::new();
 
 impl Config {
-    /// 加载配置（YAML 配置文件优先，回退到环境变量）
+    /// 加载配置（只读取 YAML 配置文件）
     ///
-    /// 每次调用都重新读取文件 / 环境变量，不使用缓存。
+    /// 每次调用都重新读取文件，不使用缓存。
     /// 如需缓存请使用 [`load_cached`](Self::load_cached)。
     pub fn load() -> Result<Self> {
         dotenv::dotenv().ok();
 
-        // 优先尝试 YAML 配置文件
         if let Some(config) = Self::from_config_file()? {
             tracing::info!("已从配置文件加载模型配置");
             return Ok(config);
         }
 
-        // 回退到环境变量
-        tracing::debug!("未找到配置文件，尝试从环境变量加载");
-        Self::from_legacy_env()
+        Err(ConfigError::ConfigFileError(
+            "未找到模型配置文件，请提供 echo-agent.yaml；环境变量仅支持通过 `${VAR}` 在 YAML 中注入值".to_string(),
+        )
+        .into())
     }
 
     /// 查找配置文件路径
@@ -535,158 +541,127 @@ impl Config {
         })?;
 
         let mut models = HashMap::new();
+        let mut invalid_models = HashMap::new();
 
         for (key, entry) in file.models {
-            // 解析 base_url：显式指定 > provider 快捷方式
-            let base_url = match (entry.base_url.as_deref(), entry.provider.as_deref()) {
-                (Some(url), _) => resolve_env_ref(url),
-                (None, Some(provider)) => {
-                    let resolved_provider = resolve_env_ref(provider);
-                    provider_base_url(&resolved_provider)
-                        .ok_or_else(|| {
-                            ConfigError::ConfigFileError(format!(
-                                "模型 '{}' 指定了未知的 provider: '{}'，\
-                                 支持的 provider: openai, anthropic, deepseek, dashscope, moonshot, zhipu, ollama",
-                                key, resolved_provider
-                            ))
-                        })?
-                        .to_string()
-                }
-                (None, None) => {
-                    return Err(ConfigError::MissingConfig(
-                        key.clone(),
-                        "base_url 或 provider".to_string(),
-                    )
-                    .into());
-                }
-            };
-
-            let api_key = resolve_env_ref(&entry.api_key);
-            let model_name = entry
-                .model
-                .as_deref()
-                .map(resolve_env_ref)
-                .unwrap_or_else(|| key.clone());
-
-            // 确定 provider：显式指定 > 从 base_url 推断
-            let provider = match entry.provider.as_deref() {
-                Some(p) => parse_provider(&resolve_env_ref(p)),
-                None => detect_provider_from_url(&base_url),
-            };
-
-            let mc = ModelConfig {
-                model: model_name.clone(),
-                baseurl: base_url,
-                apikey: api_key,
-                provider,
-            };
-
-            // 同时注册 key 和 model_name，方便按任意名称查找
-            models.insert(key.clone(), mc.clone());
-            if key != model_name {
-                models.insert(model_name, mc);
-            }
-        }
-
-        let embedding = match file.embedding {
-            Some(entry) => {
-                let url = match (entry.endpoint_url.as_deref(), entry.base_url.as_deref()) {
+            let parsed: Result<(String, String, String, LlmProvider)> = (|| {
+                // 解析 base_url：显式指定 > provider 快捷方式
+                let base_url = match (entry.base_url.as_deref(), entry.provider.as_deref()) {
                     (Some(url), _) => resolve_env_ref(url),
-                    (None, Some(base)) => {
-                        let resolved = resolve_env_ref(base);
-                        format!("{}/v1/embeddings", resolved.trim_end_matches('/'))
+                    (None, Some(provider)) => {
+                        let resolved_provider = resolve_env_ref(provider);
+                        provider_base_url(&resolved_provider)
+                            .ok_or_else(|| {
+                                ConfigError::ConfigFileError(format!(
+                                    "模型 '{}' 指定了未知的 provider: '{}'，\
+                                     支持的 provider: openai, anthropic, deepseek, dashscope, moonshot, zhipu, ollama",
+                                    key, resolved_provider
+                                ))
+                            })?
+                            .to_string()
                     }
                     (None, None) => {
                         return Err(ConfigError::MissingConfig(
-                            "embedding".to_string(),
-                            "endpoint_url 或 base_url".to_string(),
+                            key.clone(),
+                            "base_url 或 provider".to_string(),
                         )
                         .into());
                     }
                 };
 
-                Some(EmbeddingConfig {
-                    url,
-                    api_key: resolve_env_ref(&entry.api_key),
-                    model: entry
-                        .model
-                        .as_deref()
-                        .map(resolve_env_ref)
-                        .unwrap_or_else(|| "text-embedding-3-small".to_string()),
-                    timeout_secs: entry.timeout_secs.unwrap_or(30),
-                })
-            }
-            None => None,
-        };
+                let api_key = ensure_resolved_api_key(
+                    &key,
+                    "api_key",
+                    &entry.api_key,
+                    &resolve_env_ref(&entry.api_key),
+                )?;
+                let model_name = entry
+                    .model
+                    .as_deref()
+                    .map(resolve_env_ref)
+                    .unwrap_or_else(|| key.clone());
 
-        Ok(Some(Config { models, embedding }))
-    }
-
-    /// 从环境变量加载（兼容旧格式 `AGENT_MODEL_<ID>_*`）
-    fn from_legacy_env() -> Result<Self> {
-        const PREFIX: &str = "AGENT_MODEL_";
-        let mut model_configs: HashMap<String, HashMap<String, String>> = HashMap::new();
-
-        for (key, value) in std::env::vars() {
-            if let Some(suffix) = key.strip_prefix(PREFIX) {
-                // 找到最后一个 _ 作为分隔符，前面是 model_id，后面是 config_key
-                // 这样支持 model_id 中包含下划线，如 AGENT_MODEL_QWEN3_MAX_APIKEY
-                let (model_id, config_key) = match suffix.rfind('_') {
-                    Some(pos) => {
-                        let id = suffix[..pos].to_lowercase();
-                        let cfg = suffix[pos + 1..].to_lowercase();
-                        (id, cfg)
-                    }
-                    None => {
-                        return Err(ConfigError::EnvFormatError(key).into());
-                    }
+                // 确定 provider：显式指定 > 从 base_url 推断
+                let provider = match entry.provider.as_deref() {
+                    Some(p) => parse_provider(&resolve_env_ref(p)),
+                    None => detect_provider_from_url(&base_url),
                 };
+                Ok((base_url, api_key, model_name, provider))
+            })();
 
-                match config_key.as_str() {
-                    "model" | "baseurl" | "apikey" => {}
-                    _ => {
-                        return Err(ConfigError::UnMatchConfigError(config_key, key).into());
+            match parsed {
+                Ok((base_url, api_key, model_name, provider)) => {
+                    let mc = ModelConfig {
+                        model: model_name.clone(),
+                        baseurl: base_url,
+                        apikey: api_key,
+                        provider,
+                    };
+
+                    models.insert(key.clone(), mc.clone());
+                    if key != model_name {
+                        models.insert(model_name, mc);
                     }
                 }
-
-                model_configs
-                    .entry(model_id)
-                    .or_default()
-                    .insert(config_key, value);
+                Err(err) => {
+                    tracing::warn!("跳过无效模型配置 {}: {}", key, err);
+                    invalid_models.insert(key.clone(), err.to_string());
+                }
             }
         }
 
-        let mut models = HashMap::new();
-        for (model_id, config_map) in model_configs {
-            let model = config_map
-                .get("model")
-                .ok_or_else(|| ConfigError::MissingConfig(model_id.clone(), "model".to_string()))?
-                .clone();
-            let baseurl = config_map
-                .get("baseurl")
-                .ok_or_else(|| ConfigError::MissingConfig(model_id.clone(), "baseurl".to_string()))?
-                .clone();
-            let apikey = config_map
-                .get("apikey")
-                .ok_or_else(|| ConfigError::MissingConfig(model_id.clone(), "apikey".to_string()))?
-                .clone();
+        let (embedding, invalid_embedding) = match file.embedding {
+            Some(entry) => {
+                let parsed: Result<EmbeddingConfig> = (|| {
+                    let url = match (entry.endpoint_url.as_deref(), entry.base_url.as_deref()) {
+                        (Some(url), _) => resolve_env_ref(url),
+                        (None, Some(base)) => {
+                            let resolved = resolve_env_ref(base);
+                            format!("{}/v1/embeddings", resolved.trim_end_matches('/'))
+                        }
+                        (None, None) => {
+                            return Err(ConfigError::MissingConfig(
+                                "embedding".to_string(),
+                                "endpoint_url 或 base_url".to_string(),
+                            )
+                            .into());
+                        }
+                    };
 
-            let provider = detect_provider_from_url(&baseurl);
-            models.insert(
-                model.to_string(),
-                ModelConfig {
-                    model,
-                    baseurl,
-                    apikey,
-                    provider,
-                },
-            );
-        }
+                    Ok(EmbeddingConfig {
+                        url,
+                        api_key: ensure_resolved_api_key(
+                            "embedding",
+                            "api_key",
+                            &entry.api_key,
+                            &resolve_env_ref(&entry.api_key),
+                        )?,
+                        model: entry
+                            .model
+                            .as_deref()
+                            .map(resolve_env_ref)
+                            .unwrap_or_else(|| "text-embedding-3-small".to_string()),
+                        timeout_secs: entry.timeout_secs.unwrap_or(30),
+                    })
+                })();
 
-        Ok(Self {
+                match parsed {
+                    Ok(cfg) => (Some(cfg), None),
+                    Err(err) => {
+                        tracing::warn!("跳过无效 embedding 配置: {}", err);
+                        (None, Some(err.to_string()))
+                    }
+                }
+            }
+            None => (None, None),
+        };
+
+        Ok(Some(Config {
             models,
-            embedding: env_embedding_config(),
-        })
+            invalid_models,
+            embedding,
+            invalid_embedding,
+        }))
     }
 
     // ── 公共查询 API ─────────────────────────────────────────────────────────
@@ -706,6 +681,9 @@ impl Config {
     /// 获取指定模型的配置
     pub fn get_model(model: &str) -> Result<ModelConfig> {
         let config = Self::load_cached()?;
+        if let Some(err) = config.invalid_models.get(model) {
+            return Err(ConfigError::ConfigFileError(err.clone()).into());
+        }
         Ok(config
             .models
             .get(model)
@@ -715,7 +693,7 @@ impl Config {
                     "{}（可用模型: {}）",
                     model,
                     if available.is_empty() {
-                        "无，请创建 echo-agent.yaml 或设置 AGENT_MODEL_* 环境变量".to_string()
+                        "无，请创建 echo-agent.yaml 并在其中声明 models.*".to_string()
                     } else {
                         available.join(", ")
                     }
@@ -745,10 +723,13 @@ impl Config {
     /// 获取 embedding 配置
     pub fn get_embedding() -> Result<EmbeddingConfig> {
         let config = Self::load_cached()?;
+        if let Some(err) = &config.invalid_embedding {
+            return Err(ConfigError::ConfigFileError(err.clone()).into());
+        }
         config.embedding.clone().ok_or_else(|| {
             ConfigError::MissingConfig(
                 "embedding".to_string(),
-                "请在 echo-agent.yaml 中配置 embedding 段，或设置 EMBEDDING_* 环境变量".to_string(),
+                "请在 echo-agent.yaml 中配置 embedding 段".to_string(),
             )
             .into()
         })
@@ -786,12 +767,16 @@ fn resolve_env_ref(value: &str) -> String {
         if let Some(rel_end) = result[start..].find('}') {
             let end = start + rel_end;
             let var_name = &result[start + 2..end];
-            match std::env::var(var_name) {
-                Ok(val) => {
+            match std::env::var(var_name).ok().or_else(|| {
+                fallback_env_alias(var_name)
+                    .and_then(std::env::var_os)
+                    .map(|v| v.to_string_lossy().into_owned())
+            }) {
+                Some(val) => {
                     result = format!("{}{}{}", &result[..start], val, &result[end + 1..]);
                     search_from = start + val.len();
                 }
-                Err(_) => {
+                None => {
                     tracing::warn!("环境变量 {} 未设置", var_name);
                     search_from = end + 1;
                 }
@@ -804,41 +789,99 @@ fn resolve_env_ref(value: &str) -> String {
     result
 }
 
-fn env_embedding_config() -> Option<EmbeddingConfig> {
-    let (url, has_url) = if let Ok(u) = std::env::var("EMBEDDING_BASEURL") {
-        (u, true)
-    } else if let Ok(base) = std::env::var("EMBEDDING_API_URL") {
-        (
-            format!("{}/v1/embeddings", base.trim_end_matches('/')),
-            true,
-        )
-    } else {
-        (String::new(), false)
-    };
+fn first_present_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+}
 
-    let api_key = std::env::var("EMBEDDING_APIKEY")
-        .or_else(|_| std::env::var("EMBEDDING_API_KEY"))
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .unwrap_or_default();
+fn fallback_env_alias(var_name: &str) -> Option<&'static str> {
+    match var_name {
+        "DASHSCOPE_API_KEY" => Some("QWEN_API_KEY"),
+        "QWEN_API_KEY" => Some("DASHSCOPE_API_KEY"),
+        "MOONSHOT_API_KEY" => Some("KIMI_API_KEY"),
+        "KIMI_API_KEY" => Some("MOONSHOT_API_KEY"),
+        "ZHIPU_API_KEY" => Some("GLM_API_KEY"),
+        "GLM_API_KEY" => Some("ZHIPU_API_KEY"),
+        _ => None,
+    }
+}
 
-    if !has_url && api_key.is_empty() {
-        return None;
+fn provider_env_var_names(provider: &str) -> &'static [&'static str] {
+    match provider.to_lowercase().as_str() {
+        "anthropic" => &["ANTHROPIC_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+        "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+        "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
+        "ollama" => &[],
+        _ => &[],
+    }
+}
+
+fn ensure_resolved_api_key(
+    scope: &str,
+    field: &str,
+    raw_value: &str,
+    resolved_value: &str,
+) -> Result<String> {
+    if !raw_value.contains("${") {
+        return Ok(resolved_value.to_string());
     }
 
-    Some(EmbeddingConfig {
-        url: if has_url {
-            url
+    let unresolved: Vec<String> = extract_env_refs(raw_value)
+        .into_iter()
+        .filter(|name| {
+            std::env::var(name).is_err()
+                && fallback_env_alias(name)
+                    .and_then(std::env::var_os)
+                    .is_none()
+        })
+        .collect();
+
+    if !unresolved.is_empty() || resolved_value.contains("${") || resolved_value.trim().is_empty() {
+        let details = unresolved
+            .into_iter()
+            .map(|name| {
+                if let Some(alias) = fallback_env_alias(&name) {
+                    format!("{name}（或别名 {alias}）")
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ConfigError::MissingConfig(
+            scope.to_string(),
+            if details.is_empty() {
+                format!("{field} 未解析为有效值")
+            } else {
+                format!("{field} 依赖的环境变量未设置: {details}")
+            },
+        )
+        .into());
+    }
+
+    Ok(resolved_value.to_string())
+}
+
+fn extract_env_refs(value: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel_start) = value[search_from..].find("${") {
+        let start = search_from + rel_start;
+        if let Some(rel_end) = value[start..].find('}') {
+            let end = start + rel_end;
+            refs.push(value[start + 2..end].to_string());
+            search_from = end + 1;
         } else {
-            "https://api.openai.com/v1/embeddings".to_string()
-        },
-        api_key,
-        model: std::env::var("EMBEDDING_MODEL")
-            .unwrap_or_else(|_| "text-embedding-3-small".to_string()),
-        timeout_secs: std::env::var("EMBEDDING_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(30),
-    })
+            break;
+        }
+    }
+    refs
 }
 
 // ── 单元测试 ─────────────────────────────────────────────────────────────────
@@ -846,6 +889,12 @@ fn env_embedding_config() -> Option<EmbeddingConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn test_llm_config_new() {
@@ -901,6 +950,7 @@ mod tests {
 
     #[test]
     fn test_resolve_env_ref_with_var() {
+        let _guard = env_test_lock();
         unsafe { std::env::set_var("TEST_ECHO_KEY", "resolved-value") };
         assert_eq!(resolve_env_ref("${TEST_ECHO_KEY}"), "resolved-value");
         unsafe { std::env::remove_var("TEST_ECHO_KEY") };
@@ -908,8 +958,57 @@ mod tests {
 
     #[test]
     fn test_resolve_env_ref_missing_var() {
+        let _guard = env_test_lock();
         let result = resolve_env_ref("${NONEXISTENT_VAR_12345}");
         assert_eq!(result, "${NONEXISTENT_VAR_12345}");
+    }
+
+    #[test]
+    fn test_resolve_env_ref_supports_dashscope_qwen_alias() {
+        let _guard = env_test_lock();
+        unsafe {
+            std::env::remove_var("DASHSCOPE_API_KEY");
+            std::env::set_var("QWEN_API_KEY", "qwen-alias-value");
+        }
+        assert_eq!(resolve_env_ref("${DASHSCOPE_API_KEY}"), "qwen-alias-value");
+        unsafe {
+            std::env::remove_var("QWEN_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_env_api_key_supports_qwen_alias() {
+        let _guard = env_test_lock();
+        unsafe {
+            std::env::remove_var("DASHSCOPE_API_KEY");
+            std::env::set_var("QWEN_API_KEY", "qwen-provider-key");
+        }
+        assert_eq!(
+            ProviderFactory::env_api_key("dashscope"),
+            "qwen-provider-key"
+        );
+        assert_eq!(ProviderFactory::env_api_key("qwen"), "qwen-provider-key");
+        unsafe {
+            std::env::remove_var("QWEN_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_ensure_resolved_api_key_reports_missing_alias_group() {
+        let _guard = env_test_lock();
+        unsafe {
+            std::env::remove_var("DASHSCOPE_API_KEY");
+            std::env::remove_var("QWEN_API_KEY");
+        }
+        let err = ensure_resolved_api_key(
+            "qwen3.6-plus",
+            "api_key",
+            "${DASHSCOPE_API_KEY}",
+            "${DASHSCOPE_API_KEY}",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("DASHSCOPE_API_KEY"));
+        assert!(format!("{err}").contains("QWEN_API_KEY"));
     }
 
     #[test]
@@ -1033,26 +1132,5 @@ models:
 "#;
         let file: ConfigFile = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(file.models.len(), 3);
-    }
-
-    #[test]
-    fn test_env_embedding_config() {
-        unsafe {
-            std::env::set_var("EMBEDDING_API_URL", "https://api.openai.com");
-            std::env::set_var("EMBEDDING_API_KEY", "sk-embed");
-            std::env::set_var("EMBEDDING_MODEL", "text-embedding-3-small");
-            std::env::set_var("EMBEDDING_TIMEOUT", "12");
-        }
-        let cfg = env_embedding_config().expect("embedding config should be detected");
-        assert_eq!(cfg.url, "https://api.openai.com/v1/embeddings");
-        assert_eq!(cfg.api_key, "sk-embed");
-        assert_eq!(cfg.model, "text-embedding-3-small");
-        assert_eq!(cfg.timeout_secs, 12);
-        unsafe {
-            std::env::remove_var("EMBEDDING_API_URL");
-            std::env::remove_var("EMBEDDING_API_KEY");
-            std::env::remove_var("EMBEDDING_MODEL");
-            std::env::remove_var("EMBEDDING_TIMEOUT");
-        }
     }
 }

@@ -110,6 +110,7 @@ pub struct ReactAgent {
     #[allow(dead_code)] // Used by AgentDispatchTool at construction; accessor TBD
     pub(crate) subagent_executor: Arc<SubagentExecutor>,
     client: Arc<Client>,
+    llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
     /// LLM 配置（可选，不设置时使用环境变量配置）
     llm_config: Option<LlmConfig>,
     #[cfg(feature = "tasks")]
@@ -338,6 +339,7 @@ impl ReactAgent {
             subagent_registry,
             subagent_executor,
             client: Arc::new(client),
+            llm_client: None,
             llm_config: None,
             #[cfg(feature = "tasks")]
             task_manager,
@@ -368,15 +370,14 @@ impl ReactAgent {
 
     /// 从配置文件创建 Agent
     ///
-    /// 搜索 `echo-agent.yaml` 并加载配置，自动应用环境变量覆盖。
+    /// 搜索 `echo-agent.yaml` 并加载配置。
     ///
     /// ```no_run
     /// use echo_agent::agent::react::ReactAgent;
     /// let agent = ReactAgent::from_config_file(None);
     /// ```
     pub fn from_config_file(path: Option<&str>) -> Self {
-        let mut app_config = crate::config::load_config(path);
-        crate::config::apply_env_overrides(&mut app_config);
+        let app_config = crate::config::load_config(path);
         Self::new(app_config.to_agent_config())
     }
 
@@ -406,13 +407,28 @@ impl ReactAgent {
     /// ).with_llm_config(llm_config);
     /// ```
     pub fn with_llm_config(mut self, config: LlmConfig) -> Self {
+        self.config.model_name = config.model.clone();
         self.llm_config = Some(config);
+        self
+    }
+
+    /// 注入自定义 LLM 客户端
+    pub fn with_llm_client(mut self, client: Arc<dyn crate::llm::LlmClient>) -> Self {
+        self.config.model_name = client.model_name().to_string();
+        self.llm_client = Some(client);
         self
     }
 
     /// 设置 LLM 配置
     pub fn set_llm_config(&mut self, config: LlmConfig) {
+        self.config.model_name = config.model.clone();
         self.llm_config = Some(config);
+    }
+
+    /// 设置自定义 LLM 客户端
+    pub fn set_llm_client(&mut self, client: Arc<dyn crate::llm::LlmClient>) {
+        self.config.model_name = client.model_name().to_string();
+        self.llm_client = Some(client);
     }
 
     /// 获取当前 LLM 配置
@@ -845,8 +861,9 @@ impl Agent for ReactAgent {
 impl ReactAgent {
     /// 发送带图片 URL 的消息（多模态）
     ///
-    /// 自动下载图片并转换为 base64 发送给 LLM。
-    /// 部分云厂商（如阿里云 Qwen）不支持直接访问外部 URL，需要下载后转 base64。
+    /// 直接将图片 URL 作为 `image_url` part 发送给 LLM。
+    /// 如果你已经持有本地文件或 base64 数据，请使用 `chat_multimodal()`
+    /// 并自行构造 `data:image/...;base64,...` 的 `ImageUrl.url`。
     ///
     /// # 示例
     ///
@@ -864,16 +881,13 @@ impl ReactAgent {
     pub async fn chat_with_image_url(&mut self, text: &str, image_url: &str) -> Result<String> {
         use crate::llm::types::{ContentPart, ImageUrl, Message};
 
-        // 下载图片并转换为 base64 data URL
-        let data_url = fetch_image_as_base64(image_url).await?;
-
         let message = Message::user_multimodal(vec![
             ContentPart::Text {
                 text: text.to_string(),
             },
             ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: data_url,
+                    url: image_url.to_string(),
                     detail: None,
                 },
             },
@@ -913,7 +927,7 @@ impl ReactAgent {
     /// # }
     /// ```
     pub async fn chat_multimodal(&mut self, message: crate::llm::types::Message) -> Result<String> {
-        use crate::llm::chat;
+        use crate::llm::{ChatRequest, chat};
 
         // 确保上下文已初始化（包含 system prompt）
         if self.context.messages().is_empty() {
@@ -928,25 +942,38 @@ impl ReactAgent {
         // 准备消息列表
         let messages = self.context.messages().to_vec();
 
-        // 调用 LLM（不使用工具模式，因为这是直接对话）
-        let response = chat(
-            self.client.clone(),
-            &self.config.model_name,
-            &messages,
-            None,        // temperature
-            None,        // max_tokens
-            Some(false), // stream
-            None,        // tools
-            None,        // tool_choice
-            None,        // response_format
-        )
-        .await?;
+        let content = if let Some(llm_client) = &self.llm_client {
+            let response = llm_client
+                .chat(ChatRequest {
+                    messages: messages.clone(),
+                    temperature: None,
+                    max_tokens: None,
+                    tools: None,
+                    tool_choice: None,
+                    response_format: None,
+                })
+                .await?;
+            response.content().unwrap_or_default()
+        } else {
+            let response = chat(
+                self.client.clone(),
+                &self.config.model_name,
+                &messages,
+                None,        // temperature
+                None,        // max_tokens
+                Some(false), // stream
+                None,        // tools
+                None,        // tool_choice
+                None,        // response_format
+            )
+            .await?;
 
-        let content = response
-            .choices
-            .first()
-            .and_then(|c| c.message.content.as_text())
-            .unwrap_or_default();
+            response
+                .choices
+                .first()
+                .and_then(|c| c.message.content.as_text())
+                .unwrap_or_default()
+        };
 
         // 添加助手回复到上下文
         self.context
@@ -975,16 +1002,13 @@ impl ReactAgent {
         // 重置上下文
         self.reset_messages();
 
-        // 下载图片并转换为 base64
-        let data_url = fetch_image_as_base64(image_url).await?;
-
         let message = Message::user_multimodal(vec![
             ContentPart::Text {
                 text: task.to_string(),
             },
             ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: data_url,
+                    url: image_url.to_string(),
                     detail: None,
                 },
             },
@@ -992,65 +1016,4 @@ impl ReactAgent {
 
         self.chat_multimodal(message).await
     }
-}
-
-/// 下载图片并转换为 base64 data URL
-///
-/// 支持检测 Content-Type 并生成正确的 data URI 格式：
-/// `data:image/jpeg;base64,...`
-async fn fetch_image_as_base64(url: &str) -> Result<String> {
-    use crate::error::{ReactError, ToolError};
-    use base64::Engine;
-    use std::time::Duration;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            ReactError::Agent(crate::error::AgentError::InitializationFailed(format!(
-                "Failed to build HTTP client: {}",
-                e
-            )))
-        })?;
-
-    let response = client.get(url).send().await.map_err(|e| {
-        ReactError::Tool(ToolError::ExecutionFailed {
-            tool: "fetch_image".to_string(),
-            message: format!("下载图片失败: {}", e),
-        })
-    })?;
-
-    if !response.status().is_success() {
-        return Err(ReactError::Tool(ToolError::ExecutionFailed {
-            tool: "fetch_image".to_string(),
-            message: format!("HTTP 错误: {}", response.status()),
-        }));
-    }
-
-    // 获取 MIME 类型（在消费 response 之前）
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
-
-    // 提取主类型（如 image/jpeg -> jpeg）
-    let mime_subtype = content_type.split('/').nth(1).unwrap_or("jpeg");
-
-    // 下载二进制数据
-    let bytes = response.bytes().await.map_err(|e| {
-        ReactError::Tool(ToolError::ExecutionFailed {
-            tool: "fetch_image".to_string(),
-            message: format!("读取图片数据失败: {}", e),
-        })
-    })?;
-
-    // 转换为 base64
-    let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-
-    Ok(format!(
-        "data:image/{};base64,{}",
-        mime_subtype, base64_data
-    ))
 }

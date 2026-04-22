@@ -11,11 +11,12 @@
 //! ```
 
 use echo_agent::human_loop::{
-    CompositePermissionAuditSink, InMemoryPermissionAuditSink, LoggingPermissionAuditSink,
-    PermissionService,
+    CompositePermissionAuditSink, HumanLoopEvent, HumanLoopManager, InMemoryPermissionAuditSink,
+    LoggingPermissionAuditSink, PermissionService,
 };
 use echo_agent::prelude::*;
 use echo_agent::tools::ToolResult;
+use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
@@ -108,21 +109,77 @@ async fn main() -> echo_agent::error::Result<()> {
         Box::new(log_sink) as _,
     ]));
 
+    // ── 2.1 创建自动批准的 HumanLoop Provider ─────────────────────────────
+    let manager = Arc::new(HumanLoopManager::new());
+    let mgr = manager.clone();
+    tokio::spawn(async move {
+        while let Some(event) = mgr.recv_event().await {
+            match event {
+                HumanLoopEvent::ApprovalRequest {
+                    tool_name,
+                    responder,
+                    ..
+                } => {
+                    println!("自动批准敏感工具审批: {tool_name}");
+                    responder.approve();
+                }
+                HumanLoopEvent::InputRequest { responder, .. } => {
+                    responder.respond("无需额外输入".to_string());
+                }
+            }
+        }
+    });
+
     // ── 2. 创建带审计的 PermissionService ──────────────────────────────
-    let _service = PermissionService::new().with_audit_sink(composite);
+    let service = Arc::new(
+        PermissionService::from_provider(
+            manager.clone() as Arc<dyn echo_agent::human_loop::HumanLoopProvider>
+        )
+        .with_audit_sink(composite),
+    );
+    service
+        .add_rules(vec![
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "get_time".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "final_answer".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::ask(
+                RuleMatcher::Pattern {
+                    pattern: "run_command".to_string(),
+                },
+                vec!["允许".to_string(), "拒绝".to_string()],
+                RuleSource::Session,
+            ),
+        ])
+        .await;
 
     // ── 3. 构建 Agent ──────────────────────────────────────────────────
     let mut agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .system_prompt("你是一个助手，可以使用工具完成任务。请直接调用工具，不要询问用户。")
         .enable_tools()
+        .approval_provider(manager)
+        .permission_service(service)
         .tool(Box::new(RunCommandTool))
         .tool(Box::new(SafeTool))
         .build()?;
 
-    // 执行对话
+    // 执行对话：一个安全工具 + 一个敏感工具
     let answer = agent.chat("请获取当前时间").await?;
     println!("Agent: {answer}\n");
+
+    let command_answer = agent
+        .chat("请调用 run_command 执行 `echo hello-from-demo20`，并告诉我结果。")
+        .await?;
+    println!("Agent: {command_answer}\n");
 
     // ── 4. 查询审计记录 ────────────────────────────────────────────────
     println!("=== 审计记录 ({} 条) ===", mem_sink.count());
@@ -144,6 +201,21 @@ async fn main() -> echo_agent::error::Result<()> {
     // 按条件查询
     let allows = mem_sink.query(|e| e.decision == "allow");
     println!("\n允许的操作: {} 条", allows.len());
+    let approval_requests = mem_sink.query(|e| e.decision == "ask");
+    println!("需要审批的操作: {} 条", approval_requests.len());
+
+    if allows.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo20 验收失败：未记录到任何 allow 审计事件".to_string(),
+        )
+        .into());
+    }
+    if approval_requests.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo20 验收失败：未记录到任何 ask 审计事件".to_string(),
+        )
+        .into());
+    }
 
     Ok(())
 }

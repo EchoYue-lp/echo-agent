@@ -3,6 +3,7 @@
 use echo_agent::agent::{Agent, AgentCallback};
 use echo_agent::error::ReactError;
 use echo_agent::prelude::*;
+use echo_agent::testing::MockLlmClient;
 use echo_agent::tool;
 use echo_agent::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::Value;
@@ -201,12 +202,18 @@ impl AgentCallback for SimpleLog {
 async fn demo_feedback_off() -> Result<()> {
     println!("  配置：tool_error_feedback = false\n");
 
-    // 使用 AgentBuilder 创建 Agent
+    let mock = Arc::new(MockLlmClient::new().then_tool_call(
+        "call_broken_once",
+        "broken_tool",
+        r#"{"input":"trigger failure"}"#,
+    ));
+
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
         .name("agent_no_feedback")
+        .llm_client(mock)
         .system_prompt("你是一个智能助手。请调用 broken_tool 并报告结果。")
         .enable_tools()
+        .tool_error_feedback(false)
         .max_iterations(4)
         .callback(Arc::new(SimpleLog { label: "NO-FB" }))
         .build()?;
@@ -232,12 +239,27 @@ async fn demo_feedback_off() -> Result<()> {
 async fn demo_feedback_on() -> echo_agent::error::Result<()> {
     println!("  配置：tool_error_feedback = true（默认）\n");
 
-    // 使用 AgentBuilder 创建 Agent
+    let mock = Arc::new(
+        MockLlmClient::new()
+            .then_tool_call(
+                "call_broken_once",
+                "broken_tool",
+                r#"{"input":"trigger failure"}"#,
+            )
+            .then_tool_call("call_add_once", "add", r#"{"a":3,"b":4}"#)
+            .then_tool_call(
+                "call_final_answer",
+                "final_answer",
+                r#"{"answer":"broken_tool 失败后已自动改用 add，结果是 7。"}"#,
+            ),
+    );
+
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
         .name("agent_with_feedback")
+        .llm_client(mock)
         .system_prompt("你是一个智能助手。先尝试 broken_tool，失败后换用 add 计算 3+4。")
         .enable_tools()
+        .tool_error_feedback(true)
         .max_iterations(6)
         .callback(Arc::new(SimpleLog { label: "FB-ON" }))
         .build()?;
@@ -263,10 +285,21 @@ async fn demo_feedback_on() -> echo_agent::error::Result<()> {
 async fn demo_flaky_tool() -> echo_agent::error::Result<()> {
     println!("  配置：FlakyTool（前 2 次失败）\n");
 
-    // 使用 AgentBuilder 创建 Agent
+    let mock = Arc::new(
+        MockLlmClient::new()
+            .then_tool_call("call_weather_1", "weather_api", r#"{"city":"北京"}"#)
+            .then_tool_call("call_weather_2", "weather_api", r#"{"city":"北京"}"#)
+            .then_tool_call("call_weather_3", "weather_api", r#"{"city":"北京"}"#)
+            .then_tool_call(
+                "call_final_answer",
+                "final_answer",
+                r#"{"answer":"北京天气查询已在偶发故障后恢复成功：北京：晴，26°C"}"#,
+            ),
+    );
+
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
         .name("agent_flaky")
+        .llm_client(mock)
         .system_prompt("你是一个天气查询助手。调用 weather_api 查询北京天气，失败时请重试。")
         .enable_tools()
         .max_iterations(8)

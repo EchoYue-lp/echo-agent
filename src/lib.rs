@@ -74,6 +74,8 @@
 //! | [`telemetry`] | OpenTelemetry 追踪与指标 |
 //! | [`error`] | 统一错误类型 |
 
+extern crate self as echo_agent;
+
 // ── 核心模块（始终编译） ─────────────────────────────────────────────────────
 
 pub mod agent;

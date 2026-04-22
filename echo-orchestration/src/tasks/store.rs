@@ -89,46 +89,23 @@ impl TaskStore for SqliteTaskStore {
 
     fn load_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Task>>> {
         Box::pin(async move {
-            // Support pagination: fetch in batches of 1000 until no more results
-            const BATCH_SIZE: usize = 1000;
-            let mut all_tasks = Vec::new();
-            let mut offset: usize = 0;
+            let items = self
+                .store
+                .list(TASK_NAMESPACE)
+                .await
+                .map_err(|e| echo_core::error::ReactError::Other(format!("load_all: {}", e)))?;
 
-            loop {
-                let results = self
-                    .store
-                    .search(TASK_NAMESPACE, "", BATCH_SIZE)
-                    .await
-                    .map_err(|e| echo_core::error::ReactError::Other(format!("load_all: {}", e)))?;
-
-                let count = results.len();
-                for item in results {
-                    match serde_json::from_value::<Task>(item.value) {
-                        Ok(task) => all_tasks.push(task),
-                        Err(e) => {
-                            tracing::warn!(error = %e, key = %item.key, "Failed to parse stored task");
-                        }
+            let mut tasks = Vec::with_capacity(items.len());
+            for item in items {
+                match serde_json::from_value::<Task>(item.value) {
+                    Ok(task) => tasks.push(task),
+                    Err(e) => {
+                        tracing::warn!(error = %e, key = %item.key, "Failed to parse stored task");
                     }
-                }
-
-                // If we got fewer results than the batch size, we're done
-                if count < BATCH_SIZE {
-                    break;
-                }
-
-                offset += count;
-
-                // Safety limit to prevent infinite loops
-                if offset > 1_000_000 {
-                    tracing::warn!(
-                        offset,
-                        "load_all: exceeded 1M task limit, stopping pagination"
-                    );
-                    break;
                 }
             }
 
-            Ok(all_tasks)
+            Ok(tasks)
         })
     }
 

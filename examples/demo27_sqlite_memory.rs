@@ -53,11 +53,15 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // Part 4: 向量语义检索
     separator("Part 4: 向量语义检索（需要 Embedding 服务）");
-    demo_semantic_search(&db_path).await?;
+    if let Err(err) = demo_semantic_search(&db_path).await {
+        println!("  ⚠️ 跳过 Part 4：{}\n", err);
+    }
 
     // Part 5: 与 Agent 集成
     separator("Part 5: SqliteStore × Agent 集成");
-    demo_agent_integration(&db_path).await?;
+    if let Err(err) = demo_agent_integration(&db_path).await {
+        println!("  ⚠️ 跳过 Part 5：{}\n", err);
+    }
 
     // Part 6: 持久化验证
     separator("Part 6: 持久化验证");
@@ -376,15 +380,7 @@ async fn demo_semantic_search(db_path: &Path) -> echo_agent::error::Result<()> {
 // ── Part 5: Agent 集成 ──────────────────────────────────────────────────────
 
 async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()> {
-    let models = echo_agent::llm::config::Config::list_models();
-    if models.is_empty() {
-        return Err(echo_agent::error::ReactError::Other(
-            "demo27 验收失败：缺少模型配置，无法验证 Agent 集成".to_string(),
-        )
-        .into());
-    }
-
-    let model_name = &models[0];
+    let model_name = require_configured_model(None)?;
     println!("  使用模型: {model_name}\n");
 
     let store: Arc<dyn Store> = Arc::new(SqliteStore::new(db_path)?);
@@ -407,7 +403,7 @@ async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()>
         .await?;
     println!("  📚 预填充 2 条长期记忆\n");
 
-    let llm_config = LlmConfig::from_model(model_name)?;
+    let llm_config = LlmConfig::from_model(&model_name)?;
     let mut agent = ReactAgentBuilder::new()
         .llm_config(llm_config)
         .name("agent_demo")
@@ -512,18 +508,18 @@ fn separator(title: &str) {
     println!("{title}\n");
 }
 
-fn load_embedder_from_config() -> Option<Arc<dyn echo_agent::memory::Embedder>> {
-    let cfg = echo_agent::llm::config::Config::get_embedding().ok()?;
+fn load_embedder_from_config() -> echo_agent::error::Result<Arc<dyn echo_agent::memory::Embedder>> {
+    let cfg = echo_agent::llm::config::Config::get_embedding().map_err(|e| {
+        echo_agent::error::ReactError::Other(format!("demo27 验收失败：embedding 配置无效：{e}"))
+    })?;
     let embedder = HttpEmbedder::with_endpoint(cfg.url, cfg.api_key, cfg.model)
         .with_timeout(Duration::from_secs(cfg.timeout_secs));
-    Some(Arc::new(embedder))
+    Ok(Arc::new(embedder))
 }
 
 async fn load_verified_embedder_from_config()
 -> echo_agent::error::Result<Arc<dyn echo_agent::memory::Embedder>> {
-    let embedder = load_embedder_from_config().ok_or_else(|| {
-        echo_agent::error::ReactError::Other("demo27 验收失败：缺少 embedding 配置".to_string())
-    })?;
+    let embedder = load_embedder_from_config()?;
     embedder
         .embed("demo27 sqlite memory health check")
         .await
@@ -543,4 +539,45 @@ fn cleanup_sqlite_files(path: &Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(path.with_extension("db-wal"));
     let _ = std::fs::remove_file(path.with_extension("db-shm"));
+}
+
+fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<String> {
+    let app_config = echo_agent::config::load_config(None);
+    let configured = app_config.model.name.trim();
+
+    if !configured.is_empty() {
+        return echo_agent::llm::config::LlmConfig::from_model(configured)
+            .map(|_| configured.to_string())
+            .map_err(|e| {
+                echo_agent::error::ReactError::Other(format!(
+                    "demo27 验收失败：当前 `model.name = {configured}` 配置无效：{e}"
+                ))
+                .into()
+            });
+    }
+
+    if let Some(preferred) = preferred
+        && echo_agent::llm::config::Config::has_model(preferred)
+    {
+        return Ok(preferred.to_string());
+    }
+
+    if let Some(first) = echo_agent::llm::config::Config::list_models()
+        .into_iter()
+        .next()
+    {
+        return Ok(first);
+    }
+
+    let load_err = echo_agent::llm::config::Config::load_cached()
+        .err()
+        .map(|e| format!("配置加载失败：{e}"))
+        .unwrap_or_else(|| {
+            "请在 echo-agent.yaml 的 `models:` 中声明至少一个模型，并让 `model.name` 指向它。"
+                .to_string()
+        });
+    Err(echo_agent::error::ReactError::Other(format!(
+        "demo27 验收失败：缺少模型配置，无法验证 Agent 集成。{load_err}"
+    ))
+    .into())
 }

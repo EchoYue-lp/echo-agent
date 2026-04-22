@@ -300,7 +300,7 @@ impl PermissionService {
                 rules.add_rule(rule);
             }
             PermissionUpdate::RemoveRule { matcher } => {
-                let _ = matcher;
+                rules.remove_by_matcher(&matcher);
             }
             PermissionUpdate::SetMode { mode } => {
                 self.config.write().await.mode = mode;

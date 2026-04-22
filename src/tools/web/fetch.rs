@@ -4,6 +4,7 @@
 //! 支持 HTML → 纯文本转换，适合 LLM 消费。
 
 use crate::error::{Result, ToolError};
+use crate::tools::builtin::security::{ssrf_safe_redirect_policy, validate_url};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use reqwest::Client;
@@ -26,7 +27,7 @@ fn build_client() -> &'static Client {
                  Chrome/131.0.0.0 Safari/537.36",
             )
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(ssrf_safe_redirect_policy())
             .build()
             .unwrap_or_else(|e| {
                 tracing::error!("Failed to build HTTP client: {}, using default", e);
@@ -151,6 +152,9 @@ impl Tool for WebFetchTool {
                 .get("max_length")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(self.max_content_length as u64) as usize;
+
+            // SSRF 防护：验证目标地址
+            validate_url(url)?;
 
             tracing::info!("WebFetch: url='{}', max_length={}", url, max_length);
 

@@ -33,6 +33,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -321,9 +322,28 @@ impl FileCheckpointer {
         let data = self.data.read().await;
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
-        tokio::fs::write(&self.path, json)
+        let tmp_path = self.path.with_extension(format!(
+            "{}.tmp",
+            self.path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("json")
+        ));
+        let mut file = tokio::fs::File::create(&tmp_path)
             .await
             .map_err(|e| MemoryError::IoError(e.to_string()))?;
+        file.write_all(json.as_bytes())
+            .await
+            .map_err(|e| MemoryError::IoError(e.to_string()))?;
+        file.sync_all()
+            .await
+            .map_err(|e| MemoryError::IoError(e.to_string()))?;
+        drop(file);
+
+        if let Err(e) = tokio::fs::rename(&tmp_path, &self.path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(MemoryError::IoError(e.to_string()).into());
+        }
         debug!(path = %self.path.display(), "💾 Checkpoint 已持久化");
         Ok(())
     }
@@ -482,6 +502,7 @@ fn new_checkpoint_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[tokio::test]
     async fn test_in_memory_checkpointer_put_and_get() {
@@ -596,5 +617,27 @@ mod tests {
         assert_eq!(checkpoint.checkpoint_id, "cp-123");
         assert_eq!(checkpoint.messages.len(), 1);
         assert_eq!(checkpoint.created_at, 1234567890);
+    }
+
+    #[tokio::test]
+    async fn test_file_checkpointer_flush_is_atomicish() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("echo-checkpointer-{unique}.json"));
+        let tmp_path = path.with_extension("json.tmp");
+
+        let checkpointer = FileCheckpointer::new(&path).unwrap();
+        checkpointer
+            .put("session1", vec![Message::user("persist me".to_string())])
+            .await
+            .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("persist me"));
+        assert!(!tmp_path.exists(), "temporary file should be cleaned up");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

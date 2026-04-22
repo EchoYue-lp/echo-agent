@@ -1,4 +1,9 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use echo_agent::human_loop::{HumanLoopEvent, HumanLoopManager};
 use echo_agent::prelude::*;
+use echo_agent::testing::MockLlmClient;
 use echo_agent::tool;
 
 #[tool(name = "add", description = "两数相加")]
@@ -24,25 +29,39 @@ async fn divide(a: f64, b: f64) -> Result<ToolResult> {
     Ok(ToolResult::success(format!("{} / {} = {}", a, b, a / b)))
 }
 
-#[tool(name = "weather", description = "查询指定城市的天气")]
-async fn weather(
-    /// 城市名称
-    city: String,
-) -> Result<ToolResult> {
-    // 模拟天气数据
-    let weather_data = format!("{}: 气温 25°C，晴天", city);
-    Ok(ToolResult::success(weather_data))
-}
-
-/// demo04: SubAgent 编排演示（Orchestrator + Worker）
-fn create_all_tools() -> Vec<Box<dyn Tool>> {
+fn math_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(AddTool),
         Box::new(SubtractTool),
         Box::new(MultiplyTool),
         Box::new(DivideTool),
-        Box::new(WeatherTool),
     ]
+}
+
+fn spawn_human_loop_worker(
+    manager: Arc<HumanLoopManager>,
+    input_count: Arc<AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = manager.recv_event().await {
+            match event {
+                HumanLoopEvent::ApprovalRequest {
+                    tool_name,
+                    prompt,
+                    responder,
+                    ..
+                } => {
+                    println!("🔔 审批请求: {tool_name} -> {prompt}");
+                    responder.approve();
+                }
+                HumanLoopEvent::InputRequest { prompt, responder } => {
+                    input_count.fetch_add(1, Ordering::Relaxed);
+                    println!("💬 Human-in-the-loop: {prompt}");
+                    responder.respond("用户补充：今天下雨，请按雨天折扣计算。".to_string());
+                }
+            }
+        }
+    })
 }
 
 #[tokio::main]
@@ -51,96 +70,142 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    println!("🧪 demo04 - SubAgent 编排演示\n");
+    println!("🧪 demo04 - SubAgent 编排 + Human-in-the-Loop 演示\n");
 
-    // 第一步：定义 Worker sub-agent 配置
-    let sub_agent_configs = vec![
-        AgentConfig::new(
-            "qwen3-max",
-            "weather-agent",
-            "你是获取天气数据的专家，专注于：
+    let human_loop = Arc::new(HumanLoopManager::new());
+    let input_count = Arc::new(AtomicUsize::new(0));
+    let worker = spawn_human_loop_worker(human_loop.clone(), input_count.clone());
 
-- 使用工具获取天气数据
- - 在获取天气数据时完全根据用户需求进行，不凭空猜测、杜撰、编造一切时间、地点参数",
+    let weather_llm = Arc::new(
+        MockLlmClient::new()
+            .with_model_name("weather-agent-mock")
+            .then_tool_call(
+                "weather-hitl-1",
+                "human_in_loop",
+                r#"{
+                    "reasoning":"用户没有说明购物当天是否下雨，无法决定是否触发雨天 85 折。",
+                    "approval_type":"LLM",
+                    "tool":"weather-context"
+                }"#,
+            )
+            .then_tool_call(
+                "weather-final-1",
+                "final_answer",
+                r#"{"answer":"已通过 human_in_loop 向用户确认：今天下雨，因此后续计算需要叠加雨天 85 折。"}"#,
+            ),
+    );
+
+    let math_llm = Arc::new(
+        MockLlmClient::new()
+            .with_model_name("math-agent-mock")
+            .then_tool_call("math-1", "multiply", r#"{"a":10,"b":15}"#)
+            .then_tool_call("math-2", "multiply", r#"{"a":16,"b":8}"#)
+            .then_tool_call("math-3", "multiply", r#"{"a":2,"b":98}"#)
+            .then_tool_call("math-4", "multiply", r#"{"a":500,"b":0.8}"#)
+            .then_tool_call("math-5", "add", r#"{"a":150,"b":128}"#)
+            .then_tool_call("math-6", "add", r#"{"a":278,"b":196}"#)
+            .then_tool_call("math-7", "add", r#"{"a":474,"b":400}"#)
+            .then_tool_call("math-8", "multiply", r#"{"a":874,"b":0.9}"#)
+            .then_tool_call("math-9", "multiply", r#"{"a":786.6,"b":0.85}"#)
+            .then_tool_call("math-10", "subtract", r#"{"a":1000,"b":668.61}"#)
+            .then_tool_call(
+                "math-final-1",
+                "final_answer",
+                r#"{"answer":"计算结果：本子 150 元，笔 128 元，玩具 196 元，衣服满 500 打八折后为 400 元；小计 874 元，满 800 打九折后为 786.6 元；已确认下雨，再打 85 折，实付 668.61 元，最终剩余 331.39 元。"}"#,
+            ),
+    );
+
+    let orchestrator_llm = Arc::new(
+        MockLlmClient::new()
+            .with_model_name("orchestrator-mock")
+            .then_tool_call(
+                "main-1",
+                "agent_tool",
+                r#"{
+                    "agent_name":"weather-agent",
+                    "task":"先向用户确认购物当天是否下雨，并只返回与折扣判断相关的结论。"
+                }"#,
+            )
+            .then_tool_call(
+                "main-2",
+                "agent_tool",
+                r#"{
+                    "agent_name":"math-agent",
+                    "task":"预算是 1000 元。已确认今天下雨。请按先单品折扣、再满减折扣、最后雨天折扣的顺序计算剩余金额，并返回清晰的计算结论。"
+                }"#,
+            )
+            .then_tool_call(
+                "main-final-1",
+                "final_answer",
+                r#"{"answer":"weather-agent 先通过 human_in_loop 完成了天气澄清，确认今天下雨；math-agent 随后完成折扣计算，最终实付 668.61 元，还剩 331.39 元。"}"#,
+            ),
+    );
+
+    let weather_agent = ReactAgentBuilder::new()
+        .name("weather-agent")
+        .model("weather-agent-mock")
+        .system_prompt(
+            "你负责识别是否缺少天气上下文。若用户未说明是否下雨，必须先调用 human_in_loop 获取补充信息，再给出简洁结论。",
         )
-        .enable_tool(true)
-        .enable_task(false)
-        .enable_human_in_loop(true)
-        .enable_subagent(false)
-        .allowed_tools(vec!["weather".to_string()]),
-        AgentConfig::new(
-            "qwen3-max",
-            "math-agent",
-            "你是擅长数据计算的专家，专注于：
+        .enable_tools()
+        .enable_human_in_loop()
+        .approval_provider(human_loop.clone() as Arc<dyn echo_agent::human_loop::HumanLoopProvider>)
+        .llm_client(weather_llm)
+        .max_iterations(6)
+        .build()?;
 
-- 进行复杂的数学计算",
-        )
-        .enable_tool(true)
-        .enable_task(false)
-        .enable_human_in_loop(false)
-        .enable_subagent(false)
-        .allowed_tools(vec![
-            "add".to_string(),
-            "subtract".to_string(),
-            "multiply".to_string(),
-            "divide".to_string(),
-        ]),
-    ];
+    let mut math_agent = ReactAgentBuilder::new()
+        .name("math-agent")
+        .model("math-agent-mock")
+        .system_prompt("你是折扣计算专家，只使用数学工具逐步计算，再给出最终金额。")
+        .enable_tools()
+        .llm_client(math_llm)
+        .max_iterations(16)
+        .build()?;
+    math_agent.add_tools(math_tools());
 
-    //  第二步：构建 Worker sub-agents
-    let sub_agents: Vec<Box<dyn Agent>> = sub_agent_configs
-        .into_iter()
-        .map(|config| {
-            let mut agent = ReactAgent::new(config);
-            agent.add_tools(create_all_tools());
-            Box::new(agent) as Box<dyn Agent>
-        })
-        .collect();
-
-    // 第三步：使用 AgentBuilder 构建 Orchestrator main agent
     let mut main_agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("orchestrator-mock")
         .name("main_agent")
         .system_prompt(
-            r#"你是一个智能助手，负责协调和分配任务。
-
-你的职责：
-1. 理解用户需求
-2. 判断任务复杂度
-3. 对于复杂或专业任务，使用 agent_tool 分配给专用 SubAgent
-4. 汇总 SubAgent 结果并呈现给用户
-
-可用的 SubAgent：
-- math-agent: 擅长数学计算
-- weather-agent: 获取天气相关信息
-
-当任务涉及天气查询或数学计算时，优先通过 agent_tool 调度对应 SubAgent，不要自己直接计算。"#,
+            "你是主编排 Agent。遇到缺失上下文的专业问题先分派给对应 subagent，再汇总结果，不要自己直接计算。",
         )
         .role(AgentRole::Orchestrator)
         .enable_subagent()
-        .enable_planning()
-        .max_iterations(50)
+        .llm_client(orchestrator_llm)
+        .max_iterations(8)
         .build()?;
 
-    main_agent.register_agents(sub_agents);
+    main_agent.register_agent(Box::new(weather_agent));
+    main_agent.register_agent(Box::new(math_agent));
 
-    // 第四步：执行任务
     let result = main_agent
         .execute(
-            "我有1000元，我准备去商场购物。\
-            我需要买10个15元的本子，16个8元的笔，2个98元的玩具，一个500元的衣服。\
-            商场决定单品价格满500打八折，总价满800打9折。\
-            如果当天天气下雨，则商场总价会打85折。\
-            请问我还剩多少？",
+            "我有1000元，要买 10 个 15 元的本子、16 个 8 元的笔、2 个 98 元的玩具和一件 500 元的衣服。单品满 500 打八折，总价满 800 打九折；如果当天下雨，总价再打 85 折。请问我还剩多少？",
         )
         .await?;
+
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo04 验收失败：SubAgent 编排示例返回空结果".to_string(),
         )
         .into());
     }
+    if input_count.load(Ordering::Relaxed) == 0 {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo04 验收失败：未触发 human_in_loop 输入请求".to_string(),
+        )
+        .into());
+    }
+    if !result.contains("331.39") {
+        return Err(echo_agent::error::ReactError::Other(
+            "demo04 验收失败：最终结果未包含预期剩余金额 331.39".to_string(),
+        )
+        .into());
+    }
 
     println!("\n✅ 最终结果:\n{}", result);
+
+    worker.abort();
     Ok(())
 }

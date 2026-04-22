@@ -451,10 +451,23 @@ impl GraphBuilder {
             }
         }
 
-        // 构建邻接表
+        // 构建邻接表并校验多出边
         let mut edge_map: HashMap<String, Vec<Edge>> = HashMap::new();
         for edge in self.edges {
-            edge_map.entry(edge.from.clone()).or_default().push(edge);
+            let from = edge.from.clone();
+            let entry = edge_map.entry(from.clone()).or_default();
+            // 禁止同一节点存在多条普通出边（Fixed / Conditional），
+            // 因为 resolve_next() 只取第一条边，其余会被静默丢弃。
+            if !entry.is_empty() {
+                return Err(ReactError::Agent(AgentError::InitializationFailed(
+                    format!(
+                        "Node '{}' has multiple outgoing edges; only one edge per node is supported \
+                         (use a Conditional edge for branching, or a Parallel edge for fan-out)",
+                        from,
+                    ),
+                )));
+            }
+            entry.push(edge);
         }
 
         Ok(Graph {
@@ -815,8 +828,38 @@ impl Graph {
     pub async fn resume(
         &self,
         checkpoint: Checkpoint,
-        _decision: ApprovalDecision,
+        decision: ApprovalDecision,
     ) -> Result<RunUntilInterruptResult> {
+        // 检查审批决策 — Rejected 和 Deferred 不得继续执行
+        match &decision {
+            ApprovalDecision::Rejected { reason } => {
+                info!(
+                    graph = %self.name,
+                    checkpoint_id = %checkpoint.id,
+                    reason = reason.as_deref().unwrap_or("no reason"),
+                    "Resume rejected, aborting workflow"
+                );
+                return Ok(RunUntilInterruptResult::Completed(GraphResult {
+                    state: checkpoint.restore_state()?,
+                    path: checkpoint.path,
+                    steps: checkpoint.step_count,
+                }));
+            }
+            ApprovalDecision::Deferred => {
+                info!(
+                    graph = %self.name,
+                    checkpoint_id = %checkpoint.id,
+                    "Resume deferred, aborting workflow"
+                );
+                return Ok(RunUntilInterruptResult::Completed(GraphResult {
+                    state: checkpoint.restore_state()?,
+                    path: checkpoint.path,
+                    steps: checkpoint.step_count,
+                }));
+            }
+            _ => {} // Approved, ApprovedWithScope, Modified — continue
+        }
+
         // 恢复状态
         let state = checkpoint.restore_state()?;
         let mut current = checkpoint.current_node;
@@ -829,9 +872,6 @@ impl Graph {
             node = %current,
             "Resuming from checkpoint"
         );
-
-        // 删除已使用的 checkpoint
-        self.checkpoint_store.delete(&checkpoint.id).await?;
 
         // 继续执行
         loop {
@@ -853,6 +893,8 @@ impl Graph {
                     path.push(current.clone());
                     step_count += 1;
                 }
+                // 成功执行完成后删除 checkpoint
+                self.checkpoint_store.delete(&checkpoint.id).await?;
                 return Ok(RunUntilInterruptResult::Completed(GraphResult {
                     state,
                     path,
@@ -894,6 +936,9 @@ impl Graph {
 
                 self.checkpoint_store.save(&new_checkpoint).await?;
 
+                // 删除旧的 checkpoint（新的已保存成功）
+                self.checkpoint_store.delete(&checkpoint.id).await?;
+
                 let interrupt_state = InterruptState::after_node(new_checkpoint, current);
                 return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
             }
@@ -914,6 +959,9 @@ impl Graph {
                         );
                         self.checkpoint_store.save(&new_checkpoint).await?;
 
+                        // 删除旧的 checkpoint（新的已保存成功）
+                        self.checkpoint_store.delete(&checkpoint.id).await?;
+
                         let interrupt_state = InterruptState::before_node(new_checkpoint, name);
                         return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
                     }
@@ -932,6 +980,7 @@ impl Graph {
                     current = then;
                 }
                 NextStep::End => {
+                    self.checkpoint_store.delete(&checkpoint.id).await?;
                     return Ok(RunUntilInterruptResult::Completed(GraphResult {
                         state,
                         path,
@@ -957,15 +1006,12 @@ impl Graph {
             let _ = state.set(key, value.clone());
         }
 
-        // Create a modified checkpoint with updated state
-        let modified_checkpoint = Checkpoint::new(
-            checkpoint.graph_name.clone(),
-            checkpoint.current_node.clone(),
-            &state,
-            checkpoint.path.clone(),
-            checkpoint.step_count,
-            checkpoint.interrupt_type,
-        );
+        // Reuse the original checkpoint identity so subsequent save/delete
+        // operations still target the persisted checkpoint entry.
+        let mut modified_checkpoint = checkpoint;
+        modified_checkpoint.state_snapshot = state.to_json_value().map_err(|e| {
+            ReactError::Other(format!("Failed to serialize updated workflow state: {}", e))
+        })?;
 
         self.resume(modified_checkpoint, ApprovalDecision::Approved)
             .await
@@ -1427,6 +1473,31 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_build_rejects_multiple_outgoing_edges() {
+        // 同一节点有两条出边 → build 阶段应报错
+        let result = GraphBuilder::new("multi_edge")
+            .add_function_node("a", |_: &SharedState| Box::pin(async { Ok(()) }))
+            .add_function_node("b", |_: &SharedState| Box::pin(async { Ok(()) }))
+            .add_function_node("c", |_: &SharedState| Box::pin(async { Ok(()) }))
+            .set_entry("a")
+            .add_edge("a", "b")
+            .add_edge("a", "c") // 第二条出边
+            .build();
+        assert!(
+            result.is_err(),
+            "Multiple outgoing edges should be rejected"
+        );
+        let err_msg = match result {
+            Err(e) => e.to_string(),
+            _ => String::new(),
+        };
+        assert!(
+            err_msg.contains("multiple outgoing edges"),
+            "Error should mention 'multiple outgoing edges', got: {err_msg}"
+        );
+    }
+
     // ── Feature 4: Workflow 流式输出 (run_stream) ────────────────────────────
 
     #[tokio::test]
@@ -1597,5 +1668,58 @@ mod tests {
         }
 
         assert_eq!(visited, vec!["check", "yes"]);
+    }
+
+    #[tokio::test]
+    async fn test_resume_with_state_reuses_checkpoint_identity() {
+        use std::collections::HashMap;
+
+        let checkpoint_store = Arc::new(MemoryCheckpointStore::new());
+        let graph = GraphBuilder::new("resume_with_state")
+            .add_function_node("start", |state: &SharedState| {
+                Box::pin(async move {
+                    let _ = state.set("message", "original");
+                    Ok(())
+                })
+            })
+            .add_function_node("finish", |state: &SharedState| {
+                Box::pin(async move {
+                    let msg: String = state.get("message").unwrap_or_default();
+                    let _ = state.set("result", format!("seen={msg}"));
+                    Ok(())
+                })
+            })
+            .set_entry("start")
+            .add_edge("start", "finish")
+            .set_finish("finish")
+            .interrupt_before(vec!["finish"])
+            .build()
+            .unwrap()
+            .with_checkpoint_store(checkpoint_store.clone());
+
+        let state = SharedState::new();
+        let interrupted = graph.run_until_interrupt(state).await.unwrap();
+        let checkpoint = match interrupted {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            RunUntilInterruptResult::Completed(_) => panic!("expected interrupt"),
+        };
+
+        assert_eq!(graph.list_checkpoints().await.unwrap().len(), 1);
+
+        let mut updates = HashMap::new();
+        updates.insert("message".to_string(), Value::String("patched".to_string()));
+
+        let resumed = graph.resume_with_state(checkpoint, updates).await.unwrap();
+        let result = match resumed {
+            RunUntilInterruptResult::Completed(result) => result,
+            RunUntilInterruptResult::Interrupted(_) => panic!("expected completed result"),
+        };
+
+        let seen: String = result.state.get("result").unwrap_or_default();
+        assert_eq!(seen, "seen=patched");
+        assert!(
+            graph.list_checkpoints().await.unwrap().is_empty(),
+            "checkpoint should be deleted after successful resume"
+        );
     }
 }

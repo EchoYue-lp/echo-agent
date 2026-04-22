@@ -5,7 +5,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
 pub async fn post(
     client: Arc<Client>,
@@ -13,9 +13,10 @@ pub async fn post(
     header_map: HeaderMap,
     url: &str,
 ) -> Result<ChatCompletionResponse> {
-    debug!(
-        "Post completion request_body: {}",
-        serde_json::to_string(request_body).unwrap_or_else(|e| format!("<serialize error: {}>", e))
+    trace!(
+        model = %request_body.model,
+        message_count = request_body.messages.len(),
+        "Post completion request"
     );
     let response = client
         .post(url)
@@ -43,10 +44,9 @@ pub async fn post(
         .await
         .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
 
-    debug!(
-        "Post completion response: {}",
-        serde_json::to_string(&completion_response)
-            .unwrap_or_else(|e| format!("<serialize error: {}>", e))
+    trace!(
+        choice_count = completion_response.choices.len(),
+        "Post completion response received"
     );
 
     Ok(completion_response)
@@ -65,10 +65,10 @@ pub async fn stream_post(
         "Stream completion: model={}, url={}",
         request_body.model, url
     );
-    debug!(
-        "Stream completion request_body: {}",
-        serde_json::to_string(&request_body)
-            .unwrap_or_else(|e| format!("<serialize error: {}>", e))
+    trace!(
+        model = %request_body.model,
+        message_count = request_body.messages.len(),
+        "Stream completion request"
     );
 
     let response = client

@@ -1,6 +1,6 @@
 //! 统一配置管理
 //!
-//! 从 `echo-agent.yaml` 加载全局配置，支持环境变量覆盖。
+//! 从 `echo-agent.yaml` 加载全局配置。
 //!
 //! # 配置文件搜索顺序
 //!
@@ -8,10 +8,6 @@
 //! 2. `./echo-agent.yaml`
 //! 3. `~/.echo-agent/config.yaml`
 //! 4. 无配置文件时使用默认值
-//!
-//! # 配置优先级
-//!
-//! CLI 参数 > 环境变量 > 配置文件 > 默认值
 //!
 //! # 示例
 //!
@@ -62,6 +58,8 @@ impl AppConfig {
         .enable_human_in_loop(self.agent.enable_human_in_loop)
         .max_iterations(self.agent.max_iterations)
         .memory_path(&self.agent.memory_path)
+        .temperature(self.model.temperature)
+        .max_tokens(self.model.max_tokens)
     }
 }
 
@@ -250,6 +248,11 @@ impl Default for LoggingConfig {
 /// 配置文件搜索路径
 fn config_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    if let Ok(explicit) = std::env::var("ECHO_AGENT_CONFIG")
+        && !explicit.trim().is_empty()
+    {
+        paths.push(PathBuf::from(explicit));
+    }
     paths.push(PathBuf::from("echo-agent.yaml"));
     if let Ok(home) = std::env::var("HOME") {
         paths.push(PathBuf::from(home).join(".echo-agent").join("config.yaml"));
@@ -297,13 +300,10 @@ pub fn load_config(explicit_path: Option<&str>) -> AppConfig {
     AppConfig::default()
 }
 
-/// 合并环境变量覆盖
+/// 合并基础环境变量覆盖。
 ///
-/// 环境变量优先级高于配置文件，但低于 CLI 参数。
+/// 仅保留配置文件路径、渠道密钥等基础引导项；模型选择必须来自 YAML。
 pub fn apply_env_overrides(config: &mut AppConfig) {
-    if let Ok(v) = std::env::var("MODEL_NAME") {
-        config.model.name = v;
-    }
     if let Ok(v) = std::env::var("QQ_APP_ID") {
         config.channels.qq.app_id = v;
         if !config.channels.qq.app_id.is_empty() {
@@ -374,5 +374,26 @@ mod tests {
         let parsed: AppConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.model.name, config.model.name);
         assert_eq!(parsed.agent.system_prompt, config.agent.system_prompt);
+    }
+
+    #[test]
+    fn test_load_config_honors_echo_agent_config_env() {
+        let temp_path =
+            std::env::temp_dir().join(format!("echo-agent-config-{}.yaml", std::process::id()));
+        std::fs::write(
+            &temp_path,
+            r#"
+model:
+  name: qwen-vl-max
+"#,
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("ECHO_AGENT_CONFIG", &temp_path) };
+        let config = load_config(None);
+        unsafe { std::env::remove_var("ECHO_AGENT_CONFIG") };
+        std::fs::remove_file(&temp_path).unwrap();
+
+        assert_eq!(config.model.name, "qwen-vl-max");
     }
 }

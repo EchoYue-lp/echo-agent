@@ -24,12 +24,18 @@
 //!
 //! # 带流式输出和彩色日志
 //! RUST_LOG=info QWEN_API_KEY=your_key cargo run --example comprehensive_customer_service --features sqlite
+//!
+//! # 若要验证图片输入，请先在 echo-agent.yaml 中把 model.name 设为视觉模型
+//! cargo run --example comprehensive_customer_service --features sqlite
 //! ```
 
-use echo_agent::human_loop::{InMemoryPermissionAuditSink, PermissionService};
+use echo_agent::human_loop::{
+    HumanLoopEvent, HumanLoopManager, InMemoryPermissionAuditSink, PermissionService,
+};
 use echo_agent::memory::SqliteStore;
 use echo_agent::prelude::*;
 use echo_agent::tool;
+use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
 use futures::StreamExt;
 use serde_json::json;
 use std::io::Write;
@@ -172,7 +178,128 @@ async fn main() -> Result<()> {
 
     // ── 3. 创建审批服务（退款需要人工批准）──────────────────────────────────
     let audit_sink = Arc::new(InMemoryPermissionAuditSink::new(100));
-    let permission_service = Arc::new(PermissionService::new().with_audit_sink(audit_sink.clone()));
+    let manager = Arc::new(HumanLoopManager::new());
+    let mgr = manager.clone();
+    tokio::spawn(async move {
+        while let Some(event) = mgr.recv_event().await {
+            match event {
+                HumanLoopEvent::ApprovalRequest {
+                    tool_name,
+                    responder,
+                    ..
+                } => {
+                    println!("\n   🔐 [自动审批: {}]\n", tool_name);
+                    responder.approve();
+                }
+                HumanLoopEvent::InputRequest { prompt, responder } => {
+                    println!("\n   💬 [自动补充信息: {}]\n", prompt);
+                    responder
+                        .respond("客户未补充更多信息，请基于已知订单信息继续处理。".to_string());
+                }
+            }
+        }
+    });
+    let permission_service = Arc::new(
+        PermissionService::from_provider(
+            manager.clone() as Arc<dyn echo_agent::human_loop::HumanLoopProvider>
+        )
+        .with_audit_sink(audit_sink.clone()),
+    );
+    permission_service
+        .add_rules(vec![
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "query_order".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "check_inventory".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "create_ticket".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "remember".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "recall".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "search_memory".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "forget".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "plan".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "create_task".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "list_tasks".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "update_task".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "visualize_dependencies".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "get_execution_order".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::allow(
+                RuleMatcher::Pattern {
+                    pattern: "final_answer".to_string(),
+                },
+                RuleSource::Session,
+            ),
+            PermissionRule::ask(
+                RuleMatcher::Pattern {
+                    pattern: "process_refund".to_string(),
+                },
+                vec!["允许".to_string(), "拒绝".to_string()],
+                RuleSource::Session,
+            ),
+        ])
+        .await;
 
     // ── 4. 创建护栏（敏感词过滤）────────────────────────────────────────────
     let input_guard = Arc::new(
@@ -197,6 +324,7 @@ async fn main() -> Result<()> {
         .max_iterations(20)
         .snapshot_policy(SnapshotPolicy::EveryIteration)
         .max_snapshots(10)
+        .approval_provider(manager)
         .permission_service(permission_service)
         .guard(input_guard)
         .audit_logger(audit_logger.clone())

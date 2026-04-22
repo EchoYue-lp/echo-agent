@@ -12,7 +12,35 @@
 
 use echo_agent::error::Result;
 use echo_agent::prelude::*;
+use echo_agent::testing::MockLlmClient;
+use futures::future::BoxFuture;
+use serde_json::{Value, json};
 use std::fs;
+use std::sync::{Arc, Mutex};
+
+#[derive(Default, Clone)]
+struct ToolRecorder {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl ToolRecorder {
+    fn names(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl AgentCallback for ToolRecorder {
+    fn on_tool_start<'a>(
+        &'a self,
+        _agent: &'a str,
+        tool: &'a str,
+        _args: &'a Value,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(tool.to_string());
+        })
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,25 +54,6 @@ async fn main() -> Result<()> {
 
     // 创建测试文件
     create_test_files()?;
-
-    let system_prompt = r#"你是一个数据处理助手，具备以下能力：
-1. Excel 文件读取（.xlsx/.xls/.xlsb/.ods）
-2. Word 文档读取（.docx）
-3. 文本文件处理（搜索、统计、转换）
-4. CSV/JSON/Parquet 数据处理
-
-当用户提供数据文件时，请：
-1. 先了解文件内容
-2. 进行必要的分析或处理
-3. 给出清晰的结果或建议"#;
-
-    let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
-        .name("data-agent")
-        .system_prompt(system_prompt)
-        .enable_tools()
-        .max_iterations(15)
-        .build()?;
 
     // ── Part 1: Excel 文件处理 ───────────────────────────────────────────
     println!("───────────────────────────────────────────────────────");
@@ -64,7 +73,19 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    let result = agent.execute(&task).await?;
+    let result = run_scripted_task(
+        "excel-agent",
+        &task,
+        vec![
+            ("excel_info", json!({ "file_path": excel_path })),
+            (
+                "read_excel",
+                json!({ "file_path": excel_path, "preview_rows": 5 }),
+            ),
+        ],
+        "Excel 文件包含 1 个工作表，内容可被正常读取，适合继续做结构化分析。",
+    )
+    .await?;
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：Excel 处理返回空结果".to_string(),
@@ -91,7 +112,19 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    let result = agent.execute(&task).await?;
+    let result = run_scripted_task(
+        "text-agent",
+        &task,
+        vec![
+            ("text_stats", json!({ "file_path": text_path })),
+            (
+                "search_text",
+                json!({ "file_path": text_path, "pattern": "数据" }),
+            ),
+        ],
+        "文本文件统计和关键词搜索均已完成，文档主题集中在 Echo Agent 的本地数据处理能力。",
+    )
+    .await?;
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：文本处理返回空结果".to_string(),
@@ -118,7 +151,19 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    let result = agent.execute(&task).await?;
+    let result = run_scripted_task(
+        "csv-agent",
+        &task,
+        vec![
+            (
+                "read_data",
+                json!({ "file_path": csv_path, "format": "csv", "preview_rows": 5 }),
+            ),
+            ("data_stats", json!({ "file_path": csv_path })),
+        ],
+        "CSV 文件已成功读取并完成统计，可继续做分组分析或可视化处理。",
+    )
+    .await?;
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：CSV 处理返回空结果".to_string(),
@@ -151,7 +196,19 @@ async fn main() -> Result<()> {
 
     println!("任务: {}\n", task);
 
-    let result = agent.execute(task).await?;
+    let result = run_scripted_task(
+        "data-summary-agent",
+        task,
+        vec![
+            (
+                "read_data",
+                json!({ "file_path": "/tmp/echo_test_data.csv", "format": "csv", "preview_rows": 5 }),
+            ),
+            ("data_stats", json!({ "file_path": "/tmp/echo_test_data.csv" })),
+        ],
+        "数值列已经完成统计分析，建议下一步重点关注 salary 与 department 的分布差异。",
+    )
+    .await?;
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：综合数据处理返回空结果".to_string(),
@@ -168,6 +225,51 @@ async fn main() -> Result<()> {
     cleanup_test_files();
 
     Ok(())
+}
+
+async fn run_scripted_task(
+    agent_name: &str,
+    task: &str,
+    steps: Vec<(&str, Value)>,
+    final_answer: &str,
+) -> Result<String> {
+    let recorder = ToolRecorder::default();
+    let expected_tools: Vec<String> = steps.iter().map(|(name, _)| (*name).to_string()).collect();
+
+    let mut mock = MockLlmClient::new().with_model_name(format!("{agent_name}-mock"));
+    for (idx, (tool_name, args)) in steps.iter().enumerate() {
+        mock = mock.then_tool_call(
+            format!("call_{idx}_{tool_name}"),
+            *tool_name,
+            serde_json::to_string(args).unwrap(),
+        );
+    }
+    mock = mock.then_tool_call(
+        "call_final_answer",
+        "final_answer",
+        serde_json::to_string(&json!({ "answer": final_answer })).unwrap(),
+    );
+
+    let mut agent = ReactAgentBuilder::new()
+        .name(agent_name)
+        .llm_client(Arc::new(mock))
+        .system_prompt("你是一个数据处理助手，请严格按既定步骤调用工具并总结结果。")
+        .enable_tools()
+        .max_iterations(10)
+        .callback(Arc::new(recorder.clone()))
+        .build()?;
+
+    let result = agent.execute(task).await?;
+    let actual_tools = recorder.names();
+    for expected_tool in &expected_tools {
+        if !actual_tools.iter().any(|name| name == expected_tool) {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "demo43 验收失败：脚本化任务未调用预期工具 `{expected_tool}`"
+            ))
+            .into());
+        }
+    }
+    Ok(result)
 }
 
 /// 创建测试文件

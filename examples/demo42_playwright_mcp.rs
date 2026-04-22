@@ -35,6 +35,8 @@ use echo_agent::mcp::McpConfigFile;
 use echo_agent::prelude::*;
 use futures::StreamExt;
 
+const BROWSER_TOOL_TIMEOUT_MS: u64 = 120_000;
+
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     dotenv::dotenv().ok();
@@ -75,19 +77,26 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
     println!("{}", "─".repeat(55));
     println!("Part 2: Agent 集成浏览器自动化（显示思考过程和工具返回）\n");
 
+    let model_name = require_configured_model(Some("deepseek-chat"))?;
     let mut agent = ReactAgentBuilder::new()
-        .model("deepseek-chat")
+        .model(&model_name)
         .name("browser-agent")
         .system_prompt(
-            "你是一个浏览器自动化助手。你可以使用 playwright_* 系列工具控制浏览器完成任务。\n\
+            "你是一个浏览器自动化助手。你可以使用 browser_* 系列工具控制浏览器完成任务。\n\
              工作流程：\n\
-             1. 使用 playwright_navigate 导航到目标页面\n\
-             2. 使用 playwright_snapshot 获取页面结构\n\
-             3. 根据页面结构使用 playwright_click / playwright_type 等工具操作页面\n\
-             4. 使用 playwright_screenshot 截图确认结果\n\
-             完成任务后使用 playwright_close 关闭浏览器。",
+             1. 先导航，再读取页面结构，不要盲点\n\
+             2. 如果需要输入，优先使用 type/fill/click 等最直接的工具\n\
+             3. 页面已经足够分析时就直接总结，避免无意义的重复操作\n\
+             4. 输出简洁结论，说明你在页面上看到了什么。",
         )
         .enable_tools()
+        .tool_execution(ToolExecutionConfig {
+            timeout_ms: BROWSER_TOOL_TIMEOUT_MS,
+            retry_on_fail: true,
+            max_retries: 1,
+            retry_delay_ms: 500,
+            ..ToolExecutionConfig::default()
+        })
         .max_iterations(50)
         .build()?;
 
@@ -103,8 +112,9 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
     println!("✓ Agent 已创建，包含浏览器工具");
     println!("  已连接 MCP 服务端数: {}", clients.len());
 
-    let task = "请用浏览器打开 https://www.baidu.com ，然后搜索 rust ,分析页面返回的内容。";
+    let task = "请按下面步骤完成任务：1）打开 https://www.baidu.com；2）搜索 rust；3）读取搜索结果页的主要内容；4）用简洁中文总结页面返回了什么。";
     println!("\n  任务: {}\n", task);
+    println!("  工具超时: {} 秒\n", BROWSER_TOOL_TIMEOUT_MS / 1000);
 
     // 使用 execute_stream 获取实时事件
     let mut stream = agent.execute_stream(task).await?;
@@ -182,3 +192,44 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────
+
+fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<String> {
+    let app_config = echo_agent::config::load_config(None);
+    let configured = app_config.model.name.trim();
+
+    if !configured.is_empty() {
+        return echo_agent::llm::config::LlmConfig::from_model(configured)
+            .map(|_| configured.to_string())
+            .map_err(|e| {
+                echo_agent::error::ReactError::Other(format!(
+                    "demo42 验收失败：当前 `model.name = {configured}` 配置无效：{e}"
+                ))
+                .into()
+            });
+    }
+
+    if let Some(preferred) = preferred
+        && echo_agent::llm::config::Config::has_model(preferred)
+    {
+        return Ok(preferred.to_string());
+    }
+
+    if let Some(first) = echo_agent::llm::config::Config::list_models()
+        .into_iter()
+        .next()
+    {
+        return Ok(first);
+    }
+
+    let load_err = echo_agent::llm::config::Config::load_cached()
+        .err()
+        .map(|e| format!("配置加载失败：{e}"))
+        .unwrap_or_else(|| {
+            "请在 echo-agent.yaml 的 `models:` 中声明至少一个模型，并让 `model.name` 指向它。"
+                .to_string()
+        });
+    Err(echo_agent::error::ReactError::Other(format!(
+        "demo42 验收失败：未找到可用模型配置。{load_err}"
+    ))
+    .into())
+}

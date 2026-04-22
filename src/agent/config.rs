@@ -83,6 +83,10 @@ pub struct AgentConfig {
     /// 当可用 token 余量低于此比例时，在 think() 前主动触发压缩。
     /// 取值 0.0–1.0，默认 0.2（即剩余不到 20% 时触发）。
     pub(crate) compress_threshold_ratio: f64,
+    /// LLM 温度参数（0.0 ～ 2.0，None 表示使用模型默认值）
+    pub(crate) temperature: Option<f32>,
+    /// 最大生成 token 数（None 表示使用模型默认值）
+    pub(crate) max_tokens: Option<u32>,
 }
 
 impl AgentConfig {
@@ -123,6 +127,8 @@ impl AgentConfig {
             response_format: None,
             max_tool_output_tokens: None,
             compress_threshold_ratio: 0.2,
+            temperature: None,
+            max_tokens: None,
         }
     }
 
@@ -651,6 +657,40 @@ impl AgentConfig {
     /// 压缩阈值比例（0.0–1.0），默认 0.2
     pub fn get_compress_threshold_ratio(&self) -> f64 {
         self.compress_threshold_ratio
+    }
+
+    /// 设置 LLM 温度参数
+    ///
+    /// # 参数
+    /// * `temperature` - 温度值（0.0 ～ 2.0，None 表示使用模型默认值）
+    pub fn temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
+    }
+
+    /// 获取 LLM 温度参数
+    ///
+    /// # 返回值
+    /// 温度值，`None` 表示使用模型默认值
+    pub fn get_temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    /// 设置最大生成 token 数
+    ///
+    /// # 参数
+    /// * `max_tokens` - 最大 token 数（None 表示使用模型默认值）
+    pub fn max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+
+    /// 获取最大生成 token 数
+    ///
+    /// # 返回值
+    /// 最大 token 数，`None` 表示使用模型默认值
+    pub fn get_max_tokens(&self) -> Option<u32> {
+        self.max_tokens
     }
 }
 

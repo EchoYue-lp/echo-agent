@@ -4,7 +4,9 @@
 //! System messages are sent as a top-level `system` field (not in the messages array).
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::types::{DeltaMessage, FunctionCall, Message, ToolCall};
+use echo_core::llm::types::{
+    DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message, ToolCall,
+};
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -235,6 +237,9 @@ impl LlmClient for AnthropicClient {
 
             let byte_stream = resp.bytes_stream();
             let mut buffer = String::new();
+            // Track in-progress tool calls during streaming (index → accumulated args)
+            let mut tool_call_args: std::collections::HashMap<usize, (String, String, String)> =
+                std::collections::HashMap::new();
 
             let stream = async_stream::stream! {
                 let mut byte_stream = std::pin::pin!(byte_stream);
@@ -263,13 +268,61 @@ impl LlmClient for AnthropicClient {
                             }
                             if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                                 match event {
-                                    AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
+                                    AnthropicStreamEvent::ContentBlockStart {
+                                        content_block:
+                                            ContentBlockStartBody::ToolUse { id, name },
+                                        ..
+                                    } => {
+                                        // Start tracking a new tool_use block
+                                        let idx = tool_call_args.len();
+                                        tool_call_args.insert(idx, (id, name, String::new()));
+                                    }
+                                    AnthropicStreamEvent::ContentBlockStart { .. } => {
+                                        // text block start — no action needed
+                                    }
+                                    AnthropicStreamEvent::ContentBlockDelta {
+                                        index,
+                                        delta,
+                                    } => {
                                         if let Some(text) = delta.text {
                                             yield Ok(ChatChunk {
                                                 delta: DeltaMessage {
                                                     role: Some("assistant".to_string()),
                                                     content: Some(text),
                                                     tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            });
+                                        } else if let Some(partial) = delta.partial_json {
+                                            // Accumulate tool_use arguments
+                                            if let Some(entry) = tool_call_args.get_mut(&index) {
+                                                entry.2.push_str(&partial);
+                                            }
+                                        }
+                                    }
+                                    AnthropicStreamEvent::ContentBlockStop { index } => {
+                                        // Finalize tool call and emit
+                                        if let Some((id, name, args)) =
+                                            tool_call_args.remove(&index)
+                                        {
+                                            let parsed_args: serde_json::Value =
+                                                serde_json::from_str(&args)
+                                                    .unwrap_or(serde_json::Value::Null);
+                                            yield Ok(ChatChunk {
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: None,
+                                                    tool_calls: Some(vec![DeltaToolCall {
+                                                        index: index as u32,
+                                                        id: Some(id),
+                                                        call_type: Some("function".to_string()),
+                                                        function: Some(DeltaFunctionCall {
+                                                            name: Some(name),
+                                                            arguments: Some(
+                                                                parsed_args.to_string(),
+                                                            ),
+                                                        }),
+                                                    }]),
                                                 },
                                                 finish_reason: None,
                                             });
@@ -372,12 +425,16 @@ struct AnthropicResponse {
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum AnthropicStreamEvent {
-    #[serde(rename = "content_block_delta")]
-    ContentBlockDelta {
-        #[allow(dead_code)]
-        index: usize,
-        delta: ContentDelta,
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        #[serde(rename = "index")]
+        _index: usize,
+        content_block: ContentBlockStartBody,
     },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta { index: usize, delta: ContentDelta },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
     MessageDelta { delta: MessageDeltaBody },
     #[serde(other)]
@@ -385,8 +442,19 @@ enum AnthropicStreamEvent {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ContentBlockStartBody {
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
 struct ContentDelta {
     text: Option<String>,
+    #[serde(rename = "partial_json")]
+    partial_json: Option<String>,
 }
 
 #[derive(Deserialize)]

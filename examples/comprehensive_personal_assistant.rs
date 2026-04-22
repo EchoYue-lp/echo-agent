@@ -7,7 +7,7 @@
 //! | 功能模块 | 实现方式 |
 //! |---------|---------|
 //! | 长期记忆 | `SqliteStore` 持久化用户偏好和对话历史 |
-//! | 多模态支持 | `execute_with_image()` 处理图片输入 |
+//! | 多模态支持 | `chat_with_image_url()` / `execute_with_image_url()` 处理图片输入 |
 //! | Agent 编排 | 主协调 Agent + 专业化子 Agent |
 //! | 任务管理 | `TaskManager` 创建和追踪任务 |
 //! | 流式输出 | `chat_stream()` 实时对话体验 |
@@ -25,6 +25,8 @@ use echo_agent::tasks::{Task, TaskManager, TaskStatus};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const SUBAGENT_TOOL_TIMEOUT_MS: u64 = 180_000;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Main
@@ -173,31 +175,33 @@ async fn demo_agent_orchestration() -> Result<()> {
     println!("Part 2: Agent 编排协作");
     println!("═══════════════════════════════════════════════════════\n");
 
+    let model_name = require_configured_model(None)?;
+
     // 创建专业化子 Agent
     let planner = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model(&model_name)
         .name("planner")
-        .system_prompt("你是规划专家，擅长制定计划和分解任务。")
+        .system_prompt("你是规划专家，擅长制定计划和分解任务。请用简洁要点输出，不要写冗长铺垫。")
         .max_iterations(5)
         .build()?;
 
     let researcher = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model(&model_name)
         .name("researcher")
-        .system_prompt("你是研究专家，擅长收集和分析信息。")
+        .system_prompt("你是研究专家，擅长收集和分析信息。请只返回高价值学习资源和简短说明。")
         .max_iterations(5)
         .build()?;
 
     let writer = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model(&model_name)
         .name("writer")
-        .system_prompt("你是写作专家，擅长整理和表达内容。")
+        .system_prompt("你是写作专家，擅长整理和表达内容。请输出结构清晰、篇幅适中的最终方案。")
         .max_iterations(5)
         .build()?;
 
     // 创建主编排 Agent
     let mut coordinator = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model(&model_name)
         .name("coordinator")
         .system_prompt(
             "你是主编排者，负责协调各个子 Agent 完成复杂任务。
@@ -210,6 +214,10 @@ async fn demo_agent_orchestration() -> Result<()> {
         )
         .role(echo_agent::agent::AgentRole::Orchestrator)
         .enable_subagent()
+        .tool_execution(ToolExecutionConfig {
+            timeout_ms: SUBAGENT_TOOL_TIMEOUT_MS,
+            ..ToolExecutionConfig::default()
+        })
         .max_iterations(15)
         .build()?;
 
@@ -218,15 +226,22 @@ async fn demo_agent_orchestration() -> Result<()> {
     coordinator.register_agent(Box::new(writer));
 
     println!("  ✓ 已创建 1 个主编排 Agent + 3 个专业化子 Agent\n");
+    println!(
+        "  子 Agent 工具超时: {} 秒\n",
+        SUBAGENT_TOOL_TIMEOUT_MS / 1000
+    );
 
     println!("  📋 协作任务: 制定「学习 Rust」计划\n");
 
-    let task = r#"请帮我制定一个学习 Rust 的计划：
+    let task = r#"请帮我制定一个学习 Rust 的计划，并尽量高效完成：
 1. 使用 planner 制定学习大纲
 2. 使用 researcher 收集学习资源
 3. 使用 writer 整理成完整的学习计划
 
-请协调子 Agent 完成这个任务。"#;
+要求：
+- 每个子 Agent 输出尽量精炼，控制在要点级别
+- 最终结果包含阶段安排、推荐资源、实践建议
+- 不要重复调用同一个子 Agent 做同一件事"#;
 
     println!("  执行中...\n");
 
@@ -295,15 +310,22 @@ async fn demo_task_management() -> Result<()> {
     println!();
 
     // 更新任务状态
-    let _ = manager.update_task_status("task-001", TaskStatus::Completed);
-    let _ = manager.update_task_status("task-002", TaskStatus::InProgress);
+    manager
+        .update_task_status("task-001", TaskStatus::InProgress)
+        .map_err(echo_agent::error::ReactError::Other)?;
+    manager
+        .update_task_status("task-001", TaskStatus::Completed)
+        .map_err(echo_agent::error::ReactError::Other)?;
+    manager
+        .update_task_status("task-002", TaskStatus::InProgress)
+        .map_err(echo_agent::error::ReactError::Other)?;
 
     println!("  ✓ 更新了任务状态\n");
 
     // 获取特定任务
-    let Some(task) = manager.get_task("task-003") else {
+    let Some(task) = manager.get_task("task-002") else {
         return Err(echo_agent::error::ReactError::Other(
-            "综合验收失败：无法读取 task-003".to_string(),
+            "综合验收失败：无法读取 task-002".to_string(),
         )
         .into());
     };
@@ -333,9 +355,11 @@ async fn demo_multimodal_support() -> Result<()> {
 
     println!("  📝 演示多模态消息类型:\n");
 
+    let model_name = require_configured_model(None)?;
+
     // 创建支持多模态的 Agent
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model(&model_name)
         .name("multimodal-assistant")
         .system_prompt("你是一个多模态助手，可以理解文字和图片。")
         .max_iterations(5)
@@ -355,8 +379,8 @@ async fn demo_multimodal_support() -> Result<()> {
     let preview: String = response.chars().take(100).collect();
     println!("    回复: {}...\n", preview);
 
-    println!("  注意: 实际图片分析需要支持视觉的 LLM 模型");
-    println!("    支持的模型包括: qwen3-max, gpt-4o, gpt-4o-mini 等\n");
+    println!("  注意: 实际图片分析需要在 echo-agent.yaml 中把 model.name 设为视觉模型");
+    println!("    例如 `qwen-vl-max` 或 `gpt-4o`，并确保它已在 models 中声明\n");
 
     Ok(())
 }
@@ -385,4 +409,45 @@ fn cleanup_sqlite_files(path: &Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(path.with_extension("db-wal"));
     let _ = std::fs::remove_file(path.with_extension("db-shm"));
+}
+
+fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Result<String> {
+    let app_config = echo_agent::config::load_config(None);
+    let configured = app_config.model.name.trim();
+
+    if !configured.is_empty() {
+        return echo_agent::llm::config::LlmConfig::from_model(configured)
+            .map(|_| configured.to_string())
+            .map_err(|e| {
+                echo_agent::error::ReactError::Other(format!(
+                    "综合验收失败：当前 `model.name = {configured}` 配置无效：{e}"
+                ))
+                .into()
+            });
+    }
+
+    if let Some(preferred) = preferred
+        && echo_agent::llm::config::Config::has_model(preferred)
+    {
+        return Ok(preferred.to_string());
+    }
+
+    if let Some(first) = echo_agent::llm::config::Config::list_models()
+        .into_iter()
+        .next()
+    {
+        return Ok(first);
+    }
+
+    let load_err = echo_agent::llm::config::Config::load_cached()
+        .err()
+        .map(|e| format!("配置加载失败：{e}"))
+        .unwrap_or_else(|| {
+            "请在 echo-agent.yaml 的 `models:` 中声明至少一个模型，并让 `model.name` 指向它。"
+                .to_string()
+        });
+    Err(echo_agent::error::ReactError::Other(format!(
+        "综合验收失败：未找到可用模型配置。{load_err}"
+    ))
+    .into())
 }

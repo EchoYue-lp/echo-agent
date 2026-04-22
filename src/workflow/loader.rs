@@ -213,7 +213,13 @@ impl WorkflowDefinition {
                     builder = builder.add_router_node(&node_def.name);
                 }
                 "function" => {
-                    builder = builder.add_router_node(&node_def.name);
+                    return Err(ReactError::Agent(AgentError::InitializationFailed(
+                        format!(
+                            "Node type 'function' is not yet supported for node '{}'. \
+                             Use 'agent' or 'router' instead, or register a function node manually.",
+                            node_def.name
+                        ),
+                    )));
                 }
                 other => {
                     return Err(ReactError::Agent(AgentError::InitializationFailed(

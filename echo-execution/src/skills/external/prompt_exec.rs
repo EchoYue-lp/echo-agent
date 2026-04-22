@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use regex::Regex;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::sandbox::{SandboxCommand, SandboxManager};
 use crate::skills::minimal_env;
@@ -76,19 +76,132 @@ impl Default for PromptContext {
 
 /// Process a skill's Markdown body: substitute variables, then execute inline commands.
 ///
-/// Returns the processed content with all substitutions and command outputs applied.
+/// # Security
+///
+/// To prevent user-supplied arguments from injecting new commands:
+/// 1. All command regions are extracted FIRST from the original content.
+/// 2. Variable substitution runs only on non-command text (placeholders protect command
+///    regions from both substitution and injection).
+/// 3. After substitution, the result is scanned for any NEW command markers. If found,
+///    substitution is rejected and the content is returned without command execution.
+/// 4. Original commands are executed and their output replaces the placeholders.
 pub async fn process_skill_content(content: &str, ctx: &PromptContext) -> String {
-    let mut result = substitute_variables(content, ctx);
-
     // MCP skills: completely forbid execution of inline commands
     if ctx.source == SkillSource::Mcp {
-        debug!("Skipping inline command execution for MCP skill (untrusted)");
-        return result;
+        return substitute_variables(content, ctx);
     }
 
-    result = execute_block_commands(&result, ctx).await;
-    result = execute_inline_commands(&result, ctx).await;
+    // Step 1: Extract all command regions from ORIGINAL content (before substitution)
+    let regions = extract_command_regions(content);
+
+    // Step 2: Build a safe version with unique placeholders instead of command regions
+    let mut safe = String::with_capacity(content.len());
+    let mut pos = 0;
+    for (i, region) in regions.iter().enumerate() {
+        safe.push_str(&content[pos..region.start]);
+        safe.push_str(&format!("\x01CMD_OUT_{}\x01", i)); // SOH-delimited placeholder
+        pos = region.end;
+    }
+    safe.push_str(&content[pos..]);
+
+    // Step 3: Substitute variables only in the safe (non-command) content
+    let substituted = substitute_variables(&safe, ctx);
+
+    // Step 4: Detect injected command markers introduced by variable expansion
+    if has_command_markers(&substituted) {
+        warn!(
+            "Possible command injection detected after variable substitution — \
+               command execution disabled for this skill activation"
+        );
+        // Return substituted content with placeholders removed (no command execution)
+        return strip_placeholders(&substituted);
+    }
+
+    // Step 5: Execute original commands and collect outputs
+    let mut cmd_outputs: HashMap<usize, String> = HashMap::new();
+    for (i, region) in regions.iter().enumerate() {
+        let output = run_command(&region.command_text, ctx).await;
+        cmd_outputs.insert(i, output);
+    }
+
+    // Step 6: Replace placeholders with command outputs
+    let mut result = substituted;
+    for i in (0..regions.len()).rev() {
+        let placeholder = format!("\x01CMD_OUT_{}\x01", i);
+        if let Some(output) = cmd_outputs.remove(&i) {
+            if regions[i].is_block {
+                // Block commands: output replaces the entire ```! ... ``` block
+                result = result.replace(&placeholder, &output);
+            } else {
+                // Inline commands: preserve leading whitespace from the original match
+                let matched = &content[regions[i].start..regions[i].end];
+                let leading_ws: String =
+                    matched.chars().take_while(|c| c.is_whitespace()).collect();
+                result = result.replace(&placeholder, &format!("{}{}", leading_ws, output.trim()));
+            }
+        }
+    }
+
     result
+}
+
+/// A detected command region in skill content.
+struct CmdRegion {
+    start: usize,
+    end: usize,
+    command_text: String,
+    is_block: bool,
+}
+
+/// Extract all command regions (block and inline) from content, in order.
+fn extract_command_regions(content: &str) -> Vec<CmdRegion> {
+    let block_re = Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid block regex");
+    let inline_re = Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid inline regex");
+
+    let mut regions: Vec<CmdRegion> = Vec::new();
+
+    for cap in block_re.captures_iter(content) {
+        let m = cap.get(0).unwrap();
+        regions.push(CmdRegion {
+            start: m.start(),
+            end: m.end(),
+            command_text: cap
+                .get(1)
+                .map(|m| m.as_str().trim())
+                .unwrap_or("")
+                .to_string(),
+            is_block: true,
+        });
+    }
+    for cap in inline_re.captures_iter(content) {
+        let m = cap.get(0).unwrap();
+        regions.push(CmdRegion {
+            start: m.start(),
+            end: m.end(),
+            command_text: cap
+                .get(1)
+                .map(|m| m.as_str().trim())
+                .unwrap_or("")
+                .to_string(),
+            is_block: false,
+        });
+    }
+
+    regions.sort_by_key(|r| r.start);
+    regions
+}
+
+/// Check if content contains block or inline command markers.
+fn has_command_markers(content: &str) -> bool {
+    let block_re = Regex::new(r"```!\s*\n?").expect("valid block regex");
+    let inline_re = Regex::new(r"(?:^|\s)!`[^`]*`").expect("valid inline regex");
+    block_re.is_match(content) || inline_re.is_match(content)
+}
+
+/// Remove placeholder markers from content.
+fn strip_placeholders(content: &str) -> String {
+    let re = Regex::new(r"\x01CMD_OUT_\d+\x01").expect("valid placeholder regex");
+    re.replace_all(content, "").to_string()
 }
 
 /// Substitute template variables in skill content.
@@ -120,6 +233,7 @@ fn substitute_variables(content: &str, ctx: &PromptContext) -> String {
 }
 
 /// Execute block commands: ` ```! \n command \n ``` ` -> stdout
+#[cfg(test)]
 async fn execute_block_commands(content: &str, ctx: &PromptContext) -> String {
     // Pattern: ```! followed by optional newline, then command(s), then ```
     let re = Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid regex");
@@ -151,6 +265,7 @@ async fn execute_block_commands(content: &str, ctx: &PromptContext) -> String {
 ///
 /// The pattern requires whitespace or line start before `!`` to avoid
 /// matching Markdown image syntax (`![alt](url)`).
+#[cfg(test)]
 async fn execute_inline_commands(content: &str, ctx: &PromptContext) -> String {
     let re = Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid regex");
 
@@ -543,5 +658,101 @@ mod tests {
         unsafe {
             std::env::remove_var(key);
         }
+    }
+
+    // ── Injection prevention tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_injection_via_arguments_inline() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        // User argument containing inline command syntax should NOT be executed
+        let ctx = PromptContext {
+            arguments: vec!["!`echo injected`".into()],
+            ..test_ctx()
+        };
+        let content = "Args: ${ARGUMENTS}";
+        let result = process_skill_content(content, &ctx).await;
+        // The full command syntax must remain literal (not executed and replaced by output)
+        assert!(
+            result.contains("!`echo injected`"),
+            "Injected inline command should remain as literal text, got: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_injection_via_arguments_block() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        // User argument containing block command syntax should NOT be executed
+        let ctx = PromptContext {
+            arguments: vec!["```!\necho injected\n```".into()],
+            ..test_ctx()
+        };
+        let content = "Args: ${ARGUMENTS}";
+        let result = process_skill_content(content, &ctx).await;
+        // The block command markers must remain as literal text
+        assert!(
+            result.contains("```!"),
+            "Injected block command marker should remain literal, got: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_injection_via_positional_arg() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        let ctx = PromptContext {
+            arguments: vec!["!`touch /tmp/evil`".into()],
+            ..test_ctx()
+        };
+        let content = "Arg1: ${1}";
+        let result = process_skill_content(content, &ctx).await;
+        assert!(
+            result.contains("!`touch /tmp/evil`"),
+            "Injected command should remain literal, got: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_variables_still_expand_in_text_regions() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        let ctx = PromptContext {
+            arguments: vec!["world".into()],
+            ..test_ctx()
+        };
+        // Command is in the original content, variables in text region
+        let content = "Hello ${1}! Status: !`echo ok`";
+        let result = process_skill_content(content, &ctx).await;
+        assert!(
+            result.contains("Hello world!"),
+            "Variable should expand: {}",
+            result
+        );
+        assert!(
+            result.contains("ok"),
+            "Command should still execute: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_injection_safe_argument_no_command() {
+        // Safe argument should work normally
+        let ctx = PromptContext {
+            arguments: vec!["safe-value".into()],
+            ..test_ctx()
+        };
+        let content = "Arg: ${1}";
+        let result = process_skill_content(content, &ctx).await;
+        assert_eq!(result, "Arg: safe-value");
     }
 }

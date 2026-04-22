@@ -1,346 +1,122 @@
-//! demo22_plan_execute —— Plan-and-Execute 完整演示
+//! demo22_plan_execute —— 面向真实使用的 Plan-and-Execute 示例
 //!
-//! 演示 Plan-and-Execute 引擎的完整能力：
-//! - **Plan 阶段**：将任务拆解为结构化步骤
-//! - **Execute 阶段**：按步骤顺序执行
-//! - **Replan 阶段**：失败后重新规划
-//!
-//! # 运行方式
+//! 这个示例优先演示推荐写法：
+//! - `LlmPlanner` 负责把用户任务拆成结构化步骤
+//! - `ReactExecutor` 负责逐步执行与汇总
+//! - 仅演示真实 LLM 路径，不做 mock/offline 回退
 //!
 //! ```bash
-//! # 无需 LLM，完整演示整个流程
 //! cargo run --example demo22_plan_execute
 //! ```
 
-use echo_agent::agent::plan_execute::{Executor, PlanExecuteAgent, StaticPlanner};
+use echo_agent::agent::plan_execute::{LlmPlanner, Plan, PlanExecuteAgent, Planner, ReactExecutor};
 use echo_agent::prelude::*;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-// Import Timelike for hour() method on NaiveTime
-use chrono::Timelike;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     dotenv::dotenv().ok();
 
-    // 设置日志级别以查看 Plan-and-Execute 的内部流程
     tracing_subscriber::fmt()
         .with_env_filter("echo_agent::plan_execute=info,demo22=info")
         .init();
 
     println!("═══════════════════════════════════════════════════════");
-    println!("      Plan-and-Execute 完整演示 (demo22)");
+    println!("      Plan-and-Execute 实战示例 (demo22)");
     println!("═══════════════════════════════════════════════════════\n");
 
-    // ── Part 1: 静态计划演示（无需 LLM）──────────────────────────────────────
-    demo_static_plan().await?;
+    demo_recommended_shape();
+    demo_practical_plan_execute().await?;
 
-    // ── Part 2: 自定义 Executor 演示──────────────────────────────────────────
-    demo_custom_executor().await?;
-
-    // ── Part 3: 失败重规划演示──────────────────────────────────────────────────
-    demo_replan_on_failure().await?;
-
-    // ── Part 4: 计划结构演示────────────────────────────────────────────────────
-    demo_plan_structure();
-
-    println!("═══════════════════════════════════════════════════════\n");
+    println!("\n═══════════════════════════════════════════════════════");
+    println!("      demo22 完成");
+    println!("═══════════════════════════════════════════════════════");
 
     Ok(())
 }
 
-// ── Part 1: 静态计划演示 ─────────────────────────────────────────────────────
-
-async fn demo_static_plan() -> echo_agent::error::Result<()> {
+fn demo_recommended_shape() {
     println!("─────────────────────────────────────────────");
-    println!("Part 1: 静态计划（无需 LLM）");
+    println!("Part 1: 推荐使用方式");
     println!("─────────────────────────────────────────────\n");
 
-    // 使用 StaticPlanner 创建预定义计划
-    let planner = StaticPlanner::new(vec![
-        "搜索 Rust 所有权权机制的官方文档",
-        "总结所有权的核心概念（所有权、借用、生命周期）",
-        "列举 3 个实际代码示例",
-        "生成一份学习指南",
-    ]);
+    println!("  推荐组合:");
+    println!("    1. 用 `LlmPlanner` 生成结构化计划");
+    println!("    2. 用 `ReactExecutor` 包装一个执行 Agent");
+    println!("    3. 直接调用 `PlanExecuteAgent::execute(task)`");
+    println!("    4. 保持真实模型、真实规划、真实执行，不做假回退\n");
+}
 
-    // 创建可打印计划的 Executor
-    let executor = VerboseExecutor::new();
+async fn demo_practical_plan_execute() -> echo_agent::error::Result<()> {
+    println!("─────────────────────────────────────────────");
+    println!("Part 2: 端到端任务编排");
+    println!("─────────────────────────────────────────────\n");
 
-    let mut agent = PlanExecuteAgent::new("static_demo_agent", planner, executor).disable_replan();
+    let task = "为一个有 Python 基础、每天可投入 1 小时的人，制定一份 3 天的 Rust 入门学习行动计划，要求每天都有学习重点、练习方式和交付结果。";
+    println!("  任务:\n  {task}\n");
 
-    let task = "学习 Rust 的所有权机制";
+    run_live_plan_execute(task).await
+}
 
-    println!("┌─────────────────────────────────────────────┐");
-    println!("│ 任务: {}", task);
-    println!("└─────────────────────────────────────────────┘\n");
+async fn run_live_plan_execute(task: &str) -> echo_agent::error::Result<()> {
+    println!("  模式: 真实 LlmPlanner + ReactExecutor\n");
+
+    let preview_plan = build_live_planner().plan(task).await?;
+    print_plan_preview(&preview_plan);
+
+    let executor_agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .name("plan-executor")
+        .system_prompt(
+            "你是计划执行助手。你每次只执行当前这一个步骤，并基于已有上下文输出简洁、可复用的中间结果或最终总结。",
+        )
+        .max_iterations(6)
+        .build()?;
+
+    let mut agent = PlanExecuteAgent::new(
+        "practical-plan-execute",
+        build_live_planner(),
+        ReactExecutor::new(executor_agent),
+    )
+    .disable_replan();
 
     let result = agent.execute(task).await?;
+    ensure_non_empty_result("demo22", &result)?;
 
-    println!("┌─────────────────────────────────────────────┐");
-    println!("│ 最终结果                                     │");
-    println!("└─────────────────────────────────────────────┘");
-    println!("{}\n", result);
-
+    println!("  ✓ 最终结果:\n{result}\n");
     Ok(())
 }
 
-// ── Part 2: 自定义 Executor 演示 ───────────────────────────────────────────────
-
-async fn demo_custom_executor() -> echo_agent::error::Result<()> {
-    println!("─────────────────────────────────────────────");
-    println!("Part 2: 自定义 Executor");
-    println!("─────────────────────────────────────────────\n");
-
-    println!("演示：创建一个会显示步骤详情的 Executor\n");
-
-    // 创建一个可以注入上下文的 Executor
-    let executor = ContextAwareExecutor::new();
-
-    let planner = StaticPlanner::new(vec!["读取当前时间", "根据时间判断问候语", "生成问候消息"]);
-
-    let mut agent = PlanExecuteAgent::new("custom_executor_agent", planner, executor);
-
-    println!("┌─────────────────────────────────────────────┐");
-    println!("│ 任务: 生成带时间问候的消息                     │");
-    println!("└─────────────────────────────────────────────┘\n");
-
-    let result = agent.execute("生成问候消息").await?;
-
-    println!("✓ 最终结果:\n{}\n", result);
-
-    Ok(())
+fn build_live_planner() -> LlmPlanner {
+    LlmPlanner::new("qwen3-max").with_system_prompt(
+        "你是一个任务规划专家。请把用户目标拆成 3-5 个真正可执行的步骤。\
+每一步都要足够具体，并尽量体现顺序依赖。\
+不要输出空泛口号，不要把“继续思考”写成步骤。",
+    )
 }
 
-// ── Part 3: 失败重规划演示 ─────────────────────────────────────────────────────
-
-async fn demo_replan_on_failure() -> echo_agent::error::Result<()> {
-    println!("─────────────────────────────────────────────");
-    println!("Part 3: 失败重规划演示");
-    println!("─────────────────────────────────────────────\n");
-
-    println!("演示：当某个步骤失败时，系统如何重新规划下游任务\n");
-
-    // 创建一个会前两次失败、第三次成功的 Executor
-    let executor = FlakyExecutor::new(vec![false, false, true]);
-
-    let planner = StaticPlanner::new(vec![
-        "连接数据库",
-        "查询用户数据",
-        "生成统计报告",
-        "发送邮件通知",
-    ]);
-
-    let mut agent = PlanExecuteAgent::new("replan_demo_agent", planner, executor).max_replans(2);
-
-    println!("┌─────────────────────────────────────────────┐");
-    println!("│ 任务: 数据库查询 + 报告生成                  │");
-    println!("│ 说明: 前两次执行会失败，触发重规划         │");
-    println!("└─────────────────────────────────────────────┘\n");
-
-    match agent.execute("执行数据查询任务").await {
-        Ok(result) => {
-            println!("✓ 最终结果:\n{}\n", result);
-        }
-        Err(e) => {
-            println!("✗ 执行失败: {}\n", e);
-        }
-    }
-
-    Ok(())
-}
-
-// ── Part 4: 计划结构演示 ─────────────────────────────────────────────────────
-
-fn demo_plan_structure() {
-    println!("─────────────────────────────────────────────");
-    println!("Part 4: Plan 结构说明");
-    println!("─────────────────────────────────────────────\n");
-
-    println!("Plan 结构:");
-    println!("┌─────────────────────────────────────────────┐");
-    println!("│ struct Plan {{                                 │");
-    println!("│     id: Option<String>,        // 计划 ID    │");
-    println!("│     version: u32,              // 版本号    │");
-    println!("│     steps: Vec<PlanStep>,      // 步骤列表  │");
-    println!("│     goal: Option<String>,       // 目标描述  │");
-    println!("│     parent_plan_id: Option<String>, // 父计划ID│");
-    println!("│     created_at: u64,           // 创建时间  │");
-    println!("│     updated_at: u64,           // 更新时间  │");
-    println!("│ }}                                               │");
-    println!("└─────────────────────────────────────────────┘\n");
-
-    println!("PlanStep 结构:");
-    println!("┌─────────────────────────────────────────────┐");
-    println!("│ struct PlanStep {{                              │");
-    println!("│     id: String,                  // 步骤 ID   │");
-    println!("│     description: String,        // 步骤描述  │");
-    println!("│     dependencies: Vec<String>, // 依赖的步骤│");
-    println!("│     expected_output: Option<String>, // 期望输出 │");
-    println!("│ }}                                               │");
-    println!("└─────────────────────────────────────────────┘\n");
-
-    println!("执行流程:");
-    println!("  1. Planner.plan(task) → Plan");
-    println!("  2. Plan → TaskManager (转换为 DAG)");
-    println!("  3. TaskExecutor.execute_all() (并行或顺序)");
-    println!("  4. 汇总结果 → 最终答案\n");
-}
-
-// ── 自定义 Executor 实现 ─────────────────────────────────────────────────────
-
-/// 详细输出 Executor - 显示每个步骤的执行情况
-struct VerboseExecutor;
-
-impl VerboseExecutor {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl Executor for VerboseExecutor {
-    fn execute_step<'a>(
-        &'a mut self,
-        description: &'a str,
-        context: &'a str,
-    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<String>> {
-        Box::pin(async move {
-            println!("┌─────────────────────────────────────────────┐");
-            println!("│ ⚡ 执行步骤                                   │");
-            println!("├─────────────────────────────────────────────┤");
-            println!("│ 描述: {}", description);
+fn print_plan_preview(plan: &Plan) {
+    println!("  计划预览:");
+    for (idx, step) in plan.steps.iter().enumerate() {
+        if step.dependencies.is_empty() {
+            println!("    {}. {}", idx + 1, step.description);
+        } else {
             println!(
-                "│ 上下文: {}",
-                if context.is_empty() { "(无)" } else { context }
+                "    {}. {}  (依赖: {:?})",
+                idx + 1,
+                step.description,
+                step.dependencies
             );
-            println!("├─────────────────────────────────────────────┤");
-            println!("│ 状态: 执行中...                               │");
-            println!("└─────────────────────────────────────────────┘");
-
-            // 模拟执行
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-            let result = format!("已完成: {}", description);
-
-            println!("┌─────────────────────────────────────────────┐");
-            println!("│ ✓ 步骤完成                                  │");
-            println!("│ 结果: {}", result);
-            println!("└─────────────────────────────────────────────┘\n");
-
-            Ok(result)
-        })
-    }
-}
-
-/// 带上下文的 Executor - 可以使用之前步骤的结果
-struct ContextAwareExecutor {
-    results: Arc<std::sync::Mutex<Vec<String>>>,
-}
-
-impl ContextAwareExecutor {
-    fn new() -> Self {
-        Self {
-            results: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
+    println!();
 }
 
-impl Executor for ContextAwareExecutor {
-    fn execute_step<'a>(
-        &'a mut self,
-        description: &'a str,
-        _context: &'a str,
-    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<String>> {
-        Box::pin(async move {
-            println!("  ⚡ 执行: {}", description);
-
-            // 获取当前时间
-            if description.contains("读取当前时间") {
-                let now = chrono::Local::now().time().format("%H:%M").to_string();
-                let result = format!("当前时间: {}", now);
-
-                // 保存结果供后续步骤使用
-                if let Ok(mut results) = self.results.lock() {
-                    results.push(result.clone());
-                }
-
-                return Ok(result);
-            }
-
-            // 判断问候语
-            if description.contains("根据时间判断问候语") {
-                let now = chrono::Local::now().time();
-                let greeting = if now.hour() < 12 {
-                    "早上好"
-                } else if now.hour() < 18 {
-                    "下午好"
-                } else {
-                    "晚上好"
-                };
-
-                let result = format!("时间判断结果: {}", greeting);
-
-                if let Ok(mut results) = self.results.lock() {
-                    results.push(result.clone());
-                }
-
-                return Ok(result);
-            }
-
-            // 生成问候
-            if description.contains("生成问候消息") {
-                let results = self.results.lock().unwrap();
-                let time_info = results.get(0).map(|s| s.as_str()).unwrap_or("未知时间");
-                let greeting = results.get(1).map(|s| s.as_str()).unwrap_or("你好");
-
-                let result = format!("{}，{}！很高兴为您服务。", greeting, time_info);
-
-                return Ok(result);
-            }
-
-            Ok(format!("已处理: {}", description))
-        })
+fn ensure_non_empty_result(label: &str, result: &str) -> echo_agent::error::Result<()> {
+    if result.trim().is_empty() {
+        return Err(echo_agent::error::ReactError::Other(format!(
+            "{label} 验收失败：最终结果为空"
+        ))
+        .into());
     }
-}
-
-/// 会失败几次后成功的 Executor（演示重规划）
-struct FlakyExecutor {
-    /// 记录每次调用是否应该成功
-    should_succeed: Vec<bool>,
-    call_count: Arc<AtomicUsize>,
-}
-
-impl FlakyExecutor {
-    fn new(should_succeed: Vec<bool>) -> Self {
-        Self {
-            should_succeed,
-            call_count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-impl Executor for FlakyExecutor {
-    fn execute_step<'a>(
-        &'a mut self,
-        description: &'a str,
-        _context: &'a str,
-    ) -> futures::future::BoxFuture<'a, echo_agent::error::Result<String>> {
-        Box::pin(async move {
-            let call_num = self.call_count.fetch_add(1, Ordering::SeqCst);
-            let should_succeed = self.should_succeed.get(call_num).copied().unwrap_or(true);
-
-            println!("  ⚡ [调用 #{:?}] 执行: {}", call_num + 1, description);
-
-            if should_succeed {
-                println!("  ✓ 执行成功\n");
-                Ok(format!("{}: 成功完成", description))
-            } else {
-                println!("  ✗ 执行失败 (将触发重规划)\n");
-                Err(echo_agent::error::ReactError::Agent(
-                    echo_agent::error::AgentError::NoResponse,
-                ))
-            }
-        })
-    }
+    Ok(())
 }

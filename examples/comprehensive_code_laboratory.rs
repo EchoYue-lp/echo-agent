@@ -318,13 +318,23 @@ async fn demo_guard_system() -> Result<()> {
     for (desc, input) in test_inputs {
         println!("  [测试] {}", desc);
         match input_guard.check(input, GuardDirection::Input).await {
-            Ok(_) => {
+            Ok(GuardResult::Pass) => {
                 passed += 1;
                 println!("    ✓ 通过: 内容检查");
             }
-            Err(e) => {
+            Ok(GuardResult::Block { reason }) => {
                 blocked += 1;
-                println!("    🚫 阻止: {}", e);
+                println!("    🚫 阻止: {}", reason);
+            }
+            Ok(GuardResult::Warn { reasons }) => {
+                passed += 1;
+                println!("    ⚠️ 告警: {}", reasons.join("；"));
+            }
+            Err(e) => {
+                return Err(echo_agent::error::ReactError::Other(format!(
+                    "综合验收失败：护栏执行出错: {e}"
+                ))
+                .into());
             }
         }
         println!();

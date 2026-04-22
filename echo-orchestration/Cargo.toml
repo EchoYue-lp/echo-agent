@@ -1,6 +1,6 @@
 [package]
 name = "echo_orchestration"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 description = "Orchestration layer for echo-agent framework (workflow, human-loop, tasks)"
 
@@ -9,14 +9,13 @@ default = []
 websocket = ["dep:tokio-tungstenite"]
 
 [dependencies]
-echo_core = { version = "1.4.0", path = "../echo-core" }
-echo_state = { version = "1.4.0", path = "../echo-state" }
+echo_core = { version = "1.5.0", path = "../echo-core" }
+echo_state = { version = "1.5.0", path = "../echo-state" }
 
 # From echo-workflow
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
 futures = "0.3"
 async-trait = "0.1"
 async-stream = "0.3"

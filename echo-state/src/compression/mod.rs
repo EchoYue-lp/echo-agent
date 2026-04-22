@@ -34,6 +34,15 @@ pub struct CompressionOutput {
     pub evicted: Vec<Message>,
 }
 
+/// Metadata needed to restore protected messages near their original positions.
+struct ProtectedMessage {
+    message: Message,
+    /// Number of compressible messages that originally appeared after this message.
+    compressible_after: usize,
+    /// Number of protected messages that originally appeared after this message.
+    protected_after: usize,
+}
+
 /// 所有压缩策略的统一接口（async，支持 `dyn` trait object）
 pub trait ContextCompressor: Send + Sync {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>>;
@@ -271,43 +280,55 @@ impl ContextManager {
         }
     }
 
-    /// Split messages into (compressible, protected_with_original_index).
+    /// Split messages into (compressible, protected_metadata).
     ///
     /// Protected messages are removed from the compressible set and will be
     /// re-inserted at their original relative positions after compression.
-    fn split_protected(&self, messages: Vec<Message>) -> (Vec<Message>, Vec<(usize, Message)>) {
+    fn split_protected(&self, messages: Vec<Message>) -> (Vec<Message>, Vec<ProtectedMessage>) {
         let mut compressible = Vec::new();
-        let mut protected = Vec::new();
+        let mut protected: Vec<(usize, Message)> = Vec::new();
+        let mut compressible_seen = 0usize;
 
-        for (idx, msg) in messages.into_iter().enumerate() {
+        for msg in messages {
             if self.is_protected(&msg) {
-                protected.push((idx, msg));
+                protected.push((compressible_seen, msg));
             } else {
                 compressible.push(msg);
+                compressible_seen += 1;
             }
         }
+
+        let total_compressible = compressible.len();
+        let total_protected = protected.len();
+        let protected = protected
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (compressible_before, message))| ProtectedMessage {
+                message,
+                compressible_after: total_compressible.saturating_sub(compressible_before),
+                protected_after: total_protected.saturating_sub(idx + 1),
+            })
+            .collect();
 
         (compressible, protected)
     }
 
     /// Merge protected messages back into the compressed output.
     ///
-    /// Protected messages are re-inserted after the system message(s) and
-    /// before the conversation messages, preserving their relative order.
-    fn merge_protected(compressed: Vec<Message>, protected: Vec<(usize, Message)>) -> Vec<Message> {
+    /// Protected messages are re-inserted near their original relative positions.
+    /// We restore from the tail so each message can reserve the amount of trailing
+    /// conversation that originally followed it.
+    fn merge_protected(compressed: Vec<Message>, protected: Vec<ProtectedMessage>) -> Vec<Message> {
         if protected.is_empty() {
             return compressed;
         }
 
-        let (system_msgs, conv_msgs): (Vec<Message>, Vec<Message>) =
-            compressed.into_iter().partition(|m| m.role == "system");
-
-        let mut result = system_msgs;
-        // Protected messages go right after system messages
-        for (_idx, msg) in protected {
-            result.push(msg);
+        let mut result = compressed;
+        for protected_msg in protected.into_iter().rev() {
+            let trailing_slots = protected_msg.compressible_after + protected_msg.protected_after;
+            let insert_at = result.len().saturating_sub(trailing_slots);
+            result.insert(insert_at, protected_msg.message);
         }
-        result.extend(conv_msgs);
         result
     }
 
@@ -543,6 +564,47 @@ mod tests {
         for m in &messages {
             println!("  [{}] {}", m.role, m.content.as_text_ref().unwrap_or(""));
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_protected_messages_keep_relative_position_after_compression() -> Result<()> {
+        let mut ctx = ContextManager::builder(10)
+            .compressor(SlidingWindowCompressor::new(2))
+            .build();
+        ctx.add_protected_marker("<skill>".to_string());
+
+        ctx.push(Message::system("system".to_string()));
+        ctx.push(Message::user("old user".to_string()));
+        ctx.push(Message::assistant("old assistant".to_string()));
+        ctx.push(Message::user("<skill> protected".to_string()));
+        ctx.push(Message::assistant("recent assistant".to_string()));
+        ctx.push(Message::user("latest user".to_string()));
+
+        let messages = ctx.force_compress(2).await?;
+        assert!(messages.after_count >= 3);
+
+        let rendered: Vec<(String, String)> = ctx
+            .messages()
+            .iter()
+            .map(|m| {
+                (
+                    m.role.clone(),
+                    m.content.as_text_ref().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                ("system".to_string(), "system".to_string()),
+                ("user".to_string(), "<skill> protected".to_string()),
+                ("assistant".to_string(), "recent assistant".to_string()),
+                ("user".to_string(), "latest user".to_string()),
+            ]
+        );
+
         Ok(())
     }
 

@@ -11,6 +11,7 @@
 #   - models.*.model 字段可选，默认使用配置的 key 名称
 #   - 支持的 provider: openai, anthropic, deepseek, dashscope/qwen/aliyun,
 #                       moonshot/kimi, zhipu/glm, ollama
+#   - `model.name` 应引用 `models` 中已经声明好的一个 key
 #   - 本文件同时包含两类配置：
 #       1) `models` / `embedding`：供 ProviderFactory、语义检索等使用
 #       2) `model` / `agent` / `channels` / `mcp` / `server` / `logging`：
@@ -20,6 +21,10 @@ models:
   # ── 阿里云百炼（DashScope）──────────────────────────────────────────────
   qwen3-max:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+    api_key: ${DASHSCOPE_API_KEY}
+
+  qwen-vl-max:
+    provider: dashscope
     api_key: ${DASHSCOPE_API_KEY}
 
   # 使用 provider 快捷方式（等效于上面手动填 base_url）
@@ -84,7 +89,7 @@ embedding:
 
 # ── Runtime 配置（供 echo_agent::config 使用）───────────────────────────────
 model:
-  name: qwen3-max
+  name: qwen-vl-max
   max_tokens: 4096
   temperature: 0.7
 

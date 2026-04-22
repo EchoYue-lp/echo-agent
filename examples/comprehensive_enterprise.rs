@@ -24,6 +24,7 @@
 use echo_agent::advanced::*;
 use echo_agent::prelude::*;
 use echo_agent::skills::external::loader::DiscoveryScope;
+use echo_agent::testing::MockLlmClient;
 use echo_agent::workflow::{GraphBuilder, SharedState, WorkflowEvent};
 use futures::StreamExt;
 use serde_json::json;
@@ -549,10 +550,21 @@ async fn demo_topology_tracking() -> Result<()> {
     let tracker = Arc::new(TopologyTracker::new());
     let callback = Arc::new(TopologyCallback::new(tracker.clone()));
 
+    let mock_llm = Arc::new(
+        MockLlmClient::new()
+            .with_model_name("topology-mock")
+            .then_tool_call(
+                "call_code_quality",
+                "code_quality",
+                r#"{"code":"fn main() { println!(\"hi\"); }","language":"rust"}"#,
+            )
+            .with_response("这段 Rust 代码结构简单、质量良好，适合作为拓扑追踪演示输入。"),
+    );
+
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
         .name("tracked-agent")
-        .system_prompt("你是助手")
+        .llm_client(mock_llm)
+        .system_prompt("你是助手，必须先调用 code_quality 工具，再总结结果。")
         .enable_tools()
         .callback(callback)
         .build()?;
@@ -561,7 +573,7 @@ async fn demo_topology_tracking() -> Result<()> {
 
     println!("  Agent 执行任务时的工具调用将被自动追踪...\n");
 
-    let task = "检查这段代码的质量";
+    let task = "检查这段代码的质量，并给出一句总结。";
     println!("  任务: {}\n", task);
 
     let result = agent.execute(task).await?;

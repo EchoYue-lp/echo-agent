@@ -220,6 +220,19 @@ pub enum RuleMatcher {
 }
 
 impl RuleMatcher {
+    /// 检查 matcher 字符串是否匹配此 matcher（用于规则移除）
+    ///
+    /// 与 `parse_rule()` 中的 `RuleMatcher::Pattern` 构造语义保持一致：
+    /// 移除时使用与添加时相同的 matcher 字符串来定位规则。
+    pub fn matches_matcher_str(&self, matcher_str: &str) -> bool {
+        match self {
+            RuleMatcher::Tool { name } => name == matcher_str,
+            RuleMatcher::Pattern { pattern } => pattern == matcher_str,
+            RuleMatcher::Permission { .. } => false,
+            RuleMatcher::All => matcher_str == "*" || matcher_str == "all",
+        }
+    }
+
     /// 检查是否匹配指定的工具
     pub fn matches(&self, tool_name: &str, permissions: &[ToolPermission]) -> bool {
         match self {
@@ -448,7 +461,25 @@ impl RuleRegistry {
     /// 移除指定来源的所有规则
     pub fn remove_by_source(&mut self, source: RuleSource) {
         self.rules.retain(|r| r.source != source);
-        // Rebuild the tool index
+        self.rebuild_tool_index();
+    }
+
+    /// 移除匹配指定 matcher 字符串的所有规则
+    ///
+    /// 返回被移除的规则数量。匹配方式与 `parse_rule()` 的 `AddRule` 语义一致。
+    pub fn remove_by_matcher(&mut self, matcher_str: &str) -> usize {
+        let before = self.rules.len();
+        self.rules
+            .retain(|r| !r.matcher.matches_matcher_str(matcher_str));
+        let removed = before - self.rules.len();
+        if removed > 0 {
+            self.rebuild_tool_index();
+        }
+        removed
+    }
+
+    /// 重建 tool_index（在移除规则后调用）
+    fn rebuild_tool_index(&mut self) {
         self.tool_index.clear();
         for (i, rule) in self.rules.iter().enumerate() {
             if let RuleMatcher::Tool { name } = &rule.matcher {

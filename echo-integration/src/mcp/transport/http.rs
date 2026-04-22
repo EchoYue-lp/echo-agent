@@ -60,6 +60,13 @@ impl McpTransport for HttpTransport {
             let id = self.next_id.fetch_add(1, Ordering::SeqCst);
             request.id = Some(Value::Number(id.into()));
 
+            // 在 HTTP 请求发送前注册 pending channel，避免 202 异步响应竞态
+            let (tx, rx) = oneshot::channel();
+            {
+                let mut pending = self.pending.lock().await;
+                pending.insert(id, tx);
+            }
+
             let mut builder = self
                 .client
                 .post(&self.endpoint)
@@ -80,9 +87,16 @@ impl McpTransport for HttpTransport {
                 builder = builder.header(k, v);
             }
 
-            let response = builder.send().await.map_err(|e| {
-                ReactError::Mcp(McpError::ConnectionFailed(format!("HTTP 请求失败: {}", e)))
-            })?;
+            let response = match builder.send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+                        "HTTP 请求失败: {}",
+                        e
+                    ))));
+                }
+            };
 
             // 从响应中保存会话 ID（通常在 initialize 响应中返回）
             if let Some(new_session_id) = response.headers().get("mcp-session-id") {
@@ -98,13 +112,6 @@ impl McpTransport for HttpTransport {
             // 202 Accepted：服务端已接受请求，响应将异步到达
             if status == 202 {
                 tracing::debug!("HTTP: 收到 202 Accepted (id={})，等待异步响应", id);
-
-                // 注册 pending channel
-                let (tx, rx) = oneshot::channel();
-                {
-                    let mut pending = self.pending.lock().await;
-                    pending.insert(id, tx);
-                }
 
                 // 等待异步响应（60 秒超时）
                 let result =
@@ -122,6 +129,9 @@ impl McpTransport for HttpTransport {
 
                 return Ok(result);
             }
+
+            // 非 202 响应，移除 pending 条目
+            self.pending.lock().await.remove(&id);
 
             // 非 2xx 错误
             if !response.status().is_success() {

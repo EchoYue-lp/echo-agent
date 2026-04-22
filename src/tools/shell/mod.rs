@@ -1,12 +1,13 @@
 //! Shell 命令执行工具
 //!
-//! ⚠️ 安全策略：仅允许白名单中的安全命令执行
+//! ⚠️ 安全策略：仅允许白名单中的安全命令，使用直接 argv 执行（拒绝 shell 注入）
 
 use super::{Tool, ToolParameters, ToolResult};
 use crate::error::{Result, ToolError};
 use crate::sandbox::{SandboxCommand, SandboxExecutor};
 use futures::future::BoxFuture;
 use serde_json::Value;
+use shlex::split as shlex_split;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 use tokio::process::Command;
@@ -19,7 +20,7 @@ static ALLOWED_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "pwd", "tree", "find", "du", // ===== 代码相关 =====
         "git", "cargo", "rustc", "clippy", "rustfmt", // ===== 搜索与查找 =====
         "grep", "rg", "ag", "fd", // ===== 文本处理（只读）=====
-        "echo", "printf", "sed", "awk", "cut", "sort", "uniq", "diff",
+        "echo", "printf", "cut", "sort", "uniq", "diff",
         // ===== 系统信息（只读）=====
         "which", "whereis", "env", "date", "uname",
     ])
@@ -34,6 +35,8 @@ static REQUIRE_APPROVAL_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::ne
         "apt", "apt-get", "yum", "dnf", "brew", "pip", "pip3", "npm", "yarn", "pnpm",
         // ===== 脚本执行（需要确认）=====
         "bash", "sh", "zsh", "fish", "python", "python3", "node", "perl", "ruby", "php",
+        // ===== 文本处理（可能修改文件）=====
+        "sed", "awk",
     ])
 });
 
@@ -66,6 +69,23 @@ static CARGO_SAFE_SUBCOMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|
         "clean", "update",
     ])
 });
+
+/// Shell 元字符列表（用于拒绝 shell 语法，防止注入）
+///
+/// 这些字符在 `sh -c` 中有特殊含义。本工具使用直接 argv 执行，
+/// 因此包含这些字符的命令会被拒绝。
+const SHELL_METACHARACTERS: &[char] = &[
+    '|',  // 管道
+    ';',  // 命令分隔
+    '&',  // 后台/条件执行
+    '$',  // 变量/命令替换
+    '`',  // 反引号命令替换
+    '>',  // 重定向输出
+    '<',  // 重定向输入
+    '(',  // 子 shell
+    ')',  // 子 shell
+    '\n', // 换行注入
+];
 
 /// 命令安全性检查结果
 #[derive(Debug, Clone, PartialEq)]
@@ -118,14 +138,41 @@ impl ShellTool {
         self
     }
 
+    /// 检查命令中是否包含 shell 元字符
+    ///
+    /// 注意：在引号内的元字符是安全的（作为字面参数传递），
+    /// 但本工具采用保守策略，只要发现元字符就拒绝执行。
+    /// 这是为了防止 `ls; rm -rf /` 或 `echo $(id)` 等注入。
+    fn has_shell_metacharacters(&self, cmd: &str) -> bool {
+        cmd.contains(SHELL_METACHARACTERS)
+    }
+
     /// 检查命令是否安全
     pub fn check_command_safety(&self, command: &str) -> CommandSafety {
-        let parts: Vec<&str> = command.split_whitespace().collect();
+        // 首先检查 shell 元字符（防止注入）
+        if self.has_shell_metacharacters(command) {
+            return CommandSafety::Dangerous(format!(
+                "命令包含 shell 元字符（| ; & $ ` > < () 等），已拒绝执行。\
+                 \n本工具仅支持简单命令（程序名 + 参数），不支持管道、重定向、命令替换等 shell 语法。\
+                 \n命令: {}",
+                command
+            ));
+        }
+
+        let parts = match shlex_split(command) {
+            Some(parts) => parts,
+            None => {
+                return CommandSafety::Dangerous(format!(
+                    "命令解析失败，可能包含未闭合引号或非法参数格式: {}",
+                    command
+                ));
+            }
+        };
         if parts.is_empty() {
             return CommandSafety::Dangerous("空命令".to_string());
         }
 
-        let base_cmd = parts[0];
+        let base_cmd = parts[0].as_str();
 
         // 1. 检查是否在危险命令黑名单中（明确拒绝）
         if DANGEROUS_COMMANDS.contains(base_cmd) {
@@ -155,24 +202,17 @@ impl ShellTool {
         match base_cmd {
             "git" => self.check_git_command(&parts),
             "cargo" => self.check_cargo_command(&parts),
-            "sed" | "awk" => {
-                // 文本处理命令可能包含危险操作
-                CommandSafety::RequiresApproval(format!(
-                    "'{}' 命令可能修改文件，需要确认",
-                    base_cmd
-                ))
-            }
             _ => CommandSafety::Safe,
         }
     }
 
     /// 检查 git 子命令
-    fn check_git_command(&self, parts: &[&str]) -> CommandSafety {
+    fn check_git_command(&self, parts: &[String]) -> CommandSafety {
         if parts.len() < 2 {
             return CommandSafety::Safe;
         }
 
-        let subcommand = parts[1];
+        let subcommand = parts[1].as_str();
 
         // 检查 git 操作
         match subcommand {
@@ -183,7 +223,7 @@ impl ShellTool {
             )),
             // 强制重置（危险，拒绝）
             "reset" => {
-                if parts.contains(&"--hard") {
+                if parts.iter().any(|part| part == "--hard") {
                     CommandSafety::Dangerous(
                         "git reset --hard 会丢失数据，已拒绝。如需执行请手动操作".to_string(),
                     )
@@ -214,12 +254,12 @@ impl ShellTool {
     }
 
     /// 检查 cargo 子命令
-    fn check_cargo_command(&self, parts: &[&str]) -> CommandSafety {
+    fn check_cargo_command(&self, parts: &[String]) -> CommandSafety {
         if parts.len() < 2 {
             return CommandSafety::Safe;
         }
 
-        let subcommand = parts[1];
+        let subcommand = parts[1].as_str();
 
         match subcommand {
             // 包安装/发布（需要确认）
@@ -252,7 +292,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "执行受限的 shell 命令（仅允许安全的只读操作和代码相关命令）。参数：command - 要执行的命令"
+        "执行受限的 shell 命令（仅允许安全的只读操作和代码相关命令）。参数：command - 要执行的命令。注意：仅支持简单命令（程序名 + 参数），不支持管道、重定向、命令替换等 shell 语法。"
     }
 
     fn parameters(&self) -> Value {
@@ -261,7 +301,7 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "要执行的 shell 命令（仅限白名单中的安全命令）"
+                    "description": "要执行的命令（仅限白名单中的安全命令，不支持管道/重定向/命令替换等 shell 语法）"
                 }
             },
             "required": ["command"]
@@ -291,9 +331,17 @@ impl Tool for ShellTool {
                 }
             }
 
-            // 如果配置了沙箱，通过沙箱执行
+            // 解析命令为 argv（程序名 + 参数列表）
+            let parts = shlex_split(command).ok_or_else(|| ToolError::ExecutionFailed {
+                tool: self.name().to_string(),
+                message: "命令解析失败，可能包含未闭合引号或非法参数格式".to_string(),
+            })?;
+            let program = parts[0].as_str();
+            let args = &parts[1..];
+
+            // 如果配置了沙箱，通过沙箱执行（使用 program 模式，避免 shell 注入）
             if let Some(sandbox) = &self.sandbox {
-                let sandbox_cmd = SandboxCommand::shell(command);
+                let sandbox_cmd = SandboxCommand::program(program, args.to_vec());
                 match sandbox.execute(sandbox_cmd).await {
                     Ok(result) => {
                         if result.success() {
@@ -308,18 +356,8 @@ impl Tool for ShellTool {
                     Err(e) => Ok(ToolResult::error(format!("沙箱执行失败: {}", e))),
                 }
             } else {
-                // 直接执行（无沙箱）
-                #[cfg(target_os = "windows")]
-                let (shell, shell_arg) = ("cmd", "/C");
-                #[cfg(not(target_os = "windows"))]
-                let (shell, shell_arg) = ("sh", "-c");
-
-                match Command::new(shell)
-                    .arg(shell_arg)
-                    .arg(command)
-                    .output()
-                    .await
-                {
+                // 直接执行（无沙箱，使用直接 argv 模式，拒绝 sh -c 注入）
+                match Command::new(program).args(args).output().await {
                     Ok(output) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -363,6 +401,53 @@ mod tests {
             tool.check_command_safety("cargo check"),
             CommandSafety::Safe
         );
+    }
+
+    #[test]
+    fn test_shell_injection_rejected() {
+        let tool = ShellTool::new();
+
+        // 管道注入
+        match tool.check_command_safety("ls | rm -rf /tmp") {
+            CommandSafety::Dangerous(_) => {}
+            other => panic!("管道注入应被拒绝，但得到: {:?}", other),
+        }
+
+        // 命令替换注入
+        match tool.check_command_safety("echo $(id)") {
+            CommandSafety::Dangerous(_) => {}
+            other => panic!("命令替换注入应被拒绝，但得到: {:?}", other),
+        }
+
+        // 反引号注入
+        match tool.check_command_safety("echo `id`") {
+            CommandSafety::Dangerous(_) => {}
+            other => panic!("反引号注入应被拒绝，但得到: {:?}", other),
+        }
+
+        // 分号注入
+        match tool.check_command_safety("ls; rm -rf /tmp/x") {
+            CommandSafety::Dangerous(_) => {}
+            other => panic!("分号注入应被拒绝，但得到: {:?}", other),
+        }
+
+        // 重定向注入
+        match tool.check_command_safety("cat file > /etc/passwd") {
+            CommandSafety::Dangerous(_) => {}
+            other => panic!("重定向注入应被拒绝，但得到: {:?}", other),
+        }
+
+        // 条件执行注入
+        match tool.check_command_safety("echo hello && rm -rf /") {
+            CommandSafety::Dangerous(_) => {}
+            other => panic!("条件执行注入应被拒绝，但得到: {:?}", other),
+        }
+
+        // 子 shell 注入
+        match tool.check_command_safety("$(dangerous)") {
+            CommandSafety::Dangerous(_) => {}
+            other => panic!("子 shell 注入应被拒绝，但得到: {:?}", other),
+        }
     }
 
     #[test]
@@ -524,6 +609,32 @@ mod tests {
         let result = tool.execute(params).await.unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("拒绝"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_injection_rejected_in_execution() {
+        let tool = ShellTool::new();
+
+        // 管道注入 → 被拒绝
+        let mut params = HashMap::new();
+        params.insert("command".to_string(), serde_json::json!("ls | rm -rf /tmp"));
+        let result = tool.execute(params).await.unwrap();
+        assert!(!result.success, "管道注入应被拒绝");
+        assert!(result.error.as_ref().unwrap().contains("shell 元字符"));
+
+        // 命令替换 → 被拒绝
+        let mut params = HashMap::new();
+        params.insert("command".to_string(), serde_json::json!("echo $(id)"));
+        let result = tool.execute(params).await.unwrap();
+        assert!(!result.success, "命令替换应被拒绝");
+        assert!(result.error.as_ref().unwrap().contains("shell 元字符"));
+
+        // 分号注入 → 被拒绝
+        let mut params = HashMap::new();
+        params.insert("command".to_string(), serde_json::json!("ls; echo pwned"));
+        let result = tool.execute(params).await.unwrap();
+        assert!(!result.success, "分号注入应被拒绝");
+        assert!(result.error.as_ref().unwrap().contains("shell 元字符"));
     }
 
     #[tokio::test]

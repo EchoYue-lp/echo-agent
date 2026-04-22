@@ -14,45 +14,6 @@ use crate::tools::{Tool, ToolParameters, ToolResult};
 
 const TOOL_NAME: &str = "word_tools";
 
-/// 验证文件路径并返回规范化的路径
-fn validate_file_path(path_str: &str, limits: &ResourceLimits) -> Result<std::path::PathBuf> {
-    let path = std::path::Path::new(path_str);
-
-    // 1. 检查是否为绝对路径
-    if !path.is_absolute() {
-        return Err(ToolError::InvalidPath {
-            path: path_str.to_string(),
-            reason: "路径必须是绝对路径".to_string(),
-        }
-        .into());
-    }
-
-    // 2. 检查文件是否存在
-    if !path.exists() {
-        return Err(ToolError::ExecutionFailed {
-            tool: TOOL_NAME.to_string(),
-            message: "文件不存在".to_string(),
-        }
-        .into());
-    }
-
-    // 3. 检查文件大小
-    let metadata = std::fs::metadata(path).map_err(|e| ToolError::ExecutionFailed {
-        tool: TOOL_NAME.to_string(),
-        message: format!("获取文件信息失败: {}", e),
-    })?;
-
-    if metadata.len() > limits.max_file_size {
-        return Err(ToolError::FileTooLarge {
-            size: metadata.len(),
-            max: limits.max_file_size,
-        }
-        .into());
-    }
-
-    Ok(path.to_path_buf())
-}
-
 /// Word 文档读取工具
 pub struct WordReadTool;
 
@@ -95,7 +56,7 @@ impl Tool for WordReadTool {
                 .unwrap_or(false);
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(file_path, &security.limits)?;
+            let path = security.validate_file(file_path)?;
 
             // 读取文件内容
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
@@ -150,7 +111,7 @@ impl Tool for WordInfoTool {
                 .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(file_path, &security.limits)?;
+            let path = security.validate_file(file_path)?;
 
             // 读取文件内容
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
@@ -231,7 +192,7 @@ impl Tool for WordStructureTool {
                 .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
 
             let security = SecurityConfig::global();
-            let path = validate_file_path(file_path, &security.limits)?;
+            let path = security.validate_file(file_path)?;
 
             // 读取文件内容
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {

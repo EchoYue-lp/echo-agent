@@ -4,7 +4,8 @@
 //! - 路径沙箱：防止路径遍历攻击
 //! - 资源限制：防止 DoS 和 OOM
 
-use std::path::{Path, PathBuf};
+use std::net::ToSocketAddrs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -260,6 +261,60 @@ impl PathValidator {
         Ok(canonical)
     }
 
+    /// 验证输出文件路径。
+    ///
+    /// 与 `validate_file()` 不同，输出路径允许文件尚不存在，但仍会：
+    /// - 要求绝对路径
+    /// - 规范化 `.` / `..`
+    /// - 检查 denied_paths / allowed_roots
+    pub fn validate_output_file(&self, path: &str) -> Result<PathBuf> {
+        if !self.enabled {
+            return Ok(PathBuf::from(path));
+        }
+
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            return Err(ToolError::InvalidPath {
+                path: path.display().to_string(),
+                reason: "路径必须是绝对路径".to_string(),
+            }
+            .into());
+        }
+
+        let normalized = normalize_absolute_path(path)?;
+
+        for denied in &self.denied_paths {
+            if normalize_for_policy(denied)
+                .map(|denied_path| normalized.starts_with(&denied_path))
+                .unwrap_or(false)
+            {
+                return Err(ToolError::AccessDenied {
+                    path: path.display().to_string(),
+                    reason: "路径在禁止列表中".to_string(),
+                }
+                .into());
+            }
+        }
+
+        if !self.allowed_roots.is_empty() {
+            let is_allowed = self.allowed_roots.iter().any(|root| {
+                normalize_for_policy(root)
+                    .map(|allowed_root| normalized.starts_with(&allowed_root))
+                    .unwrap_or(false)
+            });
+
+            if !is_allowed {
+                return Err(ToolError::AccessDenied {
+                    path: path.display().to_string(),
+                    reason: "路径不在允许的目录范围内".to_string(),
+                }
+                .into());
+            }
+        }
+
+        Ok(normalized)
+    }
+
     /// 验证并获取文件内容大小
     pub fn get_file_size(path: &Path) -> Result<u64> {
         let metadata = std::fs::metadata(path).map_err(|e| ToolError::ExecutionFailed {
@@ -319,6 +374,11 @@ impl SecurityConfig {
         self.path_validator.validate_file(path)
     }
 
+    /// 验证输出文件路径（允许目标文件尚不存在）。
+    pub fn validate_output_file(&self, path: &str) -> Result<PathBuf> {
+        self.path_validator.validate_output_file(path)
+    }
+
     /// 检查文件大小
     pub fn check_file_size(&self, size: u64) -> Result<()> {
         if size > self.limits.max_file_size {
@@ -341,7 +401,7 @@ pub fn create_safe_http_client(limits: &ResourceLimits) -> Result<reqwest::Clien
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(limits.http_timeout_secs))
         .connect_timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(ssrf_safe_redirect_policy())
         .build()
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "http_client".to_string(),
@@ -372,6 +432,145 @@ pub fn create_safe_regex(pattern: &str, limits: &ResourceLimits) -> Result<regex
         })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SSRF 防护
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 验证 URL 的目标地址，拒绝请求私有/链路本地 IP（SSRF 防护）
+pub fn validate_url(url_str: &str) -> Result<()> {
+    let host = extract_host(url_str)?;
+
+    // 将主机名解析为 IP 地址
+    let addr_str = format!("{}:0", host);
+    let addrs = addr_str
+        .to_socket_addrs()
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: "security".to_string(),
+            message: format!("SSRF 防护：DNS 解析失败: {}", e),
+        })?;
+
+    for addr in addrs {
+        let ip = addr.ip();
+        if is_private_ip(&ip) {
+            return Err(ToolError::AccessDenied {
+                path: url_str.to_string(),
+                reason: format!("SSRF 防护：拒绝访问私有 IP 地址 {}", ip),
+            }
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+/// 从 URL 字符串提取主机名（不依赖 url crate）
+fn extract_host(url_str: &str) -> Result<&str> {
+    let rest = url_str
+        .strip_prefix("http://")
+        .or_else(|| url_str.strip_prefix("https://"))
+        .ok_or_else(|| ToolError::InvalidParameter {
+            name: "url".to_string(),
+            message: "URL 必须以 http:// 或 https:// 开头".to_string(),
+        })?;
+
+    // 提取 authority（host:port）
+    let authority = rest.split('/').next().unwrap_or(rest);
+    // 去除 ?query
+    let authority = authority.split('?').next().unwrap_or(authority);
+    // 去除 :port
+    let authority = authority.split(':').next().unwrap_or(authority);
+    // 去除 userinfo@ —— 取最后一个 @ 之后的部分
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+
+    // 处理 IPv6: [::1] → ::1
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.split(']').next())
+        .unwrap_or(host);
+
+    if host.is_empty() {
+        return Err(ToolError::InvalidParameter {
+            name: "url".to_string(),
+            message: "URL 缺少主机名".to_string(),
+        }
+        .into());
+    }
+
+    Ok(host)
+}
+
+/// 判断 IP 地址是否为私有/链路本地地址
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 127.0.0.0/8 (loopback)
+            octets[0] == 127
+                // 10.0.0.0/8 (RFC 1918)
+                || octets[0] == 10
+                // 172.16.0.0/12 (RFC 1918)
+                || (octets[0] == 172 && (octets[1] & 0xF0) == 16)
+                // 192.168.0.0/16 (RFC 1918)
+                || (octets[0] == 192 && octets[1] == 168)
+                // 169.254.0.0/16 (link-local)
+                || (octets[0] == 169 && octets[1] == 254)
+                // 0.0.0.0/8 (current network)
+                || octets[0] == 0
+        }
+        std::net::IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            // ::1 (localhost)
+            *v6 == std::net::Ipv6Addr::LOCALHOST
+                // fd00::/8 (ULA)
+                || octets[0] == 0xfd
+                // fe80::/10 (link-local)
+                || (octets[0] == 0xfe && (octets[1] & 0xC0) == 0x80)
+        }
+    }
+}
+
+/// 创建 SSRF 安全的重定向策略
+pub fn ssrf_safe_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() > 5 {
+            return attempt.error("SSRF 保护：重定向次数过多");
+        }
+        match validate_url(attempt.url().as_str()) {
+            Ok(()) => attempt.follow(),
+            Err(e) => attempt.error(format!("SSRF 保护：重定向目标被阻止: {}", e)),
+        }
+    })
+}
+
+fn normalize_for_policy(path: &Path) -> Option<PathBuf> {
+    path.canonicalize()
+        .ok()
+        .or_else(|| normalize_absolute_path(path).ok())
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(ToolError::InvalidPath {
+            path: path.display().to_string(),
+            reason: "路径必须是绝对路径".to_string(),
+        }
+        .into());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +597,21 @@ mod tests {
         let limits = ResourceLimits::default();
         assert_eq!(limits.max_file_size, 50 * 1024 * 1024);
         assert_eq!(limits.max_preview_rows, 10000);
+    }
+
+    #[test]
+    fn test_validate_output_file_absolute_required() {
+        let validator = PathValidator::new().with_enabled(true);
+        let result = validator.validate_output_file("relative/output.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_output_file_normalizes_parent_segments() {
+        let validator = PathValidator::new().with_enabled(true);
+        let path = validator
+            .validate_output_file("/tmp/demo/../result.txt")
+            .unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/result.txt"));
     }
 }

@@ -17,9 +17,9 @@
 //! - **Open**：拒绝所有请求，等待 timeout 后转入 HalfOpen
 //! - **HalfOpen**：允许少量探测请求，根据结果决定恢复或重新打开
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// 熔断器配置
 #[derive(Debug, Clone)]
@@ -84,10 +84,7 @@ impl CircuitBreaker {
     ///
     /// 仅用于监控和日志，不触发状态转换。
     pub fn is_open(&self) -> bool {
-        let state = self.state.lock().unwrap_or_else(|e| {
-            error!("circuit breaker mutex poisoned, recovering: {e}");
-            e.into_inner()
-        });
+        let state = self.state.lock();
         matches!(&*state, State::Open { .. })
     }
 
@@ -98,10 +95,7 @@ impl CircuitBreaker {
     ///
     /// 调用方应在拒绝请求时调用 `record_rejected()` 来更新统计。
     pub fn try_advance(&self) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| {
-            error!("circuit breaker mutex poisoned, recovering: {e}");
-            e.into_inner()
-        });
+        let mut state = self.state.lock();
         match &*state {
             State::Closed { .. } | State::HalfOpen { .. } => false,
             State::Open { opened_at } => {
@@ -135,10 +129,7 @@ impl CircuitBreaker {
 
     /// 记录一次成功调用
     pub fn record_success(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| {
-            error!("circuit breaker mutex poisoned, recovering: {e}");
-            e.into_inner()
-        });
+        let mut state = self.state.lock();
         match &*state {
             State::HalfOpen {
                 consecutive_successes,
@@ -170,10 +161,7 @@ impl CircuitBreaker {
 
     /// 记录一次失败调用
     pub fn record_failure(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| {
-            error!("circuit breaker mutex poisoned, recovering: {e}");
-            e.into_inner()
-        });
+        let mut state = self.state.lock();
         match &*state {
             State::Closed {
                 consecutive_failures,
@@ -210,10 +198,7 @@ impl CircuitBreaker {
 
     /// 获取当前状态描述（用于日志/监控）
     pub fn state_name(&self) -> &'static str {
-        let state = self.state.lock().unwrap_or_else(|e| {
-            error!("circuit breaker mutex poisoned, recovering: {e}");
-            e.into_inner()
-        });
+        let state = self.state.lock();
         match &*state {
             State::Closed { .. } => "closed",
             State::Open { .. } => "open",
@@ -223,10 +208,7 @@ impl CircuitBreaker {
 
     /// 获取当前连续失败次数（仅 Closed 状态下有意义）
     pub fn consecutive_failures(&self) -> u32 {
-        let state = self.state.lock().unwrap_or_else(|e| {
-            error!("circuit breaker mutex poisoned, recovering: {e}");
-            e.into_inner()
-        });
+        let state = self.state.lock();
         match &*state {
             State::Closed {
                 consecutive_failures,

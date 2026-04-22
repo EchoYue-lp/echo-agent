@@ -6,7 +6,7 @@
 use futures::future::BoxFuture;
 use serde_json::Value;
 
-use super::security::{ResourceLimits, SecurityConfig, create_safe_http_client};
+use super::security::{ResourceLimits, SecurityConfig, create_safe_http_client, validate_url};
 use crate::error::{Result, ToolError};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
@@ -68,7 +68,7 @@ impl Tool for ImageAnalysisTool {
 
             // 根据来源类型获取图片数据
             let (base64_data, mime_type) = match source {
-                "file" => read_image_from_file(data, &security.limits)?,
+                "file" => read_image_from_file(data, &security)?,
                 "url" => fetch_image_from_url(data, &security.limits).await?,
                 "base64" => {
                     // 验证 base64 数据
@@ -101,49 +101,15 @@ impl Tool for ImageAnalysisTool {
 }
 
 /// 从文件读取图片并转换为 base64
-fn read_image_from_file(path: &str, limits: &ResourceLimits) -> Result<(String, String)> {
+fn read_image_from_file(path: &str, security: &SecurityConfig) -> Result<(String, String)> {
     use std::fs;
-    use std::path::Path;
-
-    let path_obj = Path::new(path);
-
-    // 1. 检查是否为绝对路径
-    if !path_obj.is_absolute() {
-        return Err(ToolError::InvalidPath {
-            path: path.to_string(),
-            reason: "路径必须是绝对路径".to_string(),
-        }
-        .into());
-    }
-
-    // 2. 检查文件是否存在
-    if !path_obj.exists() {
-        return Err(ToolError::ExecutionFailed {
-            tool: "analyze_image".to_string(),
-            message: "文件不存在".to_string(),
-        }
-        .into());
-    }
-
-    // 3. 检查文件大小
-    let metadata = fs::metadata(path_obj).map_err(|e| ToolError::ExecutionFailed {
-        tool: "analyze_image".to_string(),
-        message: format!("获取文件信息失败: {}", e),
-    })?;
-
-    if metadata.len() > limits.max_file_size {
-        return Err(ToolError::FileTooLarge {
-            size: metadata.len(),
-            max: limits.max_file_size,
-        }
-        .into());
-    }
+    let path_obj = security.validate_file(path)?;
 
     // 4. 检测 MIME 类型（使用文件内容而非扩展名）
-    let mime_type = detect_image_mime_type(path_obj);
+    let mime_type = detect_image_mime_type(&path_obj);
 
     // 5. 读取文件
-    let bytes = fs::read(path_obj).map_err(|e| ToolError::ExecutionFailed {
+    let bytes = fs::read(&path_obj).map_err(|e| ToolError::ExecutionFailed {
         tool: "analyze_image".to_string(),
         message: format!("读取文件失败: {}", e),
     })?;
@@ -155,6 +121,9 @@ fn read_image_from_file(path: &str, limits: &ResourceLimits) -> Result<(String, 
 
 /// 从 URL 获取图片并转换为 base64
 async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(String, String)> {
+    // SSRF 防护：验证目标地址
+    validate_url(url)?;
+
     // 使用安全配置的 HTTP 客户端
     let client = create_safe_http_client(limits)?;
 

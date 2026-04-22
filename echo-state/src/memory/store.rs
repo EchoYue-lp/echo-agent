@@ -176,6 +176,12 @@ pub trait Store: Send + Sync {
         &'a self,
         prefix: Option<&'a [&'a str]>,
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>>;
+
+    /// 列出命名空间中的所有条目（无关键词过滤、无分页限制）。
+    ///
+    /// 用于需要完整枚举的场景（如 task store 的 `load_all()`），
+    /// 避免使用 `search` 做分页时因空查询匹配所有条目导致的无限循环。
+    fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
 }
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
@@ -319,6 +325,17 @@ impl Store for InMemoryStore {
                 })
                 .map(|k| k.split('/').map(String::from).collect())
                 .collect())
+        })
+    }
+
+    fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let data = self.data.read().await;
+            Ok(data
+                .get(&ns_key)
+                .map(|bucket| bucket.values().cloned().collect())
+                .unwrap_or_default())
         })
     }
 }
@@ -537,6 +554,17 @@ impl Store for FileStore {
                 })
                 .map(|k| k.split('/').map(String::from).collect())
                 .collect())
+        })
+    }
+
+    fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
+        Box::pin(async move {
+            let ns_key = namespace.join("/");
+            let data = self.data.read().await;
+            Ok(data
+                .get(&ns_key)
+                .map(|bucket| bucket.values().cloned().collect())
+                .unwrap_or_default())
         })
     }
 }

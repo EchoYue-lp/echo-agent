@@ -1,6 +1,6 @@
 [package]
 name = "echo_state"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 description = "State management for echo-agent framework (memory, compression, audit)"
 
@@ -8,7 +8,7 @@ description = "State management for echo-agent framework (memory, compression, a
 sqlite = ["dep:rusqlite"]
 
 [dependencies]
-echo_core = { version = "1.4.0", path = "../echo-core" }
+echo_core = { version = "1.5.0", path = "../echo-core" }
 # From echo-memory
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -19,10 +19,9 @@ tracing = "0.1"
 futures = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 reqwest = { version = "0.12", features = ["json"] }
-dirs = "6"
 # From echo-compression (no extra deps beyond echo_core)
 # From echo-audit (no extra deps beyond echo_core)
 
 [dev-dependencies]
 # echo_integration and reqwest needed for compression tests (#[ignore] by default)
-echo_integration = { version = "1.4.0", path = "../echo-integration" }
+echo_integration = { version = "1.5.0", path = "../echo-integration" }

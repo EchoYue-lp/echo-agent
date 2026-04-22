@@ -12,8 +12,8 @@ use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
 use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
 use crate::sandbox::SandboxManager;
-use crate::tools::Tool;
 use crate::tools::permission::PermissionPolicy;
+use crate::tools::{Tool, ToolExecutionConfig};
 use echo_core::circuit_breaker::CircuitBreakerConfig;
 use std::sync::Arc;
 
@@ -35,6 +35,8 @@ pub struct ReactAgentBuilder {
     enable_human_in_loop: bool,
     enable_subagent: bool,
     enable_cot: bool,
+    tool_error_feedback: bool,
+    tool_execution: ToolExecutionConfig,
     max_iterations: usize,
     token_limit: usize,
     callbacks: Vec<Arc<dyn AgentCallback>>,
@@ -80,6 +82,8 @@ impl ReactAgentBuilder {
             enable_human_in_loop: false,
             enable_subagent: false,
             enable_cot: true,
+            tool_error_feedback: true,
+            tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
             token_limit: usize::MAX,
             callbacks: Vec::new(),
@@ -175,6 +179,7 @@ impl ReactAgentBuilder {
     /// - 使用自定义 LLM 实现
     /// - 共享 LLM 客户端实例
     pub fn llm_client(mut self, client: Arc<dyn LlmClient>) -> Self {
+        self.model = client.model_name().to_string();
         self.llm_client = Some(client);
         self
     }
@@ -183,6 +188,7 @@ impl ReactAgentBuilder {
     ///
     /// 用于动态配置 API 地址、密钥等，不使用环境变量。
     pub fn llm_config(mut self, config: LlmConfig) -> Self {
+        self.model = config.model.clone();
         self.llm_config = Some(config);
         self
     }
@@ -310,6 +316,18 @@ impl ReactAgentBuilder {
     /// 设置最大迭代次数
     pub fn max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    /// 设置工具错误反馈开关
+    pub fn tool_error_feedback(mut self, enabled: bool) -> Self {
+        self.tool_error_feedback = enabled;
+        self
+    }
+
+    /// 设置工具执行配置
+    pub fn tool_execution(mut self, config: ToolExecutionConfig) -> Self {
+        self.tool_execution = config;
         self
     }
 
@@ -488,6 +506,8 @@ impl ReactAgentBuilder {
             .enable_human_in_loop(self.enable_human_in_loop)
             .enable_subagent(self.enable_subagent)
             .enable_cot(self.enable_cot)
+            .tool_error_feedback(self.tool_error_feedback)
+            .tool_execution(self.tool_execution)
             .max_iterations(self.max_iterations)
             .token_limit(self.token_limit);
 
@@ -518,6 +538,10 @@ impl ReactAgentBuilder {
         }
 
         let mut agent = crate::agent::react::ReactAgent::new(config);
+
+        if let Some(llm_client) = self.llm_client {
+            agent.set_llm_client(llm_client);
+        }
 
         // 注入 LLM 配置
         if let Some(llm_config) = self.llm_config {
@@ -586,6 +610,8 @@ impl ReactAgentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::MockLlmClient;
+    use std::sync::Arc;
 
     #[test]
     fn test_builder_basic() {
@@ -620,5 +646,47 @@ mod tests {
             .enable_tools();
 
         assert!(builder.enable_builtin_tools);
+    }
+
+    #[test]
+    fn test_builder_llm_config_syncs_runtime_model_name() {
+        let agent = ReactAgentBuilder::new()
+            .llm_config(LlmConfig::openai("sk-demo", "gpt-4o"))
+            .system_prompt("测试")
+            .build()
+            .unwrap();
+
+        assert_eq!(agent.config().get_model_name(), "gpt-4o");
+        assert_eq!(
+            agent.llm_config().map(|cfg| cfg.model.as_str()),
+            Some("gpt-4o")
+        );
+    }
+
+    #[test]
+    fn test_builder_llm_client_syncs_runtime_model_name() {
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new().with_model_name("mock-topology"),
+            ))
+            .system_prompt("测试")
+            .build()
+            .unwrap();
+
+        assert_eq!(agent.config().get_model_name(), "mock-topology");
+    }
+
+    #[test]
+    fn test_builder_tool_execution_config_is_applied() {
+        let agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .tool_execution(ToolExecutionConfig {
+                timeout_ms: 120_000,
+                ..ToolExecutionConfig::default()
+            })
+            .build()
+            .unwrap();
+
+        assert_eq!(agent.config().get_tool_execution().timeout_ms, 120_000);
     }
 }

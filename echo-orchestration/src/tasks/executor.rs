@@ -43,6 +43,7 @@ use super::hooks::{RetryDecision, TaskHookRegistry};
 use super::manager::TaskManager;
 use super::store::{CheckpointStore, ExecutionCheckpoint};
 use super::task::{Task, TaskStatus};
+use dashmap::DashMap;
 use echo_core::error::{ReactError, Result};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -285,6 +286,9 @@ pub struct TaskExecutor {
     execute_fn: Option<TaskExecuteFn>,
     hooks: Arc<TaskHookRegistry>,
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    /// Tracks cancellation tokens for running tasks.
+    /// Used by `cancel_task()` to abort in-flight executions.
+    running_tasks: Arc<DashMap<String, CancellationToken>>,
 }
 
 impl TaskExecutor {
@@ -299,6 +303,7 @@ impl TaskExecutor {
             execute_fn: None,
             hooks,
             checkpoint_store: None,
+            running_tasks: Arc::new(DashMap::new()),
         }
     }
 
@@ -355,20 +360,43 @@ impl TaskExecutor {
             let config = self.config.clone();
             let execute_fn = self.execute_fn.clone();
             let hooks = self.hooks.clone();
+            let running_tasks = self.running_tasks.clone();
+            let task_id = task.id.clone();
+            let cancel = CancellationToken::new();
+            let cancel_clone = cancel.clone();
+            running_tasks.insert(task_id.clone(), cancel);
 
             handles.push(tokio::spawn(async move {
                 let _permit = permit;
-                let task_id = task.id.clone();
                 let start = Instant::now();
 
                 // Check cancellation before starting
-                if task.is_cancelled() {
+                if task.is_cancelled() || cancel_clone.is_cancelled() {
+                    running_tasks.remove(&task_id);
                     return TaskExecutionResult::cancelled(&task_id);
                 }
 
-                // Execute with retry
-                let result =
-                    Self::run_task_with_retry(task, manager, config, execute_fn, hooks).await;
+                // Execute with retry, racing against cancellation
+                let manager2 = manager.clone();
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel_clone.cancelled() => {
+                        let _ = manager.cancel_task(&task_id);
+                        TaskExecutionResult::cancelled(&task_id)
+                    }
+                    result = Self::run_task_with_retry(
+                        task,
+                        manager2,
+                        config,
+                        execute_fn,
+                        hooks,
+                        cancel_clone.clone(),
+                    ) => {
+                        result
+                    }
+                };
+
+                running_tasks.remove(&task_id);
 
                 debug!(
                     task_id = %task_id,
@@ -402,6 +430,7 @@ impl TaskExecutor {
         config: TaskExecutorConfig,
         execute_fn: Option<TaskExecuteFn>,
         hooks: Arc<TaskHookRegistry>,
+        cancel: CancellationToken,
     ) -> TaskExecutionResult {
         let task_id = task.id.clone();
         let timeout_secs = if task.timeout_secs > 0 {
@@ -425,10 +454,11 @@ impl TaskExecutor {
 
         loop {
             // Check cancellation
-            if manager
-                .get_task(&task_id)
-                .map(|t| t.is_cancelled())
-                .unwrap_or(false)
+            if cancel.is_cancelled()
+                || manager
+                    .get_task(&task_id)
+                    .map(|t| t.is_cancelled())
+                    .unwrap_or(false)
             {
                 return TaskExecutionResult::cancelled(&task_id);
             }
@@ -468,24 +498,22 @@ impl TaskExecutor {
             // Execute with timeout
             let execute_result = if let Some(ref f) = execute_fn {
                 let f = f.clone();
-                let cancel = CancellationToken::new();
-                let cancel_clone = cancel.clone();
+                let execution = f(ctx);
+                tokio::pin!(execution);
 
-                // Spawn the task with a cancellation token so we can cancel on timeout
-                let task_handle = tokio::spawn(async move {
-                    let ctx = TaskContext {
-                        attempt: ctx.attempt,
-                        ..ctx
-                    };
-                    f(ctx).await
-                });
+                let cancel_token = cancel.clone();
+                let cancel_wait = cancel_token.cancelled();
+                tokio::pin!(cancel_wait);
 
-                match tokio::time::timeout(Duration::from_secs(timeout_secs), task_handle).await {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => Err(ReactError::Other(format!("task join error: {}", e))),
-                    Err(_) => {
-                        // Timeout: cancel the task
-                        cancel_clone.cancel();
+                let timeout_wait = tokio::time::sleep(Duration::from_secs(timeout_secs));
+                tokio::pin!(timeout_wait);
+
+                tokio::select! {
+                    biased;
+                    _ = &mut cancel_wait => {
+                        return TaskExecutionResult::cancelled(&task_id);
+                    }
+                    _ = &mut timeout_wait => {
                         let result =
                             TaskExecutionResult::timeout(&task_id, timeout_secs, current_attempt);
 
@@ -499,6 +527,7 @@ impl TaskExecutor {
 
                         return result;
                     }
+                    result = &mut execution => result,
                 }
             } else {
                 // No execute_fn provided - return success with description
@@ -586,7 +615,13 @@ impl TaskExecutor {
                                 );
 
                                 current_attempt += 1;
-                                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        return TaskExecutionResult::cancelled(&task_id);
+                                    }
+                                    _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+                                }
                                 continue;
                             }
                             RetryDecision::Skip => {
@@ -676,13 +711,30 @@ impl TaskExecutor {
     }
 
     /// Cancel a specific task
+    ///
+    /// Marks the task as cancelled in the manager AND cancels the in-flight
+    /// execution via CancellationToken, so a running spawned task is aborted.
     pub fn cancel_task(&self, task_id: &str) -> bool {
-        self.task_manager.cancel_task(task_id)
+        let cancelled = self.task_manager.cancel_task(task_id);
+        if let Some((_, token)) = self.running_tasks.remove(task_id) {
+            token.cancel();
+        }
+        cancelled
     }
 
     /// Cancel all tasks
     pub fn cancel_all(&self) {
         self.task_manager.cancel_all();
+        // Cancel all in-flight tokens
+        let tokens: Vec<_> = self
+            .running_tasks
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        for token in tokens {
+            token.cancel();
+        }
+        self.running_tasks.clear();
     }
 
     /// Run the full execution loop until all tasks complete or a deadlock is detected.
