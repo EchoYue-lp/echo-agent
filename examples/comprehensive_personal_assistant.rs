@@ -140,8 +140,7 @@ async fn demo_long_term_memory(db_path: &Path) -> Result<()> {
     let Some(item) = store.get(ns, "user_profile").await? else {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：无法读取 user_profile".to_string(),
-        )
-        .into());
+        ));
     };
     println!("    用户资料:");
     println!("      兴趣: {:?}", item.value["interests"]);
@@ -153,8 +152,7 @@ async fn demo_long_term_memory(db_path: &Path) -> Result<()> {
     if search_results.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：长期记忆检索没有命中 Rust 对话".to_string(),
-        )
-        .into());
+        ));
     }
     println!("    关于「Rust」的对话:");
     for item in &search_results {
@@ -249,8 +247,7 @@ async fn demo_agent_orchestration() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：个人助手编排结果为空".to_string(),
-        )
-        .into());
+        ));
     }
     let preview: String = result.chars().take(300).collect();
     println!("  ✓ 协作完成:\n");
@@ -290,8 +287,7 @@ async fn demo_task_management() -> Result<()> {
             "综合验收失败：任务数不匹配，预期 {} 实际 {}",
             tasks.len(),
             all_tasks.len()
-        ))
-        .into());
+        )));
     }
     println!("  任务列表:\n");
     for task in &all_tasks {
@@ -326,8 +322,7 @@ async fn demo_task_management() -> Result<()> {
     let Some(task) = manager.get_task("task-002") else {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：无法读取 task-002".to_string(),
-        )
-        .into());
+        ));
     };
     println!("  当前进行中: {} ({})\n", task.description, task.id);
 
@@ -336,8 +331,7 @@ async fn demo_task_management() -> Result<()> {
     if completed != 1 || total != 3 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：任务进度不符合预期（completed={completed}, total={total}）"
-        ))
-        .into());
+        )));
     }
     println!("  进度: {}/{} 任务已完成\n", completed, total);
 
@@ -373,8 +367,7 @@ async fn demo_multimodal_support() -> Result<()> {
     if response.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：多模态 Agent 的文本对话返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     let preview: String = response.chars().take(100).collect();
     println!("    回复: {}...\n", preview);
@@ -422,7 +415,6 @@ fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Resul
                 echo_agent::error::ReactError::Other(format!(
                     "综合验收失败：当前 `model.name = {configured}` 配置无效：{e}"
                 ))
-                .into()
             });
     }
 
@@ -448,6 +440,5 @@ fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Resul
         });
     Err(echo_agent::error::ReactError::Other(format!(
         "综合验收失败：未找到可用模型配置。{load_err}"
-    ))
-    .into())
+    )))
 }

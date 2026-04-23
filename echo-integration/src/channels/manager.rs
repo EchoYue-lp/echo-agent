@@ -107,13 +107,19 @@ impl ChannelManager {
     }
 
     /// 获取通道引用（通过 ID）
-    pub fn get(&self, id: &str) -> Option<&Box<dyn ChannelPlugin>> {
-        self.channels.get(id)
+    pub fn get(&self, id: &str) -> Option<&(dyn ChannelPlugin + '_)> {
+        match self.channels.get(id) {
+            Some(plugin) => Some(plugin.as_ref()),
+            None => None,
+        }
     }
 
     /// 获取通道可变引用（通过 ID）
-    pub fn get_mut(&mut self, id: &str) -> Option<&mut Box<dyn ChannelPlugin>> {
-        self.channels.get_mut(id)
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut (dyn ChannelPlugin + '_)> {
+        match self.channels.get_mut(id) {
+            Some(plugin) => Some(plugin.as_mut()),
+            None => None,
+        }
     }
 
     /// 列出所有已注册的通道 ID

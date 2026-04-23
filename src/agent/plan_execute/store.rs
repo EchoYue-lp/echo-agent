@@ -244,6 +244,22 @@ impl PlanStore for SqlitePlanStore {
     }
 }
 
+/// Generate a readable slug from two random words (e.g. "quick-fox")
+pub fn generate_plan_slug() -> String {
+    const ADJECTIVES: &[&str] = &[
+        "swift", "bold", "calm", "dark", "fast", "keen", "lucky", "neat", "pure", "quiet", "rare",
+        "safe", "tidy", "vast", "warm", "wise", "zippy", "agile", "brave", "clean",
+    ];
+    const NOUNS: &[&str] = &[
+        "fox", "wolf", "bear", "hawk", "lynx", "tiger", "eagle", "shark", "crane", "otter",
+        "raven", "whale", "panda", "cobra", "falcon", "badger", "heron", "moose", "robin", "stoat",
+    ];
+
+    let adj = ADJECTIVES[fastrand::usize(0..ADJECTIVES.len())];
+    let noun = NOUNS[fastrand::usize(0..NOUNS.len())];
+    format!("{}-{}", adj, noun)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,20 +350,4 @@ mod tests {
         let parts: Vec<&str> = slug.split('-').collect();
         assert_eq!(parts.len(), 2);
     }
-}
-
-/// Generate a readable slug from two random words (e.g. "quick-fox")
-pub fn generate_plan_slug() -> String {
-    const ADJECTIVES: &[&str] = &[
-        "swift", "bold", "calm", "dark", "fast", "keen", "lucky", "neat", "pure", "quiet", "rare",
-        "safe", "tidy", "vast", "warm", "wise", "zippy", "agile", "brave", "clean",
-    ];
-    const NOUNS: &[&str] = &[
-        "fox", "wolf", "bear", "hawk", "lynx", "tiger", "eagle", "shark", "crane", "otter",
-        "raven", "whale", "panda", "cobra", "falcon", "badger", "heron", "moose", "robin", "stoat",
-    ];
-
-    let adj = ADJECTIVES[fastrand::usize(0..ADJECTIVES.len())];
-    let noun = NOUNS[fastrand::usize(0..NOUNS.len())];
-    format!("{}-{}", adj, noun)
 }

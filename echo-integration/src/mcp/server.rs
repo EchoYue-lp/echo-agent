@@ -418,14 +418,14 @@ impl McpServer {
             })?;
 
         // 验证 arguments 必须是 Object 类型（如果存在）
-        if let Some(ref args) = params.arguments {
-            if !args.is_object() {
-                return Err(JsonRpcError {
-                    code: ERR_INVALID_PARAMS,
-                    message: "tools/call arguments 必须是 JSON Object".to_string(),
-                    data: None,
-                });
-            }
+        if let Some(ref args) = params.arguments
+            && !args.is_object()
+        {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "tools/call arguments 必须是 JSON Object".to_string(),
+                data: None,
+            });
         }
 
         let tool = self.tools.get(&params.name).ok_or_else(|| JsonRpcError {

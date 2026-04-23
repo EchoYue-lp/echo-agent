@@ -58,8 +58,7 @@ async fn main() -> echo_agent::error::Result<()> {
     } else {
         return Err(echo_agent::error::ReactError::Other(
             "demo42 验收失败：未找到 mcp.json 配置文件".to_string(),
-        )
-        .into());
+        ));
     };
 
     // Part 1: MCP 工具发现
@@ -105,8 +104,7 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
     if clients.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo42 验收失败：未连接到任何 Playwright MCP 服务端".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!("✓ Agent 已创建，包含浏览器工具");
@@ -184,8 +182,7 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo42 验收失败：浏览器任务未完成（tool_calls={tool_calls}, tool_errors={tool_errors}, final_answer_empty={})",
             final_answer.trim().is_empty(),
-        ))
-        .into());
+        )));
     }
 
     Ok(())
@@ -204,7 +201,6 @@ fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Resul
                 echo_agent::error::ReactError::Other(format!(
                     "demo42 验收失败：当前 `model.name = {configured}` 配置无效：{e}"
                 ))
-                .into()
             });
     }
 
@@ -230,6 +226,5 @@ fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Resul
         });
     Err(echo_agent::error::ReactError::Other(format!(
         "demo42 验收失败：未找到可用模型配置。{load_err}"
-    ))
-    .into())
+    )))
 }

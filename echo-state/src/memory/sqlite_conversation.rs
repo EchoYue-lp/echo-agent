@@ -275,7 +275,7 @@ impl ConversationStore for SqliteConversationStore {
                 return Ok(());
             }
 
-            sets.push(format!("updated_at = datetime('now')"));
+            sets.push("updated_at = datetime('now')".to_string());
             params.push(Box::new(conversation_id.to_string()));
 
             let sql = format!(

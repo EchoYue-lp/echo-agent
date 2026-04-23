@@ -45,20 +45,15 @@ pub struct ImageUrl {
 /// 序列化时：
 /// - `Text("hello")` → `"hello"`（与旧版 API 完全兼容）
 /// - `Parts([...])` → `[{"type":"text","text":"..."},...]`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum MessageContent {
     /// Plain text content.
     Text(String),
     /// Multimodal content parts.
     Parts(Vec<ContentPart>),
     /// Explicitly empty content payload.
+    #[default]
     Empty,
-}
-
-impl Default for MessageContent {
-    fn default() -> Self {
-        MessageContent::Empty
-    }
 }
 
 impl Serialize for MessageContent {

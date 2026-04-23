@@ -635,7 +635,7 @@ mod tests {
         };
 
         match approved {
-            ApprovalDecision::Approved => assert!(true),
+            ApprovalDecision::Approved => {}
             _ => panic!("Should be Approved"),
         }
 

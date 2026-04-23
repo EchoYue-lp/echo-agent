@@ -223,8 +223,8 @@ mod tests {
         assert_eq!(chains.len(), 2, "应该有两条依赖链");
 
         // 验证两条链
-        let chain1 = vec!["task4", "task2", "task1"];
-        let chain2 = vec!["task4", "task3", "task1"];
+        let chain1 = ["task4", "task2", "task1"];
+        let chain2 = ["task4", "task3", "task1"];
         let chain1 = chain1.iter().map(|x| x.to_string()).collect();
         let chain2 = chain2.iter().map(|x| x.to_string()).collect();
 

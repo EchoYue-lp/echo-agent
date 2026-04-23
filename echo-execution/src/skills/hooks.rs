@@ -333,10 +333,10 @@ fn matches_tool(matcher: &str, tool_name: &str) -> bool {
         return true;
     }
     // Try glob matching: e.g. "Bash(*)" matches "Bash(git:*)"
-    if let Ok(pattern) = glob::Pattern::new(matcher) {
-        if pattern.matches(tool_name) {
-            return true;
-        }
+    if let Ok(pattern) = glob::Pattern::new(matcher)
+        && pattern.matches(tool_name)
+    {
+        return true;
     }
     // Fallback: prefix match for patterns like "Bash" matching "Bash(git:*)"
     if tool_name.starts_with(matcher)
@@ -365,18 +365,18 @@ async fn execute_action(
             shell,
             timeout,
         } => {
-            execute_command_hook(
+            let request = CommandHookRequest {
                 command,
-                shell.as_deref(),
-                *timeout,
+                shell: shell.as_deref(),
                 skill_dir,
                 tool_name,
                 tool_input,
                 tool_output,
                 session_id,
                 sandbox,
-            )
-            .await
+                timeout_secs: *timeout,
+            };
+            execute_command_hook(request).await
         }
         HookAction::Prompt { prompt } => {
             let mut result = HookResult::default();
@@ -416,17 +416,31 @@ async fn execute_action(
     }
 }
 
-async fn execute_command_hook(
-    command: &str,
-    shell: Option<&str>,
+struct CommandHookRequest<'a> {
+    command: &'a str,
+    shell: Option<&'a str>,
     timeout_secs: u64,
-    skill_dir: &str,
-    tool_name: &str,
-    tool_input: &Value,
-    tool_output: Option<&str>,
-    session_id: &str,
-    sandbox: Option<&Arc<SandboxManager>>,
-) -> HookResult {
+    skill_dir: &'a str,
+    tool_name: &'a str,
+    tool_input: &'a Value,
+    tool_output: Option<&'a str>,
+    session_id: &'a str,
+    sandbox: Option<&'a Arc<SandboxManager>>,
+}
+
+async fn execute_command_hook(request: CommandHookRequest<'_>) -> HookResult {
+    let CommandHookRequest {
+        command,
+        shell,
+        timeout_secs,
+        skill_dir,
+        tool_name,
+        tool_input,
+        tool_output,
+        session_id,
+        sandbox,
+    } = request;
+
     // Variable substitution in command
     let command = command
         .replace("${SKILL_DIR}", skill_dir)
@@ -1061,8 +1075,10 @@ PostToolUse:
     #[test]
     fn test_merge_result_permission_priority_deny_wins() {
         // deny > ask > allow
-        let mut combined = HookResult::default();
-        combined.permission_decision = Some(PermissionDecision::Allow);
+        let mut combined = HookResult {
+            permission_decision: Some(PermissionDecision::Allow),
+            ..HookResult::default()
+        };
 
         // Ask should override allow
         let incoming = HookResult {

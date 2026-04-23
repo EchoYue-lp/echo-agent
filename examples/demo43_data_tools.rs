@@ -89,8 +89,7 @@ async fn main() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：Excel 处理返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("✓ 结果:\n{}\n", result);
 
@@ -128,8 +127,7 @@ async fn main() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：文本处理返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("✓ 结果:\n{}\n", result);
 
@@ -167,8 +165,7 @@ async fn main() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：CSV 处理返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("✓ 结果:\n{}\n", result);
 
@@ -212,8 +209,7 @@ async fn main() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo43 验收失败：综合数据处理返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("✓ 结果:\n{}\n", result);
 
@@ -265,8 +261,7 @@ async fn run_scripted_task(
         if !actual_tools.iter().any(|name| name == expected_tool) {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo43 验收失败：脚本化任务未调用预期工具 `{expected_tool}`"
-            ))
-            .into());
+            )));
         }
     }
     Ok(result)

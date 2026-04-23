@@ -168,8 +168,7 @@ async fn demo_research_memory(db_path: &Path) -> Result<()> {
     if results.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：研究历史全文检索没有命中".to_string(),
-        )
-        .into());
+        ));
     }
     for (i, item) in results.iter().enumerate() {
         println!(
@@ -191,8 +190,7 @@ async fn demo_research_memory(db_path: &Path) -> Result<()> {
     let Some(item) = record else {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：无法读取 rust_2024 研究记录".to_string(),
-        )
-        .into());
+        ));
     };
     println!("  📄 获取单条记录 (rust_2024):");
     println!("    主题: {}", item.value["topic"]);
@@ -201,8 +199,7 @@ async fn demo_research_memory(db_path: &Path) -> Result<()> {
     if item.value["topic"] != "Rust 语言 2024 年发展" {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：研究记录内容不符合预期".to_string(),
-        )
-        .into());
+        ));
     }
 
     Ok(())
@@ -278,14 +275,12 @@ async fn demo_simple_research() -> Result<()> {
     if !used_search || !used_fetch {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：单 Agent 研究未完整使用 web_search/web_fetch（search={used_search}, fetch={used_fetch}）"
-        ))
-        .into());
+        )));
     }
     if final_answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：单 Agent 研究返回空答案".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!();
@@ -348,8 +343,7 @@ async fn demo_workflow_research() -> Result<()> {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：研究工作流执行结果不符合预期（steps={}, path={:?}）",
             result.steps, result.path
-        ))
-        .into());
+        )));
     }
     let analysis = result.state.get::<String>("analysis").ok_or_else(|| {
         echo_agent::error::ReactError::Other("综合验收失败：研究工作流未产出 analysis".to_string())
@@ -394,8 +388,7 @@ async fn demo_structured_extraction() -> Result<()> {
     {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：结构化技术对比结果不完整".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  ✓ 结构化提取成功:\n");
     println!("  推荐语言: {}", result.winner);
@@ -474,8 +467,7 @@ async fn demo_multi_agent_research() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：多 Agent 协作研究返回空报告".to_string(),
-        )
-        .into());
+        ));
     }
     println!("✓ 研究完成!\n");
     println!("═══════════════════════════════════════════════════════");

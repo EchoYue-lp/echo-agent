@@ -191,8 +191,7 @@ async fn demo_semantic_storage(db_path: &Path) -> Result<()> {
         if results.is_empty() {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "语义检索验收失败：查询 `{query}` 没有命中，说明 embedding 索引或语义检索链路不可用"
-            ))
-            .into());
+            )));
         }
 
         for (i, item) in results.iter().take(2).enumerate() {
@@ -479,8 +478,7 @@ async fn demo_history_retrieval(db_path: &Path) -> Result<()> {
         if results.is_empty() {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "历史检索验收失败：查询 `{query}` 没有命中，说明历史检索链路不可用"
-            ))
-            .into());
+            )));
         }
         for (i, item) in results.iter().enumerate() {
             let content = item.value["content"]

@@ -145,8 +145,7 @@ fn demo_skill_metadata() -> Result<()> {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo07 验收失败：Skill `{}` 未注册任何工具",
                 skill.name()
-            ))
-            .into());
+            )));
         }
         println!("  Skill: {}", skill.name());
         println!("    描述: {}", skill.description());
@@ -211,8 +210,7 @@ fn demo_skill_installation() -> Result<()> {
     {
         return Err(echo_agent::error::ReactError::Other(
             "demo07 验收失败：Skill 安装或查询结果不符合预期".to_string(),
-        )
-        .into());
+        ));
     }
     Ok(())
 }
@@ -243,8 +241,7 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
         if !content.contains("Hello from echo-agent Skills!") || result.trim().is_empty() {
             return Err(echo_agent::error::ReactError::Other(
                 "demo07 验收失败：FileSystem Skill 未完成文件读写".to_string(),
-            )
-            .into());
+            ));
         }
         println!("✓ 结果: {}\n", result);
     }
@@ -271,8 +268,7 @@ async fn demo_agent_with_skills() -> echo_agent::error::Result<()> {
         if !content.contains("HELLO WORLD") || result.trim().is_empty() {
             return Err(echo_agent::error::ReactError::Other(
                 "demo07 验收失败：多 Skill 组合未写入预期大写内容".to_string(),
-            )
-            .into());
+            ));
         }
         println!("✓ 结果: {}\n", result);
     }

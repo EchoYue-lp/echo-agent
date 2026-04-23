@@ -186,8 +186,7 @@ async fn main() -> Result<()> {
     {
         return Err(echo_core::error::ReactError::Other(
             "demo30 验收失败：get_weather 返回空文本".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  get_weather(Beijing) → {}",
@@ -205,8 +204,7 @@ async fn main() -> Result<()> {
     if resp["result"]["content"][0]["text"].as_str().unwrap_or("") != "126" {
         return Err(echo_core::error::ReactError::Other(
             "demo30 验收失败：calculate(42 * 3) 返回值不正确".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  calculate(42 * 3)    → {}",
@@ -225,8 +223,7 @@ async fn main() -> Result<()> {
     if !is_err {
         return Err(echo_core::error::ReactError::Other(
             "demo30 验收失败：calculate(10 / 0) 未标记 isError".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  calculate(10 / 0)    → {} (isError={is_err})",
@@ -244,8 +241,7 @@ async fn main() -> Result<()> {
     if resp.get("error").is_some() {
         return Err(echo_core::error::ReactError::Other(
             "demo30 验收失败：ping 返回 error".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  ping → {}",
@@ -272,8 +268,7 @@ async fn main() -> Result<()> {
     {
         return Err(echo_core::error::ReactError::Other(
             "demo30 验收失败：调用不存在工具时未返回错误消息".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  tools/call(nonexistent) → error: {}",
@@ -290,8 +285,7 @@ async fn main() -> Result<()> {
     if !resp["error"]["code"].is_number() {
         return Err(echo_core::error::ReactError::Other(
             "demo30 验收失败：未知方法未返回错误码".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  foo/bar → error code: {} (Method not found)",
@@ -303,8 +297,7 @@ async fn main() -> Result<()> {
     if !resp["error"]["code"].is_number() {
         return Err(echo_core::error::ReactError::Other(
             "demo30 验收失败：非法 JSON 未返回 parse error".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  invalid JSON → error code: {} (Parse error)",
@@ -334,8 +327,7 @@ async fn main() -> Result<()> {
     if count != 2 {
         return Err(echo_core::error::ReactError::Other(format!(
             "demo30 验收失败：from_tools() 构建后的工具数错误: {count}"
-        ))
-        .into());
+        )));
     }
     println!("  from_tools() 构建的 quick-server → {count} 个工具");
 

@@ -144,17 +144,17 @@ impl SessionConfig {
         }
 
         // 命令前缀匹配
-        if let Some(ref prefix) = self.command_prefix {
-            if let Some(cmd) = trimmed.strip_prefix(prefix.as_str()) {
-                let cmd = cmd.trim();
-                let cmd_lower = cmd.to_lowercase();
-                if self
-                    .reset_commands
-                    .iter()
-                    .any(|c| cmd_lower == c.to_lowercase())
-                {
-                    return true;
-                }
+        if let Some(ref prefix) = self.command_prefix
+            && let Some(cmd) = trimmed.strip_prefix(prefix.as_str())
+        {
+            let cmd = cmd.trim();
+            let cmd_lower = cmd.to_lowercase();
+            if self
+                .reset_commands
+                .iter()
+                .any(|c| cmd_lower == c.to_lowercase())
+            {
+                return true;
             }
         }
 

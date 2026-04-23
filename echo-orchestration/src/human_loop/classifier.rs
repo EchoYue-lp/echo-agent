@@ -532,24 +532,24 @@ impl<C: LlmClient + ?Sized> LlmClassifier<C> {
     fn parse_response(response: &str) -> Option<ClassifierResult> {
         // 尝试使用正则表达式提取 JSON 对象
         // 匹配第一个完整的 JSON 对象（支持嵌套）
-        if let Some(json_str) = Self::extract_json(response) {
-            if let Ok(json) = serde_json::from_str::<Value>(&json_str) {
-                let should_block = json
-                    .get("should_block")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let reason = json
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("未提供原因")
-                    .to_string();
+        if let Some(json_str) = Self::extract_json(response)
+            && let Ok(json) = serde_json::from_str::<Value>(&json_str)
+        {
+            let should_block = json
+                .get("should_block")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let reason = json
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未提供原因")
+                .to_string();
 
-                return Some(if should_block {
-                    ClassifierResult::block(reason)
-                } else {
-                    ClassifierResult::allow(reason)
-                });
-            }
+            return Some(if should_block {
+                ClassifierResult::block(reason)
+            } else {
+                ClassifierResult::allow(reason)
+            });
         }
 
         // 回退：尝试从文本中判断
@@ -570,9 +570,9 @@ impl<C: LlmClient + ?Sized> LlmClassifier<C> {
         let trimmed = text.trim();
         let mut depth = 0i32;
         let mut start: Option<usize> = None;
-        let mut chars = trimmed.char_indices().peekable();
+        let chars = trimmed.char_indices();
 
-        while let Some((i, c)) = chars.next() {
+        for (i, c) in chars {
             if c == '{' {
                 if depth == 0 {
                     start = Some(i);
@@ -580,10 +580,10 @@ impl<C: LlmClient + ?Sized> LlmClassifier<C> {
                 depth += 1;
             } else if c == '}' {
                 depth -= 1;
-                if depth == 0 {
-                    if let Some(s) = start {
-                        return Some(trimmed[s..=i].to_string());
-                    }
+                if depth == 0
+                    && let Some(s) = start
+                {
+                    return Some(trimmed[s..=i].to_string());
                 }
             }
         }

@@ -117,8 +117,7 @@ async fn main() -> echo_agent::error::Result<()> {
     if response_json.get("result").is_none() {
         return Err(echo_agent::error::ReactError::Other(
             "demo23 验收失败：A2A 同步请求未返回 result".to_string(),
-        )
-        .into());
+        ));
     }
     println!("\n响应: {}\n", response);
 
@@ -179,8 +178,7 @@ async fn main() -> echo_agent::error::Result<()> {
     if !saw_final && artifact_updates == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "demo23 验收失败：A2A 流式请求既没有终态也没有任何产出".to_string(),
-        )
-        .into());
+        ));
     }
 
     // ── 6. A2A Client 使用 ───────────────────────────────────

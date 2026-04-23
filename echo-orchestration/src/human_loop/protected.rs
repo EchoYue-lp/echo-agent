@@ -295,12 +295,11 @@ fn extract_direct_paths_from_command(cmd: &str) -> Vec<String> {
 /// 从 JSON Value 中递归提取可能是路径的字符串
 fn extract_paths_from_value(value: &Value, paths: &mut Vec<String>) {
     match value {
-        Value::String(s) => {
-            // 简单启发式：包含 / 或以 . 开头的字符串可能是路径
-            if s.contains('/') || s.starts_with('.') {
-                paths.push(s.clone());
-            }
+        // 简单启发式：包含 / 或以 . 开头的字符串可能是路径
+        Value::String(s) if s.contains('/') || s.starts_with('.') => {
+            paths.push(s.clone());
         }
+        Value::String(_) => {}
         Value::Object(map) => {
             for (key, v) in map {
                 if matches!(

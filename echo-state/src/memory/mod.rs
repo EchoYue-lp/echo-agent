@@ -87,6 +87,8 @@ pub use sqlite_conversation::SqliteConversationStore;
 #[cfg(feature = "sqlite")]
 pub use sqlite_store::SqliteStore;
 pub use store::{FileStore, InMemoryStore, SearchMode, SearchQuery, Store, StoreItem};
+#[cfg(test)]
+pub use test_utils::MockEmbedder;
 
 /// 测试用嵌入器（仅在测试时可见）
 #[cfg(test)]
@@ -124,6 +126,3 @@ mod test_utils {
         }
     }
 }
-
-#[cfg(test)]
-pub use test_utils::MockEmbedder;

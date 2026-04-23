@@ -97,8 +97,7 @@ fn demo_from_config_file() -> echo_agent::error::Result<()> {
     if models.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo26 验收失败：未找到可用模型配置".to_string(),
-        )
-        .into());
+        ));
     } else {
         println!("  已配置的模型: {:?}\n", models);
         // 尝试用第一个模型创建客户端
@@ -179,8 +178,7 @@ fn demo_auto_provider_detection() -> echo_agent::error::Result<()> {
     if anthropic_config.provider != LlmProvider::Anthropic {
         return Err(echo_agent::error::ReactError::Other(
             "demo26 验收失败：anthropic provider 自动检测错误".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  LlmConfig::anthropic() → provider = {:?}",
@@ -191,8 +189,7 @@ fn demo_auto_provider_detection() -> echo_agent::error::Result<()> {
     if ollama_config.provider != LlmProvider::Ollama {
         return Err(echo_agent::error::ReactError::Other(
             "demo26 验收失败：ollama provider 自动检测错误".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "  LlmConfig::ollama()    → provider = {:?}",
@@ -215,8 +212,7 @@ async fn demo_agent_with_factory() -> echo_agent::error::Result<()> {
     } else {
         return Err(echo_agent::error::ReactError::Other(
             "demo26 验收失败：无配置文件，无法验证 ProviderFactory + Agent 对话".to_string(),
-        )
-        .into());
+        ));
     };
 
     println!("  使用模型: {model_name}\n");
@@ -239,8 +235,7 @@ async fn demo_agent_with_factory() -> echo_agent::error::Result<()> {
     if answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo26 验收失败：ProviderFactory Agent 对话返回空答案".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  🤖 Agent: {answer}");
 

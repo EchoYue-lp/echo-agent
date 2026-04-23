@@ -143,15 +143,13 @@ fn require_yaml_model() -> echo_agent::error::Result<String> {
     if model_name.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo36 需要在 echo-agent.yaml 中设置 `model.name`，并让它指向 `models.*` 里声明的视觉模型。".to_string(),
-        )
-        .into());
+        ));
     }
 
     if !echo_agent::llm::config::Config::has_model(&model_name) {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo36 当前 `model.name = {model_name}`，但它没有在 `echo-agent.yaml` 的 `models:` 中声明。请先在 YAML 中配置同名模型，并确保它支持视觉输入。"
-        ))
-        .into());
+        )));
     }
 
     Ok(model_name)
@@ -186,8 +184,7 @@ fn ensure_vision_response(model_name: &str, response: String) -> echo_agent::err
     if looks_like_text_only_fallback {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo36 当前 `model.name = {model_name}` 没有真正处理图片输入，而是返回了文本模型式的兜底回复：{normalized:?}。请在 YAML 中改用支持视觉的模型。"
-        ))
-        .into());
+        )));
     }
 
     Ok(response)

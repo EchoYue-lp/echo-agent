@@ -678,15 +678,14 @@ impl PermissionService {
             if let PermissionUpdate::AddRule {
                 source, behavior, ..
             } = update
+                && source == "session"
             {
-                if source == "session" {
-                    // session 级 allow 规则 → SessionAllTools
-                    if behavior == "allow" {
-                        return ApprovalScope::SessionAllTools;
-                    }
-                    // session 级 deny 规则 → Session（仅针对当前工具）
-                    return ApprovalScope::Session;
+                // session 级 allow 规则 → SessionAllTools
+                if behavior == "allow" {
+                    return ApprovalScope::SessionAllTools;
                 }
+                // session 级 deny 规则 → Session（仅针对当前工具）
+                return ApprovalScope::Session;
             }
         }
         ApprovalScope::Once

@@ -79,8 +79,8 @@ fn react_agent_add_tool_enables_tool_flag() {
     assert!(agent.config().is_tool_enabled(), "add_tool 后应启用工具");
     // FinalAnswerTool + test_tool
     let tool_names = agent.tool_names();
-    assert!(tool_names.iter().any(|n| *n == "test_tool"));
-    assert!(tool_names.iter().any(|n| *n == "final_answer"));
+    assert!(tool_names.contains(&"test_tool"));
+    assert!(tool_names.contains(&"final_answer"));
 }
 
 #[test]
@@ -99,9 +99,9 @@ fn react_agent_add_tools_batch() {
     let tool_names = agent.tool_names();
     // FinalAnswerTool + 3 个自定义工具 = 4
     assert_eq!(tool_names.len(), 4);
-    assert!(tool_names.iter().any(|n| *n == "tool1"));
-    assert!(tool_names.iter().any(|n| *n == "tool2"));
-    assert!(tool_names.iter().any(|n| *n == "tool3"));
+    assert!(tool_names.contains(&"tool1"));
+    assert!(tool_names.contains(&"tool2"));
+    assert!(tool_names.contains(&"tool3"));
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn react_agent_add_tools_with_allowed_list() {
     let tool_names = agent.tool_names();
     // FinalAnswerTool + allowed_tool = 2 (白名单只过滤用户添加的工具)
     assert_eq!(tool_names.len(), 2);
-    assert!(tool_names.iter().any(|n| *n == "allowed_tool"));
+    assert!(tool_names.contains(&"allowed_tool"));
 }
 
 // ── ReactAgent getter 方法测试 ───────────────────────────────────────────────────────
@@ -488,12 +488,9 @@ fn react_agent_builder_with_tools() {
     assert!(agent.config().is_tool_enabled());
     // FinalAnswerTool + 内置工具（数量取决于启用的 feature）+ tool1 + tool2
     let names = agent.tool_names();
-    assert!(names.iter().any(|n| *n == "tool1"), "应包含 tool1");
-    assert!(names.iter().any(|n| *n == "tool2"), "应包含 tool2");
-    assert!(
-        names.iter().any(|n| *n == "final_answer"),
-        "应包含 final_answer"
-    );
+    assert!(names.contains(&"tool1"), "应包含 tool1");
+    assert!(names.contains(&"tool2"), "应包含 tool2");
+    assert!(names.contains(&"final_answer"), "应包含 final_answer");
     assert!(names.len() >= 3, "至少应有 3 个工具");
 }
 
@@ -722,7 +719,7 @@ fn react_agent_register_agent_dispatch_tool() {
 
     // 启用 subagent 后，agent_tool 工具应被注册
     let tool_names = agent.tool_names();
-    assert!(tool_names.iter().any(|n| *n == "agent_tool"));
+    assert!(tool_names.contains(&"agent_tool"));
 }
 
 #[test]
@@ -732,7 +729,7 @@ fn react_agent_no_agent_dispatch_without_subagent() {
 
     // 不启用 subagent 时，agent_tool 工具不应被注册
     let tool_names = agent.tool_names();
-    assert!(!tool_names.iter().any(|n| *n == "agent_tool"));
+    assert!(!tool_names.contains(&"agent_tool"));
 }
 
 // ── Agent 配置隔离测试 ───────────────────────────────────────────────────────
@@ -802,7 +799,7 @@ fn react_agent_human_in_loop_tool_registration() {
 
     // 启用 human_in_loop 后，human_in_loop 工具应被注册
     let tool_names = agent.tool_names();
-    assert!(tool_names.iter().any(|n| *n == "human_in_loop"));
+    assert!(tool_names.contains(&"human_in_loop"));
 }
 
 #[test]
@@ -812,7 +809,7 @@ fn react_agent_no_human_in_loop_without_flag() {
 
     // 不启用 human_in_loop 时，工具不应被注册
     let tool_names = agent.tool_names();
-    assert!(!tool_names.iter().any(|n| *n == "human_in_loop"));
+    assert!(!tool_names.contains(&"human_in_loop"));
 }
 
 #[tokio::test]
@@ -1065,10 +1062,10 @@ fn react_agent_planning_tools_registration() {
 
     let tool_names = agent.tool_names();
     // 启用任务规划后应有相关工具
-    assert!(tool_names.iter().any(|n| *n == "plan"));
-    assert!(tool_names.iter().any(|n| *n == "create_task"));
-    assert!(tool_names.iter().any(|n| *n == "update_task"));
-    assert!(tool_names.iter().any(|n| *n == "list_tasks"));
+    assert!(tool_names.contains(&"plan"));
+    assert!(tool_names.contains(&"create_task"));
+    assert!(tool_names.contains(&"update_task"));
+    assert!(tool_names.contains(&"list_tasks"));
 }
 
 #[test]
@@ -1078,7 +1075,7 @@ fn react_agent_no_planning_tools_without_flag() {
 
     let tool_names = agent.tool_names();
     // 不启用任务规划时不应有相关工具
-    assert!(!tool_names.iter().any(|n| *n == "create_task"));
+    assert!(!tool_names.contains(&"create_task"));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1095,13 +1092,10 @@ fn builder_with_memory_tools_registers_all_memory_tools() {
         .unwrap();
 
     let tools = agent.tool_names();
-    assert!(tools.iter().any(|n| *n == "remember"), "应注册 remember");
-    assert!(tools.iter().any(|n| *n == "recall"), "应注册 recall");
-    assert!(
-        tools.iter().any(|n| *n == "search_memory"),
-        "应注册 search_memory"
-    );
-    assert!(tools.iter().any(|n| *n == "forget"), "应注册 forget");
+    assert!(tools.contains(&"remember"), "应注册 remember");
+    assert!(tools.contains(&"recall"), "应注册 recall");
+    assert!(tools.contains(&"search_memory"), "应注册 search_memory");
+    assert!(tools.contains(&"forget"), "应注册 forget");
 }
 
 #[test]
@@ -1122,7 +1116,7 @@ fn set_memory_store_registers_search_memory_tool() {
     let mut agent = ReactAgent::new(config);
 
     assert!(
-        !agent.tool_names().iter().any(|n| *n == "search_memory"),
+        !agent.tool_names().contains(&"search_memory"),
         "初始不应有 search_memory"
     );
 
@@ -1130,7 +1124,7 @@ fn set_memory_store_registers_search_memory_tool() {
     agent.set_memory_store(store);
 
     assert!(
-        agent.tool_names().iter().any(|n| *n == "search_memory"),
+        agent.tool_names().contains(&"search_memory"),
         "set_memory_store 后应有 search_memory"
     );
 }
@@ -1231,18 +1225,12 @@ fn remove_tool_basic() {
     agent.add_tool(Box::new(MockTool::new("tool_a")));
     agent.add_tool(Box::new(MockTool::new("tool_b")));
 
-    assert!(agent.tool_names().iter().any(|n| *n == "tool_a"));
+    assert!(agent.tool_names().contains(&"tool_a"));
 
     let removed = agent.remove_tool("tool_a");
     assert!(removed.is_some(), "应返回被移除的工具");
-    assert!(
-        !agent.tool_names().iter().any(|n| *n == "tool_a"),
-        "移除后不应存在"
-    );
-    assert!(
-        agent.tool_names().iter().any(|n| *n == "tool_b"),
-        "其他工具应不受影响"
-    );
+    assert!(!agent.tool_names().contains(&"tool_a"), "移除后不应存在");
+    assert!(agent.tool_names().contains(&"tool_b"), "其他工具应不受影响");
 }
 
 #[test]
@@ -1261,10 +1249,7 @@ fn replace_tool_basic() {
 
     let old = agent.replace_tool(Box::new(MockTool::new("tool_x")));
     assert!(old.is_some(), "应返回旧工具");
-    assert!(
-        agent.tool_names().iter().any(|n| *n == "tool_x"),
-        "新工具应存在"
-    );
+    assert!(agent.tool_names().contains(&"tool_x"), "新工具应存在");
 }
 
 #[test]
@@ -1274,8 +1259,5 @@ fn replace_tool_when_not_exists() {
 
     let old = agent.replace_tool(Box::new(MockTool::new("new_tool")));
     assert!(old.is_none(), "不存在旧工具时应返回 None");
-    assert!(
-        agent.tool_names().iter().any(|n| *n == "new_tool"),
-        "新工具应已注册"
-    );
+    assert!(agent.tool_names().contains(&"new_tool"), "新工具应已注册");
 }

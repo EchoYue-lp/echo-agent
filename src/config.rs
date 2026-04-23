@@ -362,8 +362,10 @@ mod tests {
 
     #[test]
     fn test_load_config_no_file() {
-        // Should return defaults when no file exists
-        let config = load_config(None);
+        // An explicit but missing config path should fall back to defaults.
+        let missing_path =
+            std::env::temp_dir().join(format!("echo-agent-missing-config-{}.yaml", uuid()));
+        let config = load_config(missing_path.to_str());
         assert_eq!(config.model.name, "qwen-plus");
     }
 
@@ -395,5 +397,14 @@ model:
         std::fs::remove_file(&temp_path).unwrap();
 
         assert_eq!(config.model.name, "qwen-vl-max");
+    }
+
+    fn uuid() -> u128 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }

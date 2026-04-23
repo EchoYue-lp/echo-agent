@@ -53,8 +53,7 @@ fn demo_skill_overview() -> echo_agent::error::Result<()> {
         if tools.is_empty() {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo09 验收失败：{label} 未暴露任何工具"
-            ))
-            .into());
+            )));
         }
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         println!("  [{label}]");
@@ -90,8 +89,7 @@ fn demo_shell_safety() -> echo_agent::error::Result<()> {
             _ => {
                 return Err(echo_agent::error::ReactError::Other(format!(
                     "demo09 验收失败：命令 `{cmd}` 的安全等级判断异常"
-                ))
-                .into());
+                )));
             }
         }
         let (icon, label) = match &safety {
@@ -137,14 +135,12 @@ async fn demo_agent_tasks() -> echo_agent::error::Result<()> {
     if !content.contains("项目笔记") || !content.contains("完成了文件工具的实现") {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo09 验收失败：Agent 未正确写入文件 `{note_path}`"
-        ))
-        .into());
+        )));
     }
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo09 验收失败：Agent 返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("✓ 结果:\n{result}\n");
 

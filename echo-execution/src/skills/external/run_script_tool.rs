@@ -224,7 +224,7 @@ impl Tool for RunSkillScriptTool {
             let invocation = resolve_interpreter(&script_path);
 
             // Build argument list: [prefix_args...] <script_path> [user_args...]
-            let mut all_args: Vec<String> = invocation.prefix_args.iter().cloned().collect();
+            let mut all_args: Vec<String> = invocation.prefix_args.to_vec();
             all_args.push(canonical_script_path.display().to_string());
             if !args_str.is_empty() {
                 let parsed =

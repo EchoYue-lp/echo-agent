@@ -189,8 +189,7 @@ async fn demo_docker_sandbox() -> echo_agent::error::Result<()> {
     if !available {
         return Err(echo_agent::error::ReactError::Other(
             "demo29 验收失败：Docker 不可用，无法验证容器沙箱".to_string(),
-        )
-        .into());
+        ));
     }
 
     // Docker 执行
@@ -199,8 +198,7 @@ async fn demo_docker_sandbox() -> echo_agent::error::Result<()> {
     if !result.success() {
         return Err(echo_agent::error::ReactError::Other(
             "demo29 验收失败：Docker shell 执行失败".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  Docker Shell:");
     println!("    stdout: {}", result.stdout.trim());
@@ -214,8 +212,7 @@ async fn demo_docker_sandbox() -> echo_agent::error::Result<()> {
     if !result.success() {
         return Err(echo_agent::error::ReactError::Other(
             "demo29 验收失败：Docker Python 执行失败".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  Docker Python:");
     println!("    {}", result.stdout.trim());
@@ -228,8 +225,7 @@ async fn demo_docker_sandbox() -> echo_agent::error::Result<()> {
     if !result.success() {
         return Err(echo_agent::error::ReactError::Other(
             "demo29 验收失败：Docker 资源限制执行失败".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  资源受限执行:");
     println!(

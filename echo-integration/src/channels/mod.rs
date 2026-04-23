@@ -56,6 +56,7 @@
 //! # }
 //! ```
 
+#[allow(clippy::module_inception)]
 pub mod channels;
 pub mod manager;
 pub mod session;

@@ -224,8 +224,7 @@ async fn demo_feedback_off() -> Result<()> {
         Ok(answer) => {
             return Err(ReactError::Other(format!(
                 "demo12 验收失败：tool_error_feedback=false 时意外成功: {answer}"
-            ))
-            .into());
+            )));
         }
         Err(e) => {
             println!("\n  ✅ 符合预期 —— Agent 因工具失败而中断: {e}");
@@ -273,8 +272,7 @@ async fn demo_feedback_on() -> echo_agent::error::Result<()> {
     if !answer.contains('7') {
         return Err(ReactError::Other(format!(
             "demo12 验收失败：tool_error_feedback=true 未恢复到正确结果: {answer}"
-        ))
-        .into());
+        )));
     }
     println!("\n  ✅ 任务成功完成: {answer}");
     Ok(())
@@ -312,8 +310,7 @@ async fn demo_flaky_tool() -> echo_agent::error::Result<()> {
     if !answer.contains("北京") {
         return Err(ReactError::Other(format!(
             "demo12 验收失败：FlakyTool 恢复后的结果不包含目标城市: {answer}"
-        ))
-        .into());
+        )));
     }
     println!("\n  ✅ 任务成功完成: {answer}");
     Ok(())
@@ -328,9 +325,9 @@ fn demo_llm_retry_config() -> Result<()> {
         .llm_max_retries(3)
         .llm_retry_delay_ms(500);
     if no_retry.get_llm_max_retries() != 0 || retrying.get_llm_max_retries() != 3 {
-        return Err(
-            ReactError::Other("demo12 验收失败：LLM 重试配置未正确生效".to_string()).into(),
-        );
+        return Err(ReactError::Other(
+            "demo12 验收失败：LLM 重试配置未正确生效".to_string(),
+        ));
     }
     println!("  ── llm_max_retries = 0（关闭重试）──");
     println!("     LLM 调用失败 → 立即返回 Err");

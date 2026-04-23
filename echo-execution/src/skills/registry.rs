@@ -215,16 +215,15 @@ impl SkillRegistry {
         let mut raw_instructions = extract_body(&raw_content);
 
         // Fall back to legacy instructions from frontmatter if body is empty
-        if raw_instructions.trim().is_empty() {
-            if let Some(legacy) = self.legacy_instructions.get(name) {
-                if !legacy.trim().is_empty() {
-                    warn!(
-                        "Skill '{}': using legacy frontmatter instructions (body is empty)",
-                        name
-                    );
-                    raw_instructions = legacy.clone();
-                }
-            }
+        if raw_instructions.trim().is_empty()
+            && let Some(legacy) = self.legacy_instructions.get(name)
+            && !legacy.trim().is_empty()
+        {
+            warn!(
+                "Skill '{}': using legacy frontmatter instructions (body is empty)",
+                name
+            );
+            raw_instructions = legacy.clone();
         }
 
         // Process inline commands and variable substitution

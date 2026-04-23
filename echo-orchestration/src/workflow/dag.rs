@@ -391,16 +391,15 @@ fn detect_cycle(nodes: &[String], edges: &[DagEdge]) -> Option<Vec<String>> {
 
         if let Some(neighbors) = succs.get(node) {
             for neighbor in neighbors {
-                match color.get(neighbor.as_str()) {
+                match color.get(neighbor.as_str()).copied() {
                     Some(Color::Gray) => {
                         path.push(neighbor.clone());
                         return true;
                     }
-                    Some(Color::White) | None => {
-                        if dfs(neighbor, succs, color, path) {
-                            return true;
-                        }
+                    Some(Color::White) | None if dfs(neighbor, succs, color, path) => {
+                        return true;
                     }
+                    Some(Color::White) | None => {}
                     _ => {}
                 }
             }

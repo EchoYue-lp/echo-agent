@@ -318,8 +318,7 @@ async fn demo_llm_retry() -> Result<()> {
             if answer.trim().is_empty() {
                 return Err(echo_agent::error::ReactError::Other(
                     "demo33 验收失败：LLM 重试最终返回空答案".to_string(),
-                )
-                .into());
+                ));
             }
             println!("    ✓ 最终成功: {}\n", answer);
         }
@@ -327,8 +326,7 @@ async fn demo_llm_retry() -> Result<()> {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo33 验收失败：LLM 重试最终失败: {}",
                 e
-            ))
-            .into());
+            )));
         }
     }
     Ok(())

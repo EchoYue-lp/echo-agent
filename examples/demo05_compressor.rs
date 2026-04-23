@@ -215,8 +215,7 @@ async fn main() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo05 验收失败：综合能力示例返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     let approval_validation = agent
         .execute(
@@ -228,14 +227,12 @@ async fn main() -> Result<()> {
     if approval_validation.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo05 验收失败：审批链路验证步骤返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     if confirmation_count.load(Ordering::Relaxed) == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "demo05 验收失败：divide 未触发任何人工审批事件".to_string(),
-        )
-        .into());
+        ));
     }
     let approval_tools = approval_tools
         .lock()
@@ -245,8 +242,7 @@ async fn main() -> Result<()> {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo05 验收失败：出现了非 divide 的审批事件: {:?}",
             approval_tools
-        ))
-        .into());
+        )));
     }
     let confirmation_prompts = confirmation_prompts
         .lock()
@@ -259,8 +255,7 @@ async fn main() -> Result<()> {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo05 验收失败：未观察到 divide 的确认请求，实际 prompts: {:?}",
             confirmation_prompts
-        ))
-        .into());
+        )));
     }
 
     println!("\n✅ 最终结果:\n{}", result);

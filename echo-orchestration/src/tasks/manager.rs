@@ -91,32 +91,32 @@ impl TaskManager {
             task.updated_at = super::time::now_secs();
 
             // 仅当状态实际改变时才发送事件
-            if old_status != new_status {
-                if let Some(ref bus) = self.event_bus {
-                    bus.emit(super::events::TaskEvent::Updated {
-                        task_id: id.to_string(),
-                        old_status: old_status.clone(),
-                        new_status: new_status.clone(),
-                    });
+            if old_status != new_status
+                && let Some(ref bus) = self.event_bus
+            {
+                bus.emit(super::events::TaskEvent::Updated {
+                    task_id: id.to_string(),
+                    old_status: old_status.clone(),
+                    new_status: new_status.clone(),
+                });
 
-                    // 如果进入终态，发送对应的具体事件
-                    match &new_status {
-                        TaskStatus::Completed => {
-                            let result = task.result.clone().unwrap_or_default();
-                            bus.emit(super::events::TaskEvent::Completed {
-                                task_id: id.to_string(),
-                                result,
-                            });
-                        }
-                        TaskStatus::Failed(err) => {
-                            bus.emit(super::events::TaskEvent::Failed {
-                                task_id: id.to_string(),
-                                error: err.clone(),
-                                attempt: task.retry_count,
-                            });
-                        }
-                        _ => {}
+                // 如果进入终态，发送对应的具体事件
+                match &new_status {
+                    TaskStatus::Completed => {
+                        let result = task.result.clone().unwrap_or_default();
+                        bus.emit(super::events::TaskEvent::Completed {
+                            task_id: id.to_string(),
+                            result,
+                        });
                     }
+                    TaskStatus::Failed(err) => {
+                        bus.emit(super::events::TaskEvent::Failed {
+                            task_id: id.to_string(),
+                            error: err.clone(),
+                            attempt: task.retry_count,
+                        });
+                    }
+                    _ => {}
                 }
             }
 
@@ -246,7 +246,7 @@ impl TaskManager {
     /// 获取下一个应该执行的任务
     pub fn get_next_task(&self) -> Option<Task> {
         let mut ready = self.get_ready_tasks();
-        ready.sort_by(|a, b| b.priority.cmp(&a.priority));
+        ready.sort_by_key(|task| std::cmp::Reverse(task.priority));
         ready.into_iter().next()
     }
 

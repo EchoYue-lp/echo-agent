@@ -122,8 +122,7 @@ async fn demo_brave_search() -> echo_agent::error::Result<()> {
     let Some(provider) = BraveSearchProvider::from_env() else {
         return Err(echo_agent::error::ReactError::Other(
             "demo41 验收失败：未配置 BRAVE_SEARCH_API_KEY".to_string(),
-        )
-        .into());
+        ));
     };
 
     let query = "Rust programming language";
@@ -145,8 +144,7 @@ async fn demo_tavily_search() -> echo_agent::error::Result<()> {
     let Some(provider) = TavilyProvider::from_env() else {
         return Err(echo_agent::error::ReactError::Other(
             "demo41 验收失败：未配置 TAVILY_API_KEY".to_string(),
-        )
-        .into());
+        ));
     };
 
     let query = "Rust programming language";
@@ -181,8 +179,7 @@ async fn demo_auto_search() -> echo_agent::error::Result<()> {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo41 验收失败：auto search 执行失败: {:?}",
             result.error
-        ))
-        .into());
+        )));
     }
     println!("{}", result.output);
     println!();
@@ -209,8 +206,7 @@ async fn demo_web_fetch() -> echo_agent::error::Result<()> {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo41 验收失败：web fetch 执行失败: {:?}",
             result.error
-        ))
-        .into());
+        )));
     }
     let preview: String = result.output.chars().take(500).collect();
     println!("  {preview}");
@@ -251,8 +247,7 @@ async fn demo_agent_web_task() -> echo_agent::error::Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo41 验收失败：Agent Web 任务返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("✓ 结果:\n{result}\n");
 
@@ -284,8 +279,7 @@ fn ensure_search_results(
     if results.is_empty() {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo41 验收失败：{provider} 搜索没有返回任何结果"
-        ))
-        .into());
+        )));
     }
     Ok(())
 }

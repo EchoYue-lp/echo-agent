@@ -244,17 +244,17 @@ impl SqliteStore {
                     Ok((value_str, created_at, updated_at))
                 },
             );
-            if let Ok((value_str, created_at, updated_at)) = row {
-                if let Ok(value) = serde_json::from_str::<Value>(&value_str) {
-                    results.push(StoreItem {
-                        namespace: namespace.iter().map(|s| s.to_string()).collect(),
-                        key: key.clone(),
-                        value,
-                        created_at: created_at as u64,
-                        updated_at: updated_at as u64,
-                        score: default_score.or(Some(1.0 / (i as f32 + 1.0))),
-                    });
-                }
+            if let Ok((value_str, created_at, updated_at)) = row
+                && let Ok(value) = serde_json::from_str::<Value>(&value_str)
+            {
+                results.push(StoreItem {
+                    namespace: namespace.iter().map(|s| s.to_string()).collect(),
+                    key: key.clone(),
+                    value,
+                    created_at: created_at as u64,
+                    updated_at: updated_at as u64,
+                    score: default_score.or(Some(1.0 / (i as f32 + 1.0))),
+                });
             }
         }
         Ok(results)
@@ -281,17 +281,17 @@ impl SqliteStore {
                     Ok((value_str, created_at, updated_at))
                 },
             );
-            if let Ok((value_str, created_at, updated_at)) = row {
-                if let Ok(value) = serde_json::from_str::<Value>(&value_str) {
-                    results.push(StoreItem {
-                        namespace: namespace.iter().map(|s| s.to_string()).collect(),
-                        key: key.clone(),
-                        value,
-                        created_at: created_at as u64,
-                        updated_at: updated_at as u64,
-                        score: *score,
-                    });
-                }
+            if let Ok((value_str, created_at, updated_at)) = row
+                && let Ok(value) = serde_json::from_str::<Value>(&value_str)
+            {
+                results.push(StoreItem {
+                    namespace: namespace.iter().map(|s| s.to_string()).collect(),
+                    key: key.clone(),
+                    value,
+                    created_at: created_at as u64,
+                    updated_at: updated_at as u64,
+                    score: *score,
+                });
             }
         }
         Ok(results)

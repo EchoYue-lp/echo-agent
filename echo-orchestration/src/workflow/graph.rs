@@ -426,13 +426,12 @@ impl GraphBuilder {
                 )));
             }
             match &edge.kind {
-                EdgeKind::Fixed(to) if to != Graph::END => {
-                    if !self.nodes.contains_key(to) {
-                        return Err(ReactError::Agent(AgentError::InitializationFailed(
-                            format!("Edge to unknown node '{}'", to),
-                        )));
-                    }
+                EdgeKind::Fixed(to) if to != Graph::END && !self.nodes.contains_key(to) => {
+                    return Err(ReactError::Agent(AgentError::InitializationFailed(
+                        format!("Edge to unknown node '{}'", to),
+                    )));
                 }
+                EdgeKind::Fixed(_) => {}
                 EdgeKind::Parallel { targets, then } => {
                     for t in targets {
                         if !self.nodes.contains_key(t) {

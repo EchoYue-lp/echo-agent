@@ -99,12 +99,12 @@ impl McpTransport for HttpTransport {
             };
 
             // 从响应中保存会话 ID（通常在 initialize 响应中返回）
-            if let Some(new_session_id) = response.headers().get("mcp-session-id") {
-                if let Ok(sid) = new_session_id.to_str() {
-                    let mut sid_guard = self.session_id.lock().await;
-                    *sid_guard = Some(sid.to_string());
-                    tracing::debug!("HTTP: 保存 Mcp-Session-Id: {}", sid);
-                }
+            if let Some(new_session_id) = response.headers().get("mcp-session-id")
+                && let Ok(sid) = new_session_id.to_str()
+            {
+                let mut sid_guard = self.session_id.lock().await;
+                *sid_guard = Some(sid.to_string());
+                tracing::debug!("HTTP: 保存 Mcp-Session-Id: {}", sid);
             }
 
             let status = response.status().as_u16();

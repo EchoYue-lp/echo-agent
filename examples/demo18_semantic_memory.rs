@@ -83,8 +83,7 @@ async fn demo_keyword_vs_semantic() -> echo_agent::error::Result<()> {
         if sem_hits.is_empty() {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo18 验收失败：语义查询 `{query}` 没有命中"
-            ))
-            .into());
+            )));
         }
 
         println!("  🔍 查询: \"{query}\"  ({desc})");
@@ -116,7 +115,7 @@ async fn demo_agent_with_semantic_memory() -> echo_agent::error::Result<()> {
     let store = Arc::new(EmbeddingStore::new(inner as Arc<dyn Store>, embedder));
 
     // 预填充记忆
-    let ns = vec!["memory_agent".to_string(), "memories".to_string()];
+    let ns = ["memory_agent".to_string(), "memories".to_string()];
     let ns_ref: Vec<&str> = ns.iter().map(String::as_str).collect();
 
     store
@@ -153,8 +152,7 @@ async fn demo_agent_with_semantic_memory() -> echo_agent::error::Result<()> {
     if answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo18 验收失败：Agent 语义记忆回答为空".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  🤖 Agent: {answer}\n");
 
@@ -185,14 +183,10 @@ async fn demo_set_memory_store() -> echo_agent::error::Result<()> {
     agent.set_memory_store(store.clone());
     println!("  ✅ EmbeddingStore 已挂载");
     let names = agent.tool_names();
-    if !names.iter().any(|name| *name == "remember")
-        || !names.iter().any(|name| *name == "recall")
-        || !names.iter().any(|name| *name == "forget")
-    {
+    if !names.contains(&"remember") || !names.contains(&"recall") || !names.contains(&"forget") {
         return Err(echo_agent::error::ReactError::Other(
             "demo18 验收失败：热挂载 EmbeddingStore 后记忆工具未完整注册".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!("\n  ℹ️  接下来 Agent 的 remember/recall 工具将使用向量检索");

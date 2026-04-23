@@ -195,16 +195,14 @@ async fn demo_sandbox_execution() -> Result<()> {
                         "综合验收失败：沙箱命令 `{cmd}` 执行失败 (exit code {}): {}",
                         result.exit_code,
                         result.stderr.trim()
-                    ))
-                    .into());
+                    )));
                 }
                 println!("    耗时: {:?}", result.duration);
             }
             Err(e) => {
                 return Err(echo_agent::error::ReactError::Other(format!(
                     "综合验收失败：沙箱命令 `{cmd}` 执行错误: {e}"
-                ))
-                .into());
+                )));
             }
         }
         println!();
@@ -213,8 +211,7 @@ async fn demo_sandbox_execution() -> Result<()> {
     if success_count != 3 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：仅有 {success_count} 个沙箱命令成功"
-        ))
-        .into());
+        )));
     }
 
     Ok(())
@@ -265,8 +262,7 @@ async fn demo_retry_policy() -> Result<()> {
     if result != "API响应成功" || attempts != 4 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：重试结果不符合预期（result={result}, attempts={attempts}）"
-        ))
-        .into());
+        )));
     }
     println!("    ✓ 成功: {} (经过 {} 次尝试)", result, attempts);
     println!();
@@ -333,8 +329,7 @@ async fn demo_guard_system() -> Result<()> {
             Err(e) => {
                 return Err(echo_agent::error::ReactError::Other(format!(
                     "综合验收失败：护栏执行出错: {e}"
-                ))
-                .into());
+                )));
             }
         }
         println!();
@@ -343,8 +338,7 @@ async fn demo_guard_system() -> Result<()> {
     if passed != 1 || blocked != 3 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：护栏结果不符合预期（passed={passed}, blocked={blocked}）"
-        ))
-        .into());
+        )));
     }
 
     Ok(())
@@ -405,8 +399,7 @@ async fn demo_audit_logging() -> Result<()> {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：审计日志条数不符合预期（{}）",
             audit_events.len()
-        ))
-        .into());
+        )));
     }
 
     println!("  审计日志记录:\n");
@@ -513,14 +506,12 @@ print(f"Fibonacci(10) = {result}")
     if !used_syntax || !used_analysis || !used_execution {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：综合代码分析未完整调用工具（syntax={used_syntax}, analyze={used_analysis}, execute={used_execution}）"
-        ))
-        .into());
+        )));
     }
     if final_answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：综合代码分析返回空答案".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!();

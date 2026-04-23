@@ -98,8 +98,7 @@ async fn main() -> echo_agent::error::Result<()> {
     if manager.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo38 验收失败：没有可用的 IM 通道配置，请至少启用并完整配置一个通道".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!("\n  共 {} 个通道待启动\n", manager.len());
@@ -108,8 +107,7 @@ async fn main() -> echo_agent::error::Result<()> {
             "demo38 验收失败：注册通道数不一致，manager={}, recorded={}",
             manager.len(),
             registered.len()
-        ))
-        .into());
+        )));
     }
 
     // 6. 构建会话配置
@@ -120,8 +118,7 @@ async fn main() -> echo_agent::error::Result<()> {
     if timeout_minutes == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "demo38 验收失败：session timeout_minutes 不能为 0".to_string(),
-        )
-        .into());
+        ));
     }
 
     // 7. 使用 AgentChannelHandler 桥接 —— 自动继承全部框架能力
@@ -147,8 +144,7 @@ async fn main() -> echo_agent::error::Result<()> {
             "demo38 验收失败：启动结果数与通道数不一致，results={}, manager={}",
             start_results.len(),
             manager.len()
-        ))
-        .into());
+        )));
     }
     for result in start_results {
         result?;

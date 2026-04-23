@@ -104,11 +104,11 @@ async fn demo_raw_stream() -> echo_agent::error::Result<()> {
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
-        if let Some(choice) = chunk.choices.first() {
-            if let Some(content) = &choice.delta.content {
-                print!("{}", content);
-                std::io::stdout().flush().ok();
-            }
+        if let Some(choice) = chunk.choices.first()
+            && let Some(content) = &choice.delta.content
+        {
+            print!("{}", content);
+            std::io::stdout().flush().ok();
         }
     }
     println!();
@@ -147,8 +147,7 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
             AgentEvent::ToolError { name, error } => {
                 return Err(echo_agent::error::ReactError::Other(format!(
                     "demo10 验收失败：文本流式执行中工具 `{name}` 出错: {error}"
-                ))
-                .into());
+                )));
             }
             _ => {}
         }
@@ -157,8 +156,7 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
     if final_answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo10 验收失败：文本流式执行未产生最终答案".to_string(),
-        )
-        .into());
+        ));
     }
 
     Ok(())
@@ -214,8 +212,7 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
             AgentEvent::ToolError { name, error } => {
                 return Err(echo_agent::error::ReactError::Other(format!(
                     "demo10 验收失败：工具流式执行中 `{name}` 出错: {error}"
-                ))
-                .into());
+                )));
             }
             AgentEvent::FinalAnswer(answer) => {
                 final_answer = answer.clone();
@@ -231,8 +228,7 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
     if final_answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo10 验收失败：工具流式执行未产生最终答案".to_string(),
-        )
-        .into());
+        ));
     }
 
     Ok(())

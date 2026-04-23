@@ -69,8 +69,7 @@ async fn main() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo02 验收失败：任务规划示例返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!("\n✅ 最终结果:\n{}", result);

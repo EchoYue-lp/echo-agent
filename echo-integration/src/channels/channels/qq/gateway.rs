@@ -217,10 +217,10 @@ pub(super) async fn connect_to_gateway(
                     }
                     OP_DISPATCH => {
                         // 事件消息（op=0 表示 dispatch event）
-                        if *identified.lock().await {
-                            if let Err(e) = handle_gateway_event(handler.clone(), &payload).await {
-                                warn!("QQ Gateway: failed to handle event: {:?}", e);
-                            }
+                        if *identified.lock().await
+                            && let Err(e) = handle_gateway_event(handler.clone(), &payload).await
+                        {
+                            warn!("QQ Gateway: failed to handle event: {:?}", e);
                         }
                     }
                     _ => {

@@ -242,8 +242,7 @@ async fn demo_external_skills() -> Result<()> {
     if !skills_dir.exists() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：缺少 skills/ 目录，无法验证外部技能系统".to_string(),
-        )
-        .into());
+        ));
     }
 
     let mut agent = ReactAgentBuilder::new()
@@ -262,8 +261,7 @@ async fn demo_external_skills() -> Result<()> {
     if discovered.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：未发现任何外部技能".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!("  ✓ 发现 {} 个技能:", discovered.len());
@@ -280,8 +278,7 @@ async fn demo_external_skills() -> Result<()> {
     if registered_skill_tools == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：发现了技能但未注册任何 skill 相关工具".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  ✓ 自动注册工具: {} 个", tools.len());
 
@@ -341,8 +338,7 @@ async fn demo_plan_execute() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：Plan-and-Execute 返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("\n  ✓ 最终结果:\n  {}\n", result);
 
@@ -382,14 +378,12 @@ async fn demo_dynamic_tools() -> Result<()> {
     if result1.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：开发阶段任务返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     if quality_counter.load(Ordering::SeqCst) == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：开发阶段未实际调用 code_quality 工具".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  ✓ 结果: {}\n", result1);
 
@@ -403,21 +397,15 @@ async fn demo_dynamic_tools() -> Result<()> {
     agent.add_tool(Box::new(ci_tool));
 
     println!("  可用工具: {:?}\n", agent.tool_names());
-    if agent
-        .tool_names()
-        .iter()
-        .any(|name| *name == "code_quality")
-    {
+    if agent.tool_names().contains(&"code_quality") {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：切换工具后 code_quality 仍然存在".to_string(),
-        )
-        .into());
+        ));
     }
-    if !agent.tool_names().iter().any(|name| *name == "ci_check") {
+    if !agent.tool_names().contains(&"ci_check") {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：切换工具后 ci_check 未注册".to_string(),
-        )
-        .into());
+        ));
     }
 
     let task2 = "检查 main 管道的 CI/CD 状态";
@@ -428,14 +416,12 @@ async fn demo_dynamic_tools() -> Result<()> {
     if result2.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：运维阶段任务返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     if ci_counter.load(Ordering::SeqCst) == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：运维阶段未实际调用 ci_check 工具".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  ✓ 结果: {}\n", result2);
 
@@ -529,8 +515,7 @@ async fn demo_workflow_stream() -> Result<()> {
     if !completed || completed_steps != 4 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：Workflow 未按预期完成（completed={completed}, steps={completed_steps}）"
-        ))
-        .into());
+        )));
     }
 
     println!();
@@ -580,8 +565,7 @@ async fn demo_topology_tracking() -> Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：拓扑追踪任务返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
 
     // 显示拓扑图
@@ -597,8 +581,7 @@ async fn demo_topology_tracking() -> Result<()> {
     if stats.total_calls == 0 || stats.node_count == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：TopologyTracker 未记录任何调用".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!();
@@ -637,8 +620,7 @@ async fn demo_agent_handoff() -> Result<()> {
     if manager.registered_agents().len() != 2 {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：HandoffManager 注册的 Agent 数量不正确".to_string(),
-        )
-        .into());
+        ));
     }
 
     // 场景：技术问题转给开发者，业务问题转给分析师
@@ -658,14 +640,12 @@ async fn demo_agent_handoff() -> Result<()> {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "综合验收失败：handoff 目标错误，预期 `{expected_agent}`，实际 `{}`",
                 result.target_agent
-            ))
-            .into());
+            )));
         }
         if result.output.trim().is_empty() {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "综合验收失败：handoff 到 `{expected_agent}` 返回空结果"
-            ))
-            .into());
+            )));
         }
         println!("    → 转发给: {}", result.target_agent);
         println!("    → 结果: {}", result.output);

@@ -24,11 +24,11 @@ fn deep_merge_values(
     source: &serde_json::Map<String, Value>,
 ) {
     for (k, v) in source {
-        if let Some(existing) = target.get_mut(k) {
-            if let (Some(obj_a), Some(obj_b)) = (existing.as_object_mut(), v.as_object()) {
-                deep_merge_values(obj_a, obj_b);
-                continue;
-            }
+        if let Some(existing) = target.get_mut(k)
+            && let (Some(obj_a), Some(obj_b)) = (existing.as_object_mut(), v.as_object())
+        {
+            deep_merge_values(obj_a, obj_b);
+            continue;
         }
         target.insert(k.clone(), v.clone());
     }

@@ -226,6 +226,7 @@ impl LocalSandbox {
         if stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
         }
+        configure_command_process_group(&mut command);
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         command.kill_on_drop(true);
@@ -239,18 +240,18 @@ impl LocalSandbox {
         })?;
 
         // 写入 stdin 并处理写入失败时的进程清理
-        if let Some(input) = stdin {
-            if let Some(mut child_stdin) = child.stdin.take() {
-                if let Err(e) = child_stdin.write_all(input.as_bytes()).await {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Err(echo_core::error::ReactError::Sandbox(
-                        SandboxError::IoError(format!("Failed to write stdin: {e}")),
-                    ));
-                }
-                // 关闭 stdin 发送 EOF
-                drop(child_stdin);
+        if let Some(input) = stdin
+            && let Some(mut child_stdin) = child.stdin.take()
+        {
+            if let Err(e) = child_stdin.write_all(input.as_bytes()).await {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(echo_core::error::ReactError::Sandbox(
+                    SandboxError::IoError(format!("Failed to write stdin: {e}")),
+                ));
             }
+            // 关闭 stdin 发送 EOF
+            drop(child_stdin);
         }
 
         // 提前取出 stdout/stderr 管道，避免 child.wait() 消耗后无法读取
@@ -275,16 +276,14 @@ impl LocalSandbox {
             }
             Ok(Err(e)) => {
                 // wait() 自身失败 — 清理进程
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                cleanup_child_process(&mut child).await;
                 Err(echo_core::error::ReactError::Sandbox(
                     SandboxError::IoError(format!("Process wait error: {e}")),
                 ))
             }
             Err(_) => {
                 // 超时 — 显式 kill + wait 确保进程完全终止并被收割
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                cleanup_child_process(&mut child).await;
                 let duration = start.elapsed();
                 Ok(ExecutionResult {
                     exit_code: -1,
@@ -297,6 +296,26 @@ impl LocalSandbox {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn configure_command_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_command_process_group(_command: &mut Command) {}
+
+async fn cleanup_child_process(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .status();
+    }
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 /// 从管道句柄中读取全部输出，并截断超过 max_bytes 的部分。
@@ -503,42 +522,39 @@ mod tests {
             ..Default::default()
         });
 
-        // 获取当前 sleep 进程数
-        let _pid = std::process::id();
-        let count_before = std::process::Command::new("sh")
-            .args([
-                "-c",
-                &format!("ps -o pid= -o comm= | grep -c '[s]leep' || echo 0"),
-            ])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(0);
+        let marker = "sleep 65432";
+        let count_before = count_processes_matching(marker);
 
-        let cmd =
-            SandboxCommand::shell("sleep 9999").with_timeout(std::time::Duration::from_millis(200));
+        let cmd = SandboxCommand::shell(marker).with_timeout(std::time::Duration::from_millis(200));
         let result = sandbox.execute(cmd).await.unwrap();
         assert!(result.timed_out);
 
         // 等待一小段时间确保进程被收割
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        let count_after = std::process::Command::new("sh")
-            .args(["-c", "ps -o pid= -o comm= | grep -c '[s]leep' || echo 0"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(0);
+        let count_after = count_processes_matching(marker);
 
         // 超时后不应增加 sleep 进程数
         assert!(
             count_after <= count_before,
-            "Found {} sleep processes after timeout (was {})",
+            "Found {} matching processes after timeout for {:?} (was {})",
             count_after,
+            marker,
             count_before
         );
+    }
+
+    fn count_processes_matching(pattern: &str) -> i32 {
+        std::process::Command::new("sh")
+            .args([
+                "-c",
+                &format!("ps -o args= | grep -F -- {pattern:?} | grep -v grep | wc -l"),
+            ])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(0)
     }
 
     #[cfg(target_os = "linux")]

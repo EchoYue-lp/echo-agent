@@ -79,8 +79,7 @@ async fn demo_store_namespace_isolation(store: Arc<dyn Store>) -> Result<()> {
     if !writer_hits.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo14 验收失败：writer_agent 跨 namespace 搜到了 math_agent 的机密数据".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "🔍 writer_agent 搜索 [机密]：{} 条命中 ✅ (跨 namespace 数据不可见)\n",
@@ -110,8 +109,7 @@ async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<(
     if math_result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo14 验收失败：math_agent 返回空答案".to_string(),
-        )
-        .into());
+        ));
     }
     println!("▶ math_agent 答案: {}\n", math_result);
 
@@ -128,8 +126,7 @@ async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<(
     if writer_result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo14 验收失败：writer_agent 返回空答案".to_string(),
-        )
-        .into());
+        ));
     }
     println!("▶ writer_agent 答案: {}\n", writer_result);
 
@@ -140,8 +137,7 @@ async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<(
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo14 验收失败：保存的线程列表不完整: {:?}",
             sessions
-        ))
-        .into());
+        )));
     }
     println!("📋 已保存线程: {:?}", sessions);
 
@@ -208,14 +204,12 @@ async fn demo_context_isolation_multi_agent(checkpointer: Arc<dyn Checkpointer>)
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo14 验收失败：主 Agent 返回空答案".to_string(),
-        )
-        .into());
+        ));
     }
     if result.contains("PROJECT-OMEGA") {
         return Err(echo_agent::error::ReactError::Other(
             "demo14 验收失败：主 Agent 输出泄漏了系统提示中的机密信息".to_string(),
-        )
-        .into());
+        ));
     }
     println!("\n✅ 主 Agent 最终答案:\n{}\n", result);
 

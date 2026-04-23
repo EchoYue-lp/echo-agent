@@ -143,8 +143,7 @@ async fn demo_default() -> Result<()> {
     if !ans.contains("42") {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo13 验收失败：默认工具执行未得到 42，实际输出: {ans}"
-        ))
-        .into());
+        )));
     }
     println!("✅ 结果：{}", ans);
     Ok(())
@@ -173,8 +172,7 @@ async fn demo_timeout() -> Result<()> {
         Ok(ans) => {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo13 验收失败：超时配置未生效，实际成功返回: {ans}"
-            ))
-            .into());
+            )));
         }
         Err(e) => println!("✅ 超时符合预期：{}", e),
     }
@@ -208,15 +206,13 @@ async fn demo_retry() -> Result<()> {
     if !ans.contains("56") {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo13 验收失败：重试后未得到正确结果 56，实际输出: {ans}"
-        ))
-        .into());
+        )));
     }
     if call_count.load(Ordering::SeqCst) < 3 {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo13 验收失败：工具重试次数不足，实际调用 {} 次",
             call_count.load(Ordering::SeqCst)
-        ))
-        .into());
+        )));
     }
     println!("✅ 结果：{}", ans);
     Ok(())
@@ -241,8 +237,7 @@ async fn demo_concurrency() -> Result<()> {
     if !ans.contains('3') {
         return Err(echo_agent::error::ReactError::Other(format!(
             "demo13 验收失败：并发配置场景下基础工具执行失败: {ans}"
-        ))
-        .into());
+        )));
     }
     println!("✅ 结果：{}", ans);
     Ok(())

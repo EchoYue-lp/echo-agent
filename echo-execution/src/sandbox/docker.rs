@@ -192,14 +192,14 @@ impl DockerSandbox {
         // 挂载卷（limits 中的路径），需验证安全性
         if let Some(limits) = limits {
             for path in &limits.read_only_paths {
-                Self::validate_mount_paths(&[path.clone()]).map_err(|e| {
+                Self::validate_mount_paths(std::slice::from_ref(path)).map_err(|e| {
                     echo_core::error::ReactError::Sandbox(SandboxError::PermissionDenied(e))
                 })?;
                 args.push("-v".to_string());
                 args.push(format!("{}:{}:ro", path.display(), path.display()));
             }
             for path in &limits.writable_paths {
-                Self::validate_mount_paths(&[path.clone()]).map_err(|e| {
+                Self::validate_mount_paths(std::slice::from_ref(path)).map_err(|e| {
                     echo_core::error::ReactError::Sandbox(SandboxError::PermissionDenied(e))
                 })?;
                 args.push("-v".to_string());

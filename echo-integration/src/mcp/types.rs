@@ -555,8 +555,7 @@ impl McpContent {
 
 // ── 通知接收器 ────────────────────────────────────────────────────────────────
 
-use std::sync::Mutex;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 
 /// 通知接收者 trait，用于接收服务端推送的通知
 pub trait JsonRpcNotificationReceiver: Send + Sync {
@@ -574,13 +573,13 @@ impl NotificationReceiver {
 
     /// 异步等待下一条通知
     pub async fn recv(&self) -> Result<JsonRpcNotification, broadcast::error::RecvError> {
-        let mut rx = self.0.lock().unwrap();
+        let mut rx = self.0.lock().await;
         rx.recv().await
     }
 }
 
 impl JsonRpcNotificationReceiver for NotificationReceiver {
     fn try_recv(&self) -> Option<JsonRpcNotification> {
-        self.0.lock().unwrap().try_recv().ok()
+        self.0.try_lock().ok()?.try_recv().ok()
     }
 }

@@ -52,6 +52,9 @@ type WsConn =
 type WsSink = SplitSink<WsConn, Message>;
 type WsRead = SplitStream<WsConn>;
 type SharedSink = Arc<Mutex<WsSink>>;
+type FragmentParts = Vec<Option<Vec<u8>>>;
+type FragmentCacheEntry = (Instant, FragmentParts);
+type FragmentCache = Arc<DashMap<String, FragmentCacheEntry>>;
 
 // ── WebSocket Client ──────────────────────────────────────────────────────────
 
@@ -107,7 +110,7 @@ pub struct WsClient {
     /// 服务 ID（用于发送帧）
     service_id: i32,
     /// 消息分片缓存（msg_id -> (创建时间, 各分片)）
-    fragment_cache: Arc<DashMap<String, (Instant, Vec<Option<Vec<u8>>>)>>,
+    fragment_cache: FragmentCache,
     /// 已处理事件去重缓存（event message_id -> 处理时间）
     processed_events: Arc<DashMap<String, Instant>>,
     /// 运行标志
@@ -350,11 +353,11 @@ impl WsClient {
         match msg_type {
             MESSAGE_TYPE_PONG => {
                 debug!("Feishu WebSocket: received pong");
-                if let Some(payload) = &frame.payload {
-                    if let Ok(config) = serde_json::from_slice::<ClientConfig>(payload) {
-                        self.config.update_from_server(&config);
-                        debug!("Feishu WebSocket: updated config from pong");
-                    }
+                if let Some(payload) = &frame.payload
+                    && let Ok(config) = serde_json::from_slice::<ClientConfig>(payload)
+                {
+                    self.config.update_from_server(&config);
+                    debug!("Feishu WebSocket: updated config from pong");
                 }
             }
             MESSAGE_TYPE_PING => {
@@ -511,11 +514,8 @@ impl WsClient {
             event_type
         );
 
-        match event_type {
-            "im.message.receive_v1" => {
-                Self::process_im_message(event, handler).await?;
-            }
-            _ => {}
+        if event_type == "im.message.receive_v1" {
+            Self::process_im_message(event, handler).await?;
         }
 
         Ok(())

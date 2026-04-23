@@ -114,25 +114,28 @@ async fn main() -> Result<()> {
         .chat("帮我安排一个会议提醒，但我还没说清楚提醒谁、什么时候提醒。")
         .await?;
     if clarification.trim().is_empty() {
-        return Err(ReactError::Other("demo03 验收失败：澄清链路返回空答案".to_string()).into());
+        return Err(ReactError::Other(
+            "demo03 验收失败：澄清链路返回空答案".to_string(),
+        ));
     }
     if input_count.load(Ordering::Relaxed) == 0 {
         return Err(ReactError::Other(
             "demo03 验收失败：未触发 human_in_loop 输入请求".to_string(),
-        )
-        .into());
+        ));
     }
     println!("\n✅ 澄清结果: {}", clarification);
 
     println!("\n--- Part 2: 敏感工具调用 → 人工审批 ---");
     let approval_answer = agent.chat("请调用工具获取当前时间。").await?;
     if approval_answer.trim().is_empty() {
-        return Err(
-            ReactError::Other("demo03 验收失败：审批链路完成后返回空答案".to_string()).into(),
-        );
+        return Err(ReactError::Other(
+            "demo03 验收失败：审批链路完成后返回空答案".to_string(),
+        ));
     }
     if approval_count.load(Ordering::Relaxed) == 0 {
-        return Err(ReactError::Other("demo03 验收失败：未触发工具审批事件".to_string()).into());
+        return Err(ReactError::Other(
+            "demo03 验收失败：未触发工具审批事件".to_string(),
+        ));
     }
     println!("\n✅ 审批结果: {}", approval_answer);
 

@@ -367,8 +367,7 @@ async fn main() -> Result<()> {
     if shipping_summary.final_answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：发货退单场景没有生成最终答复".to_string(),
-        )
-        .into());
+        ));
     }
     println!();
 
@@ -389,9 +388,9 @@ async fn main() -> Result<()> {
 
     let audit_events = audit_logger.query(AuditFilter::default()).await?;
     if audit_events.is_empty() {
-        return Err(
-            echo_agent::error::ReactError::Other("综合验收失败：审计日志为空".to_string()).into(),
-        );
+        return Err(echo_agent::error::ReactError::Other(
+            "综合验收失败：审计日志为空".to_string(),
+        ));
     }
     for (i, event) in audit_events.iter().take(10).enumerate() {
         println!(
@@ -420,8 +419,7 @@ async fn main() -> Result<()> {
     if snapshots.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：未生成任何会话快照".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  当前会话快照数: {}", snapshots.len());
     for (i, snap) in snapshots.iter().take(3).enumerate() {
@@ -442,8 +440,7 @@ async fn main() -> Result<()> {
     if memories.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：长期记忆检索没有命中政策内容".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  相关记忆: {} 条", memories.len());
     for mem in &memories {
@@ -459,8 +456,7 @@ async fn main() -> Result<()> {
     if audit_sink.count() == 0 {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：权限审计未记录任何事件".to_string(),
-        )
-        .into());
+        ));
     }
 
     cleanup_sqlite_files(&db_path);
@@ -494,9 +490,9 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<ChatRunSum
             AgentEvent::ToolResult { output, .. } => {
                 let preview: String = output.chars().take(100).collect();
                 if output.len() > 100 {
-                    print!("   ✓ 结果: {}...\n", preview);
+                    println!("   ✓ 结果: {}...", preview);
                 } else {
-                    print!("   ✓ 结果: {}\n", preview);
+                    println!("   ✓ 结果: {}", preview);
                 }
                 std::io::stdout().flush().ok();
             }
@@ -510,8 +506,7 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<ChatRunSum
     if summary.final_answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：客服对话没有产生最终答复".to_string(),
-        )
-        .into());
+        ));
     }
 
     Ok(summary)
@@ -532,8 +527,7 @@ fn ensure_tool_called(summary: &ChatRunSummary, tool_name: &str, scenario: &str)
     if !summary.tool_calls.iter().any(|name| name == tool_name) {
         return Err(echo_agent::error::ReactError::Other(format!(
             "综合验收失败：{scenario} 场景未调用 `{tool_name}`"
-        ))
-        .into());
+        )));
     }
     Ok(())
 }

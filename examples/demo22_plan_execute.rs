@@ -115,8 +115,7 @@ fn ensure_non_empty_result(label: &str, result: &str) -> echo_agent::error::Resu
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(format!(
             "{label} 验收失败：最终结果为空"
-        ))
-        .into());
+        )));
     }
     Ok(())
 }

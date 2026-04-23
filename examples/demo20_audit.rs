@@ -207,14 +207,12 @@ async fn main() -> echo_agent::error::Result<()> {
     if allows.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo20 验收失败：未记录到任何 allow 审计事件".to_string(),
-        )
-        .into());
+        ));
     }
     if approval_requests.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo20 验收失败：未记录到任何 ask 审计事件".to_string(),
-        )
-        .into());
+        ));
     }
 
     Ok(())

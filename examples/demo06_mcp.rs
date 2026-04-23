@@ -43,8 +43,7 @@ async fn main() -> echo_agent::error::Result<()> {
     if !npx_available() {
         return Err(echo_agent::error::ReactError::Other(
             "demo06 验收失败：未找到 npx，请先安装 Node.js".to_string(),
-        )
-        .into());
+        ));
     }
 
     println!("═══════════════════════════════════════════════════════");
@@ -98,15 +97,13 @@ async fn demo_raw_mcp_call() -> echo_agent::error::Result<()> {
         if text.trim().is_empty() {
             return Err(echo_agent::error::ReactError::Other(
                 "demo06 验收失败：list_directory 返回空结果".to_string(),
-            )
-            .into());
+            ));
         }
         println!("工具返回结果:\n{}", text);
     } else {
         return Err(echo_agent::error::ReactError::Other(
             "demo06 验收失败：未获取到 filesystem MCP 客户端".to_string(),
-        )
-        .into());
+        ));
     }
 
     manager.close_all().await;
@@ -122,8 +119,7 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
     {
         return Err(echo_agent::error::ReactError::Other(
             "demo06 验收失败：未检测到任何 LLM API 密钥".to_string(),
-        )
-        .into());
+        ));
     }
 
     let mut manager = McpManager::new();
@@ -159,8 +155,7 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
     if result.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo06 验收失败：Agent + MCP 返回空结果".to_string(),
-        )
-        .into());
+        ));
     }
     println!("\n✓ 任务完成！\n{}", result);
 

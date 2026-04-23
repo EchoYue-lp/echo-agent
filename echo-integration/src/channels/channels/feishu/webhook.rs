@@ -47,8 +47,7 @@ fn verify_feishu_signature(
     let computed = mac.finalize().into_bytes();
 
     // Base64 编码计算结果
-    let computed_b64 =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &computed);
+    let computed_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, computed);
 
     // 常量时间比较，防止时序攻击
     if computed_b64.len() != expected_signature.len() {

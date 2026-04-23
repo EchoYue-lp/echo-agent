@@ -115,8 +115,7 @@ async fn demo_crud(db_path: &Path) -> echo_agent::error::Result<()> {
     let Some(item) = item else {
         return Err(echo_agent::error::ReactError::Other(
             "demo27 验收失败：CRUD get 未读取到 user-pref-001".to_string(),
-        )
-        .into());
+        ));
     };
     println!(
         "  ✅ get: key={}, value={}",
@@ -147,8 +146,7 @@ async fn demo_crud(db_path: &Path) -> echo_agent::error::Result<()> {
     if !deleted {
         return Err(echo_agent::error::ReactError::Other(
             "demo27 验收失败：删除 user-pref-001 返回 false".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  ✅ delete: user-pref-001, found={deleted}");
 
@@ -156,8 +154,7 @@ async fn demo_crud(db_path: &Path) -> echo_agent::error::Result<()> {
     if gone.is_some() {
         return Err(echo_agent::error::ReactError::Other(
             "demo27 验收失败：delete 后仍能读取到 user-pref-001".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  ✅ get after delete: {:?}", gone.map(|i| i.key));
 
@@ -213,8 +210,7 @@ async fn demo_fts5_search(db_path: &Path) -> echo_agent::error::Result<()> {
         if results.is_empty() {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo27 验收失败：FTS5 查询 `{query}` 没有命中"
-            ))
-            .into());
+            )));
         }
         println!("  🔍 \"{query}\" ({desc}):");
         if results.is_empty() {
@@ -276,8 +272,7 @@ async fn demo_namespace_isolation(db_path: &Path) -> echo_agent::error::Result<(
     if !cross_search.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo27 验收失败：namespace 隔离失效，Bob 搜到了 Alice 的内容".to_string(),
-        )
-        .into());
+        ));
     }
     println!(
         "\n  🔍 Bob 搜索 \"Alice\": {} 条命中 ✅ (跨 namespace 不可见)",
@@ -333,8 +328,7 @@ async fn demo_semantic_search(db_path: &Path) -> echo_agent::error::Result<()> {
         if results.is_empty() {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo27 验收失败：语义查询 `{query}` 没有命中"
-            ))
-            .into());
+            )));
         }
         println!("  🧠 \"{query}\" ({desc}):");
         for item in &results {
@@ -358,8 +352,7 @@ async fn demo_semantic_search(db_path: &Path) -> echo_agent::error::Result<()> {
     if sem_results.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo27 验收失败：语义检索对比查询没有命中".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  🔍 \"{query}\"");
     println!(
@@ -419,8 +412,7 @@ async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()>
     if answer.trim().is_empty() {
         return Err(echo_agent::error::ReactError::Other(
             "demo27 验收失败：Agent 集成回答为空".to_string(),
-        )
-        .into());
+        ));
     }
     println!("  🤖 Agent: {answer}");
 
@@ -456,8 +448,7 @@ async fn demo_persistence(db_path: &Path) -> echo_agent::error::Result<()> {
         let Some(item) = item else {
             return Err(echo_agent::error::ReactError::Other(
                 "demo27 验收失败：跨实例持久化数据丢失".to_string(),
-            )
-            .into());
+            ));
         };
         println!(
             "  ✅ 实例 2: 读取成功 → {}",
@@ -469,8 +460,7 @@ async fn demo_persistence(db_path: &Path) -> echo_agent::error::Result<()> {
         if results.is_empty() {
             return Err(echo_agent::error::ReactError::Other(
                 "demo27 验收失败：跨实例 FTS5 检索没有命中".to_string(),
-            )
-            .into());
+            ));
         }
         println!(
             "  ✅ 实例 2: FTS5 搜索 \"记忆 保留\" → {} 条命中",
@@ -552,7 +542,6 @@ fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Resul
                 echo_agent::error::ReactError::Other(format!(
                     "demo27 验收失败：当前 `model.name = {configured}` 配置无效：{e}"
                 ))
-                .into()
             });
     }
 
@@ -578,6 +567,5 @@ fn require_configured_model(preferred: Option<&str>) -> echo_agent::error::Resul
         });
     Err(echo_agent::error::ReactError::Other(format!(
         "demo27 验收失败：缺少模型配置，无法验证 Agent 集成。{load_err}"
-    ))
-    .into())
+    )))
 }

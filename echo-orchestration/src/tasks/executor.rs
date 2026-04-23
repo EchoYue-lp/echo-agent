@@ -72,6 +72,9 @@ pub struct TaskExecutorConfig {
     pub checkpoint_interval_secs: u64,
 }
 
+type TaskOutputPair = (String, String);
+type UpstreamResults = (Vec<TaskOutputPair>, Vec<TaskOutputPair>);
+
 impl Default for TaskExecutorConfig {
     fn default() -> Self {
         Self {
@@ -681,7 +684,7 @@ impl TaskExecutor {
     fn collect_upstream_results_with_errors(
         task: &Task,
         manager: &Arc<TaskManager>,
-    ) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    ) -> UpstreamResults {
         let mut results = Vec::new();
         let mut errors = Vec::new();
 
