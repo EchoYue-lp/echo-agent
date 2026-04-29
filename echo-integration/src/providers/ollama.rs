@@ -6,12 +6,22 @@
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::types::{DeltaMessage, FunctionCall, Message, ToolCall};
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
+use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::{Instrument, info_span};
+
+fn is_retryable(err: &LlmError) -> bool {
+    match err {
+        LlmError::NetworkError(_) => true,
+        LlmError::ApiError { status, .. } => *status == 429 || *status >= 500,
+        _ => false,
+    }
+}
 
 pub struct OllamaClient {
     client: Arc<Client>,
@@ -22,7 +32,7 @@ pub struct OllamaClient {
 impl OllamaClient {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(Self::build_http_client()),
             model: model.into(),
             base_url: "http://localhost:11434/api/chat".to_string(),
         }
@@ -30,10 +40,17 @@ impl OllamaClient {
 
     pub fn with_base_url(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(Self::build_http_client()),
             model: model.into(),
             base_url: base_url.into(),
         }
+    }
+
+    fn build_http_client() -> Client {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default()
     }
 
     fn convert_request(&self, request: &ChatRequest) -> OllamaRequest {
@@ -124,6 +141,7 @@ impl OllamaClient {
             tool_calls,
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         };
 
         ChatResponse {
@@ -136,123 +154,166 @@ impl OllamaClient {
 
 impl LlmClient for OllamaClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
-        Box::pin(async move {
-            let body = self.convert_request(&request);
+        let model = self.model.clone();
+        Box::pin(
+            async move {
+                let body = self.convert_request(&request);
 
-            let resp = self
-                .client
-                .post(&self.base_url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+                let policy = RetryPolicy::default();
+                let resp = with_retry_if(
+                    &policy,
+                    || {
+                        let client = self.client.clone();
+                        let base_url = self.base_url.clone();
+                        let body = &body;
+                        async move {
+                            let resp = client
+                                .post(&base_url)
+                                .json(body)
+                                .send()
+                                .await
+                                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(LlmError::ApiError {
-                    status: status.as_u16(),
-                    message: text,
-                }
-                .into());
+                            let status = resp.status();
+                            if !status.is_success() {
+                                let text = resp.text().await.unwrap_or_default();
+                                return Err(LlmError::ApiError {
+                                    status: status.as_u16(),
+                                    message: text,
+                                });
+                            }
+
+                            Ok(resp)
+                        }
+                    },
+                    is_retryable,
+                )
+                .await?;
+
+                let ollama_resp: OllamaResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| LlmError::NetworkError(format!("Response parse error: {e}")))?;
+
+                Ok(self.convert_response(ollama_resp))
             }
-
-            let ollama_resp: OllamaResponse = resp
-                .json()
-                .await
-                .map_err(|e| LlmError::NetworkError(format!("Response parse error: {e}")))?;
-
-            Ok(self.convert_response(ollama_resp))
-        })
+            .instrument(info_span!("ollama_chat", model = %model)),
+        )
     }
 
     fn chat_stream(
         &self,
         request: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
-        Box::pin(async move {
-            let mut body = self.convert_request(&request);
-            body.stream = true;
+        let model = self.model.clone();
+        Box::pin(
+            async move {
+                let mut body = self.convert_request(&request);
+                body.stream = true;
 
-            let resp = self
-                .client
-                .post(&self.base_url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+                let policy = RetryPolicy::default();
+                let resp = with_retry_if(
+                    &policy,
+                    || {
+                        let client = self.client.clone();
+                        let base_url = self.base_url.clone();
+                        let body = &body;
+                        async move {
+                            let resp = client
+                                .post(&base_url)
+                                .json(body)
+                                .send()
+                                .await
+                                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(LlmError::ApiError {
-                    status: status.as_u16(),
-                    message: text,
-                }
-                .into());
-            }
-
-            let byte_stream = resp.bytes_stream();
-            let mut buffer = String::new();
-
-            let stream = async_stream::stream! {
-                let mut byte_stream = std::pin::pin!(byte_stream);
-                while let Some(chunk_result) = byte_stream.next().await {
-                    let chunk = match chunk_result {
-                        Ok(c) => c,
-                        Err(e) => {
-                            yield Err(LlmError::NetworkError(e.to_string()).into());
-                            return;
-                        }
-                    };
-
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                    while let Some(line_end) = buffer.find('\n') {
-                        let line = buffer[..line_end].trim().to_string();
-                        buffer = buffer[line_end + 1..].to_string();
-
-                        if line.is_empty() {
-                            continue;
-                        }
-
-                        match serde_json::from_str::<OllamaResponse>(&line) {
-                            Ok(resp) => {
-                                let finish = if resp.done {
-                                    Some("stop".to_string())
-                                } else {
-                                    None
-                                };
-
-                                let content = if resp.message.content.is_empty() {
-                                    None
-                                } else {
-                                    Some(resp.message.content)
-                                };
-
-                                yield Ok(ChatChunk {
-                                    delta: DeltaMessage {
-                                        role: Some(resp.message.role),
-                                        content,
-                                        tool_calls: None,
-                                    },
-                                    finish_reason: finish,
+                            let status = resp.status();
+                            if !status.is_success() {
+                                let text = resp.text().await.unwrap_or_default();
+                                return Err(LlmError::ApiError {
+                                    status: status.as_u16(),
+                                    message: text,
                                 });
-
-                                if resp.done {
-                                    return;
-                                }
                             }
+
+                            Ok(resp)
+                        }
+                    },
+                    is_retryable,
+                )
+                .await?;
+
+                let byte_stream = resp.bytes_stream();
+                let mut buffer = String::new();
+
+                let stream = async_stream::stream! {
+                    let mut byte_stream = std::pin::pin!(byte_stream);
+                    while let Some(chunk_result) = byte_stream.next().await {
+                        // Check for cancellation
+                        if let Some(ref ct) = request.cancel_token
+                            && ct.is_cancelled() {
+                                tracing::info!("Ollama stream cancelled by caller");
+                                return;
+                            }
+
+                        let chunk = match chunk_result {
+                            Ok(c) => c,
                             Err(e) => {
-                                tracing::warn!("Failed to parse Ollama stream line: {e}");
+                                yield Err(LlmError::NetworkError(e.to_string()).into());
+                                return;
+                            }
+                        };
+
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                        while let Some(line_end) = buffer.find('\n') {
+                            let line = buffer[..line_end].trim().to_string();
+                            buffer = buffer[line_end + 1..].to_string();
+
+                            if line.is_empty() {
+                                continue;
+                            }
+
+                            match serde_json::from_str::<OllamaResponse>(&line) {
+                                Ok(resp) => {
+                                    let finish = if resp.done {
+                                        Some("stop".to_string())
+                                    } else {
+                                        None
+                                    };
+
+                                    let content = if resp.message.content.is_empty() {
+                                        None
+                                    } else {
+                                        Some(resp.message.content)
+                                    };
+
+                                    yield Ok(ChatChunk {
+                                        delta: DeltaMessage {
+                                            role: Some(resp.message.role),
+                                            content,
+                                            reasoning_content: None,
+                                            tool_calls: None,
+                                        },
+                                        finish_reason: finish,
+                                        usage: None,
+                                    });
+
+                                    if resp.done {
+                                        return;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to parse Ollama stream line: {e}");
+                                }
                             }
                         }
                     }
-                }
-            };
+                };
 
-            Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
-        })
+                Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
+            }
+            .instrument(info_span!("ollama_chat_stream", model = %model)),
+        )
     }
 
     fn model_name(&self) -> &str {

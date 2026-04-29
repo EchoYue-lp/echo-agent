@@ -130,7 +130,7 @@ async fn test_summary_compressor() {
 async fn test_mock_agent() {
     section!(4, "MockAgent — SubAgent 行为验证");
 
-    let mut math = MockAgent::new("math_agent")
+    let math = MockAgent::new("math_agent")
         .with_response("6 × 7 = 42")
         .with_response("√144 = 12");
 
@@ -145,7 +145,7 @@ async fn test_mock_agent() {
 async fn test_failing_agent() {
     section!(5, "FailingMockAgent — 编排容错路径验证");
 
-    let mut failing = FailingMockAgent::new("broken_agent", "下游服务不可用");
+    let failing = FailingMockAgent::new("broken_agent", "下游服务不可用");
 
     let result = failing.execute("执行任务").await;
     assert!(result.is_err());

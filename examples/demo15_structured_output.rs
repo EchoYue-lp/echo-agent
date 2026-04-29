@@ -203,7 +203,7 @@ async fn demo_config_level() -> echo_agent::error::Result<()> {
     );
 
     // 使用 AgentBuilder 创建翻译 Agent
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("translator")
         .system_prompt("你是一个专业翻译助手，将用户输入翻译成英文。")

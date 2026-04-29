@@ -261,7 +261,7 @@ impl HandoffManager {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
-            let mut agent = agent_arc_clone.lock().await;
+            let agent = agent_arc_clone.lock().await;
             let result = agent.execute(&full_prompt).await;
             let _ = tx.send(result);
         });

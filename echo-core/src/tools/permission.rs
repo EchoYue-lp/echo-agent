@@ -402,13 +402,10 @@ impl RuleRegistry {
             .position(|r| r.source < rule.source)
             .unwrap_or(self.rules.len());
 
-        // Build index entry for exact tool name matches
-        if let RuleMatcher::Tool { name } = &rule.matcher {
-            let entry = self.tool_index.entry(name.clone()).or_default();
-            entry.push(pos);
-        }
-
         self.rules.insert(pos, rule);
+
+        // Rebuild tool_index after insertion so all indices are correct
+        self.rebuild_tool_index();
     }
 
     /// 批量添加规则

@@ -18,7 +18,7 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("=== Agent 状态快照与回滚 ===\n");
 
     // ── 1. 创建启用快照的 Agent ────────────────────────────────────────────
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .system_prompt("你是一个简洁的助手，每次回答控制在一句话以内")
         .snapshot_policy(SnapshotPolicy::EveryIteration)
@@ -54,14 +54,14 @@ async fn main() -> echo_agent::error::Result<()> {
     let total_snapshots = agent.snapshots().len();
     if total_snapshots >= 2 {
         let steps_back = total_snapshots - 1;
-        if let Some(snapshot) = agent.rollback(steps_back) {
+        if let Some(snapshot) = agent.rollback(steps_back).await {
             println!(
                 "已回滚到快照 {} (iteration={}, messages={})",
                 &snapshot.id[..8],
                 snapshot.iteration,
                 snapshot.messages.len(),
             );
-            println!("当前消息数: {}", agent.get_messages().len());
+            println!("当前消息数: {}", agent.get_messages().await.len());
             println!("剩余快照数: {}", agent.snapshots().len());
         }
     }
@@ -75,7 +75,7 @@ async fn main() -> echo_agent::error::Result<()> {
 
     // ── 6. 手动快照 ─────────────────────────────────────────────────────────
     println!("\n--- 手动快照 ---");
-    if let Some(id) = agent.snapshot() {
+    if let Some(id) = agent.snapshot().await {
         println!("手动快照 ID: {}", &id[..8]);
     }
     println!("最终快照数: {}", agent.snapshots().len());

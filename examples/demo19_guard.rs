@@ -40,7 +40,7 @@ async fn main() -> echo_agent::error::Result<()> {
     let audit_logger = Arc::new(InMemoryAuditLogger::new());
 
     // 构建 Agent，注入护栏和审计
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .system_prompt("你是一个有帮助的助手。")
         .guard(input_guard)

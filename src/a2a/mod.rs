@@ -50,10 +50,14 @@
 //! # }
 //! ```
 
+mod auth;
 mod client;
+mod serve;
 mod server;
 mod types;
 
+pub use auth::{JwtClaims, JwtConfig, get_claims};
 pub use client::A2AClient;
+pub use serve::{serve, serve_from_config, serve_from_config_with_auth, serve_with_auth};
 pub use server::A2AServer;
 pub use types::*;

@@ -94,6 +94,7 @@ use futures::Stream;
 use reqwest::Client;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 // Core traits from echo-core
 pub use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
@@ -161,6 +162,7 @@ pub async fn stream_chat(
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<String>,
     response_format: Option<ResponseFormat>,
+    cancel_token: Option<CancellationToken>,
 ) -> echo_core::error::Result<
     impl Stream<Item = echo_core::error::Result<ChatCompletionChunk>> + use<>,
 > {
@@ -173,6 +175,7 @@ pub async fn stream_chat(
         tools,
         tool_choice,
         response_format,
+        cancel_token,
     )
     .await
 }

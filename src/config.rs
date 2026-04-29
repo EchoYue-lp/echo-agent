@@ -60,6 +60,10 @@ impl AppConfig {
         .memory_path(&self.agent.memory_path)
         .temperature(self.model.temperature)
         .max_tokens(self.model.max_tokens)
+        .tool_execution(crate::tools::ToolExecutionConfig {
+            timeout_ms: self.agent.tool_timeout_ms,
+            ..Default::default()
+        })
     }
 }
 
@@ -103,6 +107,8 @@ pub struct AgentYamlConfig {
     pub enable_human_in_loop: bool,
     /// 记忆存储路径（SQLite 文件位置）
     pub memory_path: String,
+    /// 工具执行超时（毫秒），默认 120_000（2 分钟），适用于 MCP 工具等长时间调用
+    pub tool_timeout_ms: u64,
 }
 
 impl Default for AgentYamlConfig {
@@ -115,6 +121,7 @@ impl Default for AgentYamlConfig {
             enable_memory: true,
             enable_human_in_loop: true,
             memory_path: "~/.echo-agent/memory".to_string(),
+            tool_timeout_ms: 120_000,
         }
     }
 }
@@ -216,6 +223,8 @@ pub struct ServerConfig {
     pub host: String,
     /// 监听端口
     pub port: u16,
+    /// 请求体最大字节数（默认 1MB，用于 A2A HTTP 服务）
+    pub max_body_bytes: usize,
 }
 
 impl Default for ServerConfig {
@@ -223,6 +232,7 @@ impl Default for ServerConfig {
         Self {
             host: "0.0.0.0".to_string(),
             port: 3000,
+            max_body_bytes: 1024 * 1024, // 1MB
         }
     }
 }

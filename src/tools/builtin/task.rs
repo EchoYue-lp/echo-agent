@@ -159,9 +159,9 @@ impl Tool for CreateTaskTool {
                 self.task_manager.delete_task(task_id);
 
                 let error_msg = format!(
-                    "❌ 任务 [{}] 创建失败：此任务与现有任务形成循环依赖！\n\n循环路径: {}\n\n请检查依赖关系并重新规划。",
+                    "任务 [{}] 创建失败：此任务与现有任务形成循环依赖。循环路径: {}",
                     task_id,
-                    cycle_paths.join(" | ")
+                    cycle_paths.join(" → ")
                 );
 
                 return Ok(ToolResult::error(error_msg));
@@ -172,21 +172,20 @@ impl Tool for CreateTaskTool {
                 task_id
             );
 
-            let deps_str = if task.dependencies.is_empty() {
-                "无".to_string()
-            } else {
-                task.dependencies.join(", ")
-            };
-
-            let create = format!(
-                "✅ 已创建任务 [{}]\n📝 描述: {}\n💭 推理: {}\n⭐ 优先级: {}\n🔗 依赖: {}",
-                task_id, description, reasoning, priority, deps_str
-            );
-
             debug!("Task create parameters: {:?}", parameters);
-            info!("Task create: {}", create);
+            info!("Task [{}] created successfully", task_id);
 
-            Ok(ToolResult::success(create))
+            let result = serde_json::json!({
+                "task_id": task_id,
+                "description": description,
+                "reasoning": reasoning,
+                "priority": priority,
+                "dependencies": task.dependencies,
+                "assigned_agent": assigned_agent,
+                "tags": tags,
+                "status": "pending",
+            });
+            Ok(ToolResult::success_json(result))
         })
     }
 }
@@ -265,7 +264,7 @@ impl Tool for UpdateTaskTool {
                 "in_progress" => TaskStatus::InProgress,
                 "completed" => TaskStatus::Completed,
                 "cancelled" => TaskStatus::Cancelled,
-                "failed" => TaskStatus::Failed(reason.unwrap_or_default()),
+                "failed" => TaskStatus::Failed(reason.clone().unwrap_or_default()),
                 _ => {
                     return Err(ToolError::InvalidParameter {
                         name: "status".to_string(),
@@ -278,21 +277,26 @@ impl Tool for UpdateTaskTool {
             // Validate state transition
             if let Err(e) = self.task_manager.update_task(task_id, new_status.clone()) {
                 return Ok(ToolResult::error(format!(
-                    "❌ 任务 [{}] 状态更新失败: {}",
+                    "任务 [{}] 状态更新失败: {}",
                     task_id, e
                 )));
             }
 
             // 更新结果
-            if let Some(r) = result {
-                self.task_manager.set_task_result(task_id, r);
+            if let Some(ref r) = result {
+                self.task_manager.set_task_result(task_id, r.clone());
             }
 
-            let update = format!("✓ 任务 [{}] 状态已更新为: {:?}", task_id, new_status);
             debug!("Task update parameters:{:?} ", parameters);
-            info!("Task update:{}", update);
+            info!("Task [{}] status updated to: {:?}", task_id, new_status);
 
-            Ok(ToolResult::success(update))
+            let update_result = serde_json::json!({
+                "task_id": task_id,
+                "status": status_str,
+                "result": result,
+                "reason": reason,
+            });
+            Ok(ToolResult::success_json(update_result))
         })
     }
 }
@@ -349,31 +353,30 @@ impl Tool for ListTasksTool {
 
             let summary = self.task_manager.get_summary();
 
-            let task_list = tasks
+            let task_items: Vec<Value> = tasks
                 .iter()
                 .map(|t| {
-                    format!(
-                        "taskid:[{}] ,task status:{:?}  ,task description: {} (任务优先级: {}, 任务依赖: {:?})",
-                        t.id, t.status, t.description, t.priority, t.dependencies
-                    )
+                    serde_json::json!({
+                        "id": t.id,
+                        "description": t.description,
+                        "status": format!("{:?}", t.status),
+                        "priority": t.priority,
+                        "dependencies": t.dependencies,
+                        "assigned_agent": t.assigned_agent,
+                        "tags": t.tags,
+                    })
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let list = format!(
-                "{}\n\n任务列表:\n{}",
-                summary,
-                if task_list.is_empty() {
-                    "无任务"
-                } else {
-                    &task_list
-                }
-            );
+                .collect();
 
             debug!("Task list parameters:{:?} ", parameters);
-            info!("Task list:{}", list);
+            info!("Task list: {} tasks", task_items.len());
 
-            Ok(ToolResult::success(list))
+            let result = serde_json::json!({
+                "summary": summary,
+                "filter": filter,
+                "tasks": task_items,
+            });
+            Ok(ToolResult::success_json(result))
         })
     }
 }
@@ -450,13 +453,14 @@ impl Tool for GetExecutionOrderTool {
         Box::pin(async move {
             match self.task_manager.get_topological_order() {
                 Ok(order) => {
-                    let output = order
+                    let items: Vec<Value> = order
                         .iter()
                         .enumerate()
-                        .map(|(i, id)| format!("{}. {}", i + 1, id))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    Ok(ToolResult::success(output))
+                        .map(|(i, id)| serde_json::json!({"order": i + 1, "task_id": id}))
+                        .collect();
+                    Ok(ToolResult::success_json(serde_json::json!({
+                        "execution_order": items
+                    })))
                 }
                 Err(e) => Ok(ToolResult::error(e)),
             }

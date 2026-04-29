@@ -2,61 +2,77 @@
 //!
 //! 所有公共 API 返回 [`Result<T>`]，底层错误通过 `From` 自动转换为 [`ReactError`]。
 
-use std::fmt;
-use std::io;
+use thiserror::Error;
 
 /// 框架顶层错误，聚合所有子系统错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ReactError {
     /// LLM 相关错误
+    #[error("LLM Error: {0}")]
     Llm(Box<LlmError>),
     /// 工具执行错误
-    Tool(ToolError),
+    #[error("Tool Error: {0}")]
+    Tool(#[from] ToolError),
     /// 解析错误
-    Parse(ParseError),
+    #[error("Parse Error: {0}")]
+    Parse(#[from] ParseError),
     /// Agent 执行错误
-    Agent(AgentError),
+    #[error("Agent Error: {0}")]
+    Agent(#[from] AgentError),
     /// 配置错误
+    #[error("Config Error: {0}")]
     Config(Box<ConfigError>),
     /// MCP 相关错误
-    Mcp(McpError),
+    #[error("MCP Error: {0}")]
+    Mcp(#[from] McpError),
     /// 记忆系统错误
+    #[error("Memory Error: {0}")]
     Memory(Box<MemoryError>),
     /// 沙箱错误
-    Sandbox(SandboxError),
+    #[error("Sandbox Error: {0}")]
+    Sandbox(#[from] SandboxError),
     /// Channel / IM 集成错误
-    Channel(ChannelError),
+    #[error("Channel Error: {0}")]
+    Channel(#[from] ChannelError),
     /// IO 错误
-    Io(std::io::Error),
+    #[error("IO Error: {0}")]
+    Io(#[from] std::io::Error),
     /// 其他错误
+    #[error("{0}")]
     Other(String),
 }
 
 /// 记忆系统错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum MemoryError {
     /// I/O 错误
+    #[error("IO error: {0}")]
     IoError(String),
     /// 序列化错误
+    #[error("Serialization error: {0}")]
     SerializationError(String),
     /// 记忆未找到
+    #[error("Memory '{0}' not found")]
     NotFound(String),
     /// 不支持的操作
+    #[error("Unsupported operation: {0}")]
     Unsupported(String),
 }
 
-impl From<io::Error> for MemoryError {
-    fn from(err: io::Error) -> Self {
+impl From<std::io::Error> for MemoryError {
+    fn from(err: std::io::Error) -> Self {
         MemoryError::IoError(err.to_string())
     }
 }
 
 /// LLM 相关错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum LlmError {
     /// 网络错误
+    #[error("Network error: {0}")]
     NetworkError(String),
     /// API 错误（状态码和消息）
+    #[error("API error (status {status}): {message}")]
     ApiError {
         /// HTTP 状态码
         status: u16,
@@ -64,21 +80,27 @@ pub enum LlmError {
         message: String,
     },
     /// 无效响应
+    #[error("Invalid response: {0}")]
     InvalidResponse(String),
     /// 空响应
+    #[error("Empty response from LLM")]
     EmptyResponse,
     /// 序列化错误
+    #[error("Serialization error: {0}")]
     SerializationError(String),
 }
 
 /// 工具执行错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ToolError {
     /// 工具未找到
+    #[error("Tool '{0}' not found")]
     NotFound(String),
     /// 缺少参数
+    #[error("Missing parameter: {0}")]
     MissingParameter(String),
     /// 无效参数
+    #[error("Invalid parameter '{name}': {message}")]
     InvalidParameter {
         /// 参数名称
         name: String,
@@ -86,6 +108,7 @@ pub enum ToolError {
         message: String,
     },
     /// 工具执行失败
+    #[error("Tool '{tool}' execution failed: {message}")]
     ExecutionFailed {
         /// 工具名称
         tool: String,
@@ -93,8 +116,10 @@ pub enum ToolError {
         message: String,
     },
     /// 执行超时
+    #[error("Tool '{0}' execution timed out")]
     Timeout(String),
     /// 无效路径（路径遍历攻击检测）
+    #[error("Invalid path: {path} ({reason})")]
     InvalidPath {
         /// 被拒绝的路径
         path: String,
@@ -102,6 +127,7 @@ pub enum ToolError {
         reason: String,
     },
     /// 访问被拒绝（不在允许目录范围内）
+    #[error("Access denied: {path} ({reason})")]
     AccessDenied {
         /// 被拒绝的路径
         path: String,
@@ -109,6 +135,7 @@ pub enum ToolError {
         reason: String,
     },
     /// 文件过大
+    #[error("File too large: {size} bytes (max: {max} bytes)")]
     FileTooLarge {
         /// 文件大小（字节）
         size: u64,
@@ -118,85 +145,119 @@ pub enum ToolError {
 }
 
 /// 解析错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ParseError {
     /// 无效的 Thought 格式
+    #[error("Invalid Thought: {0}")]
     InvalidThought(String),
     /// 无效的 Action 格式
+    #[error("Invalid Action: {0}")]
     InvalidAction(String),
     /// 无效的 Action 输入
+    #[error("Invalid Action Input: {0}")]
     InvalidActionInput(String),
     /// JSON 解析错误
-    JsonError(serde_json::Error),
+    #[error("JSON parse error: {0}")]
+    JsonError(#[from] serde_json::Error),
     /// 意外的格式
+    #[error("Unexpected format: {0}")]
     UnexpectedFormat(String),
 }
 
 /// Agent 执行错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AgentError {
     /// 超过最大迭代次数
+    #[error("Max iterations exceeded: {0}")]
     MaxIterationsExceeded(usize),
     /// 无可用工具
+    #[error("No tools available")]
     NoToolsAvailable,
     /// 初始化失败
+    #[error("Initialization failed: {0}")]
     InitializationFailed(String),
     /// 执行被中断
+    #[error("Execution interrupted")]
     Interrupted,
     /// LLM 无响应
-    NoResponse,
+    #[error("No response from LLM (model: {model}, agent: {agent})")]
+    NoResponse {
+        /// 使用的模型名称
+        model: String,
+        /// Agent 名称
+        agent: String,
+    },
     /// Token 数量超限
+    #[error("Token limit exceeded")]
     TokenLimitExceeded,
     /// 权限被拒绝
+    #[error("Permission denied: {0}")]
     PermissionDenied(String),
     /// Hook 执行错误
+    #[error("Hook error: {0}")]
     HookError(String),
     /// 子代理执行错误
+    #[error("Subagent error: {0}")]
     SubagentError(String),
     /// 执行超时
+    #[error("Timeout: {0}")]
     Timeout(String),
     /// 上下文限制（如 delegation depth, memory limit 等）
+    #[error("Context limit exceeded: {0}")]
     ContextLimitExceeded(String),
 }
 
 /// MCP 相关错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum McpError {
     /// 连接失败
+    #[error("Connection failed: {0}")]
     ConnectionFailed(String),
     /// 初始化失败
+    #[error("Initialization failed: {0}")]
     InitializationFailed(String),
     /// 协议错误
+    #[error("Protocol error: {0}")]
     ProtocolError(String),
     /// 工具调用失败
+    #[error("Tool call failed: {0}")]
     ToolCallFailed(String),
     /// 传输通道关闭
+    #[error("MCP transport closed unexpectedly")]
     TransportClosed,
 }
 
 /// 沙箱错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum SandboxError {
     /// 沙箱不可用（未安装 Docker、无 K8s 集群等）
+    #[error("Sandbox unavailable: {0}")]
     Unavailable(String),
     /// 沙箱启动失败
+    #[error("Sandbox start failed: {0}")]
     StartFailed(String),
     /// 执行超时
+    #[error("Sandbox timeout: {0}")]
     Timeout(String),
     /// 资源限制超出
+    #[error("Resource exceeded: {0}")]
     ResourceExceeded(String),
     /// 权限被拒绝
+    #[error("Permission denied: {0}")]
     PermissionDenied(String),
     /// IO 错误
+    #[error("IO error: {0}")]
     IoError(String),
 }
 
 /// Channel / IM 集成错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ChannelError {
     /// 网络错误
+    #[error("Network error: {0}")]
     NetworkError(String),
     /// API 错误（状态码和消息）
+    #[error("API error (status {status}): {message}")]
     ApiError {
         /// HTTP 状态码
         status: u16,
@@ -204,237 +265,68 @@ pub enum ChannelError {
         message: String,
     },
     /// 认证错误
+    #[error("Auth error: {0}")]
     AuthError(String),
     /// 连接错误
+    #[error("Connection error: {0}")]
     ConnectionError(String),
     /// 发送错误
+    #[error("Send error: {0}")]
     SendError(String),
     /// 无效配置
+    #[error("Invalid config: {0}")]
     InvalidConfig(String),
     /// 其他错误
+    #[error("Channel error: {0}")]
     Other(String),
 }
 
 /// 配置错误
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ConfigError {
     /// 环境变量解析错误
+    #[error("Failed to parse environment variable: {0}")]
     EnvParseError(String),
     /// 缺少配置项
+    #[error("Model '{0}' missing required config: {1}")]
     MissingConfig(String, String),
     /// 环境变量格式错误
+    #[error("Invalid environment variable format: {0}")]
     EnvFormatError(String),
     /// 配置不匹配
+    #[error("Model '{0}' mismatched config error: {1}")]
     UnMatchConfigError(String, String),
     /// 未找到模型配置
+    #[error("No configuration found for model: {0}")]
     NotFindModelError(String),
     /// 配置文件错误
+    #[error("Config file error: {0}")]
     ConfigFileError(String),
 }
 
-// ── Display impls ────────────────────────────────────────────────────────────
+// ── From 转换实现（Box 包装 + 自定义转换） ────────────────────────────────────
 
-impl fmt::Display for ReactError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReactError::Llm(e) => write!(f, "LLM Error: {}", e),
-            ReactError::Tool(e) => write!(f, "Tool Error: {}", e),
-            ReactError::Parse(e) => write!(f, "Parse Error: {}", e),
-            ReactError::Agent(e) => write!(f, "Agent Error: {}", e),
-            ReactError::Config(e) => write!(f, "Config Error: {}", e),
-            ReactError::Mcp(e) => write!(f, "MCP Error: {}", e),
-            ReactError::Memory(e) => write!(f, "Memory Error: {}", e),
-            ReactError::Sandbox(e) => write!(f, "Sandbox Error: {}", e),
-            ReactError::Channel(e) => write!(f, "Channel Error: {}", e),
-            ReactError::Io(e) => write!(f, "IO Error: {}", e),
-            ReactError::Other(msg) => write!(f, "Error: {}", msg),
-        }
+impl From<LlmError> for ReactError {
+    fn from(err: LlmError) -> Self {
+        ReactError::Llm(Box::new(err))
     }
 }
 
-impl fmt::Display for MemoryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MemoryError::IoError(err) => write!(f, "IO error: {}", err),
-            MemoryError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
-            MemoryError::NotFound(id) => write!(f, "Memory '{}' not found", id),
-            MemoryError::Unsupported(op) => write!(f, "Unsupported operation: {}", op),
-        }
+impl From<ConfigError> for ReactError {
+    fn from(err: ConfigError) -> Self {
+        ReactError::Config(Box::new(err))
     }
 }
 
-impl fmt::Display for McpError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            McpError::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
-            McpError::InitializationFailed(msg) => write!(f, "Initialization failed: {}", msg),
-            McpError::ProtocolError(msg) => write!(f, "Protocol error: {}", msg),
-            McpError::ToolCallFailed(msg) => write!(f, "Tool call failed: {}", msg),
-            McpError::TransportClosed => write!(f, "MCP transport closed unexpectedly"),
-        }
+impl From<MemoryError> for ReactError {
+    fn from(err: MemoryError) -> Self {
+        ReactError::Memory(Box::new(err))
     }
 }
 
-impl fmt::Display for SandboxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SandboxError::Unavailable(msg) => write!(f, "Sandbox unavailable: {}", msg),
-            SandboxError::StartFailed(msg) => write!(f, "Sandbox start failed: {}", msg),
-            SandboxError::Timeout(msg) => write!(f, "Sandbox timeout: {}", msg),
-            SandboxError::ResourceExceeded(msg) => write!(f, "Resource exceeded: {}", msg),
-            SandboxError::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
-            SandboxError::IoError(msg) => write!(f, "IO error: {}", msg),
-        }
-    }
-}
-
-impl fmt::Display for LlmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LlmError::NetworkError(msg) => write!(f, "Network error: {}", msg),
-            LlmError::ApiError { status, message } => {
-                write!(f, "API error (status {}): {}", status, message)
-            }
-            LlmError::InvalidResponse(msg) => write!(f, "Invalid response: {}", msg),
-            LlmError::EmptyResponse => write!(f, "Empty response from LLM"),
-            LlmError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
-        }
-    }
-}
-
-impl fmt::Display for ToolError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ToolError::NotFound(name) => write!(f, "Tool '{}' not found", name),
-            ToolError::MissingParameter(name) => write!(f, "Missing parameter: {}", name),
-            ToolError::InvalidParameter { name, message } => {
-                write!(f, "Invalid parameter '{}': {}", name, message)
-            }
-            ToolError::ExecutionFailed { tool, message } => {
-                write!(f, "Tool '{}' execution failed: {}", tool, message)
-            }
-            ToolError::Timeout(name) => write!(f, "Tool '{}' execution timed out", name),
-            ToolError::InvalidPath { path, reason } => {
-                write!(f, "Invalid path: {} ({})", path, reason)
-            }
-            ToolError::AccessDenied { path, reason } => {
-                write!(f, "Access denied: {} ({})", path, reason)
-            }
-            ToolError::FileTooLarge { size, max } => {
-                write!(f, "File too large: {} bytes (max: {} bytes)", size, max)
-            }
-        }
-    }
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseError::InvalidThought(msg) => write!(f, "Invalid Thought: {}", msg),
-            ParseError::InvalidAction(msg) => write!(f, "Invalid Action: {}", msg),
-            ParseError::InvalidActionInput(msg) => write!(f, "Invalid Action Input: {}", msg),
-            ParseError::JsonError(err) => write!(f, "JSON parse error: {}", err),
-            ParseError::UnexpectedFormat(msg) => write!(f, "Unexpected format: {}", msg),
-        }
-    }
-}
-
-impl fmt::Display for AgentError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AgentError::MaxIterationsExceeded(n) => {
-                write!(f, "Max iterations exceeded: {}", n)
-            }
-            AgentError::NoToolsAvailable => write!(f, "No tools available"),
-            AgentError::InitializationFailed(msg) => write!(f, "Initialization failed: {}", msg),
-            AgentError::Interrupted => write!(f, "Execution interrupted"),
-            AgentError::NoResponse => write!(f, "No response from LLM"),
-            AgentError::TokenLimitExceeded => write!(f, "Token limit exceeded"),
-            AgentError::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
-            AgentError::HookError(msg) => write!(f, "Hook error: {}", msg),
-            AgentError::SubagentError(msg) => write!(f, "Subagent error: {}", msg),
-            AgentError::Timeout(msg) => write!(f, "Timeout: {}", msg),
-            AgentError::ContextLimitExceeded(msg) => write!(f, "Context limit exceeded: {}", msg),
-        }
-    }
-}
-
-impl fmt::Display for ChannelError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ChannelError::NetworkError(msg) => write!(f, "Network error: {}", msg),
-            ChannelError::ApiError { status, message } => {
-                write!(f, "API error (status {}): {}", status, message)
-            }
-            ChannelError::AuthError(msg) => write!(f, "Auth error: {}", msg),
-            ChannelError::ConnectionError(msg) => write!(f, "Connection error: {}", msg),
-            ChannelError::SendError(msg) => write!(f, "Send error: {}", msg),
-            ChannelError::InvalidConfig(msg) => write!(f, "Invalid config: {}", msg),
-            ChannelError::Other(msg) => write!(f, "Channel error: {}", msg),
-        }
-    }
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConfigError::EnvParseError(env_config) => {
-                write!(f, "Failed to parse environment variable: {}", env_config)
-            }
-            ConfigError::MissingConfig(model, param) => {
-                write!(f, "Model '{}' missing required config: {}", model, param)
-            }
-            ConfigError::EnvFormatError(env_config) => {
-                write!(f, "Invalid environment variable format: {}", env_config)
-            }
-            ConfigError::UnMatchConfigError(model, param) => {
-                write!(f, "Model '{}' mismatched config error: {}", model, param)
-            }
-            ConfigError::NotFindModelError(model) => {
-                write!(f, "No configuration found for model: {}", model)
-            }
-            ConfigError::ConfigFileError(msg) => {
-                write!(f, "Config file error: {}", msg)
-            }
-        }
-    }
-}
-
-// ── std::error::Error impls ──────────────────────────────────────────────────
-
-impl std::error::Error for ReactError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ReactError::Llm(e) => Some(e.as_ref()),
-            ReactError::Tool(e) => Some(e),
-            ReactError::Parse(e) => Some(e),
-            ReactError::Agent(e) => Some(e),
-            ReactError::Config(e) => Some(e.as_ref()),
-            ReactError::Mcp(e) => Some(e),
-            ReactError::Memory(e) => Some(e.as_ref()),
-            ReactError::Sandbox(e) => Some(e),
-            ReactError::Channel(e) => Some(e),
-            ReactError::Io(e) => Some(e),
-            ReactError::Other(_) => None,
-        }
-    }
-}
-
-impl std::error::Error for LlmError {}
-impl std::error::Error for ToolError {}
-impl std::error::Error for ParseError {}
-impl std::error::Error for AgentError {}
-impl std::error::Error for ConfigError {}
-impl std::error::Error for McpError {}
-impl std::error::Error for MemoryError {}
-impl std::error::Error for SandboxError {}
-impl std::error::Error for ChannelError {}
-
-// ── From 转换实现 ─────────────────────────────────────────────────────────────
-
-impl From<std::io::Error> for ReactError {
-    fn from(err: std::io::Error) -> Self {
-        ReactError::Io(err)
+impl From<serde_json::Error> for ReactError {
+    fn from(err: serde_json::Error) -> Self {
+        ReactError::Parse(ParseError::JsonError(err))
     }
 }
 
@@ -453,66 +345,6 @@ impl From<reqwest::Error> for ReactError {
         } else {
             ReactError::Llm(Box::new(LlmError::NetworkError(err.to_string())))
         }
-    }
-}
-
-impl From<serde_json::Error> for ReactError {
-    fn from(err: serde_json::Error) -> Self {
-        ReactError::Parse(ParseError::JsonError(err))
-    }
-}
-
-impl From<ConfigError> for ReactError {
-    fn from(err: ConfigError) -> Self {
-        ReactError::Config(Box::new(err))
-    }
-}
-
-impl From<LlmError> for ReactError {
-    fn from(err: LlmError) -> Self {
-        ReactError::Llm(Box::new(err))
-    }
-}
-
-impl From<ToolError> for ReactError {
-    fn from(err: ToolError) -> Self {
-        ReactError::Tool(err)
-    }
-}
-
-impl From<ParseError> for ReactError {
-    fn from(err: ParseError) -> Self {
-        ReactError::Parse(err)
-    }
-}
-
-impl From<AgentError> for ReactError {
-    fn from(err: AgentError) -> Self {
-        ReactError::Agent(err)
-    }
-}
-
-impl From<McpError> for ReactError {
-    fn from(err: McpError) -> Self {
-        ReactError::Mcp(err)
-    }
-}
-
-impl From<MemoryError> for ReactError {
-    fn from(err: MemoryError) -> Self {
-        ReactError::Memory(Box::new(err))
-    }
-}
-
-impl From<SandboxError> for ReactError {
-    fn from(err: SandboxError) -> Self {
-        ReactError::Sandbox(err)
-    }
-}
-
-impl From<ChannelError> for ReactError {
-    fn from(err: ChannelError) -> Self {
-        ReactError::Channel(err)
     }
 }
 

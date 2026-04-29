@@ -10,6 +10,7 @@ use futures::stream::BoxStream;
 use reqwest::Client;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
+use tracing::{Instrument, info_span};
 
 use super::client::{post, stream_post};
 use super::config::{Config, LlmConfig, ModelConfig};
@@ -60,6 +61,7 @@ pub async fn chat(
         tools,
         tool_choice,
         response_format,
+        stream_options: None,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -77,6 +79,7 @@ pub async fn stream_chat(
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<String>,
     response_format: Option<ResponseFormat>,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<impl Stream<Item = Result<ChatCompletionChunk>> + use<>> {
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
@@ -85,6 +88,7 @@ pub async fn stream_chat(
         temperature,
         max_tokens,
         stream: Some(true),
+        stream_options: Some(serde_json::json!({"include_usage": true})),
         tools,
         tool_choice,
         response_format,
@@ -92,7 +96,7 @@ pub async fn stream_chat(
 
     let header_map = assemble_req_header(&model)?;
     let url = model.baseurl.clone();
-    stream_post(client, request_body, header_map, url).await
+    stream_post(client, request_body, header_map, url, cancel_token).await
 }
 
 // ── OpenAI 客户端实现 ──────────────────────────────────────────────────────────
@@ -112,7 +116,7 @@ impl OpenAiClient {
         let config = Config::get_model(model_name)?;
         let header_map = assemble_req_header(&config)?;
         Ok(Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(Self::build_http_client()),
             config,
             header_map,
         })
@@ -123,7 +127,7 @@ impl OpenAiClient {
         let model_config = config.to_model_config();
         let header_map = assemble_req_header(&model_config)?;
         Ok(Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(Self::build_http_client()),
             config: model_config,
             header_map,
         })
@@ -139,74 +143,93 @@ impl OpenAiClient {
             header_map,
         })
     }
+
+    fn build_http_client() -> Client {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default()
+    }
 }
 
 impl LlmClient for OpenAiClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
-        Box::pin(async move {
-            let req = ChatCompletionRequest {
-                model: self.config.model.clone(),
-                messages: request.messages,
-                temperature: request.temperature,
-                max_tokens: request.max_tokens,
-                stream: None,
-                tools: request.tools,
-                tool_choice: request.tool_choice,
-                response_format: request.response_format,
-            };
+        let model = self.config.model.clone();
+        Box::pin(
+            async move {
+                let req = ChatCompletionRequest {
+                    model: self.config.model.clone(),
+                    messages: request.messages,
+                    temperature: request.temperature,
+                    max_tokens: request.max_tokens,
+                    stream: None,
+                    stream_options: None,
+                    tools: request.tools,
+                    tool_choice: request.tool_choice,
+                    response_format: request.response_format,
+                };
 
-            let raw = post(
-                self.client.clone(),
-                &req,
-                self.header_map.clone(),
-                &self.config.baseurl,
-            )
-            .await?;
+                let raw = post(
+                    self.client.clone(),
+                    &req,
+                    self.header_map.clone(),
+                    &self.config.baseurl,
+                )
+                .await?;
 
-            let choice = raw.choices.first().ok_or(LlmError::EmptyResponse)?;
+                let choice = raw.choices.first().ok_or(LlmError::EmptyResponse)?;
 
-            Ok(ChatResponse {
-                message: choice.message.clone(),
-                finish_reason: choice.finish_reason.clone(),
-                raw,
-            })
-        })
+                Ok(ChatResponse {
+                    message: choice.message.clone(),
+                    finish_reason: choice.finish_reason.clone(),
+                    raw,
+                })
+            }
+            .instrument(info_span!("openai_chat", model = %model)),
+        )
     }
 
     fn chat_stream(
         &self,
         request: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
-        Box::pin(async move {
-            let req = ChatCompletionRequest {
-                model: self.config.model.clone(),
-                messages: request.messages,
-                temperature: request.temperature,
-                max_tokens: request.max_tokens,
-                stream: Some(true),
-                tools: request.tools,
-                tool_choice: request.tool_choice,
-                response_format: request.response_format,
-            };
+        let model = self.config.model.clone();
+        Box::pin(
+            async move {
+                let req = ChatCompletionRequest {
+                    model: self.config.model.clone(),
+                    messages: request.messages,
+                    temperature: request.temperature,
+                    max_tokens: request.max_tokens,
+                    stream: Some(true),
+                    stream_options: Some(serde_json::json!({"include_usage": true})),
+                    tools: request.tools,
+                    tool_choice: request.tool_choice,
+                    response_format: request.response_format,
+                };
 
-            let stream = stream_post(
-                self.client.clone(),
-                req,
-                self.header_map.clone(),
-                self.config.baseurl.clone(),
-            )
-            .await?;
+                let stream = stream_post(
+                    self.client.clone(),
+                    req,
+                    self.header_map.clone(),
+                    self.config.baseurl.clone(),
+                    request.cancel_token,
+                )
+                .await?;
 
-            Ok(Box::pin(futures::StreamExt::map(stream, |result| {
-                result.map(|chunk| {
-                    let choice = chunk.choices.first();
-                    ChatChunk {
-                        delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
-                        finish_reason: choice.and_then(|c| c.finish_reason.clone()),
-                    }
-                })
-            })) as BoxStream<'_, Result<ChatChunk>>)
-        })
+                Ok(Box::pin(futures::StreamExt::map(stream, |result| {
+                    result.map(|chunk| {
+                        let choice = chunk.choices.first();
+                        ChatChunk {
+                            delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
+                            finish_reason: choice.and_then(|c| c.finish_reason.clone()),
+                            usage: chunk.usage.clone(),
+                        }
+                    })
+                })) as BoxStream<'_, Result<ChatChunk>>)
+            }
+            .instrument(info_span!("openai_chat_stream", model = %model)),
+        )
     }
 
     fn model_name(&self) -> &str {
@@ -269,6 +292,7 @@ impl LlmClient for DefaultLlmClient {
                 request.tools,
                 request.tool_choice,
                 request.response_format,
+                request.cancel_token,
             )
             .await?;
 
@@ -278,6 +302,7 @@ impl LlmClient for DefaultLlmClient {
                     ChatChunk {
                         delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
                         finish_reason: choice.and_then(|c| c.finish_reason.clone()),
+                        usage: chunk.usage.clone(),
                     }
                 })
             })) as BoxStream<'_, Result<ChatChunk>>)

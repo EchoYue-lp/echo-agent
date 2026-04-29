@@ -26,11 +26,9 @@
 //! ```
 
 use echo_agent::prelude::*;
-use echo_agent::testing::MockLlmClient;
 use echo_agent::tools::{Tool, ToolParameters, ToolResult};
 use futures::{StreamExt, future::BoxFuture};
 use serde_json::json;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -94,7 +92,6 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
     println!("Part 2: 实际截断效果演示");
     println!("─────────────────────────────────────────────\n");
 
-    // 模拟一个可以控制输出长度的工具
     struct ConfigurableOutputTool {
         output_length: usize,
     }
@@ -127,10 +124,8 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
             let length = self.output_length;
 
             Box::pin(async move {
-                // 生成指定长度的输出（模拟文件内容）
                 let mut content = String::from("=== 文件开始 ===\n\n");
 
-                // 每行约 50 字符
                 let lines = (length - 100) / 50;
                 for i in 0..lines {
                     content.push_str(&format!(
@@ -142,7 +137,6 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
                 content.push_str("\n=== 文件结束 ===\n");
                 content.push_str(&format!("[文件共 {} 字符]\n", content.len()));
 
-                // 在中间附近补充一个显式标记，避免直接按字节位置插入导致 UTF-8 边界问题。
                 if length > 500 {
                     content.push_str(">>> 重要信息在第 100 行 <<<\n");
                 }
@@ -154,16 +148,11 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
 
     // 2.1 无限制版本（返回 5000 字符）
     println!("  [2.1] 无限制版本（返回 5000 字符）");
-    let mock_unlimited = Arc::new(
-        MockLlmClient::new()
-            .then_tool_call("call_unlimited", "get_file_content", "{}")
-            .with_response("已读取工具输出。"),
-    );
     let mut agent_unlimited = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("unlimited_agent")
-        .system_prompt("你是一个分析助手。")
-        .llm_client(mock_unlimited)
+        .system_prompt("你是一个分析助手。使用 get_file_content 获取文件后，简要总结。")
+        .max_iterations(5)
         .build()?;
 
     agent_unlimited.add_tool(Box::new(ConfigurableOutputTool {
@@ -173,7 +162,7 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
     println!("    执行: 调用 get_file_content 获取文件...\n");
     let unlimited_output = collect_tool_output(
         &mut agent_unlimited,
-        "调用 get_file_content 工具，然后结束。",
+        "调用 get_file_content 工具获取文件内容，然后结束。",
     )
     .await?;
     let unlimited_chars = unlimited_output.chars().count();
@@ -192,17 +181,12 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
     println!("  [2.2] 限制版本 (max_tool_output_tokens=500)");
     println!("  {}", "-".repeat(55));
 
-    let mock_limited = Arc::new(
-        MockLlmClient::new()
-            .then_tool_call("call_limited", "get_file_content", "{}")
-            .with_response("已读取工具输出。"),
-    );
     let mut agent_limited = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("limited_agent")
-        .system_prompt("你是一个分析助手。")
-        .llm_client(mock_limited)
+        .system_prompt("你是一个分析助手。使用 get_file_content 获取文件后，简要总结。")
         .max_tool_output_tokens(500)
+        .max_iterations(5)
         .build()?;
 
     agent_limited.add_tool(Box::new(ConfigurableOutputTool {
@@ -210,8 +194,11 @@ async fn demo_actual_truncation() -> echo_agent::error::Result<()> {
     }));
 
     println!("    执行: 调用 get_file_content（将被截断）...\n");
-    let limited_output =
-        collect_tool_output(&mut agent_limited, "调用 get_file_content 工具，然后结束。").await?;
+    let limited_output = collect_tool_output(
+        &mut agent_limited,
+        "调用 get_file_content 工具获取文件内容，然后结束。",
+    )
+    .await?;
     let limited_chars = limited_output.chars().count();
     println!("    ✓ 工具输出 (共 {} 字符):", limited_chars);
     println!("    {}\n", truncate(&limited_output, 300));

@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     agent.add_need_appeal_tool(Box::new(DivideTool));
 
     // 滑动窗口压缩：超限后保留最近 20 条消息
-    agent.set_compressor(SlidingWindowCompressor::new(20));
+    agent.set_compressor(SlidingWindowCompressor::new(20)).await;
 
     let task = r#"我们团队 5 人去北京出差 3 天，请帮我核算本次出差费用：
 

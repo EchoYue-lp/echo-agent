@@ -1,11 +1,13 @@
 [package]
 name = "echo_execution"
-version = "1.5.0"
+version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "Execution layer for echo-agent framework (sandbox, skills, tools)"
+repository = "https://github.com/EchoYue-lp/echo-agent"
 
 [dependencies]
-echo_core = { version = "1.5.0", path = "../echo-core" }
+echo_core = { version = "0.1.0", path = "../echo-core" }
 # From echo-sandbox
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }

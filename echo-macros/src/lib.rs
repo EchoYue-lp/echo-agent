@@ -15,7 +15,7 @@ fn echo_agent_crate_path() -> syn::Result<syn::Path> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[tool] — 从 async fn 生成 TypedTool 实现
+// #[tool] — 从 async fn 生成 Tool 实现
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 struct ToolAttrs {
@@ -82,7 +82,7 @@ impl syn::parse::Parse for ToolAttrs {
     }
 }
 
-/// 从 async fn 生成 `TypedTool` 实现，自动生成参数结构体和 JSON Schema。
+/// 从 async fn 生成 `Tool` 实现，自动生成参数结构体和 JSON Schema。
 ///
 /// # 属性
 ///
@@ -102,7 +102,7 @@ impl syn::parse::Parse for ToolAttrs {
 /// ) -> Result<ToolResult> {
 ///     Ok(ToolResult::success(format!("{}", a + b)))
 /// }
-/// // 生成: AddParams 结构体 + AddTool 单元结构体 + impl TypedTool
+/// // 生成: AddParams 结构体 + AddTool 单元结构体 + impl Tool
 /// ```
 #[proc_macro_attribute]
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -155,14 +155,23 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 
         pub struct #struct_name;
 
-        impl #echo_agent::tools::TypedTool for #struct_name {
-            type Params = #params_name;
-
+        impl #echo_agent::tools::Tool for #struct_name {
             fn name(&self) -> &str { #tool_name }
             fn description(&self) -> &str { #tool_desc }
 
-            fn execute_typed(&self, params: #params_name) -> ::futures::future::BoxFuture<'_, #echo_agent::error::Result<#echo_agent::tools::ToolResult>> {
+            fn parameters(&self) -> ::serde_json::Value {
+                let schema = ::schemars::schema_for!(#params_name);
+                ::serde_json::to_value(schema).unwrap_or_default()
+            }
+
+            fn execute(&self, parameters: #echo_agent::tools::ToolParameters) -> ::futures::future::BoxFuture<'_, #echo_agent::error::Result<#echo_agent::tools::ToolResult>> {
                 Box::pin(async move {
+                    let value = ::serde_json::Value::Object(parameters.into_iter().collect());
+                    let params: #params_name = ::serde_json::from_value(value)
+                        .map_err(|e| #echo_agent::error::ToolError::InvalidParameter {
+                            name: "(deserialization)".to_string(),
+                            message: e.to_string(),
+                        })?;
                     let #params_name { #(#param_names),* } = params;
                     #body
                 })
@@ -596,16 +605,24 @@ fn lifetimed_params(
         .collect()
 }
 
-/// Adds `'a` to top-level references: `&T` → `&'a T`, `&mut T` → `&'a mut T`.
+/// Adds `'a` to top-level references that lack an explicit lifetime.
+/// `&T` → `&'a T`, `&mut T` → `&'a mut T`.
+/// References that already have a named lifetime (e.g., `&'b T`) are left unchanged.
 /// Non-reference types pass through unchanged.
 fn add_lifetime_a(ty: &syn::Type) -> proc_macro2::TokenStream {
     match ty {
         syn::Type::Reference(r) => {
             let elem = &r.elem;
+            // Preserve existing explicit lifetimes; only add 'a if none is present
+            let lifetime = r
+                .lifetime
+                .as_ref()
+                .map(|lt| quote! { #lt })
+                .unwrap_or(quote! { 'a });
             if r.mutability.is_some() {
-                quote! { &'a mut #elem }
+                quote! { &#lifetime mut #elem }
             } else {
-                quote! { &'a #elem }
+                quote! { &#lifetime #elem }
             }
         }
         other => quote! { #other },

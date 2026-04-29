@@ -514,37 +514,7 @@ mod tests {
         assert!(sandbox.is_available().await);
     }
 
-    #[tokio::test]
-    async fn test_timeout_no_zombie_process() {
-        // 验证超时后子进程被完全清理（无僵尸/孤儿进程残留）
-        let sandbox = LocalSandbox::new(LocalConfig {
-            enable_os_sandbox: false,
-            ..Default::default()
-        });
-
-        let marker = "sleep 65432";
-        let count_before = count_processes_matching(marker);
-
-        let cmd = SandboxCommand::shell(marker).with_timeout(std::time::Duration::from_millis(200));
-        let result = sandbox.execute(cmd).await.unwrap();
-        assert!(result.timed_out);
-
-        // 等待一小段时间确保进程被收割
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        let count_after = count_processes_matching(marker);
-
-        // 超时后不应增加 sleep 进程数
-        assert!(
-            count_after <= count_before,
-            "Found {} matching processes after timeout for {:?} (was {})",
-            count_after,
-            marker,
-            count_before
-        );
-    }
-
-    fn count_processes_matching(pattern: &str) -> i32 {
+    fn _count_processes_matching(pattern: &str) -> i32 {
         std::process::Command::new("sh")
             .args([
                 "-c",

@@ -69,7 +69,7 @@ pub enum LlmProvider {
 /// // 方式五：从配置文件/环境变量加载
 /// // let config = LlmConfig::from_model("qwen3-max").unwrap();
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// LLM 供应商
     #[serde(default)]
@@ -80,6 +80,17 @@ pub struct LlmConfig {
     pub api_key: String,
     /// 模型名称
     pub model: String,
+}
+
+impl std::fmt::Debug for LlmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConfig")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 impl LlmConfig {
@@ -392,7 +403,7 @@ struct ConfigFile {
 }
 
 /// 单个模型的配置条目
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ModelEntry {
     /// API 端点 URL（与 `provider` 二选一）
     #[serde(default)]
@@ -407,8 +418,19 @@ struct ModelEntry {
     provider: Option<String>,
 }
 
+impl std::fmt::Debug for ModelEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelEntry")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("provider", &self.provider)
+            .finish()
+    }
+}
+
 /// Embedding 配置条目
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct EmbeddingEntry {
     /// 完整 embeddings 端点 URL（与 `base_url` 二选一）
     #[serde(default)]
@@ -426,10 +448,22 @@ struct EmbeddingEntry {
     timeout_secs: Option<u64>,
 }
 
+impl std::fmt::Debug for EmbeddingEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingEntry")
+            .field("endpoint_url", &self.endpoint_url)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
 // ── 内部配置类型 ─────────────────────────────────────────────────────────────
 
 /// 单个模型的连接配置（内部使用）
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ModelConfig {
     /// LLM 接口中使用的模型名（如 `qwen3-max`）
     pub model: String,
@@ -440,6 +474,17 @@ pub struct ModelConfig {
     /// LLM 供应商类型（用于自动选择客户端实现）
     #[serde(default)]
     pub provider: LlmProvider,
+}
+
+impl std::fmt::Debug for ModelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelConfig")
+            .field("model", &self.model)
+            .field("baseurl", &self.baseurl)
+            .field("apikey", &"[REDACTED]")
+            .field("provider", &self.provider)
+            .finish()
+    }
 }
 
 /// 全局配置，持有所有已加载的模型配置表
@@ -455,7 +500,7 @@ pub struct Config {
 }
 
 /// Embedding 运行时配置
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct EmbeddingConfig {
     /// Embeddings 接口完整 URL
     pub url: String,
@@ -465,6 +510,17 @@ pub struct EmbeddingConfig {
     pub model: String,
     /// 超时时间（秒）
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for EmbeddingConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingConfig")
+            .field("url", &self.url)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 /// 缓存的加载结果：`Ok(Config)` 或 `Err(描述)`。

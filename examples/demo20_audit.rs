@@ -162,7 +162,7 @@ async fn main() -> echo_agent::error::Result<()> {
         .await;
 
     // ── 3. 构建 Agent ──────────────────────────────────────────────────
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .system_prompt("你是一个助手，可以使用工具完成任务。请直接调用工具，不要询问用户。")
         .enable_tools()

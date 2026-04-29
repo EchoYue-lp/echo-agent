@@ -1,6 +1,8 @@
 //! 护栏系统核心 trait 和类型
 
 #[cfg(feature = "guard")]
+pub mod content;
+#[cfg(feature = "guard")]
 pub mod llm;
 #[cfg(feature = "guard")]
 pub mod rule;
@@ -107,14 +109,18 @@ impl GuardManager {
 
     /// 并行执行所有护栏检查。
     ///
-    /// - 所有护栏同时启动（`join_all`），而非串行执行。
+    /// - 所有护栏同时启动（受并发度上限约束），而非串行执行。
     /// - 一旦发现 `Block` 结果，取消其他仍在运行的检查（通过 `CancellationToken`）。
     /// - 收集所有 `Warn` 理由到 `Vec<String>`。
+    ///
+    /// 并发度上限为 16，防止护栏数量过多时创建海量任务。
     pub async fn check_all(&self, content: &str, direction: GuardDirection) -> Result<GuardResult> {
         if self.guards.is_empty() {
             return Ok(GuardResult::Pass);
         }
 
+        // Concurrency limit to avoid spawning unbounded tasks
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(16));
         let cancel = CancellationToken::new();
         let mut handles = Vec::with_capacity(self.guards.len());
 
@@ -122,7 +128,9 @@ impl GuardManager {
             let guard = guard.clone();
             let content = content.to_string();
             let cancel_child = cancel.clone();
+            let permit = semaphore.clone().acquire_owned().await;
             handles.push(tokio::spawn(async move {
+                let _permit = permit; // hold until task completes
                 let result = tokio::select! {
                     _ = cancel_child.cancelled() => {
                         return (guard.name().to_string(), Ok(GuardResult::Pass));

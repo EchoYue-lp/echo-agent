@@ -431,7 +431,7 @@ impl ReactAgentBuilder {
     /// 设置统一权限服务
     ///
     /// 一旦设置，将优先使用此服务进行权限检查，
-    /// 回退到旧的 PermissionPolicy + HumanApprovalManager 逻辑。
+    /// 回退到旧的 PermissionPolicy 逻辑。
     pub fn permission_service(mut self, service: Arc<PermissionService>) -> Self {
         self.permission_service = Some(service);
         self
@@ -448,6 +448,14 @@ impl ReactAgentBuilder {
     /// 批量添加护栏
     pub fn guards(mut self, guards: Vec<Arc<dyn Guard>>) -> Self {
         self.guards.extend(guards);
+        self
+    }
+
+    /// 添加内容安全护栏（PII 检测/脱敏/拒绝）
+    #[cfg(feature = "content-guard")]
+    pub fn with_content_guard(mut self, mode: echo_core::guard::content::ContentGuardMode) -> Self {
+        let guard = echo_core::guard::content::ContentGuard::new(mode);
+        self.guards.push(Arc::new(guard));
         self
     }
 
@@ -498,6 +506,28 @@ impl ReactAgentBuilder {
 
     /// 构建 ReAct Agent（内部方法）
     pub fn build(self) -> Result<ReactAgent> {
+        // ── 构造期验证 ────────────────────────────────────────────────────────────
+        if self.model.trim().is_empty() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                "model".to_string(),
+                "模型名称不能为空".to_string(),
+            )
+            .into());
+        }
+        if self.max_iterations == 0 {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "max_iterations 必须大于 0".to_string(),
+            )
+            .into());
+        }
+        if self.enable_subagent && !self.enable_builtin_tools {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "启用子 Agent 调度 (enable_subagent) 需要同时启用工具调用 (enable_builtin_tools)"
+                    .to_string(),
+            )
+            .into());
+        }
+
         let mut config = AgentConfig::new(&self.model, &self.name, &self.system_prompt)
             .role(self.role)
             .enable_tool(self.enable_builtin_tools)

@@ -130,11 +130,47 @@ pub enum AgentEvent {
         iteration: usize,
     },
 
+    // ── 可视化 ────────────────────────────────────────────────────────────
+    /// 图表生成（vega-lite JSON 规范）
+    Chart { spec: Value },
+
+    // ── 错误 ────────────────────────────────────────────────────────────
+    /// 通用 Agent 错误（非工具执行错误，如 LLM 调用失败、护栏拦截等）
+    Error {
+        /// 错误来源（如 "llm", "guard", "config"）
+        source: String,
+        /// 错误信息
+        message: String,
+    },
+
     // ── 终态 ──────────────────────────────────────────────────────────────
     /// 最终回答
     FinalAnswer(String),
     /// 被取消
     Cancelled,
+}
+
+/// Agent 运行所处的生命周期阶段
+///
+/// 将 `AgentEvent` 的各个变体映射到统一的阶段模型，便于：
+/// - **状态持久化**：checkpoint 只在阶段边界处创建
+/// - **前端渲染**：按阶段路由到对应的 UI 组件，无需逐 variant match
+/// - **开发者理解**：新接入者先看阶段再看具体事件
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentPhase {
+    /// LLM 推理中（Token → ThinkStart → ThinkEnd）
+    Thinking,
+    /// 工具执行中（ToolCall → ToolResult / ToolError）
+    Acting,
+    /// 计划制定与步骤执行（PlanGenerated / StepStart / StepEnd）
+    Planning,
+    /// 自省反思与修正（ReflectionStart / CritiqueGenerated / Refining / ReflectionEnd）
+    Reflecting,
+    /// Agent 间切换（HandoffStart → HandoffEnd）
+    HandingOff,
+    /// 已产出最终结果或已取消
+    Terminal,
 }
 
 impl AgentEvent {
@@ -170,6 +206,83 @@ impl AgentEvent {
     /// Compatibility helper for older call sites that tracked a single token count.
     pub fn tokens_used(&self) -> Option<usize> {
         self.total_tokens()
+    }
+
+    /// 返回当前事件所属的生命周期阶段
+    ///
+    /// 用于前端按阶段路由渲染、状态机状态推导等场景。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use echo_core::agent::{AgentEvent, AgentPhase};
+    ///
+    /// let event = AgentEvent::ThinkStart;
+    /// assert_eq!(event.phase(), AgentPhase::Thinking);
+    ///
+    /// let event = AgentEvent::FinalAnswer("done".into());
+    /// assert_eq!(event.phase(), AgentPhase::Terminal);
+    /// ```
+    pub fn phase(&self) -> AgentPhase {
+        match self {
+            AgentEvent::Token(_)
+            | AgentEvent::ThinkStart
+            | AgentEvent::ThinkEnd { .. }
+            | AgentEvent::MemoryRecalled { .. }
+            | AgentEvent::Chart { .. } => AgentPhase::Thinking,
+
+            AgentEvent::ToolCall { .. }
+            | AgentEvent::ToolResult { .. }
+            | AgentEvent::ToolError { .. }
+            | AgentEvent::GuardTriggered { .. } => AgentPhase::Acting,
+
+            AgentEvent::PlanGenerated { .. }
+            | AgentEvent::StepStart { .. }
+            | AgentEvent::StepEnd { .. } => AgentPhase::Planning,
+
+            AgentEvent::ReflectionStart { .. }
+            | AgentEvent::ReflectionEnd { .. }
+            | AgentEvent::CritiqueGenerated { .. }
+            | AgentEvent::Refining { .. } => AgentPhase::Reflecting,
+
+            AgentEvent::HandoffStart { .. } | AgentEvent::HandoffEnd { .. } => {
+                AgentPhase::HandingOff
+            }
+
+            AgentEvent::FinalAnswer(_) | AgentEvent::Cancelled | AgentEvent::Error { .. } => {
+                AgentPhase::Terminal
+            }
+        }
+    }
+
+    /// 是否为可持久化的快照点（阶段边界事件）
+    ///
+    /// 在这些事件发生时，Agent 状态处于"稳定点"——没有进行中的 LLM 调用或工具执行，
+    /// 适合进行 checkpoint 保存，用于断点续传或 Time Travel 调试。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use echo_core::agent::AgentEvent;
+    ///
+    /// assert!(AgentEvent::ThinkEnd { prompt_tokens: 100, completion_tokens: 50 }.is_checkpoint());
+    /// assert!(AgentEvent::FinalAnswer("done".into()).is_checkpoint());
+    /// assert!(!AgentEvent::Token("hello".into()).is_checkpoint());
+    /// ```
+    pub fn is_checkpoint(&self) -> bool {
+        matches!(
+            self,
+            AgentEvent::ThinkEnd { .. }
+                | AgentEvent::ToolResult { .. }
+                | AgentEvent::ToolError { .. }
+                | AgentEvent::PlanGenerated { .. }
+                | AgentEvent::StepEnd { .. }
+                | AgentEvent::ReflectionEnd { .. }
+                | AgentEvent::HandoffEnd { .. }
+                | AgentEvent::FinalAnswer(_)
+                | AgentEvent::Cancelled
+                | AgentEvent::Error { .. }
+        )
     }
 }
 
@@ -223,16 +336,16 @@ pub trait Agent: Send + Sync {
     }
 
     /// Release external resources before dropping the agent.
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, ()> {
+    fn close<'a>(&'a self) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
 
     /// Execute a task and return the final answer.
-    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>>;
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>>;
 
     /// Execute a task and stream lifecycle events.
     fn execute_stream<'a>(
-        &'a mut self,
+        &'a self,
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>>;
 
@@ -242,7 +355,7 @@ pub trait Agent: Send + Sync {
     /// cancellation-aware wrapper. When `cancel` is triggered, the stream
     /// yields [`AgentEvent::Cancelled`] and terminates.
     fn execute_stream_with_cancel<'a>(
-        &'a mut self,
+        &'a self,
         task: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
@@ -270,13 +383,13 @@ pub trait Agent: Send + Sync {
     }
 
     /// Alias of [`Self::execute`] for chat-centric call sites.
-    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         self.execute(message)
     }
 
     /// Alias of [`Self::execute_stream`] for chat-centric call sites.
     fn chat_stream<'a>(
-        &'a mut self,
+        &'a self,
         message: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         self.execute_stream(message)
@@ -288,7 +401,7 @@ pub trait Agent: Send + Sync {
     /// cancellation-aware wrapper. When `cancel` is triggered, the stream
     /// yields [`AgentEvent::Cancelled`] and terminates.
     fn chat_stream_with_cancel<'a>(
-        &'a mut self,
+        &'a self,
         message: &'a str,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
@@ -316,7 +429,7 @@ pub trait Agent: Send + Sync {
     }
 
     /// Reset in-memory conversational state.
-    fn reset(&mut self) {}
+    fn reset(&self) {}
 }
 
 /// Agent 生命周期回调接口
@@ -330,8 +443,14 @@ pub trait AgentCallback: Send + Sync {
         Box::pin(async {})
     }
 
-    /// Called after the model reasoning step is parsed into logical steps.
-    fn on_think_end<'a>(&'a self, _agent: &'a str, _steps: &'a [StepType]) -> BoxFuture<'a, ()> {
+    /// Called after the model reasoning step with token usage information.
+    fn on_think_end<'a>(
+        &'a self,
+        _agent: &'a str,
+        _steps: &'a [StepType],
+        _prompt_tokens: usize,
+        _completion_tokens: usize,
+    ) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
 

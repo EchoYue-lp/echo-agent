@@ -344,6 +344,10 @@ pub struct McpToolCallResult {
     /// 结构化输出（2025-11-25），与 outputSchema 配合使用
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
+    /// 捕获 MCP 服务端返回的所有非标准扩展字段（如 queryRecordId 等），
+    /// 确保任意 MCP 服务端返回的额外字段都不会被静默丢弃。
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 // ── MCP 资源相关类型 ──────────────────────────────────────────────────────────

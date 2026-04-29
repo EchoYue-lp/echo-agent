@@ -19,9 +19,7 @@ const QQ_API_BASE: &str = "https://api.sgroup.qq.com";
 const QQ_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 
 pub fn reqwest_client() -> Client {
-    Client::builder()
-        .build()
-        .expect("Failed to create HTTP client")
+    Client::builder().build().unwrap_or_else(|_| Client::new())
 }
 
 // ── Token 管理 ────────────────────────────────────────────────────────────────

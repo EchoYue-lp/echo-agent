@@ -5,11 +5,11 @@
 use echo_core::error::{Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, TypedTool};
+pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
 
 /// 工具管理器
 ///
@@ -20,7 +20,7 @@ pub struct ToolManager {
     /// 并发限流器
     semaphore: Option<Arc<Semaphore>>,
     /// 缓存的工具定义
-    cached_definitions: Option<Vec<ToolDefinition>>,
+    cached_definitions: RwLock<Option<Vec<ToolDefinition>>>,
 }
 
 impl ToolManager {
@@ -28,22 +28,24 @@ impl ToolManager {
     ///
     /// 首次调用时构建并缓存，后续直接返回缓存值。
     /// 注册新工具后缓存会自动失效。
-    pub fn get_openai_tools(&mut self) -> Vec<ToolDefinition> {
-        if let Some(ref cached) = self.cached_definitions {
+    pub fn get_openai_tools(&self) -> Vec<ToolDefinition> {
+        // Fast path: read cached
+        if let Some(ref cached) = *self.cached_definitions.read().unwrap() {
             return cached.clone();
         }
+        // Build + cache
         let definitions: Vec<ToolDefinition> = self
             .tools
             .values()
             .map(|tool| ToolDefinition::from_tool(&**tool))
             .collect();
-        self.cached_definitions = Some(definitions.clone());
+        *self.cached_definitions.write().unwrap() = Some(definitions.clone());
         definitions
     }
 
     /// 使缓存失效（注册/注销工具时调用）
-    fn invalidate_cache(&mut self) {
-        self.cached_definitions = None;
+    fn invalidate_cache(&self) {
+        *self.cached_definitions.write().unwrap() = None;
     }
 }
 
@@ -59,7 +61,7 @@ impl ToolManager {
             tools: HashMap::new(),
             semaphore: None,
             config: ToolExecutionConfig::default(),
-            cached_definitions: None,
+            cached_definitions: RwLock::new(None),
         }
     }
 
@@ -71,7 +73,7 @@ impl ToolManager {
             tools: HashMap::new(),
             semaphore,
             config,
-            cached_definitions: None,
+            cached_definitions: RwLock::new(None),
         }
     }
 

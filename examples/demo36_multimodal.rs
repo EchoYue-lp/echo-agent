@@ -59,7 +59,7 @@ async fn demo_live_image_analysis(model_name: &str) -> echo_agent::error::Result
     println!("  使用模型: {}", model_name);
     println!("  图片 URL: {}\n", live_image_url());
 
-    let mut agent = build_live_agent(model_name)?;
+    let agent = build_live_agent(model_name)?;
     let result = agent
         .chat_with_image_url("请用一句话描述这张图片的主体和场景。", live_image_url())
         .await
@@ -77,7 +77,7 @@ async fn demo_live_chat_mode(model_name: &str) -> echo_agent::error::Result<()> 
     println!("Part 2: 真实 Chat 模式多轮对话");
     println!("─────────────────────────────────────────────\n");
 
-    let mut agent = build_live_agent(model_name)?;
+    let agent = build_live_agent(model_name)?;
 
     println!("  Q: 什么是多模态 AI？\n");
     match agent.chat("什么是多模态 AI？请用一句话简要说明。").await {
@@ -107,7 +107,7 @@ async fn demo_live_multiple_images(model_name: &str) -> echo_agent::error::Resul
     println!("Part 3: 真实多图分析");
     println!("─────────────────────────────────────────────\n");
 
-    let mut agent = build_live_agent(model_name)?;
+    let agent = build_live_agent(model_name)?;
 
     let message = Message::user_multimodal(vec![
         ContentPart::Text {

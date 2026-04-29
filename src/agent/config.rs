@@ -3,6 +3,7 @@
 use crate::agent::AgentCallback;
 use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Agent 角色枚举，决定其在多 Agent 系统中的职责范围。
@@ -37,7 +38,6 @@ pub enum AgentRole {
 pub struct AgentConfig {
     pub(crate) model_name: String,
     pub(crate) system_prompt: String,
-    verbose: bool,
     pub(crate) agent_name: String,
     /// 最大迭代轮次，防止死循环
     pub(crate) max_iterations: usize,
@@ -87,6 +87,10 @@ pub struct AgentConfig {
     pub(crate) temperature: Option<f32>,
     /// 最大生成 token 数（None 表示使用模型默认值）
     pub(crate) max_tokens: Option<u32>,
+    /// 是否自动加载项目规则文件（`.echo-agent/AGENT.md`），默认 true
+    pub(crate) auto_project_rules: bool,
+    /// 工作目录（用于搜索项目规则文件），None 表示使用当前目录
+    pub(crate) working_dir: Option<PathBuf>,
 }
 
 impl AgentConfig {
@@ -103,7 +107,6 @@ impl AgentConfig {
         Self {
             model_name: model_name.to_string(),
             system_prompt: system_prompt.to_string(),
-            verbose: false,
             agent_name: agent_name.to_string(),
             max_iterations: 10,
             allowed_tools: Vec::new(),
@@ -129,6 +132,8 @@ impl AgentConfig {
             compress_threshold_ratio: 0.2,
             temperature: None,
             max_tokens: None,
+            auto_project_rules: true,
+            working_dir: None,
         }
     }
 
@@ -294,18 +299,6 @@ impl AgentConfig {
     /// `true` 表示子代理调度功能已启用，`false` 表示已禁用
     pub fn is_subagent_enabled(&self) -> bool {
         self.enable_subagent
-    }
-
-    /// 启用或禁用详细日志输出
-    ///
-    /// # 参数
-    /// * `verbose` - `true` 启用详细日志，`false` 禁用
-    ///
-    /// # 说明
-    /// 启用后 Agent 会输出更详细的执行过程日志
-    pub fn verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
-        self
     }
 
     /// 设置最大迭代轮次
@@ -538,14 +531,6 @@ impl AgentConfig {
         &self.agent_name
     }
 
-    /// 检查是否启用详细日志输出
-    ///
-    /// # 返回值
-    /// `true` 表示详细日志已启用，`false` 表示已禁用
-    pub fn is_verbose(&self) -> bool {
-        self.verbose
-    }
-
     /// 启用或禁用思维链（CoT）
     ///
     /// # 参数
@@ -659,6 +644,24 @@ impl AgentConfig {
         self.compress_threshold_ratio
     }
 
+    /// 启用或禁用自动项目规则加载
+    ///
+    /// # 参数
+    /// * `enabled` - `true` 自动从工作目录搜索 `.echo-agent/AGENT.md` 并注入 system prompt
+    pub fn auto_project_rules(mut self, enabled: bool) -> Self {
+        self.auto_project_rules = enabled;
+        self
+    }
+
+    /// 设置工作目录（用于搜索项目规则文件）
+    ///
+    /// # 参数
+    /// * `path` - 工作目录路径，None 表示使用当前目录
+    pub fn working_dir(mut self, path: Option<PathBuf>) -> Self {
+        self.working_dir = path;
+        self
+    }
+
     /// 设置 LLM 温度参数
     ///
     /// # 参数
@@ -756,8 +759,7 @@ mod tests {
             .enable_cot(false)
             .llm_max_retries(5)
             .llm_retry_delay_ms(1000)
-            .tool_error_feedback(false)
-            .verbose(true);
+            .tool_error_feedback(false);
 
         assert_eq!(config.get_max_iterations(), 20);
         assert_eq!(config.get_token_limit(), 8000);
@@ -770,7 +772,6 @@ mod tests {
         assert_eq!(config.get_llm_max_retries(), 5);
         assert_eq!(config.get_llm_retry_delay_ms(), 1000);
         assert!(!config.get_tool_error_feedback());
-        assert!(config.is_verbose());
     }
 
     #[test]

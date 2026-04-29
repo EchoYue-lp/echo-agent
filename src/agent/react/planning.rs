@@ -17,12 +17,12 @@ impl ReactAgent {
     /// 1. **规划阶段**（LLM）：Agent 使用工具创建子任务 DAG
     /// 2. **执行阶段**（框架）：TaskExecutor 并行调度就绪任务，使用自定义执行函数
     /// 3. **汇总阶段**（LLM）：将所有任务结果交给 LLM 生成最终答案
-    pub async fn execute_with_planning(&mut self, task: &str) -> crate::error::Result<String> {
+    pub async fn execute_with_planning(&self, task: &str) -> crate::error::Result<String> {
         let agent = self.config.agent_name.clone();
 
         // 重置消息历史和任务管理器，确保每次规划都是干净的 session
-        self.reset_messages();
-        self.task_manager.clear();
+        self.reset_messages().await;
+        self.tools.task_manager.clear();
 
         info!(agent = %agent, "🎯 启动任务规划模式");
         info!(agent = %agent, task = %task, "📋 用户任务");
@@ -44,7 +44,7 @@ impl ReactAgent {
         self.plan_tasks(task).await?;
 
         // 规划阶段结束后仍无任务，回退普通执行
-        if self.task_manager.get_all_tasks().is_empty() {
+        if self.tools.task_manager.get_all_tasks().is_empty() {
             warn!(
                 agent = %agent,
                 "⚠️ 规划阶段未创建任务，自动降级为普通执行模式"
@@ -67,7 +67,7 @@ impl ReactAgent {
         // 构建执行函数：使用 LLM 执行每个任务
         let execute_fn = self.build_execute_fn();
         let executor =
-            TaskExecutor::new(self.task_manager.clone(), config).with_execute_fn(execute_fn);
+            TaskExecutor::new(self.tools.task_manager.clone(), config).with_execute_fn(execute_fn);
 
         // 执行全部任务（事件驱动调度，自动 wake_dependents）
         let results = executor.execute_all().await?;
@@ -98,6 +98,7 @@ impl ReactAgent {
         info!(agent = %agent, phase = "summary", "📝 阶段3: 生成最终答案");
 
         let task_results_summary = self
+            .tools
             .task_manager
             .get_all_tasks()
             .iter()
@@ -111,7 +112,7 @@ impl ReactAgent {
             .collect::<Vec<_>>()
             .join("\n");
 
-        self.context.push(Message::user(format!(
+        self.memory.context.lock().await.push(Message::user(format!(
             "所有任务已完成。以下是各任务的执行结果：\n{}\n\n\
             请根据以上结果，使用 final_answer 工具给出最终答案。\n\
             **注意**：不要再创建新任务或执行其他操作，直接给出最终答案。",
@@ -133,7 +134,7 @@ impl ReactAgent {
     }
 
     /// 规划阶段：LLM 通过工具调用创建任务 DAG
-    async fn plan_tasks(&mut self, task: &str) -> crate::error::Result<()> {
+    async fn plan_tasks(&self, task: &str) -> crate::error::Result<()> {
         let agent = self.config.agent_name.clone();
 
         let planning_prompt = format!(
@@ -148,7 +149,11 @@ impl ReactAgent {
             task
         );
 
-        self.context.push(Message::user(planning_prompt));
+        self.memory
+            .context
+            .lock()
+            .await
+            .push(Message::user(planning_prompt));
 
         let planning_max_rounds = self.config.max_iterations;
         let mut has_created_tasks = false;
@@ -173,8 +178,11 @@ impl ReactAgent {
                         info!(agent = %agent, "🏁 规划阶段已生成最终答案");
                         return Ok(());
                     }
-                    self.context
-                        .push(Message::tool_result(tool_call_id, function_name, result));
+                    self.memory.context.lock().await.push(Message::tool_result(
+                        tool_call_id,
+                        function_name,
+                        result,
+                    ));
                 }
             }
 
@@ -183,7 +191,7 @@ impl ReactAgent {
             }
 
             if has_created_tasks && !created_task_this_round {
-                let task_count = self.task_manager.get_all_tasks().len();
+                let task_count = self.tools.task_manager.get_all_tasks().len();
                 info!(
                     agent = %agent,
                     task_count = task_count,
@@ -207,7 +215,8 @@ impl ReactAgent {
         let is_orchestrator = self.config.role == AgentRole::Orchestrator;
         let subagent_names: Vec<String> = if is_orchestrator {
             // Use blocking read from the registry since we're in sync context
-            self.subagent_registry
+            self.tools
+                .subagent_registry
                 .agents_map()
                 .try_read()
                 .map(|agents| agents.keys().cloned().collect())
@@ -237,7 +246,10 @@ impl ReactAgent {
                 };
 
                 // 默认使用 LLM 执行任务
-                let client = reqwest::Client::new();
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .unwrap_or_default();
                 let messages = vec![
                     crate::llm::types::Message::system(
                         "你是任务执行助手。请完成以下任务，直接给出结果。".to_string(),
@@ -272,14 +284,14 @@ impl ReactAgent {
 
     /// 使用自定义执行函数的任务规划模式
     pub async fn execute_with_planning_fn(
-        &mut self,
+        &self,
         task: &str,
         execute_fn: TaskExecuteFn,
     ) -> crate::error::Result<String> {
         let _agent = self.config.agent_name.clone();
 
-        self.reset_messages();
-        self.task_manager.clear();
+        self.reset_messages().await;
+        self.tools.task_manager.clear();
 
         if !self.has_planning_tools() {
             return self.run_direct(task).await;
@@ -288,19 +300,20 @@ impl ReactAgent {
         // Phase 1: Plan
         self.plan_tasks(task).await?;
 
-        if self.task_manager.get_all_tasks().is_empty() {
+        if self.tools.task_manager.get_all_tasks().is_empty() {
             return self.run_direct(task).await;
         }
 
         // Phase 2: Execute with custom execute_fn
         let config = TaskExecutorConfig::default();
         let executor =
-            TaskExecutor::new(self.task_manager.clone(), config).with_execute_fn(execute_fn);
+            TaskExecutor::new(self.tools.task_manager.clone(), config).with_execute_fn(execute_fn);
 
         let _results = executor.execute_all().await?;
 
         // Phase 3: Summarize
         let task_results_summary = self
+            .tools
             .task_manager
             .get_all_tasks()
             .iter()
@@ -314,7 +327,7 @@ impl ReactAgent {
             .collect::<Vec<_>>()
             .join("\n");
 
-        self.context.push(Message::user(format!(
+        self.memory.context.lock().await.push(Message::user(format!(
             "所有任务已完成。以下是各任务的执行结果：\n{}\n\n\
             请根据以上结果，使用 final_answer 工具给出最终答案。",
             task_results_summary

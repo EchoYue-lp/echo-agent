@@ -40,7 +40,20 @@ impl Tool for McpToolAdapter {
             let args = serde_json::Value::Object(parameters.into_iter().collect());
             let result = self.client.call_tool(&self.tool.name, args).await?;
 
-            let text = McpClient::content_to_text(&result.content);
+            let mut text = McpClient::content_to_text(&result.content);
+
+            // 将结构化输出拼入文本（MCP 规范字段）
+            if let Some(ref structured) = result.structured_content {
+                let structured_str = serde_json::to_string_pretty(structured).unwrap_or_default();
+                text = format!("{text}\n\n结构化数据:\n{structured_str}");
+            }
+
+            // 将 MCP 服务端返回的所有非标准扩展字段也拼入文本，
+            // 确保任意 MCP 服务端的额外字段都不会被静默丢弃
+            if !result.extra.is_empty() {
+                let extra_str = serde_json::to_string_pretty(&result.extra).unwrap_or_default();
+                text = format!("{text}\n\n附加字段:\n{extra_str}");
+            }
 
             if result.is_error {
                 Ok(ToolResult::error(text))

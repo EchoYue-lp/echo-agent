@@ -10,6 +10,7 @@ pub use types::{
 
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use tokio_util::sync::CancellationToken;
 
 /// LLM 客户端统一接口
 pub trait LlmClient: Send + Sync {
@@ -56,6 +57,9 @@ pub struct ChatRequest {
     pub tool_choice: Option<String>,
     /// Optional structured output format hint.
     pub response_format: Option<ResponseFormat>,
+    /// Optional cancellation token for aborting in-flight requests.
+    /// When set and cancelled, streaming responses will stop at the next SSE boundary.
+    pub cancel_token: Option<CancellationToken>,
 }
 
 impl ChatRequest {
@@ -112,4 +116,6 @@ pub struct ChatChunk {
     pub delta: DeltaMessage,
     /// Finish reason emitted with the chunk, if any.
     pub finish_reason: Option<String>,
+    /// Token usage (present in the final chunk when stream_options.include_usage is set).
+    pub usage: Option<types::Usage>,
 }

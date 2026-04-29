@@ -17,8 +17,7 @@ use crate::compression::ContextManager;
 use crate::error::{LlmError, ReactError, Result};
 use crate::guard::GuardManager;
 #[cfg(feature = "human-loop")]
-#[allow(deprecated)] // HumanApprovalManager kept for backward compatibility
-use crate::human_loop::{HumanApprovalManager, HumanLoopProvider, PermissionService};
+use crate::human_loop::{HumanLoopProvider, PermissionService};
 use crate::llm::config::LlmConfig;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
@@ -28,7 +27,6 @@ use crate::memory::store::{FileStore, Store};
 use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
-use crate::skills::registry::SharedRegistry;
 #[cfg(feature = "tasks")]
 use crate::tasks::TaskManager;
 use crate::tools::ToolManager;
@@ -44,13 +42,16 @@ use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
 };
 use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-#[cfg(feature = "human-loop")]
-use echo_core::tools::permission::PermissionRule;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
-use std::sync::{Arc, RwLock};
-use tracing::info;
+use std::sync::Arc;
+use tracing::{Instrument, info, info_span, warn};
+
+use crate::agent::react::subsystems::approval::ApprovalSubsystem;
+use crate::agent::react::subsystems::guard::GuardSubsystem;
+use crate::agent::react::subsystems::memory::MemorySubsystem;
+use crate::agent::react::subsystems::tool_exec::ToolExecutionSubsystem;
 
 pub mod builder;
 mod capabilities;
@@ -59,6 +60,7 @@ mod extract;
 mod planning;
 mod run;
 pub mod structured;
+pub(crate) mod subsystems;
 #[cfg(test)]
 mod tests;
 // ── 内置工具名常量 ─────────────────────────────────────────────────────────────
@@ -101,57 +103,22 @@ pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
 /// - **Hook 系统**：工具调用拦截和修改
 pub struct ReactAgent {
     pub(crate) config: AgentConfig,
-    /// 上下文管理器：维护对话历史，并在 token 超限时自动触发压缩
-    pub(crate) context: ContextManager,
-    tool_manager: ToolManager,
-    /// Subagent 注册表：管理子代理的定义、发现和生命周期
-    pub(crate) subagent_registry: Arc<SubagentRegistry>,
-    /// Subagent 执行器：统一调度 Sync/Fork/Teammate 模式
-    #[allow(dead_code)] // Used by AgentDispatchTool at construction; accessor TBD
-    pub(crate) subagent_executor: Arc<SubagentExecutor>,
+    /// 工具执行子系统：工具注册/执行、Skill、Hook、MCP、SubAgent、Sandbox
+    pub(crate) tools: ToolExecutionSubsystem,
+    /// 护栏与安全子系统：护栏、权限策略、审计日志、熔断器
+    pub(crate) guard: GuardSubsystem,
+    /// 记忆与持久化子系统：上下文管理、长期记忆、快照、Checkpoint
+    pub(crate) memory: MemorySubsystem,
+    /// 人工介入审批子系统（human-in-the-loop）
+    pub(crate) approval: ApprovalSubsystem,
     client: Arc<Client>,
     llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
     /// LLM 配置（可选，不设置时使用环境变量配置）
     llm_config: Option<LlmConfig>,
-    #[cfg(feature = "tasks")]
-    pub(crate) task_manager: Arc<TaskManager>,
-    #[cfg(feature = "human-loop")]
-    #[allow(deprecated)]
-    human_in_loop: Arc<RwLock<HumanApprovalManager>>,
-    #[cfg(feature = "human-loop")]
-    approval_provider: Arc<dyn HumanLoopProvider>,
-    /// Skill 注册表：管理 code-based 和 file-based skills
-    skill_registry: SkillRegistry,
-    /// Shared registry used by progressive-disclosure skill tools.
-    pub(crate) progressive_skill_registry: Option<SharedRegistry>,
-    /// Hook registry for skill-defined tool call interception
-    pub(crate) hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
-    /// 长期记忆 Store，通过 `remember`/`recall`/`forget` 工具访问
-    store: Option<Arc<dyn Store>>,
-    /// 线程状态存储，按 session_id 持久化 runtime source of truth
-    checkpointer: Option<Arc<dyn Checkpointer>>,
-    #[cfg(feature = "mcp")]
-    mcp_manager: McpManager,
-    /// 护栏管理器：对输入/输出进行安全过滤
-    pub(crate) guard_manager: Option<GuardManager>,
-    /// 权限策略：控制工具执行权限
-    pub(crate) permission_policy: Option<Arc<dyn crate::tools::permission::PermissionPolicy>>,
-    /// 统一权限服务：整合 mode/rules/hooks/classifier/handler
-    #[cfg(feature = "human-loop")]
-    pub(crate) permission_service: Option<Arc<PermissionService>>,
-    /// 在同步 setup 阶段登记、等待在异步运行阶段刷入 PermissionService 的规则
-    #[cfg(feature = "human-loop")]
-    pub(crate) pending_permission_rules: std::sync::Mutex<Vec<PermissionRule>>,
-    /// 审计日志记录器
-    pub(crate) audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
-    /// 状态快照管理器，支持每轮迭代自动快照和回滚
-    pub(crate) snapshot_manager: Option<SnapshotManager>,
-    /// 对话历史投影 Store，用于 transcript/history 持久化与浏览
-    pub(crate) conversation_store: Option<Arc<dyn crate::memory::conversation::ConversationStore>>,
-    /// 熔断器：LLM 持续不可用时快速失败，防止无效重试
-    pub(crate) circuit_breaker: Option<Arc<CircuitBreaker>>,
-    /// 沙箱管理器：为 skill 脚本执行提供安全隔离
-    pub(crate) sandbox_manager: Option<Arc<SandboxManager>>,
+    /// 当前流式请求的取消令牌，在 `chat_stream_with_cancel` / `execute_stream_with_cancel` 中设置。
+    /// `create_llm_stream` 读取此字段并传递给 HTTP 层以支持请求级别的流式中止。
+    /// 使用 `tokio::sync::Mutex` 以支持 `&self` 流式方法。
+    cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
 }
 
 // ── 构造与初始化 ──────────────────────────────────────────────────────────────
@@ -162,7 +129,7 @@ impl ReactAgent {
         self.config.enable_task
             && [TOOL_PLAN, TOOL_CREATE_TASK, TOOL_UPDATE_TASK]
                 .iter()
-                .all(|name| self.tool_manager.get_tool(name).is_some())
+                .all(|name| self.tools.tool_manager.get_tool(name).is_some())
     }
 
     #[cfg(not(feature = "tasks"))]
@@ -191,30 +158,26 @@ impl ReactAgent {
     /// - 技能注册表
     /// - Hook 系统
     pub fn new(config: AgentConfig) -> Self {
-        let system_prompt = if config.enable_tool && config.enable_cot {
-            format!(
-                "{}\n\n{}",
-                config.system_prompt.trim_end(),
-                Self::COT_INSTRUCTION,
-            )
-        } else {
-            config.system_prompt.clone()
-        };
+        let system_prompt = Self::build_system_prompt(&config);
 
-        let context = ContextManager::builder(config.token_limit)
-            .with_system(system_prompt)
-            .build();
+        let context = Arc::new(tokio::sync::Mutex::new(
+            ContextManager::builder(config.token_limit)
+                .with_system(system_prompt)
+                .build(),
+        ));
 
         let mut tool_manager = ToolManager::new_with_config(config.tool_execution.clone());
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
 
+        // ── 核心工具 ─────────────────────────────────────────────
         tool_manager.register(Box::new(FinalAnswerTool));
 
+        // ── 子模块初始化 ─────────────────────────────────────────
         #[cfg(feature = "tasks")]
         let task_manager = Arc::new(TaskManager::default());
-        #[cfg(feature = "human-loop")]
-        #[allow(deprecated)]
-        let human_in_loop = Arc::new(RwLock::new(HumanApprovalManager::default()));
         let subagent_registry = Arc::new(SubagentRegistry::new());
         let subagent_executor = Arc::new(SubagentExecutor::new(
             subagent_registry.clone(),
@@ -222,6 +185,16 @@ impl ReactAgent {
         ));
         #[cfg(feature = "human-loop")]
         let approval_provider = crate::human_loop::default_provider();
+
+        // ── 按功能注册工具 ───────────────────────────────────────
+        // AgentDispatch 由 runtime 配置 enable_subagent 控制
+        if config.enable_subagent {
+            tool_manager.register(Box::new(AgentDispatchTool::new(
+                subagent_executor.clone(),
+                config.agent_name.clone(),
+                CancellationToken::new(),
+            )));
+        }
 
         #[cfg(feature = "human-loop")]
         if config.enable_human_in_loop {
@@ -232,22 +205,145 @@ impl ReactAgent {
         if config.enable_task {
             tool_manager.register(Box::new(PlanTool));
             tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
-            tool_manager.register(Box::new(ListTasksTool::new(task_manager.clone())));
             tool_manager.register(Box::new(UpdateTaskTool::new(task_manager.clone())));
+            tool_manager.register(Box::new(ListTasksTool::new(task_manager.clone())));
             tool_manager.register(Box::new(VisualizeDependenciesTool::new(
                 task_manager.clone(),
             )));
             tool_manager.register(Box::new(GetExecutionOrderTool::new(task_manager.clone())));
         }
-        if config.enable_subagent {
-            tool_manager.register(Box::new(AgentDispatchTool::new(
-                subagent_executor.clone(),
-                config.agent_name.clone(),
-                CancellationToken::new(),
-            )));
+        Self::register_feature_gated_tools(&config, &mut tool_manager);
+
+        // ── 记忆存储 ─────────────────────────────────────────────
+        let store = Self::setup_memory_store(&config, &mut tool_manager);
+
+        // ── 检查点 ───────────────────────────────────────────────
+        let checkpointer = Self::setup_checkpointer(&config);
+
+        Self {
+            config,
+            tools: ToolExecutionSubsystem {
+                tool_manager,
+                subagent_registry,
+                #[cfg(feature = "tasks")]
+                task_manager,
+                skill_registry: SkillRegistry::new(),
+                progressive_skill_registry: None,
+                hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
+                #[cfg(feature = "mcp")]
+                mcp_manager: McpManager::new(),
+                sandbox_manager: None,
+            },
+            guard: GuardSubsystem {
+                guard_manager: None,
+                permission_policy: None,
+                audit_logger: None,
+                circuit_breaker: None,
+            },
+            memory: MemorySubsystem {
+                context,
+                store,
+                checkpointer,
+                snapshot_manager: Arc::new(std::sync::RwLock::new(None)),
+                conversation_store: None,
+            },
+            approval: ApprovalSubsystem {
+                #[cfg(feature = "human-loop")]
+                approval_provider,
+                #[cfg(feature = "human-loop")]
+                permission_service: None,
+                #[cfg(feature = "human-loop")]
+                pending_permission_rules: std::sync::Mutex::new(Vec::new()),
+            },
+            client: Arc::new(client),
+            llm_client: None,
+            llm_config: None,
+            cancel_token: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// 从配置文件创建 Agent
+    ///
+    /// 搜索 `echo-agent.yaml` 并加载配置。
+    ///
+    /// ```no_run
+    /// use echo_agent::agent::react::ReactAgent;
+    /// let agent = ReactAgent::from_config_file(None);
+    /// ```
+    pub fn from_config_file(path: Option<&str>) -> Self {
+        let app_config = crate::config::load_config(path);
+        Self::new(app_config.to_agent_config())
+    }
+
+    // ── 构造函数辅助方法 ─────────────────────────────────────────────────────────
+
+    fn build_system_prompt(config: &AgentConfig) -> String {
+        let mut prompt = if config.enable_tool && config.enable_cot {
+            format!(
+                "{}\n\n{}",
+                config.system_prompt.trim_end(),
+                Self::COT_INSTRUCTION,
+            )
+        } else {
+            config.system_prompt.clone()
+        };
+
+        #[cfg(feature = "project-rules")]
+        if config.auto_project_rules {
+            let wd = config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            prompt = echo_core::project_rules::inject_rules(&prompt, &wd);
         }
 
-        // 注册媒体工具（图片分析、PDF 处理、Excel、Word）— 仅在 enable_tool 时
+        prompt
+    }
+
+    fn register_feature_gated_tools(config: &AgentConfig, tool_manager: &mut ToolManager) {
+        #[cfg(feature = "git")]
+        if config.enable_tool {
+            use crate::tools::builtin::git::{
+                GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
+            };
+            tool_manager.register(Box::new(GitStatusTool));
+            tool_manager.register(Box::new(GitDiffTool));
+            tool_manager.register(Box::new(GitLogTool));
+            tool_manager.register(Box::new(GitBlameTool));
+            tool_manager.register(Box::new(GitBranchTool));
+            tool_manager.register(Box::new(GitCommitTool));
+        }
+
+        #[cfg(feature = "rag")]
+        if config.enable_tool {
+            use crate::tools::builtin::rag::{RagChunkDocumentTool, RagIndexTool, RagSearchTool};
+            tool_manager.register(Box::new(RagIndexTool));
+            tool_manager.register(Box::new(RagSearchTool));
+            tool_manager.register(Box::new(RagChunkDocumentTool));
+        }
+
+        #[cfg(feature = "chart")]
+        if config.enable_tool {
+            tool_manager.register(Box::new(crate::tools::builtin::chart::GenerateChartTool));
+        }
+
+        #[cfg(feature = "database")]
+        if config.enable_tool {
+            use crate::tools::builtin::database::{
+                DescribeTableTool, ListTablesTool, SqlQueryTool,
+            };
+            tool_manager.register(Box::new(SqlQueryTool));
+            tool_manager.register(Box::new(ListTablesTool));
+            tool_manager.register(Box::new(DescribeTableTool));
+        }
+
+        #[cfg(feature = "web")]
+        if config.enable_tool {
+            use crate::tools::builtin::browser::{WebExtractTool, WebFetchTool};
+            tool_manager.register(Box::new(WebFetchTool));
+            tool_manager.register(Box::new(WebExtractTool));
+        }
+
         if config.enable_tool {
             #[cfg(feature = "media")]
             {
@@ -275,12 +371,12 @@ impl ReactAgent {
                 tool_manager.register(Box::new(TextExportTool));
             }
 
-            // 注册数据处理工具
             #[cfg(feature = "data")]
             {
                 use crate::tools::builtin::data::{
-                    DataAggregateTool, DataExportTool, DataFilterTool, DataReadTool, DataStatsTool,
-                    DataTransformTool,
+                    DataAggregateTool, DataBinTool, DataContributionTool, DataExportTool,
+                    DataFilterTool, DataProfileTool, DataRatioTool, DataReadTool, DataStatsTool,
+                    DataTopNTool, DataTransformTool,
                 };
 
                 tool_manager.register(Box::new(DataReadTool));
@@ -289,96 +385,97 @@ impl ReactAgent {
                 tool_manager.register(Box::new(DataStatsTool));
                 tool_manager.register(Box::new(DataTransformTool));
                 tool_manager.register(Box::new(DataExportTool));
+                tool_manager.register(Box::new(DataProfileTool));
+                tool_manager.register(Box::new(DataTopNTool));
+                tool_manager.register(Box::new(DataContributionTool));
+                tool_manager.register(Box::new(DataBinTool));
+                tool_manager.register(Box::new(DataRatioTool));
             }
-        }
-
-        let store: Option<Arc<dyn Store>> = if config.enable_memory {
-            match FileStore::new(&config.memory_path) {
-                Ok(s) => {
-                    let store = Arc::new(s) as Arc<dyn Store>;
-                    let agent_name = config.agent_name.clone();
-                    let namespace = vec![agent_name, "memories".to_string()];
-                    tool_manager.register(Box::new(RememberTool::new(
-                        store.clone(),
-                        namespace.clone(),
-                    )));
-                    tool_manager
-                        .register(Box::new(RecallTool::new(store.clone(), namespace.clone())));
-                    tool_manager.register(Box::new(SearchMemoryTool::new(
-                        store.clone(),
-                        namespace.clone(),
-                    )));
-                    tool_manager.register(Box::new(ForgetTool::new(store.clone(), namespace)));
-                    Some(store)
-                }
-                Err(e) => {
-                    tracing::warn!("⚠️ 长期记忆 Store 初始化失败，记忆功能已禁用: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let checkpointer: Option<Arc<dyn Checkpointer>> = if config.session_id.is_some() {
-            match FileCheckpointer::new(&config.checkpointer_path) {
-                Ok(cp) => Some(Arc::new(cp)),
-                Err(e) => {
-                    tracing::warn!("⚠️ Checkpointer 初始化失败，会话恢复功能已禁用: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        Self {
-            config,
-            context,
-            tool_manager,
-            subagent_registry,
-            subagent_executor,
-            client: Arc::new(client),
-            llm_client: None,
-            llm_config: None,
-            #[cfg(feature = "tasks")]
-            task_manager,
-            #[cfg(feature = "human-loop")]
-            human_in_loop,
-            #[cfg(feature = "human-loop")]
-            approval_provider,
-            skill_registry: SkillRegistry::new(),
-            progressive_skill_registry: None,
-            hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
-            store,
-            checkpointer,
-            #[cfg(feature = "mcp")]
-            mcp_manager: McpManager::new(),
-            guard_manager: None,
-            permission_policy: None,
-            #[cfg(feature = "human-loop")]
-            permission_service: None,
-            #[cfg(feature = "human-loop")]
-            pending_permission_rules: std::sync::Mutex::new(Vec::new()),
-            audit_logger: None,
-            snapshot_manager: None,
-            conversation_store: None,
-            circuit_breaker: None,
-            sandbox_manager: None,
         }
     }
 
-    /// 从配置文件创建 Agent
+    fn setup_memory_store(
+        config: &AgentConfig,
+        tool_manager: &mut ToolManager,
+    ) -> Option<Arc<dyn Store>> {
+        if !config.enable_memory {
+            return None;
+        }
+        match FileStore::new(&config.memory_path) {
+            Ok(file_store) => {
+                let store: Arc<dyn Store> = Self::wrap_with_embedding_store_if_available(
+                    Arc::new(file_store),
+                    &config.memory_path,
+                );
+                let agent_name = config.agent_name.clone();
+                let namespace = vec![agent_name, "memories".to_string()];
+                tool_manager.register(Box::new(RememberTool::new(
+                    store.clone(),
+                    namespace.clone(),
+                )));
+                tool_manager.register(Box::new(RecallTool::new(store.clone(), namespace.clone())));
+                tool_manager.register(Box::new(SearchMemoryTool::new(
+                    store.clone(),
+                    namespace.clone(),
+                )));
+                tool_manager.register(Box::new(ForgetTool::new(store.clone(), namespace)));
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!("⚠️ 长期记忆 Store 初始化失败，记忆功能已禁用: {e}");
+                None
+            }
+        }
+    }
+
+    /// 当 embedding 环境变量配置存在时，用 [`EmbeddingStore`] 包装底层 Store，
+    /// 使 `remember` 写入自动向量化，`search_memory` 的混合检索真正生效。
     ///
-    /// 搜索 `echo-agent.yaml` 并加载配置。
-    ///
-    /// ```no_run
-    /// use echo_agent::agent::react::ReactAgent;
-    /// let agent = ReactAgent::from_config_file(None);
-    /// ```
-    pub fn from_config_file(path: Option<&str>) -> Self {
-        let app_config = crate::config::load_config(path);
-        Self::new(app_config.to_agent_config())
+    /// 若未配置 embedding，则直接返回原始 Store，保持原有行为。
+    fn wrap_with_embedding_store_if_available(
+        inner: Arc<dyn Store>,
+        memory_path: &str,
+    ) -> Arc<dyn Store> {
+        use crate::memory::{EmbeddingStore, HttpEmbedder};
+
+        if std::env::var("EMBEDDING_API_KEY").is_err()
+            && std::env::var("OPENAI_API_KEY").is_err()
+            && std::env::var("EMBEDDING_APIKEY").is_err()
+        {
+            tracing::info!("📚 记忆 Store: 纯关键词检索（未配置 embedding 环境变量）");
+            return inner;
+        }
+
+        let embedder = Arc::new(HttpEmbedder::from_env());
+        let vec_path = format!("{}.vecs.json", memory_path.trim_end_matches(".json"));
+
+        match EmbeddingStore::with_persistence(Arc::clone(&inner), embedder, &vec_path) {
+            Ok(embedding_store) => {
+                tracing::info!(
+                    vec_path = %vec_path,
+                    "🧠 记忆 Store: 已启用向量索引（语义/混合检索可用）"
+                );
+                Arc::new(embedding_store)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "⚠️ EmbeddingStore 初始化失败，回退到纯关键词检索"
+                );
+                inner
+            }
+        }
+    }
+
+    fn setup_checkpointer(config: &AgentConfig) -> Option<Arc<dyn Checkpointer>> {
+        config.session_id.as_ref()?;
+        match FileCheckpointer::new(&config.checkpointer_path) {
+            Ok(cp) => Some(Arc::new(cp)),
+            Err(e) => {
+                tracing::warn!("⚠️ Checkpointer 初始化失败，会话恢复功能已禁用: {e}");
+                None
+            }
+        }
     }
 
     // ── LLM 配置注入 ─────────────────────────────────────────────────────────────
@@ -445,7 +542,7 @@ impl ReactAgent {
 
     /// 注入自定义长期记忆 Store（仅替换自动注入通道，不重注册工具）
     pub fn set_store(&mut self, store: Arc<dyn Store>) {
-        self.store = Some(store);
+        self.memory.store = Some(store);
     }
 
     /// 替换长期记忆 Store，并重新注册 `remember` / `recall` / `forget` 工具
@@ -470,25 +567,29 @@ impl ReactAgent {
     /// ```
     pub fn set_memory_store(&mut self, store: Arc<dyn Store>) {
         let ns = vec![self.config.agent_name.clone(), "memories".to_string()];
-        self.tool_manager
+        self.tools
+            .tool_manager
             .register(Box::new(RememberTool::new(store.clone(), ns.clone())));
-        self.tool_manager
+        self.tools
+            .tool_manager
             .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
-        self.tool_manager
+        self.tools
+            .tool_manager
             .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
-        self.tool_manager
+        self.tools
+            .tool_manager
             .register(Box::new(ForgetTool::new(store.clone(), ns)));
-        self.store = Some(store);
+        self.memory.store = Some(store);
     }
 
     /// 获取当前长期记忆 Store 的只读引用
     pub fn store(&self) -> Option<&Arc<dyn Store>> {
-        self.store.as_ref()
+        self.memory.store.as_ref()
     }
 
     /// 注入线程状态存储并绑定 session_id，启用跨进程线程恢复
     pub fn set_checkpointer(&mut self, checkpointer: Arc<dyn Checkpointer>, session_id: String) {
-        self.checkpointer = Some(checkpointer);
+        self.memory.checkpointer = Some(checkpointer);
         self.config.session_id = Some(session_id);
     }
 
@@ -499,12 +600,12 @@ impl ReactAgent {
 
     /// 获取当前线程状态存储的只读引用
     pub fn checkpointer(&self) -> Option<&Arc<dyn Checkpointer>> {
-        self.checkpointer.as_ref()
+        self.memory.checkpointer.as_ref()
     }
 
     /// `checkpointer()` 的语义化别名。
     pub fn thread_store(&self) -> Option<&Arc<dyn Checkpointer>> {
-        self.checkpointer()
+        self.memory.checkpointer.as_ref()
     }
 
     /// 设置对话历史投影使用的 conversation_id。
@@ -518,18 +619,19 @@ impl ReactAgent {
     }
 
     /// 获取当前对话历史消息（只读）
-    pub fn get_messages(&self) -> &[crate::llm::types::Message] {
-        self.context.messages()
+    pub async fn get_messages(&self) -> Vec<crate::llm::types::Message> {
+        self.memory.context.lock().await.messages().to_vec()
     }
 
     /// 获取已注册的工具名称列表
     pub fn tool_names(&self) -> Vec<&str> {
-        self.tool_manager.list_tools()
+        self.tools.tool_manager.list_tools()
     }
 
     /// 获取已注册的 Skill 名称列表
     pub fn skill_names(&self) -> Vec<&str> {
-        self.skill_registry
+        self.tools
+            .skill_registry
             .list()
             .iter()
             .map(|s| s.name.as_str())
@@ -539,7 +641,7 @@ impl ReactAgent {
     /// 获取已连接的 MCP 服务端名称列表
     #[cfg(feature = "mcp")]
     pub fn mcp_server_names(&self) -> Vec<&str> {
-        self.mcp_manager.server_names()
+        self.tools.mcp_manager.server_names()
     }
 
     #[cfg(not(feature = "mcp"))]
@@ -551,12 +653,12 @@ impl ReactAgent {
     ///
     /// LLM 连续失败达到阈值后自动熔断，等待 timeout 后恢复探测。
     pub fn set_circuit_breaker(&mut self, config: CircuitBreakerConfig) {
-        self.circuit_breaker = Some(Arc::new(CircuitBreaker::new(config)));
+        self.guard.circuit_breaker = Some(Arc::new(CircuitBreaker::new(config)));
     }
 
     /// 设置护栏管理器
     pub fn set_guard_manager(&mut self, manager: GuardManager) {
-        self.guard_manager = Some(manager);
+        self.guard.guard_manager = Some(manager);
     }
 
     /// 设置权限策略
@@ -564,16 +666,16 @@ impl ReactAgent {
         &mut self,
         policy: Arc<dyn crate::tools::permission::PermissionPolicy>,
     ) {
-        self.permission_policy = Some(policy);
+        self.guard.permission_policy = Some(policy);
     }
 
     #[cfg(feature = "human-loop")]
     /// 设置统一权限服务
     ///
     /// 一旦设置，`check_tool_approval()` 将优先使用此服务，
-    /// 回退到旧的 PermissionPolicy + HumanApprovalManager 逻辑。
+    /// 回退到旧的 PermissionPolicy 逻辑。
     pub fn set_permission_service(&mut self, service: Arc<PermissionService>) {
-        self.permission_service = Some(service);
+        self.approval.permission_service = Some(service);
     }
 
     #[cfg(feature = "human-loop")]
@@ -584,8 +686,8 @@ impl ReactAgent {
     pub fn build_permission_service(&mut self) {
         use crate::human_loop::service::PermissionService;
 
-        let policy = self.permission_policy.take();
-        let provider = self.approval_provider.clone();
+        let policy = self.guard.permission_policy.take();
+        let provider = self.approval.approval_provider.clone();
 
         let service = PermissionService::from_provider(provider);
         let service = if let Some(p) = policy {
@@ -594,83 +696,116 @@ impl ReactAgent {
             service
         };
 
-        self.permission_service = Some(Arc::new(service));
+        self.approval.permission_service = Some(Arc::new(service));
     }
 
     /// 设置审计日志记录器
     pub fn set_audit_logger(&mut self, logger: Arc<dyn crate::audit::AuditLogger>) {
-        self.audit_logger = Some(logger);
+        self.guard.audit_logger = Some(logger);
     }
 
     // ── 快照 & 回滚 ──────────────────────────────────────────────────────────
 
     /// 设置沙箱管理器，为 skill 脚本执行提供安全隔离
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
-        self.skill_registry.set_sandbox_manager(manager.clone());
-        if let Some(shared) = &self.progressive_skill_registry
+        self.tools
+            .skill_registry
+            .set_sandbox_manager(manager.clone());
+        if let Some(shared) = &self.tools.progressive_skill_registry
             && let Ok(mut registry) = shared.try_write()
         {
             registry.set_sandbox_manager(manager.clone());
         }
-        if let Ok(mut hooks) = self.hook_registry.try_write() {
+        if let Ok(mut hooks) = self.tools.hook_registry.try_write() {
             hooks.set_sandbox_manager(manager.clone());
         }
-        self.sandbox_manager = Some(manager);
+        self.tools.sandbox_manager = Some(manager);
     }
 
     /// 启用状态快照功能
-    pub fn set_snapshot_manager(&mut self, manager: SnapshotManager) {
-        self.snapshot_manager = Some(manager);
+    pub fn set_snapshot_manager(&self, manager: SnapshotManager) {
+        let mut guard = self
+            .memory
+            .snapshot_manager
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(manager);
     }
 
     /// 手动捕获一份当前对话状态的快照，返回快照 ID
-    pub fn snapshot(&mut self) -> Option<String> {
-        let messages = self.context.messages();
-        self.snapshot_manager
-            .as_mut()
-            .map(|mgr| mgr.capture(0, messages))
+    pub async fn snapshot(&self) -> Option<String> {
+        let ctx = self.memory.context.lock().await;
+        let messages = ctx.messages().to_vec();
+        let mut guard = self
+            .memory
+            .snapshot_manager
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.as_mut().map(|mgr| mgr.capture(0, &messages))
     }
 
     /// 回滚到 N 步之前的快照
     ///
     /// `steps_back = 1` 表示回到最近一次快照。
     /// 成功时恢复对话历史并返回快照信息。
-    pub fn rollback(&mut self, steps_back: usize) -> Option<StateSnapshot> {
-        let snapshot = self
-            .snapshot_manager
-            .as_mut()
-            .and_then(|mgr| mgr.rollback(steps_back))?;
-        self.context.clear();
+    pub async fn rollback(&self, steps_back: usize) -> Option<StateSnapshot> {
+        let snapshot = {
+            let mut guard = self
+                .memory
+                .snapshot_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.as_mut().and_then(|mgr| mgr.rollback(steps_back))
+        };
+        let snapshot = snapshot?;
+        let mut ctx = self.memory.context.lock().await;
+        ctx.clear();
         for msg in &snapshot.messages {
-            self.context.push(msg.clone());
+            ctx.push(msg.clone());
         }
         Some(snapshot)
     }
 
     /// 回滚到指定 ID 的快照
-    pub fn rollback_to(&mut self, snapshot_id: &str) -> Option<StateSnapshot> {
-        let snapshot = self
-            .snapshot_manager
-            .as_mut()
-            .and_then(|mgr| mgr.rollback_to(snapshot_id))?;
-        self.context.clear();
+    pub async fn rollback_to(&self, snapshot_id: &str) -> Option<StateSnapshot> {
+        let snapshot = {
+            let mut guard = self
+                .memory
+                .snapshot_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.as_mut().and_then(|mgr| mgr.rollback_to(snapshot_id))
+        };
+        let snapshot = snapshot?;
+        let mut ctx = self.memory.context.lock().await;
+        ctx.clear();
         for msg in &snapshot.messages {
-            self.context.push(msg.clone());
+            ctx.push(msg.clone());
         }
         Some(snapshot)
     }
 
     /// 获取所有快照列表
-    pub fn snapshots(&self) -> &[StateSnapshot] {
-        self.snapshot_manager
+    pub fn snapshots(&self) -> Vec<StateSnapshot> {
+        let guard = self
+            .memory
+            .snapshot_manager
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
             .as_ref()
-            .map(|mgr| mgr.list())
-            .unwrap_or(&[])
+            .map(|mgr| mgr.list().to_vec())
+            .unwrap_or_default()
     }
 
     /// 获取最新快照
-    pub fn latest_snapshot(&self) -> Option<&StateSnapshot> {
-        self.snapshot_manager.as_ref().and_then(|mgr| mgr.latest())
+    pub fn latest_snapshot(&self) -> Option<StateSnapshot> {
+        let guard = self
+            .memory
+            .snapshot_manager
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().and_then(|mgr| mgr.latest().cloned())
     }
 
     #[cfg(feature = "human-loop")]
@@ -685,9 +820,10 @@ impl ReactAgent {
     /// 同时更新 `approval_provider`（工具审批 guard）和 `human_in_loop` 内置工具（LLM
     /// 主动触发），保证两者始终指向同一个 provider。
     pub fn set_human_loop_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
-        self.approval_provider = provider.clone();
-        if self.tool_manager.get_tool("human_in_loop").is_some() {
-            self.tool_manager
+        self.approval.approval_provider = provider.clone();
+        if self.tools.tool_manager.get_tool("human_in_loop").is_some() {
+            self.tools
+                .tool_manager
                 .register(Box::new(HumanInLoop::new(provider)));
         }
     }
@@ -705,25 +841,25 @@ impl ReactAgent {
         &mut self,
         store: Arc<dyn crate::memory::conversation::ConversationStore>,
     ) {
-        self.conversation_store = Some(store);
+        self.memory.conversation_store = Some(store);
     }
 
     /// 加载历史消息到 agent 上下文（替换现有上下文）
     ///
     /// 用于从持久化存储恢复对话，使 agent 可以继续之前的对话。
     /// 消息应包含 system prompt 作为第一条（如需要）。
-    pub fn load_messages(&mut self, messages: Vec<crate::llm::types::Message>) {
-        self.context.set_messages(messages);
+    pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) {
+        self.memory.context.lock().await.set_messages(messages);
     }
 
     /// 关闭 agent 并释放所有资源
     ///
     /// 关闭 MCP 连接、取消后台任务、关闭 WebSocket 服务器。
     /// 当 agent 不再需要时应调用此方法，或依赖 `Drop` 自动调用。
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&self) {
         #[cfg(feature = "mcp")]
         {
-            self.mcp_manager.close_all().await;
+            self.tools.mcp_manager.close_all().await;
         }
         // Close WebSocket servers if any (placeholder for future WS integration)
         info!(agent = %self.config.agent_name, "Agent shut down complete");
@@ -738,7 +874,8 @@ impl Drop for ReactAgent {
         {
             // MCP cleanup is async, but Drop is synchronous.
             // Only spawn cleanup when a Tokio runtime is available.
-            let mcp_mgr = std::mem::replace(&mut self.mcp_manager, crate::mcp::McpManager::new());
+            let mcp_mgr =
+                std::mem::replace(&mut self.tools.mcp_manager, crate::mcp::McpManager::new());
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     mcp_mgr.close_all().await;
@@ -767,40 +904,110 @@ impl Agent for ReactAgent {
         &self.config.system_prompt
     }
 
-    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async move {
-            #[cfg(feature = "tasks")]
-            if self.has_planning_tools() {
-                return self.execute_with_planning(task).await;
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move {
+                #[cfg(feature = "tasks")]
+                if self.has_planning_tools() {
+                    return self.execute_with_planning(task).await;
+                }
+                self.run_direct(task).await
             }
-            self.run_direct(task).await
-        })
+            .instrument(info_span!("agent_execute", agent.name = %agent, agent.model = %model)),
+        )
     }
 
     fn execute_stream<'a>(
-        &'a mut self,
+        &'a self,
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move { self.run_stream(task, run::StreamMode::Execute).await })
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move { self.run_stream(task, run::StreamMode::Execute).await }.instrument(
+                info_span!("agent_execute_stream", agent.name = %agent, agent.model = %model),
+            ),
+        )
     }
 
-    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
-        Box::pin(async move { self.run_chat_direct(message).await })
+    fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move { self.run_chat_direct(message).await }
+                .instrument(info_span!("agent_chat", agent.name = %agent, agent.model = %model)),
+        )
     }
 
     fn chat_stream<'a>(
-        &'a mut self,
+        &'a self,
         message: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        Box::pin(async move { self.run_stream(message, run::StreamMode::Chat).await })
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move { self.run_stream(message, run::StreamMode::Chat).await }.instrument(
+                info_span!("agent_chat_stream", agent.name = %agent, agent.model = %model),
+            ),
+        )
     }
 
-    fn reset(&mut self) {
-        self.reset_messages();
+    fn chat_stream_with_cancel<'a>(
+        &'a self,
+        _message: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move {
+                *self.cancel_token.lock().await = Some(cancel.clone());
+                // Delegate to the Agent trait's default implementation
+                // which wraps chat_stream with cancellation
+                <Self as Agent>::chat_stream_with_cancel(self, _message, cancel).await
+            }
+            .instrument(info_span!("agent_chat_stream_with_cancel", agent.name = %agent, agent.model = %model)),
+        )
+    }
+
+    fn execute_stream_with_cancel<'a>(
+        &'a self,
+        _task: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move {
+                *self.cancel_token.lock().await = Some(cancel.clone());
+                <Self as Agent>::execute_stream_with_cancel(self, _task, cancel).await
+            }
+            .instrument(info_span!("agent_execute_stream_with_cancel", agent.name = %agent, agent.model = %model)),
+        )
+    }
+
+    fn reset(&self) {
+        match self.memory.context.try_lock() {
+            Ok(mut ctx) => {
+                ctx.clear();
+                ctx.push(crate::llm::types::Message::system(
+                    self.config.system_prompt.clone(),
+                ));
+            }
+            Err(_) => {
+                warn!(
+                    agent = %self.config.agent_name,
+                    "Cannot reset: context locked by active stream"
+                );
+            }
+        }
     }
 
     fn tool_names(&self) -> Vec<String> {
-        self.tool_manager
+        self.tools
+            .tool_manager
             .list_tools()
             .into_iter()
             .filter(|n| *n != TOOL_FINAL_ANSWER)
@@ -810,7 +1017,8 @@ impl Agent for ReactAgent {
 
     /// 获取工具定义列表（包含名称、描述、参数 Schema）
     fn tool_definitions(&self) -> Vec<crate::llm::types::ToolDefinition> {
-        self.tool_manager
+        self.tools
+            .tool_manager
             .get_tool_definitions()
             .into_iter()
             .filter(|d| d.function.name != TOOL_FINAL_ANSWER)
@@ -819,13 +1027,14 @@ impl Agent for ReactAgent {
 
     fn skill_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
+            .tools
             .skill_registry
             .list()
             .into_iter()
             .map(|s| s.name.clone())
             .collect();
         // Also include file-based skill names
-        for desc in self.skill_registry.list_descriptors() {
+        for desc in self.tools.skill_registry.list_descriptors() {
             if !names.contains(&desc.name) {
                 names.push(desc.name.clone());
             }
@@ -836,7 +1045,8 @@ impl Agent for ReactAgent {
     fn mcp_server_names(&self) -> Vec<String> {
         #[cfg(feature = "mcp")]
         {
-            self.mcp_manager
+            self.tools
+                .mcp_manager
                 .server_names()
                 .into_iter()
                 .map(|s| s.to_string())
@@ -848,10 +1058,10 @@ impl Agent for ReactAgent {
         }
     }
 
-    fn close(&mut self) -> BoxFuture<'_, ()> {
+    fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             #[cfg(feature = "mcp")]
-            self.mcp_manager.close_all().await;
+            self.tools.mcp_manager.close_all().await;
         })
     }
 }
@@ -859,6 +1069,30 @@ impl Agent for ReactAgent {
 // ── ReactAgent 多模态扩展方法 ────────────────────────────────────────────────────
 
 impl ReactAgent {
+    /// 流式多轮对话（多模态消息版本）
+    ///
+    /// 与 `chat_stream` 相同，但接受预构建的 `Message` 以支持图片、文件等附件。
+    /// 保留上下文，适合多轮多模态对话。
+    pub async fn chat_stream_message(
+        &self,
+        message: crate::llm::types::Message,
+    ) -> Result<futures::stream::BoxStream<'_, Result<AgentEvent>>> {
+        self.run_stream_with_message(message, run::StreamMode::Chat)
+            .await
+    }
+
+    /// 流式执行任务（多模态消息版本）
+    ///
+    /// 与 `execute_stream` 相同，但接受预构建的 `Message` 以支持图片、文件等附件。
+    /// 重置上下文，适合单轮多模态任务。
+    pub async fn execute_stream_message(
+        &self,
+        message: crate::llm::types::Message,
+    ) -> Result<futures::stream::BoxStream<'_, Result<AgentEvent>>> {
+        self.run_stream_with_message(message, run::StreamMode::Execute)
+            .await
+    }
+
     /// 发送带图片 URL 的消息（多模态）
     ///
     /// 直接将图片 URL 作为 `image_url` part 发送给 LLM。
@@ -878,7 +1112,7 @@ impl ReactAgent {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn chat_with_image_url(&mut self, text: &str, image_url: &str) -> Result<String> {
+    pub async fn chat_with_image_url(&self, text: &str, image_url: &str) -> Result<String> {
         use crate::llm::types::{ContentPart, ImageUrl, Message};
 
         let message = Message::user_multimodal(vec![
@@ -926,21 +1160,26 @@ impl ReactAgent {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn chat_multimodal(&mut self, message: crate::llm::types::Message) -> Result<String> {
+    pub async fn chat_multimodal(&self, message: crate::llm::types::Message) -> Result<String> {
         use crate::llm::{ChatRequest, chat};
 
         // 确保上下文已初始化（包含 system prompt）
-        if self.context.messages().is_empty() {
-            self.context.push(crate::llm::types::Message::system(
-                self.config.system_prompt.clone(),
-            ));
+        {
+            let mut ctx = self.memory.context.lock().await;
+            if ctx.messages().is_empty() {
+                ctx.push(crate::llm::types::Message::system(
+                    self.config.system_prompt.clone(),
+                ));
+            }
+            // 添加多模态用户消息
+            ctx.push(message.clone());
         }
 
-        // 添加多模态用户消息
-        self.context.push(message.clone());
-
         // 准备消息列表
-        let messages = self.context.messages().to_vec();
+        let messages = {
+            let ctx = self.memory.context.lock().await;
+            ctx.messages().to_vec()
+        };
 
         let content = if let Some(llm_client) = &self.llm_client {
             let response = llm_client
@@ -951,6 +1190,7 @@ impl ReactAgent {
                     tools: None,
                     tool_choice: None,
                     response_format: None,
+                    cancel_token: None,
                 })
                 .await?;
             response.content().unwrap_or_default()
@@ -976,7 +1216,10 @@ impl ReactAgent {
         };
 
         // 添加助手回复到上下文
-        self.context
+        self.memory
+            .context
+            .lock()
+            .await
             .push(crate::llm::types::Message::assistant(content.clone()));
 
         Ok(content)
@@ -996,11 +1239,11 @@ impl ReactAgent {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn execute_with_image_url(&mut self, task: &str, image_url: &str) -> Result<String> {
+    pub async fn execute_with_image_url(&self, task: &str, image_url: &str) -> Result<String> {
         use crate::llm::types::{ContentPart, ImageUrl, Message};
 
         // 重置上下文
-        self.reset_messages();
+        self.reset_messages().await;
 
         let message = Message::user_multimodal(vec![
             ContentPart::Text {

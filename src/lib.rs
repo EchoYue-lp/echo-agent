@@ -114,6 +114,10 @@ pub mod telemetry;
 #[cfg(feature = "topology")]
 pub mod topology;
 
+// Re-export project_rules from echo_core when feature enabled
+#[cfg(feature = "project-rules")]
+pub use echo_core::project_rules;
+
 // ── 声明式宏 ─────────────────────────────────────────────────────────────────
 
 mod macros;
@@ -168,7 +172,7 @@ pub mod prelude {
     pub use crate::tools::permission::{
         DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
     };
-    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, TypedTool};
+    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
 
     // Web Tools
     #[cfg(feature = "web")]
@@ -266,7 +270,7 @@ pub mod advanced {
     pub use crate::channels::AgentChannelHandler;
 
     #[cfg(feature = "telemetry")]
-    pub use crate::telemetry::{TelemetryConfig, init_telemetry, shutdown_telemetry};
+    pub use crate::telemetry::{Metrics, TelemetryConfig, init_telemetry, shutdown_telemetry};
 
     #[cfg(feature = "handoff")]
     pub use crate::handoff::{
@@ -282,7 +286,8 @@ pub mod advanced {
     #[cfg(feature = "a2a")]
     pub use crate::a2a::{
         A2AClient, A2AServer, A2AStreamEvent, AgentCapabilities, AgentCard, AgentProvider,
-        AgentSkill, TaskState,
+        AgentSkill, JwtClaims, JwtConfig, TaskState, get_claims, serve, serve_from_config,
+        serve_from_config_with_auth, serve_with_auth,
     };
 
     #[cfg(feature = "topology")]

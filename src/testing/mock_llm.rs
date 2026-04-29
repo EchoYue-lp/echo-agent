@@ -240,9 +240,11 @@ impl LlmClient for MockLlmClient {
                             delta: DeltaMessage {
                                 role: Some("assistant".to_string()),
                                 content: Some(text),
+                                reasoning_content: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("stop".to_string()),
+                            usage: None,
                         })
                     });
                     Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
@@ -267,9 +269,11 @@ impl LlmClient for MockLlmClient {
                             delta: DeltaMessage {
                                 role: Some("assistant".to_string()),
                                 content: None,
+                                reasoning_content: None,
                                 tool_calls: Some(delta_calls),
                             },
                             finish_reason: Some("tool_calls".to_string()),
+                            usage: None,
                         })
                     });
                     Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)

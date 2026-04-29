@@ -1,14 +1,16 @@
 [package]
 name = "echo_state"
-version = "1.5.0"
+version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "State management for echo-agent framework (memory, compression, audit)"
+repository = "https://github.com/EchoYue-lp/echo-agent"
 
 [features]
 sqlite = ["dep:rusqlite"]
 
 [dependencies]
-echo_core = { version = "1.5.0", path = "../echo-core" }
+echo_core = { version = "0.1.0", path = "../echo-core" }
 # From echo-memory
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -24,4 +26,4 @@ reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 # echo_integration and reqwest needed for compression tests (#[ignore] by default)
-echo_integration = { version = "1.5.0", path = "../echo-integration" }
+echo_integration = { version = "0.1.0", path = "../echo-integration" }

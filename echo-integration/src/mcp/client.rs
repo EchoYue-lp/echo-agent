@@ -493,7 +493,10 @@ impl McpClient {
             .map(|c| match c {
                 McpContent::Text { text } => text.clone(),
                 McpContent::Image { mime_type, .. } => format!("[图片: {}]", mime_type),
-                McpContent::Resource { resource } => format!("[资源: {}]", resource.uri),
+                McpContent::Resource { resource } => {
+                    let name = resource.name.as_deref().unwrap_or("unnamed");
+                    format!("[资源: {} ({})]", name, resource.uri)
+                }
                 McpContent::Audio { mime_type, .. } => format!("[音频: {}]", mime_type),
             })
             .collect::<Vec<_>>()

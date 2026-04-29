@@ -5,15 +5,26 @@
 
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::types::{
-    DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message, ToolCall,
+    ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message,
+    MessageContent, ToolCall,
 };
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
+use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::{Instrument, info_span};
+
+fn is_retryable(err: &LlmError) -> bool {
+    match err {
+        LlmError::NetworkError(_) => true,
+        LlmError::ApiError { status, .. } => *status == 429 || *status >= 500,
+        _ => false,
+    }
+}
 
 pub struct AnthropicClient {
     client: Arc<Client>,
@@ -25,7 +36,7 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(Self::build_http_client()),
             api_key: api_key.into(),
             model: model.into(),
             base_url: "https://api.anthropic.com/v1/messages".to_string(),
@@ -38,11 +49,18 @@ impl AnthropicClient {
         model: impl Into<String>,
     ) -> Self {
         Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(Self::build_http_client()),
             api_key: api_key.into(),
             model: model.into(),
             base_url: base_url.into(),
         }
+    }
+
+    fn build_http_client() -> Client {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default()
     }
 
     fn convert_request(&self, request: &ChatRequest) -> AnthropicRequest {
@@ -91,9 +109,34 @@ impl AnthropicClient {
                 continue;
             }
 
+            let content = match &msg.content {
+                MessageContent::Parts(parts) => {
+                    let blocks: Vec<ContentBlock> = parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            ContentPart::Text { text } => {
+                                Some(ContentBlock::Text { text: text.clone() })
+                            }
+                            ContentPart::ImageUrl { image_url } => Some(ContentBlock::Image {
+                                source: data_url_to_image_source(&image_url.url),
+                            }),
+                            ContentPart::File { name, .. } => Some(ContentBlock::Text {
+                                text: format!("\n[附件: {name}]"),
+                            }),
+                        })
+                        .collect();
+                    if blocks.is_empty() {
+                        AnthropicContent::Text(String::new())
+                    } else {
+                        AnthropicContent::Blocks(blocks)
+                    }
+                }
+                _ => AnthropicContent::Text(msg.content.as_text().unwrap_or_default()),
+            };
+
             messages.push(AnthropicMessage {
                 role: msg.role.clone(),
-                content: AnthropicContent::Text(msg.content.as_text().unwrap_or_default()),
+                content,
             });
         }
 
@@ -161,6 +204,7 @@ impl AnthropicClient {
             },
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         };
 
         ChatResponse {
@@ -173,67 +217,101 @@ impl AnthropicClient {
 
 impl LlmClient for AnthropicClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
-        Box::pin(async move {
-            let body = self.convert_request(&request);
+        let model = self.model.clone();
+        Box::pin(
+            async move {
+                let body = self.convert_request(&request);
 
-            let resp = self
-                .client
-                .post(&self.base_url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+                let policy = RetryPolicy::default();
+                let resp = with_retry_if(
+                    &policy,
+                    || {
+                        let client = self.client.clone();
+                        let base_url = self.base_url.clone();
+                        let api_key = self.api_key.clone();
+                        let body = &body;
+                        async move {
+                            let resp = client
+                                .post(&base_url)
+                                .header("x-api-key", &api_key)
+                                .header("anthropic-version", "2023-06-01")
+                                .header("content-type", "application/json")
+                                .json(body)
+                                .send()
+                                .await
+                                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(LlmError::ApiError {
-                    status: status.as_u16(),
-                    message: text,
-                }
-                .into());
+                            let status = resp.status();
+                            if !status.is_success() {
+                                let text = resp.text().await.unwrap_or_default();
+                                return Err(LlmError::ApiError {
+                                    status: status.as_u16(),
+                                    message: text,
+                                });
+                            }
+
+                            Ok(resp)
+                        }
+                    },
+                    is_retryable,
+                )
+                .await?;
+
+                let anthropic_resp: AnthropicResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| LlmError::NetworkError(format!("Response parse error: {e}")))?;
+
+                Ok(self.convert_response(anthropic_resp))
             }
-
-            let anthropic_resp: AnthropicResponse = resp
-                .json()
-                .await
-                .map_err(|e| LlmError::NetworkError(format!("Response parse error: {e}")))?;
-
-            Ok(self.convert_response(anthropic_resp))
-        })
+            .instrument(info_span!("anthropic_chat", model = %model)),
+        )
     }
 
     fn chat_stream(
         &self,
         request: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
-        Box::pin(async move {
+        let model = self.model.clone();
+        Box::pin(
+            async move {
             let mut body = self.convert_request(&request);
             body.stream = Some(true);
 
-            let resp = self
-                .client
-                .post(&self.base_url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+            let policy = RetryPolicy::default();
+            let resp = with_retry_if(
+                &policy,
+                || {
+                    let client = self.client.clone();
+                    let base_url = self.base_url.clone();
+                    let api_key = self.api_key.clone();
+                    let body = &body;
+                    async move {
+                        let resp = client
+                            .post(&base_url)
+                            .header("x-api-key", &api_key)
+                            .header("anthropic-version", "2023-06-01")
+                            .header("content-type", "application/json")
+                            .json(body)
+                            .send()
+                            .await
+                            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(LlmError::ApiError {
-                    status: status.as_u16(),
-                    message: text,
-                }
-                .into());
-            }
+                        let status = resp.status();
+                        if !status.is_success() {
+                            let text = resp.text().await.unwrap_or_default();
+                            return Err(LlmError::ApiError {
+                                status: status.as_u16(),
+                                message: text,
+                            });
+                        }
+
+                        Ok(resp)
+                    }
+                },
+                is_retryable,
+            )
+            .await?;
 
             let byte_stream = resp.bytes_stream();
             let mut buffer = String::new();
@@ -244,6 +322,13 @@ impl LlmClient for AnthropicClient {
             let stream = async_stream::stream! {
                 let mut byte_stream = std::pin::pin!(byte_stream);
                 while let Some(chunk_result) = byte_stream.next().await {
+                    // Check for cancellation
+                    if let Some(ref ct) = request.cancel_token
+                        && ct.is_cancelled() {
+                            tracing::info!("Anthropic stream cancelled by caller");
+                            return;
+                        }
+
                     let chunk = match chunk_result {
                         Ok(c) => c,
                         Err(e) => {
@@ -289,9 +374,11 @@ impl LlmClient for AnthropicClient {
                                                 delta: DeltaMessage {
                                                     role: Some("assistant".to_string()),
                                                     content: Some(text),
+                                                    reasoning_content: None,
                                                     tool_calls: None,
                                                 },
                                                 finish_reason: None,
+                                                usage: None,
                                             });
                                         } else if let Some(partial) = delta.partial_json {
                                             // Accumulate tool_use arguments
@@ -312,6 +399,7 @@ impl LlmClient for AnthropicClient {
                                                 delta: DeltaMessage {
                                                     role: None,
                                                     content: None,
+                                                    reasoning_content: None,
                                                     tool_calls: Some(vec![DeltaToolCall {
                                                         index: index as u32,
                                                         id: Some(id),
@@ -325,6 +413,7 @@ impl LlmClient for AnthropicClient {
                                                     }]),
                                                 },
                                                 finish_reason: None,
+                                                usage: None,
                                             });
                                         }
                                     }
@@ -338,9 +427,11 @@ impl LlmClient for AnthropicClient {
                                             delta: DeltaMessage {
                                                 role: None,
                                                 content: None,
+                                                reasoning_content: None,
                                                 tool_calls: None,
                                             },
                                             finish_reason: finish,
+                                            usage: None,
                                         });
                                     }
                                     _ => {}
@@ -352,7 +443,9 @@ impl LlmClient for AnthropicClient {
             };
 
             Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
-        })
+        }
+        .instrument(info_span!("anthropic_chat_stream", model = %model)),
+        )
     }
 
     fn model_name(&self) -> &str {
@@ -395,6 +488,8 @@ enum AnthropicContent {
 enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -406,6 +501,35 @@ enum ContentBlock {
         tool_use_id: String,
         content: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ImageSource {
+    Base64 {
+        media_type: String,
+        data: String,
+    },
+    #[serde(rename = "url")]
+    Url_ {
+        url: String,
+    },
+}
+
+/// 将 data URL 解析为 Anthropic ImageSource
+fn data_url_to_image_source(url: &str) -> ImageSource {
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((media_type, b64_data)) = rest.split_once(';')
+        && let Some(data) = b64_data.strip_prefix("base64,")
+    {
+        return ImageSource::Base64 {
+            media_type: media_type.to_string(),
+            data: data.to_string(),
+        };
+    }
+    ImageSource::Url_ {
+        url: url.to_string(),
+    }
 }
 
 #[derive(Serialize)]

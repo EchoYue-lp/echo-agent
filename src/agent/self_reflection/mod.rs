@@ -58,7 +58,7 @@ use crate::agent::{Agent, AgentEvent};
 use crate::error::Result;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "plan-execute")]
@@ -75,11 +75,11 @@ pub struct SelfReflectionAgent<C: Critic> {
     pass_threshold: f64,
     refinement_prompt_builder: Box<dyn RefinementPromptBuilder>,
     reflection_prompt_builder: Box<dyn ReflectionPromptBuilder>,
-    episodic_memory: std::collections::VecDeque<ReflectionExperience>,
+    episodic_memory: RwLock<std::collections::VecDeque<ReflectionExperience>>,
     memory_limit: usize,
     store: Option<Arc<dyn ReflectionStore>>,
     /// Pending records for batch persistence
-    pending_records: Vec<(String, Vec<ReflectionRecord>)>,
+    pending_records: RwLock<Vec<(String, Vec<ReflectionRecord>)>>,
 }
 
 impl<C: Critic> SelfReflectionAgent<C> {
@@ -103,10 +103,10 @@ impl<C: Critic> SelfReflectionAgent<C> {
             pass_threshold: 7.0,
             refinement_prompt_builder: Box::new(DefaultRefinementPromptBuilder),
             reflection_prompt_builder: Box::new(DefaultReflectionPromptBuilder),
-            episodic_memory: std::collections::VecDeque::with_capacity(10),
+            episodic_memory: RwLock::new(std::collections::VecDeque::with_capacity(10)),
             memory_limit: 10,
             store: None,
-            pending_records: Vec::new(),
+            pending_records: RwLock::new(Vec::new()),
         }
     }
 
@@ -153,7 +153,7 @@ impl<C: Critic> SelfReflectionAgent<C> {
     }
 
     /// 核心执行循环
-    async fn run_reflection_loop(&mut self, task: &str) -> Result<String> {
+    async fn run_reflection_loop(&self, task: &str) -> Result<String> {
         let agent = self.name.clone();
 
         // ── 阶段 1: 生成初始响应 ──────────────────────────────────────
@@ -262,11 +262,13 @@ impl<C: Critic> SelfReflectionAgent<C> {
 
     /// 构建情景记忆上下文文本
     fn build_memory_context(&self) -> String {
-        if self.episodic_memory.is_empty() {
+        if self.episodic_memory.read().unwrap().is_empty() {
             return String::new();
         }
 
         self.episodic_memory
+            .read()
+            .unwrap()
             .iter()
             .enumerate()
             .map(|(i, exp)| format!("{}. {}", i + 1, exp.lesson))
@@ -293,7 +295,7 @@ impl<C: Critic> SelfReflectionAgent<C> {
     }
 
     /// 从反思记录中提取经验教训
-    fn extract_experience(&mut self, records: &[ReflectionRecord]) {
+    fn extract_experience(&self, records: &[ReflectionRecord]) {
         for r in records {
             if r.critique.passed {
                 continue;
@@ -321,25 +323,24 @@ impl<C: Critic> SelfReflectionAgent<C> {
                 .unwrap_or_else(|| "未识别具体错误模式".to_string());
 
             // 去重：如果已有相似经验则增加引用计数
-            let similar = self.episodic_memory.iter_mut().find(|e| e.lesson == lesson);
-            if let Some(existing) = similar {
-                existing.use_count += 1;
-            } else {
-                // If at capacity, remove the entry with the lowest use_count before adding new one
-                if self.episodic_memory.len() >= self.memory_limit {
-                    // Find and remove the entry with the lowest use_count
-                    if let Some((min_idx, _)) = self
-                        .episodic_memory
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, e)| e.use_count)
+            let _found = {
+                let mut memory = self.episodic_memory.write().unwrap();
+                let similar = memory.iter_mut().find(|e| e.lesson == lesson);
+                if let Some(existing) = similar {
+                    existing.use_count += 1;
+                    true
+                } else {
+                    // If at capacity, remove the entry with the lowest use_count
+                    if memory.len() >= self.memory_limit
+                        && let Some((min_idx, _)) =
+                            memory.iter().enumerate().min_by_key(|(_, e)| e.use_count)
                     {
-                        self.episodic_memory.remove(min_idx);
+                        memory.remove(min_idx);
                     }
+                    memory.push_back(ReflectionExperience::new(lesson, error_pattern));
+                    false
                 }
-                self.episodic_memory
-                    .push_back(ReflectionExperience::new(lesson, error_pattern));
-            }
+            };
         }
     }
 
@@ -347,7 +348,7 @@ impl<C: Critic> SelfReflectionAgent<C> {
     ///
     /// 将记录添加到待写入缓冲区，当缓冲区大小达到阈值时自动 flush。
     /// 这减少了频繁的 I/O 操作，提升性能。
-    async fn persist_records(&mut self, task: &str, records: &[ReflectionRecord]) {
+    async fn persist_records(&self, task: &str, records: &[ReflectionRecord]) {
         if self.store.is_none() {
             return;
         }
@@ -355,31 +356,40 @@ impl<C: Critic> SelfReflectionAgent<C> {
         // Buffer the records
         if !records.is_empty() {
             self.pending_records
+                .write()
+                .unwrap()
                 .push((task.to_string(), records.to_vec()));
         }
 
         // Flush when buffer exceeds threshold (batch size of 5)
-        if self.pending_records.len() >= 5 {
+        if self.pending_records.read().unwrap().len() >= 5 {
             self.flush_pending_records().await;
         }
     }
 
     /// 立即刷新所有待写入的记录
-    pub async fn flush_pending_records(&mut self) {
-        if self.pending_records.is_empty() {
+    pub async fn flush_pending_records(&self) {
+        if self.pending_records.read().unwrap().is_empty() {
             return;
         }
 
         if let Some(ref store) = self.store {
             // Save all pending reflection records
-            for (task, records) in self.pending_records.drain(..) {
+            let pending: Vec<_> = self.pending_records.write().unwrap().drain(..).collect();
+            for (task, records) in pending {
                 if let Err(e) = store.save_reflections(&task, &records).await {
                     warn!(error = %e, task = %task, "Failed to persist reflection records");
                 }
             }
 
             // Save experiences (convert VecDeque to Vec for slice reference)
-            let experiences: Vec<_> = self.episodic_memory.iter().cloned().collect();
+            let experiences: Vec<_> = self
+                .episodic_memory
+                .read()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect();
             if let Err(e) = store.save_experiences(&experiences).await {
                 warn!(error = %e, "Failed to persist experiences");
             }
@@ -402,12 +412,12 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
         ""
     }
 
-    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move { self.run_reflection_loop(task).await })
     }
 
     fn execute_stream<'a>(
-        &'a mut self,
+        &'a self,
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
@@ -508,9 +518,9 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
         })
     }
 
-    fn reset(&mut self) {
+    fn reset(&self) {
         self.generator.reset();
-        self.episodic_memory.clear();
+        self.episodic_memory.write().unwrap().clear();
     }
 }
 
@@ -613,7 +623,7 @@ mod tests {
         let generator = crate::testing::MockAgent::new("mock").with_response("这是回答");
         let critic = StaticCritic::always_pass();
 
-        let mut agent = SelfReflectionAgent::new("test", generator, critic).max_reflections(3);
+        let agent = SelfReflectionAgent::new("test", generator, critic).max_reflections(3);
 
         let result = agent.execute("测试任务").await.unwrap();
         assert_eq!(result, "这是回答");
@@ -629,7 +639,7 @@ mod tests {
         ]);
         let critic = StaticCritic::always_fail();
 
-        let mut agent = SelfReflectionAgent::new("test", generator, critic).max_reflections(2);
+        let agent = SelfReflectionAgent::new("test", generator, critic).max_reflections(2);
 
         let result = agent.execute("测试任务").await.unwrap();
         // 即使始终失败也返回最后的回答
@@ -641,14 +651,14 @@ mod tests {
         let generator = crate::testing::MockAgent::new("mock").with_response("answer");
         let critic = StaticCritic::always_pass();
 
-        let mut agent = SelfReflectionAgent::new("test", generator, critic);
+        let agent = SelfReflectionAgent::new("test", generator, critic);
 
         // 先执行一次积累经验
         agent.execute("任务1").await.unwrap();
 
         // 重置
         agent.reset();
-        assert!(agent.episodic_memory.is_empty());
+        assert!(agent.episodic_memory.read().unwrap().is_empty());
     }
 
     #[test]

@@ -517,7 +517,7 @@ mod tests {
 
         // Verify the agent actually works
         let agent = handle.unwrap();
-        let mut agent = agent.lock().await;
+        let agent = agent.lock().await;
         let result = agent.execute("test").await.unwrap();
         assert_eq!(result, "lazy result");
     }

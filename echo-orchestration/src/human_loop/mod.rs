@@ -80,7 +80,6 @@ pub use webhook::WebhookHumanLoopProvider;
 #[cfg(feature = "websocket")]
 pub use websocket::WebSocketHumanLoopProvider;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -584,43 +583,6 @@ pub fn default_provider() -> Arc<dyn HumanLoopProvider> {
     Arc::new(ConsoleHumanLoopProvider)
 }
 
-// ── Guard 管理器（向后兼容）─────────────────────────────────────────────────
-
-/// 工具执行前的人工审批管理器（guard 模式）
-///
-/// 已被 [`ApprovalPolicy`] 取代，保留用于向后兼容。
-/// 通过 [`ReactAgent::add_need_appeal_tool`] 标记工具为"需要审批"。
-#[deprecated(
-    note = "请使用 ApprovalPolicy 代替。通过 DefaultApprovalPolicy::mark_always_require() 实现相同功能。"
-)]
-pub struct HumanApprovalManager {
-    need_approval_tools: HashSet<String>,
-}
-
-#[allow(deprecated)]
-impl HumanApprovalManager {
-    pub fn new() -> Self {
-        HumanApprovalManager {
-            need_approval_tools: HashSet::new(),
-        }
-    }
-
-    pub fn mark_need_approval(&mut self, tool_name: String) {
-        self.need_approval_tools.insert(tool_name);
-    }
-
-    pub fn needs_approval(&self, tool_name: &str) -> bool {
-        self.need_approval_tools.contains(tool_name)
-    }
-}
-
-#[allow(deprecated)]
-impl Default for HumanApprovalManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ── 单元测试 ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -776,24 +738,6 @@ mod tests {
         assert!(matches!(text, HumanLoopResponse::Text(_)));
         assert!(matches!(timeout, HumanLoopResponse::Timeout));
         assert!(matches!(deferred, HumanLoopResponse::Deferred));
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn test_human_approval_manager_new() {
-        let manager = HumanApprovalManager::new();
-        assert!(!manager.needs_approval("any_tool"));
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn test_human_approval_manager_mark_need_approval() {
-        let mut manager = HumanApprovalManager::new();
-
-        manager.mark_need_approval("dangerous_tool".to_string());
-
-        assert!(manager.needs_approval("dangerous_tool"));
-        assert!(!manager.needs_approval("safe_tool"));
     }
 
     #[tokio::test]

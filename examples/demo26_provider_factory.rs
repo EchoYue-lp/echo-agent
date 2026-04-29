@@ -66,15 +66,19 @@ fn demo_provider_model_shorthand() -> echo_agent::error::Result<()> {
     // 演示各种 provider:model 组合（仅构造，不实际发请求）
     let configs = [
         ("ollama:llama3", "Ollama 本地推理"),
-        ("anthropic:claude-sonnet-4-6", "Anthropic Claude"),
-        ("openai:gpt-4o", "OpenAI GPT-4o"),
         ("deepseek:deepseek-chat", "DeepSeek（OpenAI 兼容）"),
         ("dashscope:qwen3-max", "通义千问（OpenAI 兼容）"),
     ];
 
     for (config_str, desc) in &configs {
-        let client = ProviderFactory::create(config_str)?;
-        println!("  ✅ \"{config_str}\" → {} ({})", client.model_name(), desc);
+        match ProviderFactory::create(config_str) {
+            Ok(client) => {
+                println!("  ✅ \"{config_str}\" → {} ({})", client.model_name(), desc);
+            }
+            Err(e) => {
+                println!("  ⏭️  \"{config_str}\" → 跳过（{e}）");
+            }
+        }
     }
 
     println!();
@@ -223,7 +227,7 @@ async fn demo_agent_with_factory() -> echo_agent::error::Result<()> {
 
     // 构建 Agent，注入 LlmConfig
     let llm_config = LlmConfig::from_model(&model_name)?;
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .llm_config(llm_config)
         .name("factory_demo_agent")
         .system_prompt("你是一个简洁的助手，用一句话回答问题。")

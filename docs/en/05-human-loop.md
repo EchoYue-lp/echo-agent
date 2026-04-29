@@ -375,5 +375,5 @@ Instead it:
 
 This design avoids nested blocking inside an active Tokio runtime.
 
-If no `PermissionService` is configured, the method falls back to the legacy
-`HumanApprovalManager` marker path for backward compatibility.
+If no `PermissionService` is configured, the tool is registered without approval
+checks and will execute unconditionally.

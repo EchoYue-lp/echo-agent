@@ -134,7 +134,7 @@ impl Agent for MockAgent {
         &self.system_prompt
     }
 
-    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(task.to_string());
             Ok(self.next_response())
@@ -142,7 +142,7 @@ impl Agent for MockAgent {
     }
 
     fn execute_stream<'a>(
-        &'a mut self,
+        &'a self,
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
@@ -154,7 +154,7 @@ impl Agent for MockAgent {
 
     /// `chat()` 同样记录调用，并消费预设响应队列。
     /// 注意：MockAgent 不维护真实的对话上下文，这里仅满足调用合约。
-    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(message.to_string());
             Ok(self.next_response())
@@ -162,7 +162,7 @@ impl Agent for MockAgent {
     }
 
     fn chat_stream<'a>(
-        &'a mut self,
+        &'a self,
         message: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
@@ -173,7 +173,7 @@ impl Agent for MockAgent {
     }
 
     /// 清空调用历史，模拟真实 Agent 的重置语义。
-    fn reset(&mut self) {
+    fn reset(&self) {
         self.calls.lock().unwrap().clear();
     }
 }
@@ -214,7 +214,7 @@ impl Agent for FailingMockAgent {
         "failing mock agent"
     }
 
-    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(task.to_string());
             Err(ReactError::Agent(AgentError::InitializationFailed(
@@ -224,7 +224,7 @@ impl Agent for FailingMockAgent {
     }
 
     fn execute_stream<'a>(
-        &'a mut self,
+        &'a self,
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
@@ -234,11 +234,11 @@ impl Agent for FailingMockAgent {
         })
     }
 
-    fn chat<'a>(&'a mut self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move { self.execute(message).await })
     }
 
-    fn reset(&mut self) {
+    fn reset(&self) {
         self.calls.lock().unwrap().clear();
     }
 }

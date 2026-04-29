@@ -50,7 +50,12 @@ impl WebhookHumanLoopProvider {
     /// 创建 Webhook Provider，使用默认超时（5 分钟）。
     pub fn new(url: impl Into<String>) -> Self {
         Self {
-            client: Arc::new(Client::new()),
+            client: Arc::new(
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .unwrap_or_default(),
+            ),
             url: url.into(),
             timeout: Duration::from_secs(300),
         }

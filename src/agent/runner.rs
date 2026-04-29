@@ -38,7 +38,7 @@ pub struct Runner;
 impl Runner {
     /// 最简执行：一行代码完成 Agent 调用
     pub async fn run(model: &str, system_prompt: &str, task: &str) -> Result<String> {
-        let mut agent = ReactAgentBuilder::simple(model, system_prompt)?;
+        let agent = ReactAgentBuilder::simple(model, system_prompt)?;
         agent.execute(task).await
     }
 
@@ -94,7 +94,7 @@ impl RunnerBuilder {
 
     /// 执行任务并返回结果
     pub async fn run(self, task: &str) -> Result<String> {
-        let mut agent = self.inner.build()?;
+        let agent = self.inner.build()?;
         agent.execute(task).await
     }
 

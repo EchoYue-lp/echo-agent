@@ -39,10 +39,10 @@ fn default_merge(results: Vec<String>) -> String {
 /// #     fn name(&self) -> &str { &self.name }
 /// #     fn model_name(&self) -> &str { "mock-model" }
 /// #     fn system_prompt(&self) -> &str { "You are a mock agent" }
-/// #     fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+/// #     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
 /// #         Box::pin(async move { Ok(format!("{}: {task}", self.name)) })
 /// #     }
-/// #     fn execute_stream<'a>(&'a mut self, _task: &'a str) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+/// #     fn execute_stream<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
 /// #         Box::pin(async move {
 /// #             let s: BoxStream<'a, Result<AgentEvent>> = Box::pin(stream::empty());
 /// #             Ok(s)
@@ -101,7 +101,7 @@ impl Workflow for ConcurrentWorkflow {
                 let input = input.to_string();
                 handles.push(tokio::spawn(async move {
                     let step_start = Instant::now();
-                    let mut agent = agent_handle.lock().await;
+                    let agent = agent_handle.lock().await;
                     let agent_name = agent.name().to_string();
                     debug!(workflow = "concurrent", agent = %agent_name, "▶ 开始执行");
                     let result = agent.execute(&input).await;

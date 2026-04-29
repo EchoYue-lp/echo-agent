@@ -19,15 +19,18 @@ pub struct ImageFetchTool {
 
 impl ImageFetchTool {
     /// Create a new image fetch tool
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("Failed to build HTTP client");
-        Self {
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: "image_fetch".into(),
+                message: format!("Failed to build HTTP client: {e}"),
+            })?;
+        Ok(Self {
             client,
             timeout_secs: 30,
-        }
+        })
     }
 
     /// Set custom timeout in seconds
@@ -109,7 +112,7 @@ impl ImageFetchTool {
 
 impl Default for ImageFetchTool {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("Failed to build ImageFetchTool")
     }
 }
 
@@ -165,12 +168,6 @@ impl Tool for ImageFetchTool {
             // Convert MB to bytes
             let max_bytes = max_size_mb * 1024 * 1024;
 
-            // Create client with size limit
-            let client = Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("Failed to build HTTP client");
-
             // Check if URL points to an image
             let is_image = url.to_lowercase().ends_with(".png")
                 || url.to_lowercase().ends_with(".jpg")
@@ -182,7 +179,7 @@ impl Tool for ImageFetchTool {
 
             if !is_image {
                 // Try to check via HEAD request
-                if let Ok(response) = client.head(url).send().await
+                if let Ok(response) = self.client.head(url).send().await
                     && let Some(ct) = response.headers().get("content-type")
                     && let Ok(content_type) = ct.to_str()
                     && !content_type.starts_with("image/")
@@ -195,7 +192,7 @@ impl Tool for ImageFetchTool {
             }
 
             // Download image
-            let response = client.get(url).send().await.map_err(|e| {
+            let response = self.client.get(url).send().await.map_err(|e| {
                 crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                     tool: "image_fetch".into(),
                     message: format!("下载图片失败: {}", e),
@@ -274,7 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_image_url_by_extension() {
-        let tool = ImageFetchTool::new();
+        let tool = ImageFetchTool::new().unwrap();
         assert!(tool.is_image_url("https://example.com/image.png").await);
         assert!(tool.is_image_url("https://example.com/photo.JPG").await);
         assert!(tool.is_image_url("https://example.com/pic.webp").await);

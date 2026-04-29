@@ -2,10 +2,8 @@
 
 pub mod permission;
 
-use crate::error::{Result, ToolError};
+use crate::error::Result;
 use futures::future::BoxFuture;
-use schemars::JsonSchema;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -21,6 +19,10 @@ pub struct ToolResult {
     /// Optional binary output (mutually exclusive with `output` in practice).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bytes: Option<Vec<u8>>,
+    /// Optional structured data (JSON). When present, callers can render it
+    /// directly instead of parsing the `output` string.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data: Option<serde_json::Value>,
 }
 
 impl ToolResult {
@@ -31,6 +33,22 @@ impl ToolResult {
             output: output.into(),
             error: None,
             bytes: None,
+            data: None,
+        }
+    }
+
+    /// Construct a successful result with structured JSON data.
+    ///
+    /// The `output` field is set to a compact JSON representation so
+    /// plain-text consumers still see something useful.
+    pub fn success_json(data: serde_json::Value) -> Self {
+        let output = serde_json::to_string(&data).unwrap_or_default();
+        Self {
+            success: true,
+            output,
+            error: None,
+            bytes: None,
+            data: Some(data),
         }
     }
 
@@ -41,6 +59,7 @@ impl ToolResult {
             output: String::new(),
             error: Some(error.into()),
             bytes: None,
+            data: None,
         }
     }
 
@@ -51,6 +70,7 @@ impl ToolResult {
             output: String::new(),
             error: None,
             bytes: Some(bytes),
+            data: None,
         }
     }
 
@@ -70,6 +90,12 @@ impl ToolResult {
     pub fn with_error(mut self, error: impl Into<String>) -> Self {
         self.success = false;
         self.error = Some(error.into());
+        self
+    }
+
+    /// Attach structured data to an existing result.
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
         self
     }
 }
@@ -104,6 +130,18 @@ impl Default for ToolExecutionConfig {
 /// 工具参数类型
 pub type ToolParameters = HashMap<String, serde_json::Value>;
 
+/// 工具风险等级
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum ToolRiskLevel {
+    /// 只读操作，无副作用（如搜索、读取文件）
+    ReadOnly,
+    /// 常规操作，有有限副作用（如写入文件、调用API）
+    #[default]
+    Standard,
+    /// 危险操作，有不可逆副作用（如执行Shell命令、删除数据、SQL写入）
+    Dangerous,
+}
+
 /// 工具接口 trait
 pub trait Tool: Send + Sync {
     /// Stable tool identifier exposed to the model.
@@ -124,46 +162,9 @@ pub trait Tool: Send + Sync {
     fn permissions(&self) -> Vec<permission::ToolPermission> {
         vec![]
     }
-}
 
-/// 强类型工具接口
-pub trait TypedTool: Send + Sync {
-    /// Strongly typed parameter payload accepted by the tool.
-    type Params: DeserializeOwned + JsonSchema;
-
-    /// Stable tool identifier exposed to the model.
-    fn name(&self) -> &str;
-    /// Human-readable tool description.
-    fn description(&self) -> &str;
-    /// Execute the tool after parameters are deserialized.
-    fn execute_typed(&self, params: Self::Params) -> BoxFuture<'_, Result<ToolResult>>;
-}
-
-/// TypedTool 自动实现 Tool
-impl<T: TypedTool> Tool for T {
-    fn name(&self) -> &str {
-        TypedTool::name(self)
-    }
-
-    fn description(&self) -> &str {
-        TypedTool::description(self)
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        let schema = schemars::schema_for!(T::Params);
-        serde_json::to_value(schema).unwrap_or_default()
-    }
-
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
-        Box::pin(async move {
-            // Avoid redundant serialization: HashMap → Value::Object directly
-            let value = serde_json::Value::Object(parameters.into_iter().collect());
-            let params: T::Params =
-                serde_json::from_value(value).map_err(|e| ToolError::InvalidParameter {
-                    name: "(deserialization)".to_string(),
-                    message: e.to_string(),
-                })?;
-            TypedTool::execute_typed(self, params).await
-        })
+    /// Risk level of this tool. Dangerous tools require explicit approval.
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::Standard
     }
 }

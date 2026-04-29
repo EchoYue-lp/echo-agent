@@ -50,6 +50,7 @@ use crate::tasks::{TaskManager, TaskStatus};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 #[allow(unused_imports)]
@@ -79,8 +80,8 @@ pub enum ExecutionMode {
 /// 支持增量重规划（失败时仅重新规划下游子图）。
 pub struct PlanExecuteAgent<P: Planner, E: Executor> {
     name: String,
-    planner: P,
-    executor: E,
+    planner: RwLock<P>,
+    executor: RwLock<E>,
     max_replans: usize,
     enable_replan: bool,
     execution_mode: ExecutionMode,
@@ -125,8 +126,8 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     pub fn new(name: impl Into<String>, planner: P, executor: E) -> Self {
         Self {
             name: name.into(),
-            planner,
-            executor,
+            planner: RwLock::new(planner),
+            executor: RwLock::new(executor),
             max_replans: 3,
             enable_replan: true,
             execution_mode: ExecutionMode::default(),
@@ -199,12 +200,12 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     }
 
     /// 核心执行循环
-    async fn run_plan_execute(&mut self, task: &str) -> Result<String> {
+    async fn run_plan_execute(&self, task: &str) -> Result<String> {
         let agent = self.name.clone();
 
         // ── 阶段 1: 规划 ──────────────────────────────────────
         info!(agent = %agent, "📐 Plan-and-Execute: 阶段1 - 生成计划");
-        let mut plan = self.planner.plan(task).await?;
+        let mut plan = self.planner.write().await.plan(task).await?;
 
         // 验证并自动修复计划
         let issues = plan.validate();
@@ -258,12 +259,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     }
 
     /// Parallel execution path using TaskExecutor
-    async fn run_parallel_execution(
-        &mut self,
-        task: &str,
-        agent: &str,
-        plan: &Plan,
-    ) -> Result<String> {
+    async fn run_parallel_execution(&self, task: &str, agent: &str, plan: &Plan) -> Result<String> {
         info!(agent = %agent, "🚀 Plan-and-Execute: 阶段2 - 并行执行计划");
 
         let (execute_fn, max_concurrent) = match &self.execution_mode {
@@ -316,7 +312,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
 
     /// Sequential execution path via Executor trait (backward compatible)
     async fn run_sequential_execution(
-        &mut self,
+        &self,
         task: &str,
         agent: &str,
         mut plan: Plan,
@@ -368,6 +364,8 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
 
                 match self
                     .executor
+                    .write()
+                    .await
                     .execute_step(&task_item.description, &context)
                     .await
                 {
@@ -452,7 +450,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                                     .join("\n")
                             );
 
-                            match self.planner.plan(&replan_prompt).await {
+                            match self.planner.write().await.plan(&replan_prompt).await {
                                 Ok(new_plan) => {
                                     // Update the plan variable with the new plan for consistency
                                     plan = new_plan;
@@ -541,7 +539,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     }
 
     /// 汇总所有步骤结果
-    async fn summarize_results(&mut self, task: &str, results: &[StepResult]) -> Result<String> {
+    async fn summarize_results(&self, task: &str, results: &[StepResult]) -> Result<String> {
         let results_text: Vec<String> = results
             .iter()
             .map(|r| {
@@ -562,7 +560,11 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
             results_text.join("\n")
         );
 
-        self.executor.execute_step(&summary_prompt, "").await
+        self.executor
+            .write()
+            .await
+            .execute_step(&summary_prompt, "")
+            .await
     }
 }
 
@@ -581,12 +583,12 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
         ""
     }
 
-    fn execute<'a>(&'a mut self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move { self.run_plan_execute(task).await })
     }
 
     fn execute_stream<'a>(
-        &'a mut self,
+        &'a self,
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
@@ -596,7 +598,7 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
 
                 // ── Phase 1: Planning ──
                 info!(agent = %agent, "📐 Plan-and-Execute (stream): 生成计划");
-                let mut plan = self.planner.plan(&task_owned).await?;
+                let mut plan = self.planner.write().await.plan(&task_owned).await?;
 
                 // Validate and auto-fix
                 let issues = plan.validate();
@@ -661,7 +663,7 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
 
                         let context = self.build_step_context_from_results(&all_results);
 
-                        match self.executor.execute_step(&task_item.description, &context).await {
+                        match self.executor.write().await.execute_step(&task_item.description, &context).await {
                             Ok(output) => {
                                 let _ = task_manager.update_task(&task_id, TaskStatus::Completed);
                                 task_manager.set_task_result(&task_id, output.clone());
@@ -704,7 +706,7 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
                                         task_owned, completed_steps.join("\n"), task_item.description, e
                                     );
 
-                                    if let Ok(new_plan) = self.planner.plan(&replan_prompt).await {
+                                    if let Ok(new_plan) = self.planner.write().await.plan(&replan_prompt).await {
                                         // Only remove affected downstream tasks
                                         let to_remove: Vec<String> = task_manager
                                             .get_all_tasks()
@@ -748,7 +750,7 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
         })
     }
 
-    fn reset(&mut self) {}
+    fn reset(&self) {}
 }
 
 #[cfg(test)]
@@ -847,7 +849,7 @@ mod tests {
             "final summary",
         ]);
         let executor = SimpleExecutor::new(mock_agent);
-        let mut agent = PlanExecuteAgent::new("test_agent", planner, executor).disable_replan();
+        let agent = PlanExecuteAgent::new("test_agent", planner, executor).disable_replan();
 
         let result = agent.execute("test task").await.unwrap();
         assert!(!result.is_empty());
@@ -864,7 +866,7 @@ mod tests {
         let execute_fn: TaskExecuteFn =
             Arc::new(|ctx| Box::pin(async move { Ok(format!("done: {}", ctx.task_id)) }));
 
-        let mut agent = PlanExecuteAgent::new("test_agent", planner, executor)
+        let agent = PlanExecuteAgent::new("test_agent", planner, executor)
             .with_execute_fn(execute_fn)
             .max_concurrent(3);
 
@@ -890,7 +892,7 @@ mod tests {
             })
         });
 
-        let mut agent =
+        let agent =
             PlanExecuteAgent::new("test_agent", planner, executor).with_execute_fn(execute_fn);
 
         let result = agent.execute("test deps").await.unwrap();

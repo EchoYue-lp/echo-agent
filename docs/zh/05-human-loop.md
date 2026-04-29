@@ -372,4 +372,4 @@ Agent 准备执行工具 "delete_file"
 
 这样做是为了避免在运行中的 Tokio runtime 内部发生嵌套阻塞。
 
-如果 Agent 没有配置 `PermissionService`，则会回退到旧的 `HumanApprovalManager` 标记路径，仅用于兼容旧行为。
+如果 Agent 没有配置 `PermissionService`，则工具注册后无需审批检查，直接无条件执行。

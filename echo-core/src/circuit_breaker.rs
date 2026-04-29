@@ -61,6 +61,9 @@ pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
     /// Number of requests rejected while in Open state (for monitoring).
     rejected_count: std::sync::atomic::AtomicU32,
+    /// Number of probe requests currently in flight during HalfOpen.
+    /// Limits concurrent probes to 1 to avoid thundering herd on recovery.
+    probes_in_flight: std::sync::atomic::AtomicU32,
 }
 
 impl CircuitBreaker {
@@ -72,6 +75,7 @@ impl CircuitBreaker {
             }),
             config,
             rejected_count: std::sync::atomic::AtomicU32::new(0),
+            probes_in_flight: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -93,11 +97,28 @@ impl CircuitBreaker {
     /// 返回 `true` 表示请求应被拒绝（仍处于 Open 状态），
     /// 返回 `false` 表示可以继续处理（Closed 或 HalfOpen）。
     ///
-    /// 调用方应在拒绝请求时调用 `record_rejected()` 来更新统计。
+    /// 在 HalfOpen 状态下，最多允许 1 个探测请求同时进行，
+    /// 避免恢复期间的 thundering herd 问题。
+    ///
+    /// 调用方应在请求完成后调用 `record_success()` 或 `record_failure()`，
+    /// 这两个方法会自动释放探测配额。
+    /// 若请求被拒绝，调用方应调用 `record_rejected()` 来更新统计。
     pub fn try_advance(&self) -> bool {
         let mut state = self.state.lock();
         match &*state {
-            State::Closed { .. } | State::HalfOpen { .. } => false,
+            State::Closed { .. } => false,
+            State::HalfOpen { .. } => {
+                // Only allow one probe at a time during HalfOpen
+                let current = self
+                    .probes_in_flight
+                    .load(std::sync::atomic::Ordering::Acquire);
+                if current >= 1 {
+                    return true; // reject: probe slot already taken
+                }
+                self.probes_in_flight
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+                false
+            }
             State::Open { opened_at } => {
                 if opened_at.elapsed() >= self.config.timeout {
                     info!(
@@ -107,6 +128,9 @@ impl CircuitBreaker {
                     *state = State::HalfOpen {
                         consecutive_successes: 0,
                     };
+                    // First probe into HalfOpen
+                    self.probes_in_flight
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
                     false
                 } else {
                     true
@@ -129,6 +153,15 @@ impl CircuitBreaker {
 
     /// 记录一次成功调用
     pub fn record_success(&self) {
+        // Release probe slot if any
+        self.probes_in_flight
+            .fetch_update(
+                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::Acquire,
+                |v| if v > 0 { Some(v - 1) } else { Some(0) },
+            )
+            .ok();
+
         let mut state = self.state.lock();
         match &*state {
             State::HalfOpen {
@@ -161,6 +194,15 @@ impl CircuitBreaker {
 
     /// 记录一次失败调用
     pub fn record_failure(&self) {
+        // Release probe slot if any
+        self.probes_in_flight
+            .fetch_update(
+                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::Acquire,
+                |v| if v > 0 { Some(v - 1) } else { Some(0) },
+            )
+            .ok();
+
         let mut state = self.state.lock();
         match &*state {
             State::Closed {

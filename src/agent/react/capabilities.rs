@@ -29,7 +29,7 @@ impl ReactAgent {
     /// Register a single tool. Automatically enables tool capability.
     pub fn add_tool(&mut self, tool: Box<dyn Tool>) {
         self.config.enable_tool = true;
-        self.tool_manager.register(tool);
+        self.tools.tool_manager.register(tool);
     }
 
     /// Register multiple tools. Automatically enables tool capability.
@@ -40,11 +40,11 @@ impl ReactAgent {
         self.config.enable_tool = true;
         let allowed = &self.config.allowed_tools;
         if allowed.is_empty() {
-            self.tool_manager.register_tools(tools);
+            self.tools.tool_manager.register_tools(tools);
         } else {
             for tool in tools {
                 if allowed.contains(&tool.name().to_string()) {
-                    self.tool_manager.register(tool);
+                    self.tools.tool_manager.register(tool);
                 }
             }
         }
@@ -55,7 +55,7 @@ impl ReactAgent {
     /// Supports dynamic tool management in the ReAct loop — for example,
     /// switching from search tools to execution tools mid-task.
     pub fn remove_tool(&mut self, name: &str) -> Option<Box<dyn Tool>> {
-        self.tool_manager.unregister(name)
+        self.tools.tool_manager.unregister(name)
     }
 
     /// Replace an existing tool with a new one of the same name.
@@ -64,8 +64,8 @@ impl ReactAgent {
     /// Returns the old tool if it was replaced.
     pub fn replace_tool(&mut self, tool: Box<dyn Tool>) -> Option<Box<dyn Tool>> {
         let name = tool.name().to_string();
-        let old = self.tool_manager.unregister(&name);
-        self.tool_manager.register(tool);
+        let old = self.tools.tool_manager.unregister(&name);
+        self.tools.tool_manager.register(tool);
         old
     }
 
@@ -77,7 +77,7 @@ impl ReactAgent {
     /// This avoids calling `block_on()` inside a running Tokio runtime.
     ///
     /// If no `PermissionService` is configured, the method falls back to the legacy
-    /// `HumanApprovalManager` marker path for backward compatibility.
+    /// Registers a permission rule requiring approval for the tool.
     pub fn add_need_appeal_tool(&mut self, tool: Box<dyn Tool>) {
         #[cfg(feature = "human-loop")]
         if self.config.enable_human_in_loop {
@@ -98,7 +98,7 @@ impl ReactAgent {
 
             // add_need_appeal_tool 是同步 API，不能在运行中的 Tokio runtime 里 block_on。
             // 这里先登记规则，等到后续异步执行阶段再安全刷入 PermissionService。
-            if let Ok(mut pending) = self.pending_permission_rules.lock() {
+            if let Ok(mut pending) = self.approval.pending_permission_rules.lock() {
                 pending.push(rule);
             } else {
                 warn!(
@@ -108,21 +108,6 @@ impl ReactAgent {
                 );
             }
 
-            if self.permission_service.is_none() {
-                // 回退到旧的 HumanApprovalManager
-                #[allow(deprecated)]
-                match self.human_in_loop.write() {
-                    Ok(mut guard) => guard.mark_need_approval(tool_name),
-                    Err(e) => {
-                        warn!(
-                            agent = %self.config.agent_name,
-                            tool = %tool_name,
-                            "human_in_loop lock poisoned: {}",
-                            e
-                        );
-                    }
-                }
-            }
             return;
         }
         #[cfg(not(feature = "human-loop"))]
@@ -145,16 +130,17 @@ impl ReactAgent {
     /// # 说明
     /// 上下文压缩器用于在 token 数量超过限制时自动压缩对话历史，
     /// 移除不重要的消息以减少 token 消耗。
-    pub fn set_compressor(&mut self, compressor: impl ContextCompressor + 'static) {
-        self.context.set_compressor(compressor);
+    pub async fn set_compressor(&self, compressor: impl ContextCompressor + 'static) {
+        self.memory.context.lock().await.set_compressor(compressor);
     }
 
     /// 获取上下文统计信息
     ///
     /// # 返回值
     /// 返回元组 `(消息数量, 估计的 token 数量)`
-    pub fn context_stats(&self) -> (usize, usize) {
-        (self.context.messages().len(), self.context.token_estimate())
+    pub async fn context_stats(&self) -> (usize, usize) {
+        let ctx = self.memory.context.lock().await;
+        (ctx.messages().len(), ctx.token_estimate())
     }
 
     /// 使用指定压缩器强制压缩上下文
@@ -169,10 +155,15 @@ impl ReactAgent {
     /// 该方法会绕过自动压缩阈值，立即使用指定的压缩器压缩上下文，
     /// 通常用于手动控制压缩时机或测试压缩效果。
     pub async fn force_compress_with(
-        &mut self,
+        &self,
         compressor: &dyn ContextCompressor,
     ) -> Result<ForceCompressStats> {
-        self.context.force_compress_with(compressor).await
+        self.memory
+            .context
+            .lock()
+            .await
+            .force_compress_with(compressor)
+            .await
     }
 
     /// 列出所有已注册的工具名称
@@ -180,7 +171,7 @@ impl ReactAgent {
     /// # 返回值
     /// 已注册工具的名称列表
     pub fn list_tools(&self) -> Vec<&str> {
-        self.tool_manager.list_tools()
+        self.tools.tool_manager.list_tools()
     }
 
     // ── SubAgent ─────────────────────────────────────────────────────────────
@@ -200,7 +191,7 @@ impl ReactAgent {
         }
         let name = agent.name().to_string();
         let def = crate::agent::subagent::SubagentDefinition::simple_sync(&name);
-        if self.subagent_registry.register_sync(def, agent) {
+        if self.tools.subagent_registry.register_sync(def, agent) {
             info!(agent = %self.config.agent_name, subagent = %name, "Subagent registered");
         }
     }
@@ -250,7 +241,7 @@ impl ReactAgent {
     pub fn add_skill(&mut self, skill: Box<dyn Skill>) {
         let name = skill.name().to_string();
 
-        if self.skill_registry.is_installed(&name) {
+        if self.tools.skill_registry.is_installed(&name) {
             warn!(
                 agent = %self.config.agent_name,
                 skill = %name,
@@ -260,6 +251,7 @@ impl ReactAgent {
         }
 
         let sandbox = self
+            .tools
             .sandbox_manager
             .as_ref()
             .map(|manager| manager.clone() as Arc<dyn crate::sandbox::SandboxExecutor>);
@@ -267,17 +259,20 @@ impl ReactAgent {
         let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
 
         for tool in tools {
-            self.tool_manager.register(tool);
+            self.tools.tool_manager.register(tool);
         }
 
         let has_injection = skill.system_prompt_injection().is_some();
         if let Some(injection) = skill.system_prompt_injection() {
             self.config.system_prompt.push_str(&injection);
-            self.context
+            self.memory
+                .context
+                .try_lock()
+                .unwrap()
                 .update_system(self.config.system_prompt.clone());
         }
 
-        self.skill_registry.record_code_skill(SkillInfo {
+        self.tools.skill_registry.record_code_skill(SkillInfo {
             name: name.clone(),
             description: skill.description().to_string(),
             tool_names,
@@ -324,31 +319,35 @@ impl ReactAgent {
         let mut names = Vec::new();
 
         // Build a shared registry for the progressive disclosure tools.
-        // This is separate from `self.skill_registry` (which tracks code-based skills).
+        // This is separate from `self.tools.skill_registry` (which tracks code-based skills).
         // The shared registry holds descriptors + activation state, accessed by
         // both ActivateSkillTool and ReadSkillResourceTool during async execution.
-        let shared = if let Some(existing) = &self.progressive_skill_registry {
+        let shared = if let Some(existing) = &self.tools.progressive_skill_registry {
             existing.clone()
         } else {
             let reg = Arc::new(RwLock::new(crate::skills::SkillRegistry::new()));
-            if let Some(ref manager) = self.sandbox_manager {
+            if let Some(ref manager) = self.tools.sandbox_manager {
                 if let Ok(mut guard) = reg.try_write() {
                     guard.set_sandbox_manager(manager.clone());
                 }
-                self.skill_registry.set_sandbox_manager(manager.clone());
+                self.tools
+                    .skill_registry
+                    .set_sandbox_manager(manager.clone());
             }
-            self.progressive_skill_registry = Some(reg.clone());
+            self.tools.progressive_skill_registry = Some(reg.clone());
             reg
         };
 
         {
             let mut reg = shared.write().await;
-            if let Some(ref manager) = self.sandbox_manager {
+            if let Some(ref manager) = self.tools.sandbox_manager {
                 reg.set_sandbox_manager(manager.clone());
-                self.skill_registry.set_sandbox_manager(manager.clone());
+                self.tools
+                    .skill_registry
+                    .set_sandbox_manager(manager.clone());
             }
             for desc in descriptors {
-                if self.skill_registry.is_installed(&desc.name) {
+                if self.tools.skill_registry.is_installed(&desc.name) {
                     warn!(
                         agent = %self.config.agent_name,
                         skill = %desc.name,
@@ -366,12 +365,13 @@ impl ReactAgent {
                         .parent()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
-                    let mut hook_reg = self.hook_registry.write().await;
+                    let mut hook_reg = self.tools.hook_registry.write().await;
                     hook_reg.register(&desc.name, &skill_dir, hooks_def.clone());
                 }
 
                 names.push(desc.name.clone());
-                self.skill_registry
+                self.tools
+                    .skill_registry
                     .register_descriptor_with_legacy(desc.clone(), legacy.clone());
                 reg.register_descriptor_with_legacy(desc, legacy);
             }
@@ -382,11 +382,14 @@ impl ReactAgent {
         }
 
         // Inject compact catalog into system prompt
-        if let Some(catalog) = self.skill_registry.catalog_prompt() {
+        if let Some(catalog) = self.tools.skill_registry.catalog_prompt() {
             self.config
                 .system_prompt
                 .push_str(&format!("\n\n{}", catalog));
-            self.context
+            self.memory
+                .context
+                .try_lock()
+                .unwrap()
                 .update_system(self.config.system_prompt.clone());
         }
 
@@ -394,7 +397,7 @@ impl ReactAgent {
         // We refresh these tool instances on every discovery pass so their internal
         // registry and available skill name list stay in sync with newly discovered
         // skills across repeated `discover_skills()` calls.
-        let available_names = self.skill_registry.available_names();
+        let available_names = self.tools.skill_registry.available_names();
 
         self.replace_tool(Box::new(ActivateSkillTool::new(
             shared.clone(),
@@ -403,14 +406,17 @@ impl ReactAgent {
         self.replace_tool(Box::new(ReadSkillResourceTool::new(shared.clone())));
 
         let mut script_tool = RunSkillScriptTool::new(shared);
-        if let Some(ref manager) = self.sandbox_manager {
+        if let Some(ref manager) = self.tools.sandbox_manager {
             script_tool = script_tool.with_sandbox_manager(manager.clone());
         }
         self.replace_tool(Box::new(script_tool));
 
         // Protect activated skill content from context compaction.
         // Messages containing <skill_content will survive compression passes.
-        self.context
+        self.memory
+            .context
+            .try_lock()
+            .unwrap()
             .add_protected_marker("<skill_content".to_string());
 
         info!(
@@ -436,27 +442,27 @@ impl ReactAgent {
 
     /// List all installed code-based skills.
     pub fn list_skills(&self) -> Vec<&SkillInfo> {
-        self.skill_registry.list()
+        self.tools.skill_registry.list()
     }
 
     /// Check if a skill (code or file-based) is installed.
     pub fn has_skill(&self, name: &str) -> bool {
-        self.skill_registry.is_installed(name)
+        self.tools.skill_registry.is_installed(name)
     }
 
     /// Total number of installed skills (code + file-based).
     pub fn skill_count(&self) -> usize {
-        self.skill_registry.count()
+        self.tools.skill_registry.count()
     }
 
     /// Get the shared skill registry handle (for external tool access).
     pub fn skill_registry(&self) -> &crate::skills::SkillRegistry {
-        &self.skill_registry
+        &self.tools.skill_registry
     }
 
     /// Get the shared hook registry handle.
     pub fn hook_registry(&self) -> &Arc<tokio::sync::RwLock<crate::skills::hooks::HookRegistry>> {
-        &self.hook_registry
+        &self.tools.hook_registry
     }
 
     // ── MCP ──────────────────────────────────────────────────────────────────
@@ -489,11 +495,11 @@ impl ReactAgent {
         config: McpServerConfig,
     ) -> crate::error::Result<Arc<McpClient>> {
         let name = config.name.clone();
-        let tools = self.mcp_manager.connect(config).await?;
+        let tools = self.tools.mcp_manager.connect(config).await?;
         let count = tools.len();
         self.add_tools(tools);
         let client = {
-            let mgr = &self.mcp_manager;
+            let mgr = &self.tools.mcp_manager;
             mgr.get_client(&name).ok_or_else(|| {
                 crate::error::ReactError::Agent(crate::error::AgentError::InitializationFailed(
                     format!("MCP client '{}' not found after connection", name),
@@ -604,7 +610,7 @@ impl ReactAgent {
     /// 该方法用于获取已连接的 MCP 客户端，以便直接调用客户端的方法。
     /// 客户端通过 `connect_mcp_from_config` 或 `load_mcp_from_file` 连接。
     pub fn mcp_client(&self, name: &str) -> Option<&Arc<McpClient>> {
-        self.mcp_manager.get_client(name)
+        self.tools.mcp_manager.get_client(name)
     }
 
     #[cfg(feature = "mcp")]
@@ -617,7 +623,7 @@ impl ReactAgent {
     /// 该方法返回当前所有已成功连接的 MCP 服务器的名称，
     /// 可用于展示连接状态或供用户选择特定的服务器。
     pub fn list_mcp_servers(&self) -> Vec<&str> {
-        self.mcp_manager.server_names()
+        self.tools.mcp_manager.server_names()
     }
 
     #[cfg(feature = "mcp")]
@@ -633,7 +639,7 @@ impl ReactAgent {
     /// 该方法会断开与指定 MCP 服务器的连接，并移除相关的工具注册。
     /// 断开连接后，该服务器提供的工具将不再可用。
     pub async fn disconnect_mcp(&mut self, name: &str) -> bool {
-        self.mcp_manager.disconnect(name).await
+        self.tools.mcp_manager.disconnect(name).await
     }
 
     // ── System Prompt ────────────────────────────────────────────────────────
@@ -650,9 +656,9 @@ impl ReactAgent {
     /// # 注意
     /// 设置系统提示词会覆盖之前的所有系统提示内容。
     /// 如果之前通过技能注入添加了提示词，也会被覆盖。
-    pub fn set_system_prompt(&mut self, prompt: String) {
+    pub async fn set_system_prompt(&mut self, prompt: String) {
         self.config.system_prompt = prompt.clone();
-        self.context.update_system(prompt);
+        self.memory.context.lock().await.update_system(prompt);
         tracing::info!(
             agent = %self.config.agent_name,
             "System prompt updated"

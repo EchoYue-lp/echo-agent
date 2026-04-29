@@ -163,7 +163,7 @@ impl Node {
             } => {
                 let input = state.get::<String>(input_key).unwrap_or_default();
 
-                let mut agent = agent.lock().await;
+                let agent = agent.lock().await;
                 let output = if *use_execute {
                     agent.execute(&input).await?
                 } else {

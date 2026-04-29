@@ -109,5 +109,5 @@ pub mod execution {
 }
 
 pub use echo_execution::tools::{
-    Tool, ToolExecutionConfig, ToolManager, ToolParameters, ToolResult, TypedTool,
+    Tool, ToolExecutionConfig, ToolManager, ToolParameters, ToolResult,
 };

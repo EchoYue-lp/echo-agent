@@ -328,7 +328,7 @@ async fn demo_plan_execute() -> Result<()> {
 
     let executor = VerboseExecutor;
 
-    let mut agent = PlanExecuteAgent::new("devops_agent", planner, executor).max_replans(1);
+    let agent = PlanExecuteAgent::new("devops_agent", planner, executor).max_replans(1);
 
     let task = "评估我的项目是否可以部署到生产环境";
 

@@ -1,9 +1,17 @@
 pub(crate) mod agent_dispatch;
 pub(crate) mod answer;
+#[cfg(feature = "web")]
+pub(crate) mod browser;
+#[cfg(feature = "chart")]
+pub(crate) mod chart;
 #[cfg(feature = "data")]
 pub(crate) mod data;
+#[cfg(feature = "database")]
+pub(crate) mod database;
 #[cfg(feature = "media")]
 pub(crate) mod excel;
+#[cfg(feature = "git")]
+pub(crate) mod git;
 #[cfg(feature = "human-loop")]
 pub(crate) mod human_in_loop;
 #[cfg(feature = "media")]
@@ -13,6 +21,8 @@ pub(crate) mod memory;
 pub(crate) mod pdf;
 #[cfg(feature = "tasks")]
 pub(crate) mod plan;
+#[cfg(feature = "rag")]
+pub(crate) mod rag;
 pub mod security;
 #[cfg(feature = "tasks")]
 pub(crate) mod task;

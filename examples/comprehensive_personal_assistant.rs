@@ -352,7 +352,7 @@ async fn demo_multimodal_support() -> Result<()> {
     let model_name = require_configured_model(None)?;
 
     // 创建支持多模态的 Agent
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model(&model_name)
         .name("multimodal-assistant")
         .system_prompt("你是一个多模态助手，可以理解文字和图片。")

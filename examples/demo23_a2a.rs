@@ -10,6 +10,7 @@
 use echo_agent::a2a::*;
 use echo_agent::prelude::*;
 use futures::StreamExt;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
@@ -92,7 +93,7 @@ async fn main() -> echo_agent::error::Result<()> {
         .system_prompt("你是一个通过 A2A 协议提供服务的助手")
         .build()?;
 
-    let server = A2AServer::new(card.clone(), server_agent);
+    let server = Arc::new(A2AServer::new(card.clone(), server_agent));
 
     println!("Agent Card: {}\n", server.agent_card().name);
 

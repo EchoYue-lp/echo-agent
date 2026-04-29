@@ -45,7 +45,12 @@ impl LlmPlanner {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            client: Arc::new(Client::new()),
+            client: Arc::new(
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .unwrap_or_default(),
+            ),
             llm_config: None,
             system_prompt: Self::default_system_prompt().to_string(),
             output_mode: PlannerOutputMode::JsonSchema,

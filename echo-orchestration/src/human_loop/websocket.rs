@@ -157,32 +157,62 @@ async fn handle_connection(
 
     clients.lock().await.push(tx);
 
+    // 写任务：转发消息 + 30s 心跳 ping
     let write_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let Err(e) = write.send(Message::Text(msg)).await {
-                warn!("WS 消息发送失败: {e}");
-                break;
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            if let Err(e) = write.send(Message::Text(msg)).await {
+                                warn!("WS 消息发送失败: {e}");
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    if let Err(e) = write.send(Message::Ping(vec![])).await {
+                        warn!("WS ping 发送失败: {e}");
+                        break;
+                    }
+                }
             }
         }
     });
 
-    while let Some(msg_result) = read.next().await {
-        match msg_result {
-            Ok(Message::Text(text)) => match serde_json::from_str::<ClientResponse>(&text) {
-                Ok(response) => {
-                    let mut map = pending.lock().await;
-                    if let Some(sender) = map.remove(&response.request_id) {
-                        let _ = sender.send(response);
-                    } else {
-                        warn!("收到未知 request_id 的 WS 响应: {}", response.request_id);
+    // 读循环：90s 超时检测死连接
+    const READ_TIMEOUT: Duration = Duration::from_secs(90);
+
+    loop {
+        match tokio::time::timeout(READ_TIMEOUT, read.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                match serde_json::from_str::<ClientResponse>(&text) {
+                    Ok(response) => {
+                        let mut map = pending.lock().await;
+                        if let Some(sender) = map.remove(&response.request_id) {
+                            let _ = sender.send(response);
+                        } else {
+                            warn!("收到未知 request_id 的 WS 响应: {}", response.request_id);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("WebSocket 消息解析失败: {e}，原始内容: {text}");
                     }
                 }
-                Err(e) => {
-                    warn!("WebSocket 消息解析失败: {e}，原始内容: {text}");
-                }
-            },
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => {}
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) => break,
+            Ok(Some(Ok(Message::Pong(_)))) => {
+                debug!("收到 WebSocket pong ({addr})");
+            }
+            Ok(Some(Ok(_))) => {} // 忽略其他帧类型
+            Ok(None) => break,
+            Err(_) => {
+                warn!("WebSocket 读取超时 ({addr})，关闭死连接");
+                break;
+            }
         }
     }
 

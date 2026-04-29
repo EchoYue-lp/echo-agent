@@ -335,7 +335,7 @@ impl SubagentExecutor {
             let _permit = child_token.clone();
             let start = Instant::now();
 
-            let mut agent = agent_arc.lock().await;
+            let agent = agent_arc.lock().await;
 
             // Check cancellation before execution
             if child_token.is_cancelled() {
@@ -449,7 +449,7 @@ impl SubagentExecutor {
             })?;
 
         let start = Instant::now();
-        let mut agent = agent_arc.lock().await;
+        let agent = agent_arc.lock().await;
 
         // Check cancellation
         if req.cancel.is_cancelled() {
@@ -532,7 +532,7 @@ impl SubagentExecutor {
                 });
             }
 
-            let mut agent = agent_arc.lock().await;
+            let agent = agent_arc.lock().await;
 
             let result = if timeout_secs > 0 {
                 match tokio::time::timeout(

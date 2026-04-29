@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
     // ── 7. agent! 宏 ────────────────────────────────────────────────────
     println!("\n── agent! 宏 ──────────────────────────────────────────────────");
 
-    let mut agent = agent! {
+    let agent = agent! {
         model: "qwen3-max",
         system_prompt: "你是一个计算助手，必须通过工具完成所有计算。",
         name: "macro_demo_agent",

@@ -51,7 +51,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-echo-agent = "1.3"
+echo-agent = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -193,13 +193,13 @@ echo-agent ships with **28+ capabilities** across 6 crates, all accessible throu
 
 ```toml
 # Minimal — just the ReAct engine
-echo-agent = { version = "1.3", default-features = false }
+echo-agent = { version = "0.1.0", default-features = false }
 
 # Full (default) — all features enabled
-echo-agent = "1.3"
+echo-agent = "0.1.0"
 
 # Pick only what you need
-echo-agent = { version = "1.3", default-features = false, features = ["mcp", "web"] }
+echo-agent = { version = "0.1.0", default-features = false, features = ["mcp", "web"] }
 ```
 
 | Feature | Enables | Key Dependencies |
@@ -828,12 +828,20 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 
 Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
+**Before submitting a PR, please run locally:**
+
 ```bash
 git clone https://github.com/EchoYue-lp/echo-agent
 cd echo-agent
-cargo build
-cargo test --lib
-cargo clippy
+
+# Code formatting
+cargo fmt --check
+
+# Linting
+cargo clippy --workspace --all-targets
+
+# Tests
+cargo test --workspace
 ```
 
 ---

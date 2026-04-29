@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
         .enable_subagent()
         .llm_client(orchestrator_llm)
         .max_iterations(8)
+        .enable_tools()
         .build()?;
 
     main_agent.register_agent(Box::new(weather_agent));

@@ -101,25 +101,28 @@ impl Tool for TextReadTool {
             let start = (start_line - 1).min(total_lines);
             let end = (start + effective_line_count).min(total_lines);
 
-            // 格式化输出
-            let mut result = Vec::new();
-            result.push(format!("文件: {}", file_path));
-            result.push(format!("总行数: {}", total_lines));
-            result.push(String::new());
+            // 结构化输出
+            let preview_lines_data: Vec<Value> = lines[start..end]
+                .iter()
+                .enumerate()
+                .map(|(idx, line)| {
+                    serde_json::json!({
+                        "line_number": start + idx + 1,
+                        "content": line,
+                    })
+                })
+                .collect();
 
-            if start > 0 {
-                result.push(format!("--- 显示第 {}-{} 行 ---", start + 1, end));
-            }
-
-            for (idx, line) in lines[start..end].iter().enumerate() {
-                result.push(format!("{:5} | {}", start + idx + 1, line));
-            }
-
-            if end < total_lines {
-                result.push(format!("... (还有 {} 行)", total_lines - end));
-            }
-
-            Ok(ToolResult::success(result.join("\n")))
+            let result = serde_json::json!({
+                "file": file_path,
+                "total_lines": total_lines,
+                "start_line": start + 1,
+                "end_line": end,
+                "truncated": end < total_lines,
+                "remaining_lines": total_lines.saturating_sub(end),
+                "lines": preview_lines_data,
+            });
+            Ok(ToolResult::success_json(result))
         })
     }
 }
@@ -247,23 +250,15 @@ impl Tool for TextSearchTool {
                 }
             }
 
-            let result = if matches.is_empty() {
-                format!("未找到匹配: '{}'", pattern)
-            } else {
-                let more = if match_count >= max_matches {
-                    format!("\n(已达到最大匹配数 {})", max_matches)
-                } else {
-                    String::new()
-                };
-                format!(
-                    "搜索结果: 共 {} 处匹配\n\n{}{}",
-                    match_count,
-                    matches.join("\n"),
-                    more
-                )
-            };
-
-            Ok(ToolResult::success(result))
+            let result = serde_json::json!({
+                "file": file_path,
+                "pattern": pattern,
+                "match_count": match_count,
+                "truncated": match_count >= max_matches,
+                "max_matches": max_matches,
+                "matches": matches,
+            });
+            Ok(ToolResult::success_json(result))
         })
     }
 }
@@ -325,32 +320,30 @@ impl Tool for TextStatsTool {
                 .filter(|s| s.len() >= 2)
                 .count();
 
-            let mut stats = Vec::new();
-            stats.push(format!("文件: {}", file_path));
-            stats.push(String::new());
-            stats.push("文本统计:".to_string());
-            stats.push(format!("  行数: {}", lines));
-            stats.push(format!("  字符数: {}", chars));
-            stats.push(format!("  单词/词组数: {}", words));
-            stats.push(format!("  中文字符: {}", chinese_chars));
-            stats.push(format!("  英文单词: {}", english_words));
-
-            // 文件大小
-            if let Ok(metadata) = std::fs::metadata(&path) {
-                let size_kb = metadata.len() as f64 / 1024.0;
-                stats.push(format!("  文件大小: {:.2} KB", size_kb));
-            }
-
-            // 行长度统计
             let line_lengths: Vec<usize> = content.lines().map(|l| l.len()).collect();
-            if !line_lengths.is_empty() {
-                let avg_len = line_lengths.iter().sum::<usize>() as f64 / line_lengths.len() as f64;
-                let max_len = line_lengths.iter().max().unwrap_or(&0);
-                stats.push(format!("  平均行长: {:.1} 字符", avg_len));
-                stats.push(format!("  最长行: {} 字符", max_len));
-            }
+            let avg_line_len = if !line_lengths.is_empty() {
+                Some(line_lengths.iter().sum::<usize>() as f64 / line_lengths.len() as f64)
+            } else {
+                None
+            };
+            let max_line_len = line_lengths.iter().max().copied();
 
-            Ok(ToolResult::success(stats.join("\n")))
+            let file_size_kb = std::fs::metadata(&path)
+                .ok()
+                .map(|m| m.len() as f64 / 1024.0);
+
+            let result = serde_json::json!({
+                "file": file_path,
+                "lines": lines,
+                "chars": chars,
+                "words": words,
+                "chinese_chars": chinese_chars,
+                "english_words": english_words,
+                "file_size_kb": file_size_kb,
+                "avg_line_len": avg_line_len,
+                "max_line_len": max_line_len,
+            });
+            Ok(ToolResult::success_json(result))
         })
     }
 }
@@ -452,16 +445,16 @@ impl Tool for TextProcessTool {
                 }
             }
 
-            let preview_lines = lines.iter().take(max_preview).cloned().collect::<Vec<_>>();
-            let result = format!(
-                "操作: {}\n原始行数: {}\n结果行数: {}\n\n{}",
-                operation,
-                original_count,
-                lines.len(),
-                preview_lines.join("\n")
-            );
-
-            Ok(ToolResult::success(result))
+            let preview_lines: Vec<&str> = lines.iter().take(max_preview).copied().collect();
+            let result = serde_json::json!({
+                "file": file_path,
+                "operation": operation,
+                "original_lines": original_count,
+                "result_lines": lines.len(),
+                "preview": preview_lines,
+                "truncated": lines.len() > max_preview,
+            });
+            Ok(ToolResult::success_json(result))
         })
     }
 }

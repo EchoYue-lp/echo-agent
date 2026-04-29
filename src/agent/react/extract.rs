@@ -47,33 +47,63 @@ impl ReactAgent {
         prompt: &str,
         schema: ResponseFormat,
     ) -> Result<serde_json::Value> {
-        let messages = vec![
+        let mut messages = vec![
             Message::system(self.config.system_prompt.clone()),
             Message::user(prompt.to_string()),
         ];
 
-        let response = chat(
-            self.client.clone(),
-            &self.config.model_name,
-            &messages,
-            Some(0.0),
-            Some(4096),
-            Some(false),
-            None,
-            None,
-            Some(schema),
-        )
-        .await?;
+        let max_retries = self.config.llm_max_retries;
+        let retry_delay = std::time::Duration::from_millis(self.config.llm_retry_delay_ms);
 
-        let text = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content.as_text())
-            .ok_or_else(|| ReactError::Other("LLM 返回空内容".to_string()))?;
+        for attempt in 0..=max_retries {
+            let response = chat(
+                self.client.clone(),
+                &self.config.model_name,
+                &messages,
+                Some(0.0),
+                Some(4096),
+                Some(false),
+                None,
+                None,
+                Some(schema.clone()),
+            )
+            .await?;
 
-        serde_json::from_str(&text)
-            .map_err(|e| ReactError::Other(format!("JSON 解析失败: {e}\n原始响应: {text}")))
+            let text = response
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.message.content.as_text())
+                .ok_or_else(|| ReactError::Other("LLM 返回空内容".to_string()))?;
+
+            match serde_json::from_str(&text) {
+                Ok(value) => return Ok(value),
+                Err(e) if attempt < max_retries => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        error = %e,
+                        "JSON 解析失败，将错误反馈给 LLM 重试"
+                    );
+                    // Feed the error back to LLM for self-correction
+                    let correction = format!(
+                        "Your previous response was not valid JSON.\n\
+                         Parse error: {e}\n\
+                         Raw response:\n{text}\n\n\
+                         Please provide a valid JSON response that strictly matches the required schema."
+                    );
+                    messages.push(Message::assistant(text));
+                    messages.push(Message::user(correction));
+                    tokio::time::sleep(retry_delay).await;
+                }
+                Err(e) => {
+                    return Err(ReactError::Other(format!(
+                        "JSON 解析失败（已重试 {max_retries} 次）: {e}\n原始响应: {text}"
+                    )));
+                }
+            }
+        }
+
+        unreachable!()
     }
 
     /// 一次性结构化提取，自动将 JSON 结果反序列化为指定类型 `T`。

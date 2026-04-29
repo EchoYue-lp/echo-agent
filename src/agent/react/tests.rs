@@ -14,52 +14,70 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // ── ReactAgent::reset() ───────────────────────────────────────────────────────
 
 /// reset() 应清除所有消息，仅保留 system prompt（1 条）
-#[test]
-fn react_agent_reset_clears_to_system_only() {
+#[tokio::test]
+async fn react_agent_reset_clears_to_system_only() {
     let config = AgentConfig::new("test-model", "test_agent", "你是测试助手");
-    let mut agent = ReactAgent::new(config);
+    let agent = ReactAgent::new(config);
 
-    let (count, _) = agent.context_stats();
+    let (count, _) = agent.context_stats().await;
     assert_eq!(count, 1, "初始应只有 1 条 system 消息");
 
-    agent.context.push(Message::user("你好".to_string()));
-    agent.context.push(Message::assistant("你好！".to_string()));
-    agent.context.push(Message::user("再见".to_string()));
-    let (count_after_push, _) = agent.context_stats();
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("你好".to_string()));
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::assistant("你好！".to_string()));
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("再见".to_string()));
+    let (count_after_push, _) = agent.context_stats().await;
     assert_eq!(count_after_push, 4, "追加后应有 4 条消息");
 
     agent.reset();
-    let (count_after_reset, _) = agent.context_stats();
+    let (count_after_reset, _) = agent.context_stats().await;
     assert_eq!(count_after_reset, 1, "reset() 后应只剩 1 条 system 消息");
 }
 
 /// 连续 reset() 多次应幂等，不产生重复的 system prompt
-#[test]
-fn react_agent_reset_is_idempotent() {
+#[tokio::test]
+async fn react_agent_reset_is_idempotent() {
     let config = AgentConfig::new("test-model", "test_agent", "系统提示词");
-    let mut agent = ReactAgent::new(config);
+    let agent = ReactAgent::new(config);
 
     agent.reset();
     agent.reset();
     agent.reset();
 
-    let (count, _) = agent.context_stats();
+    let (count, _) = agent.context_stats().await;
     assert_eq!(count, 1, "多次 reset() 后应仍只有 1 条 system 消息");
 }
 
 /// reset() 后 system prompt 内容应保持不变
-#[test]
-fn react_agent_reset_preserves_system_prompt() {
+#[tokio::test]
+async fn react_agent_reset_preserves_system_prompt() {
     let system = "这是一个自定义的系统提示词";
     let config = AgentConfig::new("test-model", "agent", system);
-    let mut agent = ReactAgent::new(config);
+    let agent = ReactAgent::new(config);
 
     agent
+        .memory
         .context
+        .lock()
+        .await
         .push(Message::user("随便什么消息".to_string()));
     agent.reset();
 
-    let messages = agent.context.messages();
+    let messages = agent.memory.context.lock().await.messages().to_vec();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role, "system");
     assert_eq!(messages[0].content.as_text_ref().unwrap_or(""), system);
@@ -97,8 +115,8 @@ fn react_agent_add_tools_batch() {
     agent.add_tools(tools);
 
     let tool_names = agent.tool_names();
-    // FinalAnswerTool + 3 个自定义工具 = 4
-    assert_eq!(tool_names.len(), 4);
+    // 内置工具 + 3 个自定义工具
+    assert!(tool_names.len() >= 4);
     assert!(tool_names.contains(&"tool1"));
     assert!(tool_names.contains(&"tool2"));
     assert!(tool_names.contains(&"tool3"));
@@ -131,8 +149,8 @@ fn react_agent_add_tools_with_allowed_list() {
     agent.add_tools(tools);
 
     let tool_names = agent.tool_names();
-    // FinalAnswerTool + allowed_tool = 2 (白名单只过滤用户添加的工具)
-    assert_eq!(tool_names.len(), 2);
+    // 内置工具 + allowed_tool（白名单只过滤用户添加的工具）
+    assert!(tool_names.len() >= 2);
     assert!(tool_names.contains(&"allowed_tool"));
 }
 
@@ -143,14 +161,15 @@ fn react_agent_tool_names() {
     let config = AgentConfig::minimal("test-model", "helper");
     let mut agent = ReactAgent::new(config);
 
-    // ReactAgent::new 会自动注册 FinalAnswerTool
-    assert_eq!(agent.tool_names().len(), 1);
+    // ReactAgent::new 会注册内置工具（至少包含 FinalAnswerTool）
+    let initial_len = agent.tool_names().len();
+    assert!(initial_len >= 1);
 
     agent.add_tool(Box::new(MockTool::new("tool1")));
     agent.add_tool(Box::new(MockTool::new("tool2")));
 
     let names = agent.tool_names();
-    assert_eq!(names.len(), 3); // FinalAnswerTool + tool1 + tool2
+    assert_eq!(names.len(), initial_len + 2);
 }
 
 #[test]
@@ -169,32 +188,40 @@ fn react_agent_mcp_server_names() {
     assert!(agent.mcp_server_names().is_empty(), "初始应无 MCP 服务器");
 }
 
-#[test]
-fn react_agent_get_messages() {
+#[tokio::test]
+async fn react_agent_get_messages() {
     let config = AgentConfig::new("test-model", "agent", "You are helpful");
-    let mut agent = ReactAgent::new(config);
+    let agent = ReactAgent::new(config);
 
-    let messages = agent.get_messages();
+    let messages = agent.get_messages().await;
     assert_eq!(messages.len(), 1, "初始只有 system 消息");
     assert_eq!(messages[0].role, "system");
 
-    agent.context.push(Message::user("Hello".to_string()));
-    let messages = agent.get_messages();
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("Hello".to_string()));
+    let messages = agent.get_messages().await;
     assert_eq!(messages.len(), 2);
 }
 
-#[test]
-fn react_agent_context_stats() {
+#[tokio::test]
+async fn react_agent_context_stats() {
     let config = AgentConfig::new("test-model", "agent", "System prompt");
-    let mut agent = ReactAgent::new(config);
+    let agent = ReactAgent::new(config);
 
-    let (count, _tokens) = agent.context_stats();
+    let (count, _tokens) = agent.context_stats().await;
     assert_eq!(count, 1);
 
     agent
+        .memory
         .context
+        .lock()
+        .await
         .push(Message::user("This is a test message".to_string()));
-    let (count, tokens) = agent.context_stats();
+    let (count, tokens) = agent.context_stats().await;
     assert_eq!(count, 2);
     assert!(tokens > 0, "token 估算应大于 0");
 }
@@ -213,18 +240,20 @@ fn react_agent_set_model() {
     assert_eq!(agent.model_name(), "model2");
 }
 
-#[test]
-fn react_agent_set_system_prompt() {
+#[tokio::test]
+async fn react_agent_set_system_prompt() {
     let config = AgentConfig::minimal("test-model", "helper");
     let mut agent = ReactAgent::new(config);
 
     let _original_prompt = agent.system_prompt().to_string();
-    agent.set_system_prompt("New system prompt".to_string());
+    agent
+        .set_system_prompt("New system prompt".to_string())
+        .await;
 
     assert_eq!(agent.system_prompt(), "New system prompt");
 
     // 验证上下文中的 system 消息也已更新
-    let messages = agent.get_messages();
+    let messages = agent.get_messages().await;
     assert_eq!(
         messages[0].content.as_text_ref().unwrap(),
         "New system prompt"
@@ -313,7 +342,7 @@ fn react_agent_add_callback() {
 /// reset() 可通过 &mut dyn Agent 调用（trait 对象安全性验证）
 #[tokio::test]
 async fn trait_reset_callable_via_dyn_agent() {
-    let mut agent: Box<dyn Agent> = Box::new(
+    let agent: Box<dyn Agent> = Box::new(
         MockAgent::new("mock")
             .with_response("r1")
             .with_response("r2"),
@@ -361,7 +390,7 @@ fn trait_skill_names_default() {
 /// chat() 应记录调用，并消费预设响应队列
 #[tokio::test]
 async fn mock_agent_chat_records_calls_and_consumes_responses() {
-    let mut agent = MockAgent::new("test")
+    let agent = MockAgent::new("test")
         .with_response("回复1")
         .with_response("回复2")
         .with_response("回复3");
@@ -380,7 +409,7 @@ async fn mock_agent_chat_records_calls_and_consumes_responses() {
 /// reset() 应清空 MockAgent 的调用历史（模拟对话重置语义）
 #[tokio::test]
 async fn mock_agent_reset_clears_call_history() {
-    let mut agent = MockAgent::new("test")
+    let agent = MockAgent::new("test")
         .with_response("r1")
         .with_response("r2")
         .with_response("r3");
@@ -400,7 +429,7 @@ async fn mock_agent_reset_clears_call_history() {
 /// execute() 和 chat() 共享同一个响应队列
 #[tokio::test]
 async fn mock_agent_execute_and_chat_share_response_queue() {
-    let mut agent = MockAgent::new("test")
+    let agent = MockAgent::new("test")
         .with_response("execute回复")
         .with_response("chat回复");
 
@@ -415,7 +444,7 @@ async fn mock_agent_execute_and_chat_share_response_queue() {
 /// 响应队列耗尽后，chat() 应返回默认响应
 #[tokio::test]
 async fn mock_agent_chat_falls_back_to_default_when_queue_empty() {
-    let mut agent = MockAgent::new("test");
+    let agent = MockAgent::new("test");
 
     let r = agent.chat("任意消息").await.unwrap();
     assert_eq!(r, "mock agent response", "队列空时应返回默认响应");
@@ -424,7 +453,7 @@ async fn mock_agent_chat_falls_back_to_default_when_queue_empty() {
 /// FailingMockAgent::reset() 清空调用历史
 #[tokio::test]
 async fn failing_mock_agent_reset_clears_calls() {
-    let mut agent = FailingMockAgent::new("failing", "总是失败");
+    let agent = FailingMockAgent::new("failing", "总是失败");
 
     agent.execute("任务1").await.unwrap_err();
     agent.chat("任务2").await.unwrap_err();
@@ -439,7 +468,7 @@ async fn failing_mock_agent_reset_clears_calls() {
 /// 模拟典型多轮对话生命周期：chat → reset → chat
 #[tokio::test]
 async fn mock_agent_full_chat_lifecycle() {
-    let mut agent = MockAgent::new("assistant").with_responses([
+    let agent = MockAgent::new("assistant").with_responses([
         "轮1回复1",
         "轮1回复2",
         "轮2回复1",
@@ -657,32 +686,38 @@ async fn subagent_context_isolation() {
     // 创建父 agent
     let parent_config =
         AgentConfig::new("qwen3-max", "parent", "You are the parent agent").enable_subagent(true);
-    let mut parent = ReactAgent::new(parent_config);
+    let parent = ReactAgent::new(parent_config);
 
     // 父 agent 添加消息到上下文
     parent
+        .memory
         .context
+        .lock()
+        .await
         .push(Message::user("Parent message".to_string()));
-    let (parent_count_before, _) = parent.context_stats();
+    let (parent_count_before, _) = parent.context_stats().await;
     assert_eq!(parent_count_before, 2); // system + user message
 
     // 创建独立的子 agent
     let sub_config = AgentConfig::new("qwen3-max", "child", "You are a child agent");
-    let mut child = ReactAgent::new(sub_config);
+    let child = ReactAgent::new(sub_config);
 
     // 子 agent 有自己的独立上下文
-    let (child_count, _) = child.context_stats();
+    let (child_count, _) = child.context_stats().await;
     assert_eq!(child_count, 1); // 只有 system 消息
 
     // 子 agent 添加消息不影响父 agent
     child
+        .memory
         .context
+        .lock()
+        .await
         .push(Message::user("Child message".to_string()));
-    let (child_count_after, _) = child.context_stats();
+    let (child_count_after, _) = child.context_stats().await;
     assert_eq!(child_count_after, 2);
 
     // 父 agent 的上下文不受影响
-    let (parent_count_after, _) = parent.context_stats();
+    let (parent_count_after, _) = parent.context_stats().await;
     assert_eq!(parent_count_after, 2);
 }
 
@@ -691,24 +726,34 @@ async fn subagent_reset_independence() {
     // 创建父 agent 和子 agent
     let parent_config =
         AgentConfig::new("qwen3-max", "parent", "Parent system").enable_subagent(true);
-    let mut parent = ReactAgent::new(parent_config);
+    let parent = ReactAgent::new(parent_config);
 
     let child_config = AgentConfig::new("qwen3-max", "child", "Child system");
-    let mut child = ReactAgent::new(child_config);
+    let child = ReactAgent::new(child_config);
 
     // 两者都添加消息
-    parent.context.push(Message::user("Parent msg".to_string()));
-    child.context.push(Message::user("Child msg".to_string()));
+    parent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("Parent msg".to_string()));
+    child
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("Child msg".to_string()));
 
     // 重置父 agent
     parent.reset();
 
     // 父 agent 上下文被清空
-    let (parent_count, _) = parent.context_stats();
+    let (parent_count, _) = parent.context_stats().await;
     assert_eq!(parent_count, 1);
 
     // 子 agent 上下文不受影响
-    let (child_count, _) = child.context_stats();
+    let (child_count, _) = child.context_stats().await;
     assert_eq!(child_count, 2);
 }
 
@@ -767,10 +812,20 @@ fn agent_tool_registration_isolation() {
     let tools1 = agent1.tool_names();
     let tools2 = agent2.tool_names();
 
-    // agent1 有 FinalAnswerTool + tool1
-    assert_eq!(tools1.len(), 2);
-    // agent2 只有 FinalAnswerTool
-    assert_eq!(tools2.len(), 1);
+    // agent1 有内置工具 + tool1；agent2 只有内置工具
+    assert!(
+        tools1.len() >= 2,
+        "agent1 should have at least 2 tools (built-in + tool1)"
+    );
+    assert!(
+        tools2.len() >= 1,
+        "agent2 should have at least 1 built-in tool"
+    );
+    assert_eq!(
+        tools1.len(),
+        tools2.len() + 1,
+        "agent1 should have exactly one more tool than agent2"
+    );
 }
 
 #[test]
@@ -869,6 +924,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .unwrap();
 
     let first_params = agent
+        .tools
         .tool_manager
         .get_tool("activate_skill")
         .expect("activate_skill should be registered")
@@ -878,6 +934,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
     assert!(!first_params.contains("skill-two"));
 
     let first_activation = agent
+        .tools
         .tool_manager
         .execute_tool(
             "activate_skill",
@@ -894,6 +951,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .unwrap();
 
     let second_params = agent
+        .tools
         .tool_manager
         .get_tool("activate_skill")
         .expect("activate_skill should stay registered")
@@ -903,6 +961,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
     assert!(second_params.contains("skill-two"));
 
     let repeat_activation = agent
+        .tools
         .tool_manager
         .execute_tool(
             "activate_skill",
@@ -914,6 +973,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
     assert!(repeat_activation.output.contains("already activated"));
 
     let second_activation = agent
+        .tools
         .tool_manager
         .execute_tool(
             "activate_skill",
@@ -935,7 +995,7 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
         MockTool::new("test_tool").with_response("tool ok"),
     ));
 
-    let mut hooks = agent.hook_registry.write().await;
+    let mut hooks = agent.tools.hook_registry.write().await;
     hooks.register(
         "hook-skill",
         "/tmp",
@@ -961,6 +1021,7 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
 
     let messages: Vec<String> = agent
         .get_messages()
+        .await
         .iter()
         .filter_map(|m| m.content.as_text_ref().map(str::to_string))
         .collect();
@@ -1005,6 +1066,7 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         .unwrap();
 
     let missing = agent
+        .tools
         .tool_manager
         .execute_tool(
             "activate_skill",
@@ -1016,6 +1078,7 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
     assert!(missing.error.unwrap_or_default().contains("context_path"));
 
     let mismatch = agent
+        .tools
         .tool_manager
         .execute_tool(
             "activate_skill",
@@ -1036,6 +1099,7 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
     );
 
     let matched = agent
+        .tools
         .tool_manager
         .execute_tool(
             "activate_skill",
@@ -1174,30 +1238,30 @@ fn builder_max_tool_output_tokens() {
     assert_eq!(agent.config().get_max_tool_output_tokens(), Some(1500));
 }
 
-#[test]
-fn truncate_tool_output_no_limit() {
+#[tokio::test]
+async fn truncate_tool_output_no_limit() {
     let config = AgentConfig::new("model", "agent", "prompt");
     let agent = ReactAgent::new(config);
     let long_text = "a".repeat(10000);
-    let result = agent.truncate_tool_output(long_text.clone());
+    let result = agent.truncate_tool_output(long_text.clone()).await;
     assert_eq!(result.len(), long_text.len(), "无限制时不应截断");
 }
 
-#[test]
-fn truncate_tool_output_within_limit() {
+#[tokio::test]
+async fn truncate_tool_output_within_limit() {
     let config = AgentConfig::new("model", "agent", "prompt").max_tool_output_tokens(100000);
     let agent = ReactAgent::new(config);
     let short_text = "hello world".to_string();
-    let result = agent.truncate_tool_output(short_text.clone());
+    let result = agent.truncate_tool_output(short_text.clone()).await;
     assert_eq!(result, short_text, "未超限时不应截断");
 }
 
-#[test]
-fn truncate_tool_output_exceeds_limit() {
+#[tokio::test]
+async fn truncate_tool_output_exceeds_limit() {
     let config = AgentConfig::new("model", "agent", "prompt").max_tool_output_tokens(10);
     let agent = ReactAgent::new(config);
     let long_text = "a ".repeat(500);
-    let result = agent.truncate_tool_output(long_text);
+    let result = agent.truncate_tool_output(long_text).await;
     assert!(result.contains("[输出已截断"), "超限时应有截断提示");
     assert!(result.len() < 1000, "截断后应显著变短");
 }

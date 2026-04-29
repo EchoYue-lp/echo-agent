@@ -72,7 +72,7 @@ async fn run_live_plan_execute(task: &str) -> echo_agent::error::Result<()> {
         .max_iterations(6)
         .build()?;
 
-    let mut agent = PlanExecuteAgent::new(
+    let agent = PlanExecuteAgent::new(
         "practical-plan-execute",
         build_live_planner(),
         ReactExecutor::new(executor_agent),

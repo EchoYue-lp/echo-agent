@@ -162,7 +162,8 @@ async fn demo_timeout() -> Result<()> {
     .tool_execution(ToolExecutionConfig {
         timeout_ms: 1_500,
         ..ToolExecutionConfig::default()
-    });
+    })
+    .tool_error_feedback(false);
     assert_eq!(config.get_tool_execution().timeout_ms, 1_500);
     let mut agent = ReactAgent::new(config);
 

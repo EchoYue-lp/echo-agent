@@ -499,6 +499,7 @@ fn format_execution_result(
                 script_path, exit_code
             )),
             bytes: None,
+            data: None,
         })
     }
 }

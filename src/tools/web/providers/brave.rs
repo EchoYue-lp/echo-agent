@@ -30,7 +30,7 @@ impl BraveSearchProvider {
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .expect("Failed to build reqwest client");
+            .unwrap_or_else(|_| Client::new());
         Self {
             client,
             api_key: api_key.into(),

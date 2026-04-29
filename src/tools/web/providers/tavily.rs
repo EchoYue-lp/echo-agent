@@ -36,7 +36,7 @@ impl TavilyProvider {
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .expect("Failed to build reqwest client");
+            .unwrap_or_else(|_| Client::new());
         Self {
             client,
             api_key: api_key.into(),
@@ -52,13 +52,24 @@ impl TavilyProvider {
 }
 
 /// Tavily 搜索请求体
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct TavilyRequest {
     api_key: String,
     query: String,
     max_results: usize,
     #[serde(rename = "include_answer")]
     include_answer: bool,
+}
+
+impl std::fmt::Debug for TavilyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TavilyRequest")
+            .field("api_key", &"[REDACTED]")
+            .field("query", &self.query)
+            .field("max_results", &self.max_results)
+            .field("include_answer", &self.include_answer)
+            .finish()
+    }
 }
 
 /// Tavily 搜索响应

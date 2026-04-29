@@ -4,7 +4,7 @@
 //!
 //! 本 crate 提供所有子 crate 共享的接口和类型：
 //! - [`error`][]: 统一错误类型
-//! - [`tools`]: 工具系统 trait (Tool, TypedTool) 和权限模型
+//! - [`tools`]: 工具系统 trait 和权限模型
 //! - [`llm`]: LLM 客户端 trait 和消息类型
 //! - [`agent`]: Agent trait、回调接口和事件
 //! - [`guard`]: 护栏系统 trait 和管理器
@@ -16,6 +16,7 @@ pub mod circuit_breaker;
 pub mod error;
 pub mod guard;
 pub mod llm;
+pub mod project_rules;
 pub mod retry;
 pub mod tokenizer;
 pub mod tools;

@@ -454,6 +454,7 @@ impl McpServer {
                     content: vec![McpContent::Text { text }],
                     is_error: !result.success,
                     structured_content: None,
+                    extra: serde_json::Map::new(),
                 }
             }
             Err(e) => McpToolCallResult {
@@ -462,6 +463,7 @@ impl McpServer {
                 }],
                 is_error: true,
                 structured_content: None,
+                extra: serde_json::Map::new(),
             },
         };
 

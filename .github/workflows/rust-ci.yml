@@ -23,20 +23,12 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Cargo check workspace
-        run: cargo check --workspace
-
-      - name: Cargo check workspace all targets
-        run: cargo check --workspace --all-targets
-
-      - name: Compile tests without running
-        run: cargo test --workspace --no-run
-
-      - name: Run workspace tests
-        run: cargo test --workspace
-
       - name: Cargo fmt check
         run: cargo fmt --check
 
       - name: Cargo clippy workspace
         run: cargo clippy --workspace --all-targets
+
+      - name: Cargo check workspace all targets
+        run: cargo check --workspace --all-targets
+

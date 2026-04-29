@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -42,7 +43,12 @@ impl HttpTransport {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .unwrap_or_else(|_| {
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(60))
+                        .build()
+                        .unwrap_or_default()
+                }),
             endpoint: endpoint.trim_end_matches('/').to_string(),
             headers,
             next_id: Arc::new(AtomicU64::new(1)),
@@ -87,14 +93,57 @@ impl McpTransport for HttpTransport {
                 builder = builder.header(k, v);
             }
 
-            let response = match builder.send().await {
-                Ok(resp) => resp,
-                Err(e) => {
-                    self.pending.lock().await.remove(&id);
-                    return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
-                        "HTTP 请求失败: {}",
-                        e
-                    ))));
+            // Retry loop for transient HTTP errors (connection reset, timeout, DNS, TLS, 5xx)
+            const MAX_RETRIES: u32 = 3;
+            const BASE_DELAY_MS: u64 = 500;
+            let mut retry_count: u32 = 0;
+            let response = loop {
+                let req = match builder.try_clone() {
+                    Some(r) => r,
+                    None => {
+                        self.pending.lock().await.remove(&id);
+                        return Err(ReactError::Mcp(McpError::ConnectionFailed(
+                            "无法复制 HTTP 请求".to_string(),
+                        )));
+                    }
+                };
+                match req.send().await {
+                    Ok(resp) => break resp,
+                    Err(e) => {
+                        if retry_count < MAX_RETRIES && is_retryable_error(&e) {
+                            retry_count += 1;
+                            let delay_ms = BASE_DELAY_MS * 2u64.pow(retry_count - 1);
+                            // Add jitter: +/- 25%
+                            let jitter = delay_ms / 4;
+                            let delay = if jitter > 0 {
+                                let r = (delay_ms as i64 - jitter as i64
+                                    + (std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .subsec_nanos()
+                                        as i64
+                                        % (jitter * 2) as i64))
+                                    .max(0) as u64;
+                                Duration::from_millis(r)
+                            } else {
+                                Duration::from_millis(delay_ms)
+                            };
+                            tracing::warn!(
+                                attempt = retry_count,
+                                max = MAX_RETRIES,
+                                delay_ms = delay.as_millis() as u64,
+                                error = %e,
+                                "MCP HTTP 请求失败，重试中..."
+                            );
+                            tokio::time::sleep(delay).await;
+                        } else {
+                            self.pending.lock().await.remove(&id);
+                            return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+                                "HTTP 请求失败: {}",
+                                e
+                            ))));
+                        }
+                    }
                 }
             };
 
@@ -195,4 +244,29 @@ impl McpTransport for HttpTransport {
             self.notification_tx.subscribe(),
         )))
     }
+}
+
+/// Check if a reqwest error is transient and worth retrying.
+///
+/// Retries on: connection failures, timeouts, DNS errors, TLS handshake errors,
+/// connection resets, EOF on connection, and HTTP 503/504 responses.
+fn is_retryable_error(e: &reqwest::Error) -> bool {
+    if e.is_timeout() || e.is_connect() {
+        return true;
+    }
+    if let Some(status) = e.status() {
+        // 5xx server errors (especially 502/503/504) are transient
+        let code = status.as_u16();
+        return code == 502 || code == 503 || code == 504;
+    }
+    // Check the error message for common transient patterns
+    let msg = e.to_string().to_lowercase();
+    msg.contains("connection reset")
+        || msg.contains("connection refused")
+        || msg.contains("broken pipe")
+        || msg.contains("eof")
+        || msg.contains("unexpected eof")
+        || msg.contains("dns")
+        || msg.contains("tls")
+        || msg.contains("timed out")
 }

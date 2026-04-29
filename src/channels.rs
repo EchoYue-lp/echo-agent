@@ -115,7 +115,7 @@ impl AgentChannelHandler {
 #[async_trait]
 impl MessageHandler for AgentChannelHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
-        let mut agent = self.agent.lock().await;
+        let agent = self.agent.lock().await;
         let reply = agent.chat(&msg.text).await?;
 
         Ok(OutboundMessage::new(

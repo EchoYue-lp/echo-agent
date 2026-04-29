@@ -43,20 +43,20 @@ async fn main() -> echo_agent::error::Result<()> {
 
     print_banner();
 
-    separator("Part 1: chat() — 基础多轮对话（上下文记忆）");
-    demo_basic_chat().await?;
-
-    separator("Part 2: chat() + 工具调用 — 多轮数学推理");
-    demo_chat_with_tools().await?;
-
-    separator("Part 3: chat_stream() — 流式多轮对话");
-    demo_chat_stream().await?;
+    // separator("Part 1: chat() — 基础多轮对话（上下文记忆）");
+    // demo_basic_chat().await?;
+    //
+    // separator("Part 2: chat() + 工具调用 — 多轮数学推理");
+    // demo_chat_with_tools().await?;
+    //
+    // separator("Part 3: chat_stream() — 流式多轮对话");
+    // demo_chat_stream().await?;
 
     separator("Part 4: execute() vs chat() 行为对比");
     demo_execute_vs_chat().await?;
 
-    separator("Part 5: reset() 会话生命周期");
-    demo_reset_lifecycle().await?;
+    // separator("Part 5: reset() 会话生命周期");
+    // demo_reset_lifecycle().await?;
 
     println!("\n{}", "═".repeat(62));
     println!("  demo17 完成");
@@ -71,7 +71,7 @@ async fn demo_basic_chat() -> echo_agent::error::Result<()> {
     println!("  同一个 agent 实例连续调用 chat()，每轮都能看到之前的对话\n");
 
     // 使用 AgentBuilder 创建 Agent
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("chat_agent")
         .system_prompt("你是一个友好的助手，请用中文回答，保持简洁。")
@@ -129,7 +129,7 @@ async fn demo_chat_stream() -> echo_agent::error::Result<()> {
     println!("  使用 chat_stream() 进行流式多轮对话\n");
 
     // 使用 AgentBuilder 创建 Agent
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("stream_chat_agent")
         .system_prompt("你是一个助手，用中文回答，不超过三句话。")
@@ -170,7 +170,7 @@ async fn demo_execute_vs_chat() -> echo_agent::error::Result<()> {
     println!("  对比 execute() 和 chat() 的行为差异\n");
 
     // execute() 每次重置
-    let mut exec_agent = ReactAgentBuilder::new()
+    let exec_agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("exec_agent")
         .system_prompt("你是一个助手，用中文简洁回答。")
@@ -186,7 +186,7 @@ async fn demo_execute_vs_chat() -> echo_agent::error::Result<()> {
     println!("  ℹ️  execute() 第2轮看不到第1轮的信息\n");
 
     // chat() 保留历史
-    let mut chat_agent = ReactAgentBuilder::new()
+    let chat_agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("chat_cmp_agent")
         .system_prompt("你是一个助手，用中文简洁回答。")
@@ -210,7 +210,7 @@ async fn demo_reset_lifecycle() -> echo_agent::error::Result<()> {
     println!("  reset() 清除上下文，开启新会话\n");
 
     // 使用 AgentBuilder 创建 Agent
-    let mut agent: Box<dyn Agent> = Box::new(
+    let agent: Box<dyn Agent> = Box::new(
         ReactAgentBuilder::new()
             .model("qwen3-max")
             .name("lifecycle_agent")

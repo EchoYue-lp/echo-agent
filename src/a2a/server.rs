@@ -137,9 +137,9 @@ impl A2AServer {
     /// data: {"type":"status","taskId":"...","status":{"state":"completed",...},"final":true}
     /// ```
     pub async fn handle_request_stream(
-        &self,
+        self: &Arc<Self>,
         request_json: &str,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = A2AStreamEvent> + Send + '_>>> {
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = A2AStreamEvent> + Send + 'static>>> {
         let request: A2ATaskRequest = serde_json::from_str(request_json)
             .map_err(|e| crate::error::ReactError::Other(format!("Parse error: {}", e)))?;
 
@@ -202,7 +202,7 @@ impl A2AServer {
             });
 
             // Execute agent with streaming
-            let mut agent_guard = agent.lock().await;
+            let agent_guard = agent.lock().await;
             let stream_result = agent_guard.execute_stream(&input_text).await;
 
             match stream_result {
@@ -400,7 +400,7 @@ impl A2AServer {
         Self::update_task_state(&self.tasks, &task_id, TaskState::Working, None).await;
 
         // working → completed / failed
-        let mut agent = self.agent.lock().await;
+        let agent = self.agent.lock().await;
         match agent.execute(&input_text).await {
             Ok(output) => {
                 info!(task_id = %task_id, "A2A: 任务执行完成");

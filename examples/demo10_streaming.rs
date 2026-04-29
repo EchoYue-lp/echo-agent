@@ -95,6 +95,7 @@ async fn demo_raw_stream() -> echo_agent::error::Result<()> {
             None,
             None,
             None,
+            None,
         )
         .await?,
     );
@@ -117,7 +118,7 @@ async fn demo_raw_stream() -> echo_agent::error::Result<()> {
 
 async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
     // 使用 AgentBuilder 创建 Agent
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("stream_text_agent")
         .system_prompt("你是一个知识渊博的助手，用中文简洁回答问题。")

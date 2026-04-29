@@ -163,6 +163,8 @@ pub struct Message {
     pub name: Option<String>,
     /// Optional tool call identifier for tool messages.
     pub tool_call_id: Option<String>,
+    /// Reasoning content from models like Qwen3/DeepSeek (thinking process).
+    pub reasoning_content: Option<String>,
 }
 
 impl Serialize for Message {
@@ -186,6 +188,9 @@ impl Serialize for Message {
         if let Some(ref id) = self.tool_call_id {
             map.serialize_entry("tool_call_id", id)?;
         }
+        if let Some(ref rc) = self.reasoning_content {
+            map.serialize_entry("reasoning_content", rc)?;
+        }
         map.end()
     }
 }
@@ -204,16 +209,12 @@ impl<'de> Deserialize<'de> for Message {
             name: Option<String>,
             #[serde(default)]
             tool_call_id: Option<String>,
+            #[serde(default)]
+            reasoning_content: Option<String>,
         }
         let raw = RawMessage::deserialize(deserializer)?;
         let content = match raw.content {
-            Some(serde_json::Value::String(s)) => MessageContent::Text(s),
-            Some(serde_json::Value::Array(arr)) => {
-                let parts: Vec<ContentPart> = serde_json::from_value(serde_json::Value::Array(arr))
-                    .map_err(serde::de::Error::custom)?;
-                MessageContent::Parts(parts)
-            }
-            Some(other) => MessageContent::Text(other.to_string()),
+            Some(value) => MessageContent::deserialize(value).map_err(serde::de::Error::custom)?,
             None => MessageContent::Empty,
         };
         Ok(Message {
@@ -222,6 +223,7 @@ impl<'de> Deserialize<'de> for Message {
             tool_calls: raw.tool_calls,
             name: raw.name,
             tool_call_id: raw.tool_call_id,
+            reasoning_content: raw.reasoning_content,
         })
     }
 }
@@ -235,6 +237,7 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -246,6 +249,7 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -257,6 +261,7 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -310,6 +315,7 @@ impl Message {
             tool_calls: None,
             name: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -321,6 +327,7 @@ impl Message {
             tool_calls: Some(tool_calls),
             name: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -332,6 +339,7 @@ impl Message {
             tool_calls: None,
             name: Some(name),
             tool_call_id: Some(tool_call_id),
+            reasoning_content: None,
         }
     }
 
@@ -445,6 +453,9 @@ pub struct ChatCompletionRequest {
     /// 是否启用流式响应
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// 流式响应选项（如 include_usage）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<serde_json::Value>,
     /// 响应格式控制
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
@@ -546,6 +557,9 @@ pub struct ChatCompletionChunk {
     /// 候选响应列表
     #[serde(default)]
     pub choices: Vec<ChunkChoice>,
+    /// Token 使用统计（仅在最后一帧出现，需配合 stream_options.include_usage）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 /// 流式候选响应
@@ -570,6 +584,9 @@ pub struct DeltaMessage {
     /// 内容增量
     #[serde(default)]
     pub content: Option<String>,
+    /// 推理内容增量（Qwen3/DeepSeek 等模型的思考过程）
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
     /// 工具调用增量
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,

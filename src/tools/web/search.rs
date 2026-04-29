@@ -12,10 +12,10 @@
 //! let tool = WebSearchTool::with_duckduckgo();
 //! ```
 
+use super::providers::SearchProvider;
 use super::providers::brave::BraveSearchProvider;
 use super::providers::duckduckgo::DuckDuckGoProvider;
 use super::providers::tavily::TavilyProvider;
-use super::providers::{SearchProvider, SearchResult};
 use crate::error::{Result, ToolError};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
@@ -88,24 +88,6 @@ impl WebSearchTool {
     pub fn provider_name(&self) -> &str {
         self.provider.name()
     }
-
-    /// 格式化搜索结果
-    fn format_results(query: &str, results: &[SearchResult]) -> String {
-        if results.is_empty() {
-            return format!("未找到与 '{}' 相关的搜索结果。", query);
-        }
-
-        let mut output = format!("搜索结果（共 {} 条）:\n\n", results.len());
-        for (i, r) in results.iter().enumerate() {
-            output.push_str(&format!("{}. {}\n", i + 1, r.title));
-            output.push_str(&format!("   {}\n", r.url));
-            if !r.snippet.is_empty() {
-                output.push_str(&format!("   {}\n", r.snippet));
-            }
-            output.push('\n');
-        }
-        output
-    }
 }
 
 impl Tool for WebSearchTool {
@@ -161,10 +143,9 @@ impl Tool for WebSearchTool {
             );
 
             match self.provider.search(query, max_results).await {
-                Ok(results) => {
-                    let output = Self::format_results(query, &results);
-                    Ok(ToolResult::success(output))
-                }
+                Ok(results) => Ok(ToolResult::success_json(
+                    serde_json::to_value(&results).unwrap_or_default(),
+                )),
                 Err(e) => Ok(ToolResult::error(format!(
                     "搜索失败 (provider: {}): {}",
                     self.provider.name(),
@@ -177,16 +158,17 @@ impl Tool for WebSearchTool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::tools::web::providers::SearchResult;
 
     #[test]
-    fn test_format_results_empty() {
-        let output = WebSearchTool::format_results("test", &[]);
-        assert!(output.contains("未找到"));
+    fn test_empty_results_json() {
+        let results: Vec<SearchResult> = vec![];
+        let json = serde_json::to_value(&results).unwrap();
+        assert!(json.as_array().unwrap().is_empty());
     }
 
     #[test]
-    fn test_format_results_with_data() {
+    fn test_results_json_structure() {
         let results = vec![
             SearchResult {
                 title: "Rust".into(),
@@ -200,11 +182,13 @@ mod tests {
             },
         ];
 
-        let output = WebSearchTool::format_results("rust", &results);
-        assert!(output.contains("共 2 条"));
-        assert!(output.contains("1. Rust"));
-        assert!(output.contains("https://rust-lang.org"));
-        assert!(output.contains("A programming language"));
-        assert!(output.contains("2. Cargo"));
+        let json = serde_json::to_value(&results).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["title"], "Rust");
+        assert_eq!(arr[0]["url"], "https://rust-lang.org");
+        assert_eq!(arr[0]["snippet"], "A programming language");
+        assert_eq!(arr[1]["title"], "Cargo");
+        assert_eq!(arr[1]["snippet"], "");
     }
 }

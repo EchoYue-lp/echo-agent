@@ -96,7 +96,7 @@ async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<(
     println!("╚═══════════════════════════════════════════════════════╝\n");
 
     // 使用 AgentBuilder 创建 Agent
-    let mut math_agent = ReactAgentBuilder::new()
+    let math_agent = ReactAgentBuilder::new()
         .model(MODEL)
         .name("math_agent")
         .system_prompt("你是一位简洁的数学助手，用中文给出简短答案。")
@@ -113,7 +113,7 @@ async fn demo_session_isolation(checkpointer: Arc<dyn Checkpointer>) -> Result<(
     }
     println!("▶ math_agent 答案: {}\n", math_result);
 
-    let mut writer_agent = ReactAgentBuilder::new()
+    let writer_agent = ReactAgentBuilder::new()
         .model(MODEL)
         .name("writer_agent")
         .system_prompt("你是一位简洁的写作助手。")
@@ -187,6 +187,8 @@ async fn demo_context_isolation_multi_agent(checkpointer: Arc<dyn Checkpointer>)
         .session_id(SESSION_MAIN)
         .checkpointer_only(checkpointer.clone())
         .max_iterations(20)
+        .enable_subagent()
+        .enable_tools()
         .build()?;
 
     main_agent.register_agent(Box::new(math_sub));

@@ -246,7 +246,7 @@ async fn run_scripted_task(
         serde_json::to_string(&json!({ "answer": final_answer })).unwrap(),
     );
 
-    let mut agent = ReactAgentBuilder::new()
+    let agent = ReactAgentBuilder::new()
         .name(agent_name)
         .llm_client(Arc::new(mock))
         .system_prompt("你是一个数据处理助手，请严格按既定步骤调用工具并总结结果。")

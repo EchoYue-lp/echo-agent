@@ -59,6 +59,13 @@ const DANGEROUS_DOCKER_ARGS: &[&str] = &[
     "--cap-add",
     "--security-opt=seccomp=unconfined",
     "--security-opt=apparmor=unconfined",
+    "--userns=host",
+    "--device=",
+    "--volume=/",
+    "-v=/etc",
+    "-v=/proc",
+    "-v=/sys",
+    "-v=/",
 ];
 
 impl Default for DockerConfig {
@@ -79,7 +86,7 @@ impl Default for DockerConfig {
             disable_network: true,
             memory_limit: Some(256 * 1024 * 1024), // 256 MB
             cpu_quota: Some(50_000),
-            read_only_rootfs: false,
+            read_only_rootfs: true,
             extra_args: vec![],
         }
     }
@@ -182,6 +189,13 @@ impl DockerSandbox {
         args.push("--cap-drop=ALL".to_string());
         // 禁止提权
         args.push("--security-opt=no-new-privileges".to_string());
+        // 防止僵尸进程累积
+        args.push("--init".to_string());
+        // 防止容器意外重启
+        args.push("--restart=no".to_string());
+        // 限制资源使用上限
+        args.push("--ulimit=nofile=256:512".to_string());
+        args.push("--ulimit=nproc=64:128".to_string());
 
         // 环境变量
         for (k, v) in &command.env {
@@ -580,6 +594,11 @@ mod tests {
         assert!(args.contains(&"--cap-drop=ALL".to_string()));
         assert!(args.contains(&"--security-opt=no-new-privileges".to_string()));
         assert!(args.contains(&"--network=none".to_string()));
+        assert!(args.contains(&"--init".to_string()));
+        assert!(args.contains(&"--restart=no".to_string()));
+        assert!(args.contains(&"--read-only".to_string()));
+        assert!(args.contains(&"--ulimit=nofile=256:512".to_string()));
+        assert!(args.contains(&"--ulimit=nproc=64:128".to_string()));
     }
 
     #[test]
