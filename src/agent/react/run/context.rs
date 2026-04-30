@@ -1,4 +1,4 @@
-//! 上下文管理 + 长期记忆 + 持久化 + 审计
+//! Context management + long-term memory + persistence + audit
 
 use super::super::ReactAgent;
 use super::stream_loop::StreamMode;
@@ -32,7 +32,7 @@ impl ReactAgent {
         service.add_rules(pending).await;
     }
 
-    /// 根据快照策略自动捕获状态快照
+    /// Automatically capture a state snapshot according to the snapshot policy
     pub(crate) async fn auto_snapshot(&self, iteration: usize) {
         let should = self
             .memory
@@ -57,7 +57,7 @@ impl ReactAgent {
                 agent = %self.config.agent_name,
                 iteration = iteration,
                 snapshot_id = %id,
-                "📸 自动快照已捕获"
+                "📸 Auto-snapshot captured"
             );
         }
     }
@@ -112,7 +112,7 @@ impl ReactAgent {
         }
     }
 
-    /// 重置消息历史，仅保留 system prompt，确保每次执行互不干扰
+    /// Reset message history, keeping only the system prompt to ensure each execution is independent
     pub(crate) async fn reset_messages(&self) {
         let mut ctx = self.memory.context.lock().await;
         ctx.clear();
@@ -124,7 +124,7 @@ impl ReactAgent {
         if let (Some(cp), Some(tid)) = (&self.memory.checkpointer, &self.config.session_id) {
             match cp.get_state(tid).await {
                 Ok(Some(state)) => {
-                    info!(agent = %agent, session_id = %tid, "🔄 从线程状态恢复会话");
+                    info!(agent = %agent, session_id = %tid, "🔄 Restoring session from thread state");
                     self.memory
                         .context
                         .lock()
@@ -132,11 +132,11 @@ impl ReactAgent {
                         .set_messages(state.messages);
                 }
                 Ok(None) => {
-                    debug!(agent = %agent, session_id = %tid, "新会话，从空上下文开始");
+                    debug!(agent = %agent, session_id = %tid, "New session, starting from empty context");
                     self.reset_messages().await;
                 }
                 Err(e) => {
-                    warn!(agent = %agent, error = %e, "⚠️ 线程状态加载失败，从空上下文开始");
+                    warn!(agent = %agent, error = %e, "⚠️ Failed to load thread state, starting from empty context");
                     self.reset_messages().await;
                 }
             }
@@ -170,7 +170,7 @@ impl ReactAgent {
         let Some(conversation_id) = self.config.get_conversation_id() else {
             warn!(
                 agent = %self.config.agent_name,
-                "⚠️ 已配置 ConversationStore，但缺少 conversation_id，跳过历史投影"
+                "⚠️ ConversationStore configured but conversation_id is missing, skipping history projection"
             );
             return;
         };
@@ -199,7 +199,7 @@ impl ReactAgent {
                 agent = %self.config.agent_name,
                 conversation_id = %conversation_id,
                 error = %e,
-                "⚠️ 对话历史投影保存失败"
+                "⚠️ Conversation history projection save failed"
             );
         }
     }
@@ -213,10 +213,10 @@ impl ReactAgent {
             let state = ThreadState::from_messages(messages);
             match cp.put_state(&tid, state).await {
                 Ok(cid) => {
-                    debug!(agent = %self.config.agent_name, session_id = %tid, checkpoint_id = %cid, "🔖 线程状态已保存")
+                    debug!(agent = %self.config.agent_name, session_id = %tid, checkpoint_id = %cid, "🔖 Thread state saved")
                 }
                 Err(e) => {
-                    warn!(agent = %self.config.agent_name, error = %e, "⚠️ 线程状态保存失败")
+                    warn!(agent = %self.config.agent_name, error = %e, "⚠️ Thread state save failed")
                 }
             }
         }
@@ -248,27 +248,27 @@ impl ReactAgent {
             .await;
     }
 
-    /// 流式执行的公共初始化逻辑
+    /// Common initialization logic for streaming execution
     ///
-    /// 根据模式决定是否重置上下文、是否从 checkpoint 恢复。
-    /// 返回召回的长期记忆数量（0 表示无记忆注入）。
+    /// Decides whether to reset context or restore from checkpoint based on the mode.
+    /// Returns the number of recalled long-term memories (0 means no memories were injected).
     pub(crate) async fn prepare_stream_context(&self, mode: StreamMode, input: &str) -> usize {
         match mode {
             StreamMode::Execute => {
                 self.restore_thread_context().await;
             }
             StreamMode::Chat => {
-                // 多轮对话模式：不重置上下文
+                // Multi-turn chat mode: do not reset context
             }
         }
 
-        // 注入相关长期记忆
+        // Inject relevant long-term memories
         let mut recalled = 0usize;
         if let Ok(items) = self.recall_long_term_memories(input).await
             && !items.is_empty()
         {
             recalled = items.len();
-            let mut lines = vec!["[相关历史记忆]".to_string()];
+            let mut lines = vec!["[Relevant historical memories]".to_string()];
             for (i, item) in items.iter().enumerate() {
                 let content_str = item
                     .value
@@ -278,7 +278,7 @@ impl ReactAgent {
                     .unwrap_or_else(|| item.value.to_string());
                 lines.push(format!("{}. {}", i + 1, content_str));
             }
-            lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+            lines.push("[The above memories are for reference, please answer with the current question in mind]".to_string());
             self.memory
                 .context
                 .lock()
@@ -286,7 +286,7 @@ impl ReactAgent {
                 .push(Message::user(lines.join("\n")));
         }
 
-        // 推送用户消息
+        // Push user message
         self.memory
             .context
             .lock()
@@ -295,10 +295,10 @@ impl ReactAgent {
         recalled
     }
 
-    /// 流式执行上下文初始化（多模态消息版本）
+    /// Streaming execution context initialization (multimodal message version)
     ///
-    /// 与 `prepare_stream_context` 相同，但接受预构建的 `Message` 而不是字符串，
-    /// 支持多模态 content parts（图片、文件等）。
+    /// Same as `prepare_stream_context`, but accepts a pre-built `Message` instead of a string,
+    /// supporting multimodal content parts (images, files, etc.).
     pub(crate) async fn prepare_stream_context_with_message(
         &self,
         mode: StreamMode,
@@ -311,7 +311,7 @@ impl ReactAgent {
             StreamMode::Chat => {}
         }
 
-        // 从消息中提取文本用于长期记忆检索
+        // Extract text from message for long-term memory retrieval
         let text = message.content.as_text().unwrap_or_default();
         let mut recalled = 0usize;
         if !text.is_empty()
@@ -319,7 +319,7 @@ impl ReactAgent {
             && !items.is_empty()
         {
             recalled = items.len();
-            let mut lines = vec!["[相关历史记忆]".to_string()];
+            let mut lines = vec!["[Relevant historical memories]".to_string()];
             for (i, item) in items.iter().enumerate() {
                 let content_str = item
                     .value
@@ -329,7 +329,7 @@ impl ReactAgent {
                     .unwrap_or_else(|| item.value.to_string());
                 lines.push(format!("{}. {}", i + 1, content_str));
             }
-            lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+            lines.push("[The above memories are for reference, please answer with the current question in mind]".to_string());
             self.memory
                 .context
                 .lock()
@@ -337,12 +337,12 @@ impl ReactAgent {
                 .push(Message::user(lines.join("\n")));
         }
 
-        // 推送多模态用户消息
+        // Push multimodal user message
         self.memory.context.lock().await.push(message.clone());
         recalled
     }
 
-    /// 保存 checkpoint（用于 chat 模式）
+    /// Save checkpoint (for chat mode)
     pub(crate) async fn save_checkpoint(&self) {
         self.persist_runtime_state().await;
     }

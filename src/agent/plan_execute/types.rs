@@ -1,11 +1,11 @@
-//! Plan-and-Execute 类型定义
+//! Plan-and-Execute type definitions
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// 计算两个文本的简单相似度（0.0-1.0）
+/// Compute simple similarity between two texts (0.0-1.0)
 ///
-/// 使用 Jaccard 相似度：交集大小 / 并集大小（基于字符集合）
+/// Uses Jaccard similarity: intersection size / union size (based on character sets)
 fn text_similarity(a: &str, b: &str) -> f32 {
     if a.is_empty() && b.is_empty() {
         return 1.0;
@@ -14,7 +14,7 @@ fn text_similarity(a: &str, b: &str) -> f32 {
         return 0.0;
     }
 
-    // 转换为小写字符集合
+    // Convert to lowercase character sets
     let set_a: std::collections::HashSet<char> = a.to_lowercase().chars().collect();
     let set_b: std::collections::HashSet<char> = b.to_lowercase().chars().collect();
 
@@ -24,32 +24,32 @@ fn text_similarity(a: &str, b: &str) -> f32 {
     intersection / union
 }
 
-/// 执行计划
+/// Execution plan
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
-    /// 计划唯一 ID（自动生成）
+    /// Plan unique ID (auto-generated)
     #[serde(default = "generate_plan_id")]
     pub id: Option<String>,
-    /// 可读 slug（如 "swift-fox"）
+    /// Human-readable slug (e.g., "swift-fox")
     #[serde(default)]
     pub slug: Option<String>,
-    /// 版本号（每次 replan 递增）
+    /// Version number (incremented on each replan)
     #[serde(default)]
     pub version: u32,
-    /// 计划中的步骤列表
+    /// List of steps in the plan
     pub steps: Vec<PlanStep>,
-    /// 计划的整体目标描述
+    /// Overall goal description of the plan
     pub goal: Option<String>,
-    /// 父计划 ID（用于增量重规划追踪）
+    /// Parent plan ID (for incremental replanning tracking)
     #[serde(default)]
     pub parent_plan_id: Option<String>,
-    /// 附加元数据
+    /// Additional metadata
     #[serde(default)]
     pub metadata: HashMap<String, serde_json::Value>,
-    /// 创建时间戳（秒）
+    /// Creation timestamp (seconds)
     #[serde(default)]
     pub created_at: u64,
-    /// 最后更新时间戳（秒）
+    /// Last update timestamp (seconds)
     #[serde(default)]
     pub updated_at: u64,
 }
@@ -63,10 +63,10 @@ fn now_secs() -> u64 {
 }
 
 impl Plan {
-    /// 创建新计划
+    /// Create a new plan
     ///
-    /// # 参数
-    /// * `steps` - 计划步骤列表
+    /// # Parameters
+    /// * `steps` - List of plan steps
     pub fn new(steps: Vec<PlanStep>) -> Self {
         let now = now_secs();
         Self {
@@ -82,34 +82,34 @@ impl Plan {
         }
     }
 
-    /// 设置计划目标描述
+    /// Set the plan goal description
     ///
-    /// # 参数
-    /// * `goal` - 计划目标描述
+    /// # Parameters
+    /// * `goal` - Plan goal description
     pub fn with_goal(mut self, goal: impl Into<String>) -> Self {
         self.goal = Some(goal.into());
         self
     }
 
-    /// 设置可读 slug
+    /// Set a human-readable slug
     pub fn with_slug(mut self, slug: impl Into<String>) -> Self {
         self.slug = Some(slug.into());
         self
     }
 
-    /// 设置父计划 ID（用于增量重规划）
+    /// Set the parent plan ID (for incremental replanning)
     pub fn with_parent(mut self, parent_id: impl Into<String>) -> Self {
         self.parent_plan_id = Some(parent_id.into());
         self
     }
 
-    /// 添加元数据
+    /// Add metadata
     pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
         self
     }
 
-    /// 返回所有已完成步骤的数量
+    /// Return the number of completed steps
     pub fn completed_count(&self) -> usize {
         self.steps
             .iter()
@@ -117,22 +117,23 @@ impl Plan {
             .count()
     }
 
-    /// 检查计划是否全部完成
+    /// Check if the plan is fully completed
     pub fn is_completed(&self) -> bool {
         self.steps.iter().all(|s| s.status == StepStatus::Completed)
     }
 
-    /// 触碰更新时间
+    /// Touch the update timestamp
     pub fn touch(&mut self) {
         self.updated_at = now_secs();
     }
 
-    /// 将 Plan 转换为 Task DAG，用于统一执行模型
+    /// Convert Plan to Task DAG for the unified execution model
     ///
-    /// 每个 PlanStep 映射为一个 Task，`step_N` 格式的依赖转换为任务 ID 引用。
-    /// 转换后可直接交给 `TaskExecutor` 并行执行。
+    /// Each PlanStep maps to a Task, with `step_N`-format dependencies
+    /// converted to task ID references. Can be directly handed to
+    /// `TaskExecutor` for parallel execution.
     ///
-    /// 当依赖使用模糊匹配（非精确 step_N）时会发出警告。
+    /// Emits warnings when fuzzy matching (non-exact step_N) is used for dependencies.
     pub fn to_task_dag(&self) -> Vec<crate::tasks::Task> {
         use tracing::warn;
         let now = now_secs();
@@ -140,7 +141,7 @@ impl Plan {
             .iter()
             .enumerate()
             .map(|(i, step)| {
-                // 将依赖转换为 "plan_step_N" 任务 ID
+                // Convert dependencies to "plan_step_N" task IDs
                 let deps: Vec<String> = step
                     .dependencies
                     .iter()
@@ -181,13 +182,13 @@ impl Plan {
             .collect()
     }
 
-    // ── 验证与自动修复 ──────────────────────────────────────────────────
+    // ── Validation & Auto-Fix ──────────────────────────────────────────────────
 
-    /// 验证计划的有效性，返回所有发现的问题
+    /// Validate the plan, returning all discovered issues
     pub fn validate(&self) -> Vec<PlanValidationIssue> {
         let mut issues = Vec::new();
 
-        // 1. 至少有一个步骤
+        // 1. At least one step
         if self.steps.is_empty() {
             issues.push(PlanValidationIssue {
                 severity: IssueSeverity::Error,
@@ -196,13 +197,13 @@ impl Plan {
             });
         }
 
-        // 2. 检查步骤间的循环依赖
+        // 2. Check for circular dependencies between steps
         let desc_set: std::collections::HashSet<&str> =
             self.steps.iter().map(|s| s.description.as_str()).collect();
 
         for (i, step) in self.steps.iter().enumerate() {
             for dep in &step.dependencies {
-                // 自环检测
+                // Self-cycle detection
                 if dep == &format!("step_{}", i) {
                     issues.push(PlanValidationIssue {
                         severity: IssueSeverity::Error,
@@ -213,11 +214,11 @@ impl Plan {
             }
         }
 
-        // 3. 检查缺失的依赖引用
+        // 3. Check for missing dependency references
         for (i, step) in self.steps.iter().enumerate() {
             for dep in &step.dependencies {
                 if !dep.starts_with("step_") {
-                    // 可能是描述引用，尝试匹配
+                    // May be a descriptive reference, attempt matching
                     let matched = self.resolve_dependency(dep).is_some();
                     if !matched && !desc_set.contains(dep.as_str()) {
                         issues.push(PlanValidationIssue {
@@ -238,7 +239,7 @@ impl Plan {
             }
         }
 
-        // 4. 检查步骤描述是否为空
+        // 4. Check for empty step descriptions
         for (i, step) in self.steps.iter().enumerate() {
             if step.description.trim().is_empty() {
                 issues.push(PlanValidationIssue {
@@ -252,17 +253,17 @@ impl Plan {
         issues
     }
 
-    /// 自动修复可修复的问题
+    /// Auto-fix fixable issues
     ///
-    /// 修复项：
-    /// - 移除自环依赖
-    /// - 移除指向不存在步骤的依赖
-    /// - 为空描述生成占位描述
+    /// Fix items:
+    /// - Remove self-cyclic dependencies
+    /// - Remove dependencies pointing to non-existent steps
+    /// - Generate placeholder descriptions for empty descriptions
     pub fn auto_fix(&mut self) -> Vec<String> {
         let mut fixes = Vec::new();
         let steps_len = self.steps.len();
 
-        // 首先收集所有唯一的依赖字符串
+        // First collect all unique dependency strings
         use std::collections::HashSet;
         let mut all_deps = HashSet::new();
         for step in self.steps.iter() {
@@ -271,7 +272,7 @@ impl Plan {
             }
         }
 
-        // 预先计算所有依赖的可解析性（在可变借用之前）
+        // Pre-compute resolvability of all dependencies (before mutable borrow)
         use std::collections::HashMap;
         let mut dependency_resolvable: HashMap<String, bool> = HashMap::new();
         for dep in &all_deps {
@@ -280,7 +281,7 @@ impl Plan {
         }
 
         for (i, step) in self.steps.iter_mut().enumerate() {
-            // 移除自环
+            // Remove self-cycle
             let self_dep = format!("step_{}", i);
             let before = step.dependencies.len();
             step.dependencies.retain(|d| d != &self_dep);
@@ -288,18 +289,18 @@ impl Plan {
                 fixes.push(format!("Removed self-dependency from step {}", i));
             }
 
-            // 移除无效索引引用和无法解析的描述型依赖
+            // Remove invalid index references and unresolvable descriptive dependencies
             step.dependencies.retain(|d| {
                 if let Some(idx_str) = d.strip_prefix("step_")
                     && let Ok(idx) = idx_str.parse::<usize>()
                 {
                     return idx < steps_len;
                 }
-                // 检查描述型依赖是否可以解析（使用预先计算的结果）
+                // Check whether descriptive dependency is resolvable (use pre-computed results)
                 *dependency_resolvable.get(d).unwrap_or(&false)
             });
 
-            // 修复空描述
+            // Fix empty description
             if step.description.trim().is_empty() {
                 step.description = format!("Unnamed step {}", i);
                 fixes.push(format!("Filled empty description for step {}", i));
@@ -313,13 +314,13 @@ impl Plan {
         fixes
     }
 
-    /// 将依赖字符串解析为步骤索引，并返回是否使用了模糊匹配
+    /// Resolve a dependency string to a step index, returning whether fuzzy matching was used
     ///
-    /// 返回 `(Some(idx), false)` 表示精确 step_N 匹配
-    /// 返回 `(Some(idx), true)` 表示模糊匹配（fallback）
-    /// 返回 `(None, false)` 表示无法解析
+    /// Returns `(Some(idx), false)` for exact step_N match
+    /// Returns `(Some(idx), true)` for fuzzy match (fallback)
+    /// Returns `(None, false)` for unresolvable
     fn resolve_dependency_with_fuzzy(&self, dep: &str) -> (Option<usize>, bool) {
-        // 1. 优先处理 "step_N" 格式（精确匹配）
+        // 1. Prioritize "step_N" format (exact match)
         if let Some(idx_str) = dep.strip_prefix("step_")
             && let Ok(idx) = idx_str.parse::<usize>()
             && idx < self.steps.len()
@@ -327,21 +328,21 @@ impl Plan {
             return (Some(idx), false);
         }
 
-        // 2. 模糊匹配作为 fallback
+        // 2. Fuzzy match as fallback
         let result = self.resolve_dependency(dep);
         (result, result.is_some())
     }
 
-    /// 将依赖字符串解析为步骤索引
+    /// Resolve a dependency string to a step index
     ///
-    /// 解析逻辑：
-    /// 1. 如果是 "step_N" 格式，直接解析索引
-    /// 2. 否则尝试模糊匹配步骤描述
-    ///    - 如果依赖是描述的子串且长度≥3，匹配
-    ///    - 如果依赖长度≥5，使用相似度阈值（0.6）
-    /// 3. 返回匹配的步骤索引，无匹配时返回 None
+    /// Resolution logic:
+    /// 1. If "step_N" format, parse the index directly
+    /// 2. Otherwise attempt fuzzy matching against step descriptions
+    ///    - If dependency is a substring of description with length >= 3, match
+    ///    - If dependency length >= 5, use similarity threshold (0.6)
+    /// 3. Return the matched step index, None if no match
     fn resolve_dependency(&self, dep: &str) -> Option<usize> {
-        // 1. 处理 "step_N" 格式
+        // 1. Handle "step_N" format
         if let Some(idx_str) = dep.strip_prefix("step_")
             && let Ok(idx) = idx_str.parse::<usize>()
             && idx < self.steps.len()
@@ -349,17 +350,17 @@ impl Plan {
             return Some(idx);
         }
 
-        // 2. 模糊匹配步骤描述
+        // 2. Fuzzy match against step descriptions
         let mut candidates = Vec::new();
 
         for (idx, step) in self.steps.iter().enumerate() {
-            // 检查依赖是否是描述的子串（长度至少3，避免太短的匹配）
+            // Check if dependency is a substring of description (at least 3 chars, avoid too-short matches)
             if dep.len() >= 3 && step.description.contains(dep) {
-                // 进一步检查：依赖是否出现在单词边界处（对于英文）
+                // Further check: whether dependency appears at word boundaries (for English)
                 let desc_lower = step.description.to_lowercase();
                 let dep_lower = dep.to_lowercase();
 
-                // 查找所有出现位置
+                // Find all occurrence positions
                 let mut positions = Vec::new();
                 let mut start = 0;
                 while let Some(pos) = desc_lower[start..].find(&dep_lower) {
@@ -368,16 +369,16 @@ impl Plan {
                     start = actual_pos + 1;
                 }
 
-                // 检查是否有出现在单词边界处
+                // Check if any occurrence is at a word boundary
                 let mut has_word_boundary = false;
                 for &pos in &positions {
-                    // 检查前一个字符是否是单词边界
+                    // Check if previous character is a word boundary
                     let prev_is_boundary = pos == 0
                         || !desc_lower
                             .chars()
                             .nth(pos - 1)
                             .is_some_and(|c| c.is_alphanumeric());
-                    // 检查后一个字符是否是单词边界
+                    // Check if next character is a word boundary
                     let next_pos = pos + dep.len();
                     let next_is_boundary = next_pos >= desc_lower.len()
                         || !desc_lower
@@ -392,20 +393,20 @@ impl Plan {
                 }
 
                 if has_word_boundary {
-                    candidates.push((idx, 1.0)); // 最高分数：精确子串匹配在单词边界处
+                    candidates.push((idx, 1.0)); // Highest score: exact substring match at word boundary
                 } else if dep.len() >= 3 {
-                    candidates.push((idx, 0.8)); // 较高分数：子串匹配但不在单词边界处
+                    candidates.push((idx, 0.8)); // Higher score: substring match but not at word boundary
                 }
                 continue;
             }
 
-            // 检查描述是否是依赖的子串
+            // Check if description is a substring of the dependency
             if step.description.len() >= 3 && dep.contains(&step.description) {
-                candidates.push((idx, 0.7)); // 中等分数：描述是依赖的子串
+                candidates.push((idx, 0.7)); // Medium score: description is a substring of dependency
                 continue;
             }
 
-            // 如果依赖长度足够，计算相似度
+            // If dependency is long enough, compute similarity
             if dep.len() >= 5 {
                 let similarity = text_similarity(dep, &step.description);
                 if similarity >= 0.6 {
@@ -414,12 +415,12 @@ impl Plan {
             }
         }
 
-        // 选择最佳匹配（最高相似度）
+        // Select the best match (highest similarity)
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         candidates.first().map(|&(idx, _)| idx)
     }
 
-    /// 获取指定步骤的所有下游步骤（依赖于此步骤的步骤）
+    /// Get all downstream steps of a given step (steps that depend on it)
     pub fn downstream_steps(&self, step_idx: usize) -> Vec<usize> {
         let step_id = format!("step_{}", step_idx);
         self.steps
@@ -430,7 +431,7 @@ impl Plan {
             .collect()
     }
 
-    /// 递归获取所有下游步骤（包括间接依赖）
+    /// Recursively get all downstream steps (including transitive dependencies)
     pub fn downstream_steps_recursive(&self, step_idx: usize) -> Vec<usize> {
         let mut result = Vec::new();
         let mut visited = std::collections::HashSet::new();
@@ -457,48 +458,48 @@ impl Plan {
     }
 }
 
-/// 计划验证问题
+/// Plan validation issue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanValidationIssue {
-    /// 严重程度
+    /// Severity level
     pub severity: IssueSeverity,
-    /// 问题描述
+    /// Issue description
     pub message: String,
-    /// 建议修复方式
+    /// Suggested fix
     #[serde(default)]
     pub fix: Option<String>,
 }
 
-/// 问题严重程度
+/// Issue severity level
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueSeverity {
-    /// 错误：计划无法执行
+    /// Error: plan cannot be executed
     Error,
-    /// 警告：计划可执行但可能有问题
+    /// Warning: plan is executable but may have issues
     Warning,
 }
 
-/// 计划中的单个步骤
+/// A single step in a plan
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStep {
-    /// 步骤描述
+    /// Step description
     pub description: String,
-    /// 步骤状态
+    /// Step status
     pub status: StepStatus,
-    /// 预期输入（对上一步结果的依赖描述）
+    /// Expected input (dependency description on previous step results)
     pub expected_input: Option<String>,
-    /// 预期输出描述
+    /// Expected output description
     pub expected_output: Option<String>,
-    /// 依赖的步骤索引列表（从 LLM 规划结果生成）
+    /// List of dependent step indices (generated from LLM planning output)
     #[serde(default)]
     pub dependencies: Vec<String>,
 }
 
 impl PlanStep {
-    /// 创建新步骤
+    /// Create a new step
     ///
-    /// # 参数
-    /// * `description` - 步骤描述
+    /// # Parameters
+    /// * `description` - Step description
     pub fn new(description: impl Into<String>) -> Self {
         Self {
             description: description.into(),
@@ -509,34 +510,34 @@ impl PlanStep {
         }
     }
 
-    /// 设置预期输入描述
+    /// Set expected input description
     ///
-    /// # 参数
-    /// * `input` - 预期输入描述
+    /// # Parameters
+    /// * `input` - Expected input description
     pub fn with_expected_input(mut self, input: impl Into<String>) -> Self {
         self.expected_input = Some(input.into());
         self
     }
 
-    /// 设置预期输出描述
+    /// Set expected output description
     ///
-    /// # 参数
-    /// * `output` - 预期输出描述
+    /// # Parameters
+    /// * `output` - Expected output description
     pub fn with_expected_output(mut self, output: impl Into<String>) -> Self {
         self.expected_output = Some(output.into());
         self
     }
 
-    /// 设置步骤的依赖关系
+    /// Set step dependencies
     ///
-    /// # 参数
-    /// * `deps` - 依赖的步骤标识符列表，格式为 `"step_N"`（其中 N 为步骤索引）或步骤描述关键词
+    /// # Parameters
+    /// * `deps` - List of dependency step identifiers, in `"step_N"` format (N is the step index) or step description keywords
     ///
-    /// # 示例
+    /// # Example
     /// ```rust
     /// use echo_agent::agent::plan_execute::PlanStep;
     ///
-    /// let step = PlanStep::new("优化数据库查询")
+    /// let step = PlanStep::new("Optimize database query")
     ///     .with_dependencies(vec!["step_0".to_string(), "step_1".to_string()]);
     /// let _ = step;
     /// ```
@@ -546,29 +547,29 @@ impl PlanStep {
     }
 }
 
-// ── 结构化输出类型（LLM 响应解析用） ──────────────────────────────────────────
+// ── Structured output types (for LLM response parsing) ──────────────────────────
 
-/// LLM 返回的结构化计划输出
+/// Structured plan output returned by LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanOutput {
-    /// 步骤列表
+    /// List of steps
     pub steps: Vec<PlanStepOutput>,
 }
 
-/// LLM 返回的单个步骤
+/// Single step returned by LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStepOutput {
-    /// 步骤描述
+    /// Step description
     pub description: String,
-    /// 依赖的步骤描述（模糊匹配后转换为索引）
+    /// Dependent step descriptions (converted to indices after fuzzy matching)
     #[serde(default)]
     pub dependencies: Vec<String>,
-    /// 预期输出
+    /// Expected output
     #[serde(default)]
     pub expected_output: Option<String>,
 }
 
-/// 返回 JSON Schema 用于 LLM 结构化输出
+/// Return JSON Schema for LLM structured output
 pub fn plan_output_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -580,16 +581,16 @@ pub fn plan_output_schema() -> serde_json::Value {
                     "properties": {
                         "description": {
                             "type": "string",
-                            "description": "步骤的详细描述"
+                            "description": "Detailed description of the step"
                         },
                         "dependencies": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "依赖的步骤描述关键词（可为空）"
+                            "description": "Dependency step description keywords (can be empty)"
                         },
                         "expected_output": {
                             "type": "string",
-                            "description": "步骤的预期输出"
+                            "description": "Expected output of the step"
                         }
                     },
                     "required": ["description"]
@@ -601,29 +602,29 @@ pub fn plan_output_schema() -> serde_json::Value {
     })
 }
 
-/// 步骤执行状态
+/// Step execution status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepStatus {
-    /// 等待执行
+    /// Waiting to execute
     Pending,
-    /// 正在执行
+    /// Currently executing
     Running,
-    /// 已完成
+    /// Completed
     Completed,
-    /// 执行失败
+    /// Execution failed
     Failed,
 }
 
-/// 单个步骤的执行结果
+/// Execution result of a single step
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
-    /// 步骤在计划中的索引
+    /// Step index in the plan
     pub step_index: usize,
-    /// 步骤描述
+    /// Step description
     pub description: String,
-    /// 执行输出
+    /// Execution output
     pub output: String,
-    /// 是否成功
+    /// Whether successful
     pub success: bool,
 }
 
@@ -745,35 +746,35 @@ mod tests {
 
     #[test]
     fn test_dependency_resolution_improved_matching() {
-        // 测试依赖解析的改进匹配逻辑
+        // Test improved matching logic for dependency resolution
         let plan = Plan::new(vec![
             PlanStep::new("database migration"),
             PlanStep::new("setup environment"),
             PlanStep::new("group setup"),
         ]);
 
-        // 测试："data" 不应该匹配 "database migration"（太短且不在单词边界）
-        // 但我们的实现中，dep.len() >= 3 且 step.description.contains(dep) 会匹配
-        // 不过我们添加了单词边界检查，所以应该不匹配
+        // Test: "data" should NOT match "database migration" (too short and not at word boundary)
+        // In our implementation, dep.len() >= 3 and step.description.contains(dep) would match
+        // But we added word boundary check, so it should NOT match
         let _result = plan.resolve_dependency("data");
-        // 可能匹配也可能不匹配，取决于单词边界检查
-        // 我们不断言具体结果，只是测试函数不会崩溃
+        // May or may not match, depending on word boundary check
+        // We don't assert a specific result, just test that the function doesn't crash
 
-        // 测试："setup" 不应该同时匹配 "setup environment" 和 "group setup"
-        // 但 "setup" 在 "setup environment" 中出现在单词边界处，应该匹配
+        // Test: "setup" should NOT match both "setup environment" and "group setup"
+        // But "setup" appears at a word boundary in "setup environment", so it should match
         let _result = plan.resolve_dependency("setup");
-        // 可能匹配 index 1（"setup environment"）
+        // May match index 1 ("setup environment")
 
-        // 测试有效的匹配
+        // Test valid matches
         let result = plan.resolve_dependency("database migration");
-        assert_eq!(result, Some(0)); // 应该精确匹配
+        assert_eq!(result, Some(0)); // Should be exact match
 
-        // 测试 step_N 格式
+        // Test step_N format
         let result = plan.resolve_dependency("step_1");
         assert_eq!(result, Some(1));
 
-        // 测试无效的 step_N 格式
+        // Test invalid step_N format
         let result = plan.resolve_dependency("step_10");
-        assert_eq!(result, None); // 超出范围
+        assert_eq!(result, None); // Out of range
     }
 }

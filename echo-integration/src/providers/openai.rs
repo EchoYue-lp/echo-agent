@@ -15,9 +15,9 @@ use tracing::{Instrument, info_span};
 use super::client::{post, stream_post};
 use super::config::{Config, LlmConfig, ModelConfig};
 
-// ── 便捷函数 ─────────────────────────────────────────────────────────────────
+// ── Convenience Functions ─────────────────────────────────────────────────────
 
-/// 组装请求头
+/// Assemble request headers
 pub fn assemble_req_header(model: &ModelConfig) -> Result<HeaderMap> {
     let mut header_map = HeaderMap::new();
     header_map.insert(
@@ -35,10 +35,11 @@ pub fn assemble_req_header(model: &ModelConfig) -> Result<HeaderMap> {
     Ok(header_map)
 }
 
-/// 同步聊天请求（独立函数，使用环境变量配置）
+/// Synchronous chat request (standalone function, uses environment variable config).
 ///
-/// `messages` 接受切片引用，调用方无需在重试循环中重复 clone 整个消息列表。
-/// 内部按需转换为 owned Vec，开销固定为单次 clone。
+/// `messages` accepts a slice reference so callers don't need to repeatedly clone
+/// the entire message list in a retry loop. Internally converts to an owned Vec
+/// as needed, with a fixed cost of a single clone.
 #[allow(clippy::too_many_arguments)]
 pub async fn chat(
     client: Arc<Client>,
@@ -68,7 +69,7 @@ pub async fn chat(
     post(client, &request_body, header_map, model.baseurl.as_str()).await
 }
 
-/// 流式聊天请求（独立函数，使用环境变量配置）
+/// Streaming chat request (standalone function, uses environment variable config)
 #[allow(clippy::too_many_arguments)]
 pub async fn stream_chat(
     client: Arc<Client>,
@@ -99,11 +100,11 @@ pub async fn stream_chat(
     stream_post(client, request_body, header_map, url, cancel_token).await
 }
 
-// ── OpenAI 客户端实现 ──────────────────────────────────────────────────────────
+// ── OpenAI Client Implementation ───────────────────────────────────────────────
 
-/// OpenAI 兼容客户端
+/// OpenAI-compatible client.
 ///
-/// 支持任何兼容 OpenAI Chat Completions API 的服务。
+/// Supports any service compatible with the OpenAI Chat Completions API.
 pub struct OpenAiClient {
     client: Arc<Client>,
     config: ModelConfig,
@@ -111,7 +112,7 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
-    /// 从环境变量创建客户端
+    /// Create a client from environment variables
     pub fn from_env(model_name: &str) -> Result<Self> {
         let config = Config::get_model(model_name)?;
         let header_map = assemble_req_header(&config)?;
@@ -122,7 +123,7 @@ impl OpenAiClient {
         })
     }
 
-    /// 使用自定义配置创建客户端
+    /// Create a client with a custom configuration
     pub fn new(config: LlmConfig) -> Result<Self> {
         let model_config = config.to_model_config();
         let header_map = assemble_req_header(&model_config)?;
@@ -133,7 +134,7 @@ impl OpenAiClient {
         })
     }
 
-    /// 使用共享的 HTTP 客户端
+    /// Create a client with a shared HTTP client
     pub fn with_client(client: Arc<Client>, config: LlmConfig) -> Result<Self> {
         let model_config = config.to_model_config();
         let header_map = assemble_req_header(&model_config)?;
@@ -237,7 +238,7 @@ impl LlmClient for OpenAiClient {
     }
 }
 
-/// 基于 [`chat`] 函数的默认 [`LlmClient`] 实现
+/// Default [`LlmClient`] implementation based on the [`chat`] function
 pub struct DefaultLlmClient {
     client: Arc<Client>,
     model_name: String,
@@ -329,7 +330,7 @@ impl LlmClient for DefaultLlmClient {
                 .into_iter()
                 .next()
                 .and_then(|c| c.message.content.as_text())
-                .ok_or_else(|| ReactError::Other("LLM 返回空内容".to_string()))
+                .ok_or_else(|| ReactError::Other("LLM returned empty content".to_string()))
         })
     }
 

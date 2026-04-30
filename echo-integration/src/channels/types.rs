@@ -1,18 +1,18 @@
-//! IM 通道统一消息类型和 trait 定义
+//! IM channel unified message types and trait definitions
 
 use async_trait::async_trait;
 pub use echo_core::error::ChannelError;
 pub use echo_core::error::ReactError;
 use echo_core::error::Result;
 
-// ── 聊天类型 ─────────────────────────────────────────────────────────────────
+// ── Chat Type ────────────────────────────────────────────────────────────────
 
-/// 聊天类型：私聊 / 群聊
+/// Chat type: direct message / group
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatType {
-    /// 私聊（Direct Message）
+    /// Direct message
     Direct,
-    /// 群聊（Group）
+    /// Group
     Group,
 }
 
@@ -25,29 +25,29 @@ impl std::fmt::Display for ChatType {
     }
 }
 
-// ── 多模态附件 ───────────────────────────────────────────────────────────────
+// ── Multimedia Attachments ───────────────────────────────────────────────────
 
-/// 附件类型
+/// Attachment type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentKind {
-    /// 图片（PNG, JPEG, GIF, WebP 等）
+    /// Image (PNG, JPEG, GIF, WebP, etc.)
     Image,
-    /// 文件（PDF, DOC, TXT 等）
+    /// File (PDF, DOC, TXT, etc.)
     File,
-    /// 音频（MP3, WAV, OGG 等）
+    /// Audio (MP3, WAV, OGG, etc.)
     Audio,
-    /// 视频（MP4, AVI 等）
+    /// Video (MP4, AVI, etc.)
     Video,
 }
 
-/// 消息附件
+/// Message attachment
 #[derive(Debug, Clone)]
 pub struct MessageAttachment {
-    /// 附件类型
+    /// Attachment type
     pub kind: AttachmentKind,
-    /// 附件二进制数据
+    /// Attachment binary data
     pub data: Vec<u8>,
-    /// 文件名（可选）
+    /// Filename (optional)
     pub filename: Option<String>,
 }
 
@@ -66,26 +66,26 @@ impl MessageAttachment {
     }
 }
 
-// ── 入站消息 ─────────────────────────────────────────────────────────────────
+// ── Inbound Message ──────────────────────────────────────────────────────────
 
-/// 从 IM 平台接收到的消息
+/// Message received from an IM platform
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
-    /// 通道 ID："qqbot" | "feishu"
+    /// Channel ID: "qqbot" | "feishu"
     pub channel_id: String,
-    /// 发送者标识（QQ: openid / 飞书: open_id）
+    /// Sender identifier (QQ: openid / Feishu: open_id)
     pub sender_id: String,
-    /// 会话标识（群聊时为 group_id，私聊时为 sender_id）
+    /// Chat identifier (group_id for group chats, sender_id for direct messages)
     pub chat_id: String,
-    /// 聊天类型
+    /// Chat type
     pub chat_type: ChatType,
-    /// 消息文本
+    /// Message text
     pub text: String,
-    /// 平台原始消息 ID（用于回复）
+    /// Platform original message ID (used for replies)
     pub message_id: String,
-    /// 时间戳（Unix 秒）
+    /// Timestamp (Unix seconds)
     pub timestamp: u64,
-    /// 消息附件（图片、文件、音频、视频等）
+    /// Message attachments (images, files, audio, video, etc.)
     pub attachments: Vec<MessageAttachment>,
 }
 
@@ -110,29 +110,29 @@ impl InboundMessage {
         }
     }
 
-    /// 添加附件
+    /// Add attachments
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
         self
     }
 }
 
-// ── 出站消息 ─────────────────────────────────────────────────────────────────
+// ── Outbound Message ─────────────────────────────────────────────────────────
 
-/// 发送给 IM 平台的消息
+/// Message to be sent to an IM platform
 #[derive(Debug, Clone)]
 pub struct OutboundMessage {
-    /// 目标通道
+    /// Target channel
     pub channel_id: String,
-    /// 目标标识（用户 openid / 群 id）
+    /// Target identifier (user openid / group id)
     pub to: String,
-    /// 聊天类型
+    /// Chat type
     pub chat_type: ChatType,
-    /// 回复文本
+    /// Reply text
     pub text: String,
-    /// 被回复的消息 ID（at_reply）
+    /// Message ID being replied to (at_reply)
     pub reply_to: Option<String>,
-    /// 消息附件
+    /// Message attachments
     pub attachments: Vec<MessageAttachment>,
 }
 
@@ -158,7 +158,7 @@ impl OutboundMessage {
         self
     }
 
-    /// 添加附件
+    /// Add attachments
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
         self
@@ -169,60 +169,60 @@ impl OutboundMessage {
 
 use std::sync::Arc;
 
-/// 消息处理器 —— 将 IM 消息转给 Agent 处理
+/// Message handler — forwards IM messages to the Agent for processing
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
-    /// 处理入站消息，返回出站消息
+    /// Handle an inbound message, returning an outbound message
     async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage>;
 
-    /// 将出站消息发送回 IM 平台（由 Channel 自身实现）
+    /// Send an outbound message back to the IM platform (implemented by the Channel itself)
     async fn reply(&self, msg: OutboundMessage) -> Result<()>;
 }
 
-/// Channel 能力描述
+/// Channel capability description
 #[derive(Debug)]
 pub struct ChannelCapabilities {
-    /// 支持的聊天类型
+    /// Supported chat types
     pub chat_types: &'static [ChatType],
-    /// 是否支持媒体（图片/文件）
+    /// Whether media is supported (images/files)
     pub supports_media: bool,
-    /// 是否支持话题/线程
+    /// Whether topics/threads are supported
     pub supports_threads: bool,
 }
 
-/// IM 通道插件的统一接口
+/// Unified interface for IM channel plugins
 #[async_trait]
 pub trait ChannelPlugin: Send + Sync {
-    /// 通道唯一 ID："qqbot" | "feishu"
+    /// Unique channel ID: "qqbot" | "feishu"
     fn id(&self) -> &str;
 
-    /// 用户可见的名称
+    /// Human-readable name
     fn label(&self) -> &str {
         self.id()
     }
 
-    /// 能力描述
+    /// Capability description
     fn capabilities(&self) -> &ChannelCapabilities;
 
-    /// 启动通道（建立连接 / 启动 server）
+    /// Start the channel (establish connection / start server)
     async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()>;
 
-    /// 停止通道
+    /// Stop the channel
     async fn stop(&mut self) -> Result<()>;
 
-    /// 发送消息
+    /// Send a message
     async fn send(&self, msg: OutboundMessage) -> Result<()>;
 
-    /// 健康检查 —— 验证通道是否处于正常工作状态
+    /// Health check — verifies whether the channel is in normal working state.
     ///
-    /// 默认返回 Ok(())，子类可以重写以执行更复杂的检查
-    /// （如 token 有效性、连接状态等）。
+    /// Returns Ok(()) by default; subclasses may override to perform more
+    /// complex checks (e.g. token validity, connection status, etc.).
     async fn health_check(&self) -> Result<()> {
         Ok(())
     }
 }
 
-/// 通道上下文
+/// Channel context
 pub struct ChannelContext {
     pub handler: Arc<dyn MessageHandler>,
 }

@@ -6,42 +6,17 @@
 
 **ReAct 引擎 • 多 Agent • 记忆 • 流式 • MCP • IM 通道 • 工作流**
 
-[![crates.io](https://img.shields.io/crates/v/echo-agent?color=brightgreen)](https://crates.io/crates/echo-agent)
+[![crates.io](https://img.shields.io/crates/v/echo_agent?color=brightgreen)](https://crates.io/crates/echo_agent)
+[![docs.rs](https://docs.rs/echo_agent/badge.svg)](https://docs.rs/echo_agent)
+[![CI](https://github.com/EchoYue-lp/echo-agent/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/EchoYue-lp/echo-agent/actions)
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20兼容-green)](https://platform.openai.com/docs/api-reference)
+[![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20%E5%85%BC%E5%AE%B9-green)](https://platform.openai.com/docs/api-reference)
 [![Async](https://img.shields.io/badge/runtime-tokio-blue)](https://tokio.rs/)
 
 [English](./README.md) &middot; [文档中心](./docs/zh/README.md) &middot; [示例](./examples/) &middot; [更新日志](./CHANGELOG.md)
 
 </div>
-
----
-
-## 为什么选择 echo-agent？
-
-绝大多数 AI Agent 框架基于 Python。**echo-agent** 将完整的现代 Agent 框架带入 Rust——与 [LangGraph](https://github.com/langchain-ai/langgraph)、[CrewAI](https://github.com/crewAIInc/crewAI)、[AutoGen](https://github.com/microsoft/autogen) 功能对齐，同时提供只有 Rust 才能带来的**性能、类型安全和可靠性**。
-
-| | echo-agent | LangGraph (Python) | CrewAI (Python) | AutoGen (Python) |
-|---|---|---|---|---|
-| **语言** | Rust | Python | Python | Python |
-| **内存安全** | 编译时保证 | GC | GC | GC |
-| **异步运行时** | tokio（原生） | asyncio | asyncio | asyncio |
-| **ReAct 循环** | 内置 | 内置 | 内置 | 内置 |
-| **工具系统** | `#[tool]` 宏 + JSON Schema | 装饰器 | 装饰器 | 函数调用 |
-| **多 Agent** | SubAgent + Handoff | 图结构 | Crew 模式 | 对话模式 |
-| **记忆系统** | 双层（Store + Checkpointer） | Checkpoint | Memory 对象 | Context 变量 |
-| **流式输出** | 原生 async stream | 回调 | 有限 | 回调 |
-| **MCP 协议** | 原生（stdio/SSE/HTTP） | 通过 LangChain | 无 | 无 |
-| **IM 通道** | QQ + 飞书内置 | 无 | 无 | 无 |
-| **工作流引擎** | Graph + DAG + Sequential | StateGraph | Sequential | Sequential |
-| **上下文压缩** | SlidingWindow + LLM + Hybrid | 无 | 无 | 无 |
-| **Token 预算** | 内置 | 无 | 无 | 无 |
-| **护栏系统** | 规则 + LLM 过滤 | 无 | 无 | 无 |
-| **审计日志** | 内置 | 无 | 无 | 无 |
-| **沙箱** | Local + Docker + K8s | 无 | 无 | Docker |
-| **零成本抽象** | 是 | N/A | N/A | N/A |
-| **单二进制部署** | 是 | 否 | 否 | 否 |
 
 ---
 
@@ -51,7 +26,7 @@
 
 ```toml
 [dependencies]
-echo-agent = "1.3"
+echo-agent = "0.1.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -79,6 +54,28 @@ async fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+---
+
+## 为什么选择 echo-agent？
+
+绝大多数 AI Agent 框架基于 Python。**echo-agent** 将完整的现代 Agent 框架带入 Rust——与 [LangGraph](https://github.com/langchain-ai/langgraph)、[CrewAI](https://github.com/crewAIInc/crewAI)、[AutoGen](https://github.com/microsoft/autogen) 功能对齐，同时提供只有 Rust 才能带来的**性能、类型安全和可靠性**。
+
+| | echo-agent | LangGraph | CrewAI | AutoGen |
+|---|---|---|---|---|
+| **语言** | Rust | Python | Python | Python |
+| **内存安全** | 编译时保证 | GC | GC | GC |
+| **ReAct 循环** | 内置 | 内置 | 内置 | 内置 |
+| **工具系统** | `#[tool]` 宏 + JSON Schema | 装饰器 | 装饰器 | 函数调用 |
+| **多 Agent** | SubAgent + Handoff | 图结构 | Crew 模式 | 对话模式 |
+| **流式输出** | 原生 async stream | 回调 | 有限 | 回调 |
+| **MCP 协议** | 原生（stdio/SSE/HTTP） | 通过 LangChain | 无 | 无 |
+| **IM 通道** | QQ + 飞书内置 | 无 | 无 | 无 |
+| **工作流** | Graph + DAG + Sequential | StateGraph | Sequential | Sequential |
+| **上下文压缩** | SlidingWindow + LLM + Hybrid | 无 | 无 | 无 |
+| **护栏系统** | 规则 + LLM 过滤 | 无 | 无 | 无 |
+| **沙箱** | Local + Docker + K8s | 无 | 无 | Docker |
+| **单二进制部署** | 是 | 否 | 否 | 否 |
 
 ### 5 行代码接入 IM
 
@@ -196,7 +193,7 @@ echo-agent 提供 **28+ 项能力**，跨越 6 个 crate，通过一行 `use ech
 echo-agent = { version = "1.3", default-features = false }
 
 # 完整功能（默认）
-echo-agent = "1.3"
+echo-agent = "0.1.2"
 
 # 按需选择
 echo-agent = { version = "1.3", default-features = false, features = ["mcp", "web"] }
@@ -227,16 +224,17 @@ echo-agent = { version = "1.3", default-features = false, features = ["mcp", "we
 
 ```
 echo-agent/
-├── echo-core/        核心 trait：Tool、Agent、LlmClient、Guard、Error、Retry
-├── echo-macros/      过程宏：#[tool]、#[callback]、#[guard]、#[handler]
-├── echo-providers/   LLM 客户端：OpenAI、Anthropic、Ollama
-├── echo-mcp/         MCP 协议：stdio、SSE、HTTP 传输
-├── echo-channels/    IM 插件：QQ Bot（WebSocket）、飞书（Webhook）
-├── src/              Agent 引擎、记忆、技能、工具、工作流、沙箱
-├── examples/         40+ 可运行示例
-├── docs/             双语文档（en + zh）
-├── skills/           外部技能包（Markdown 格式）
-└── echo-agent.yaml   示例配置
+├── echo-core/           核心 trait：Tool、Agent、LlmClient、Guard、Error、Retry
+├── echo-macros/         过程宏：#[tool]、#[callback]、#[guard]、#[handler]
+├── echo-execution/      沙箱、技能和工具执行
+├── echo-state/          记忆、压缩和审计日志
+├── echo-orchestration/  工作流、人工审批和 DAG 任务
+├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
+├── src/                 Agent 引擎、重导出和门面层
+├── examples/            40+ 可运行示例
+├── docs/                双语文档（en + zh）
+├── skills/              外部技能包（Markdown 格式）
+└── echo-agent.yaml      示例配置
 ```
 
 > **注意：** `echo-agent` 是纯库框架。开箱即用的应用（含 CLI、Web UI、WebSocket）请参见 [echo-agent-cli](https://github.com/EchoYue-lp/echo-agent-cli)。

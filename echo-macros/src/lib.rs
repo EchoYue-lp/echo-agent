@@ -1,3 +1,34 @@
+//! # echo-macros
+//!
+//! Procedural macros for the [echo-agent](https://crates.io/crates/echo_agent) framework.
+//!
+//! ## Macros
+//!
+//! | Macro | Generates | Description |
+//! |-------|-----------|-------------|
+//! | [`#[tool]`](attr.tool.html) | `Tool` impl | Auto-generates params struct, JSON Schema, and `Tool` trait impl from an async fn |
+//! | [`#[callback]`](attr.callback.html) | `AgentCallback` impl | Generates lifecycle callbacks from an impl block |
+//! | [`#[guard]`](attr.guard.html) | `Guard` impl | Content filtering guard from an async fn |
+//! | [`#[handler]`](attr.handler.html) | `HumanLoopHandler` impl | Human-in-the-loop handler from an impl block |
+//! | [`#[compressor]`](attr.compressor.html) | `ContextCompressor` impl | Context compression strategy from an async fn |
+//! | [`#[permission_policy]`](attr.permission_policy.html) | `PermissionPolicy` impl | Tool permission policy from an async fn |
+//! | [`#[audit_logger]`](attr.audit_logger.html) | `AuditLogger` impl | Audit logging backend from an impl block |
+//!
+//! ## Quick Example
+//!
+//! ```rust,ignore
+//! use echo_agent::tool;
+//!
+//! #[tool(name = "add", description = "Add two numbers")]
+//! async fn add(a: f64, b: f64) -> Result<ToolResult> {
+//!     Ok(ToolResult::success(format!("{}", a + b)))
+//! }
+//! ```
+//!
+//! Most users should import these macros via `echo_agent::prelude::*` or
+//! `use echo_agent::{tool, callback, guard, handler};` rather than depending
+//! on `echo_macros` directly.
+
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
@@ -15,7 +46,7 @@ fn echo_agent_crate_path() -> syn::Result<syn::Path> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[tool] — 从 async fn 生成 Tool 实现
+// #[tool] — Generate Tool impl from async fn
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 struct ToolAttrs {
@@ -82,27 +113,28 @@ impl syn::parse::Parse for ToolAttrs {
     }
 }
 
-/// 从 async fn 生成 `Tool` 实现，自动生成参数结构体和 JSON Schema。
+/// Generate a `Tool` implementation from an async function, auto-creating the
+/// parameter struct and JSON Schema.
 ///
-/// # 属性
+/// # Attributes
 ///
-/// - `name` (必填): 工具名称
-/// - `description` (必填): 工具描述
-/// - `permissions` (可选): 权限列表，如 `[Execute, Network]`
+/// - `name` (required): Tool name
+/// - `description` (required): Tool description
+/// - `permissions` (optional): Permission list, e.g. `[Execute, Network]`
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,ignore
-/// #[tool(name = "add", description = "两数相加")]
+/// #[tool(name = "add", description = "Add two numbers")]
 /// async fn add(
-///     /// 第一个数
+///     /// First number
 ///     a: f64,
-///     /// 第二个数
+///     /// Second number
 ///     b: f64,
 /// ) -> Result<ToolResult> {
 ///     Ok(ToolResult::success(format!("{}", a + b)))
 /// }
-/// // 生成: AddParams 结构体 + AddTool 单元结构体 + impl Tool
+/// // Generates: AddParams struct + AddTool unit struct + impl Tool
 /// ```
 #[proc_macro_attribute]
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -187,12 +219,13 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[callback] — 从 impl 块生成 AgentCallback 实现
+// #[callback] — Generate AgentCallback impl from impl block
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// 从 impl 块生成 `AgentCallback` 实现，只覆写你定义的方法。
+/// Generate an `AgentCallback` implementation from an impl block, overriding
+/// only the methods you define.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,ignore
 /// struct LogCallback;
@@ -200,10 +233,10 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 /// #[callback]
 /// impl LogCallback {
 ///     async fn on_tool_start(&self, _agent: &str, tool: &str, _args: &Value) {
-///         println!("工具开始: {tool}");
+///         println!("Tool started: {tool}");
 ///     }
 ///     async fn on_final_answer(&self, _agent: &str, answer: &str) {
-///         println!("最终答案: {answer}");
+///         println!("Final answer: {answer}");
 ///     }
 /// }
 /// ```
@@ -229,7 +262,7 @@ fn callback_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[guard] — 从 async fn 生成 Guard 实现
+// #[guard] — Generate Guard impl from async fn
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 struct NameAttr {
@@ -258,20 +291,20 @@ impl syn::parse::Parse for NameAttr {
     }
 }
 
-/// 从 async fn 生成 `Guard` 实现。
+/// Generate a `Guard` implementation from an async function.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,ignore
 /// #[guard(name = "length-limit")]
 /// async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardResult> {
 ///     if content.len() > 10000 {
-///         Ok(GuardResult::Block { reason: "内容过长".into() })
+///         Ok(GuardResult::Block { reason: "Content too long".into() })
 ///     } else {
 ///         Ok(GuardResult::Pass)
 ///     }
 /// }
-/// // 生成: LengthLimitGuard + impl Guard
+/// // Generates: LengthLimitGuard + impl Guard
 /// ```
 #[proc_macro_attribute]
 pub fn guard(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -308,17 +341,17 @@ fn guard_impl(attrs: NameAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[handler] — 从 impl 块生成 HumanLoopHandler 实现
+// #[handler] — Generate HumanLoopHandler impl from impl block
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// 从 impl 块生成 `HumanLoopHandler` 实现。
+/// Generate a `HumanLoopHandler` implementation from an impl block.
 ///
-/// # 可覆写方法
+/// # Overridable Methods
 ///
 /// - `on_approval(&self, tool_name: &str, args: &Value, prompt: &str) -> ApprovalDecision`
 /// - `on_input(&self, prompt: &str) -> String`
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,ignore
 /// struct AutoApproveHandler;
@@ -329,8 +362,8 @@ fn guard_impl(attrs: NameAttr, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
 ///         ApprovalDecision::Approved
 ///     }
 ///     async fn on_input(&self, prompt: &str) -> String {
-///         println!("Agent 问: {prompt}");
-///         "默认回答".to_string()
+///         println!("Agent asks: {prompt}");
+///         "default response".to_string()
 ///     }
 /// }
 /// ```
@@ -356,12 +389,12 @@ fn handler_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[compressor] — 从 async fn 生成 ContextCompressor 实现
+// #[compressor] — Generate ContextCompressor impl from async fn
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// 从 async fn 生成 `ContextCompressor` 实现。
+/// Generate a `ContextCompressor` implementation from an async function.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,ignore
 /// #[compressor]
@@ -371,7 +404,7 @@ fn handler_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
 ///     let messages = input.messages[input.messages.len() - keep..].to_vec();
 ///     Ok(CompressionOutput { messages, evicted })
 /// }
-/// // 生成: KeepRecentCompressor + impl ContextCompressor
+/// // Generates: KeepRecentCompressor + impl ContextCompressor
 /// ```
 #[proc_macro_attribute]
 pub fn compressor(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -404,19 +437,19 @@ fn compressor_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[permission_policy] — 从 async fn 生成 PermissionPolicy 实现
+// #[permission_policy] — Generate PermissionPolicy impl from async fn
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// 从 async fn 生成 `PermissionPolicy` 实现。
+/// Generate a `PermissionPolicy` implementation from an async function.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,ignore
 /// #[permission_policy]
 /// async fn allow_all(tool_name: &str, permissions: &[ToolPermission]) -> PermissionDecision {
 ///     PermissionDecision::Allow
 /// }
-/// // 生成: AllowAllPolicy + impl PermissionPolicy
+/// // Generates: AllowAllPolicy + impl PermissionPolicy
 /// ```
 #[proc_macro_attribute]
 pub fn permission_policy(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -450,17 +483,17 @@ fn permission_policy_impl(func: ItemFn) -> syn::Result<proc_macro2::TokenStream>
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// #[audit_logger] — 从 impl 块生成 AuditLogger 实现
+// #[audit_logger] — Generate AuditLogger impl from impl block
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// 从 impl 块生成 `AuditLogger` 实现。
+/// Generate an `AuditLogger` implementation from an impl block.
 ///
-/// # 可覆写方法
+/// # Overridable Methods
 ///
 /// - `log(&self, event: AuditEvent) -> Result<()>`
 /// - `query(&self, filter: AuditFilter) -> Result<Vec<AuditEvent>>`
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,ignore
 /// struct PrintLogger;
@@ -498,7 +531,7 @@ fn audit_logger_impl(input: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 共用辅助函数
+// Shared helper functions
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 fn extract_fn_params(

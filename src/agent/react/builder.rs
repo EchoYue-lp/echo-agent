@@ -1,4 +1,4 @@
-//! Agent 构建器
+//! Agent builder
 
 use crate::agent::{AgentCallback, AgentConfig, AgentRole};
 use crate::audit::AuditLogger;
@@ -17,10 +17,10 @@ use crate::tools::{Tool, ToolExecutionConfig};
 use echo_core::circuit_breaker::CircuitBreakerConfig;
 use std::sync::Arc;
 
-/// Agent 构建器
+/// Agent builder
 ///
-/// 提供流畅的 API 来配置和构建 Agent。
-/// 通过 [`AgentKind`] 指定具体类型，返回 `Box<dyn Agent>` 抽象。
+/// Provides a fluent API to configure and build an Agent.
+/// Specify the concrete type via a generic parameter, returning a `Box<dyn Agent>` abstraction.
 pub struct ReactAgentBuilder {
     name: String,
     model: String,
@@ -66,12 +66,12 @@ impl Default for ReactAgentBuilder {
 }
 
 impl ReactAgentBuilder {
-    /// 创建新的构建器（默认 ReAct 模式）
+    /// Create a new builder (default ReAct mode)
     pub fn new() -> Self {
         Self {
             name: "assistant".to_string(),
             model: String::new(),
-            system_prompt: "你是一个有帮助的助手".to_string(),
+            system_prompt: "You are a helpful assistant".to_string(),
             role: AgentRole::default(),
             llm_client: None,
             llm_config: None,
@@ -107,11 +107,11 @@ impl ReactAgentBuilder {
         }
     }
 
-    // ── 预设配置 ────────────────────────────────────────────────────────────────
+    // ── Preset Configurations ───────────────────────────────────────────────────
 
-    /// 创建简单对话 Agent（无工具、无记忆）
+    /// Create a simple conversation Agent (no tools, no memory)
     ///
-    /// 适用于简单的问答场景。
+    /// Suitable for simple Q&A scenarios.
     pub fn simple(model: &str, system_prompt: &str) -> Result<ReactAgent> {
         Self::new()
             .model(model)
@@ -119,9 +119,9 @@ impl ReactAgentBuilder {
             .build()
     }
 
-    /// 创建标准 Agent（启用工具、思维链）
+    /// Create a standard Agent (tools + chain-of-thought enabled)
     ///
-    /// 适用于大多数 Agent 场景。
+    /// Suitable for most Agent scenarios.
     pub fn standard(model: &str, name: &str, system_prompt: &str) -> Result<ReactAgent> {
         Self::new()
             .model(model)
@@ -131,9 +131,9 @@ impl ReactAgentBuilder {
             .build()
     }
 
-    /// 创建完整功能 Agent（工具、记忆、规划）
+    /// Create a full-featured Agent (tools, memory, planning)
     ///
-    /// 适用于复杂的自主 Agent 场景。
+    /// Suitable for complex autonomous Agent scenarios.
     pub fn full_featured(model: &str, name: &str, system_prompt: &str) -> Result<ReactAgent> {
         Self::new()
             .model(model)
@@ -144,58 +144,58 @@ impl ReactAgentBuilder {
             .enable_planning()
             .build()
     }
-    // ── 基本配置 ────────────────────────────────────────────────────────────────
+    // ── Basic Configuration ─────────────────────────────────────────────────────
 
-    /// 设置 Agent 名称
+    /// Set Agent name
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
     }
 
-    /// 设置模型名称
+    /// Set model name
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
     }
 
-    /// 设置系统提示词
+    /// Set system prompt
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
         self
     }
 
-    /// 设置 Agent 角色
+    /// Set Agent role
     pub fn role(mut self, role: AgentRole) -> Self {
         self.role = role;
         self
     }
 
-    // ── LLM 配置 ────────────────────────────────────────────────────────────────
+    // ── LLM Configuration ───────────────────────────────────────────────────────
 
-    /// 设置自定义 LLM 客户端
+    /// Set custom LLM client
     ///
-    /// 使用此方法可以：
-    /// - 注入 Mock 客户端进行测试
-    /// - 使用自定义 LLM 实现
-    /// - 共享 LLM 客户端实例
+    /// Use this method to:
+    /// - Inject a Mock client for testing
+    /// - Use a custom LLM implementation
+    /// - Share an LLM client instance
     pub fn llm_client(mut self, client: Arc<dyn LlmClient>) -> Self {
         self.model = client.model_name().to_string();
         self.llm_client = Some(client);
         self
     }
 
-    /// 设置 LLM 配置（依赖注入）
+    /// Set LLM configuration (dependency injection)
     ///
-    /// 用于动态配置 API 地址、密钥等，不使用环境变量。
+    /// For dynamically configuring API endpoint, keys, etc., without using environment variables.
     pub fn llm_config(mut self, config: LlmConfig) -> Self {
         self.model = config.model.clone();
         self.llm_config = Some(config);
         self
     }
 
-    /// 使用 OpenAI 客户端（便捷方法）
+    /// Use OpenAI client (convenience method)
     ///
-    /// 从环境变量读取配置。
+    /// Reads configuration from environment variables.
     pub fn with_openai(mut self, model: &str) -> Result<Self> {
         let client = Arc::new(OpenAiClient::from_env(model)?);
         self.llm_client = Some(client);
@@ -203,78 +203,78 @@ impl ReactAgentBuilder {
         Ok(self)
     }
 
-    // ── 工具配置 ────────────────────────────────────────────────────────────────
+    // ── Tool Configuration ──────────────────────────────────────────────────────
 
-    /// 启用内置工具（通过 `enable_tool` 标志）
+    /// Enable built-in tools (via the `enable_tool` flag)
     pub fn enable_tools(mut self) -> Self {
         self.enable_builtin_tools = true;
         self
     }
 
-    /// 禁用内置工具
+    /// Disable built-in tools
     pub fn disable_tools(mut self) -> Self {
         self.enable_builtin_tools = false;
         self
     }
 
-    /// 注册单个工具
+    /// Register a single tool
     pub fn tool(mut self, tool: Box<dyn Tool>) -> Self {
         self.tools.push(tool);
         self
     }
 
-    /// 批量注册工具
+    /// Batch register tools
     pub fn tools(mut self, tools: Vec<Box<dyn Tool>>) -> Self {
         self.tools.extend(tools);
         self
     }
 
-    // ── 功能开关 ────────────────────────────────────────────────────────────────
+    // ── Feature Flags ───────────────────────────────────────────────────────────
 
-    /// 启用长期记忆
+    /// Enable long-term memory
     pub fn enable_memory(mut self) -> Self {
         self.enable_memory = true;
         self
     }
 
-    /// 启用任务规划
+    /// Enable task planning
     pub fn enable_planning(mut self) -> Self {
         self.enable_task = true;
         self
     }
 
-    /// 启用人工介入
+    /// Enable human-in-the-loop
     pub fn enable_human_in_loop(mut self) -> Self {
         self.enable_human_in_loop = true;
         self
     }
 
-    /// 启用子 Agent 调度
+    /// Enable sub-Agent dispatch
     pub fn enable_subagent(mut self) -> Self {
         self.enable_subagent = true;
         self
     }
 
-    /// 启用思维链引导
+    /// Enable chain-of-thought guidance
     pub fn enable_cot(mut self) -> Self {
         self.enable_cot = true;
         self
     }
 
-    /// 禁用思维链引导
+    /// Disable chain-of-thought guidance
     pub fn disable_cot(mut self) -> Self {
         self.enable_cot = false;
         self
     }
 
-    // ── 结构化输出 ──────────────────────────────────────────────────────────────
+    // ── Structured Output ────────────────────────────────────────────────────────
 
-    /// 声明 Agent 的结构化输出类型
+    /// Declare the Agent's structured output type
     ///
-    /// 自动根据 `T` 的 [`JsonSchema`](schemars::JsonSchema) 生成 `response_format`，
-    /// 配合 [`ReactAgent::execute_typed`] 使用可直接获得反序列化后的结果。
+    /// Automatically generates `response_format` from `T`'s [`JsonSchema`](schemars::JsonSchema),
+    /// works with [`ReactAgent::execute_typed`] to directly obtain deserialized results.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use echo_agent::prelude::*;
@@ -305,68 +305,68 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// 手动设置响应格式
+    /// Manually set response format
     pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
         self.response_format = Some(fmt);
         self
     }
 
-    // ── 执行参数 ────────────────────────────────────────────────────────────────
+    // ── Execution Parameters ────────────────────────────────────────────────────
 
-    /// 设置最大迭代次数
+    /// Set maximum iteration count
     pub fn max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
         self
     }
 
-    /// 设置工具错误反馈开关
+    /// Set tool error feedback toggle
     pub fn tool_error_feedback(mut self, enabled: bool) -> Self {
         self.tool_error_feedback = enabled;
         self
     }
 
-    /// 设置工具执行配置
+    /// Set tool execution configuration
     pub fn tool_execution(mut self, config: ToolExecutionConfig) -> Self {
         self.tool_execution = config;
         self
     }
 
-    /// 设置 token 上限
+    /// Set token limit
     pub fn token_limit(mut self, limit: usize) -> Self {
         self.token_limit = limit;
         self
     }
 
-    /// 设置单次工具输出的最大 token 数
+    /// Set maximum token count for a single tool output
     ///
-    /// 工具输出超过此限制时自动截断，并在尾部追加 `[输出已截断，共 N tokens]`。
-    /// 防止单次工具调用撑爆上下文窗口。
+    /// Tool output exceeding this limit is automatically truncated, with `[Output truncated, N tokens total]` appended.
+    /// Prevents a single tool call from overflowing the context window.
     pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
         self.max_tool_output_tokens = Some(max);
         self
     }
 
-    // ── 回调与扩展 ──────────────────────────────────────────────────────────────
+    // ── Callbacks and Extensions ─────────────────────────────────────────────────
 
-    /// 添加回调
+    /// Add callback
     pub fn callback(mut self, callback: Arc<dyn AgentCallback>) -> Self {
         self.callbacks.push(callback);
         self
     }
 
-    /// 设置长期记忆 Store
+    /// Set long-term memory Store
     pub fn store(mut self, store: Arc<dyn Store>) -> Self {
         self.store = Some(store);
         self
     }
 
-    /// 注入外部 Store 并自动注册 remember / recall / search_memory / forget 四个内置 Tool
+    /// Inject an external Store and automatically register the four built-in tools: remember / recall / search_memory / forget
     ///
-    /// 这是从"有记忆存储"到"Agent 自主使用记忆"的快捷方式，
-    /// 等价于 `.store(store).enable_memory()`，但支持传入任意 `Store` 实现
-    /// （如 `EmbeddingStore`），无需依赖默认的 `FileStore`。
+    /// This is a shortcut from "having a memory store" to "the Agent can use memory autonomously",
+    /// equivalent to `.store(store).enable_memory()`, but supports any `Store` implementation
+    /// (such as `EmbeddingStore`) without depending on the default `FileStore`.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use echo_agent::prelude::*;
@@ -387,7 +387,7 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// 设置 Checkpointer（同时设置 session_id）
+    /// Set Checkpointer (also sets session_id)
     pub fn checkpointer(
         mut self,
         checkpointer: Arc<dyn Checkpointer>,
@@ -398,60 +398,60 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// 设置 Checkpointer（使用已设置的 session_id）
-    /// 需要先调用 session_id() 设置线程标识
+    /// Set Checkpointer (using the already-set session_id)
+    /// Must call session_id() first to set the thread identifier
     pub fn checkpointer_only(mut self, checkpointer: Arc<dyn Checkpointer>) -> Self {
         self.checkpointer = Some(checkpointer);
         self
     }
 
-    /// 设置 session_id（线程标识）
+    /// Set session_id (thread identifier)
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
     }
 
-    /// 设置 conversation_id（历史投影标识）
+    /// Set conversation_id (history projection identifier)
     ///
-    /// 与 `session_id` 不同，`conversation_id` 仅用于 `ConversationStore`
-    /// 的 transcript/history 投影；如果启用了对话历史持久化，应显式设置它。
+    /// Unlike `session_id`, `conversation_id` is only used for `ConversationStore`
+    /// transcript/history projections; if conversation history persistence is enabled, this should be set explicitly.
     pub fn conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
         self.conversation_id = Some(conversation_id.into());
         self
     }
 
     #[cfg(feature = "human-loop")]
-    /// 设置审批 Provider
+    /// Set approval Provider
     pub fn approval_provider(mut self, provider: Arc<dyn HumanLoopProvider>) -> Self {
         self.approval_provider = Some(provider);
         self
     }
 
     #[cfg(feature = "human-loop")]
-    /// 设置统一权限服务
+    /// Set unified permission service
     ///
-    /// 一旦设置，将优先使用此服务进行权限检查，
-    /// 回退到旧的 PermissionPolicy 逻辑。
+    /// Once set, this service takes priority for permission checks,
+    /// falling back to the legacy PermissionPolicy logic.
     pub fn permission_service(mut self, service: Arc<PermissionService>) -> Self {
         self.permission_service = Some(service);
         self
     }
 
-    // ── 护栏 & 权限 & 审计 ──────────────────────────────────────────────────────
+    // ── Guardrails & Permissions & Audit ─────────────────────────────────────────
 
-    /// 添加护栏
+    /// Add guard
     pub fn guard(mut self, guard: Arc<dyn Guard>) -> Self {
         self.guards.push(guard);
         self
     }
 
-    /// 批量添加护栏
+    /// Batch add guards
     pub fn guards(mut self, guards: Vec<Arc<dyn Guard>>) -> Self {
         self.guards.extend(guards);
         self
     }
 
-    /// 添加内容安全护栏（PII 检测/脱敏/拒绝）
+    /// Add content safety guard (PII detection/redaction/rejection)
     #[cfg(feature = "content-guard")]
     pub fn with_content_guard(mut self, mode: echo_core::guard::content::ContentGuardMode) -> Self {
         let guard = echo_core::guard::content::ContentGuard::new(mode);
@@ -459,70 +459,70 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// 设置工具权限策略
+    /// Set tool permission policy
     pub fn permission_policy(mut self, policy: Arc<dyn PermissionPolicy>) -> Self {
         self.permission_policy = Some(policy);
         self
     }
 
-    /// 设置审计日志记录器
+    /// Set audit logger
     pub fn audit_logger(mut self, logger: Arc<dyn AuditLogger>) -> Self {
         self.audit_logger = Some(logger);
         self
     }
 
-    // ── 快照配置 ────────────────────────────────────────────────────────────────
+    // ── Snapshot Configuration ──────────────────────────────────────────────────
 
-    /// 设置快照策略，启用状态快照功能
+    /// Set snapshot policy, enabling state snapshot functionality
     ///
-    /// 启用后，ReAct 循环的每轮迭代可自动捕获对话历史快照，
-    /// 异常时可通过 `agent.rollback(n)` 回滚到之前的 known-good 状态。
+    /// When enabled, each iteration of the ReAct loop can automatically capture conversation history snapshots.
+    /// On exception, `agent.rollback(n)` can roll back to a previous known-good state.
     pub fn snapshot_policy(mut self, policy: SnapshotPolicy) -> Self {
         self.snapshot_policy = Some(policy);
         self
     }
 
-    /// 设置最大快照保留数量（默认 10）
+    /// Set maximum snapshot retention count (default 10)
     pub fn max_snapshots(mut self, max: usize) -> Self {
         self.max_snapshots = max;
         self
     }
 
-    /// 启用熔断器
+    /// Enable circuit breaker
     ///
-    /// LLM 连续失败 `failure_threshold` 次后开启熔断，等待 `timeout` 后进入半开状态探测。
+    /// Opens the circuit after `failure_threshold` consecutive LLM failures, waits for `timeout` before entering half-open probing.
     pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker_config = Some(config);
         self
     }
 
-    /// 设置沙箱管理器，为 skill 脚本执行提供安全隔离
+    /// Set sandbox manager, providing secure isolation for skill script execution
     pub fn sandbox_manager(mut self, manager: Arc<SandboxManager>) -> Self {
         self.sandbox_manager = Some(manager);
         self
     }
 
-    // ── 构建 ────────────────────────────────────────────────────────────────────
+    // ── Build ──────────────────────────────────────────────────────────────────
 
-    /// 构建 ReAct Agent（内部方法）
+    /// Build ReAct Agent (internal method)
     pub fn build(self) -> Result<ReactAgent> {
-        // ── 构造期验证 ────────────────────────────────────────────────────────────
+        // ── Construction-time validation ────────────────────────────────────────────
         if self.model.trim().is_empty() {
             return Err(crate::error::ConfigError::MissingConfig(
                 "model".to_string(),
-                "模型名称不能为空".to_string(),
+                "Model name cannot be empty".to_string(),
             )
             .into());
         }
         if self.max_iterations == 0 {
             return Err(crate::error::ConfigError::ConfigFileError(
-                "max_iterations 必须大于 0".to_string(),
+                "max_iterations must be greater than 0".to_string(),
             )
             .into());
         }
         if self.enable_subagent && !self.enable_builtin_tools {
             return Err(crate::error::ConfigError::ConfigFileError(
-                "启用子 Agent 调度 (enable_subagent) 需要同时启用工具调用 (enable_builtin_tools)"
+                "Enabling sub-agent dispatch (enable_subagent) requires enabling tool calls (enable_builtin_tools)"
                     .to_string(),
             )
             .into());
@@ -559,9 +559,9 @@ impl ReactAgentBuilder {
             config = config.conversation_id(conversation_id);
         }
 
-        // 当用户通过 with_memory_tools(store) 传入自定义 Store 时，
-        // 跳过 ReactAgent::new() 内部的 FileStore 自动初始化，
-        // 改由 build() 阶段手动注入用户提供的 Store。
+        // When the user passes a custom Store via with_memory_tools(store),
+        // skip the automatic FileStore initialization inside ReactAgent::new(),
+        // instead manually inject the user-provided Store during the build() phase.
         let has_external_store = self.store.is_some();
         if has_external_store {
             config = config.enable_memory(false);
@@ -573,22 +573,22 @@ impl ReactAgentBuilder {
             agent.set_llm_client(llm_client);
         }
 
-        // 注入 LLM 配置
+        // Inject LLM config
         if let Some(llm_config) = self.llm_config {
             agent.set_llm_config(llm_config);
         }
 
-        // 注册自定义工具
+        // Register custom tools
         for tool in self.tools {
             agent.add_tool(tool);
         }
 
-        // 设置 Store（同时注册 remember/recall/search_memory/forget 工具）
+        // Set Store (also registers remember/recall/search_memory/forget tools)
         if let Some(store) = self.store {
             agent.set_memory_store(store);
         }
 
-        // 设置 Checkpointer
+        // Set Checkpointer
         if let (Some(checkpointer), Some(session_id)) = (self.checkpointer, self.session_id) {
             agent.set_checkpointer(checkpointer, session_id);
         }
@@ -603,32 +603,32 @@ impl ReactAgentBuilder {
             agent.set_permission_service(service);
         }
 
-        // 设置护栏
+        // Set guardrails
         if !self.guards.is_empty() {
             agent.set_guard_manager(GuardManager::from_guards(self.guards));
         }
 
-        // 设置权限策略
+        // Set permission policy
         if let Some(policy) = self.permission_policy {
             agent.set_permission_policy(policy);
         }
 
-        // 设置审计日志
+        // Set audit logger
         if let Some(logger) = self.audit_logger {
             agent.set_audit_logger(logger);
         }
 
-        // 设置快照管理器
+        // Set snapshot manager
         if let Some(policy) = self.snapshot_policy {
             agent.set_snapshot_manager(SnapshotManager::new(policy, self.max_snapshots));
         }
 
-        // 设置熔断器
+        // Set circuit breaker
         if let Some(cb_config) = self.circuit_breaker_config {
             agent.set_circuit_breaker(cb_config);
         }
 
-        // 设置沙箱管理器
+        // Set sandbox manager
         if let Some(manager) = self.sandbox_manager {
             agent.set_sandbox_manager(manager);
         }
@@ -648,11 +648,11 @@ mod tests {
         let builder = ReactAgentBuilder::new()
             .name("test-agent")
             .model("qwen3-max")
-            .system_prompt("测试");
+            .system_prompt("Test");
 
         assert_eq!(builder.name, "test-agent");
         assert_eq!(builder.model, "qwen3-max");
-        assert_eq!(builder.system_prompt, "测试");
+        assert_eq!(builder.system_prompt, "Test");
     }
 
     #[test]
@@ -672,7 +672,7 @@ mod tests {
     fn test_react_agent_builder() {
         let builder = ReactAgentBuilder::new()
             .model("qwen3-max")
-            .system_prompt("测试")
+            .system_prompt("Test")
             .enable_tools();
 
         assert!(builder.enable_builtin_tools);
@@ -682,7 +682,7 @@ mod tests {
     fn test_builder_llm_config_syncs_runtime_model_name() {
         let agent = ReactAgentBuilder::new()
             .llm_config(LlmConfig::openai("sk-demo", "gpt-4o"))
-            .system_prompt("测试")
+            .system_prompt("Test")
             .build()
             .unwrap();
 
@@ -699,7 +699,7 @@ mod tests {
             .llm_client(Arc::new(
                 MockLlmClient::new().with_model_name("mock-topology"),
             ))
-            .system_prompt("测试")
+            .system_prompt("Test")
             .build()
             .unwrap();
 

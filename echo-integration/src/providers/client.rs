@@ -8,7 +8,7 @@ use reqwest::header::HeaderMap;
 use std::sync::Arc;
 use tracing::{info, trace};
 
-/// 判断 LLM 错误是否值得重试（网络错误 / 429 限流 / 5xx 服务端错误）
+/// Determine whether an LLM error is retryable (network error / 429 rate limit / 5xx server error)
 fn is_retryable(err: &LlmError) -> bool {
     match err {
         LlmError::NetworkError(_) => true,
@@ -82,12 +82,13 @@ pub async fn post(
     Ok(completion_response)
 }
 
-/// 发送带 `stream: true` 的请求，返回解析好的 SSE chunk 流
+/// Send a request with `stream: true`, returning a parsed SSE chunk stream.
 ///
-/// 注意：接收 `request_body` 的所有权，避免引用与 async stream 的生命周期冲突。
+/// Note: Takes ownership of `request_body` to avoid lifetime conflicts between
+/// references and the async stream.
 ///
-/// `cancel_token` 用于支持流式响应中止：每个 SSE chunk 之间检查取消信号，
-/// 一旦触发取消则立即停止迭代。
+/// `cancel_token` enables aborting the stream: the cancellation signal is checked
+/// between each SSE chunk, and iteration stops immediately once cancelled.
 #[tracing::instrument(skip(client, request_body, header_map, url, cancel_token), fields(model = %request_body.model))]
 pub async fn stream_post(
     client: Arc<Client>,
@@ -172,7 +173,7 @@ pub async fn stream_post(
                         match serde_json::from_str::<ChatCompletionChunk>(data) {
                             Ok(chunk) => yield chunk,
                             Err(e) => {
-                                // 部分提供商会混入非标准行，跳过即可
+                                // Some providers mix in non-standard lines; skip them
                                 tracing::debug!("skip non-standard SSE line: {} — {}", e, data);
                             }
                         }
@@ -181,7 +182,7 @@ pub async fn stream_post(
             }
         }
 
-        // 处理末尾残留数据（某些服务不以 \n\n 结尾）
+        // Handle trailing residual data (some services don't end with \n\n)
         for line in buffer.lines() {
             if let Some(data) = line.strip_prefix("data: ") &&
                  data.trim() != "[DONE]" &&

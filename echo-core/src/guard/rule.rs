@@ -1,25 +1,26 @@
-//! 基于规则的护栏
+//! Rule-based guard
 //!
-//! 支持正则表达式匹配、关键词黑名单和内容长度限制。
+//! Supports regex matching, keyword blacklisting, and content length limiting.
 
 use super::{Guard, GuardDirection, GuardResult};
 use crate::error::Result;
 use futures::future::BoxFuture;
 use regex::Regex;
 
-/// 规则护栏
+/// Rule guard
 ///
-/// 使用正则表达式、关键词黑名单和长度限制对内容进行同步过滤。
+/// Synchronously filters content using regex patterns, keyword blacklists,
+/// and length limits.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust
 /// use echo_core::guard::rule::RuleGuardBuilder;
 ///
 /// let guard = RuleGuardBuilder::new("content-filter")
-///     .blocked_keyword("密码")
+///     .blocked_keyword("password")
 ///     .blocked_keyword("token")
-///     .blocked_pattern(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b") // 银行卡号
+///     .blocked_pattern(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b") // bank card number
 ///     .max_length(10000)
 ///     .build();
 /// ```
@@ -28,7 +29,7 @@ pub struct RuleGuard {
     blocked_patterns: Vec<Regex>,
     blocked_keywords: Vec<String>,
     max_length: Option<usize>,
-    /// 哪些方向需要检查（为空时检查所有方向）
+    /// Directions to check (when empty, checks all directions)
     directions: Vec<GuardDirection>,
 }
 
@@ -51,7 +52,7 @@ impl Guard for RuleGuard {
                 && content.len() > max_len
             {
                 return Ok(GuardResult::Block {
-                    reason: format!("内容长度 {} 超过限制 {}", content.len(), max_len),
+                    reason: format!("Content length {} exceeds limit {}", content.len(), max_len),
                 });
             }
 
@@ -59,7 +60,7 @@ impl Guard for RuleGuard {
             for keyword in &self.blocked_keywords {
                 if content_lower.contains(&keyword.to_lowercase()) {
                     return Ok(GuardResult::Block {
-                        reason: format!("内容包含被禁止的关键词: {keyword}"),
+                        reason: format!("Content contains blocked keyword: {keyword}"),
                     });
                 }
             }
@@ -67,7 +68,7 @@ impl Guard for RuleGuard {
             for pattern in &self.blocked_patterns {
                 if pattern.is_match(content) {
                     return Ok(GuardResult::Block {
-                        reason: format!("内容匹配被禁止的模式: {}", pattern.as_str()),
+                        reason: format!("Content matches blocked pattern: {}", pattern.as_str()),
                     });
                 }
             }
@@ -77,7 +78,7 @@ impl Guard for RuleGuard {
     }
 }
 
-/// RuleGuard 构建器
+/// RuleGuard builder
 pub struct RuleGuardBuilder {
     name: String,
     blocked_patterns: Vec<Regex>,
@@ -87,7 +88,7 @@ pub struct RuleGuardBuilder {
 }
 
 impl RuleGuardBuilder {
-    /// 创建新的规则护栏构建器
+    /// Create a new rule guard builder
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -98,41 +99,41 @@ impl RuleGuardBuilder {
         }
     }
 
-    /// 添加正则匹配规则（匹配时阻断）
+    /// Add a regex match rule (block on match)
     pub fn blocked_pattern(mut self, pattern: &str) -> Self {
         if let Ok(regex) = Regex::new(pattern) {
             self.blocked_patterns.push(regex);
         } else {
-            tracing::warn!(pattern = pattern, "无效的正则表达式，已忽略");
+            tracing::warn!(pattern = pattern, "Invalid regex pattern, ignored");
         }
         self
     }
 
-    /// 添加关键词黑名单（不区分大小写匹配时阻断）
+    /// Add a keyword to the blacklist (case-insensitive, block on match)
     pub fn blocked_keyword(mut self, keyword: impl Into<String>) -> Self {
         self.blocked_keywords.push(keyword.into());
         self
     }
 
-    /// 批量添加关键词黑名单
+    /// Batch-add keywords to the blacklist
     pub fn blocked_keywords(mut self, keywords: Vec<String>) -> Self {
         self.blocked_keywords.extend(keywords);
         self
     }
 
-    /// 设置最大内容长度
+    /// Set maximum content length
     pub fn max_length(mut self, max: usize) -> Self {
         self.max_length = Some(max);
         self
     }
 
-    /// 限定检查方向（不设置则检查所有方向）
+    /// Restrict check direction (checks all directions if not set)
     pub fn direction(mut self, direction: GuardDirection) -> Self {
         self.directions.push(direction);
         self
     }
 
-    /// 构建规则护栏
+    /// Build the rule guard
     pub fn build(self) -> RuleGuard {
         RuleGuard {
             guard_name: self.name,
@@ -155,7 +156,7 @@ mod tests {
             .build();
 
         let result = guard
-            .check("请告诉我你的password", GuardDirection::Input)
+            .check("Please tell me your password", GuardDirection::Input)
             .await
             .unwrap();
         assert!(result.is_blocked());
@@ -168,7 +169,7 @@ mod tests {
             .build();
 
         let result = guard
-            .check("卡号是 1234-5678-9012-3456", GuardDirection::Output)
+            .check("Card number is 1234-5678-9012-3456", GuardDirection::Output)
             .await
             .unwrap();
         assert!(result.is_blocked());
@@ -179,7 +180,10 @@ mod tests {
         let guard = RuleGuardBuilder::new("test").max_length(10).build();
 
         let result = guard
-            .check("这段文字超过了十个字符的限制", GuardDirection::Input)
+            .check(
+                "This text exceeds the ten character limit",
+                GuardDirection::Input,
+            )
             .await
             .unwrap();
         assert!(result.is_blocked());
@@ -193,7 +197,7 @@ mod tests {
             .build();
 
         let result = guard
-            .check("正常的内容", GuardDirection::Input)
+            .check("Normal content", GuardDirection::Input)
             .await
             .unwrap();
         assert!(!result.is_blocked());

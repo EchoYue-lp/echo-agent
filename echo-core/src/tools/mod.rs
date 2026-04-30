@@ -1,4 +1,4 @@
-//! 工具系统核心 trait 和类型
+//! Tool system core trait and types
 
 pub mod permission;
 
@@ -100,7 +100,7 @@ impl ToolResult {
     }
 }
 
-/// 工具执行配置：超时、重试、并发度
+/// Tool execution config: timeout, retry, concurrency
 #[derive(Debug, Clone)]
 pub struct ToolExecutionConfig {
     /// Maximum execution time for a single attempt.
@@ -127,22 +127,22 @@ impl Default for ToolExecutionConfig {
     }
 }
 
-/// 工具参数类型
+/// Tool parameter type
 pub type ToolParameters = HashMap<String, serde_json::Value>;
 
-/// 工具风险等级
+/// Tool risk level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum ToolRiskLevel {
-    /// 只读操作，无副作用（如搜索、读取文件）
+    /// Read-only operation, no side effects (e.g. search, read file)
     ReadOnly,
-    /// 常规操作，有有限副作用（如写入文件、调用API）
+    /// Standard operation, limited side effects (e.g. write file, call API)
     #[default]
     Standard,
-    /// 危险操作，有不可逆副作用（如执行Shell命令、删除数据、SQL写入）
+    /// Dangerous operation, irreversible side effects (e.g. execute shell command, delete data, SQL write)
     Dangerous,
 }
 
-/// 工具接口 trait
+/// Tool interface trait
 pub trait Tool: Send + Sync {
     /// Stable tool identifier exposed to the model.
     fn name(&self) -> &str;

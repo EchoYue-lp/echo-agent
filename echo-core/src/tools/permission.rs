@@ -1,31 +1,31 @@
-//! 工具权限模型
+//! Tool permission model
 //!
-//! 提供多层级的权限控制系统：
-//! - PermissionMode: 权限模式（default/plan/auto/bypass 等）
-//! - PermissionRule: 规则系统（allow/deny/ask）
-//! - RuleSource: 规则来源优先级
-//! - RuleRegistry: 规则注册表
+//! Provides a multi-level permission control system:
+//! - PermissionMode: permission mode (default/plan/auto/bypass etc.)
+//! - PermissionRule: rule system (allow/deny/ask)
+//! - RuleSource: rule source priority
+//! - RuleRegistry: rule registry
 //!
-//! 参考 Claude Code 的权限架构设计
+//! Referenced from Claude Code's permission architecture design
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-// ── 工具权限类型 ───────────────────────────────────────────────────────────────
+// ── Tool Permission Types ──────────────────────────────────────────────────────
 
-/// 工具权限类型
+/// Tool permission types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolPermission {
-    /// 读取文件/目录权限
+    /// Read files/directories permission
     Read,
-    /// 写入文件/目录权限
+    /// Write files/directories permission
     Write,
-    /// 网络访问权限
+    /// Network access permission
     Network,
-    /// 执行命令/代码权限
+    /// Execute commands/code permission
     Execute,
-    /// 敏感操作权限（如访问密钥、环境变量等）
+    /// Sensitive operation permission (e.g. access keys, environment variables, etc.)
     Sensitive,
 }
 
@@ -41,38 +41,38 @@ impl std::fmt::Display for ToolPermission {
     }
 }
 
-// ── 权限模式 ───────────────────────────────────────────────────────────────────
+// ── Permission Mode ────────────────────────────────────────────────────────────
 
-/// 权限模式 - 控制权限检查的行为
+/// Permission mode - controls permission check behavior
 ///
-/// 参考 Claude Code 的 PermissionMode 设计：
-/// - Default: 需要用户确认危险操作
-/// - Plan: 只读模式
-/// - AcceptEdits: 自动接受编辑
-/// - BypassPermissions: 绕过所有检查（可被 bypass_disabled 禁用）
-/// - Auto: AI 分类器自动决策
-/// - Bubble: 子代理权限上浮
-/// - DontAsk: 未匹配 allow 规则的工具静默拒绝（不提示用户）
+/// Referenced from Claude Code's PermissionMode design:
+/// - Default: require user confirmation for dangerous operations
+/// - Plan: read-only mode
+/// - AcceptEdits: automatically accept edits
+/// - BypassPermissions: bypass all checks (can be disabled by bypass_disabled)
+/// - Auto: AI classifier auto-decides
+/// - Bubble: sub-agent permissions bubble up
+/// - DontAsk: silently reject tools not matching an allow rule (no user prompt)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
-    /// 默认模式：需要用户确认危险操作
+    /// Default mode: require user confirmation for dangerous operations
     #[default]
     Default,
-    /// 计划模式：只读，不允许写入和执行
+    /// Plan mode: read-only, disallow writes and executes
     Plan,
-    /// 自动接受文件编辑操作
+    /// Automatically accept file edit operations
     AcceptEdits,
-    /// 绕过所有权限检查（谨慎使用）
+    /// Bypass all permission checks (use with caution)
     BypassPermissions,
-    /// AI 分类器自动决策（需要 Classifier 实现）
+    /// AI classifier auto-decides (requires Classifier implementation)
     Auto,
-    /// 子代理权限上浮到父进程
+    /// Sub-agent permissions bubble up to parent process
     Bubble,
-    /// 静默模式：匹配 allow 规则的自动通过，未匹配的静默拒绝
+    /// Silent mode: auto-allow rules that match, silently reject those that don't
     ///
-    /// 介于 Default 和 BypassPermissions 之间的中间模式，
-    /// 适合 CI/CD 等需要无人值守运行的场景。
+    /// An intermediate mode between Default and BypassPermissions,
+    /// suitable for CI/CD and other unattended execution scenarios.
     DontAsk,
 }
 
@@ -82,7 +82,7 @@ impl PermissionMode {
         match self {
             PermissionMode::BypassPermissions => true,
             PermissionMode::AcceptEdits => true,
-            PermissionMode::DontAsk => true, // 允许规则中的写入操作
+            PermissionMode::DontAsk => true, // allows write operations in rules
             PermissionMode::Plan => false,
             _ => false,
         }
@@ -93,8 +93,8 @@ impl PermissionMode {
         match self {
             PermissionMode::BypassPermissions => false,
             PermissionMode::Auto => false,
-            PermissionMode::DontAsk => false, // 静默拒绝，不交互
-            PermissionMode::AcceptEdits => false, // 编辑自动接受，其他仍需确认
+            PermissionMode::DontAsk => false, // silently reject, no interaction
+            PermissionMode::AcceptEdits => false, // edits auto-accepted, others still need confirmation
             _ => true,
         }
     }
@@ -119,23 +119,23 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
-// ── 权限决策 ───────────────────────────────────────────────────────────────────
+// ── Permission Decision ────────────────────────────────────────────────────────
 
-/// 权限决策
+/// Permission decision
 #[derive(Debug, Clone, PartialEq)]
 pub enum PermissionDecision {
-    /// 允许执行
+    /// Allow execution
     Allow,
-    /// 拒绝执行
+    /// Deny execution
     Deny {
-        /// 拒绝原因
+        /// Denial reason
         reason: String,
     },
-    /// 需要用户审批
+    /// Require user approval
     RequireApproval,
-    /// 需要用户审批并提供建议
+    /// Require user approval with suggestions
     Ask {
-        /// 建议列表
+        /// Suggestion list
         suggestions: Vec<String>,
     },
 }
@@ -160,32 +160,33 @@ impl PermissionDecision {
     }
 }
 
-// ── 规则来源优先级 ─────────────────────────────────────────────────────────────
+// ── Rule Source Priority ───────────────────────────────────────────────────────
 
-/// 规则来源优先级（数值越大优先级越高）
+/// Rule source priority (higher value = higher priority)
 ///
-/// 参考 Claude Code 的 PERMISSION_RULE_SOURCES 设计。
-/// 在 deny-first 评估中，来源优先级只影响同类型规则（deny/ask/allow）之间的顺序，
-/// deny 规则始终优先于 ask 和 allow 规则。
+/// Referenced from Claude Code's PERMISSION_RULE_SOURCES design.
+/// In deny-first evaluation, source priority only affects ordering among
+/// rules of the same type (deny/ask/allow); deny rules always take
+/// precedence over ask and allow rules.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum RuleSource {
-    /// 默认规则（最低优先级）
+    /// Default rule (lowest priority)
     #[default]
     Default = 0,
-    /// 本地设置（.echo/settings.local.json）
+    /// Local settings (.echo/settings.local.json)
     LocalSettings = 1,
-    /// 项目设置（.echo/settings.json）
+    /// Project settings (.echo/settings.json)
     ProjectSettings = 2,
-    /// 用户设置（~/.echo/settings.json）
+    /// User settings (~/.echo/settings.json)
     UserSettings = 3,
-    /// 管理员策略（不可被用户覆盖，企业部署用）
+    /// Admin policy (cannot be overridden by users, for enterprise deployment)
     Managed = 4,
-    /// 命令行参数
+    /// CLI argument
     CliArg = 5,
-    /// 会话临时规则（最高优先级）
+    /// Session temporary rule (highest priority)
     Session = 6,
 }
 
@@ -203,27 +204,28 @@ impl std::fmt::Display for RuleSource {
     }
 }
 
-// ── 规则匹配器 ─────────────────────────────────────────────────────────────────
+// ── Rule Matcher ───────────────────────────────────────────────────────────────
 
-/// 规则匹配器 - 定义规则如何匹配工具调用
+/// Rule matcher - defines how a rule matches tool invocations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RuleMatcher {
-    /// 精确工具名匹配
+    /// Exact tool name match
     Tool { name: String },
-    /// 通配符模式匹配（支持 "Bash(git:*)" 等格式）
+    /// Wildcard pattern match (supports "Bash(git:*)" etc.)
     Pattern { pattern: String },
-    /// 按权限类型匹配
+    /// Match by permission type
     Permission { permission: ToolPermission },
-    /// 匹配所有工具
+    /// Match all tools
     All,
 }
 
 impl RuleMatcher {
-    /// 检查 matcher 字符串是否匹配此 matcher（用于规则移除）
+    /// Check whether a matcher string matches this matcher (for rule removal)
     ///
-    /// 与 `parse_rule()` 中的 `RuleMatcher::Pattern` 构造语义保持一致：
-    /// 移除时使用与添加时相同的 matcher 字符串来定位规则。
+    /// Consistent with the `RuleMatcher::Pattern` construction semantics in
+    /// `parse_rule()`: uses the same matcher string for removal as for addition
+    /// to locate rules.
     pub fn matches_matcher_str(&self, matcher_str: &str) -> bool {
         match self {
             RuleMatcher::Tool { name } => name == matcher_str,
@@ -233,7 +235,7 @@ impl RuleMatcher {
         }
     }
 
-    /// 检查是否匹配指定的工具
+    /// Check whether this matches the specified tool
     pub fn matches(&self, tool_name: &str, permissions: &[ToolPermission]) -> bool {
         match self {
             RuleMatcher::Tool { name } => tool_name == name,
@@ -290,22 +292,22 @@ impl std::fmt::Display for RuleMatcher {
     }
 }
 
-// ── 规则行为 ───────────────────────────────────────────────────────────────────
+// ── Rule Behavior ──────────────────────────────────────────────────────────────
 
-/// 规则行为 - 匹配后采取的动作
+/// Rule behavior - the action taken after a match
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RuleBehavior {
-    /// 允许执行
+    /// Allow execution
     Allow,
-    /// 拒绝执行
+    /// Deny execution
     Deny { reason: String },
-    /// 需要用户确认
+    /// Require user confirmation
     Ask { suggestions: Vec<String> },
 }
 
 impl RuleBehavior {
-    /// 转换为 PermissionDecision
+    /// Convert to PermissionDecision
     pub fn to_decision(&self) -> PermissionDecision {
         match self {
             RuleBehavior::Allow => PermissionDecision::Allow,
@@ -319,24 +321,24 @@ impl RuleBehavior {
     }
 }
 
-// ── 权限规则 ───────────────────────────────────────────────────────────────────
+// ── Permission Rule ────────────────────────────────────────────────────────────
 
-/// 权限规则 - 单条规则的完整定义
+/// Permission rule - complete definition of a single rule
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PermissionRule {
-    /// 规则匹配器
+    /// Rule matcher
     pub matcher: RuleMatcher,
-    /// 规则行为
+    /// Rule behavior
     pub behavior: RuleBehavior,
-    /// 规则来源
+    /// Rule source
     pub source: RuleSource,
-    /// 规则描述（可选）
+    /// Rule description (optional)
     #[serde(default)]
     pub description: Option<String>,
 }
 
 impl PermissionRule {
-    /// 创建允许规则
+    /// Create an allow rule
     pub fn allow(matcher: RuleMatcher, source: RuleSource) -> Self {
         Self {
             matcher,
@@ -346,7 +348,7 @@ impl PermissionRule {
         }
     }
 
-    /// 创建拒绝规则
+    /// Create a deny rule
     pub fn deny(matcher: RuleMatcher, reason: String, source: RuleSource) -> Self {
         Self {
             matcher,
@@ -356,7 +358,7 @@ impl PermissionRule {
         }
     }
 
-    /// 创建询问规则
+    /// Create an ask rule
     pub fn ask(matcher: RuleMatcher, suggestions: Vec<String>, source: RuleSource) -> Self {
         Self {
             matcher,
@@ -366,20 +368,20 @@ impl PermissionRule {
         }
     }
 
-    /// 检查是否匹配指定的工具调用
+    /// Check whether this matches the specified tool invocation
     pub fn matches(&self, tool_name: &str, permissions: &[ToolPermission]) -> bool {
         self.matcher.matches(tool_name, permissions)
     }
 }
 
-// ── 规则注册表 ─────────────────────────────────────────────────────────────────
+// ── Rule Registry ──────────────────────────────────────────────────────────────
 
-/// 规则注册表 - 管理所有权限规则
+/// Rule registry - manages all permission rules
 ///
-/// 规则按来源优先级排序，高优先级规则优先匹配。
-/// 匹配顺序：
-/// 1. 按来源优先级从高到低
-/// 2. 同一来源内按添加顺序
+/// Rules are sorted by source priority; higher priority rules match first.
+/// Matching order:
+/// 1. By source priority from high to low
+/// 2. Within the same source, by insertion order
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
     rules: Vec<PermissionRule>,
@@ -388,12 +390,12 @@ pub struct RuleRegistry {
 }
 
 impl RuleRegistry {
-    /// 创建空的规则注册表
+    /// Create an empty rule registry
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 添加规则（自动按优先级排序）
+    /// Add a rule (auto-sorted by priority)
     pub fn add_rule(&mut self, rule: PermissionRule) {
         // 按来源优先级插入排序
         let pos = self
@@ -408,21 +410,22 @@ impl RuleRegistry {
         self.rebuild_tool_index();
     }
 
-    /// 批量添加规则
+    /// Batch add rules
     pub fn add_rules(&mut self, rules: Vec<PermissionRule>) {
         for rule in rules {
             self.add_rule(rule);
         }
     }
 
-    /// 检查工具调用，返回匹配的规则行为
+    /// Check a tool invocation and return the matching rule behavior
     ///
-    /// 评估顺序遵循 deny-first 原则（参考 Claude Code）：
-    /// 1. Deny 规则 — 任何来源的 deny 都优先于所有 allow
-    /// 2. Ask 规则 — 按来源优先级
-    /// 3. Allow 规则 — 按来源优先级
+    /// Evaluation order follows deny-first principle (referenced from Claude Code):
+    /// 1. Deny rules — any deny from any source takes precedence over all allows
+    /// 2. Ask rules — by source priority
+    /// 3. Allow rules — by source priority
     ///
-    /// 这确保了一个低优先级的 deny 规则永远不会被高优先级的 allow 规则覆盖。
+    /// This ensures that a low-priority deny rule can never be overridden by a
+    /// high-priority allow rule.
     pub fn check(&self, tool_name: &str, permissions: &[ToolPermission]) -> Option<RuleBehavior> {
         // Pass 1: Deny — any deny anywhere wins (full scan)
         for rule in &self.rules {
@@ -450,20 +453,21 @@ impl RuleRegistry {
         None
     }
 
-    /// 获取指定来源的所有规则
+    /// Get all rules from the specified source
     pub fn rules_by_source(&self, source: RuleSource) -> Vec<&PermissionRule> {
         self.rules.iter().filter(|r| r.source == source).collect()
     }
 
-    /// 移除指定来源的所有规则
+    /// Remove all rules from the specified source
     pub fn remove_by_source(&mut self, source: RuleSource) {
         self.rules.retain(|r| r.source != source);
         self.rebuild_tool_index();
     }
 
-    /// 移除匹配指定 matcher 字符串的所有规则
+    /// Remove all rules matching the specified matcher string
     ///
-    /// 返回被移除的规则数量。匹配方式与 `parse_rule()` 的 `AddRule` 语义一致。
+    /// Returns the number of removed rules. Matches with the same semantics as
+    /// `parse_rule()`'s `AddRule`.
     pub fn remove_by_matcher(&mut self, matcher_str: &str) -> usize {
         let before = self.rules.len();
         self.rules
@@ -475,7 +479,7 @@ impl RuleRegistry {
         removed
     }
 
-    /// 重建 tool_index（在移除规则后调用）
+    /// Rebuild tool_index (called after rule removal)
     fn rebuild_tool_index(&mut self) {
         self.tool_index.clear();
         for (i, rule) in self.rules.iter().enumerate() {
@@ -485,31 +489,31 @@ impl RuleRegistry {
         }
     }
 
-    /// 清空所有规则
+    /// Clear all rules
     pub fn clear(&mut self) {
         self.rules.clear();
         self.tool_index.clear();
     }
 
-    /// 获取规则数量
+    /// Get the number of rules
     pub fn len(&self) -> usize {
         self.rules.len()
     }
 
-    /// 检查是否为空
+    /// Check whether it is empty
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
 
-    /// 获取所有规则
+    /// Get all rules
     pub fn all_rules(&self) -> &[PermissionRule] {
         &self.rules
     }
 }
 
-// ── 权限策略 trait ───────────────────────────────────────────────────────────────
+// ── Permission Policy Trait ────────────────────────────────────────────────────
 
-/// 权限策略 trait
+/// Permission policy trait
 pub trait PermissionPolicy: Send + Sync {
     fn check<'a>(
         &'a self,
@@ -518,7 +522,7 @@ pub trait PermissionPolicy: Send + Sync {
     ) -> BoxFuture<'a, PermissionDecision>;
 }
 
-/// 默认权限策略（保留向后兼容）
+/// Default permission policy (retains backward compatibility)
 pub struct DefaultPermissionPolicy {
     granted: HashSet<ToolPermission>,
     approval_required: HashSet<ToolPermission>,
@@ -593,7 +597,7 @@ impl PermissionPolicy for DefaultPermissionPolicy {
             if !denied.is_empty() {
                 let names: Vec<String> = denied.iter().map(|p| p.to_string()).collect();
                 return PermissionDecision::Deny {
-                    reason: format!("未授权的权限: {}", names.join(", ")),
+                    reason: format!("Unauthorized permissions: {}", names.join(", ")),
                 };
             }
 
@@ -606,7 +610,7 @@ impl PermissionPolicy for DefaultPermissionPolicy {
     }
 }
 
-// ── 单元测试 ───────────────────────────────────────────────────────────────────────
+// ── Unit Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -822,7 +826,7 @@ mod tests {
             RuleMatcher::Pattern {
                 pattern: "Bash(rm:*)".to_string(),
             },
-            vec!["确认".to_string()],
+            vec!["Confirm".to_string()],
             RuleSource::Default,
         ));
 

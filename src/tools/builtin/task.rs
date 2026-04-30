@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, info};
 
-/// 获取当前时间戳（秒），不会 panic
+/// Get the current timestamp in seconds, will not panic
 fn now_secs() -> u64 {
     crate::utils::time::now_secs()
 }
@@ -28,7 +28,7 @@ impl Tool for CreateTaskTool {
     }
 
     fn description(&self) -> &str {
-        "将复杂问题拆解为子任务。创建一个新的待执行任务。"
+        "Break down complex problems into sub-tasks. Create a new pending task."
     }
 
     fn parameters(&self) -> Value {
@@ -37,33 +37,33 @@ impl Tool for CreateTaskTool {
             "properties": {
                 "task_id": {
                     "type": "string",
-                    "description": "任务唯一标识符，如 task_1, task_2"
+                    "description": "Unique task identifier, e.g. task_1, task_2"
                 },
                 "description": {
                     "type": "string",
-                    "description": "任务的详细描述，说明要做什么"
+                    "description": "Detailed task description explaining what to do"
                 },
                 "reasoning": {
                     "type": "string",
-                    "description": "为什么需要这个任务，它如何帮助解决主问题"
+                    "description": "Why this task is needed and how it helps solve the main problem"
                 },
                 "dependencies": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "依赖的任务ID列表（必须先完成这些任务）"
+                    "description": "List of dependent task IDs (these must be completed first)"
                 },
                 "priority": {
                     "type": "number",
-                    "description": "优先级 0-10，默认5"
+                    "description": "Priority 0-10, default 5"
                 },
                 "assigned_agent": {
                     "type": "string",
-                    "description": "分配执行的 Agent 名称（可选）"
+                    "description": "Agent name assigned to execute this task (optional)"
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "任务标签（可选，用于分类和过滤）"
+                    "description": "Task tags (optional, for categorization and filtering)"
                 }
             },
             "required": ["task_id", "description", "reasoning"]
@@ -142,10 +142,10 @@ impl Tool for CreateTaskTool {
                 retry_count: 0,
             };
 
-            // 先添加任务
+            // Add task first
             self.task_manager.add_task(task.clone());
 
-            // 再检测是否因添加此任务而产生循环依赖
+            // Then check if adding this task created circular dependencies
             let has_circular_deps = self.task_manager.has_circular_dependencies();
 
             if has_circular_deps {
@@ -155,11 +155,11 @@ impl Tool for CreateTaskTool {
                     .map(|cycle| format!("[{}]", cycle.join(" → ")))
                     .collect();
 
-                // 回滚：移除刚添加的有问题的任务
+                // Rollback: remove the problematic task that was just added
                 self.task_manager.delete_task(task_id);
 
                 let error_msg = format!(
-                    "任务 [{}] 创建失败：此任务与现有任务形成循环依赖。循环路径: {}",
+                    "Task [{}] creation failed: this task forms a circular dependency with existing tasks. Cycle path: {}",
                     task_id,
                     cycle_paths.join(" → ")
                 );
@@ -206,7 +206,7 @@ impl Tool for UpdateTaskTool {
     }
 
     fn description(&self) -> &str {
-        "更新任务的状态（开始执行、标记完成、记录失败等）"
+        "Update task status (start execution, mark completed, record failure, etc.)"
     }
 
     fn parameters(&self) -> Value {
@@ -215,20 +215,20 @@ impl Tool for UpdateTaskTool {
             "properties": {
                 "task_id": {
                     "type": "string",
-                    "description": "要更新的任务ID"
+                    "description": "Task ID to update"
                 },
                 "status": {
                     "type": "string",
                     "enum": ["in_progress", "completed", "cancelled", "failed"],
-                    "description": "新状态"
+                    "description": "New status"
                 },
                 "result": {
                     "type": "string",
-                    "description": "任务执行结果（完成时填写）"
+                    "description": "Task execution result (filled when completed)"
                 },
                 "reason": {
                     "type": "string",
-                    "description": "失败或取消的原因"
+                    "description": "Reason for failure or cancellation"
                 }
             },
             "required": ["task_id", "status"]
@@ -268,7 +268,7 @@ impl Tool for UpdateTaskTool {
                 _ => {
                     return Err(ToolError::InvalidParameter {
                         name: "status".to_string(),
-                        message: format!("无效的状态: {}", status_str),
+                        message: format!("Invalid status: {}", status_str),
                     }
                     .into());
                 }
@@ -277,12 +277,12 @@ impl Tool for UpdateTaskTool {
             // Validate state transition
             if let Err(e) = self.task_manager.update_task(task_id, new_status.clone()) {
                 return Ok(ToolResult::error(format!(
-                    "任务 [{}] 状态更新失败: {}",
+                    "Task [{}] status update failed: {}",
                     task_id, e
                 )));
             }
 
-            // 更新结果
+            // Update result
             if let Some(ref r) = result {
                 self.task_manager.set_task_result(task_id, r.clone());
             }
@@ -317,7 +317,7 @@ impl Tool for ListTasksTool {
     }
 
     fn description(&self) -> &str {
-        "查看当前所有任务的状态和进度"
+        "View the status and progress of all current tasks"
     }
 
     fn parameters(&self) -> Value {
@@ -327,7 +327,7 @@ impl Tool for ListTasksTool {
                 "filter": {
                     "type": "string",
                     "enum": ["all", "pending", "in_progress", "completed", "ready"],
-                    "description": "筛选条件：all-所有, pending-待处理, ready-可立即执行"
+                    "description": "Filter: all - all tasks, pending - awaiting, ready - can execute now"
                 }
             }
         })
@@ -397,7 +397,7 @@ impl Tool for VisualizeDependenciesTool {
     }
 
     fn description(&self) -> &str {
-        "生成任务依赖关系的可视化图表（Mermaid 格式）"
+        "Generate a visualization chart of task dependencies (Mermaid format)"
     }
 
     fn parameters(&self) -> Value {
@@ -435,7 +435,7 @@ impl Tool for GetExecutionOrderTool {
     }
 
     fn description(&self) -> &str {
-        "获取任务的推荐执行顺序（基于依赖关系）"
+        "Get the recommended task execution order (based on dependencies)"
     }
 
     fn parameters(&self) -> Value {

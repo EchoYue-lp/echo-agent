@@ -1,9 +1,9 @@
-//! 图工作流节点
+//! Graph workflow nodes
 //!
-//! 每个节点是图中的一个执行单元，可以是：
-//! - **Agent 节点**：调用 `Agent::execute()` 并将结果写入 state
-//! - **函数节点**：任意 `async fn(SharedState) -> Result<()>`
-//! - **Router 节点**：纯路由（不执行，仅做条件分支）
+//! Each node is an execution unit in the graph, which can be:
+//! - **Agent node**: calls `Agent::execute()` and writes the result to state
+//! - **Function node**: arbitrary `async fn(SharedState) -> Result<()>`
+//! - **Router node**: pure routing (no execution, conditional branching only)
 
 use super::state::SharedState;
 use echo_core::agent::Agent;
@@ -14,28 +14,28 @@ use tokio::sync::Mutex;
 
 // ── NodeAction ──────────────────────────────────────────────────────────────
 
-/// 节点执行逻辑的类型安全封装
+/// Type-safe wrapper for node execution logic
 pub(crate) enum NodeAction {
-    /// Agent 执行：从 state 中读取 input_key 作为 prompt，输出写入 output_key
+    /// Agent execution: reads input_key from state as prompt, writes output to output_key
     Agent {
         agent: Arc<Mutex<Box<dyn Agent>>>,
         input_key: String,
         output_key: String,
-        /// 使用 execute (multi-turn with tools) 还是 chat (single turn)
+        /// Whether to use execute (multi-turn with tools) or chat (single turn)
         use_execute: bool,
     },
-    /// 自定义异步函数
+    /// Custom async function
     Function(Box<dyn NodeFn>),
-    /// 空操作（用于 router 节点）
+    /// No-op (used for router nodes)
     Passthrough,
 }
 
-/// 自定义节点函数 trait（object-safe）
+/// Custom node function trait (object-safe)
 pub(crate) trait NodeFn: Send + Sync {
     fn call<'a>(&'a self, state: &'a SharedState) -> BoxFuture<'a, Result<()>>;
 }
 
-/// 用闭包实现 NodeFn
+/// Implements NodeFn using a closure
 struct FnWrapper<F>(F);
 
 impl<F> NodeFn for FnWrapper<F>
@@ -49,17 +49,17 @@ where
 
 // ── Node ────────────────────────────────────────────────────────────────────
 
-/// 图中的节点定义
+/// Node definition in the graph
 #[allow(dead_code)]
 pub(crate) struct Node {
-    /// 节点唯一名称
+    /// Unique node name
     pub name: String,
-    /// 执行逻辑
+    /// Execution logic
     pub action: NodeAction,
 }
 
 impl Node {
-    /// 创建 Agent 节点（默认使用 execute，即 multi-turn with tools）
+    /// Create an Agent node (defaults to execute, i.e., multi-turn with tools)
     pub fn agent(
         name: impl Into<String>,
         agent: impl Agent + 'static,
@@ -77,7 +77,7 @@ impl Node {
         }
     }
 
-    /// 创建 Agent 节点（可配置 execute/chat 模式）
+    /// Create an Agent node (configurable execute/chat mode)
     pub fn agent_with_mode(
         name: impl Into<String>,
         agent: impl Agent + 'static,
@@ -96,7 +96,7 @@ impl Node {
         }
     }
 
-    /// 创建 Agent 节点（已封装为 Arc<Mutex<Box<dyn Agent>>>）
+    /// Create an Agent node (pre-wrapped as Arc<Mutex<Box<dyn Agent>>>)
     pub fn agent_shared(
         name: impl Into<String>,
         agent: Arc<Mutex<Box<dyn Agent>>>,
@@ -114,7 +114,7 @@ impl Node {
         }
     }
 
-    /// 创建 Agent 节点（已封装 + 可配置 execute/chat）
+    /// Create an Agent node (pre-wrapped + configurable execute/chat)
     pub fn agent_shared_with_mode(
         name: impl Into<String>,
         agent: Arc<Mutex<Box<dyn Agent>>>,
@@ -133,7 +133,7 @@ impl Node {
         }
     }
 
-    /// 创建函数节点
+    /// Create a function node
     pub fn function<F>(name: impl Into<String>, f: F) -> Self
     where
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
@@ -144,7 +144,7 @@ impl Node {
         }
     }
 
-    /// 创建 passthrough（路由）节点
+    /// Create a passthrough (router) node
     pub fn passthrough(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -152,7 +152,7 @@ impl Node {
         }
     }
 
-    /// 执行节点
+    /// Execute the node
     pub async fn execute(&self, state: &SharedState) -> Result<()> {
         match &self.action {
             NodeAction::Agent {
@@ -170,8 +170,8 @@ impl Node {
                     agent.chat(&input).await?
                 };
 
-                // 使用 merge_overwrite 支持结构化数据的合并语义
-                // 而不是简单的 key-level overwrite
+                // Use merge_overwrite to support structural data merge semantics
+                // rather than simple key-level overwrite
                 state.merge_overwrite(&SharedState::from_values(
                     [(
                         output_key.to_string(),
@@ -180,7 +180,7 @@ impl Node {
                     .into_iter()
                     .collect(),
                 ))?;
-                // 同时追加到消息历史
+                // Also append to message history
                 state.push_message(echo_core::llm::types::Message::assistant(output))?;
                 Ok(())
             }
@@ -190,7 +190,7 @@ impl Node {
     }
 }
 
-// ── 单元测试 ────────────────────────────────────────────────────────────────
+// ── Unit Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -218,6 +218,6 @@ mod tests {
         let state = SharedState::new();
         let _ = state.set("x", 1);
         node.execute(&state).await.unwrap();
-        assert_eq!(state.get::<i64>("x"), Some(1)); // 不变
+        assert_eq!(state.get::<i64>("x"), Some(1)); // unchanged
     }
 }

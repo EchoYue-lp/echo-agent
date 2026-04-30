@@ -1,8 +1,29 @@
-//! Compression façade
+//! Context compression strategies to manage token budget.
 //!
-//! 此模块只做 `echo_state::compression` 的薄重导出。
-//! 权威实现位于 `echo_state`；如需直接依赖拆分后的 crate，
-//! 可使用 [`crate::workspace::state::compression`]。
+//! When conversations grow beyond the model's context window, compressors reduce
+//! history while preserving the most relevant information.
+//!
+//! # Strategies
+//!
+//! | Compressor | Strategy | Best For |
+//! |------------|----------|----------|
+//! | `SlidingWindowCompressor` | Keeps the N most recent messages | Simple, fast |
+//! | `SummaryCompressor` | Uses an LLM to summarize older messages | High quality |
+//! | `HybridCompressor` | Combines sliding window + LLM summary | Balanced |
+//!
+//! # Quick Start
+//!
+//! ```rust,ignore
+//! use echo_agent::prelude::*;
+//!
+//! # fn main() -> echo_agent::error::Result<()> {
+//! let agent = ReactAgentBuilder::new()
+//!     .model("qwen3-max")
+//!     .compressor(Box::new(SlidingWindowCompressor::new(4096)))
+//!     .build()?;
+//! # Ok(())
+//! # }
+//! ```
 
 /// Direct re-exports from `echo_state::compression`.
 pub mod state {

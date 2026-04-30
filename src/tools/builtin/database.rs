@@ -1,9 +1,9 @@
-//! 数据库 SQL 工具
+//! Database SQL tools
 //!
-//! 通过 sqlx 提供跨数据库的只读查询能力：
-//! - sql_query: 执行只读 SQL 查询
-//! - list_tables: 列出数据库中的所有表
-//! - describe_table: 查看表结构
+//! Provides cross-database read-only query capabilities via sqlx:
+//! - sql_query: execute read-only SQL queries
+//! - list_tables: list all tables in the database
+//! - describe_table: view table structure
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -13,7 +13,7 @@ use sqlx::{Column, Row};
 use crate::error::{Result, ToolError};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
-// ── SQL 查询（只读） ─────────────────────────────────────────────────────────
+// ── SQL Query (read-only) ─────────────────────────────────────────────────────────
 
 pub struct SqlQueryTool;
 
@@ -23,8 +23,8 @@ impl Tool for SqlQueryTool {
     }
 
     fn description(&self) -> &str {
-        "执行只读 SQL 查询（仅允许 SELECT）。支持 SQLite、MySQL、PostgreSQL。\
-         连接 URL 格式: sqlite://path.db, mysql://user:pass@host/db, postgresql://user:pass@host/db"
+        "Execute read-only SQL queries (SELECT only). Supports SQLite, MySQL, PostgreSQL. \
+         Connection URL format: sqlite://path.db, mysql://user:pass@host/db, postgresql://user:pass@host/db"
     }
 
     fn parameters(&self) -> Value {
@@ -33,11 +33,11 @@ impl Tool for SqlQueryTool {
             "properties": {
                 "connection_url": {
                     "type": "string",
-                    "description": "数据库连接 URL（sqlite:///path.db | mysql://user:pass@host/db | postgresql://user:pass@host/db）"
+                    "description": "Database connection URL (sqlite:///path.db | mysql://user:pass@host/db | postgresql://user:pass@host/db)"
                 },
                 "query": {
                     "type": "string",
-                    "description": "要执行的 SQL 查询（仅允许 SELECT / SHOW / DESCRIBE / EXPLAIN / PRAGMA）"
+                    "description": "SQL query to execute (only SELECT / SHOW / DESCRIBE / EXPLAIN / PRAGMA allowed)"
                 }
             },
             "required": ["connection_url", "query"]
@@ -56,7 +56,7 @@ impl Tool for SqlQueryTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
-            // 安全检查：仅允许只读语句
+            // Safety check: only allow read-only statements
             let trimmed = query.trim().to_uppercase();
             let allowed = trimmed.starts_with("SELECT")
                 || trimmed.starts_with("SHOW")
@@ -64,16 +64,16 @@ impl Tool for SqlQueryTool {
                 || trimmed.starts_with("DESC ")
                 || trimmed.starts_with("EXPLAIN")
                 || trimmed.starts_with("PRAGMA")
-                || trimmed.starts_with("WITH"); // CTE 通常跟着 SELECT
+                || trimmed.starts_with("WITH"); // CTE usually followed by SELECT
 
             if !allowed {
                 return Ok(ToolResult::error(format!(
-                    "仅允许只读查询（SELECT/SHOW/DESCRIBE/EXPLAIN/PRAGMA），收到: {}",
+                    "Only read-only queries allowed (SELECT/SHOW/DESCRIBE/EXPLAIN/PRAGMA), received: {}",
                     query
                 )));
             }
 
-            // 额外的危险关键词扫描
+            // Additional dangerous keyword scan
             let dangerous = [
                 "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT",
                 "REVOKE", "REPLACE",
@@ -81,7 +81,7 @@ impl Tool for SqlQueryTool {
             for keyword in &dangerous {
                 if trimmed.contains(keyword) {
                     return Ok(ToolResult::error(format!(
-                        "查询包含禁止的关键词: {}。仅允许只读查询。",
+                        "Query contains forbidden keyword: {}. Only read-only queries allowed.",
                         keyword
                     )));
                 }
@@ -89,13 +89,13 @@ impl Tool for SqlQueryTool {
 
             match execute_readonly_query(conn_url, query).await {
                 Ok(data) => Ok(ToolResult::success_json(data)),
-                Err(e) => Ok(ToolResult::error(format!("查询失败: {}", e))),
+                Err(e) => Ok(ToolResult::error(format!("Query failed: {}", e))),
             }
         })
     }
 }
 
-// ── 列出表 ───────────────────────────────────────────────────────────────────
+// ── List tables ───────────────────────────────────────────────────────────────────
 
 pub struct ListTablesTool;
 
@@ -105,7 +105,7 @@ impl Tool for ListTablesTool {
     }
 
     fn description(&self) -> &str {
-        "列出数据库中的所有表。支持 SQLite、MySQL、PostgreSQL。"
+        "List all tables in the database. Supports SQLite, MySQL, PostgreSQL."
     }
 
     fn parameters(&self) -> Value {
@@ -114,7 +114,7 @@ impl Tool for ListTablesTool {
             "properties": {
                 "connection_url": {
                     "type": "string",
-                    "description": "数据库连接 URL"
+                    "description": "Database connection URL"
                 }
             },
             "required": ["connection_url"]
@@ -128,25 +128,25 @@ impl Tool for ListTablesTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("connection_url".to_string()))?;
 
-            // 根据数据库类型选择合适的查询
+            // Choose appropriate query based on database type
             let query = if conn_url.starts_with("sqlite") {
                 "SELECT name AS table_name FROM sqlite_master WHERE type='table' ORDER BY name"
             } else if conn_url.starts_with("mysql") {
                 "SELECT TABLE_NAME AS table_name FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME"
             } else {
-                // PostgreSQL 及其他
+                // PostgreSQL and others
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name"
             };
 
             match execute_readonly_query(conn_url, query).await {
                 Ok(data) => Ok(ToolResult::success_json(data)),
-                Err(e) => Ok(ToolResult::error(format!("列出表失败: {}", e))),
+                Err(e) => Ok(ToolResult::error(format!("List tables failed: {}", e))),
             }
         })
     }
 }
 
-// ── 描述表结构 ───────────────────────────────────────────────────────────────
+// ── Describe table structure ───────────────────────────────────────────────────────────────
 
 pub struct DescribeTableTool;
 
@@ -156,7 +156,7 @@ impl Tool for DescribeTableTool {
     }
 
     fn description(&self) -> &str {
-        "查看指定表的结构（列名、类型、是否可空）。支持 SQLite、MySQL、PostgreSQL。"
+        "View the structure of a specified table (column names, types, nullable). Supports SQLite, MySQL, PostgreSQL."
     }
 
     fn parameters(&self) -> Value {
@@ -165,11 +165,11 @@ impl Tool for DescribeTableTool {
             "properties": {
                 "connection_url": {
                     "type": "string",
-                    "description": "数据库连接 URL"
+                    "description": "Database connection URL"
                 },
                 "table_name": {
                     "type": "string",
-                    "description": "要查看的表名"
+                    "description": "Table name to view"
                 }
             },
             "required": ["connection_url", "table_name"]
@@ -188,7 +188,7 @@ impl Tool for DescribeTableTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("table_name".to_string()))?;
 
-            // 根据数据库类型选择合适的查询
+            // Choose appropriate query based on database type
             let query = if conn_url.starts_with("sqlite") {
                 format!("PRAGMA table_info('{}')", table_name.replace('\'', "''"))
             } else if conn_url.starts_with("mysql") {
@@ -212,7 +212,7 @@ impl Tool for DescribeTableTool {
 
             match execute_readonly_query(conn_url, &query).await {
                 Ok(data) => Ok(ToolResult::success_json(data)),
-                Err(e) => Ok(ToolResult::error(format!("查询表结构失败: {}", e))),
+                Err(e) => Ok(ToolResult::error(format!("Describe table failed: {}", e))),
             }
         })
     }
@@ -220,7 +220,7 @@ impl Tool for DescribeTableTool {
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
-/// 执行只读查询，返回结构化 JSON
+/// Execute a read-only query and return structured JSON
 async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_json::Value> {
     let pool = AnyPoolOptions::new()
         .max_connections(1)
@@ -228,7 +228,7 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
         .await
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "database".to_string(),
-            message: format!("数据库连接失败: {}", e),
+            message: format!("Database connection failed: {}", e),
         })?;
 
     let rows =
@@ -237,7 +237,7 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "database".to_string(),
-                message: format!("查询执行失败: {}", e),
+                message: format!("Query execution failed: {}", e),
             })?;
 
     let columns: Vec<String> = if rows.is_empty() {

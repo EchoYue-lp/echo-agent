@@ -1,15 +1,16 @@
-//! 短期线程状态持久化（Checkpointer）
+//! Short-term thread state persistence (Checkpointer)
 //!
-//! 按 `session_id` 将运行时线程状态序列化到存储后端，支持跨进程恢复同一线程。
+//! Serialize runtime thread state to a storage backend keyed by `session_id`,
+//! enabling cross-process recovery of the same thread.
 //!
-//! ## 内置实现
+//! ## Built-in implementations
 //!
-//! | 类型 | 说明 |
-//! |------|------|
-//! | [`InMemoryCheckpointer`] | 进程内存，重启即清空，适合测试 |
-//! | [`FileCheckpointer`] | JSON 文件持久化，适合本地单机场景 |
+//! | Type | Description |
+//! |------|-------------|
+//! | [`InMemoryCheckpointer`] | In-process memory, cleared on restart, suitable for tests |
+//! | [`FileCheckpointer`] | JSON file persistence, suitable for local single-machine scenarios |
 //!
-//! ## 快速上手
+//! ## Quick start
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -18,7 +19,7 @@
 //!
 //! # async fn example() -> Result<()> {
 //! let cp = Arc::new(FileCheckpointer::new("~/.echo-agent/checkpoints.json")?);
-//! // 将 `cp` 接入你自己的 agent/runtime 层，或通过 `echo_agent` façade 使用。
+//! // Wire `cp` into your own agent/runtime layer, or use it through the `echo_agent` façade.
 //! let _ = cp;
 //! # Ok(())
 //! # }
@@ -39,29 +40,29 @@ use tracing::{debug, info};
 
 // ── Checkpoint ────────────────────────────────────────────────────────────────
 
-/// 单次对话状态快照
+/// Snapshot of a single conversation state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
-    /// 所属会话标识
+    /// Owning session identifier
     pub session_id: String,
-    /// 快照唯一 ID（UUID v4）
+    /// Unique snapshot ID (UUID v4)
     pub checkpoint_id: String,
-    /// 该时刻的完整消息历史
+    /// Complete message history at this point in time
     pub messages: Vec<Message>,
-    /// 父级快照 ID，用于表示 checkpoint lineage。
+    /// Parent snapshot ID, representing checkpoint lineage.
     #[serde(default)]
     pub parent_checkpoint_id: Option<String>,
-    /// 与该线程状态一起持久化的摘要信息。
+    /// Summary information persisted together with this thread state.
     #[serde(default)]
     pub summary: Option<String>,
-    /// 自定义元数据（如执行阶段、来源、标签）。
+    /// Custom metadata (e.g., execution phase, source, tags).
     #[serde(default)]
     pub metadata: Option<Value>,
-    /// 创建时间（Unix 秒）
+    /// Creation time (Unix seconds)
     pub created_at: u64,
 }
 
-/// 线程级运行时状态。
+/// Thread-level runtime state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadState {
     pub messages: Vec<Message>,
@@ -93,30 +94,30 @@ impl Checkpoint {
 
 // ── Checkpointer trait ────────────────────────────────────────────────────────
 
-/// 短期会话记忆的持久化接口
+/// Persistence interface for short-term conversation memory
 ///
-/// 实现方可替换为任意存储后端（内存、文件、数据库等）。
+/// Implementations may be swapped with any storage backend (in-memory, file, database, etc.).
 pub trait Checkpointer: Send + Sync {
-    /// 保存当前会话的消息历史，返回新快照 ID
+    /// Save the current session's message history, returning the new snapshot ID
     fn put<'a>(
         &'a self,
         session_id: &'a str,
         messages: Vec<Message>,
     ) -> BoxFuture<'a, Result<String>>;
 
-    /// 获取指定会话的最新快照（若不存在返回 `None`）
+    /// Get the latest snapshot for the given session (returns `None` if not found)
     fn get<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<Checkpoint>>>;
 
-    /// 获取指定会话的全部历史快照（时间倒序）
+    /// Get all historical snapshots for the given session (reverse chronological order)
     fn list<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<Checkpoint>>>;
 
-    /// 删除指定会话的所有快照
+    /// Delete all snapshots for the given session
     fn delete_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>>;
 
-    /// 列出所有已存在的 session_id
+    /// List all existing session IDs
     fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>>;
 
-    /// 保存完整线程状态，默认退化为仅保存消息列表。
+    /// Save complete thread state, defaulting to saving only the message list.
     fn put_state<'a>(
         &'a self,
         session_id: &'a str,
@@ -125,7 +126,7 @@ pub trait Checkpointer: Send + Sync {
         self.put(session_id, state.messages)
     }
 
-    /// 获取最新线程状态，默认从最新 checkpoint 中恢复。
+    /// Get the latest thread state, defaulting to recovering from the latest checkpoint.
     fn get_state<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<ThreadState>>> {
         Box::pin(async move { Ok(self.get(session_id).await?.map(|cp| cp.thread_state())) })
     }
@@ -133,7 +134,7 @@ pub trait Checkpointer: Send + Sync {
 
 // ── InMemoryCheckpointer ──────────────────────────────────────────────────────
 
-/// 进程内存 Checkpointer，重启后状态丢失，适合测试
+/// In-process memory Checkpointer, state is lost on restart, suitable for tests
 pub struct InMemoryCheckpointer {
     data: RwLock<HashMap<String, Vec<Checkpoint>>>,
 }

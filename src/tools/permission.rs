@@ -1,4 +1,4 @@
-//! 工具权限模型 (re-exported from echo_core)
+//! Tool permission model (re-exported from echo_core)
 pub use echo_core::tools::permission::*;
 
 #[cfg(test)]

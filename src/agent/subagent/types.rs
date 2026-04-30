@@ -94,7 +94,7 @@ pub struct SubagentDefinition {
 impl SubagentDefinition {
     /// Create a minimal Sync-mode built-in definition.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `name` - Unique name for discovery and dispatch.
     /// * `description` - Human-readable description exposed to the LLM.
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
@@ -118,11 +118,11 @@ impl SubagentDefinition {
 
     /// Convenience: a Sync-mode definition for backward-compatible registration.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `name` - Unique name for discovery and dispatch.
     ///
-    /// # 说明
-    /// 自动生成描述为 "Subagent {name}"。
+    /// # Notes
+    /// Auto-generates description as "Subagent {name}".
     pub fn simple_sync(name: impl Into<String>) -> Self {
         let name = name.into();
         Self::new(name.clone(), format!("Subagent {}", name))
@@ -153,7 +153,7 @@ pub struct SubagentResult {
 impl SubagentResult {
     /// Create a result for a synchronous (blocking) subagent execution.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `agent_name` - Name of the agent that produced the result.
     /// * `output` - Final output text from the agent.
     /// * `duration` - Execution duration.
@@ -171,7 +171,7 @@ impl SubagentResult {
 
     /// Create a result for a forked (non-blocking) subagent execution.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `agent_name` - Name of the agent that produced the result.
     /// * `output` - Final output text from the agent.
     /// * `duration` - Execution duration.

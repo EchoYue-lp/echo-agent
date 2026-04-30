@@ -1,13 +1,13 @@
 //! Feishu WebSocket Protobuf Protocol
 //!
-//! 飞书长连接使用自定义的 Protobuf 协议（PBBP2），而非普通 WebSocket JSON。
-//! 本模块实现了 Frame 和 Header 的编解码。
+//! Feishu long connection uses a custom Protobuf protocol (PBBP2), not plain WebSocket JSON.
+//! This module implements Frame and Header encoding/decoding.
 //!
-//! 协议参考：larksuite/oapi-sdk-go/ws/pbbp2.proto
+//! Protocol reference: larksuite/oapi-sdk-go/ws/pbbp2.proto
 
 use prost::Message;
 
-/// Protobuf Header 结构
+/// Protobuf Header structure
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoHeader {
     #[prost(string, required, tag = "1")]
@@ -17,42 +17,42 @@ pub struct ProtoHeader {
     pub value: String,
 }
 
-/// Protobuf Frame 结构（飞书 WebSocket 消息帧）
+/// Protobuf Frame structure (Feishu WebSocket message frame)
 #[derive(Clone, PartialEq, Message)]
 pub struct ProtoFrame {
-    /// 序列号
+    /// Sequence number
     #[prost(uint64, required, tag = "1")]
     pub seq_id: u64,
 
-    /// 日志 ID
+    /// Log ID
     #[prost(uint64, required, tag = "2")]
     pub log_id: u64,
 
-    /// 服务 ID（从连接 URL 的 query 参数获取）
+    /// Service ID (obtained from connection URL query parameter)
     #[prost(int32, required, tag = "3")]
     pub service: i32,
 
-    /// 帧类型：0 = 控制帧（ping/pong），1 = 数据帧（事件）
+    /// Frame type: 0 = control frame (ping/pong), 1 = data frame (event)
     #[prost(int32, required, tag = "4")]
     pub method: i32,
 
-    /// Headers 列表
+    /// Headers list
     #[prost(message, repeated, tag = "5")]
     pub headers: Vec<ProtoHeader>,
 
-    /// Payload 编码方式（通常为空或 "json"）
+    /// Payload encoding format (usually empty or "json")
     #[prost(string, optional, tag = "6")]
     pub payload_encoding: Option<String>,
 
-    /// Payload 类型
+    /// Payload type
     #[prost(string, optional, tag = "7")]
     pub payload_type: Option<String>,
 
-    /// Payload 数据（事件 JSON 或控制帧配置）
+    /// Payload data (event JSON or control frame config)
     #[prost(bytes, optional, tag = "8")]
     pub payload: Option<Vec<u8>>,
 
-    /// 新版日志 ID（字符串形式）
+    /// New log ID (string format)
     #[prost(string, optional, tag = "9")]
     pub log_id_new: Option<String>,
 }

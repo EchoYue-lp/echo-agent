@@ -1,60 +1,61 @@
-//! 统一错误类型
+//! Unified error types
 //!
-//! 所有公共 API 返回 [`Result<T>`]，底层错误通过 `From` 自动转换为 [`ReactError`]。
+//! All public APIs return [`Result<T>`]; underlying errors are automatically converted
+//! to [`ReactError`] through `From`.
 
 use thiserror::Error;
 
-/// 框架顶层错误，聚合所有子系统错误
+/// Top-level framework error, aggregating all subsystem errors
 #[derive(Debug, Error)]
 pub enum ReactError {
-    /// LLM 相关错误
+    /// LLM-related error
     #[error("LLM Error: {0}")]
     Llm(Box<LlmError>),
-    /// 工具执行错误
+    /// Tool execution error
     #[error("Tool Error: {0}")]
     Tool(#[from] ToolError),
-    /// 解析错误
+    /// Parse error
     #[error("Parse Error: {0}")]
     Parse(#[from] ParseError),
-    /// Agent 执行错误
+    /// Agent execution error
     #[error("Agent Error: {0}")]
     Agent(#[from] AgentError),
-    /// 配置错误
+    /// Configuration error
     #[error("Config Error: {0}")]
     Config(Box<ConfigError>),
-    /// MCP 相关错误
+    /// MCP-related error
     #[error("MCP Error: {0}")]
     Mcp(#[from] McpError),
-    /// 记忆系统错误
+    /// Memory system error
     #[error("Memory Error: {0}")]
     Memory(Box<MemoryError>),
-    /// 沙箱错误
+    /// Sandbox error
     #[error("Sandbox Error: {0}")]
     Sandbox(#[from] SandboxError),
-    /// Channel / IM 集成错误
+    /// Channel / IM integration error
     #[error("Channel Error: {0}")]
     Channel(#[from] ChannelError),
-    /// IO 错误
+    /// IO error
     #[error("IO Error: {0}")]
     Io(#[from] std::io::Error),
-    /// 其他错误
+    /// Other error
     #[error("{0}")]
     Other(String),
 }
 
-/// 记忆系统错误
+/// Memory system error
 #[derive(Debug, Error)]
 pub enum MemoryError {
-    /// I/O 错误
+    /// I/O error
     #[error("IO error: {0}")]
     IoError(String),
-    /// 序列化错误
+    /// Serialization error
     #[error("Serialization error: {0}")]
     SerializationError(String),
-    /// 记忆未找到
+    /// Memory not found
     #[error("Memory '{0}' not found")]
     NotFound(String),
-    /// 不支持的操作
+    /// Unsupported operation
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
 }
@@ -65,246 +66,246 @@ impl From<std::io::Error> for MemoryError {
     }
 }
 
-/// LLM 相关错误
+/// LLM-related error
 #[derive(Debug, Error)]
 pub enum LlmError {
-    /// 网络错误
+    /// Network error
     #[error("Network error: {0}")]
     NetworkError(String),
-    /// API 错误（状态码和消息）
+    /// API error (status code and message)
     #[error("API error (status {status}): {message}")]
     ApiError {
-        /// HTTP 状态码
+        /// HTTP status code
         status: u16,
-        /// 错误消息
+        /// Error message
         message: String,
     },
-    /// 无效响应
+    /// Invalid response
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
-    /// 空响应
+    /// Empty response
     #[error("Empty response from LLM")]
     EmptyResponse,
-    /// 序列化错误
+    /// Serialization error
     #[error("Serialization error: {0}")]
     SerializationError(String),
 }
 
-/// 工具执行错误
+/// Tool execution error
 #[derive(Debug, Error)]
 pub enum ToolError {
-    /// 工具未找到
+    /// Tool not found
     #[error("Tool '{0}' not found")]
     NotFound(String),
-    /// 缺少参数
+    /// Missing parameter
     #[error("Missing parameter: {0}")]
     MissingParameter(String),
-    /// 无效参数
+    /// Invalid parameter
     #[error("Invalid parameter '{name}': {message}")]
     InvalidParameter {
-        /// 参数名称
+        /// Parameter name
         name: String,
-        /// 错误消息
+        /// Error message
         message: String,
     },
-    /// 工具执行失败
+    /// Tool execution failed
     #[error("Tool '{tool}' execution failed: {message}")]
     ExecutionFailed {
-        /// 工具名称
+        /// Tool name
         tool: String,
-        /// 错误消息
+        /// Error message
         message: String,
     },
-    /// 执行超时
+    /// Execution timed out
     #[error("Tool '{0}' execution timed out")]
     Timeout(String),
-    /// 无效路径（路径遍历攻击检测）
+    /// Invalid path (path traversal attack detected)
     #[error("Invalid path: {path} ({reason})")]
     InvalidPath {
-        /// 被拒绝的路径
+        /// Rejected path
         path: String,
-        /// 拒绝原因
+        /// Rejection reason
         reason: String,
     },
-    /// 访问被拒绝（不在允许目录范围内）
+    /// Access denied (outside allowed directory scope)
     #[error("Access denied: {path} ({reason})")]
     AccessDenied {
-        /// 被拒绝的路径
+        /// Rejected path
         path: String,
-        /// 拒绝原因
+        /// Rejection reason
         reason: String,
     },
-    /// 文件过大
+    /// File too large
     #[error("File too large: {size} bytes (max: {max} bytes)")]
     FileTooLarge {
-        /// 文件大小（字节）
+        /// File size (bytes)
         size: u64,
-        /// 允许的最大文件大小（字节）
+        /// Maximum allowed file size (bytes)
         max: u64,
     },
 }
 
-/// 解析错误
+/// Parse error
 #[derive(Debug, Error)]
 pub enum ParseError {
-    /// 无效的 Thought 格式
+    /// Invalid Thought format
     #[error("Invalid Thought: {0}")]
     InvalidThought(String),
-    /// 无效的 Action 格式
+    /// Invalid Action format
     #[error("Invalid Action: {0}")]
     InvalidAction(String),
-    /// 无效的 Action 输入
+    /// Invalid Action Input
     #[error("Invalid Action Input: {0}")]
     InvalidActionInput(String),
-    /// JSON 解析错误
+    /// JSON parse error
     #[error("JSON parse error: {0}")]
     JsonError(#[from] serde_json::Error),
-    /// 意外的格式
+    /// Unexpected format
     #[error("Unexpected format: {0}")]
     UnexpectedFormat(String),
 }
 
-/// Agent 执行错误
+/// Agent execution error
 #[derive(Debug, Error)]
 pub enum AgentError {
-    /// 超过最大迭代次数
+    /// Max iterations exceeded
     #[error("Max iterations exceeded: {0}")]
     MaxIterationsExceeded(usize),
-    /// 无可用工具
+    /// No tools available
     #[error("No tools available")]
     NoToolsAvailable,
-    /// 初始化失败
+    /// Initialization failed
     #[error("Initialization failed: {0}")]
     InitializationFailed(String),
-    /// 执行被中断
+    /// Execution interrupted
     #[error("Execution interrupted")]
     Interrupted,
-    /// LLM 无响应
+    /// No response from LLM
     #[error("No response from LLM (model: {model}, agent: {agent})")]
     NoResponse {
-        /// 使用的模型名称
+        /// Model name used
         model: String,
-        /// Agent 名称
+        /// Agent name
         agent: String,
     },
-    /// Token 数量超限
+    /// Token limit exceeded
     #[error("Token limit exceeded")]
     TokenLimitExceeded,
-    /// 权限被拒绝
+    /// Permission denied
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
-    /// Hook 执行错误
+    /// Hook execution error
     #[error("Hook error: {0}")]
     HookError(String),
-    /// 子代理执行错误
+    /// Subagent execution error
     #[error("Subagent error: {0}")]
     SubagentError(String),
-    /// 执行超时
+    /// Execution timeout
     #[error("Timeout: {0}")]
     Timeout(String),
-    /// 上下文限制（如 delegation depth, memory limit 等）
+    /// Context limit exceeded (e.g. delegation depth, memory limit, etc.)
     #[error("Context limit exceeded: {0}")]
     ContextLimitExceeded(String),
 }
 
-/// MCP 相关错误
+/// MCP-related error
 #[derive(Debug, Error)]
 pub enum McpError {
-    /// 连接失败
+    /// Connection failed
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
-    /// 初始化失败
+    /// Initialization failed
     #[error("Initialization failed: {0}")]
     InitializationFailed(String),
-    /// 协议错误
+    /// Protocol error
     #[error("Protocol error: {0}")]
     ProtocolError(String),
-    /// 工具调用失败
+    /// Tool call failed
     #[error("Tool call failed: {0}")]
     ToolCallFailed(String),
-    /// 传输通道关闭
+    /// Transport channel closed
     #[error("MCP transport closed unexpectedly")]
     TransportClosed,
 }
 
-/// 沙箱错误
+/// Sandbox error
 #[derive(Debug, Error)]
 pub enum SandboxError {
-    /// 沙箱不可用（未安装 Docker、无 K8s 集群等）
+    /// Sandbox unavailable (Docker not installed, no K8s cluster, etc.)
     #[error("Sandbox unavailable: {0}")]
     Unavailable(String),
-    /// 沙箱启动失败
+    /// Sandbox start failed
     #[error("Sandbox start failed: {0}")]
     StartFailed(String),
-    /// 执行超时
+    /// Execution timeout
     #[error("Sandbox timeout: {0}")]
     Timeout(String),
-    /// 资源限制超出
+    /// Resource limit exceeded
     #[error("Resource exceeded: {0}")]
     ResourceExceeded(String),
-    /// 权限被拒绝
+    /// Permission denied
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
-    /// IO 错误
+    /// IO error
     #[error("IO error: {0}")]
     IoError(String),
 }
 
-/// Channel / IM 集成错误
+/// Channel / IM integration error
 #[derive(Debug, Error)]
 pub enum ChannelError {
-    /// 网络错误
+    /// Network error
     #[error("Network error: {0}")]
     NetworkError(String),
-    /// API 错误（状态码和消息）
+    /// API error (status code and message)
     #[error("API error (status {status}): {message}")]
     ApiError {
-        /// HTTP 状态码
+        /// HTTP status code
         status: u16,
-        /// 错误消息
+        /// Error message
         message: String,
     },
-    /// 认证错误
+    /// Auth error
     #[error("Auth error: {0}")]
     AuthError(String),
-    /// 连接错误
+    /// Connection error
     #[error("Connection error: {0}")]
     ConnectionError(String),
-    /// 发送错误
+    /// Send error
     #[error("Send error: {0}")]
     SendError(String),
-    /// 无效配置
+    /// Invalid config
     #[error("Invalid config: {0}")]
     InvalidConfig(String),
-    /// 其他错误
+    /// Other error
     #[error("Channel error: {0}")]
     Other(String),
 }
 
-/// 配置错误
+/// Configuration error
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// 环境变量解析错误
+    /// Environment variable parse error
     #[error("Failed to parse environment variable: {0}")]
     EnvParseError(String),
-    /// 缺少配置项
+    /// Missing config entry
     #[error("Model '{0}' missing required config: {1}")]
     MissingConfig(String, String),
-    /// 环境变量格式错误
+    /// Invalid environment variable format
     #[error("Invalid environment variable format: {0}")]
     EnvFormatError(String),
-    /// 配置不匹配
+    /// Config mismatch
     #[error("Model '{0}' mismatched config error: {1}")]
     UnMatchConfigError(String, String),
-    /// 未找到模型配置
+    /// Model config not found
     #[error("No configuration found for model: {0}")]
     NotFindModelError(String),
-    /// 配置文件错误
+    /// Config file error
     #[error("Config file error: {0}")]
     ConfigFileError(String),
 }
 
-// ── From 转换实现（Box 包装 + 自定义转换） ────────────────────────────────────
+// ── From implementation (Box wrapping + custom conversions) ────────────────────────────────────
 
 impl From<LlmError> for ReactError {
     fn from(err: LlmError) -> Self {
@@ -348,5 +349,5 @@ impl From<reqwest::Error> for ReactError {
     }
 }
 
-/// 便捷 Result 别名
+/// Convenience Result alias
 pub type Result<T> = std::result::Result<T, ReactError>;

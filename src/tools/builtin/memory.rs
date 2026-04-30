@@ -1,9 +1,9 @@
-//! Agent 记忆工具：remember / recall / forget
+//! Agent memory tools: remember / recall / forget
 //!
-//! 使用 LangGraph 对齐的 [`Store`] API 实现持久化长期记忆。
+//! Uses LangGraph-aligned [`Store`] API for persistent long-term memory.
 //!
-//! | 工具       | 对应 Store 操作                              |
-//! |------------|---------------------------------------------|
+//! | Tool       | Store Operation                              |
+//! |------------|----------------------------------------------|
 //! | `remember` | `store.put(namespace, uuid, value)`          |
 //! | `recall`   | `store.search(namespace, query, limit)`      |
 //! | `forget`   | `store.delete(namespace, key)`              |
@@ -19,12 +19,12 @@ use tracing::debug;
 
 // ── RememberTool ─────────────────────────────────────────────────────────────
 
-/// 将重要信息存入持久化 Store
+/// Store important information into the persistent Store
 ///
-/// 内部调用 `store.put(namespace, uuid, {"content": ..., "importance": ..., "tags": [...]})`
+/// Internally calls `store.put(namespace, uuid, {"content": ..., "importance": ..., "tags": [...]})`
 pub struct RememberTool {
     pub store: Arc<dyn Store>,
-    /// 存储命名空间，如 `["alice", "memories"]`
+    /// Storage namespace, e.g. `["alice", "memories"]`
     pub namespace: Vec<String>,
 }
 
@@ -44,8 +44,8 @@ impl Tool for RememberTool {
     }
 
     fn description(&self) -> &str {
-        "将值得长期保留的信息存入持久记忆库（跨会话保存）。\
-         适合记录用户偏好、重要结论、待办事项、关键事实等内容。"
+        "Store information worth long-term retention into persistent memory (cross-session). \
+         Suitable for recording user preferences, important conclusions, to-do items, key facts, etc."
     }
 
     fn parameters(&self) -> Value {
@@ -54,18 +54,18 @@ impl Tool for RememberTool {
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "要记住的具体内容，请简洁、完整地描述"
+                    "description": "The specific content to remember; please describe concisely and completely"
                 },
                 "tags": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "标签列表，用于分类检索（可选），例如 [\"偏好\", \"编程\"]"
+                    "description": "List of tags for categorization and retrieval (optional), e.g. [\"preferences\", \"programming\"]"
                 },
                 "importance": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 10,
-                    "description": "重要程度（1-10），默认 5；越高越优先被召回"
+                    "description": "Importance level (1-10), default 5; higher values are prioritized in recall"
                 }
             },
             "required": ["content"]
@@ -105,7 +105,7 @@ impl Tool for RememberTool {
                 "tags": tags,
             });
 
-            debug!(key = %key, importance = importance, "💡 remember 工具写入 Store");
+            debug!(key = %key, importance = importance, "💡 remember tool writing to Store");
 
             let ns: Vec<&str> = self.ns_refs();
             self.store.put(&ns, &key, value).await?;
@@ -113,11 +113,11 @@ impl Tool for RememberTool {
             let tag_str = if tags.is_empty() {
                 String::new()
             } else {
-                format!("（标签：{}）", tags.join(", "))
+                format!("(tags: {})", tags.join(", "))
             };
 
             Ok(ToolResult::success(format!(
-                "✅ 已记住（ID: {}，重要程度: {}）：\"{}\"{tag_str}",
+                "✅ Remembered (ID: {}, importance: {}): \"{}\"{tag_str}",
                 key.get(..8).unwrap_or(&key),
                 importance,
                 content,
@@ -128,9 +128,9 @@ impl Tool for RememberTool {
 
 // ── RecallTool ───────────────────────────────────────────────────────────────
 
-/// 从持久化 Store 中检索相关历史记忆
+/// Retrieve relevant historical memories from the persistent Store
 ///
-/// 内部调用 `store.search(namespace, query, limit)`
+/// Internally calls `store.search(namespace, query, limit)`
 pub struct RecallTool {
     pub store: Arc<dyn Store>,
     pub namespace: Vec<String>,
@@ -152,8 +152,8 @@ impl Tool for RecallTool {
     }
 
     fn description(&self) -> &str {
-        "在持久记忆库中搜索相关历史记忆，返回最匹配的若干条。\
-         可用关键词、主题或自然语言片段进行搜索。"
+        "Search the persistent memory store for relevant historical memories, returning the best matches. \
+         Search by keywords, topics, or natural language fragments."
     }
 
     fn parameters(&self) -> Value {
@@ -162,13 +162,13 @@ impl Tool for RecallTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "搜索关键词或描述，例如 \"用户偏好\" 或 \"上次提到的项目名称\""
+                    "description": "Search keywords or description, e.g. \"user preferences\" or \"project name mentioned last time\""
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 20,
-                    "description": "最多返回条数（默认 5）"
+                    "description": "Maximum number of results to return (default 5)"
                 }
             },
             "required": ["query"]
@@ -191,19 +191,19 @@ impl Tool for RecallTool {
                 .map(|n| n.clamp(1, 20) as usize)
                 .unwrap_or(5);
 
-            debug!(query = %query, limit = limit, "🔍 recall 工具查询 Store");
+            debug!(query = %query, limit = limit, "🔍 recall tool querying Store");
 
             let ns: Vec<&str> = self.ns_refs();
             let items = self.store.search(&ns, query, limit).await?;
 
             if items.is_empty() {
                 return Ok(ToolResult::success(format!(
-                    "未找到与「{}」相关的记忆。",
+                    "No memories found matching \"{}\".",
                     query
                 )));
             }
 
-            let mut lines = vec![format!("找到 {} 条相关记忆：", items.len())];
+            let mut lines = vec![format!("Found {} matching memories:", items.len())];
             for (i, item) in items.iter().enumerate() {
                 lines.push(format!(
                     "{}. [ID:{}] {}",
@@ -220,9 +220,9 @@ impl Tool for RecallTool {
 
 // ── ForgetTool ───────────────────────────────────────────────────────────────
 
-/// 根据记忆 ID（key）删除一条记忆，或清空命名空间下所有记忆
+/// Delete a memory entry by its ID (key), or clear all memories under a namespace
 ///
-/// 内部调用 `store.delete(namespace, key)`
+/// Internally calls `store.delete(namespace, key)`
 pub struct ForgetTool {
     pub store: Arc<dyn Store>,
     pub namespace: Vec<String>,
@@ -244,7 +244,7 @@ impl Tool for ForgetTool {
     }
 
     fn description(&self) -> &str {
-        "删除指定 ID 的记忆条目。ID 可通过 recall 工具返回结果中获取（取前8位即可）。"
+        "Delete a memory entry by its ID. The ID can be obtained from recall tool results (first 8 chars is sufficient)."
     }
 
     fn parameters(&self) -> Value {
@@ -253,7 +253,7 @@ impl Tool for ForgetTool {
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "要删除的记忆 ID（通过 recall 获取前8位前缀即可）"
+                    "description": "Memory ID to delete (first 8 chars prefix from recall results)"
                 }
             },
             "required": ["id"]
@@ -272,25 +272,25 @@ impl Tool for ForgetTool {
 
             let ns: Vec<&str> = self.ns_refs();
 
-            // 先尝试精确匹配，如失败则按前缀搜索全 key
+            // Try exact match first; if that fails, search by prefix across all keys
             let full_key = self.store.get(&ns, id_prefix).await?.map(|item| item.key);
 
-            // 尝试直接删除（用户可能传入了完整 key）
+            // Try direct delete (user may have passed the full key)
             let deleted = if let Some(key) = &full_key {
                 self.store.delete(&ns, key).await?
             } else {
-                // 假设用户传入的就是完整 key（UUID 格式）
+                // Assume the user passed the full key (UUID format)
                 self.store.delete(&ns, id_prefix).await?
             };
 
             if deleted {
                 Ok(ToolResult::success(format!(
-                    "🗑️ 已删除记忆 ID: {}",
+                    "🗑️ Deleted memory ID: {}",
                     id_prefix
                 )))
             } else {
                 Ok(ToolResult::success(format!(
-                    "未找到 ID 为「{}」的记忆条目，无需删除。\n提示：请通过 recall 工具查找正确的 ID。",
+                    "No memory entry found with ID \"{}\", nothing to delete.\nTip: use the recall tool to find the correct ID.",
                     id_prefix
                 )))
             }
@@ -300,12 +300,13 @@ impl Tool for ForgetTool {
 
 // ── SearchMemoryTool ─────────────────────────────────────────────────────────
 
-/// 在持久化 Store 中进行混合搜索（关键词 + embedding）
+/// Perform hybrid search (keyword + embedding) in the persistent Store
 ///
-/// 与 `RecallTool`（仅关键词搜索）不同，本工具优先走
-/// [`Store::search_with`] 的 `Hybrid` 模式，对接支持 embedding 的 Store 时
-/// 可同时利用向量相似度和关键词匹配；当底层 Store 不支持混合搜索时，
-/// 会显式回退到关键词搜索。
+/// Unlike `RecallTool` (keyword-only search), this tool prefers the
+/// [`Store::search_with`] `Hybrid` mode. When connected to a Store that
+/// supports embeddings, it leverages both vector similarity and keyword
+/// matching; when the underlying Store does not support hybrid search,
+/// it falls back to keyword search.
 pub struct SearchMemoryTool {
     pub store: Arc<dyn Store>,
     pub namespace: Vec<String>,
@@ -327,9 +328,9 @@ impl Tool for SearchMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "使用混合检索在持久记忆库中查找最相关的历史记忆。\
-         支持自然语言查询，优先结合关键词与语义相似度进行召回。\
-         当底层 Store 不支持混合检索时会回退到关键词搜索。"
+        "Use hybrid search to find the most relevant historical memories in the persistent memory store. \
+         Supports natural language queries, combining keyword and semantic similarity for recall. \
+         Falls back to keyword search when the underlying Store does not support hybrid search."
     }
 
     fn parameters(&self) -> Value {
@@ -338,13 +339,13 @@ impl Tool for SearchMemoryTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "自然语言查询，描述你想要找到的记忆内容"
+                    "description": "Natural language query describing the memory content you want to find"
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 20,
-                    "description": "最多返回条数（默认 5）"
+                    "description": "Maximum number of results to return (default 5)"
                 }
             },
             "required": ["query"]
@@ -367,7 +368,7 @@ impl Tool for SearchMemoryTool {
                 .map(|n| n.clamp(1, 20) as usize)
                 .unwrap_or(5);
 
-            debug!(query = %query, limit = limit, "🔎 search_memory 混合检索 Store");
+            debug!(query = %query, limit = limit, "🔎 search_memory hybrid search on Store");
 
             let ns: Vec<&str> = self.ns_refs();
             let items = match self
@@ -384,12 +385,15 @@ impl Tool for SearchMemoryTool {
 
             if items.is_empty() {
                 return Ok(ToolResult::success(format!(
-                    "未找到与「{}」相关的记忆。",
+                    "No memories found matching \"{}\".",
                     query
                 )));
             }
 
-            let mut lines = vec![format!("混合检索找到 {} 条相关记忆：", items.len())];
+            let mut lines = vec![format!(
+                "Hybrid search found {} matching memories:",
+                items.len()
+            )];
             for (i, item) in items.iter().enumerate() {
                 lines.push(format!(
                     "{}. [ID:{}] {}",
@@ -404,7 +408,7 @@ impl Tool for SearchMemoryTool {
     }
 }
 
-// ── 辅助函数 ─────────────────────────────────────────────────────────────────
+// ── Helper functions ────────────────────────────────────────────────────────
 
 fn format_store_item(item: &StoreItem) -> String {
     match &item.value {
@@ -412,7 +416,7 @@ fn format_store_item(item: &StoreItem) -> String {
             let content = map
                 .get("content")
                 .and_then(|v| v.as_str())
-                .unwrap_or("(无内容)");
+                .unwrap_or("(no content)");
             let importance = map.get("importance").and_then(|v| v.as_u64());
             let tags = map
                 .get("tags")

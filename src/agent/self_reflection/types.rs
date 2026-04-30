@@ -1,31 +1,31 @@
-//! Self-Reflection 类型定义
+//! Self-Reflection type definitions
 
 use serde::{Deserialize, Serialize};
 
-/// 评估结果
+/// Evaluation result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Critique {
-    /// 质量评分（0.0 - 10.0）
+    /// Quality score (0.0 - 10.0)
     pub score: f64,
-    /// 是否通过质量阈值
+    /// Whether the quality threshold was passed
     pub passed: bool,
-    /// 详细反馈
+    /// Detailed feedback
     pub feedback: String,
-    /// 改进建议
+    /// Improvement suggestions
     #[serde(default)]
     pub suggestions: Vec<String>,
 }
 
-/// 评估结果结构化输出（LLM JSON 解析用）
+/// Structured output for evaluation results (for LLM JSON parsing)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CritiqueOutput {
-    /// 质量评分（0.0 - 10.0）
+    /// Quality score (0.0 - 10.0)
     pub score: f64,
-    /// 是否通过质量阈值
+    /// Whether the quality threshold was passed
     pub passed: bool,
-    /// 详细反馈
+    /// Detailed feedback
     pub feedback: String,
-    /// 改进建议
+    /// Improvement suggestions
     #[serde(default)]
     pub suggestions: Vec<String>,
 }
@@ -41,47 +41,47 @@ impl From<CritiqueOutput> for Critique {
     }
 }
 
-/// 单次反思迭代记录
+/// Record of a single reflection iteration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReflectionRecord {
-    /// 迭代序号（0-based）
+    /// Iteration number (0-based)
     pub iteration: usize,
-    /// 当前回答
+    /// Current response
     pub answer: String,
-    /// 评估结果
+    /// Evaluation result
     pub critique: Critique,
-    /// 反思文本（分析失败原因）
+    /// Reflection text (analysis of failure reasons)
     pub reflection_text: String,
-    /// 修正后的回答
+    /// Refined response
     pub refined_answer: Option<String>,
 }
 
-/// 反思经验（用于情景记忆）
+/// Reflection experience (for episodic memory)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReflectionExperience {
-    /// 唯一 ID
+    /// Unique ID
     pub id: String,
-    /// 经验教训（如 "确认数据可用性后再查询"）
+    /// Lesson learned (e.g., "Confirm data availability before querying")
     pub lesson: String,
-    /// 错误模式（如 "假设数据存在但不检查"）
+    /// Error pattern (e.g., "Assumes data exists without checking")
     pub error_pattern: String,
-    /// 任务类别
+    /// Task category
     #[serde(default)]
     pub task_category: Option<String>,
-    /// 被引用次数
+    /// Number of times referenced
     #[serde(default)]
     pub use_count: u32,
 }
 
 impl ReflectionExperience {
-    /// 创建反思经验记录
+    /// Create a reflection experience record
     ///
-    /// # 参数
-    /// * `lesson` - 从错误中总结的经验教训（正面表述）
-    /// * `error_pattern` - 观察到的错误模式（负面表述）
+    /// # Parameters
+    /// * `lesson` - Lesson learned from errors (positive formulation)
+    /// * `error_pattern` - Observed error pattern (negative formulation)
     ///
-    /// # 说明
-    /// 自动生成唯一 ID，初始使用次数为 0，任务类别为空。
+    /// # Description
+    /// Automatically generates a unique ID, initial use count is 0, task category is empty.
     pub fn new(lesson: impl Into<String>, error_pattern: impl Into<String>) -> Self {
         Self {
             id: format!("exp_{}", uuid::Uuid::new_v4().as_simple()),
@@ -92,28 +92,28 @@ impl ReflectionExperience {
         }
     }
 
-    /// 设置任务类别
+    /// Set task category
     ///
-    /// # 参数
-    /// * `category` - 任务类别标识符，用于经验检索时的分类过滤
+    /// # Parameters
+    /// * `category` - Task category identifier, used for classification filtering during experience retrieval
     ///
-    /// # 说明
-    /// 设置后，该经验在后续检索时可按类别进行过滤，提高相关性。
+    /// # Description
+    /// Once set, this experience can be filtered by category during subsequent retrieval, improving relevance.
     pub fn with_category(mut self, category: impl Into<String>) -> Self {
         self.task_category = Some(category.into());
         self
     }
 }
 
-/// 修正提示词构建器 trait
+/// Refinement prompt builder trait
 pub trait RefinementPromptBuilder: Send + Sync {
-    /// 构建修正提示词
+    /// Build refinement prompt
     ///
-    /// - `task`: 原始任务
-    /// - `current_answer`: 当前回答
-    /// - `critique`: 评估结果
-    /// - `reflection`: 反思文本
-    /// - `iteration`: 当前迭代次数
+    /// - `task`: Original task
+    /// - `current_answer`: Current response
+    /// - `critique`: Evaluation result
+    /// - `reflection`: Reflection text
+    /// - `iteration`: Current iteration count
     fn build_prompt(
         &self,
         task: &str,
@@ -124,7 +124,7 @@ pub trait RefinementPromptBuilder: Send + Sync {
     ) -> String;
 }
 
-/// 默认修正提示词构建器
+/// Default refinement prompt builder
 pub struct DefaultRefinementPromptBuilder;
 
 impl RefinementPromptBuilder for DefaultRefinementPromptBuilder {
@@ -140,7 +140,7 @@ impl RefinementPromptBuilder for DefaultRefinementPromptBuilder {
             String::new()
         } else {
             format!(
-                "\n改进建议:\n{}",
+                "\nImprovement suggestions:\n{}",
                 critique
                     .suggestions
                     .iter()
@@ -151,11 +151,11 @@ impl RefinementPromptBuilder for DefaultRefinementPromptBuilder {
         };
 
         format!(
-            "原始任务: {}\n\n\
-             你的上一版回答:\n{}\n\n\
-             评估反馈（评分: {:.1}/10.0）:\n{}{}\n\n\
-             反思分析:\n{}\n\n\
-             这是第 {} 次改进。请根据以上评估反馈和反思分析，提供更准确、更完整的回答。",
+            "Original task: {}\n\n\
+             Your previous response:\n{}\n\n\
+             Evaluation feedback (score: {:.1}/10.0):\n{}{}\n\n\
+             Reflection analysis:\n{}\n\n\
+             This is improvement iteration #{}. Based on the above evaluation feedback and reflection analysis, provide a more accurate and complete response.",
             task,
             current_answer,
             critique.score,
@@ -167,13 +167,13 @@ impl RefinementPromptBuilder for DefaultRefinementPromptBuilder {
     }
 }
 
-/// 反思提示词构建器（生成反思文本）
+/// Reflection prompt builder (generates reflection text)
 pub trait ReflectionPromptBuilder: Send + Sync {
-    /// 构建反思提示词
+    /// Build reflection prompt
     fn build_reflection_prompt(&self, task: &str, answer: &str, critique: &Critique) -> String;
 }
 
-/// 默认反思提示词构建器
+/// Default reflection prompt builder
 pub struct DefaultReflectionPromptBuilder;
 
 impl ReflectionPromptBuilder for DefaultReflectionPromptBuilder {
@@ -182,7 +182,7 @@ impl ReflectionPromptBuilder for DefaultReflectionPromptBuilder {
             String::new()
         } else {
             format!(
-                "\n具体问题:\n{}",
+                "\nSpecific issues:\n{}",
                 critique
                     .suggestions
                     .iter()
@@ -193,41 +193,41 @@ impl ReflectionPromptBuilder for DefaultReflectionPromptBuilder {
         };
 
         format!(
-            "任务: {}\n\n\
-             生成的回答:\n{}\n\n\
-             评估结果: 评分 {:.1}/10.0，未通过。\n\
-             评估反馈: {}{}\n\n\
-             请深入分析上述回答中存在的问题，思考：\n\
-             1. 为什么会产生这些错误或不足？\n\
-             2. 根本原因是什么？\n\
-             3. 下次应该如何避免类似问题？\n\n\
-             请输出简洁的反思文本。",
+            "Task: {}\n\n\
+             Generated response:\n{}\n\n\
+             Evaluation result: score {:.1}/10.0, did not pass.\n\
+             Evaluation feedback: {}{}\n\n\
+             Please deeply analyze the issues in the above response, considering:\n\
+             1. Why did these errors or deficiencies occur?\n\
+             2. What is the root cause?\n\
+             3. How can similar issues be avoided next time?\n\n\
+             Please output concise reflection text.",
             task, answer, critique.score, critique.feedback, errors_text,
         )
     }
 }
 
-/// 返回 Critique 结构的 JSON Schema（用于 LLM 结构化输出）
+/// Return JSON Schema for Critique structure (for LLM structured output)
 pub fn critique_output_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
             "score": {
                 "type": "number",
-                "description": "质量评分（0.0 到 10.0，10.0 为最高）"
+                "description": "Quality score (0.0 to 10.0, 10.0 is highest)"
             },
             "passed": {
                 "type": "boolean",
-                "description": "是否通过质量标准"
+                "description": "Whether quality standards were met"
             },
             "feedback": {
                 "type": "string",
-                "description": "详细的评估反馈，说明优缺点"
+                "description": "Detailed evaluation feedback, explaining strengths and weaknesses"
             },
             "suggestions": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "具体的改进建议列表"
+                "description": "List of specific improvement suggestions"
             }
         },
         "required": ["score", "passed", "feedback"]
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_critique_output_parse() {
-        let json = r#"{"score": 8.5, "passed": true, "feedback": "回答准确", "suggestions": ["可以更详细"]}"#;
+        let json = r#"{"score": 8.5, "passed": true, "feedback": "Accurate response", "suggestions": ["Could be more detailed"]}"#;
         let output: CritiqueOutput = serde_json::from_str(json).unwrap();
         assert_eq!(output.score, 8.5);
         assert!(output.passed);
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_critique_output_default_suggestions() {
-        let json = r#"{"score": 6.0, "passed": false, "feedback": "不完整"}"#;
+        let json = r#"{"score": 6.0, "passed": false, "feedback": "Incomplete"}"#;
         let output: CritiqueOutput = serde_json::from_str(json).unwrap();
         assert!(output.suggestions.is_empty());
     }
@@ -260,14 +260,20 @@ mod tests {
         let critique = Critique {
             score: 5.0,
             passed: false,
-            feedback: "不够准确".to_string(),
-            suggestions: vec!["增加示例".to_string()],
+            feedback: "Not accurate enough".to_string(),
+            suggestions: vec!["Add examples".to_string()],
         };
-        let prompt = builder.build_prompt("解释 Rust", "Rust 是...", &critique, "需要更详细", 0);
-        assert!(prompt.contains("解释 Rust"));
-        assert!(prompt.contains("不够准确"));
-        assert!(prompt.contains("增加示例"));
-        assert!(prompt.contains("第 1 次改进"));
+        let prompt = builder.build_prompt(
+            "Explain Rust",
+            "Rust is...",
+            &critique,
+            "Needs more detail",
+            0,
+        );
+        assert!(prompt.contains("Explain Rust"));
+        assert!(prompt.contains("Not accurate enough"));
+        assert!(prompt.contains("Add examples"));
+        assert!(prompt.contains("improvement iteration #1"));
     }
 
     #[test]
@@ -276,21 +282,22 @@ mod tests {
         let critique = Critique {
             score: 4.0,
             passed: false,
-            feedback: "概念有误".to_string(),
-            suggestions: vec!["修正定义".to_string()],
+            feedback: "Concept is incorrect".to_string(),
+            suggestions: vec!["Fix the definition".to_string()],
         };
-        let prompt = builder.build_reflection_prompt("解释所有权", "Rust 有 GC...", &critique);
-        assert!(prompt.contains("解释所有权"));
-        assert!(prompt.contains("概念有误"));
-        assert!(prompt.contains("修正定义"));
+        let prompt =
+            builder.build_reflection_prompt("Explain ownership", "Rust has GC...", &critique);
+        assert!(prompt.contains("Explain ownership"));
+        assert!(prompt.contains("Concept is incorrect"));
+        assert!(prompt.contains("Fix the definition"));
     }
 
     #[test]
     fn test_reflection_experience() {
-        let exp =
-            ReflectionExperience::new("确认数据后再查询", "假设数据存在").with_category("database");
+        let exp = ReflectionExperience::new("Confirm data before querying", "Assumes data exists")
+            .with_category("database");
         assert!(exp.id.starts_with("exp_"));
-        assert_eq!(exp.lesson, "确认数据后再查询");
+        assert_eq!(exp.lesson, "Confirm data before querying");
         assert_eq!(exp.task_category, Some("database".to_string()));
     }
 

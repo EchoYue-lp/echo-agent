@@ -1,8 +1,8 @@
-//! 高层声明式 DSL — StateGraph
+//! High-level declarative DSL — StateGraph
 //!
-//! 提供 LangGraph 风格的链式 API，用于声明式构建多 Agent 拓扑。
+//! Provides a LangGraph-style chain API for declaratively building multi-Agent topologies.
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust,no_run
 //! use echo_agent::workflow::dsl::StateGraph;
@@ -11,11 +11,11 @@
 //! # async fn example() -> echo_agent::error::Result<()> {
 //! let mut sg = StateGraph::new("research_flow");
 //! sg.add_react_node("researcher", |b| {
-//!         b.model("qwen3-max").system_prompt("研究员").enable_tools()
+//!         b.model("qwen3-max").system_prompt("Researcher").enable_tools()
 //!     })
 //!     .with_input("topic").with_output("research");
 //! sg.add_react_node("writer", |b| {
-//!         b.model("qwen3-max").system_prompt("作者")
+//!         b.model("qwen3-max").system_prompt("Writer")
 //!     })
 //!     .with_input("research").with_output("draft");
 //! sg.add_function_node("checker", |state| Box::pin(async move {
@@ -28,7 +28,7 @@
 //!         if r == "pass" { "done" } else { "writer" }.to_string()
 //!     }));
 //! sg.add_react_node("done", |b| {
-//!         b.model("qwen3-max").system_prompt("润色")
+//!         b.model("qwen3-max").system_prompt("Polisher")
 //!     })
 //!     .with_input("draft").with_output("final");
 //! sg.entry("researcher").finish("done");
@@ -44,7 +44,7 @@ use crate::workflow::GraphBuilder;
 use crate::workflow::SharedState;
 use futures::future::BoxFuture;
 
-// ── Pending node definition ──────────────────────────────────────────────
+// ── Pending Node Definition ──────────────────────────────────────────────────
 
 type AgentConfigFn = Box<dyn FnOnce(ReactAgentBuilder) -> ReactAgentBuilder>;
 type FunctionNodeFn =
@@ -85,11 +85,12 @@ enum PendingEdge {
 
 // ── StateGraph ───────────────────────────────────────────────────────────
 
-/// 声明式 Agent 拓扑构建器。
+/// Declarative Agent topology builder.
 ///
-/// 通过链式 API 定义节点、边和状态字段，最终 `compile()` 编译为 `Graph`。
+/// Defines nodes, edges, and state fields through a chain API, finally compiled
+/// into a `Graph` via `compile()`.
 ///
-/// 所有 `add_*` 和 `with_*` 方法返回 `&mut Self`，支持链式调用。
+/// All `add_*` and `with_*` methods return `&mut Self`, supporting chain calls.
 pub struct StateGraph {
     name: String,
     pending_nodes: Vec<PendingNode>,
@@ -99,7 +100,7 @@ pub struct StateGraph {
 }
 
 impl StateGraph {
-    /// 创建一个新的 StateGraph
+    /// Create a new StateGraph
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -110,10 +111,10 @@ impl StateGraph {
         }
     }
 
-    /// 添加一个 ReactAgent 节点。
+    /// Add a ReactAgent node.
     ///
-    /// `configure` 闭包接收 `ReactAgentBuilder`，返回配置后的 builder。
-    /// 默认 input="task", output="result"。
+    /// The `configure` closure receives a `ReactAgentBuilder` and returns the
+    /// configured builder. Default input="task", output="result".
     pub fn add_react_node<F>(&mut self, name: impl Into<String>, configure: F) -> &mut Self
     where
         F: FnOnce(ReactAgentBuilder) -> ReactAgentBuilder + 'static,
@@ -127,7 +128,7 @@ impl StateGraph {
         self
     }
 
-    /// 设置最后一个 agent 节点的 input key
+    /// Set the input key of the last agent node
     pub fn with_input(&mut self, key: impl Into<String>) -> &mut Self {
         if let Some(PendingNode::Agent { input_key, .. }) = self.pending_nodes.last_mut() {
             *input_key = key.into();
@@ -135,7 +136,7 @@ impl StateGraph {
         self
     }
 
-    /// 设置最后一个 agent 节点的 output key
+    /// Set the output key of the last agent node
     pub fn with_output(&mut self, key: impl Into<String>) -> &mut Self {
         if let Some(PendingNode::Agent { output_key, .. }) = self.pending_nodes.last_mut() {
             *output_key = key.into();
@@ -143,7 +144,7 @@ impl StateGraph {
         self
     }
 
-    /// 添加函数节点
+    /// Add a function node
     pub fn add_function_node<F>(&mut self, name: impl Into<String>, f: F) -> &mut Self
     where
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
@@ -155,14 +156,14 @@ impl StateGraph {
         self
     }
 
-    /// 添加路由节点
+    /// Add a router node
     pub fn add_router(&mut self, name: impl Into<String>) -> &mut Self {
         self.pending_nodes
             .push(PendingNode::Router { name: name.into() });
         self
     }
 
-    /// 添加固定边：from → to
+    /// Add a fixed edge: from → to
     pub fn add_edge(&mut self, from: impl Into<String>, to: impl Into<String>) -> &mut Self {
         self.edges.push(PendingEdge::Fixed {
             from: from.into(),
@@ -171,7 +172,7 @@ impl StateGraph {
         self
     }
 
-    /// 添加条件边
+    /// Add a conditional edge
     pub fn add_conditional_edge<F>(&mut self, from: impl Into<String>, f: F) -> &mut Self
     where
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, String> + Send + Sync + 'static,
@@ -183,7 +184,7 @@ impl StateGraph {
         self
     }
 
-    /// 添加并行边：from → [targets...] → then
+    /// Add parallel edges: from → [targets...] → then
     pub fn add_parallel_edge(
         &mut self,
         from: impl Into<String>,
@@ -198,21 +199,21 @@ impl StateGraph {
         self
     }
 
-    /// 设置入口节点
+    /// Set the entry node
     pub fn entry(&mut self, name: impl Into<String>) -> &mut Self {
         self.entry = Some(name.into());
         self
     }
 
-    /// 添加结束节点
+    /// Add a finish node
     pub fn finish(&mut self, name: impl Into<String>) -> &mut Self {
         self.finish_nodes.push(name.into());
         self
     }
 
-    /// 编译为 Graph
+    /// Compile into a Graph
     ///
-    /// 遍历所有 pending nodes，构建 agents，添加边和入口/终点，最终 build。
+    /// Iterate over all pending nodes, build agents, add edges and entry/finish nodes, then build.
     pub fn compile(self) -> Result<Graph> {
         let mut builder = GraphBuilder::new(&self.name);
 

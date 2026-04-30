@@ -1,20 +1,55 @@
-//! Workflow façade
+//! Graph-based workflow engine (LangGraph-style state machines).
 //!
-//! 此模块的核心运行时类型来自 `echo_orchestration::workflow`，
-//! 根 crate 仅保留两类内容：
-//! - 核心工作流类型的统一重导出
-//! - 根 crate 特有的 `dsl` / `loader` 薄扩展入口
+//! Model agent execution as a **directed graph with shared state**.
+//! Supports linear pipelines, conditional branches, loops, and parallel fan-out/fan-in.
 //!
-//! 如需直接依赖拆分后的 crate，可使用 [`crate::workspace::orchestration::workflow`]。
+//! # Builders
 //!
-//! 提供两套编排能力：
+//! | Builder | Style | Best For |
+//! |---------|-------|----------|
+//! | [`GraphBuilder`] | Programmatic Rust API | Complex logic, type safety |
+//! | [`WorkflowDefinition`] | YAML/JSON declaration | Simple pipelines, no-code config |
 //!
-//! ## 1. Graph 工作流（对标 LangGraph）
+//! # Quick Start (Programmatic)
 //!
-//! 将 Agent 执行建模为**有向图 + 共享状态**，支持：
-//! - 线性管道、条件分支、循环、并行 fan-out/fan-in
+//! ```rust,no_run
+//! use echo_agent::prelude::*;
 //!
-//! ## 2. Pipeline 工作流（Sequential / Concurrent / DAG）
+//! # fn main() -> echo_agent::error::Result<()> {
+//! let graph = GraphBuilder::new("pipeline")
+//!     .add_function_node("step_a", |state| Box::pin(async move {
+//!         state.set("key", "value")?;
+//!         Ok(())
+//!     }))
+//!     .add_edge("step_a", Graph::END)
+//!     .build()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Quick Start (Declarative YAML)
+//!
+//! ```rust,ignore
+//! use echo_agent::prelude::*;
+//!
+//! # fn main() -> echo_agent::error::Result<()> {
+//! let graph = Graph::from_yaml("workflow.yaml")?;
+//! let result = graph.run(SharedState::new()).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Key Types
+//!
+//! | Type | Description |
+//! |------|-------------|
+//! | [`Graph`] / [`GraphBuilder`] | Build and run directed workflows |
+//! | [`SequentialWorkflow`] | Simple linear step execution |
+//! | [`ConcurrentWorkflow`] | Parallel step execution |
+//! | [`DagWorkflow`] | Dependency-based scheduling |
+//! | [`SharedState`] | State passed between nodes |
+//! | [`WorkflowEvent`] | Streaming events per node |
+//! | [`WorkflowDefinition`] | YAML/JSON workflow definition |
 
 /// Direct re-exports from `echo_orchestration::workflow`.
 pub mod orchestration {

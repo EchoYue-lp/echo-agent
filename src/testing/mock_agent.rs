@@ -1,11 +1,12 @@
-//! Mock Agent，实现 [`Agent`] trait，用于测试多 Agent 编排时替换真实的 SubAgent。
+//! Mock Agent, implementing the [`Agent`] trait, for replacing real SubAgents
+//! when testing multi-Agent orchestration.
 //!
-//! 在测试编排逻辑时，我们通常希望：
-//! - 不发起真实 LLM 调用
-//! - 控制每个 SubAgent 的返回内容
-//! - 验证 SubAgent 被调用了几次，以及每次收到什么任务
+//! When testing orchestration logic, we typically want to:
+//! - Avoid making real LLM calls
+//! - Control the return content of each SubAgent
+//! - Verify how many times a SubAgent was called, and what task it received each time
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust
 //! use echo_agent::testing::MockAgent;
@@ -14,15 +15,15 @@
 //! # #[tokio::main]
 //! # async fn main() {
 //! let mut agent = MockAgent::new("math_agent")
-//!     .with_response("结果是 42")
-//!     .with_response("结果是 100");
+//!     .with_response("The result is 42")
+//!     .with_response("The result is 100");
 //!
-//! let r1 = agent.execute("计算 6 * 7").await.unwrap();
-//! let r2 = agent.execute("计算 10 * 10").await.unwrap();
-//! assert_eq!(r1, "结果是 42");
-//! assert_eq!(r2, "结果是 100");
+//! let r1 = agent.execute("compute 6 * 7").await.unwrap();
+//! let r2 = agent.execute("compute 10 * 10").await.unwrap();
+//! assert_eq!(r1, "The result is 42");
+//! assert_eq!(r2, "The result is 100");
 //! assert_eq!(agent.call_count(), 2);
-//! assert_eq!(agent.calls()[0], "计算 6 * 7");
+//! assert_eq!(agent.calls()[0], "compute 6 * 7");
 //! # }
 //! ```
 
@@ -36,11 +37,14 @@ use std::sync::{Arc, Mutex};
 
 // ── MockAgent ─────────────────────────────────────────────────────────────────
 
-/// 可脚本化的 Mock Agent。
+/// A scriptable Mock Agent.
 ///
-/// 按顺序返回预设的响应；队列耗尽后每次调用都返回 `"mock agent response"`。
-/// `execute()` 和 `chat()` 的消息均被记录，可通过 [`calls()`](MockAgent::calls) 检查。
-/// `reset()` 清空调用历史，模拟真实 Agent 的对话重置语义。
+/// Returns preset responses in order; once the queue is exhausted, each call
+/// returns `"mock agent response"`.
+/// Messages from both `execute()` and `chat()` are recorded, and can be inspected
+/// via [`calls()`](MockAgent::calls).
+/// `reset()` clears the call history, simulating the conversation-reset semantics
+/// of a real Agent.
 pub struct MockAgent {
     name: String,
     model_name: String,
@@ -50,7 +54,7 @@ pub struct MockAgent {
 }
 
 impl MockAgent {
-    /// 创建具名 Mock Agent
+    /// Create a named Mock Agent
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -61,25 +65,25 @@ impl MockAgent {
         }
     }
 
-    /// 设置模型名称（用于需要检查 model_name 的测试）
+    /// Set the model name (for tests that need to check model_name)
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model_name = model.into();
         self
     }
 
-    /// 设置系统提示词
+    /// Set the system prompt
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
         self
     }
 
-    /// 追加一条预设响应
+    /// Append a preset response
     pub fn with_response(self, text: impl Into<String>) -> Self {
         self.responses.lock().unwrap().push_back(text.into());
         self
     }
 
-    /// 批量追加多条预设响应
+    /// Append multiple preset responses in bulk
     pub fn with_responses(self, texts: impl IntoIterator<Item = impl Into<String>>) -> Self {
         {
             let mut q = self.responses.lock().unwrap();
@@ -90,24 +94,24 @@ impl MockAgent {
         self
     }
 
-    /// 已被调用的总次数
+    /// Total number of times called
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }
 
-    /// 所有历史调用的任务字符串（按时序排列）
+    /// All historical call task strings (in chronological order)
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 
-    /// 最后一次调用时的任务字符串（若从未调用则返回 `None`）
+    /// The task string from the last call (returns `None` if never called)
     pub fn last_task(&self) -> Option<String> {
         self.calls.lock().unwrap().last().cloned()
     }
 
-    /// 清空调用历史（响应队列不受影响）
+    /// Clear call history (response queue is unaffected)
     ///
-    /// 仅用于测试断言重置，不等同于 `Agent::reset()`。
+    /// Used only for test assertion reset, not equivalent to `Agent::reset()`.
     pub fn reset_calls(&self) {
         self.calls.lock().unwrap().clear();
     }
@@ -152,8 +156,8 @@ impl Agent for MockAgent {
         })
     }
 
-    /// `chat()` 同样记录调用，并消费预设响应队列。
-    /// 注意：MockAgent 不维护真实的对话上下文，这里仅满足调用合约。
+    /// `chat()` also records the call and consumes the preset response queue.
+    /// Note: MockAgent does not maintain a real conversation context; this only satisfies the call contract.
     fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(message.to_string());
@@ -172,13 +176,13 @@ impl Agent for MockAgent {
         })
     }
 
-    /// 清空调用历史，模拟真实 Agent 的重置语义。
+    /// Clear call history, simulating the reset semantics of a real Agent.
     fn reset(&self) {
         self.calls.lock().unwrap().clear();
     }
 }
 
-/// 产生总是返回错误的 Mock Agent（用于测试编排容错行为）
+/// A Mock Agent that always returns an error (for testing orchestration fault-tolerance behavior)
 pub struct FailingMockAgent {
     name: String,
     error_message: String,
@@ -186,7 +190,7 @@ pub struct FailingMockAgent {
 }
 
 impl FailingMockAgent {
-    /// 创建失败型 Mock Agent
+    /// Create a failing Mock Agent
     pub fn new(name: impl Into<String>, error_message: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -195,7 +199,7 @@ impl FailingMockAgent {
         }
     }
 
-    /// 获取该 Mock Agent 被调用的次数。
+    /// Get the number of times this Mock Agent has been called.
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }

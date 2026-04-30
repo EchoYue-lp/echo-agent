@@ -1,6 +1,27 @@
-//! 三层沙箱执行系统（re-export from echo_execution::sandbox）
+//! Multi-layer code execution sandbox.
 //!
-//! 提供 Local / Docker / K8s 三种隔离级别的代码执行环境，
-//! 统一通过 [`SandboxExecutor`] trait 抽象，由 [`SandboxManager`] 自动选择最佳执行层。
+//! Three isolation levels, unified behind the [`SandboxExecutor`] trait.
+//! The [`SandboxManager`] automatically selects the best available layer.
+//!
+//! # Isolation Levels
+//!
+//! | Level | Backend | Use Case |
+//! |-------|---------|----------|
+//! | [`LocalSandbox`] | Direct process spawn | Development, trusted code |
+//! | [`DockerSandbox`] | Docker container | CI/CD, untrusted code |
+//! | [`K8sSandbox`] | Kubernetes pod | Production, multi-tenant |
+//!
+//! # Quick Start
+//!
+//! ```rust,ignore
+//! use echo_agent::prelude::*;
+//!
+//! # fn main() -> echo_agent::error::Result<()> {
+//! let sandbox = LocalSandbox::new();
+//! let result = sandbox.execute(SandboxCommand::shell("echo hello"))?;
+//! println!("{}", result.stdout);
+//! # Ok(())
+//! # }
+//! ```
 
 pub use echo_execution::sandbox::*;

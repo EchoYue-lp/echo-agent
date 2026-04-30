@@ -1,27 +1,27 @@
-//! 图工作流引擎 + 通用 Workflow / Pipeline
+//! Graph workflow engine + general Workflow / Pipeline
 //!
-//! 提供两套编排能力：
+//! Provides two orchestration capabilities:
 //!
-//! ## 1. Graph 工作流（对标 LangGraph）
+//! ## 1. Graph Workflow (analogous to LangGraph)
 //!
-//! 将 Agent 执行建模为**有向图 + 共享状态**，支持：
-//! - 线性管道、条件分支、循环、并行 fan-out/fan-in
+//! Models agent execution as a **directed graph + shared state**, supporting:
+//! - Linear pipelines, conditional branching, cycles, parallel fan-out/fan-in
 //!
-//! | 概念 | 类型 | 说明 |
+//! | Concept | Type | Description |
 //! |------|------|------|
-//! | 状态 | [`SharedState`] | 节点间共享的 KV store + 结构化消息历史 |
-//! | 图 | [`Graph`] | 编译后的不可变工作流 |
-//! | 构建器 | [`GraphBuilder`] | 链式 API 构建图 |
+//! | State | [`SharedState`] | KV store shared between nodes + structured message history |
+//! | Graph | [`Graph`] | Compiled immutable workflow |
+//! | Builder | [`GraphBuilder`] | Chain API for building graphs |
 //!
-//! ## 2. Pipeline 工作流（Sequential / Concurrent / DAG）
+//! ## 2. Pipeline Workflow (Sequential / Concurrent / DAG)
 //!
-//! | 类型 | 说明 |
+//! | Type | Description |
 //! |------|------|
-//! | [`SequentialWorkflow`] | 顺序管道，前一步输出作为后一步输入 |
-//! | [`ConcurrentWorkflow`] | 并发管道，所有 Agent 并行执行后合并结果 |
-//! | [`DagWorkflow`] | DAG 管道，按拓扑序执行，独立节点自动并发 |
+//! | [`SequentialWorkflow`] | Sequential pipeline: previous step output becomes next step input |
+//! | [`ConcurrentWorkflow`] | Concurrent pipeline: all agents execute in parallel, then merge results |
+//! | [`DagWorkflow`] | DAG pipeline: topological execution, independent nodes run concurrently |
 
-// ── Graph 工作流 ────────────────────────────────────────────────────────────
+// ── Graph Workflow ────────────────────────────────────────────────────────────
 
 pub mod checkpoint_store;
 mod graph;
@@ -38,7 +38,7 @@ pub use graph::{
 };
 pub use state::SharedState;
 
-// ── Pipeline 工作流 ─────────────────────────────────────────────────────────
+// ── Pipeline Workflow ─────────────────────────────────────────────────────────
 
 mod concurrent;
 mod dag;
@@ -56,36 +56,36 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
-/// 可共享的 Agent 句柄，支持跨异步任务安全访问
+/// Shareable agent handle for safe access across async tasks
 pub type SharedAgent = Arc<AsyncMutex<Box<dyn Agent>>>;
 
-/// 将任意 `impl Agent` 包装为 [`SharedAgent`]
+/// Wrap arbitrary `impl Agent` as a [`SharedAgent`]
 pub fn shared_agent(agent: impl Agent + 'static) -> SharedAgent {
     Arc::new(AsyncMutex::new(Box::new(agent)))
 }
 
-/// 工作流执行过程中产生的逐步事件
+/// Step-by-step events emitted during workflow execution.
 ///
-/// 通过 [`Workflow::run_stream`] 获取 `BoxStream<WorkflowEvent>`，
-/// 实现 UI 实时更新、进度条、日志等场景。
+/// Obtain a `BoxStream<WorkflowEvent>` via [`Workflow::run_stream`]
+/// for realtime UI updates, progress bars, logging, etc.
 #[derive(Debug, Clone)]
 pub enum WorkflowEvent {
-    /// 节点开始执行
+    /// Node started execution
     NodeStart {
         node_name: String,
         step_index: usize,
     },
-    /// 节点执行结束
+    /// Node finished execution
     NodeEnd {
         node_name: String,
         step_index: usize,
         elapsed: Duration,
     },
-    /// 节点产生的 token（流式 Agent 输出时透传）
+    /// Token produced by node (forwarded during streaming agent output)
     Token { node_name: String, token: String },
-    /// 节点执行错误（非致命，错误被记录但流继续）
+    /// Node execution error (non-fatal; error is recorded but stream continues)
     NodeError { node_name: String, error: String },
-    /// 工作流执行完毕
+    /// Workflow execution completed
     Completed {
         result: String,
         total_steps: usize,
@@ -93,14 +93,14 @@ pub enum WorkflowEvent {
     },
 }
 
-/// Workflow 统一执行接口
+/// Unified workflow execution interface
 pub trait Workflow: Send + Sync {
-    /// 以 `input` 为初始输入运行整个工作流
+    /// Run the entire workflow with `input` as the initial input
     fn run<'a>(&'a mut self, input: &'a str) -> BoxFuture<'a, Result<WorkflowOutput>>;
 
-    /// 以 `input` 为初始输入运行整个工作流（流式输出逐节点事件）
+    /// Run the entire workflow with `input` as initial input (streaming per-node events).
     ///
-    /// 默认实现回退到 `run()` 并仅发出 `Completed` 事件。
+    /// Default implementation falls back to `run()` and only emits the `Completed` event.
     fn run_stream<'a>(
         &'a mut self,
         input: &'a str,
@@ -119,26 +119,26 @@ pub trait Workflow: Send + Sync {
     }
 }
 
-/// Workflow 执行的完整输出
+/// Complete output of a workflow execution
 #[derive(Debug, Clone)]
 pub struct WorkflowOutput {
-    /// 最终结果文本
+    /// Final result text
     pub result: String,
-    /// 每一步的详细输出
+    /// Detailed output for each step
     pub steps: Vec<StepOutput>,
-    /// 总耗时
+    /// Total elapsed time
     pub elapsed: Duration,
 }
 
-/// 单步执行的详细输出
+/// Detailed output of a single step execution
 #[derive(Debug, Clone)]
 pub struct StepOutput {
-    /// 执行该步的 Agent 名称
+    /// Name of the agent that executed this step
     pub agent_name: String,
-    /// 该步接收到的输入
+    /// Input received by this step
     pub input: String,
-    /// 该步产出的输出
+    /// Output produced by this step
     pub output: String,
-    /// 该步耗时
+    /// Step elapsed time
     pub elapsed: Duration,
 }

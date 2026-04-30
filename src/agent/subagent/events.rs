@@ -76,7 +76,7 @@ pub enum SubagentEvent {
 pub trait SubagentEventListener: Send + Sync {
     /// Handle a subagent lifecycle event.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `event` - The event to handle.
     fn on_event(&self, event: &SubagentEvent);
 }
@@ -159,7 +159,7 @@ impl SubagentEventBus {
 
     /// Create a new event bus with the specified channel capacity.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `capacity` - Maximum number of events to buffer before dropping old ones.
     pub fn with_capacity(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);

@@ -17,7 +17,7 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")

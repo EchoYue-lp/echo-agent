@@ -1,4 +1,4 @@
-//! 工具执行审批（人工介入）
+//! Tool execution approval (human-in-the-loop)
 
 use super::super::ReactAgent;
 use crate::error::{ReactError, Result};
@@ -7,15 +7,15 @@ use tracing::{info, warn};
 
 impl ReactAgent {
     #[cfg(feature = "human-loop")]
-    /// 判断工具是否需要人工审批（供 process_steps 决定串行/并行执行）
+    /// Determine whether a tool requires human approval (for process_steps to decide serial/parallel execution)
     ///
-    /// 优先使用 PermissionService（传递真实工具参数而非空 JSON），回退到旧的两阶段检查。
+    /// Prioritize PermissionService (passing real tool params instead of empty JSON), fall back to legacy two-phase check.
     pub(crate) async fn tool_needs_approval(&self, tool_name: &str) -> bool {
-        // 1. PermissionService 统一管线（快速路径：不触发 handler）
+        // 1. PermissionService unified pipeline (fast path: no handler triggers)
         if let Some(service) = &self.approval.permission_service {
             self.flush_pending_permission_rules(service).await;
             let mode = service.mode().await;
-            // BypassPermissions / Auto / DontAsk 模式不需要串行等待审批
+            // BypassPermissions / Auto / DontAsk modes do not need serial approval wait
             if matches!(
                 mode,
                 crate::tools::permission::PermissionMode::BypassPermissions
@@ -23,7 +23,7 @@ impl ReactAgent {
             ) {
                 return false;
             }
-            // Plan 模式下写操作直接拒绝（不需要串行审批）
+            // Plan mode directly denies write operations (no serial approval needed)
             if mode == crate::tools::permission::PermissionMode::Plan {
                 return false;
             }
@@ -45,7 +45,7 @@ impl ReactAgent {
             return decision.requires_approval();
         }
 
-        // 2. PermissionPolicy 回退
+        // 2. PermissionPolicy fallback
         if let Some(policy) = &self.guard.permission_policy {
             let tool_perms = self
                 .tools
@@ -74,13 +74,13 @@ impl ReactAgent {
         false
     }
 
-    /// 统一审批检查入口
+    /// Unified approval check entry point
     ///
-    /// 优先使用 PermissionService（统一管线: mode → rules → cache → denial → classifier/handler），
-    /// PermissionPolicy 检查，需审批则请求人工介入。
+    /// Prioritizes PermissionService (unified pipeline: mode → rules → cache → denial → classifier/handler),
+    /// then PermissionPolicy check; if approval is required, requests human intervention.
     ///
-    /// 返回 `Ok(Some(modified_args))` 表示用户在审批时修改了参数，调用方应使用修改后的参数。
-    /// 返回 `Ok(None)` 表示审批通过，使用原始参数。
+    /// Returns `Ok(Some(modified_args))` if the user modified parameters during approval (caller should use modified params).
+    /// Returns `Ok(None)` if approved, use original params.
     #[cfg(feature = "human-loop")]
     pub(crate) async fn check_tool_approval(
         &self,
@@ -89,7 +89,7 @@ impl ReactAgent {
     ) -> Result<Option<Value>> {
         let agent = &self.config.agent_name;
 
-        // ── Phase 0: PermissionService 统一管线 ──
+        // ── Phase 0: PermissionService unified pipeline ──
         if let Some(service) = &self.approval.permission_service {
             self.flush_pending_permission_rules(service).await;
             let tool_perms = self
@@ -102,7 +102,7 @@ impl ReactAgent {
             let decision = service
                 .check_with_permissions(tool_name, input, &tool_perms)
                 .await
-                .map_err(|e| ReactError::Other(format!("PermissionService 错误: {e}")))?;
+                .map_err(|e| ReactError::Other(format!("PermissionService error: {e}")))?;
 
             match decision {
                 crate::tools::permission::PermissionDecision::Allow => {
@@ -113,11 +113,11 @@ impl ReactAgent {
                     self.log_permission_denied(tool_name, &tool_perms, &reason)
                         .await;
                     return Err(ReactError::Other(format!(
-                        "工具 {tool_name} 权限不足: {reason}"
+                        "Tool {tool_name} has insufficient permissions: {reason}"
                     )));
                 }
                 crate::tools::permission::PermissionDecision::RequireApproval => {
-                    info!(agent = %agent, tool = %tool_name, "🔐 权限服务要求人工审批");
+                    info!(agent = %agent, tool = %tool_name, "🔐 PermissionService requires human approval");
                     return self.request_human_approval(tool_name, input).await;
                 }
                 crate::tools::permission::PermissionDecision::Ask { suggestions } => {
@@ -126,7 +126,7 @@ impl ReactAgent {
             }
         }
 
-        // ── Phase 1 (回退): PermissionPolicy 检查 ──
+        // ── Phase 1 (fallback): PermissionPolicy check ──
         if let Some(policy) = &self.guard.permission_policy {
             let tool_perms = self
                 .tools
@@ -143,11 +143,11 @@ impl ReactAgent {
                         self.log_permission_denied(tool_name, &tool_perms, &reason)
                             .await;
                         return Err(ReactError::Other(format!(
-                            "工具 {tool_name} 权限不足: {reason}"
+                            "Tool {tool_name} has insufficient permissions: {reason}"
                         )));
                     }
                     crate::tools::permission::PermissionDecision::RequireApproval => {
-                        info!(agent = %agent, tool = %tool_name, "🔐 权限策略要求人工审批");
+                        info!(agent = %agent, tool = %tool_name, "🔐 PermissionPolicy requires human approval");
                         return self.request_human_approval(tool_name, input).await;
                     }
                     crate::tools::permission::PermissionDecision::Ask { suggestions } => {
@@ -169,7 +169,7 @@ impl ReactAgent {
         Ok(None)
     }
 
-    /// 记录权限拒绝审计日志
+    /// Log permission denied audit event
     #[cfg(feature = "human-loop")]
     async fn log_permission_denied(
         &self,
@@ -178,7 +178,7 @@ impl ReactAgent {
         reason: &str,
     ) {
         let agent = &self.config.agent_name;
-        warn!(agent = %agent, tool = %tool_name, reason = %reason, "🔒 权限拒绝");
+        warn!(agent = %agent, tool = %tool_name, reason = %reason, "🔒 Permission denied");
         if let Some(al) = &self.guard.audit_logger {
             let event = crate::audit::AuditEvent::now(
                 self.config.session_id.clone(),
@@ -193,7 +193,7 @@ impl ReactAgent {
         }
     }
 
-    /// 处理 Ask 决策 — 向用户确认工具执行
+    /// Handle Ask decision — confirm tool execution with the user
     #[cfg(feature = "human-loop")]
     async fn handle_ask_decision(
         &self,
@@ -201,47 +201,49 @@ impl ReactAgent {
         suggestions: &[String],
     ) -> Result<Option<Value>> {
         let agent = &self.config.agent_name;
-        info!(agent = %agent, tool = %tool_name, "❓ 权限需要用户确认");
+        info!(agent = %agent, tool = %tool_name, "❓ Permission requires user confirmation");
         let prompt = format!(
-            "工具 '{}' 需要确认。建议选项：{}",
+            "Tool '{}' requires confirmation. Suggested options: {}",
             tool_name,
             suggestions.join(", ")
         );
         let req = crate::human_loop::HumanLoopRequest::input(prompt);
         match self.approval.approval_provider.request(req).await? {
             crate::human_loop::HumanLoopResponse::Text(response) => {
-                if response.to_lowercase().contains("拒绝")
+                if response.to_lowercase().contains("reject")
                     || response.to_lowercase().contains("deny")
                 {
                     return Err(ReactError::Other(format!(
-                        "工具 {tool_name} 用户选择拒绝：{response}"
+                        "Tool {tool_name} user chose to reject: {response}"
                     )));
                 }
-                info!(agent = %agent, tool = %tool_name, "✅ 用户确认执行");
+                info!(agent = %agent, tool = %tool_name, "✅ User confirmed execution");
             }
             crate::human_loop::HumanLoopResponse::Approved => {
-                info!(agent = %agent, tool = %tool_name, "✅ 用户确认执行");
+                info!(agent = %agent, tool = %tool_name, "✅ User confirmed execution");
             }
             crate::human_loop::HumanLoopResponse::Rejected { reason } => {
                 return Err(ReactError::Other(format!(
-                    "工具 {tool_name} 用户拒绝{}",
-                    reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                    "Tool {tool_name} user rejected{}",
+                    reason.map(|r| format!(", reason: {r}")).unwrap_or_default()
                 )));
             }
             _ => {
-                return Err(ReactError::Other(format!("工具 {tool_name} 用户确认超时")));
+                return Err(ReactError::Other(format!(
+                    "Tool {tool_name} user confirmation timed out"
+                )));
             }
         }
         Ok(None)
     }
 
-    /// 请求人工审批并记录审计日志
+    /// Request human approval and record audit log
     ///
-    /// 处理所有 `HumanLoopResponse` 变体，统一记录审批请求/完成审计事件。
-    /// 风险等级根据工具权限动态计算，而非硬编码。
+    /// Handles all `HumanLoopResponse` variants, consistently recording approval request/completion audit events.
+    /// Risk level is dynamically computed based on tool permissions rather than hardcoded.
     ///
-    /// 返回 `Ok(Some(modified_args))` 表示用户修改了参数后批准。
-    /// 返回 `Ok(None)` 表示用户直接批准。
+    /// Returns `Ok(Some(modified_args))` if the user modified parameters and approved.
+    /// Returns `Ok(None)` if the user directly approved.
     #[cfg(feature = "human-loop")]
     async fn request_human_approval(
         &self,
@@ -251,7 +253,7 @@ impl ReactAgent {
         let agent = &self.config.agent_name;
         let approval_start = std::time::Instant::now();
 
-        // 根据工具权限动态计算风险等级
+        // Dynamically compute risk level based on tool permissions
         let tool_perms = self
             .tools
             .tool_manager
@@ -261,7 +263,7 @@ impl ReactAgent {
         let risk_level = crate::human_loop::RiskLevel::from_permissions(&tool_perms);
         let risk_level_str = format!("{:?}", risk_level).to_lowercase();
 
-        // 审计：审批请求
+        // Audit: approval request
         if let Some(al) = &self.guard.audit_logger {
             let args_hash = {
                 use std::hash::{Hash, Hasher};
@@ -284,7 +286,7 @@ impl ReactAgent {
         let req = crate::human_loop::HumanLoopRequest::approval(tool_name, input.clone());
         let response = self.approval.approval_provider.request(req).await?;
 
-        // 审计：审批完成
+        // Audit: approval completed
         if let Some(al) = &self.guard.audit_logger {
             let duration_ms = approval_start.elapsed().as_millis() as u64;
             let (decision, scope, reason) = match &response {
@@ -326,41 +328,41 @@ impl ReactAgent {
 
         match response {
             crate::human_loop::HumanLoopResponse::Approved => {
-                info!(agent = %agent, tool = %tool_name, "✅ 用户批准执行工具");
+                info!(agent = %agent, tool = %tool_name, "✅ User approved tool execution");
                 Ok(None)
             }
             crate::human_loop::HumanLoopResponse::ApprovedWithScope { scope: _ } => {
-                info!(agent = %agent, tool = %tool_name, "✅ 用户带范围批准执行工具");
+                info!(agent = %agent, tool = %tool_name, "✅ User approved tool execution with scope");
                 Ok(None)
             }
             crate::human_loop::HumanLoopResponse::ModifiedArgs { args, scope: _ } => {
-                info!(agent = %agent, tool = %tool_name, "✅ 用户修改参数后批准执行工具");
+                info!(agent = %agent, tool = %tool_name, "✅ User modified parameters and approved tool execution");
                 Ok(Some(args))
             }
             crate::human_loop::HumanLoopResponse::Rejected { reason } => {
-                warn!(agent = %agent, tool = %tool_name, "❌ 用户拒绝执行工具");
+                warn!(agent = %agent, tool = %tool_name, "❌ User rejected tool execution");
                 Err(ReactError::Other(format!(
-                    "用户已拒绝执行工具 {}{}",
+                    "User rejected tool execution {}{}",
                     tool_name,
-                    reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                    reason.map(|r| format!(", reason: {r}")).unwrap_or_default()
                 )))
             }
             crate::human_loop::HumanLoopResponse::Timeout => {
-                warn!(agent = %agent, tool = %tool_name, "⏰ 审批超时");
+                warn!(agent = %agent, tool = %tool_name, "⏰ Approval timed out");
                 Err(ReactError::Other(format!(
-                    "工具 {tool_name} 审批超时，已跳过执行"
+                    "Tool {tool_name} approval timed out, execution skipped"
                 )))
             }
             crate::human_loop::HumanLoopResponse::Deferred => {
-                warn!(agent = %agent, tool = %tool_name, "⏸️ 用户推迟审批");
+                warn!(agent = %agent, tool = %tool_name, "⏸️ User deferred approval");
                 Err(ReactError::Other(format!(
-                    "工具 {tool_name} 审批被推迟，已跳过执行"
+                    "Tool {tool_name} approval deferred, execution skipped"
                 )))
             }
             crate::human_loop::HumanLoopResponse::Text(_) => {
-                warn!(agent = %agent, tool = %tool_name, "⚠️ 审批请求收到意外的 Text 响应");
+                warn!(agent = %agent, tool = %tool_name, "⚠️ Approval request received unexpected Text response");
                 Err(ReactError::Other(format!(
-                    "工具 {tool_name} 审批异常，已跳过执行"
+                    "Tool {tool_name} approval abnormal, execution skipped"
                 )))
             }
         }

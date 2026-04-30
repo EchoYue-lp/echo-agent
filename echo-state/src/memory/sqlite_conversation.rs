@@ -1,6 +1,6 @@
-//! SQLite 对话持久化实现
+//! SQLite conversation persistence implementation
 //!
-//! 生产级对话存储，基于 SQLite，支持级联删除和高效查询。
+//! Production-grade conversation storage backed by SQLite, with cascading deletes and efficient queries.
 
 use super::conversation::{
     Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
@@ -16,7 +16,7 @@ use tracing::info;
 
 // ── SqliteConversationStore ─────────────────────────────────────────────────
 
-/// SQLite 对话持久化 Store
+/// SQLite conversation persistence Store
 pub struct SqliteConversationStore {
     conn: Mutex<Connection>,
     #[allow(dead_code)]
@@ -24,15 +24,16 @@ pub struct SqliteConversationStore {
 }
 
 impl SqliteConversationStore {
-    /// 打开或创建 SQLite 数据库，自动建表
+    /// Open or create the SQLite database, auto-creating tables
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = expand_tilde(path.as_ref());
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| memory_io_error("创建目录失败", e))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| memory_io_error("failed to create directory", e))?;
         }
 
-        let conn =
-            Connection::open(&path).map_err(|e| memory_io_error("打开 SQLite 数据库失败", e))?;
+        let conn = Connection::open(&path)
+            .map_err(|e| memory_io_error("failed to open SQLite database", e))?;
 
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -41,7 +42,7 @@ impl SqliteConversationStore {
              PRAGMA temp_store=MEMORY;
              PRAGMA foreign_keys=ON;",
         )
-        .map_err(|e| memory_io_error("SQLite PRAGMA 设置失败", e))?;
+        .map_err(|e| memory_io_error("SQLite PRAGMA configuration failed", e))?;
 
         Self::init_tables(&conn)?;
 
@@ -52,7 +53,7 @@ impl SqliteConversationStore {
         info!(
             path = %path.display(),
             conversations = count,
-            "SqliteConversationStore 初始化"
+            "SqliteConversationStore initialized"
         );
 
         Ok(Self {
@@ -89,12 +90,12 @@ impl SqliteConversationStore {
             );
             CREATE INDEX IF NOT EXISTS idx_msg_conv ON message(conversation_id);",
         )
-        .map_err(|e| memory_io_error("建表失败", e))?;
+        .map_err(|e| memory_io_error("failed to create tables", e))?;
         Ok(())
     }
 }
 
-// ── Trait 实现 ─────────────────────────────────────────────────────────────
+// ── Trait implementation ───────────────────────────────────────────────────
 
 impl ConversationStore for SqliteConversationStore {
     fn create_conversation<'a>(
@@ -113,7 +114,7 @@ impl ConversationStore for SqliteConversationStore {
                     conv.title
                 ],
             )
-            .map_err(|e| memory_io_error("插入对话失败", e))?;
+            .map_err(|e| memory_io_error("failed to insert conversation", e))?;
 
             let id = conn.last_insert_rowid();
             let row = conn
@@ -136,7 +137,7 @@ impl ConversationStore for SqliteConversationStore {
                         })
                     },
                 )
-                .map_err(|e| memory_io_error("查询新对话失败", e))?;
+                .map_err(|e| memory_io_error("failed to query new conversation", e))?;
 
             Ok(row)
         })
@@ -171,7 +172,7 @@ impl ConversationStore for SqliteConversationStore {
             match result {
                 Ok(conv) => Ok(Some(conv)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(memory_io_error("查询对话失败", e).into()),
+                Err(e) => Err(memory_io_error("failed to query conversation", e).into()),
             }
         })
     }
@@ -219,7 +220,7 @@ impl ConversationStore for SqliteConversationStore {
 
             let mut stmt = conn
                 .prepare(&sql)
-                .map_err(|e| memory_io_error("准备查询失败", e))?;
+                .map_err(|e| memory_io_error("failed to prepare query", e))?;
 
             let rows = stmt
                 .query_map(params_refs.as_slice(), |row| {
@@ -233,11 +234,11 @@ impl ConversationStore for SqliteConversationStore {
                         message_count: row.get::<_, i64>(6).unwrap_or(0) as usize,
                     })
                 })
-                .map_err(|e| memory_io_error("查询对话列表失败", e))?;
+                .map_err(|e| memory_io_error("failed to query conversation list", e))?;
 
             let mut result = Vec::new();
             for row in rows {
-                let meta = row.map_err(|e| memory_io_error("读取行失败", e))?;
+                let meta = row.map_err(|e| memory_io_error("failed to read row", e))?;
                 result.push(meta);
             }
             Ok(result)
@@ -288,7 +289,7 @@ impl ConversationStore for SqliteConversationStore {
                 params.iter().map(|p| p.as_ref()).collect();
 
             conn.execute(&sql, params_refs.as_slice())
-                .map_err(|e| memory_io_error("更新对话失败", e))?;
+                .map_err(|e| memory_io_error("failed to update conversation", e))?;
 
             Ok(())
         })
@@ -301,7 +302,7 @@ impl ConversationStore for SqliteConversationStore {
                 "DELETE FROM conversation WHERE conversation_id = ?1",
                 params![conversation_id],
             )
-            .map_err(|e| memory_io_error("删除对话失败", e))?;
+            .map_err(|e| memory_io_error("failed to delete conversation", e))?;
             Ok(())
         })
     }
@@ -319,7 +320,7 @@ impl ConversationStore for SqliteConversationStore {
                 "DELETE FROM message WHERE conversation_id = ?1",
                 params![conversation_id],
             )
-            .map_err(|e| memory_io_error("清除旧消息失败", e))?;
+            .map_err(|e| memory_io_error("failed to clear old messages", e))?;
 
             // Insert new messages
             for msg in messages {
@@ -336,7 +337,7 @@ impl ConversationStore for SqliteConversationStore {
                         msg.created_at,
                     ],
                 )
-                .map_err(|e| memory_io_error("插入消息失败", e))?;
+                .map_err(|e| memory_io_error("failed to insert message", e))?;
             }
 
             // Update conversation timestamp
@@ -344,7 +345,7 @@ impl ConversationStore for SqliteConversationStore {
                 "UPDATE conversation SET updated_at = datetime('now') WHERE conversation_id = ?1",
                 params![conversation_id],
             )
-            .map_err(|e| memory_io_error("更新对话时间戳失败", e))?;
+            .map_err(|e| memory_io_error("failed to update conversation timestamp", e))?;
 
             Ok(())
         })
@@ -362,7 +363,7 @@ impl ConversationStore for SqliteConversationStore {
                             tool_calls_json, tool_result_json, created_at
                      FROM message WHERE conversation_id = ?1 ORDER BY id ASC",
                 )
-                .map_err(|e| memory_io_error("准备查询失败", e))?;
+                .map_err(|e| memory_io_error("failed to prepare query", e))?;
 
             let rows = stmt
                 .query_map(params![conversation_id], |row| {
@@ -377,11 +378,11 @@ impl ConversationStore for SqliteConversationStore {
                         created_at: row.get(7)?,
                     })
                 })
-                .map_err(|e| memory_io_error("查询消息失败", e))?;
+                .map_err(|e| memory_io_error("failed to query messages", e))?;
 
             let mut result = Vec::new();
             for row in rows {
-                result.push(row.map_err(|e| memory_io_error("读取消息失败", e))?);
+                result.push(row.map_err(|e| memory_io_error("failed to read message", e))?);
             }
             Ok(result)
         })
@@ -396,7 +397,7 @@ impl ConversationStore for SqliteConversationStore {
                     params![conversation_id],
                     |row| row.get(0),
                 )
-                .map_err(|e| memory_io_error("统计消息失败", e))?;
+                .map_err(|e| memory_io_error("failed to count messages", e))?;
             Ok(count as usize)
         })
     }

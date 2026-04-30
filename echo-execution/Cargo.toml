@@ -1,13 +1,25 @@
 [package]
 name = "echo_execution"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Execution layer for echo-agent framework (sandbox, skills, tools)"
 repository = "https://github.com/EchoYue-lp/echo-agent"
+homepage = "https://github.com/EchoYue-lp/echo-agent"
+documentation = "https://docs.rs/echo_execution"
+keywords = ["ai", "agent", "sandbox", "tools"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+exclude = ["**/.DS_Store"]
 
 [dependencies]
-echo_core = { version = "0.1.1", path = "../echo-core" }
+echo_core = { version = "0.1.2", path = "../echo-core" }
 # From echo-sandbox
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }

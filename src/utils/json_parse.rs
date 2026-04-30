@@ -1,14 +1,14 @@
-//! JSON 解析工具函数
+//! JSON parsing utility functions
 //!
-//! 提供从 LLM 输出中提取和修复 JSON 的公共函数，
-//! 消除 `LlmPlanner` 和 `LlmCritic` 中的重复代码。
+//! Provides common functions for extracting and fixing JSON from LLM output,
+//! eliminating duplicated code in `LlmPlanner` and `LlmCritic`.
 
-/// 从 markdown code block 或裸文本中提取 JSON
+/// Extract JSON from markdown code blocks or bare text
 ///
-/// 支持以下格式：
+/// Supports the following formats:
 /// - ````json ... ````
 /// - ```` ... ````
-/// - 裸 JSON 文本
+/// - Bare JSON text
 pub fn extract_json_from_markdown(content: &str) -> String {
     if let Some(start) = content.find("```json") {
         let rest = &content[start + 7..];
@@ -25,10 +25,10 @@ pub fn extract_json_from_markdown(content: &str) -> String {
     content.trim().to_string()
 }
 
-/// 清理常见 JSON 格式问题
+/// Clean common JSON formatting issues
 ///
-/// - 修复尾部逗号（`,}` → `}`，`,]` → `]`）
-/// - 修复单引号 → 双引号（当不含双引号时）
+/// - Fix trailing commas (`,}` → `}`, `,]` → `]`)
+/// - Fix single quotes → double quotes (when no double quotes are present)
 pub fn clean_json(s: &str) -> String {
     let mut cleaned = s.to_string();
     cleaned = cleaned.replace(",}", "}").replace(",]", "]");

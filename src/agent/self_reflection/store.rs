@@ -1,4 +1,4 @@
-//! 情景记忆存储 — 持久化反思历史和经验
+//! Episodic memory store — persists reflection history and experiences
 
 use crate::agent::self_reflection::types::{ReflectionExperience, ReflectionRecord};
 use crate::error::Result;
@@ -6,43 +6,43 @@ use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// 反思存储 trait
+/// Reflection store trait
 pub trait ReflectionStore: Send + Sync {
-    /// 保存反思记录
+    /// Save reflection records
     fn save_reflections<'a>(
         &'a self,
         task_id: &'a str,
         records: &'a [ReflectionRecord],
     ) -> BoxFuture<'a, Result<()>>;
 
-    /// 加载反思记录
+    /// Load reflection records
     fn load_reflections<'a>(
         &'a self,
         task_id: &'a str,
     ) -> BoxFuture<'a, Result<Vec<ReflectionRecord>>>;
 
-    /// 保存经验
+    /// Save experiences
     fn save_experiences<'a>(
         &'a self,
         experiences: &'a [ReflectionExperience],
     ) -> BoxFuture<'a, Result<()>>;
 
-    /// 加载所有经验
+    /// Load all experiences
     fn load_experiences(&self) -> BoxFuture<'_, Result<Vec<ReflectionExperience>>>;
 }
 
-/// 内存存储（用于测试）
+/// In-memory store (for testing)
 pub struct InMemoryReflectionStore {
     reflections: Arc<RwLock<std::collections::HashMap<String, Vec<ReflectionRecord>>>>,
     experiences: Arc<RwLock<Vec<ReflectionExperience>>>,
 }
 
 impl InMemoryReflectionStore {
-    /// 创建内存存储实例
+    /// Create an in-memory store instance
     ///
-    /// # 说明
-    /// 内存存储用于测试和开发环境，数据仅保存在内存中，
-    /// 进程退出后数据丢失。
+    /// # Description
+    /// In-memory store is intended for testing and development environments. Data is only stored in memory,
+    /// and is lost when the process exits.
     pub fn new() -> Self {
         Self {
             reflections: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].answer, "test answer");
 
-        // 不存在的任务返回空
+        // Non-existent task returns empty
         let empty = store.load_reflections("nonexistent").await.unwrap();
         assert!(empty.is_empty());
     }
@@ -141,8 +141,8 @@ mod tests {
     async fn test_in_memory_store_experiences() {
         let store = InMemoryReflectionStore::new();
         let experiences = vec![
-            ReflectionExperience::new("先验证再执行", "跳过验证"),
-            ReflectionExperience::new("检查边界条件", "忽略边界"),
+            ReflectionExperience::new("Verify first, then execute", "Skipping verification"),
+            ReflectionExperience::new("Check boundary conditions", "Ignoring boundaries"),
         ];
 
         store.save_experiences(&experiences).await.unwrap();

@@ -1,8 +1,9 @@
-//! Tasks façade
+//! Tasks facade
 //!
-//! 此模块只做 `echo_orchestration::tasks` 的薄重导出。
-//! 权威实现位于 `echo_orchestration`；如需直接依赖拆分后的 crate，
-//! 可使用 [`crate::workspace::orchestration::tasks`]。
+//! This module is a thin re-export of `echo_orchestration::tasks`.
+//! The authoritative implementation is in `echo_orchestration`; if you need
+//! to directly depend on the split crate, use
+//! [`crate::workspace::orchestration::tasks`].
 
 /// Direct re-exports from `echo_orchestration::tasks`.
 pub mod orchestration {

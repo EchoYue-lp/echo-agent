@@ -1,4 +1,4 @@
-//! LLM 重试逻辑 + 工具并发超时计算
+//! LLM retry logic + concurrent tool timeout calculation
 
 use crate::error::{AgentError, ReactError, Result};
 use std::time::Duration;
@@ -6,9 +6,9 @@ use tracing::{info, warn};
 
 use super::super::is_retryable_llm_error;
 
-/// 统一 LLM 重试逻辑：指数退避 + 抖动 + 熔断器更新
+/// Unified LLM retry logic: exponential backoff + jitter + circuit breaker update
 ///
-/// `think` 和 `create_llm_stream` 共享此逻辑，避免代码重复。
+/// Shared by `think` and `create_llm_stream` to avoid code duplication.
 #[tracing::instrument(skip(agent_name, max_retries, retry_delay_ms, circuit_breaker, call_fn), fields(agent = %agent_name))]
 pub(crate) async fn retry_llm_call<F, Fut, T>(
     agent_name: &str,
@@ -36,7 +36,7 @@ where
                 attempt = attempt,
                 max = max_retries,
                 delay_ms = delay_ms,
-                "⚠️ LLM 请求失败，{delay_ms}ms 后重试（{attempt}/{max_retries}）"
+                "⚠️ LLM request failed, retrying in {delay_ms}ms ({attempt}/{max_retries})"
             );
             tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
         }
@@ -44,18 +44,18 @@ where
         match &result {
             Ok(_) => {
                 if attempt > 0 {
-                    info!(agent = %agent_name, attempt, "✅ LLM 重试成功");
+                    info!(agent = %agent_name, attempt, "✅ LLM retry succeeded");
                 }
                 break;
             }
             Err(e) if attempt < max_retries && is_retryable_llm_error(e) => {
-                warn!(agent = %agent_name, error = %e, "LLM 可重试错误");
+                warn!(agent = %agent_name, error = %e, "LLM retryable error");
             }
             Err(_) => break,
         }
     }
 
-    // 更新熔断器状态
+    // Update circuit breaker state
     if let Some(cb) = circuit_breaker {
         if result.is_ok() {
             cb.record_success();

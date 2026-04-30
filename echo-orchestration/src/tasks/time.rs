@@ -1,4 +1,4 @@
-/// 返回当前 Unix 时间戳（秒）
+/// Return the current Unix timestamp in seconds
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

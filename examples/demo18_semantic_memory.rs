@@ -10,7 +10,7 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
         .with_env_filter(

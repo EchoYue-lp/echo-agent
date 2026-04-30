@@ -1,8 +1,7 @@
-//! MCP façade
+//! MCP (Model Context Protocol) façade.
 //!
-//! 此模块只重导出 `echo_integration::mcp` 的公共 API。
-//! 权威实现位于 `echo_integration`；如需直接依赖拆分后的 crate，
-//! 可使用 [`crate::workspace::integration::mcp`]。
+//! Re-exports the public API of `echo_integration::mcp`.
+//! The authoritative implementation lives in `echo_integration`.
 
 /// Direct re-exports from `echo_integration::mcp`.
 pub mod integration {

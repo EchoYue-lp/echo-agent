@@ -1,14 +1,22 @@
 //! # echo-core
 //!
-//! 核心 trait 和类型定义，作为 echo-agent 框架的基础层。
+//! Core traits, types, and error definitions for the [echo-agent](https://crates.io/crates/echo_agent) framework.
 //!
-//! 本 crate 提供所有子 crate 共享的接口和类型：
-//! - [`error`][]: 统一错误类型
-//! - [`tools`]: 工具系统 trait 和权限模型
-//! - [`llm`]: LLM 客户端 trait 和消息类型
-//! - [`agent`]: Agent trait、回调接口和事件
-//! - [`guard`]: 护栏系统 trait 和管理器
-//! - [`audit`]: 审计日志 trait 和事件类型
+//! This crate provides the shared interfaces that all other workspace crates build on:
+//!
+//! | Module | Contents |
+//! |--------|----------|
+//! | [`agent`] | `Agent` trait, `AgentEvent`, `AgentCallback`, `CancellationToken` |
+//! | [`llm`] | `LlmClient` trait, `ChatRequest`/`ChatResponse`/`ChatChunk` types |
+//! | [`tools`] | `Tool` trait, `ToolResult`, `ToolPermission`, permission model |
+//! | [`error`] | Unified `Error` enum covering all failure modes |
+//! | [`guard`] | `Guard` trait, `GuardResult`, `GuardManager` |
+//! | [`audit`] | `AuditEvent`, `AuditLogger` trait |
+//! | [`retry`] | `RetryPolicy` with exponential backoff |
+//! | [`tokenizer`] | Token counting interface |
+//!
+//! Most users should depend on `echo_agent` (the facade crate) instead of
+//! depending on `echo_core` directly.
 
 pub mod agent;
 pub mod audit;

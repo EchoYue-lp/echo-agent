@@ -1,13 +1,13 @@
-//! ReAct Agent 核心模块
+//! ReAct Agent core module
 //!
-//! ## 模块结构
+//! ## Module Structure
 //!
-//! | 文件 | 职责 |
-//! |------|------|
-//! | `mod.rs` | 结构体定义、`new()`、`impl Agent` trait |
-//! | `run.rs` | 执行引擎（`think` / `process_steps` / `run_react_loop`） |
-//! | `capabilities.rs` | 能力配置（工具 / Skill / MCP / SubAgent 注册） |
-//! | `extract.rs` | 结构化 JSON 提取（`extract_json` / `extract`） |
+//! | File | Responsibility |
+//! |------|----------------|
+//! | `mod.rs` | Struct definition, `new()`, `impl Agent` trait |
+//! | `run.rs` | Execution engine (`think` / `process_steps` / `run_react_loop`) |
+//! | `capabilities.rs` | Capability configuration (tool / skill / MCP / subagent registration) |
+//! | `extract.rs` | Structured JSON extraction (`extract_json` / `extract`) |
 
 pub use crate::agent::config::{AgentConfig, AgentRole};
 use crate::agent::subagent::SubagentRegistry;
@@ -63,7 +63,7 @@ pub mod structured;
 pub(crate) mod subsystems;
 #[cfg(test)]
 mod tests;
-// ── 内置工具名常量 ─────────────────────────────────────────────────────────────
+// ── Built-in tool name constants ────────────────────────────────────────────────
 
 pub(crate) const TOOL_FINAL_ANSWER: &str = "final_answer";
 #[cfg(feature = "tasks")]
@@ -73,7 +73,7 @@ pub(crate) const TOOL_PLAN: &str = "plan";
 #[cfg(feature = "tasks")]
 pub(crate) const TOOL_UPDATE_TASK: &str = "update_task";
 
-/// 判断 LLM 错误是否值得重试（网络/超时/限流/服务端 5xx）
+/// Returns `true` if the LLM error is worth retrying (network, timeout, rate-limit, server 5xx).
 pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
     match err {
         ReactError::Llm(e) => match e.as_ref() {
@@ -85,43 +85,46 @@ pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
     }
 }
 
-// ── ReactAgent 结构体 ─────────────────────────────────────────────────────────
+// ── ReactAgent struct ───────────────────────────────────────────────────────────
 
-/// ReAct（Reasoning + Acting）Agent 实现
+/// ReAct (Reasoning + Acting) Agent implementation.
 ///
-/// 基于 ReAct 范式的自主 Agent，支持工具调用、任务规划、子代理调度、
-/// 长期记忆、思维链、上下文压缩等核心功能。
+/// An autonomous agent based on the ReAct paradigm, supporting tool calling,
+/// task planning, subagent dispatch, long-term memory, chain-of-thought,
+/// context compression, and other core capabilities.
 ///
-/// # 核心组件
+/// # Core Components
 ///
-/// - **配置管理**：通过 `AgentConfig` 控制 Agent 行为和能力
-/// - **上下文管理**：维护对话历史，支持自动压缩和 token 计数
-/// - **工具管理**：注册、发现和执行工具，支持权限控制和沙箱执行
-/// - **子代理系统**：支持 Sync/Fork/Teammate 三种调度模式
-/// - **记忆系统**：长期记忆存储和检索
-/// - **技能系统**：代码和文件技能管理
-/// - **Hook 系统**：工具调用拦截和修改
+/// - **Configuration**: Behavior and capabilities controlled via `AgentConfig`
+/// - **Context management**: Maintains conversation history with auto-compression and token counting
+/// - **Tool management**: Register, discover, and execute tools with permission control and sandbox execution
+/// - **Subagent system**: Supports Sync/Fork/Teammate dispatch modes
+/// - **Memory system**: Long-term memory storage and retrieval
+/// - **Skill system**: Code-based and file-based skill management
+/// - **Hook system**: Tool-call interception and modification
 pub struct ReactAgent {
     pub(crate) config: AgentConfig,
-    /// 工具执行子系统：工具注册/执行、Skill、Hook、MCP、SubAgent、Sandbox
+    /// Tool execution subsystem: tool registry/execution, Skill, Hook, MCP, SubAgent, Sandbox
     pub(crate) tools: ToolExecutionSubsystem,
-    /// 护栏与安全子系统：护栏、权限策略、审计日志、熔断器
+    /// Guard & safety subsystem: guards, permission policy, audit logging, circuit breaker
     pub(crate) guard: GuardSubsystem,
-    /// 记忆与持久化子系统：上下文管理、长期记忆、快照、Checkpoint
+    /// Memory & persistence subsystem: context management, long-term memory, snapshots, checkpointer
     pub(crate) memory: MemorySubsystem,
-    /// 人工介入审批子系统（human-in-the-loop）
+    /// Human-in-the-loop approval subsystem
     pub(crate) approval: ApprovalSubsystem,
     client: Arc<Client>,
     llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
-    /// LLM 配置（可选，不设置时使用环境变量配置）
+    /// LLM configuration (optional; falls back to environment variables when not set)
     llm_config: Option<LlmConfig>,
-    /// 当前流式请求的取消令牌，在 `chat_stream_with_cancel` / `execute_stream_with_cancel` 中设置。
-    /// `create_llm_stream` 读取此字段并传递给 HTTP 层以支持请求级别的流式中止。
-    /// 使用 `tokio::sync::Mutex` 以支持 `&self` 流式方法。
+    /// Cancellation token for the current streaming request, set in
+    /// `chat_stream_with_cancel` / `execute_stream_with_cancel`.
+    /// `create_llm_stream` reads this field and passes it to the HTTP layer
+    /// to support request-level stream cancellation.
+    /// Uses `tokio::sync::Mutex` to support `&self` streaming methods.
     cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
 }
 
-// ── 构造与初始化 ──────────────────────────────────────────────────────────────
+// ── Construction & initialization ──────────────────────────────────────────────
 
 impl ReactAgent {
     #[cfg(feature = "tasks")]
@@ -138,25 +141,26 @@ impl ReactAgent {
         false
     }
 
-    /// 工具调用场景下自动注入的思维链引导语。
-    const COT_INSTRUCTION: &'static str = "在调用工具之前，先用文字简述你的分析思路和执行计划。";
+    /// Chain-of-thought preamble auto-injected before tool calls.
+    const COT_INSTRUCTION: &'static str =
+        "Before calling any tool, briefly describe your analysis and execution plan.";
 
-    /// 创建新的 ReAct Agent 实例
+    /// Create a new ReAct Agent instance.
     ///
-    /// # 参数
-    /// * `config` - Agent 运行时配置
+    /// # Parameters
+    /// * `config` - Agent runtime configuration
     ///
-    /// # 返回值
-    /// 初始化完成的 `ReactAgent` 实例
+    /// # Returns
+    /// A fully initialized `ReactAgent` instance.
     ///
-    /// # 说明
-    /// 该方法会根据配置初始化所有核心组件，包括：
-    /// - 上下文管理器
-    /// - 工具管理器（根据配置启用工具）
-    /// - 子代理系统（根据配置启用子代理调度）
-    /// - 记忆系统（根据配置启用长期记忆）
-    /// - 技能注册表
-    /// - Hook 系统
+    /// # Details
+    /// This method initializes all core components based on the config, including:
+    /// - Context manager
+    /// - Tool manager (tools enabled per config)
+    /// - Subagent system (subagent dispatch enabled per config)
+    /// - Memory system (long-term memory enabled per config)
+    /// - Skill registry
+    /// - Hook system
     pub fn new(config: AgentConfig) -> Self {
         let system_prompt = Self::build_system_prompt(&config);
 
@@ -172,10 +176,10 @@ impl ReactAgent {
             .build()
             .unwrap_or_default();
 
-        // ── 核心工具 ─────────────────────────────────────────────
+        // ── Core tools ─────────────────────────────────────────────
         tool_manager.register(Box::new(FinalAnswerTool));
 
-        // ── 子模块初始化 ─────────────────────────────────────────
+        // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
         let task_manager = Arc::new(TaskManager::default());
         let subagent_registry = Arc::new(SubagentRegistry::new());
@@ -186,8 +190,8 @@ impl ReactAgent {
         #[cfg(feature = "human-loop")]
         let approval_provider = crate::human_loop::default_provider();
 
-        // ── 按功能注册工具 ───────────────────────────────────────
-        // AgentDispatch 由 runtime 配置 enable_subagent 控制
+        // ── Feature-gated tool registration ───────────────────────
+        // AgentDispatch is controlled by runtime config enable_subagent
         if config.enable_subagent {
             tool_manager.register(Box::new(AgentDispatchTool::new(
                 subagent_executor.clone(),
@@ -214,10 +218,10 @@ impl ReactAgent {
         }
         Self::register_feature_gated_tools(&config, &mut tool_manager);
 
-        // ── 记忆存储 ─────────────────────────────────────────────
+        // ── Memory store ──────────────────────────────────────────
         let store = Self::setup_memory_store(&config, &mut tool_manager);
 
-        // ── 检查点 ───────────────────────────────────────────────
+        // ── Checkpointer ─────────────────────────────────────────
         let checkpointer = Self::setup_checkpointer(&config);
 
         Self {
@@ -262,9 +266,9 @@ impl ReactAgent {
         }
     }
 
-    /// 从配置文件创建 Agent
+    /// Create an Agent from a configuration file.
     ///
-    /// 搜索 `echo-agent.yaml` 并加载配置。
+    /// Searches for `echo-agent.yaml` and loads the config.
     ///
     /// ```no_run
     /// use echo_agent::agent::react::ReactAgent;
@@ -275,7 +279,7 @@ impl ReactAgent {
         Self::new(app_config.to_agent_config())
     }
 
-    // ── 构造函数辅助方法 ─────────────────────────────────────────────────────────
+    // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
         let mut prompt = if config.enable_tool && config.enable_cot {
@@ -422,16 +426,17 @@ impl ReactAgent {
                 Some(store)
             }
             Err(e) => {
-                tracing::warn!("⚠️ 长期记忆 Store 初始化失败，记忆功能已禁用: {e}");
+                tracing::warn!("Long-term memory Store init failed, memory disabled: {e}");
                 None
             }
         }
     }
 
-    /// 当 embedding 环境变量配置存在时，用 [`EmbeddingStore`] 包装底层 Store，
-    /// 使 `remember` 写入自动向量化，`search_memory` 的混合检索真正生效。
+    /// When embedding environment variables are configured, wraps the underlying
+    /// Store with [`EmbeddingStore`] so that `remember` writes are auto-vectorized
+    /// and `search_memory` hybrid search works.
     ///
-    /// 若未配置 embedding，则直接返回原始 Store，保持原有行为。
+    /// If no embedding is configured, returns the original Store unchanged.
     fn wrap_with_embedding_store_if_available(
         inner: Arc<dyn Store>,
         memory_path: &str,
@@ -442,7 +447,9 @@ impl ReactAgent {
             && std::env::var("OPENAI_API_KEY").is_err()
             && std::env::var("EMBEDDING_APIKEY").is_err()
         {
-            tracing::info!("📚 记忆 Store: 纯关键词检索（未配置 embedding 环境变量）");
+            tracing::info!(
+                "Memory Store: keyword-only retrieval (no embedding env vars configured)"
+            );
             return inner;
         }
 
@@ -453,14 +460,14 @@ impl ReactAgent {
             Ok(embedding_store) => {
                 tracing::info!(
                     vec_path = %vec_path,
-                    "🧠 记忆 Store: 已启用向量索引（语义/混合检索可用）"
+                    "Memory Store: vector index enabled (semantic/hybrid search available)"
                 );
                 Arc::new(embedding_store)
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "⚠️ EmbeddingStore 初始化失败，回退到纯关键词检索"
+                    "EmbeddingStore init failed, falling back to keyword-only retrieval"
                 );
                 inner
             }
@@ -472,22 +479,22 @@ impl ReactAgent {
         match FileCheckpointer::new(&config.checkpointer_path) {
             Ok(cp) => Some(Arc::new(cp)),
             Err(e) => {
-                tracing::warn!("⚠️ Checkpointer 初始化失败，会话恢复功能已禁用: {e}");
+                tracing::warn!("Checkpointer init failed, session resume disabled: {e}");
                 None
             }
         }
     }
 
-    // ── LLM 配置注入 ─────────────────────────────────────────────────────────────
+    // ── LLM config injection ──────────────────────────────────────────────────────
 
-    /// 注入自定义 LLM 配置（依赖注入模式）
+    /// Inject a custom LLM configuration (dependency injection pattern).
     ///
-    /// 使用此方法可以：
-    /// - 动态切换 API 配置
-    /// - 支持多租户场景
-    /// - 方便测试
+    /// Use this method to:
+    /// - Dynamically switch API configurations
+    /// - Support multi-tenant scenarios
+    /// - Facilitate testing
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use echo_agent::llm::LlmConfig;
@@ -500,7 +507,7 @@ impl ReactAgent {
     /// );
     ///
     /// let agent = ReactAgent::new(
-    ///     AgentConfig::standard("qwen3-max", "assistant", "你是一个助手")
+    ///     AgentConfig::standard("qwen3-max", "assistant", "You are a helpful assistant")
     /// ).with_llm_config(llm_config);
     /// ```
     pub fn with_llm_config(mut self, config: LlmConfig) -> Self {
@@ -509,43 +516,43 @@ impl ReactAgent {
         self
     }
 
-    /// 注入自定义 LLM 客户端
+    /// Inject a custom LLM client.
     pub fn with_llm_client(mut self, client: Arc<dyn crate::llm::LlmClient>) -> Self {
         self.config.model_name = client.model_name().to_string();
         self.llm_client = Some(client);
         self
     }
 
-    /// 设置 LLM 配置
+    /// Set the LLM configuration.
     pub fn set_llm_config(&mut self, config: LlmConfig) {
         self.config.model_name = config.model.clone();
         self.llm_config = Some(config);
     }
 
-    /// 设置自定义 LLM 客户端
+    /// Set a custom LLM client.
     pub fn set_llm_client(&mut self, client: Arc<dyn crate::llm::LlmClient>) {
         self.config.model_name = client.model_name().to_string();
         self.llm_client = Some(client);
     }
 
-    /// 获取当前 LLM 配置
+    /// Get the current LLM configuration.
     pub fn llm_config(&self) -> Option<&LlmConfig> {
         self.llm_config.as_ref()
     }
 
-    // ── 访问器 & 设置器 ────────────────────────────────────────────────────────
+    // ── Accessors & setters ──────────────────────────────────────────────────────
 
-    /// 获取 AgentConfig 的只读引用
+    /// Get a read-only reference to the AgentConfig.
     pub fn config(&self) -> &AgentConfig {
         &self.config
     }
 
-    /// 注入自定义长期记忆 Store（仅替换自动注入通道，不重注册工具）
+    /// Inject a custom long-term memory Store (replaces the injection channel only; does not re-register tools).
     pub fn set_store(&mut self, store: Arc<dyn Store>) {
         self.memory.store = Some(store);
     }
 
-    /// 替换长期记忆 Store，并重新注册 `remember` / `recall` / `forget` 工具
+    /// Replace the long-term memory Store and re-register `remember` / `recall` / `forget` tools.
     ///
     /// ```rust,no_run
     /// use echo_agent::memory::{EmbeddingStore, FileStore, HttpEmbedder};
@@ -582,53 +589,53 @@ impl ReactAgent {
         self.memory.store = Some(store);
     }
 
-    /// 获取当前长期记忆 Store 的只读引用
+    /// Get a read-only reference to the current long-term memory Store.
     pub fn store(&self) -> Option<&Arc<dyn Store>> {
         self.memory.store.as_ref()
     }
 
-    /// 注入线程状态存储并绑定 session_id，启用跨进程线程恢复
+    /// Inject a thread-state store and bind a session_id to enable cross-process thread recovery.
     pub fn set_checkpointer(&mut self, checkpointer: Arc<dyn Checkpointer>, session_id: String) {
         self.memory.checkpointer = Some(checkpointer);
         self.config.session_id = Some(session_id);
     }
 
-    /// `set_checkpointer()` 的语义化别名。
+    /// Semantic alias for `set_checkpointer()`.
     pub fn set_thread_store(&mut self, store: Arc<dyn Checkpointer>, session_id: String) {
         self.set_checkpointer(store, session_id);
     }
 
-    /// 获取当前线程状态存储的只读引用
+    /// Get a read-only reference to the current thread-state store.
     pub fn checkpointer(&self) -> Option<&Arc<dyn Checkpointer>> {
         self.memory.checkpointer.as_ref()
     }
 
-    /// `checkpointer()` 的语义化别名。
+    /// Semantic alias for `checkpointer()`.
     pub fn thread_store(&self) -> Option<&Arc<dyn Checkpointer>> {
         self.memory.checkpointer.as_ref()
     }
 
-    /// 设置对话历史投影使用的 conversation_id。
+    /// Set the conversation_id used for conversation history projection.
     pub fn set_conversation_id(&mut self, conversation_id: impl Into<String>) {
         self.config.conversation_id = Some(conversation_id.into());
     }
 
-    /// 获取当前对话历史投影的 conversation_id。
+    /// Get the current conversation_id for conversation history projection.
     pub fn conversation_id(&self) -> Option<&str> {
         self.config.get_conversation_id()
     }
 
-    /// 获取当前对话历史消息（只读）
+    /// Get the current conversation history messages (read-only).
     pub async fn get_messages(&self) -> Vec<crate::llm::types::Message> {
         self.memory.context.lock().await.messages().to_vec()
     }
 
-    /// 获取已注册的工具名称列表
+    /// Get the list of registered tool names.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.tool_manager.list_tools()
     }
 
-    /// 获取已注册的 Skill 名称列表
+    /// Get the list of registered Skill names.
     pub fn skill_names(&self) -> Vec<&str> {
         self.tools
             .skill_registry
@@ -638,7 +645,7 @@ impl ReactAgent {
             .collect()
     }
 
-    /// 获取已连接的 MCP 服务端名称列表
+    /// Get the list of connected MCP server names.
     #[cfg(feature = "mcp")]
     pub fn mcp_server_names(&self) -> Vec<&str> {
         self.tools.mcp_manager.server_names()
@@ -649,19 +656,20 @@ impl ReactAgent {
         vec![]
     }
 
-    /// 启用熔断器
+    /// Enable the circuit breaker.
     ///
-    /// LLM 连续失败达到阈值后自动熔断，等待 timeout 后恢复探测。
+    /// Automatically trips after consecutive LLM failures reach the threshold,
+    /// then probes for recovery after the configured timeout.
     pub fn set_circuit_breaker(&mut self, config: CircuitBreakerConfig) {
         self.guard.circuit_breaker = Some(Arc::new(CircuitBreaker::new(config)));
     }
 
-    /// 设置护栏管理器
+    /// Set the guard manager.
     pub fn set_guard_manager(&mut self, manager: GuardManager) {
         self.guard.guard_manager = Some(manager);
     }
 
-    /// 设置权限策略
+    /// Set the permission policy.
     pub fn set_permission_policy(
         &mut self,
         policy: Arc<dyn crate::tools::permission::PermissionPolicy>,
@@ -670,19 +678,19 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "human-loop")]
-    /// 设置统一权限服务
+    /// Set the unified permission service.
     ///
-    /// 一旦设置，`check_tool_approval()` 将优先使用此服务，
-    /// 回退到旧的 PermissionPolicy 逻辑。
+    /// Once set, `check_tool_approval()` will prefer this service,
+    /// falling back to the legacy PermissionPolicy logic.
     pub fn set_permission_service(&mut self, service: Arc<PermissionService>) {
         self.approval.permission_service = Some(service);
     }
 
     #[cfg(feature = "human-loop")]
-    /// 从旧的权限组件构建统一 PermissionService 并设置
+    /// Build and set a unified PermissionService from legacy components.
     ///
-    /// 将当前 `permission_policy` + `approval_provider` 合并为一个
-    /// `PermissionService`，保证管线顺序正确（mode → hooks → rules → handler）。
+    /// Merges the current `permission_policy` + `approval_provider` into a single
+    /// `PermissionService`, ensuring correct pipeline order (mode → hooks → rules → handler).
     pub fn build_permission_service(&mut self) {
         use crate::human_loop::service::PermissionService;
 
@@ -699,14 +707,14 @@ impl ReactAgent {
         self.approval.permission_service = Some(Arc::new(service));
     }
 
-    /// 设置审计日志记录器
+    /// Set the audit logger.
     pub fn set_audit_logger(&mut self, logger: Arc<dyn crate::audit::AuditLogger>) {
         self.guard.audit_logger = Some(logger);
     }
 
-    // ── 快照 & 回滚 ──────────────────────────────────────────────────────────
+    // ── Snapshots & rollback ────────────────────────────────────────────────────
 
-    /// 设置沙箱管理器，为 skill 脚本执行提供安全隔离
+    /// Set the sandbox manager to provide secure isolation for skill script execution.
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
         self.tools
             .skill_registry
@@ -722,7 +730,7 @@ impl ReactAgent {
         self.tools.sandbox_manager = Some(manager);
     }
 
-    /// 启用状态快照功能
+    /// Enable state snapshot functionality.
     pub fn set_snapshot_manager(&self, manager: SnapshotManager) {
         let mut guard = self
             .memory
@@ -732,7 +740,7 @@ impl ReactAgent {
         *guard = Some(manager);
     }
 
-    /// 手动捕获一份当前对话状态的快照，返回快照 ID
+    /// Manually capture a snapshot of the current conversation state, returning the snapshot ID.
     pub async fn snapshot(&self) -> Option<String> {
         let ctx = self.memory.context.lock().await;
         let messages = ctx.messages().to_vec();
@@ -744,10 +752,10 @@ impl ReactAgent {
         guard.as_mut().map(|mgr| mgr.capture(0, &messages))
     }
 
-    /// 回滚到 N 步之前的快照
+    /// Roll back to a snapshot N steps ago.
     ///
-    /// `steps_back = 1` 表示回到最近一次快照。
-    /// 成功时恢复对话历史并返回快照信息。
+    /// `steps_back = 1` means go back to the most recent snapshot.
+    /// On success, restores the conversation history and returns snapshot info.
     pub async fn rollback(&self, steps_back: usize) -> Option<StateSnapshot> {
         let snapshot = {
             let mut guard = self
@@ -766,7 +774,7 @@ impl ReactAgent {
         Some(snapshot)
     }
 
-    /// 回滚到指定 ID 的快照
+    /// Roll back to the snapshot with the given ID.
     pub async fn rollback_to(&self, snapshot_id: &str) -> Option<StateSnapshot> {
         let snapshot = {
             let mut guard = self
@@ -785,7 +793,7 @@ impl ReactAgent {
         Some(snapshot)
     }
 
-    /// 获取所有快照列表
+    /// Get the list of all snapshots.
     pub fn snapshots(&self) -> Vec<StateSnapshot> {
         let guard = self
             .memory
@@ -798,7 +806,7 @@ impl ReactAgent {
             .unwrap_or_default()
     }
 
-    /// 获取最新快照
+    /// Get the latest snapshot.
     pub fn latest_snapshot(&self) -> Option<StateSnapshot> {
         let guard = self
             .memory
@@ -809,16 +817,16 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "human-loop")]
-    /// 替换审批 Provider，支持在运行时切换审批渠道。
+    /// Replace the approval provider, enabling runtime switching of the approval channel.
     pub fn set_approval_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
         self.set_human_loop_provider(provider);
     }
 
     #[cfg(feature = "human-loop")]
-    /// 设置人工介入 Provider
+    /// Set the human-in-the-loop provider.
     ///
-    /// 同时更新 `approval_provider`（工具审批 guard）和 `human_in_loop` 内置工具（LLM
-    /// 主动触发），保证两者始终指向同一个 provider。
+    /// Updates both `approval_provider` (tool approval guard) and the `human_in_loop`
+    /// built-in tool (LLM-initiated triggers), keeping both pointing to the same provider.
     pub fn set_human_loop_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
         self.approval.approval_provider = provider.clone();
         if self.tools.tool_manager.get_tool("human_in_loop").is_some() {
@@ -828,15 +836,17 @@ impl ReactAgent {
         }
     }
 
-    // ── 对话持久化 ──────────────────────────────────────────────────────────────
+    // ── Conversation persistence ──────────────────────────────────────────────────
 
-    /// 设置对话历史投影 Store
+    /// Set the conversation history projection Store.
     ///
-    /// 启用后，Agent 会在持久化线程状态的同时，将当前 transcript 投影到
-    /// `ConversationStore` 中，供历史浏览与产品层查询使用。
+    /// When enabled, the agent projects the current transcript into a
+    /// `ConversationStore` alongside thread-state persistence, for history
+    /// browsing and product-layer queries.
     ///
-    /// 注意：该功能要求显式设置独立的 `conversation_id`；
-    /// `session_id` 仅用于线程状态恢复，不再作为历史投影的回退标识。
+    /// Note: this feature requires an explicit, separate `conversation_id`;
+    /// `session_id` is only used for thread-state recovery, not as a fallback
+    /// for history projection.
     pub fn set_conversation_store(
         &mut self,
         store: Arc<dyn crate::memory::conversation::ConversationStore>,
@@ -844,18 +854,19 @@ impl ReactAgent {
         self.memory.conversation_store = Some(store);
     }
 
-    /// 加载历史消息到 agent 上下文（替换现有上下文）
+    /// Load historical messages into the agent context (replaces existing context).
     ///
-    /// 用于从持久化存储恢复对话，使 agent 可以继续之前的对话。
-    /// 消息应包含 system prompt 作为第一条（如需要）。
+    /// Used to restore a conversation from persistent storage so the agent
+    /// can continue a previous dialogue. Messages should include the system
+    /// prompt as the first entry if needed.
     pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) {
         self.memory.context.lock().await.set_messages(messages);
     }
 
-    /// 关闭 agent 并释放所有资源
+    /// Shut down the agent and release all resources.
     ///
-    /// 关闭 MCP 连接、取消后台任务、关闭 WebSocket 服务器。
-    /// 当 agent 不再需要时应调用此方法，或依赖 `Drop` 自动调用。
+    /// Closes MCP connections, cancels background tasks, and shuts down WebSocket servers.
+    /// Call this when the agent is no longer needed, or rely on `Drop` for automatic cleanup.
     pub async fn shutdown(&self) {
         #[cfg(feature = "mcp")]
         {
@@ -885,7 +896,7 @@ impl Drop for ReactAgent {
     }
 }
 
-// ── LLM 每轮推理的输出类型 ────────────────────────────────────────────────────
+// ── LLM per-turn output type ───────────────────────────────────────────────────
 
 pub use echo_core::agent::StepType;
 
@@ -1015,7 +1026,7 @@ impl Agent for ReactAgent {
             .collect()
     }
 
-    /// 获取工具定义列表（包含名称、描述、参数 Schema）
+    /// Get the list of tool definitions (name, description, parameter schema).
     fn tool_definitions(&self) -> Vec<crate::llm::types::ToolDefinition> {
         self.tools
             .tool_manager
@@ -1066,13 +1077,14 @@ impl Agent for ReactAgent {
     }
 }
 
-// ── ReactAgent 多模态扩展方法 ────────────────────────────────────────────────────
+// ── ReactAgent multimodal extension methods ─────────────────────────────────────
 
 impl ReactAgent {
-    /// 流式多轮对话（多模态消息版本）
+    /// Streaming multi-turn conversation (multimodal message version).
     ///
-    /// 与 `chat_stream` 相同，但接受预构建的 `Message` 以支持图片、文件等附件。
-    /// 保留上下文，适合多轮多模态对话。
+    /// Same as `chat_stream`, but accepts a pre-built `Message` to support
+    /// images, files, and other attachments. Preserves context, suitable for
+    /// multi-turn multimodal dialogue.
     pub async fn chat_stream_message(
         &self,
         message: crate::llm::types::Message,
@@ -1081,10 +1093,11 @@ impl ReactAgent {
             .await
     }
 
-    /// 流式执行任务（多模态消息版本）
+    /// Streaming task execution (multimodal message version).
     ///
-    /// 与 `execute_stream` 相同，但接受预构建的 `Message` 以支持图片、文件等附件。
-    /// 重置上下文，适合单轮多模态任务。
+    /// Same as `execute_stream`, but accepts a pre-built `Message` to support
+    /// images, files, and other attachments. Resets context, suitable for
+    /// single-turn multimodal tasks.
     pub async fn execute_stream_message(
         &self,
         message: crate::llm::types::Message,
@@ -1093,20 +1106,20 @@ impl ReactAgent {
             .await
     }
 
-    /// 发送带图片 URL 的消息（多模态）
+    /// Send a message with an image URL (multimodal).
     ///
-    /// 直接将图片 URL 作为 `image_url` part 发送给 LLM。
-    /// 如果你已经持有本地文件或 base64 数据，请使用 `chat_multimodal()`
-    /// 并自行构造 `data:image/...;base64,...` 的 `ImageUrl.url`。
+    /// Sends the image URL directly as an `image_url` part to the LLM.
+    /// If you already have a local file or base64 data, use `chat_multimodal()`
+    /// and construct `ImageUrl.url` as `data:image/...;base64,...` yourself.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// # use echo_agent::prelude::*;
     /// # async fn test() -> echo_agent::error::Result<()> {
     /// # let mut agent = ReactAgentBuilder::new().model("qwen3.5-plus").build()?;
     /// let response = agent.chat_with_image_url(
-    ///     "描述这张图片",
+    ///     "Describe this image",
     ///     "https://example.com/image.jpg"
     /// ).await?;
     /// # Ok(())
@@ -1130,9 +1143,9 @@ impl ReactAgent {
         self.chat_multimodal(message).await
     }
 
-    /// 发送多模态消息
+    /// Send a multimodal message.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// # use echo_agent::prelude::*;
@@ -1141,7 +1154,7 @@ impl ReactAgent {
     /// use echo_agent::llm::types::{ContentPart, ImageUrl, Message};
     ///
     /// let message = Message::user_multimodal(vec![
-    ///     ContentPart::Text { text: "描述这些图片".to_string() },
+    ///     ContentPart::Text { text: "Describe these images".to_string() },
     ///     ContentPart::ImageUrl {
     ///         image_url: ImageUrl {
     ///             url: "https://example.com/img1.jpg".to_string(),
@@ -1163,7 +1176,7 @@ impl ReactAgent {
     pub async fn chat_multimodal(&self, message: crate::llm::types::Message) -> Result<String> {
         use crate::llm::{ChatRequest, chat};
 
-        // 确保上下文已初始化（包含 system prompt）
+        // Ensure context is initialized (includes system prompt)
         {
             let mut ctx = self.memory.context.lock().await;
             if ctx.messages().is_empty() {
@@ -1171,11 +1184,11 @@ impl ReactAgent {
                     self.config.system_prompt.clone(),
                 ));
             }
-            // 添加多模态用户消息
+            // Add multimodal user message
             ctx.push(message.clone());
         }
 
-        // 准备消息列表
+        // Prepare message list
         let messages = {
             let ctx = self.memory.context.lock().await;
             ctx.messages().to_vec()
@@ -1215,7 +1228,7 @@ impl ReactAgent {
                 .unwrap_or_default()
         };
 
-        // 添加助手回复到上下文
+        // Add assistant reply to context
         self.memory
             .context
             .lock()
@@ -1225,16 +1238,16 @@ impl ReactAgent {
         Ok(content)
     }
 
-    /// 执行带图片 URL 的任务（单轮，重置上下文）
+    /// Execute a task with an image URL (single-turn, resets context).
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// # use echo_agent::prelude::*;
     /// # async fn test() -> echo_agent::error::Result<()> {
     /// # let mut agent = ReactAgentBuilder::new().model("qwen3.5-plus").build()?;
     /// let response = agent
-    ///     .execute_with_image_url("分析这张停车缴费单", "https://example.com/receipt.jpg")
+    ///     .execute_with_image_url("Analyze this parking receipt", "https://example.com/receipt.jpg")
     ///     .await?;
     /// # Ok(())
     /// # }
@@ -1242,7 +1255,7 @@ impl ReactAgent {
     pub async fn execute_with_image_url(&self, task: &str, image_url: &str) -> Result<String> {
         use crate::llm::types::{ContentPart, ImageUrl, Message};
 
-        // 重置上下文
+        // Reset context
         self.reset_messages().await;
 
         let message = Message::user_multimodal(vec![

@@ -1,49 +1,49 @@
-//! OpenAI Chat Completions API 类型定义
+//! OpenAI Chat Completions API type definitions
 
 use crate::tools::Tool;
 use serde::{Deserialize, Serialize};
 
-// ── 多模态内容 ───────────────────────────────────────────────────────────────
+// ── Multimodal Content ────────────────────────────────────────────────────────
 
-/// 消息内容的单个组成部分（多模态）
+/// A single component of message content (multimodal)
 ///
-/// 对应 OpenAI Vision / Anthropic 多模态 API 的 content parts 格式。
+/// Corresponds to OpenAI Vision / Anthropic multimodal API content parts format.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
-    /// 纯文本
+    /// Plain text
     Text {
-        /// 文本内容
+        /// Text content
         text: String,
     },
-    /// 图片（Base64 编码或 URL）
+    /// Image (Base64 encoded or URL)
     ImageUrl {
-        /// 图片 URL 或 Base64 数据
+        /// Image URL or Base64 data
         image_url: ImageUrl,
     },
-    /// 文件附件（内联 Base64）
+    /// File attachment (inline Base64)
     File {
-        /// 文件名
+        /// File name
         name: String,
-        /// 文件内容（Base64 编码）
+        /// File content (Base64 encoded)
         content: String,
     },
 }
 
-/// 图片 URL 或 Base64 数据
+/// Image URL or Base64 data
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ImageUrl {
-    /// `data:image/png;base64,...` 或 `https://...`
+    /// `data:image/png;base64,...` or `https://...`
     pub url: String,
-    /// 可选细节级别：`"auto"` | `"low"` | `"high"`
+    /// Optional detail level: `"auto"` | `"low"` | `"high"`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
-/// 消息内容：兼容纯文本和多模态 parts 两种形式。
+/// Message content: compatible with both plain text and multimodal parts forms.
 ///
-/// 序列化时：
-/// - `Text("hello")` → `"hello"`（与旧版 API 完全兼容）
+/// Serialization behavior:
+/// - `Text("hello")` → `"hello"` (fully backward-compatible with legacy API)
 /// - `Parts([...])` → `[{"type":"text","text":"..."},...]`
 #[derive(Debug, Clone, Default)]
 pub enum MessageContent {
@@ -88,7 +88,7 @@ impl<'de> Deserialize<'de> for MessageContent {
 }
 
 impl MessageContent {
-    /// 提取纯文本内容（多模态时拼接所有 Text 部分）
+    /// Extract plain text content (joins all Text parts when multimodal)
     pub fn as_text(&self) -> Option<String> {
         match self {
             MessageContent::Text(s) => {
@@ -124,7 +124,7 @@ impl MessageContent {
         }
     }
 
-    /// 兼容旧版 `Option<String>::as_deref()` 调用点。
+    /// Backward-compatible with legacy `Option<String>::as_deref()` call sites.
     pub fn as_deref(&self) -> Option<&str> {
         self.as_text_ref()
     }
@@ -146,11 +146,12 @@ impl MessageContent {
     }
 }
 
-// ── 对话消息 ─────────────────────────────────────────────────────────────────
+// ── Conversation Messages ─────────────────────────────────────────────────────
 
-/// 对话消息
+/// Conversation message
 ///
-/// `content` 字段统一使用 [`MessageContent`] 枚举，支持纯文本和多模态内容。
+/// The `content` field uniformly uses the [`MessageContent`] enum, supporting
+/// plain text and multimodal content.
 #[derive(Debug, Clone, Default)]
 pub struct Message {
     /// Message role such as `system`, `user`, `assistant`, or `tool`.
@@ -229,7 +230,7 @@ impl<'de> Deserialize<'de> for Message {
 }
 
 impl Message {
-    /// 创建系统消息
+    /// Create a system message
     pub fn system(content: String) -> Self {
         Self {
             role: "system".to_string(),
@@ -241,7 +242,7 @@ impl Message {
         }
     }
 
-    /// 创建用户消息
+    /// Create a user message
     pub fn user(content: String) -> Self {
         Self {
             role: "user".to_string(),
@@ -253,7 +254,7 @@ impl Message {
         }
     }
 
-    /// 创建多模态用户消息
+    /// Create a multimodal user message
     pub fn user_multimodal(parts: Vec<ContentPart>) -> Self {
         Self {
             role: "user".to_string(),
@@ -265,15 +266,15 @@ impl Message {
         }
     }
 
-    /// 创建包含图片的用户消息
+    /// Create a user message that includes an image
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust
     /// use echo_core::llm::types::Message;
     ///
     /// let msg = Message::user_with_image(
-    ///     "请描述这张图片",
+    ///     "Please describe this image",
     ///     "image/png",
     ///     "iVBORw0KGgo...", // base64 data
     /// );
@@ -292,7 +293,7 @@ impl Message {
         ])
     }
 
-    /// 创建包含图片 URL 的用户消息
+    /// Create a user message with an image URL
     pub fn user_with_image_url(text: &str, image_url: &str) -> Self {
         Self::user_multimodal(vec![
             ContentPart::Text {
@@ -307,7 +308,7 @@ impl Message {
         ])
     }
 
-    /// 创建助手消息
+    /// Create an assistant message
     pub fn assistant(content: String) -> Self {
         Self {
             role: "assistant".to_string(),
@@ -319,7 +320,7 @@ impl Message {
         }
     }
 
-    /// 创建包含工具调用的助手消息
+    /// Create an assistant message with tool calls
     pub fn assistant_with_tools(tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: "assistant".to_string(),
@@ -331,7 +332,7 @@ impl Message {
         }
     }
 
-    /// 创建工具结果消息
+    /// Create a tool result message
     pub fn tool_result(tool_call_id: String, name: String, content: String) -> Self {
         Self {
             role: "tool".to_string(),
@@ -343,14 +344,14 @@ impl Message {
         }
     }
 
-    /// 获取纯文本内容。
+    /// Get plain text content.
     ///
-    /// 若消息包含多模态内容，则提取并拼接所有 Text 部分。
+    /// If the message contains multimodal content, all Text parts are extracted and joined.
     pub fn text_content(&self) -> Option<String> {
         self.content.as_text()
     }
 
-    /// 兼容旧版直接读取 `content_parts` 的调用点。
+    /// Backward-compatible with legacy call sites that read `content_parts` directly.
     pub fn content_parts(&self) -> Option<&[ContentPart]> {
         self.content.parts()
     }
@@ -361,35 +362,35 @@ impl Message {
     }
 }
 
-/// LLM 发起的单次工具调用
+/// A single tool call initiated by the LLM
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolCall {
-    /// 工具调用的唯一标识符
+    /// Unique identifier for the tool call
     pub id: String,
-    /// 工具调用类型，通常为 "function"
+    /// Tool call type, typically "function"
     #[serde(rename = "type")]
     pub call_type: String,
-    /// 函数调用详情
+    /// Function call details
     pub function: FunctionCall,
 }
 
-/// 工具调用的函数信息
+/// Function information for a tool call
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FunctionCall {
-    /// 函数名称
+    /// Function name
     pub name: String,
-    /// 函数参数（JSON 字符串）
+    /// Function arguments (JSON string)
     pub arguments: String,
 }
 
-/// 结构化输出的 JSON Schema 规格
+/// JSON Schema spec for structured output
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct JsonSchemaSpec {
-    /// JSON Schema 名称
+    /// JSON Schema name
     pub name: String,
-    /// JSON Schema 定义
+    /// JSON Schema definition
     pub schema: serde_json::Value,
-    /// 是否严格验证（默认 true）
+    /// Whether to enforce strict validation (default true)
     #[serde(default = "default_true")]
     pub strict: bool,
 }
@@ -398,23 +399,23 @@ fn default_true() -> bool {
     true
 }
 
-/// 响应格式控制
+/// Response format control
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
-    /// 纯文本响应
+    /// Plain text response
     Text,
-    /// JSON 对象响应
+    /// JSON object response
     JsonObject,
-    /// 符合 JSON Schema 的响应
+    /// JSON Schema constrained response
     JsonSchema {
-        /// JSON Schema 规格
+        /// JSON Schema spec
         json_schema: JsonSchemaSpec,
     },
 }
 
 impl ResponseFormat {
-    /// 创建 JSON Schema 响应格式
+    /// Create a JSON Schema response format
     pub fn json_schema(name: impl Into<String>, schema: serde_json::Value) -> Self {
         Self::JsonSchema {
             json_schema: JsonSchemaSpec {
@@ -425,65 +426,65 @@ impl ResponseFormat {
         }
     }
 
-    /// 检查是否为 JSON 响应格式
+    /// Check whether this is a JSON response format
     pub fn is_json(&self) -> bool {
         matches!(self, Self::JsonObject | Self::JsonSchema { .. })
     }
 }
 
-/// OpenAI `/chat/completions` 请求体
+/// OpenAI `/chat/completions` request body
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionRequest {
-    /// 模型名称
+    /// Model name
     pub model: String,
-    /// 对话消息列表
+    /// List of conversation messages
     pub messages: Vec<Message>,
-    /// 可选工具定义列表
+    /// Optional tool definition list
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
-    /// 工具调用策略（如 "auto", "none", 或具体工具名）
+    /// Tool call strategy (e.g. "auto", "none", or a specific tool name)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<String>,
-    /// 采样温度（0.0-2.0）
+    /// Sampling temperature (0.0-2.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// 最大生成 token 数
+    /// Maximum number of tokens to generate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// 是否启用流式响应
+    /// Whether to enable streaming response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
-    /// 流式响应选项（如 include_usage）
+    /// Streaming response options (e.g. include_usage)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<serde_json::Value>,
-    /// 响应格式控制
+    /// Response format control
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
 }
 
-/// 发送给 LLM 的工具定义
+/// Tool definition sent to the LLM
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolDefinition {
-    /// 工具类型，通常为 "function"
+    /// Tool type, typically "function"
     #[serde(rename = "type")]
     pub tool_type: String,
-    /// 函数规格
+    /// Function spec
     pub function: FunctionSpec,
 }
 
-/// 工具的函数声明
+/// Function declaration for a tool
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FunctionSpec {
-    /// 函数名称
+    /// Function name
     pub name: String,
-    /// 函数描述
+    /// Function description
     pub description: String,
-    /// 函数参数 JSON Schema
+    /// Function parameter JSON Schema
     pub parameters: serde_json::Value,
 }
 
 impl ToolDefinition {
-    /// 从 Tool trait 对象创建工具定义
+    /// Create a tool definition from a Tool trait object
     pub fn from_tool(tool: &dyn Tool) -> Self {
         Self {
             tool_type: "function".to_string(),
@@ -496,130 +497,130 @@ impl ToolDefinition {
     }
 }
 
-/// OpenAI 聊天补全响应
+/// OpenAI chat completion response
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ChatCompletionResponse {
-    /// 响应 ID
+    /// Response ID
     #[serde(default)]
     pub id: String,
-    /// 候选响应列表
+    /// List of candidate responses
     #[serde(default)]
     pub choices: Vec<Choice>,
-    /// 创建时间戳（秒）
+    /// Creation timestamp (seconds)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<u64>,
-    /// 模型名称
+    /// Model name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Token 使用统计
+    /// Token usage statistics
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// 响应中的额外字段（未显式建模）
+    /// Extra fields in the response (not explicitly modeled)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
 }
 
-/// 候选响应
+/// Candidate response
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Choice {
-    /// 消息内容
+    /// Message content
     pub message: Message,
-    /// 结束原因（如 "stop", "length", "tool_calls" 等）
+    /// Finish reason (e.g. "stop", "length", "tool_calls", etc.)
     #[serde(default)]
     pub finish_reason: Option<String>,
-    /// 候选索引
+    /// Candidate index
     #[serde(default)]
     pub index: Option<u32>,
 }
 
-/// Token 使用统计
+/// Token usage statistics
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Usage {
-    /// 提示 token 数
+    /// Prompt token count
     #[serde(default)]
     pub prompt_tokens: Option<u32>,
-    /// 补全 token 数
+    /// Completion token count
     #[serde(default)]
     pub completion_tokens: Option<u32>,
-    /// 总 token 数
+    /// Total token count
     #[serde(default)]
     pub total_tokens: Option<u32>,
 }
 
-// ── 流式响应类型 ──────────────────────────────────────────────────────────────
+// ── Streaming Response Types ───────────────────────────────────────────────────
 
-/// SSE 流式响应的单个 chunk
+/// A single chunk from an SSE streaming response
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChatCompletionChunk {
-    /// 响应 ID
+    /// Response ID
     #[serde(default)]
     pub id: String,
-    /// 候选响应列表
+    /// List of candidate responses
     #[serde(default)]
     pub choices: Vec<ChunkChoice>,
-    /// Token 使用统计（仅在最后一帧出现，需配合 stream_options.include_usage）
+    /// Token usage stats (only present in final chunk when stream_options.include_usage is set)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
 }
 
-/// 流式候选响应
+/// Streaming candidate response
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChunkChoice {
-    /// 增量消息内容
+    /// Incremental message content
     pub delta: DeltaMessage,
-    /// 结束原因
+    /// Finish reason
     #[serde(default)]
     pub finish_reason: Option<String>,
-    /// 候选索引
+    /// Candidate index
     #[serde(default)]
     pub index: u32,
 }
 
-/// 流式响应中的增量消息体
+/// Incremental message body in a streaming response
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct DeltaMessage {
-    /// 角色（首次出现时）
+    /// Role (present on first occurrence)
     #[serde(default)]
     pub role: Option<String>,
-    /// 内容增量
+    /// Content delta
     #[serde(default)]
     pub content: Option<String>,
-    /// 推理内容增量（Qwen3/DeepSeek 等模型的思考过程）
+    /// Reasoning content delta (thinking process from models like Qwen3/DeepSeek)
     #[serde(default)]
     pub reasoning_content: Option<String>,
-    /// 工具调用增量
+    /// Tool call delta
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
 }
 
-/// 流式工具调用的增量片段
+/// Incremental fragment of a streaming tool call
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeltaToolCall {
-    /// 工具调用索引
+    /// Tool call index
     pub index: u32,
-    /// 工具调用 ID（逐步出现）
+    /// Tool call ID (appears incrementally)
     #[serde(default)]
     pub id: Option<String>,
-    /// 工具调用类型（逐步出现）
+    /// Tool call type (appears incrementally)
     #[serde(rename = "type", default)]
     pub call_type: Option<String>,
-    /// 函数调用增量
+    /// Function call delta
     #[serde(default)]
     pub function: Option<DeltaFunctionCall>,
 }
 
-/// 流式函数调用的增量片段
+/// Incremental fragment of a streaming function call
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct DeltaFunctionCall {
-    /// 函数名称（逐步出现）
+    /// Function name (appears incrementally)
     #[serde(default)]
     pub name: Option<String>,
-    /// 函数参数（逐步出现）
+    /// Function arguments (appear incrementally)
     #[serde(default)]
     pub arguments: Option<String>,
 }
 
-// ── Feature 6: 多模态支持测试 ────────────────────────────────────────────────
+// ── Feature 6: Multimodal Support Tests ────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

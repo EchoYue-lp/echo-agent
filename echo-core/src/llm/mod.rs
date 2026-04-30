@@ -1,4 +1,4 @@
-//! LLM 客户端核心 trait 和请求/响应类型
+//! LLM client core trait and request/response types
 
 pub mod types;
 
@@ -12,7 +12,7 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
-/// LLM 客户端统一接口
+/// LLM client unified interface
 pub trait LlmClient: Send + Sync {
     /// Execute a non-streaming chat request.
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>>;
@@ -42,7 +42,7 @@ pub trait LlmClient: Send + Sync {
     fn model_name(&self) -> &str;
 }
 
-/// 聊天请求参数
+/// Chat request parameters
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     /// Ordered chat history sent to the model.
@@ -78,7 +78,7 @@ impl ChatRequest {
     }
 }
 
-/// 聊天响应
+/// Chat response
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
     /// Primary assistant message returned by the provider.
@@ -109,7 +109,7 @@ impl ChatResponse {
     }
 }
 
-/// 流式响应块
+/// Streaming response chunk
 #[derive(Debug, Clone)]
 pub struct ChatChunk {
     /// Incremental message delta.

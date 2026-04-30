@@ -1,12 +1,12 @@
-//! Git 版本控制工具
+//! Git version control tools
 //!
-//! 对标 Claude Code/Cursor，提供完整 Git 操作能力：
-//! - git_status: 工作区状态
-//! - git_diff: 差异比较（unstaged + staged）
-//! - git_log: 提交历史
-//! - git_blame: 逐行归属
-//! - git_branch: 分支操作
-//! - git_commit: 创建提交
+//! Aligning with Claude Code/Cursor, provides full Git operation capabilities:
+//! - git_status: working directory status
+//! - git_diff: diff comparison (unstaged + staged)
+//! - git_log: commit history
+//! - git_blame: line-level annotation
+//! - git_branch: branch operations
+//! - git_commit: create commits
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -25,7 +25,7 @@ impl Tool for GitStatusTool {
     }
 
     fn description(&self) -> &str {
-        "查看当前仓库的工作区状态：已修改、已暂存、未跟踪的文件列表"
+        "View working directory status of the current repo: modified, staged, untracked files"
     }
 
     fn parameters(&self) -> Value {
@@ -34,7 +34,7 @@ impl Tool for GitStatusTool {
             "properties": {
                 "repo_path": {
                     "type": "string",
-                    "description": "仓库路径（默认当前运行目录）"
+                    "description": "Repository path (defaults to current working directory)"
                 }
             },
             "required": []
@@ -50,9 +50,11 @@ impl Tool for GitStatusTool {
 
             let output = run_git(repo_path, &["status", "--short"])?;
             if output.is_empty() {
-                Ok(ToolResult::success("工作区干净，没有变更".to_string()))
+                Ok(ToolResult::success(
+                    "Working directory clean, no changes".to_string(),
+                ))
             } else {
-                Ok(ToolResult::success(format!("Git 状态:\n{}", output)))
+                Ok(ToolResult::success(format!("Git status:\n{}", output)))
             }
         })
     }
@@ -68,7 +70,7 @@ impl Tool for GitDiffTool {
     }
 
     fn description(&self) -> &str {
-        "查看代码差异：unstaged 变更、staged 变更、或指定分支/提交之间的差异"
+        "View code diffs: unstaged changes, staged changes, or diffs between specified branches/commits"
     }
 
     fn parameters(&self) -> Value {
@@ -77,19 +79,19 @@ impl Tool for GitDiffTool {
             "properties": {
                 "repo_path": {
                     "type": "string",
-                    "description": "仓库路径（默认当前运行目录）"
+                    "description": "Repository path (defaults to current working directory)"
                 },
                 "staged": {
                     "type": "boolean",
-                    "description": "是否查看已暂存的变更（默认 false）"
+                    "description": "Whether to view staged changes (default false)"
                 },
                 "target": {
                     "type": "string",
-                    "description": "比较目标：分支名、commit hash、或 HEAD~1"
+                    "description": "Comparison target: branch name, commit hash, or HEAD~1"
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "只显示指定文件的差异"
+                    "description": "Show diff for specified file only"
                 }
             },
             "required": []
@@ -125,7 +127,7 @@ impl Tool for GitDiffTool {
 
             let output = run_git(repo_path, &args)?;
             if output.is_empty() {
-                Ok(ToolResult::success("没有差异".to_string()))
+                Ok(ToolResult::success("No differences".to_string()))
             } else {
                 Ok(ToolResult::success(format!("```diff\n{}```", output)))
             }
@@ -143,7 +145,7 @@ impl Tool for GitLogTool {
     }
 
     fn description(&self) -> &str {
-        "查看 Git 提交历史，支持限制条数和格式选择"
+        "View Git commit history, with options for count limit and format"
     }
 
     fn parameters(&self) -> Value {
@@ -152,23 +154,23 @@ impl Tool for GitLogTool {
             "properties": {
                 "repo_path": {
                     "type": "string",
-                    "description": "仓库路径（默认当前运行目录）"
+                    "description": "Repository path (defaults to current working directory)"
                 },
                 "count": {
                     "type": "integer",
-                    "description": "显示的提交条数（默认 20）"
+                    "description": "Number of commits to show (default 20)"
                 },
                 "oneline": {
                     "type": "boolean",
-                    "description": "单行模式（默认 true）"
+                    "description": "Single-line mode (default true)"
                 },
                 "author": {
                     "type": "string",
-                    "description": "按作者筛选"
+                    "description": "Filter by author"
                 },
                 "since": {
                     "type": "string",
-                    "description": "起始日期，如 '2024-01-01'"
+                    "description": "Start date, e.g. '2024-01-01'"
                 }
             },
             "required": []
@@ -212,9 +214,11 @@ impl Tool for GitLogTool {
 
             let output = run_git(repo_path, &args)?;
             if output.is_empty() {
-                Ok(ToolResult::success("仓库没有提交记录".to_string()))
+                Ok(ToolResult::success(
+                    "Repository has no commit history".to_string(),
+                ))
             } else {
-                Ok(ToolResult::success(format!("提交历史:\n{}", output)))
+                Ok(ToolResult::success(format!("Commit history:\n{}", output)))
             }
         })
     }
@@ -230,7 +234,7 @@ impl Tool for GitBlameTool {
     }
 
     fn description(&self) -> &str {
-        "查看文件的逐行注释，显示每行代码的最后修改者和提交"
+        "View line-by-line annotations for a file, showing the last author and commit for each line"
     }
 
     fn parameters(&self) -> Value {
@@ -239,19 +243,19 @@ impl Tool for GitBlameTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "要查看的文件路径（相对于仓库根目录）"
+                    "description": "File path to inspect (relative to repo root)"
                 },
                 "repo_path": {
                     "type": "string",
-                    "description": "仓库路径（默认当前运行目录）"
+                    "description": "Repository path (defaults to current working directory)"
                 },
                 "start_line": {
                     "type": "integer",
-                    "description": "起始行号"
+                    "description": "Start line number"
                 },
                 "end_line": {
                     "type": "integer",
-                    "description": "结束行号"
+                    "description": "End line number"
                 }
             },
             "required": ["file_path"]
@@ -296,7 +300,7 @@ impl Tool for GitBranchTool {
     }
 
     fn description(&self) -> &str {
-        "查看、创建或切换 Git 分支。不带参数列出所有分支，带 name 创建新分支"
+        "View, create, or switch Git branches. No args lists all branches; with name creates a new branch"
     }
 
     fn parameters(&self) -> Value {
@@ -305,19 +309,19 @@ impl Tool for GitBranchTool {
             "properties": {
                 "repo_path": {
                     "type": "string",
-                    "description": "仓库路径（默认当前运行目录）"
+                    "description": "Repository path (defaults to current working directory)"
                 },
                 "name": {
                     "type": "string",
-                    "description": "新分支名称（如提供则创建分支）"
+                    "description": "New branch name (creates a branch if provided)"
                 },
                 "switch": {
                     "type": "string",
-                    "description": "切换到指定分支"
+                    "description": "Switch to the specified branch"
                 },
                 "delete": {
                     "type": "string",
-                    "description": "删除指定分支（需要已合并）"
+                    "description": "Delete the specified branch (must be merged)"
                 }
             },
             "required": []
@@ -336,16 +340,16 @@ impl Tool for GitBranchTool {
 
             if let Some(name) = parameters.get("name").and_then(|v| v.as_str()) {
                 args = vec!["branch".to_string(), name.to_string()];
-                action = format!("创建分支 '{}'", name);
+                action = format!("Create branch '{}'", name);
             } else if let Some(target) = parameters.get("switch").and_then(|v| v.as_str()) {
                 args = vec!["checkout".to_string(), target.to_string()];
-                action = format!("切换到分支 '{}'", target);
+                action = format!("Switch to branch '{}'", target);
             } else if let Some(target) = parameters.get("delete").and_then(|v| v.as_str()) {
                 args = vec!["branch".to_string(), "-d".to_string(), target.to_string()];
-                action = format!("删除分支 '{}'", target);
+                action = format!("Delete branch '{}'", target);
             } else {
                 args = vec!["branch".to_string(), "-a".to_string()];
-                action = "列出所有分支".to_string();
+                action = "List all branches".to_string();
             }
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -365,7 +369,7 @@ impl Tool for GitCommitTool {
     }
 
     fn description(&self) -> &str {
-        "创建 Git 提交。需要先通过 git add 暂存文件。仅当用户明确请求时才调用此工具。"
+        "Create a Git commit. Files must be staged via git add first. Only call this tool when explicitly requested by the user."
     }
 
     fn parameters(&self) -> Value {
@@ -374,16 +378,16 @@ impl Tool for GitCommitTool {
             "properties": {
                 "repo_path": {
                     "type": "string",
-                    "description": "仓库路径（默认当前运行目录）"
+                    "description": "Repository path (defaults to current working directory)"
                 },
                 "message": {
                     "type": "string",
-                    "description": "提交信息"
+                    "description": "Commit message"
                 },
                 "files": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "要暂存并提交的文件列表（空 = 提交所有已暂存的）"
+                    "description": "List of files to stage and commit (empty = commit all staged)"
                 }
             },
             "required": ["message"]
@@ -401,7 +405,7 @@ impl Tool for GitCommitTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("message".to_string()))?;
 
-            // 如果指定了文件列表，先 git add
+            // If file list is specified, run git add first
             if let Some(files) = parameters.get("files").and_then(|v| v.as_array()) {
                 for f_val in files {
                     if let Some(f) = f_val.as_str() {
@@ -413,7 +417,10 @@ impl Tool for GitCommitTool {
 
             let commit_args = ["commit", "-m", message];
             let output = run_git(repo_path, &commit_args)?;
-            Ok(ToolResult::success(format!("提交成功:\n{}", output)))
+            Ok(ToolResult::success(format!(
+                "Commit succeeded:\n{}",
+                output
+            )))
         })
     }
 }
@@ -427,7 +434,10 @@ fn run_git(repo_path: &str, args: &[&str]) -> Result<String> {
         .output()
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "git".to_string(),
-            message: format!("无法执行 git 命令（请确认已安装 git）: {}", e),
+            message: format!(
+                "Unable to execute git command (please verify git is installed): {}",
+                e
+            ),
         })?;
 
     if output.status.success() {

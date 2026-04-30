@@ -1,11 +1,11 @@
-//! 上下文压缩
+//! Context compression
 //!
-//! 维护对话历史并在 token 超限时自动压缩，由 [`ContextManager`] 统一管理。
+//! Maintains conversation history and automatically compresses when tokens exceed the limit, managed by [`ContextManager`].
 //!
-//! 内置压缩策略（均实现 [`ContextCompressor`] trait）：
-//! - [`compressor::SlidingWindowCompressor`]：滑动窗口，丢弃最早的 N 条消息
-//! - [`compressor::SummaryCompressor`]：LLM 摘要，将旧消息压缩为 system 摘要消息
-//! - [`compressor::HybridCompressor`]：多策略串联管道
+//! Built-in compression strategies (all implement the [`ContextCompressor`] trait):
+//! - [`compressor::SlidingWindowCompressor`]: Sliding window, discards the oldest N messages
+//! - [`compressor::SummaryCompressor`]: LLM summarization, compresses old messages into a system summary message
+//! - [`compressor::HybridCompressor`]: Multi-strategy pipeline chaining
 
 pub mod compressor;
 
@@ -16,21 +16,21 @@ use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
-/// 压缩管道的输入
+/// Compression pipeline input
 pub struct CompressionInput {
-    /// 待压缩的消息列表
+    /// Messages to be compressed
     pub messages: Vec<Message>,
-    /// Token 上限，超过时触发压缩
+    /// Token limit, triggers compression when exceeded
     pub token_limit: usize,
-    /// 当前用户问题（保留字段，供扩展使用）
+    /// Current user query (reserved field for future extensions)
     pub current_query: Option<String>,
 }
 
-/// 压缩管道的输出
+/// Compression pipeline output
 pub struct CompressionOutput {
-    /// 最终保留、将发送给 LLM 的消息列表
+    /// Final list of messages to keep and send to the LLM
     pub messages: Vec<Message>,
-    /// 本次被裁剪掉的消息
+    /// Messages evicted in this compression pass
     pub evicted: Vec<Message>,
 }
 
@@ -43,36 +43,36 @@ struct ProtectedMessage {
     protected_after: usize,
 }
 
-/// 所有压缩策略的统一接口（async，支持 `dyn` trait object）
+/// Unified interface for all compression strategies (async, supports `dyn` trait object)
 pub trait ContextCompressor: Send + Sync {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>>;
 }
 
-/// 允许将 `Box<dyn ContextCompressor>` 直接传给任何接受 `impl ContextCompressor` 的函数，
-/// 无需引入额外的包装枚举。
+/// Allows `Box<dyn ContextCompressor>` to be passed directly to any function accepting `impl ContextCompressor`,
+/// without introducing an extra wrapper enum.
 impl ContextCompressor for Box<dyn ContextCompressor> {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         (**self).compress(input)
     }
 }
 
-/// `force_compress()` 返回的压缩统计信息
+/// Compression statistics returned by `force_compress()`
 pub struct ForceCompressStats {
-    /// 压缩前消息总数
+    /// Total message count before compression
     pub before_count: usize,
-    /// 压缩后消息总数
+    /// Total message count after compression
     pub after_count: usize,
-    /// 被裁剪掉的消息数
+    /// Number of messages evicted
     pub evicted: usize,
-    /// 压缩前估算 token 数
+    /// Estimated token count before compression
     pub before_tokens: usize,
-    /// 压缩后估算 token 数
+    /// Estimated token count after compression
     pub after_tokens: usize,
 }
 
-/// 上下文管理器：维护完整对话历史，并在 token 超限时自动触发压缩。
+/// Context manager: maintains full conversation history and automatically triggers compression when tokens exceed the limit.
 ///
-/// # 典型用法
+/// # Typical usage
 ///
 /// ```rust,no_run
 /// use echo_core::error::Result;
@@ -85,16 +85,16 @@ pub struct ForceCompressStats {
 ///     .compressor(SlidingWindowCompressor::new(20))
 ///     .build();
 ///
-/// ctx.push(Message::system("你是一个助手".to_string()));
-/// ctx.push(Message::user("你好".to_string()));
+/// ctx.push(Message::system("You are an assistant".to_string()));
+/// ctx.push(Message::user("Hello".to_string()));
 ///
-/// // 在每次调用 LLM 前调用 prepare()，自动压缩超限消息
+/// // Call prepare() before each LLM call to auto-compress over-limit messages
 /// let messages = ctx.prepare(None).await?;
 /// # Ok(())
 /// # }
 /// ```
 ///
-/// # 混合管道示例
+/// # Hybrid pipeline example
 ///
 /// ```rust,no_run
 /// use echo_core::error::Result;
@@ -126,8 +126,8 @@ pub struct ContextManager {
     /// Any message whose content contains one of these markers is excluded from compression.
     /// Used by the skill system to protect activated skill instructions.
     protected_markers: Vec<String>,
-    /// 硬性消息数量上限。超过时触发 sliding window 降级，防止 OOM。
-    /// 默认 200 条。
+    /// Hard message count cap. When exceeded, triggers sliding window degradation to prevent OOM.
+    /// Default 200 messages.
     max_messages: usize,
 }
 
@@ -142,28 +142,28 @@ impl ContextManager {
         }
     }
 
-    /// 追加一条消息到上下文缓冲区。
+    /// Append a message to the context buffer.
     ///
-    /// 当消息数超过 `max_messages` 硬性上限时，自动应用 sliding window 降级：
-    /// 保留 system 消息和最近的消息，丢弃中间最早的对话消息。
-    /// 这是最后的防线，即使压缩器未配置或压缩失败也不会 OOM。
+    /// When the message count exceeds the `max_messages` hard cap, automatically applies sliding window degradation:
+    /// preserves system messages and recent messages, discards the earliest conversation messages in the middle.
+    /// This is the last line of defense; even if no compressor is configured or compression fails, OOM will not occur.
     pub fn push(&mut self, message: Message) {
         self.messages.push(message);
 
-        // 硬性上限降级：超过 max_messages 时应用 sliding window
+        // Hard cap degradation: apply sliding window when exceeding max_messages
         if self.messages.len() > self.max_messages {
             self.apply_hard_cap();
         }
     }
 
-    /// 应用硬性消息上限：保留 system 消息、受保护消息和最近的消息，丢弃中间最早的。
+    /// Apply hard message cap: preserve system messages, protected messages, and recent messages; discard the earliest in between.
     fn apply_hard_cap(&mut self) {
         let target = self.max_messages;
         if self.messages.len() <= target {
             return;
         }
 
-        // 识别受保护的消息（不应被删除）
+        // Identify protected messages (should not be deleted)
         let mut protected_indices: Vec<usize> = Vec::new();
         for (i, msg) in self.messages.iter().enumerate() {
             if self.is_protected(msg) {
@@ -171,14 +171,14 @@ impl ContextManager {
             }
         }
 
-        // 找到第一条非 system 消息的位置
+        // Find the position of the first non-system message
         let first_non_system = self
             .messages
             .iter()
             .position(|m| m.role != "system")
             .unwrap_or(0);
 
-        // 计算需要删除多少条非受保护的消息
+        // Calculate how many non-protected messages need to be deleted
         let excess = self.messages.len() - target;
         let mut to_remove = Vec::new();
         let mut removed = 0;
@@ -186,7 +186,7 @@ impl ContextManager {
             if removed >= excess {
                 break;
             }
-            // 跳过受保护的消息
+            // Skip protected messages
             if protected_indices.contains(&i) {
                 continue;
             }
@@ -202,35 +202,35 @@ impl ContextManager {
             total = self.messages.len(),
             cap = target,
             evicted = to_remove.len(),
-            "📦 消息数超过硬性上限，应用 sliding window 降级（保留受保护消息）"
+            "Message count exceeded hard cap, applying sliding window degradation (preserving protected messages)"
         );
 
-        // 从后往前删除，避免索引偏移
+        // Remove from back to front to avoid index shifting
         for &i in to_remove.iter().rev() {
             self.messages.remove(i);
         }
     }
 
-    /// 批量追加消息
+    /// Batch-append messages
     pub fn push_many(&mut self, messages: impl IntoIterator<Item = Message>) {
         self.messages.extend(messages);
     }
 
-    /// 返回当前缓冲区中的所有消息（不做压缩）
+    /// Return all messages currently in the buffer (no compression)
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
 
-    /// 替换内部消息缓冲区（用于从持久化存储恢复对话）
+    /// Replace the internal message buffer (used to restore conversation from persistent storage)
     ///
-    /// 消息应包含 system prompt 作为第一条（如需要）。
+    /// Messages should include the system prompt as the first entry (if needed).
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
     }
 
-    /// 估算当前上下文的 token 数
+    /// Estimate the token count of the current context
     ///
-    /// 使用已配置的 [`Tokenizer`] 实现（默认 [`HeuristicTokenizer`]，区分 ASCII/CJK）。
+    /// Uses the configured [`Tokenizer`] implementation (default [`HeuristicTokenizer`], distinguishes ASCII/CJK).
     pub fn token_estimate(&self) -> usize {
         Self::estimate_tokens(&self.messages, &*self.tokenizer)
     }
@@ -240,12 +240,12 @@ impl ContextManager {
         &*self.tokenizer
     }
 
-    /// 动态替换 Tokenizer
+    /// Dynamically replace the Tokenizer
     pub fn set_tokenizer(&mut self, tokenizer: Arc<dyn Tokenizer>) {
         self.tokenizer = tokenizer;
     }
 
-    /// 清空上下文缓冲区（保留已设置的压缩器和保护标记）
+    /// Clear the context buffer (preserves configured compressor and protection markers)
     pub fn clear(&mut self) {
         self.messages.clear();
     }
@@ -332,25 +332,25 @@ impl ContextManager {
         result
     }
 
-    /// 动态替换压缩器，不影响已有的消息缓冲区
+    /// Dynamically replace the compressor without affecting the existing message buffer
     pub fn set_compressor(&mut self, compressor: impl ContextCompressor + 'static) {
         self.compressor = Some(Box::new(compressor));
     }
 
-    /// 移除压缩器，恢复为无限制模式
+    /// Remove the compressor, reverting to unlimited mode
     pub fn remove_compressor(&mut self) {
         self.compressor = None;
     }
 
-    /// 是否已配置压缩器
+    /// Whether a compressor is configured
     pub fn has_compressor(&self) -> bool {
         self.compressor.is_some()
     }
 
-    /// 强制压缩上下文，无视当前 token 用量是否超限。
+    /// Force-compress the context, regardless of whether the current token count exceeds the limit.
     ///
-    /// - 若已配置压缩器，使用当前压缩器执行；
-    /// - 若未配置，则临时使用 `SlidingWindowCompressor::new(fallback_window)` 执行。
+    /// - If a compressor is configured, use it;
+    /// - Otherwise, temporarily use `SlidingWindowCompressor::new(fallback_window)`.
     ///
     /// Protected messages are excluded from compression and preserved.
     pub async fn force_compress(&mut self, fallback_window: usize) -> Result<ForceCompressStats> {
@@ -387,9 +387,9 @@ impl ContextManager {
         })
     }
 
-    /// 强制使用**指定压缩器**压缩上下文，不影响已安装的压缩器配置。
+    /// Force-compress using a **specific compressor**, without affecting the currently installed compressor config.
     ///
-    /// 适合 `/compress sliding 10` 这类临时覆盖策略的场景。
+    /// Suitable for temporary strategy overrides like `/compress sliding 10`.
     pub async fn force_compress_with(
         &mut self,
         compressor: &dyn ContextCompressor,
@@ -418,11 +418,11 @@ impl ContextManager {
         })
     }
 
-    /// 更新 system 消息内容
+    /// Update the system message content
     ///
-    /// 通常在 `add_skill()` 注入额外系统提示时调用：
-    /// 找到第一条 role == "system" 的消息并替换其内容；
-    /// 若不存在 system 消息，则在队列头部插入一条。
+    /// Typically called when `add_skill()` injects extra system prompts:
+    /// finds the first message with role == "system" and replaces its content;
+    /// if no system message exists, inserts one at the head of the queue.
     pub fn update_system(&mut self, new_system_prompt: String) {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.role == "system") {
             msg.content = MessageContent::Text(new_system_prompt);
@@ -431,15 +431,15 @@ impl ContextManager {
         }
     }
 
-    /// 准备发送给 LLM 的消息列表。
+    /// Prepare the list of messages to send to the LLM.
     ///
-    /// 当估算 token 超过 `token_limit` 且已配置压缩器时，自动触发压缩并更新内部缓冲区。
-    /// 压缩后的消息会替换原有缓冲区。
+    /// When the estimated token count exceeds `token_limit` and a compressor is configured, automatically trigger compression and update the internal buffer.
+    /// The compressed messages replace the original buffer.
     ///
     /// Protected messages (containing registered markers, e.g. `<skill_content>`) are
     /// excluded from compression and re-inserted after system messages.
     ///
-    /// `current_query` 为保留字段，传 `None` 即可。
+    /// `current_query` is a reserved field; pass `None`.
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<Vec<Message>> {
         if let Some(compressor) = &self.compressor
             && Self::estimate_tokens(&self.messages, &*self.tokenizer) > self.token_limit
@@ -468,7 +468,7 @@ impl ContextManager {
     }
 }
 
-/// `ContextManager` 的构建器
+/// Builder for `ContextManager`
 pub struct ContextManagerBuilder {
     token_limit: usize,
     compressor: Option<Box<dyn ContextCompressor>>,
@@ -478,22 +478,22 @@ pub struct ContextManagerBuilder {
 }
 
 impl ContextManagerBuilder {
-    /// 设置压缩策略（可选）。支持任意实现了 `ContextCompressor` 的类型，
-    /// 包括 `SlidingWindowCompressor`、`SummaryCompressor` 和 `HybridCompressor`。
+    /// Set the compression strategy (optional). Supports any type implementing `ContextCompressor`,
+    /// including `SlidingWindowCompressor`, `SummaryCompressor`, and `HybridCompressor`.
     pub fn compressor(mut self, c: impl ContextCompressor + 'static) -> Self {
         self.compressor = Some(Box::new(c));
         self
     }
 
-    /// 预置一条 system 消息作为初始上下文（通常用于 Agent 的系统提示词）
+    /// Pre-set a system message as the initial context (typically used for Agent system prompts)
     pub fn with_system(mut self, system_prompt: String) -> Self {
         self.initial_messages.push(Message::system(system_prompt));
         self
     }
 
-    /// 设置自定义 Tokenizer（默认 [`HeuristicTokenizer`]）
+    /// Set a custom Tokenizer (default [`HeuristicTokenizer`])
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use echo_state::compression::ContextManager;
@@ -509,9 +509,9 @@ impl ContextManagerBuilder {
         self
     }
 
-    /// 设置消息数量硬性上限（默认 200）。
+    /// Set the hard message count cap (default 200).
     ///
-    /// 超过此上限时自动应用 sliding window 降级，保留 system 消息和最近的消息。
+    /// When exceeded, automatically applies sliding window degradation, preserving system messages and recent messages.
     pub fn max_messages(mut self, max: usize) -> Self {
         self.max_messages = Some(max);
         self
@@ -546,13 +546,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_sliding_window_compressor() -> Result<()> {
-        println!("=== 示例 1：滑动窗口压缩 ===");
+        println!("=== Example 1: Sliding window compression ===");
 
         let mut ctx = ContextManager::builder(200)
             .compressor(SlidingWindowCompressor::new(4))
             .build();
 
-        ctx.push(Message::system("你是一个助手。".to_string()));
+        ctx.push(Message::system("You are an assistant.".to_string()));
         for i in 1..=6 {
             ctx.push(Message::user(format!("用户消息 {}", i)));
             ctx.push(Message::assistant(format!("助手回复 {}", i)));

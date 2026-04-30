@@ -1,4 +1,4 @@
-//! LLM 驱动的 Critic 实现
+//! LLM-driven Critic implementation
 
 use crate::agent::self_reflection::critic::Critic;
 use crate::agent::self_reflection::types::{Critique, CritiqueOutput, critique_output_schema};
@@ -11,10 +11,10 @@ use reqwest::Client;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// LLM 驱动的评估器
+/// LLM-driven evaluator
 ///
-/// 使用大模型评估 Agent 输出的质量，返回结构化的 `Critique`。
-/// 复用 `LlmPlanner` 的模式：LLM 调用 + 结构化 JSON 输出 + 自动修复。
+/// Uses a large language model to evaluate the quality of Agent output, returning structured `Critique`.
+/// Reuses the `LlmPlanner` pattern: LLM call + structured JSON output + auto-fix.
 pub struct LlmCritic {
     model: String,
     client: Arc<Client>,
@@ -23,15 +23,15 @@ pub struct LlmCritic {
 }
 
 impl LlmCritic {
-    /// 创建 LLM 评估器
+    /// Create an LLM evaluator
     ///
-    /// # 参数
-    /// * `model` - LLM 模型标识符，用于质量评估
+    /// # Parameters
+    /// * `model` - LLM model identifier for quality evaluation
     ///
-    /// # 默认配置
-    /// * 系统提示：多维度质量评估专家（准确性、完整性、清晰度、实用性）
-    /// * 通过阈值：7.0（评分 ≥ 7.0 视为通过）
-    /// * HTTP 客户端：新建的 `reqwest::Client`
+    /// # Default configuration
+    /// * System prompt: multi-dimensional quality evaluation expert (accuracy, completeness, clarity, usefulness)
+    /// * Pass threshold: 7.0 (score >= 7.0 considered passing)
+    /// * HTTP client: newly created `reqwest::Client`
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
@@ -46,47 +46,47 @@ impl LlmCritic {
         }
     }
 
-    /// 自定义系统提示词
+    /// Custom system prompt
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
         self
     }
 
-    /// 设置通过阈值（0.0 - 10.0）
+    /// Set pass threshold (0.0 - 10.0)
     pub fn with_pass_threshold(mut self, threshold: f64) -> Self {
         self.pass_threshold = threshold;
         self
     }
 
     fn default_system_prompt() -> &'static str {
-        "你是一个严格的质量评估专家。你需要评估给定回答的质量。\n\n\
-        评估维度：\n\
-        1. 准确性：事实是否正确\n\
-        2. 完整性：是否覆盖了所有要点\n\
-        3. 清晰度：表述是否清楚易懂\n\
-        4. 实用性：是否提供了有价值的信息\n\n\
-        评分标准：\n\
-        - 9.0-10.0: 优秀，几乎无可挑剔\n\
-        - 7.0-8.9: 良好，基本正确但有小瑕疵\n\
-        - 5.0-6.9: 一般，有明显不足\n\
-        - 0.0-4.9: 较差，存在严重错误\n\n\
-        请严格按 JSON Schema 返回结构化数据。"
+        "You are a strict quality evaluation expert. You need to evaluate the quality of the given response.\n\n\
+        Evaluation dimensions:\n\
+        1. Accuracy: Are the facts correct\n\
+        2. Completeness: Does it cover all key points\n\
+        3. Clarity: Is the expression clear and easy to understand\n\
+        4. Usefulness: Does it provide valuable information\n\n\
+        Scoring standards:\n\
+        - 9.0-10.0: Excellent, almost flawless\n\
+        - 7.0-8.9: Good, basically correct but with minor flaws\n\
+        - 5.0-6.9: Mediocre, with noticeable deficiencies\n\
+        - 0.0-4.9: Poor, contains serious errors\n\n\
+        Please strictly return structured data according to the JSON Schema."
     }
 
-    /// 解析 LLM 响应为 CritiqueOutput
+    /// Parse LLM response as CritiqueOutput
     fn parse_critique_output(content: &str) -> Result<CritiqueOutput> {
-        // 1. 直接解析
+        // 1. Direct parse
         if let Ok(output) = serde_json::from_str::<CritiqueOutput>(content) {
             return Ok(output);
         }
 
-        // 2. 从 markdown code block 提取
+        // 2. Extract from markdown code block
         let json_str = crate::utils::json_parse::extract_json_from_markdown(content);
         if let Ok(output) = serde_json::from_str::<CritiqueOutput>(&json_str) {
             return Ok(output);
         }
 
-        // 3. 自动修复
+        // 3. Auto-fix
         Self::try_auto_fix(&json_str)
     }
 
@@ -100,7 +100,7 @@ impl LlmCritic {
             }
             Err(e) => {
                 warn!(error = %e, "Failed to parse critique output");
-                // 兜底：构造默认的未通过评估
+                // Fallback: construct default non-passing evaluation
                 Ok(CritiqueOutput {
                     score: 5.0,
                     passed: false,
@@ -123,10 +123,13 @@ impl Critic for LlmCritic {
             info!(model = %self.model, "LlmCritic: evaluating answer");
 
             let user_content = if context.is_empty() {
-                format!("原始任务:\n{}\n\n待评估的回答:\n{}", task, answer)
+                format!(
+                    "Original task:\n{}\n\nResponse to evaluate:\n{}",
+                    task, answer
+                )
             } else {
                 format!(
-                    "原始任务:\n{}\n\n待评估的回答:\n{}\n\n附加上下文:\n{}",
+                    "Original task:\n{}\n\nResponse to evaluate:\n{}\n\nAdditional context:\n{}",
                     task, answer, context
                 )
             };
@@ -166,7 +169,7 @@ impl Critic for LlmCritic {
             let output = Self::parse_critique_output(&content)?;
             let mut critique: Critique = output.into();
 
-            // 用阈值覆盖 LLM 的 passed 判定
+            // Override LLM's passed judgment with threshold
             critique.passed = critique.score >= self.pass_threshold;
 
             info!(
@@ -190,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_parse_critique_output_json() {
-        let json = r#"{"score": 8.5, "passed": true, "feedback": "回答准确", "suggestions": ["可以更详细"]}"#;
+        let json = r#"{"score": 8.5, "passed": true, "feedback": "Accurate response", "suggestions": ["Could be more detailed"]}"#;
         let output = LlmCritic::parse_critique_output(json).unwrap();
         assert_eq!(output.score, 8.5);
         assert!(output.passed);
@@ -199,7 +202,7 @@ mod tests {
     #[test]
     fn test_parse_critique_output_markdown() {
         let response = r#"```json
-{"score": 6.0, "passed": false, "feedback": "不够完整", "suggestions": ["增加示例"]}
+{"score": 6.0, "passed": false, "feedback": "Not complete enough", "suggestions": ["Add examples"]}
 ```"#;
         let output = LlmCritic::parse_critique_output(response).unwrap();
         assert_eq!(output.score, 6.0);
@@ -208,16 +211,16 @@ mod tests {
 
     #[test]
     fn test_parse_critique_auto_fix() {
-        let json = r#"{"score": 7.0, "passed": true, "feedback": "良好",}"#;
+        let json = r#"{"score": 7.0, "passed": true, "feedback": "Good",}"#;
         let output = LlmCritic::parse_critique_output(json).unwrap();
         assert_eq!(output.score, 7.0);
     }
 
     #[test]
     fn test_parse_critique_fallback() {
-        let text = "无法解析的文本";
+        let text = "Unparseable text";
         let output = LlmCritic::parse_critique_output(text).unwrap();
-        assert!(!output.passed); // 兜底：未通过
+        assert!(!output.passed); // Fallback: not passed
         assert_eq!(output.score, 5.0);
     }
 }

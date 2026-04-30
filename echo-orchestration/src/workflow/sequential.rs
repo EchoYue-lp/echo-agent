@@ -1,4 +1,4 @@
-//! 顺序工作流：Agent 按注册顺序依次执行，前一步的输出作为后一步的输入。
+//! Sequential workflow: agents execute one by one in registration order, with each step's output becoming the next step's input.
 
 use super::{SharedAgent, StepOutput, Workflow, WorkflowOutput, shared_agent};
 use echo_core::agent::Agent;
@@ -7,18 +7,18 @@ use futures::future::BoxFuture;
 use std::time::Instant;
 use tracing::{debug, info};
 
-/// 步间输入变换函数
+/// Inter-step input transform function
 type TransformFn = Box<dyn Fn(&str) -> String + Send + Sync>;
 
-/// 顺序工作流中的一步
+/// One step in a sequential workflow
 pub struct WorkflowStep {
     agent: SharedAgent,
     transform: Option<TransformFn>,
 }
 
-/// 顺序工作流：每个 Agent 按注册顺序运行，前者输出流入后者输入。
+/// Sequential workflow: each agent runs in registration order; the former's output flows into the latter's input.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,no_run
 /// use echo_core::agent::{Agent, AgentEvent};
@@ -61,8 +61,8 @@ pub struct WorkflowStep {
 ///     .step(agent_b)
 ///     .build();
 ///
-/// let output = wf.run("你好世界").await?;
-/// println!("最终结果: {}", output.result);
+/// let output = wf.run("Hello world").await?;
+/// println!("Final result: {}", output.result);
 /// for s in &output.steps {
 ///     println!("  {} ({:?}): {}", s.agent_name, s.elapsed, &s.output[..s.output.len().min(80)]);
 /// }
@@ -100,7 +100,7 @@ impl Workflow for SequentialWorkflow {
                     workflow = "sequential",
                     step = i + 1,
                     agent = %agent_name,
-                    "▶ 执行步骤"
+                    "▶ Executing step"
                 );
                 debug!(
                     workflow = "sequential",
@@ -117,7 +117,7 @@ impl Workflow for SequentialWorkflow {
                     step = i + 1,
                     agent = %agent_name,
                     elapsed_ms = step_elapsed.as_millis(),
-                    "✓ 步骤完成"
+                    "✓ Step completed"
                 );
 
                 step_outputs.push(StepOutput {
@@ -140,13 +140,13 @@ impl Workflow for SequentialWorkflow {
     }
 }
 
-/// [`SequentialWorkflow`] 构建器
+/// [`SequentialWorkflow`] builder
 pub struct SequentialWorkflowBuilder {
     steps: Vec<WorkflowStep>,
 }
 
 impl SequentialWorkflowBuilder {
-    /// 添加一步（直接使用前一步的输出作为输入）
+    /// Add a step (uses previous step's output directly as input)
     pub fn step(mut self, agent: impl Agent + 'static) -> Self {
         self.steps.push(WorkflowStep {
             agent: shared_agent(agent),
@@ -155,7 +155,7 @@ impl SequentialWorkflowBuilder {
         self
     }
 
-    /// 添加一步，并在输入前执行变换函数
+    /// Add a step with a transform function applied to the input before execution
     pub fn step_with_transform(
         mut self,
         agent: impl Agent + 'static,
@@ -168,7 +168,7 @@ impl SequentialWorkflowBuilder {
         self
     }
 
-    /// 添加一步（使用已包装的 SharedAgent）
+    /// Add a step (using an already-wrapped SharedAgent)
     pub fn step_shared(mut self, agent: SharedAgent) -> Self {
         self.steps.push(WorkflowStep {
             agent,

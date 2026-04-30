@@ -1,12 +1,12 @@
-//! 图工作流引擎
+//! Graph workflow engine
 //!
-//! 将 Agent 执行建模为**有向图**：
+//! Models Agent execution as a **directed graph**:
 //!
-//! - **节点（Node）**：执行单元（Agent / 函数 / 路由器）
-//! - **边（Edge）**：节点间的转移逻辑（固定 / 条件 / 并行 fan-out + fan-in）
-//! - **状态（SharedState）**：节点间共享的 KV store + 消息历史
+//! - **Node**: execution unit (Agent / function / router)
+//! - **Edge**: transition logic between nodes (fixed / conditional / parallel fan-out + fan-in)
+//! - **State (SharedState)**: shared KV store + message history across nodes
 //!
-//! ## 与 LangGraph 对标
+//! ## Comparison with LangGraph
 //!
 //! | LangGraph | echo-agent workflow |
 //! |-----------|---------------------|
@@ -18,7 +18,7 @@
 //! | `compile()` | [`GraphBuilder::build()`] |
 //! | `invoke()` | [`Graph::run()`] |
 //!
-//! ## 示例
+//! ## Example
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -64,17 +64,17 @@ use tracing::{debug, info, warn};
 
 // ── Edge ────────────────────────────────────────────────────────────────────
 
-/// 边的路由逻辑
+/// Edge routing logic
 pub(crate) enum EdgeKind {
-    /// 固定转移：A → B
+    /// Fixed transition: A -> B
     Fixed(String),
-    /// 条件转移：根据 state 返回下一个节点名
+    /// Conditional transition: returns next node name based on state
     Conditional(Box<dyn ConditionFn>),
-    /// 并行 fan-out：同时进入多个节点，所有完成后 merge 回 then 节点
+    /// Parallel fan-out: enter multiple nodes simultaneously; merge back to then node when all complete
     Parallel { targets: Vec<String>, then: String },
 }
 
-/// 条件函数 trait（object-safe）
+/// Condition function trait (object-safe)
 pub(crate) trait ConditionFn: Send + Sync {
     fn evaluate<'a>(&'a self, state: &'a SharedState) -> BoxFuture<'a, String>;
 }
@@ -90,7 +90,7 @@ where
     }
 }
 
-/// 从节点出发的所有边
+/// All edges originating from a node
 pub(crate) struct Edge {
     pub from: String,
     pub kind: EdgeKind,
@@ -98,12 +98,12 @@ pub(crate) struct Edge {
 
 // ── Interrupt Configuration ────────────────────────────────────────────────────
 
-/// Interrupt 配置
+/// Interrupt configuration
 #[derive(Debug, Clone, Default)]
 pub struct InterruptConfig {
-    /// 进入这些节点前暂停
+    /// Pause before entering these nodes
     pub before: Vec<String>,
-    /// 这些节点执行后暂停
+    /// Pause after these nodes execute
     pub after: Vec<String>,
 }
 
@@ -112,17 +112,17 @@ impl InterruptConfig {
         Self::default()
     }
 
-    /// 检查节点是否需要在进入前暂停
+    /// Check if the node needs to pause before entering
     pub fn should_interrupt_before(&self, node_name: &str) -> bool {
         self.before.iter().any(|n| n == node_name || n == "*")
     }
 
-    /// 检查节点是否需要在执行后暂停
+    /// Check if the node needs to pause after execution
     pub fn should_interrupt_after(&self, node_name: &str) -> bool {
         self.after.iter().any(|n| n == node_name || n == "*")
     }
 
-    /// 检查是否需要任何 interrupt
+    /// Check if any interrupt is configured
     pub fn has_interrupts(&self) -> bool {
         !self.before.is_empty() || !self.after.is_empty()
     }
@@ -130,23 +130,26 @@ impl InterruptConfig {
 
 // ── Interrupt State ────────────────────────────────────────────────────────────
 
-/// Interrupt 状态 - 执行暂停时的状态
+/// Interrupt state - state when execution is paused
 #[derive(Debug)]
 pub struct InterruptState {
-    /// Checkpoint（可用于恢复）
+    /// Checkpoint (used for recovery)
     pub checkpoint: Checkpoint,
-    /// Interrupt 类型
+    /// Interrupt type
     pub interrupt_type: InterruptType,
-    /// 暂停的节点名
+    /// Name of the paused node
     pub pending_node: String,
-    /// 给用户的提示
+    /// Prompt for the user
     pub prompt: String,
 }
 
 impl InterruptState {
-    /// 创建 BeforeNode interrupt
+    /// Create a BeforeNode interrupt
     pub fn before_node(checkpoint: Checkpoint, node_name: String) -> Self {
-        let prompt = format!("节点 '{}' 执行前需要确认", node_name);
+        let prompt = format!(
+            "Node '{}' requires confirmation before execution",
+            node_name
+        );
         Self {
             checkpoint,
             interrupt_type: InterruptType::BeforeNode,
@@ -155,9 +158,9 @@ impl InterruptState {
         }
     }
 
-    /// 创建 AfterNode interrupt
+    /// Create an AfterNode interrupt
     pub fn after_node(checkpoint: Checkpoint, node_name: String) -> Self {
-        let prompt = format!("节点 '{}' 执行后需要确认", node_name);
+        let prompt = format!("Node '{}' requires confirmation after execution", node_name);
         Self {
             checkpoint,
             interrupt_type: InterruptType::AfterNode,
@@ -166,10 +169,10 @@ impl InterruptState {
         }
     }
 
-    /// 创建 ToolApproval interrupt
+    /// Create a ToolApproval interrupt
     pub fn tool_approval(checkpoint: Checkpoint, tool_name: String, args: Value) -> Self {
         let prompt = format!(
-            "工具 '{}' 需要审批\n参数: {}",
+            "Tool '{}' requires approval\nParameters: {}",
             tool_name,
             serde_json::to_string_pretty(&args).unwrap_or_default()
         );
@@ -182,32 +185,32 @@ impl InterruptState {
     }
 }
 
-/// run_until_interrupt 的返回类型
+/// Return type of run_until_interrupt
 #[derive(Debug)]
 pub enum RunUntilInterruptResult {
-    /// 执行完成
+    /// Execution completed
     Completed(GraphResult),
-    /// 遇到 interrupt 点暂停
+    /// Paused at an interrupt point
     Interrupted(InterruptState),
 }
 
 // ── GraphBuilder ────────────────────────────────────────────────────────────
 
-/// 图工作流构建器
+/// Graph workflow builder
 ///
-/// 通过链式调用添加节点和边，最后 `build()` 生成不可变的 [`Graph`]。
+/// Add nodes and edges through chained calls; finally `build()` produces an immutable [`Graph`].
 pub struct GraphBuilder {
     name: String,
     nodes: HashMap<String, Node>,
     edges: Vec<Edge>,
     entry_node: Option<String>,
     finish_nodes: Vec<String>,
-    /// Interrupt 配置
+    /// Interrupt configuration
     interrupt_config: InterruptConfig,
 }
 
 impl GraphBuilder {
-    /// 创建空的图构建器
+    /// Create an empty graph builder
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -219,14 +222,14 @@ impl GraphBuilder {
         }
     }
 
-    // ── 添加节点 ────────────────────────────────────────────────────────
+    // ── Add Nodes ─────────────────────────────────────────────────────────
 
-    /// 添加 Agent 节点
+    /// Add an Agent node
     ///
-    /// `input_key`: state 中读取 prompt 的 key
-    /// `output_key`: 执行结果写入 state 的 key
+    /// `input_key`: key for reading the prompt from state
+    /// `output_key`: key for writing the execution result to state
     ///
-    /// 默认使用 `execute` 模式（multi-turn with tools）。
+    /// Defaults to `execute` mode (multi-turn with tools).
     pub fn add_agent_node(
         mut self,
         name: impl Into<String>,
@@ -242,10 +245,10 @@ impl GraphBuilder {
         self
     }
 
-    /// 添加 Agent 节点（可配置 execute/chat 模式）
+    /// Add an Agent node (configurable execute/chat mode)
     ///
-    /// `use_execute`: true 使用 execute (multi-turn with tools),
-    /// false 使用 chat (single turn).
+    /// `use_execute`: true uses execute (multi-turn with tools),
+    /// false uses chat (single turn).
     pub fn add_agent_node_with_mode(
         mut self,
         name: impl Into<String>,
@@ -262,7 +265,7 @@ impl GraphBuilder {
         self
     }
 
-    /// 添加共享 Agent 节点（Arc<Mutex<Box<dyn Agent>>>）
+    /// Add a shared Agent node (Arc<Mutex<Box<dyn Agent>>>)
     pub fn add_shared_agent_node(
         mut self,
         name: impl Into<String>,
@@ -278,7 +281,7 @@ impl GraphBuilder {
         self
     }
 
-    /// 添加共享 Agent 节点（可配置 execute/chat 模式）
+    /// Add a shared Agent node (configurable execute/chat mode)
     pub fn add_shared_agent_node_with_mode(
         mut self,
         name: impl Into<String>,
@@ -295,7 +298,7 @@ impl GraphBuilder {
         self
     }
 
-    /// 添加函数节点
+    /// Add a function node
     pub fn add_function_node<F>(mut self, name: impl Into<String>, f: F) -> Self
     where
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
@@ -305,16 +308,16 @@ impl GraphBuilder {
         self
     }
 
-    /// 添加路由节点（不执行逻辑，仅用于条件分支的汇聚点）
+    /// Add a router node (no execution logic, only used as a convergence point for conditional branches)
     pub fn add_router_node(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
         self.nodes.insert(name.clone(), Node::passthrough(&name));
         self
     }
 
-    // ── 添加边 ──────────────────────────────────────────────────────────
+    // ── Add Edges ─────────────────────────────────────────────────────────
 
-    /// 添加固定边：from → to
+    /// Add a fixed edge: from -> to
     pub fn add_edge(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
         self.edges.push(Edge {
             from: from.into(),
@@ -323,9 +326,9 @@ impl GraphBuilder {
         self
     }
 
-    /// 添加条件边：from → f(state) 返回目标节点名
+    /// Add a conditional edge: from -> f(state) returns the target node name
     ///
-    /// 条件函数返回的字符串必须是已注册的节点名或 `"__end__"`。
+    /// The string returned by the condition function must be a registered node name or `"__end__"`.
     pub fn add_conditional_edge<F>(mut self, from: impl Into<String>, f: F) -> Self
     where
         F: for<'a> Fn(&'a SharedState) -> BoxFuture<'a, String> + Send + Sync + 'static,
@@ -337,10 +340,10 @@ impl GraphBuilder {
         self
     }
 
-    /// 添加并行边：from → [targets...] → then
+    /// Add a parallel edge: from -> [targets...] -> then
     ///
-    /// `from` 完成后，`targets` 中的所有节点**并行执行**，全部完成后进入 `then`。
-    /// 并行节点的 state 修改会在 then 节点之前 merge。
+    /// After `from` completes, all nodes in `targets` execute **in parallel**; when all complete, execution enters `then`.
+    /// State modifications from parallel nodes are merged before the then node.
     pub fn add_parallel_edge(
         mut self,
         from: impl Into<String>,
@@ -357,27 +360,27 @@ impl GraphBuilder {
         self
     }
 
-    // ── 入口和终点 ──────────────────────────────────────────────────────
+    // ── Entry and Finish ──────────────────────────────────────────────────
 
-    /// 设置入口节点
+    /// Set the entry node
     pub fn set_entry(mut self, name: impl Into<String>) -> Self {
         self.entry_node = Some(name.into());
         self
     }
 
-    /// 设置结束节点（到达此节点后图执行完毕，可设置多个）
+    /// Set a finish node (graph execution ends upon reaching this node; multiple can be set)
     pub fn set_finish(mut self, name: impl Into<String>) -> Self {
         self.finish_nodes.push(name.into());
         self
     }
 
-    // ── Interrupt 配置 ──────────────────────────────────────────────────────
+    // ── Interrupt Configuration ──────────────────────────────────────────────────
 
-    /// 设置 interrupt_before（进入节点前暂停）
+    /// Set interrupt_before (pause before entering nodes)
     ///
-    /// 支持 "*" 通配符表示所有节点。
+    /// Supports "*" wildcard to represent all nodes.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust
     /// use echo_orchestration::workflow::GraphBuilder;
@@ -387,7 +390,7 @@ impl GraphBuilder {
     ///     .add_function_node("step2", |_| Box::pin(async { Ok(()) }))
     ///     .set_entry("step1")
     ///     .add_edge("step1", "step2")
-    ///     .interrupt_before(vec!["step2"])  // 进入 step2 前暂停
+    ///     .interrupt_before(vec!["step2"])  // Pause before entering step2
     ///     .build()
     ///     .unwrap();
     /// ```
@@ -396,15 +399,15 @@ impl GraphBuilder {
         self
     }
 
-    /// 设置 interrupt_after（节点执行后暂停）
+    /// Set interrupt_after (pause after nodes execute)
     ///
-    /// 支持 "*" 通配符表示所有节点。
+    /// Supports "*" wildcard to represent all nodes.
     pub fn interrupt_after(mut self, nodes: Vec<&str>) -> Self {
         self.interrupt_config.after = nodes.into_iter().map(String::from).collect();
         self
     }
 
-    /// 构建不可变的 Graph
+    /// Build an immutable Graph
     pub fn build(self) -> Result<Graph> {
         let entry = self.entry_node.ok_or_else(|| {
             ReactError::Agent(AgentError::InitializationFailed(
@@ -418,7 +421,7 @@ impl GraphBuilder {
             )));
         }
 
-        // 校验所有边引用的节点都存在
+        // Verify all nodes referenced by edges exist
         for edge in &self.edges {
             if !self.nodes.contains_key(&edge.from) {
                 return Err(ReactError::Agent(AgentError::InitializationFailed(
@@ -450,13 +453,13 @@ impl GraphBuilder {
             }
         }
 
-        // 构建邻接表并校验多出边
+        // Build adjacency list and validate multiple outgoing edges
         let mut edge_map: HashMap<String, Vec<Edge>> = HashMap::new();
         for edge in self.edges {
             let from = edge.from.clone();
             let entry = edge_map.entry(from.clone()).or_default();
-            // 禁止同一节点存在多条普通出边（Fixed / Conditional），
-            // 因为 resolve_next() 只取第一条边，其余会被静默丢弃。
+            // Disallow multiple ordinary outgoing edges (Fixed / Conditional) from the same node,
+            // because resolve_next() only takes the first edge; the rest would be silently discarded.
             if !entry.is_empty() {
                 return Err(ReactError::Agent(AgentError::InitializationFailed(
                     format!(
@@ -481,9 +484,9 @@ impl GraphBuilder {
         })
     }
 
-    // ── 便捷方法 ────────────────────────────────────────────────────────
+    // ── Convenience Methods ───────────────────────────────────────────────
 
-    /// 快捷添加 ReactAgent 节点（默认 input="task", output="result"）
+    /// Convenience method to add a ReactAgent node (default input="task", output="result")
     pub fn add_react_node(self, name: impl Into<String>, agent: impl Agent + 'static) -> Self {
         self.add_agent_node(name, agent, "task", "result")
     }
@@ -491,51 +494,51 @@ impl GraphBuilder {
 
 // ── Graph ───────────────────────────────────────────────────────────────────
 
-/// 编译后的图工作流（不可变）
+/// Compiled graph workflow (immutable)
 ///
-/// 通过 [`GraphBuilder`] 构建，调用 [`run()`](Graph::run) 执行。
+/// Built via [`GraphBuilder`], executed by calling [`run()`](Graph::run).
 pub struct Graph {
-    /// 图名称
+    /// Graph name
     pub name: String,
-    /// 节点注册表
+    /// Node registry
     nodes: HashMap<String, Node>,
-    /// 邻接表：from → [Edge]
+    /// Adjacency list: from -> [Edge]
     edges: HashMap<String, Vec<Edge>>,
-    /// 入口节点
+    /// Entry node
     entry: String,
-    /// 结束节点列表
+    /// List of finish nodes
     finish_nodes: Vec<String>,
-    /// 最大执行步数（防止无限循环）
+    /// Maximum execution steps (prevents infinite loops)
     max_steps: usize,
-    /// Interrupt 配置
+    /// Interrupt configuration
     interrupt_config: InterruptConfig,
-    /// Checkpoint 存储
+    /// Checkpoint store
     checkpoint_store: Arc<dyn CheckpointStore>,
 }
 
-/// 图执行结果
+/// Graph execution result
 #[derive(Debug)]
 pub struct GraphResult {
-    /// 最终状态
+    /// Final state
     pub state: SharedState,
-    /// 执行路径（节点名序列）
+    /// Execution path (sequence of node names)
     pub path: Vec<String>,
-    /// 总步数
+    /// Total steps
     pub steps: usize,
 }
 
 impl Graph {
-    /// 终止标记节点名
+    /// Terminal marker node name
     pub const END: &'static str = "__end__";
 
-    /// 设置最大执行步数
+    /// Set the maximum number of execution steps
     pub fn set_max_steps(&mut self, max: usize) {
         self.max_steps = max;
     }
 
-    /// 执行图工作流
+    /// Execute the graph workflow
     ///
-    /// 从 entry 节点开始，按边的路由逻辑依次执行节点，直到到达 finish 节点或 `__end__`。
+    /// Starting from the entry node, execute nodes in sequence following edge routing logic, until reaching a finish node or `__end__`.
     pub async fn run(&self, state: SharedState) -> Result<GraphResult> {
         let mut current = self.entry.clone();
         let mut path = Vec::new();
@@ -544,7 +547,7 @@ impl Graph {
         info!(graph = %self.name, entry = %current, "Starting graph execution");
 
         loop {
-            // 防止无限循环
+            // Prevent infinite loop
             if step_count >= self.max_steps {
                 warn!(
                     graph = %self.name,
@@ -556,9 +559,9 @@ impl Graph {
                 )));
             }
 
-            // 检查终止条件
+            // Check termination condition
             if current == Self::END || self.finish_nodes.contains(&current) {
-                // 如果是 finish 节点（非 __end__），先执行该节点
+                // If this is a finish node (not __end__), execute it first
                 if current != Self::END
                     && let Some(node) = self.nodes.get(&current)
                 {
@@ -581,7 +584,7 @@ impl Graph {
                 });
             }
 
-            // 执行当前节点
+            // Execute the current node
             let node = self.nodes.get(&current).ok_or_else(|| {
                 ReactError::Agent(AgentError::InitializationFailed(format!(
                     "Node '{}' not found in graph '{}'",
@@ -595,7 +598,7 @@ impl Graph {
             path.push(current.clone());
             step_count += 1;
 
-            // 路由到下一个节点
+            // Route to the next node
             let next = self.resolve_next(&current, &state).await?;
 
             match next {
@@ -610,23 +613,23 @@ impl Graph {
                         "Executing parallel fan-out"
                     );
 
-                    // 并行分支执行（顺序执行，但使用 deep_merge 合并结果）
-                    // 注：因为 Node 包含 dyn trait（非 Send + 'static），
-                    // 无法直接 tokio::spawn。此处使用顺序执行保证正确性。
+                    // Parallel branch execution (sequential execution, using deep_merge to merge results)
+                    // Note: Because Node contains dyn traits (not Send + 'static),
+                    // tokio::spawn cannot be used directly. Sequential execution is used here to guarantee correctness.
                     //
-                    // 为避免后执行分支覆盖前分支的修改，每个分支使用独立的 state 克隆，
-                    // 执行完成后通过 deep_merge 语义合并回主 state：
-                    // - 嵌套 object 的字段会递归合并而非整体覆盖
-                    // - 简单 key（非 object）仍然会被后执行的分支覆盖
+                    // To prevent later branches from overwriting earlier modifications, each branch uses an independent state clone,
+                    // after execution completes, merge back to the main state via deep_merge semantics:
+                    // - Nested object fields are recursively merged rather than wholesale overwritten
+                    // - Simple keys (non-object) are still overwritten by later branches
                     for target_name in &targets {
                         if let Some(target_node) = self.nodes.get(target_name) {
-                            // 克隆当前 state 作为分支的独立 state
+                            // Clone the current state as the branch's independent state
                             let branch_state = state.fork()?;
                             branch_state.set_current_node(target_name);
                             debug!(graph = %self.name, node = %target_name, "Executing parallel branch");
                             target_node.execute(&branch_state).await?;
 
-                            // 将分支 state deep_merge 回主 state
+                            // deep_merge the branch state back into the main state
                             state.deep_merge(&branch_state)?;
 
                             path.push(target_name.clone());
@@ -653,17 +656,17 @@ impl Graph {
         }
     }
 
-    // ── Interrupt + Checkpoint 方法 ───────────────────────────────────────────
+    // ── Interrupt + Checkpoint Methods ──────────────────────────────────────────
 
-    /// 执行到 interrupt 点暂停
+    /// Execute until an interrupt point, then pause
     ///
-    /// 如果配置了 `interrupt_before` 或 `interrupt_after`，执行到相应节点时会暂停
-    /// 并返回 `InterruptState`。可以通过 `resume()` 方法继续执行。
+    /// If `interrupt_before` or `interrupt_after` is configured, execution pauses when reaching the corresponding node
+    /// and returns `InterruptState`. Execution can be continued via the `resume()` method.
     ///
     /// # Returns
     ///
-    /// - `RunUntilInterruptResult::Completed(GraphResult)` - 执行完成
-    /// - `RunUntilInterruptResult::Interrupted(InterruptState)` - 遇到 interrupt 点暂停
+    /// - `RunUntilInterruptResult::Completed(GraphResult)` - Execution completed
+    /// - `RunUntilInterruptResult::Interrupted(InterruptState)` - Paused at an interrupt point
     pub async fn run_until_interrupt(&self, state: SharedState) -> Result<RunUntilInterruptResult> {
         let mut current = self.entry.clone();
         let mut path = Vec::new();
@@ -672,7 +675,7 @@ impl Graph {
         info!(graph = %self.name, entry = %current, "Starting graph execution (with interrupt)");
 
         loop {
-            // 防止无限循环
+            // Prevent infinite loop
             if step_count >= self.max_steps {
                 warn!(
                     graph = %self.name,
@@ -684,7 +687,7 @@ impl Graph {
                 )));
             }
 
-            // 检查 interrupt_before
+            // Check interrupt_before
             if self.interrupt_config.should_interrupt_before(&current) {
                 debug!(graph = %self.name, node = %current, "Interrupt before node");
 
@@ -697,14 +700,14 @@ impl Graph {
                     InterruptType::BeforeNode,
                 );
 
-                // 保存 checkpoint
+                // Save the checkpoint
                 self.checkpoint_store.save(&checkpoint).await?;
 
                 let interrupt_state = InterruptState::before_node(checkpoint, current);
                 return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
             }
 
-            // 检查终止条件
+            // Check termination condition
             if current == Self::END || self.finish_nodes.contains(&current) {
                 if current != Self::END
                     && let Some(node) = self.nodes.get(&current)
@@ -728,7 +731,7 @@ impl Graph {
                 }));
             }
 
-            // 执行当前节点
+            // Execute the current node
             let node = self.nodes.get(&current).ok_or_else(|| {
                 ReactError::Agent(AgentError::InitializationFailed(format!(
                     "Node '{}' not found in graph '{}'",
@@ -742,11 +745,11 @@ impl Graph {
             path.push(current.clone());
             step_count += 1;
 
-            // 检查 interrupt_after
+            // Check interrupt_after
             if self.interrupt_config.should_interrupt_after(&current) {
                 debug!(graph = %self.name, node = %current, "Interrupt after node");
 
-                // 获取下一个节点
+                // Get the next node
                 let next = self.resolve_next(&current, &state).await?;
 
                 let checkpoint = Checkpoint::new(
@@ -768,7 +771,7 @@ impl Graph {
                 return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
             }
 
-            // 路由到下一个节点
+            // Route to the next node
             let next = self.resolve_next(&current, &state).await?;
 
             match next {
@@ -783,16 +786,16 @@ impl Graph {
                         "Executing parallel fan-out"
                     );
 
-                    // 并行分支执行（使用 deep_merge 合并各分支结果）
+                    // Parallel branch execution (using deep_merge to merge branch results)
                     for target_name in &targets {
                         if let Some(target_node) = self.nodes.get(target_name) {
-                            // 克隆 state 作为分支独立 state
+                            // Clone state as branch-independent state
                             let branch_state = state.fork()?;
                             branch_state.set_current_node(target_name);
                             debug!(graph = %self.name, node = %target_name, "Executing parallel branch");
                             target_node.execute(&branch_state).await?;
 
-                            // deep_merge 回主 state
+                            // deep_merge back to main state
                             state.deep_merge(&branch_state)?;
 
                             path.push(target_name.clone());
@@ -819,17 +822,17 @@ impl Graph {
         }
     }
 
-    /// 从 Checkpoint 恢复执行
+    /// Resume execution from a Checkpoint
     ///
-    /// 当用户批准继续后，从保存的 checkpoint 恢复执行。
+    /// When the user approves to continue, resume execution from the saved checkpoint.
     ///
-    /// 修复：遇到 interrupt 点时返回 `RunUntilInterruptResult::Interrupted` 而非 `Err`。
+    /// Fix: returns `RunUntilInterruptResult::Interrupted` instead of `Err` when encountering an interrupt point.
     pub async fn resume(
         &self,
         checkpoint: Checkpoint,
         decision: ApprovalDecision,
     ) -> Result<RunUntilInterruptResult> {
-        // 检查审批决策 — Rejected 和 Deferred 不得继续执行
+        // Check approval decision -- Rejected and Deferred must not continue execution
         match &decision {
             ApprovalDecision::Rejected { reason } => {
                 info!(
@@ -859,7 +862,7 @@ impl Graph {
             _ => {} // Approved, ApprovedWithScope, Modified — continue
         }
 
-        // 恢复状态
+        // Restore state
         let state = checkpoint.restore_state()?;
         let mut current = checkpoint.current_node;
         let mut path = checkpoint.path;
@@ -872,7 +875,7 @@ impl Graph {
             "Resuming from checkpoint"
         );
 
-        // 继续执行
+        // Continue execution
         loop {
             if step_count >= self.max_steps {
                 return Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
@@ -880,8 +883,8 @@ impl Graph {
                 )));
             }
 
-            // 检查 interrupt_before（跳过，因为已经处理过了）
-            // 如果是从 BeforeNode interrupt 恢复，需要执行当前节点
+            // Check interrupt_before (skip, as it has already been handled)
+            // If resuming from a BeforeNode interrupt, the current node must be executed
 
             if current == Self::END || self.finish_nodes.contains(&current) {
                 if current != Self::END
@@ -892,7 +895,7 @@ impl Graph {
                     path.push(current.clone());
                     step_count += 1;
                 }
-                // 成功执行完成后删除 checkpoint
+                // Delete checkpoint after successful completion
                 self.checkpoint_store.delete(&checkpoint.id).await?;
                 return Ok(RunUntilInterruptResult::Completed(GraphResult {
                     state,
@@ -901,7 +904,7 @@ impl Graph {
                 }));
             }
 
-            // 执行当前节点
+            // Execute the current node
             let node = self.nodes.get(&current).ok_or_else(|| {
                 ReactError::Agent(AgentError::InitializationFailed(format!(
                     "Node '{}' not found",
@@ -914,7 +917,7 @@ impl Graph {
             path.push(current.clone());
             step_count += 1;
 
-            // 检查 interrupt_after
+            // Check interrupt_after
             if self.interrupt_config.should_interrupt_after(&current) {
                 let next = self.resolve_next(&current, &state).await?;
 
@@ -935,7 +938,7 @@ impl Graph {
 
                 self.checkpoint_store.save(&new_checkpoint).await?;
 
-                // 删除旧的 checkpoint（新的已保存成功）
+                // Delete the old checkpoint (the new one has been saved successfully)
                 self.checkpoint_store.delete(&checkpoint.id).await?;
 
                 let interrupt_state = InterruptState::after_node(new_checkpoint, current);
@@ -946,7 +949,7 @@ impl Graph {
 
             match next {
                 NextStep::Single(name) => {
-                    // 检查下一个节点的 interrupt_before
+                    // Check interrupt_before for the next node
                     if self.interrupt_config.should_interrupt_before(&name) {
                         let new_checkpoint = Checkpoint::new(
                             self.name.clone(),
@@ -958,7 +961,7 @@ impl Graph {
                         );
                         self.checkpoint_store.save(&new_checkpoint).await?;
 
-                        // 删除旧的 checkpoint（新的已保存成功）
+                        // Delete the old checkpoint (the new one has been saved successfully)
                         self.checkpoint_store.delete(&checkpoint.id).await?;
 
                         let interrupt_state = InterruptState::before_node(new_checkpoint, name);
@@ -967,7 +970,7 @@ impl Graph {
                     current = name;
                 }
                 NextStep::Parallel { targets, then } => {
-                    // 并行分支执行，共享 SharedState（顺序执行）
+                    // Parallel branch execution, shared SharedState (sequential execution)
                     for target_name in &targets {
                         if let Some(target_node) = self.nodes.get(target_name) {
                             state.set_current_node(target_name);
@@ -990,10 +993,10 @@ impl Graph {
         }
     }
 
-    /// 从 checkpoint 恢复执行，同时注入状态修改。
+    /// Resume execution from a checkpoint while injecting state modifications.
     ///
-    /// 在恢复前将 `state_updates` 合并到 checkpoint 的状态中，
-    /// 适用于需要在外部修改 workflow 状态后继续执行的场景。
+    /// Merge `state_updates` into the checkpoint's state before resuming,
+    /// suitable for scenarios where the workflow state needs to be modified externally before continuing execution.
     pub async fn resume_with_state(
         &self,
         checkpoint: Checkpoint,
@@ -1016,25 +1019,25 @@ impl Graph {
             .await
     }
 
-    /// 加载 Checkpoint
+    /// Load a Checkpoint
     pub async fn load_checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
         self.checkpoint_store.load(id).await
     }
 
-    /// 列出所有 Checkpoint
+    /// List all Checkpoints
     pub async fn list_checkpoints(&self) -> Result<Vec<super::checkpoint_store::CheckpointInfo>> {
         self.checkpoint_store.list().await
     }
 
-    /// 设置自定义 Checkpoint 存储
+    /// Set a custom Checkpoint store
     pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
         self.checkpoint_store = store;
         self
     }
 
-    /// 流式执行图工作流，逐节点发出 [`WorkflowEvent`] 事件。
+    /// Execute the graph workflow in streaming mode, emitting [`WorkflowEvent`] events node by node.
     ///
-    /// 每个节点的 Start/End 事件都会被发出，最后发出 `Completed` 事件。
+    /// Each node's Start/End events are emitted, and finally a `Completed` event is emitted.
     pub async fn run_stream(
         &self,
         state: SharedState,
@@ -1112,10 +1115,10 @@ impl Graph {
                         current = name;
                     }
                     NextStep::Parallel { targets, then } => {
-                        // 并行分支执行（使用 deep_merge 合并各分支结果）
+                        // Parallel branch execution (using deep_merge to merge branch results)
                         for target_name in &targets {
                             if let Some(target_node) = self.nodes.get(target_name) {
-                                // 克隆 state 作为分支独立 state
+                                // Clone state as branch-independent state
                                 let branch_state = state_clone.fork()?;
                                 branch_state.set_current_node(target_name);
                                 yield WorkflowEvent::NodeStart {
@@ -1130,7 +1133,7 @@ impl Graph {
                                     elapsed: branch_start.elapsed(),
                                 };
 
-                                // deep_merge 回主 state
+                                // deep_merge back to main state
                                 state_clone.deep_merge(&branch_state)?;
 
                                 path.push(target_name.clone());
@@ -1158,12 +1161,12 @@ impl Graph {
         Ok(Box::pin(stream))
     }
 
-    /// 解析下一个节点
+    /// Resolve the next node
     async fn resolve_next(&self, current: &str, state: &SharedState) -> Result<NextStep> {
         let edges = match self.edges.get(current) {
             Some(e) => e,
             None => {
-                // 没有出边 → 如果是 finish 节点则结束，否则报错
+                // No outgoing edges -> if it is a finish node then end, otherwise report an error
                 if self.finish_nodes.contains(&current.to_string()) {
                     return Ok(NextStep::End);
                 }
@@ -1176,7 +1179,7 @@ impl Graph {
             }
         };
 
-        // 取第一条匹配的边
+        // Take the first matching edge
         if let Some(edge) = edges.iter().next() {
             match &edge.kind {
                 EdgeKind::Fixed(to) => {
@@ -1201,19 +1204,19 @@ impl Graph {
             }
         }
 
-        // 不应到达
+        // Should not be reached
         Ok(NextStep::End)
     }
 }
 
-/// 内部路由结果
+/// Internal routing result
 enum NextStep {
     Single(String),
     Parallel { targets: Vec<String>, then: String },
     End,
 }
 
-// ── 单元测试 ────────────────────────────────────────────────────────────────
+// ── Unit Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1262,7 +1265,7 @@ mod tests {
         let graph = GraphBuilder::new("conditional")
             .add_function_node("check", |_state: &SharedState| {
                 Box::pin(async move {
-                    // score 由外部设置
+                    // score is set externally
                     Ok(())
                 })
             })
@@ -1294,7 +1297,7 @@ mod tests {
             .build()
             .unwrap();
 
-        // 测试通过路径
+        // Test the pass path
         let state = SharedState::new();
         let _ = state.set("score", 80i64);
         let result = graph.run(state).await.unwrap();
@@ -1304,7 +1307,7 @@ mod tests {
         );
         assert_eq!(result.path, vec!["check", "pass"]);
 
-        // 测试失败路径
+        // Test the fail path
         let state = SharedState::new();
         let _ = state.set("score", 40i64);
         let result = graph.run(state).await.unwrap();
@@ -1317,7 +1320,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_loop_graph() {
-        // 模拟循环：counter 从 0 递增到 5
+        // Simulate a loop: counter increments from 0 to 5
         let graph = GraphBuilder::new("loop")
             .add_function_node("init", |state: &SharedState| {
                 Box::pin(async move {
@@ -1434,7 +1437,7 @@ mod tests {
                 Box::pin(async move { Ok(()) })
             })
             .set_entry("loop_node")
-            .add_edge("loop_node", "loop_node") // 无限循环
+            .add_edge("loop_node", "loop_node") // infinite loop
             .build()
             .unwrap();
 
@@ -1474,14 +1477,14 @@ mod tests {
 
     #[test]
     fn test_build_rejects_multiple_outgoing_edges() {
-        // 同一节点有两条出边 → build 阶段应报错
+        // Same node has two outgoing edges -> build phase should error
         let result = GraphBuilder::new("multi_edge")
             .add_function_node("a", |_: &SharedState| Box::pin(async { Ok(()) }))
             .add_function_node("b", |_: &SharedState| Box::pin(async { Ok(()) }))
             .add_function_node("c", |_: &SharedState| Box::pin(async { Ok(()) }))
             .set_entry("a")
             .add_edge("a", "b")
-            .add_edge("a", "c") // 第二条出边
+            .add_edge("a", "c") // second outgoing edge
             .build();
         assert!(
             result.is_err(),
@@ -1497,7 +1500,7 @@ mod tests {
         );
     }
 
-    // ── Feature 4: Workflow 流式输出 (run_stream) ────────────────────────────
+    // ── Feature 4: Workflow streaming output (run_stream) ──────────────────────
 
     #[tokio::test]
     async fn test_run_stream_linear() {
@@ -1552,7 +1555,7 @@ mod tests {
 
         assert_eq!(node_starts, vec!["a", "b"]);
         assert_eq!(node_ends, vec!["a", "b"]);
-        assert!(completed, "应收到 Completed 事件");
+        assert!(completed, "Should receive Completed event");
     }
 
     #[tokio::test]

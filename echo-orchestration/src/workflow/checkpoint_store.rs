@@ -1,18 +1,18 @@
-//! Checkpoint 持久化存储
+//! Checkpoint persistent storage
 //!
-//! 支持 Graph 执行状态的保存和恢复，实现 LangGraph 风格的 interrupt/checkpoint 机制。
+//! Supports saving and restoring Graph execution state, implementing LangGraph-style interrupt/checkpoint mechanisms.
 //!
-//! ## 设计
+//! ## Design
 //!
-//! - `CheckpointStore` trait: 抽象存储接口
-//! - `MemoryCheckpointStore`: 内存存储（默认，不持久化）
-//! - `FileCheckpointStore`: 文件存储（支持持久化）
+//! - `CheckpointStore` trait: abstract storage interface
+//! - `MemoryCheckpointStore`: in-memory storage (default, non-persistent)
+//! - `FileCheckpointStore`: file storage (supports persistence)
 //!
-//! ## 使用场景
+//! ## Use Cases
 //!
-//! - 长时间运行的工作流暂停/恢复
-//! - 需要人工审批的节点 interrupt
-//! - 故障恢复和重试
+//! - Long-running workflow pause/resume
+//! - Node interrupts requiring manual approval
+//! - Failure recovery and retry
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -26,36 +26,36 @@ use echo_core::error::Result;
 
 // ── Checkpoint ────────────────────────────────────────────────────────────────
 
-/// Checkpoint - 图执行状态的快照
+/// Checkpoint - snapshot of graph execution state
 ///
-/// 包含恢复执行所需的所有信息：
-/// - 执行路径和步数
-/// - 共享状态快照
-/// - 待处理的节点信息
+/// Contains all information needed to resume execution:
+/// - Execution path and step count
+/// - Shared state snapshot
+/// - Pending node information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
-    /// 唯一标识符
+    /// Unique identifier
     pub id: String,
-    /// 图名称
+    /// Graph name
     pub graph_name: String,
-    /// 当前节点
+    /// Current node
     pub current_node: String,
-    /// 状态快照（JSON 序列化）
+    /// State snapshot (JSON serialized)
     pub state_snapshot: serde_json::Value,
-    /// 执行路径
+    /// Execution path
     pub path: Vec<String>,
-    /// 执行步数
+    /// Step count
     pub step_count: usize,
-    /// 创建时间
+    /// Creation time
     pub created_at: DateTime<Utc>,
-    /// 待处理的工具调用（如果有）
+    /// Pending tool calls (if any)
     pub pending_action: Option<serde_json::Value>,
-    /// Interrupt 类型
+    /// Interrupt type
     pub interrupt_type: InterruptType,
 }
 
 impl Checkpoint {
-    /// 创建新的 Checkpoint
+    /// Create a new Checkpoint
     pub fn new(
         graph_name: String,
         current_node: String,
@@ -80,7 +80,7 @@ impl Checkpoint {
         }
     }
 
-    /// 从 Checkpoint 恢复 SharedState
+    /// Restore SharedState from a Checkpoint
     pub fn restore_state(&self) -> Result<SharedState> {
         SharedState::from_json(&self.state_snapshot).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to restore state: {}", e))
@@ -88,21 +88,21 @@ impl Checkpoint {
     }
 }
 
-/// Interrupt 类型
+/// Interrupt type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InterruptType {
-    /// 进入节点前暂停
+    /// Pause before entering a node
     BeforeNode,
-    /// 节点执行后暂停
+    /// Pause after node execution
     AfterNode,
-    /// 工具审批暂停
+    /// Pause for tool approval
     ToolApproval,
-    /// 用户请求暂停
+    /// Pause for user request
     UserRequest,
 }
 
-/// Checkpoint 信息摘要（用于列表显示）
+/// Checkpoint info summary (used for list display)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointInfo {
     pub id: String,
@@ -128,28 +128,28 @@ impl From<&Checkpoint> for CheckpointInfo {
 
 // ── CheckpointStore Trait ──────────────────────────────────────────────────────
 
-/// Checkpoint 存储接口
+/// Checkpoint storage interface
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
-    /// 保存 Checkpoint
+    /// Save a Checkpoint
     async fn save(&self, checkpoint: &Checkpoint) -> Result<()>;
 
-    /// 加载 Checkpoint
+    /// Load a Checkpoint
     async fn load(&self, id: &str) -> Result<Option<Checkpoint>>;
 
-    /// 列出所有 Checkpoint 信息
+    /// List all Checkpoint info
     async fn list(&self) -> Result<Vec<CheckpointInfo>>;
 
-    /// 删除 Checkpoint
+    /// Delete a Checkpoint
     async fn delete(&self, id: &str) -> Result<()>;
 
-    /// 清空所有 Checkpoint
+    /// Clear all Checkpoints
     async fn clear(&self) -> Result<()>;
 }
 
 // ── Memory Checkpoint Store ────────────────────────────────────────────────────
 
-/// 内存存储实现（默认，不持久化）
+/// In-memory storage implementation (default, non-persistent)
 pub struct MemoryCheckpointStore {
     checkpoints: RwLock<HashMap<String, Checkpoint>>,
 }
@@ -201,7 +201,7 @@ impl CheckpointStore for MemoryCheckpointStore {
 
 // ── File Checkpoint Store ──────────────────────────────────────────────────────
 
-/// 文件存储实现（支持持久化）
+/// File storage implementation (supports persistence)
 pub struct FileCheckpointStore {
     base_path: PathBuf,
 }
@@ -238,7 +238,7 @@ impl CheckpointStore for FileCheckpointStore {
         let json = serde_json::to_string_pretty(checkpoint).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to serialize checkpoint: {}", e))
         })?;
-        // 原子写入：先写临时文件再 rename，避免崩溃时损坏
+        // Atomic write: write to temp file first, then rename to avoid corruption on crash
         let tmp_path = path.with_extension("json.tmp");
         tokio::fs::write(&tmp_path, &json).await.map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to write temp checkpoint: {}", e))
@@ -282,7 +282,7 @@ impl CheckpointStore for FileCheckpointStore {
             }
         }
 
-        // 按创建时间排序（最新在前）
+        // Sort by creation time (newest first)
         infos.sort_by_key(|info| std::cmp::Reverse(info.created_at));
         Ok(infos)
     }
@@ -317,7 +317,7 @@ impl CheckpointStore for FileCheckpointStore {
     }
 }
 
-// ── 单元测试 ────────────────────────────────────────────────────────────────────
+// ── Unit Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -402,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_store() {
-        // 使用当前目录下的临时路径
+        // Use a temp path under the current directory
         let temp_path = std::env::temp_dir().join(format!("echo_test_{}", uuid::Uuid::new_v4()));
         let store = FileCheckpointStore::new(&temp_path);
 

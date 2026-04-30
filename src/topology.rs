@@ -1,32 +1,33 @@
-//! Agent 拓扑可视化
+//! Agent topology visualization
 //!
-//! 运行时记录 Agent 间的调用关系，并支持导出为 DOT (Graphviz) 和 Mermaid 格式。
+//! Records call relationships between Agents at runtime and supports export to
+//! DOT (Graphviz) and Mermaid formats.
 //!
-//! # 核心概念
+//! # Core Concepts
 //!
-//! - [`TopologyTracker`][]: 全局调用关系追踪器（线程安全）
-//! - [`TopologyNode`][]: 图中的节点（Agent）
-//! - [`TopologyEdge`][]: 图中的边（调用关系）
-//! - [`TopologyCallback`]: Agent 回调，自动记录调用关系
+//! - [`TopologyTracker`][]: Global call relationship tracker (thread-safe)
+//! - [`TopologyNode`][]: Nodes in the graph (Agents)
+//! - [`TopologyEdge`][]: Edges in the graph (call relationships)
+//! - [`TopologyCallback`]: Agent callback that auto-records call relationships
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust
 //! use echo_agent::topology::{TopologyTracker, TopologyNode, NodeType};
 //!
 //! let tracker = TopologyTracker::new();
 //!
-//! // 注册节点
+//! // Register nodes
 //! tracker.add_node(TopologyNode::new("orchestrator", NodeType::Orchestrator));
 //! tracker.add_node(TopologyNode::new("math_agent", NodeType::Worker));
 //!
-//! // 记录调用
-//! tracker.record_call("orchestrator", "math_agent", "计算 1+1");
+//! // Record call
+//! tracker.record_call("orchestrator", "math_agent", "compute 1+1");
 //!
-//! // 导出 Mermaid 图
+//! // Export Mermaid diagram
 //! println!("{}", tracker.to_mermaid());
 //!
-//! // 导出 DOT 图
+//! // Export DOT diagram
 //! println!("{}", tracker.to_dot());
 //! ```
 
@@ -38,44 +39,44 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-// ── 节点与边的类型 ───────────────────────────────────────────────────────────
+// ── Node and Edge Types ───────────────────────────────────────────────────────
 
-/// 节点类型
+/// Node type
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeType {
-    /// 编排者 Agent
+    /// Orchestrator Agent
     Orchestrator,
-    /// 工作者 Agent
+    /// Worker Agent
     Worker,
-    /// 规划器
+    /// Planner
     Planner,
-    /// 外部服务（MCP、A2A 等）
+    /// External service (MCP, A2A, etc.)
     External,
-    /// 工具
+    /// Tool
     Tool,
 }
 
-/// 拓扑图节点
+/// Topology graph node
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyNode {
-    /// 节点 ID（唯一标识）
+    /// Node ID (unique identifier)
     pub id: String,
-    /// 显示名称
+    /// Display name
     pub label: String,
-    /// 节点类型
+    /// Node type
     pub node_type: NodeType,
-    /// 节点元数据
+    /// Node metadata
     pub metadata: HashMap<String, String>,
 }
 
 impl TopologyNode {
-    /// 创建一个新的拓扑节点。
+    /// Create a new topology node.
     ///
-    /// # 参数
-    /// - `id`: 节点唯一标识符
-    /// - `node_type`: 节点类型（编排者、工作者、工具等）
+    /// # Arguments
+    /// - `id`: Unique node identifier
+    /// - `node_type`: Node type (Orchestrator, Worker, Tool, etc.)
     ///
-    /// # 示例
+    /// # Example
     /// ```
     /// use echo_agent::topology::{TopologyNode, NodeType};
     ///
@@ -93,33 +94,34 @@ impl TopologyNode {
         }
     }
 
-    /// 设置节点的显示标签（不同于 ID）。
+    /// Set the node's display label (different from ID).
     ///
-    /// # 参数
-    /// - `label`: 显示标签，用于可视化图中显示
+    /// # Arguments
+    /// - `label`: Display label, used in visualizations
     ///
-    /// # 示例
+    /// # Example
     /// ```
     /// use echo_agent::topology::{TopologyNode, NodeType};
     ///
     /// let node = TopologyNode::new("agent_123", NodeType::Worker)
-    ///     .with_label("计算 Agent");
-    /// assert_eq!(node.label, "计算 Agent");
+    ///     .with_label("Compute Agent");
+    /// assert_eq!(node.label, "Compute Agent");
     /// ```
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
         self
     }
 
-    /// 为节点添加元数据键值对。
+    /// Add a metadata key-value pair to the node.
     ///
-    /// 元数据可用于存储额外信息，如 URL、版本、配置等。
+    /// Metadata can be used to store extra information such as URL, version,
+    /// configuration, etc.
     ///
-    /// # 参数
-    /// - `key`: 元数据键
-    /// - `value`: 元数据值
+    /// # Arguments
+    /// - `key`: Metadata key
+    /// - `value`: Metadata value
     ///
-    /// # 示例
+    /// # Example
     /// ```
     /// use echo_agent::topology::{TopologyNode, NodeType};
     ///
@@ -134,37 +136,38 @@ impl TopologyNode {
     }
 }
 
-/// 拓扑图边（调用关系）
+/// Topology graph edge (call relationship)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyEdge {
-    /// 源节点 ID
+    /// Source node ID
     pub from: String,
-    /// 目标节点 ID
+    /// Target node ID
     pub to: String,
-    /// 调用标签（描述调用内容）
+    /// Call label (describes call content)
     pub label: Option<String>,
-    /// 调用次数
+    /// Call count
     pub call_count: u64,
-    /// 最近一次调用时间
+    /// Most recent call time
     pub last_called: DateTime<Utc>,
-    /// 累计执行时间（毫秒）
+    /// Cumulative execution time (milliseconds)
     pub total_duration_ms: u64,
 }
 
 // ── TopologyTracker ──────────────────────────────────────────────────────────
 
-/// 全局拓扑追踪器（线程安全）
+/// Global topology tracker (thread-safe)
 ///
-/// 用于记录 Agent 运行时的调用关系图。可通过 `TopologyCallback` 自动集成到 Agent 中。
+/// Records the call relationship graph at Agent runtime. Can be automatically
+/// integrated into an Agent via `TopologyCallback`.
 pub struct TopologyTracker {
     nodes: RwLock<HashMap<String, TopologyNode>>,
     edges: RwLock<HashMap<(String, String), TopologyEdge>>,
 }
 
 impl TopologyTracker {
-    /// 创建一个新的拓扑追踪器实例。
+    /// Create a new topology tracker instance.
     ///
-    /// # 示例
+    /// # Example
     /// ```
     /// use echo_agent::topology::TopologyTracker;
     ///
@@ -178,21 +181,21 @@ impl TopologyTracker {
         }
     }
 
-    /// 添加节点
+    /// Add a node
     pub fn add_node(&self, node: TopologyNode) {
         if let Ok(mut nodes) = self.nodes.write() {
             nodes.insert(node.id.clone(), node);
         }
     }
 
-    /// 记录一次调用关系
+    /// Record a call relationship
     pub fn record_call(&self, from: &str, to: &str, label: &str) {
         self.record_call_with_duration(from, to, label, 0);
     }
 
-    /// 记录一次调用关系（含耗时）
+    /// Record a call relationship (with duration)
     pub fn record_call_with_duration(&self, from: &str, to: &str, label: &str, duration_ms: u64) {
-        // 确保节点存在
+        // Ensure the node exists
         self.ensure_node(from, NodeType::Worker);
         self.ensure_node(to, NodeType::Tool);
 
@@ -209,12 +212,12 @@ impl TopologyTracker {
             edge.call_count += 1;
             edge.last_called = Utc::now();
             edge.total_duration_ms += duration_ms;
-            // 更新标签为最新调用
+            // Update the label to the most recent call
             edge.label = Some(label.to_string());
         }
     }
 
-    /// 确保节点存在（不覆盖已有节点）
+    /// Ensure node exists (does not overwrite existing node)
     fn ensure_node(&self, id: &str, default_type: NodeType) {
         if let Ok(mut nodes) = self.nodes.write() {
             nodes
@@ -223,7 +226,7 @@ impl TopologyTracker {
         }
     }
 
-    /// 获取所有节点
+    /// Get all nodes
     pub fn nodes(&self) -> Vec<TopologyNode> {
         self.nodes
             .read()
@@ -231,7 +234,7 @@ impl TopologyTracker {
             .unwrap_or_default()
     }
 
-    /// 获取所有边
+    /// Get all edges
     pub fn edges(&self) -> Vec<TopologyEdge> {
         self.edges
             .read()
@@ -239,7 +242,7 @@ impl TopologyTracker {
             .unwrap_or_default()
     }
 
-    /// 获取统计信息
+    /// Get statistics
     pub fn stats(&self) -> TopologyStats {
         let nodes = self.nodes.read().map(|n| n.len()).unwrap_or(0);
         let edges = self.edges.read().map(|e| e.len()).unwrap_or(0);
@@ -256,7 +259,7 @@ impl TopologyTracker {
         }
     }
 
-    /// 清空拓扑数据
+    /// Clear topology data
     pub fn clear(&self) {
         if let Ok(mut nodes) = self.nodes.write() {
             nodes.clear();
@@ -266,20 +269,20 @@ impl TopologyTracker {
         }
     }
 
-    // ── 导出格式 ─────────────────────────────────────────────────────────────
+    // ── Export Formats ─────────────────────────────────────────────────────────
 
-    /// 导出为 Mermaid 流程图格式
+    /// Export as Mermaid flowchart format
     ///
     /// ```text
     /// graph TD
     ///     orchestrator[🎯 orchestrator]
     ///     math_agent[⚙️ math_agent]
-    ///     orchestrator -->|"计算 1+1 (x3)"| math_agent
+    ///     orchestrator -->|"compute 1+1 (x3)"| math_agent
     /// ```
     pub fn to_mermaid(&self) -> String {
         let mut lines = vec!["graph TD".to_string()];
 
-        // 节点定义
+        // Node definitions
         if let Ok(nodes) = self.nodes.read() {
             for node in nodes.values() {
                 let icon = match node.node_type {
@@ -301,7 +304,7 @@ impl TopologyTracker {
             }
         }
 
-        // 边定义
+        // Edge definitions
         if let Ok(edges) = self.edges.read() {
             for edge in edges.values() {
                 let label = if let Some(l) = &edge.label {
@@ -325,7 +328,7 @@ impl TopologyTracker {
         lines.join("\n")
     }
 
-    /// 导出为 DOT (Graphviz) 格式
+    /// Export as DOT (Graphviz) format
     pub fn to_dot(&self) -> String {
         let mut lines = vec![
             "digraph AgentTopology {".to_string(),
@@ -334,7 +337,7 @@ impl TopologyTracker {
             String::new(),
         ];
 
-        // 节点定义
+        // Node definitions
         if let Ok(nodes) = self.nodes.read() {
             for node in nodes.values() {
                 let (shape, color) = match node.node_type {
@@ -353,7 +356,7 @@ impl TopologyTracker {
 
         lines.push(String::new());
 
-        // 边定义
+        // Edge definitions
         if let Ok(edges) = self.edges.read() {
             for edge in edges.values() {
                 let label = if let Some(l) = &edge.label {
@@ -386,7 +389,7 @@ impl TopologyTracker {
         lines.join("\n")
     }
 
-    /// 导出为 JSON 格式（便于前端渲染）
+    /// Export as JSON format (convenient for frontend rendering)
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         let data = TopologyData {
             nodes: self.nodes(),
@@ -403,33 +406,34 @@ impl Default for TopologyTracker {
     }
 }
 
-/// 拓扑数据（用于 JSON 序列化）
+/// Topology data (for JSON serialization)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopologyData {
-    /// 图中的所有节点（Agent、工具、服务等）
+    /// All nodes in the graph (Agents, tools, services, etc.)
     pub nodes: Vec<TopologyNode>,
-    /// 图中的所有边（调用关系）
+    /// All edges in the graph (call relationships)
     pub edges: Vec<TopologyEdge>,
-    /// 拓扑统计信息
+    /// Topology statistics
     pub stats: TopologyStats,
 }
 
-/// 拓扑统计信息
+/// Topology statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyStats {
-    /// 图中的节点总数
+    /// Total number of nodes in the graph
     pub node_count: usize,
-    /// 图中的边总数（不同的调用关系数）
+    /// Total number of edges in the graph (distinct call relationships)
     pub edge_count: usize,
-    /// 所有边的调用次数总和
+    /// Sum of call counts across all edges
     pub total_calls: u64,
 }
 
 // ── TopologyCallback ─────────────────────────────────────────────────────────
 
-/// Agent 回调 — 自动将工具调用记录到拓扑追踪器
+/// Agent callback — Automatically records tool calls to the topology tracker
 ///
-/// 将此回调添加到 Agent 后，所有工具调用会自动记录到拓扑图中。
+/// After adding this callback to an Agent, all tool calls will be automatically
+/// recorded in the topology graph.
 ///
 /// ```rust,no_run
 /// use echo_agent::topology::{TopologyTracker, TopologyCallback};
@@ -447,7 +451,7 @@ pub struct TopologyStats {
 ///     .build()
 ///     .unwrap();
 ///
-/// // agent 执行后，可以查看拓扑图
+/// // After agent execution, the topology graph can be viewed
 /// println!("{}", tracker.to_mermaid());
 /// ```
 pub struct TopologyCallback {
@@ -455,12 +459,12 @@ pub struct TopologyCallback {
 }
 
 impl TopologyCallback {
-    /// 创建一个新的拓扑回调实例。
+    /// Create a new topology callback instance.
     ///
-    /// # 参数
-    /// - `tracker`: 拓扑追踪器，用于记录 Agent 调用关系
+    /// # Arguments
+    /// - `tracker`: Topology tracker for recording Agent call relationships
     ///
-    /// # 示例
+    /// # Example
     /// ```
     /// use echo_agent::topology::{TopologyTracker, TopologyCallback};
     /// use std::sync::Arc;
@@ -485,7 +489,7 @@ impl AgentCallback for TopologyCallback {
                 .add_node(TopologyNode::new(agent, NodeType::Worker));
             self.tracker
                 .add_node(TopologyNode::new(tool, NodeType::Tool));
-            self.tracker.record_call(agent, tool, "调用");
+            self.tracker.record_call(agent, tool, "call");
         })
     }
 
@@ -505,7 +509,7 @@ impl AgentCallback for TopologyCallback {
         _err: &'a ReactError,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            self.tracker.record_call(agent, tool, "调用失败");
+            self.tracker.record_call(agent, tool, "call failed");
         })
     }
 }
@@ -520,7 +524,7 @@ mod tests {
 
         tracker.add_node(TopologyNode::new("agent_a", NodeType::Orchestrator));
         tracker.add_node(TopologyNode::new("agent_b", NodeType::Worker));
-        tracker.record_call("agent_a", "agent_b", "分派任务");
+        tracker.record_call("agent_a", "agent_b", "dispatch task");
 
         let stats = tracker.stats();
         assert_eq!(stats.node_count, 2);
@@ -547,7 +551,7 @@ mod tests {
         let tracker = TopologyTracker::new();
         tracker.add_node(TopologyNode::new("orchestrator", NodeType::Orchestrator));
         tracker.add_node(TopologyNode::new("worker", NodeType::Worker));
-        tracker.record_call("orchestrator", "worker", "执行");
+        tracker.record_call("orchestrator", "worker", "execute");
 
         let mermaid = tracker.to_mermaid();
         assert!(mermaid.starts_with("graph TD"));
@@ -559,7 +563,7 @@ mod tests {
     fn test_topology_to_dot() {
         let tracker = TopologyTracker::new();
         tracker.add_node(TopologyNode::new("agent", NodeType::Worker));
-        tracker.record_call("agent", "tool1", "使用");
+        tracker.record_call("agent", "tool1", "use");
 
         let dot = tracker.to_dot();
         assert!(dot.starts_with("digraph"));

@@ -1,33 +1,33 @@
-//! A2A (Agent-to-Agent) 协议支持
+//! A2A (Agent-to-Agent) protocol support
 //!
-//! 实现 Google A2A 协议规范，支持：
-//! - **Agent Card** 发布：描述 Agent 的能力、技能和端点
-//! - **Agent 发现**：通过 `/.well-known/agent.json` 发现远程 Agent
-//! - **任务交互**：跨框架 Agent 间的任务发送与状态查询
-//! - **任务状态机**：`submitted → working → [input-required] → completed / failed`
-//! - **流式事件**：通过 `tasks/sendSubscribe` 接收实时 SSE 事件流
+//! Implements the Google A2A protocol specification, supporting:
+//! - **Agent Card** publishing: describes Agent capabilities, skills, and endpoints
+//! - **Agent discovery**: find remote Agents via `/.well-known/agent.json`
+//! - **Task interaction**: send tasks and query status across Agent frameworks
+//! - **Task state machine**: `submitted → working → [input-required] → completed / failed`
+//! - **Streaming events**: receive real-time SSE event streams via `tasks/sendSubscribe`
 //!
-//! # 状态机
+//! # State machine
 //!
 //! ```text
 //! submitted → working → completed
 //!                     → failed
 //!                     → input-required ⇄ working
 //!
-//! 任何非终态 → canceled
+//! Any non-terminal state → canceled
 //! ```
 //!
-//! # 核心类型
+//! # Core types
 //!
-//! | 类型 | 说明 |
-//! |------|------|
-//! | [`AgentCard`] | Agent 能力描述卡片 |
-//! | [`A2AServer`] | 服务端，暴露 Agent Card 和任务接口 |
-//! | [`A2AClient`] | 客户端，发现和调用远程 Agent |
-//! | [`TaskState`] | 任务生命周期状态枚举 |
-//! | [`A2AStreamEvent`] | 流式事件（状态变更 / Artifact 更新）|
+//! | Type | Description |
+//! |------|-------------|
+//! | [`AgentCard`] | Agent capability description card |
+//! | [`A2AServer`] | Server, exposes Agent Card and task endpoints |
+//! | [`A2AClient`] | Client, discovers and invokes remote Agents |
+//! | [`TaskState`] | Task lifecycle state enum |
+//! | [`A2AStreamEvent`] | Streaming events (status changes / artifact updates) |
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust,no_run
 //! use echo_agent::a2a::{AgentCard, AgentSkill, A2AServer, TaskState};
@@ -36,13 +36,13 @@
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
 //! let card = AgentCard::builder("translator", "http://localhost:8080")
-//!     .description("多语言翻译 Agent")
+//!     .description("Multilingual translation agent")
 //!     .version("1.0.0")
-//!     .skill(AgentSkill::new("translate", "翻译文本"))
+//!     .skill(AgentSkill::new("translate", "Translate text"))
 //!     .streaming()
 //!     .build();
 //!
-//! let agent = ReactAgentBuilder::simple("qwen3-max", "翻译助手")?;
+//! let agent = ReactAgentBuilder::simple("qwen3-max", "Translation assistant")?;
 //! let server = A2AServer::new(card, agent);
 //! // server.handle_request(...) for sync
 //! // server.handle_request_stream(...) for SSE streaming

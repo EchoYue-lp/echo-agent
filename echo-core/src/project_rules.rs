@@ -1,27 +1,27 @@
-//! 项目级规则文件加载
+//! Project-level rules file loading
 //!
-//! 对标 Claude Code 的 CLAUDE.md：自动从当前目录向父级搜索
-//! `.echo-agent/AGENT.md`（或 `.echo-agent/rules.md`），将其内容注入到
-//! system prompt 开头。
+//! Equivalent to Claude Code's CLAUDE.md: automatically searches from the current
+//! directory upward for `.echo-agent/AGENT.md` (or `.echo-agent/rules.md`),
+//! injecting its content at the beginning of the system prompt.
 //!
-//! # 搜索逻辑
-//! 1. 从 working_dir 开始搜索
-//! 2. 逐级向上到文件系统根目录
-//! 3. 找到第一个匹配文件后停止
-//! 4. 支持嵌套：子目录的 AGENT.md 优先级更高
+//! # Search Logic
+//! 1. Start searching from working_dir
+//! 2. Walk up to the filesystem root
+//! 3. Stop at the first matching file
+//! 4. Supports nesting: AGENT.md in subdirectories takes higher priority
 
 use std::path::{Path, PathBuf};
 
-/// 规则文件候选名称（按优先级排序）
+/// Rule file candidate names (sorted by priority)
 const RULES_FILES: &[&str] = &["AGENT.md", "RULES.md", "rules.md"];
 
-/// 搜索目录名称
+/// Search directory name
 const RULES_DIR: &str = ".echo-agent";
 
-/// 加载项目规则
+/// Load project rules
 ///
-/// 从 `working_dir` 开始向上搜索 `.echo-agent/AGENT.md`，
-/// 返回找到的文件路径和内容。
+/// Searches upward from `working_dir` for `.echo-agent/AGENT.md`,
+/// returning the file path and content if found.
 pub fn load_project_rules(working_dir: &Path) -> Option<(PathBuf, String)> {
     let canonical = working_dir
         .canonicalize()
@@ -46,9 +46,9 @@ pub fn load_project_rules(working_dir: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
-/// 生成注入到 system prompt 的规则文本
+/// Generate rule text to inject into the system prompt
 ///
-/// 返回带标注的规则文本块，或 `None` 表示没有找到规则文件。
+/// Returns an annotated rule text block, or `None` if no rule file was found.
 pub fn rules_injection(working_dir: &Path) -> Option<String> {
     let (path, content) = load_project_rules(working_dir)?;
     let path_display = path.display();
@@ -58,7 +58,7 @@ pub fn rules_injection(working_dir: &Path) -> Option<String> {
     ))
 }
 
-/// 将项目规则注入到现有 system prompt 的前面
+/// Inject project rules before the existing system prompt
 pub fn inject_rules(existing_prompt: &str, working_dir: &Path) -> String {
     match rules_injection(working_dir) {
         Some(rules) => format!("{}\n\n{}", rules, existing_prompt),

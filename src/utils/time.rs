@@ -1,10 +1,10 @@
-//! 时间戳工具函数
+//! Timestamp utility functions
 //!
-//! 提供统一、安全的时间戳获取，避免 `unwrap()` panic。
+//! Provides unified, safe timestamp retrieval, avoiding `unwrap()` panics.
 
-/// 获取当前 Unix 时间戳（秒），失败时返回 0。
+/// Get the current Unix timestamp in seconds, returns 0 on failure.
 ///
-/// 替代散落在各处的 `SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()`。
+/// Replaces scattered `SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()` calls.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -12,7 +12,7 @@ pub fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// 获取当前 Unix 时间戳（毫秒），失败时返回 0。
+/// Get the current Unix timestamp in milliseconds, returns 0 on failure.
 pub fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

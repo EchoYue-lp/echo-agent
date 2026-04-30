@@ -1,4 +1,4 @@
-//! ChannelManager —— 管理多个 IM 通道插件的生命周期
+//! ChannelManager — manages the lifecycle of multiple IM channel plugins
 
 use super::types::{ChannelPlugin, MessageHandler};
 use echo_core::error::Result;
@@ -6,13 +6,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-/// 管理多个 IM 通道的启动、停止、查询
+/// Manage startup, shutdown, and querying of multiple IM channels.
 ///
-/// 支持：
-/// - 注册多个 ChannelPlugin（QQ Bot、飞书等）
-/// - 统一启动 / 停止
-/// - 按 ID 查询或发送
-/// - Drop 时自动停止所有通道
+/// Supports:
+/// - Registering multiple ChannelPlugins (QQ Bot, Feishu, etc.)
+/// - Unified start / stop
+/// - Query or send by ID
+/// - Auto-stop all channels on Drop
 pub struct ChannelManager {
     channels: HashMap<String, Box<dyn ChannelPlugin>>,
 }
@@ -30,14 +30,14 @@ impl ChannelManager {
         }
     }
 
-    /// 注册一个通道插件
+    /// Register a channel plugin
     pub fn register(&mut self, plugin: Box<dyn ChannelPlugin>) {
         let id = plugin.id().to_string();
         info!("Registering channel: {}", id);
         self.channels.insert(id, plugin);
     }
 
-    /// 获取通道数量
+    /// Get the number of channels
     pub fn len(&self) -> usize {
         self.channels.len()
     }
@@ -46,10 +46,10 @@ impl ChannelManager {
         self.channels.is_empty()
     }
 
-    /// 启动所有已注册的通道
+    /// Start all registered channels.
     ///
-    /// 为每个通道创建一个 task 并发启动。返回 `Vec<Result<()>>`，
-    /// 调用者可以查看每个通道的启动结果，单个失败不影响其他通道。
+    /// Creates a task for each channel and starts them concurrently. Returns `Vec<Result<()>>`
+    /// so the caller can inspect the result of each channel; a single failure does not affect others.
     pub async fn start_all(
         &mut self,
         handler_factory: impl Fn(&str) -> Arc<dyn MessageHandler> + Sync,
@@ -75,7 +75,7 @@ impl ChannelManager {
         results
     }
 
-    /// 停止单个通道
+    /// Stop a single channel
     pub async fn stop(&mut self, channel_id: &str) -> Result<()> {
         if let Some(plugin) = self.channels.get_mut(channel_id) {
             info!("Stopping channel: {}", channel_id);
@@ -92,7 +92,7 @@ impl ChannelManager {
         }
     }
 
-    /// 停止所有已注册的通道
+    /// Stop all registered channels
     pub async fn stop_all(&mut self) -> Result<()> {
         info!("Stopping all channels...");
 
@@ -106,7 +106,7 @@ impl ChannelManager {
         Ok(())
     }
 
-    /// 获取通道引用（通过 ID）
+    /// Get a channel reference by ID
     pub fn get(&self, id: &str) -> Option<&(dyn ChannelPlugin + '_)> {
         match self.channels.get(id) {
             Some(plugin) => Some(plugin.as_ref()),
@@ -114,7 +114,7 @@ impl ChannelManager {
         }
     }
 
-    /// 获取通道可变引用（通过 ID）
+    /// Get a mutable channel reference by ID
     pub fn get_mut(&mut self, id: &str) -> Option<&mut (dyn ChannelPlugin + '_)> {
         match self.channels.get_mut(id) {
             Some(plugin) => Some(plugin.as_mut()),
@@ -122,7 +122,7 @@ impl ChannelManager {
         }
     }
 
-    /// 列出所有已注册的通道 ID
+    /// List all registered channel IDs
     pub fn channel_ids(&self) -> Vec<&str> {
         self.channels.keys().map(|k| k.as_str()).collect()
     }

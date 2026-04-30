@@ -1,10 +1,10 @@
 //! Brave Search API Provider
 //!
-//! 通过 Brave Search API 实现高质量搜索，需要 API Key。
+//! High-quality search via the Brave Search API, requires an API Key.
 //!
-//! # 获取 API Key
+//! # Getting an API Key
 //!
-//! 前往 <https://brave.com/search/api/> 注册获取免费 API Key（每月 2000 次免费额度）。
+//! Visit <https://brave.com/search/api/> to register and get a free API Key (2000 free queries/month).
 
 use super::utils::{truncate_chars, urlencode};
 use super::{SearchProvider, SearchResult};
@@ -16,14 +16,14 @@ use std::time::Duration;
 
 /// Brave Search API Provider
 ///
-/// 使用 Brave Search API 进行搜索，需要 API Key。
+/// Searches via the Brave Search API, requires an API Key.
 pub struct BraveSearchProvider {
     client: Client,
     api_key: String,
 }
 
 impl BraveSearchProvider {
-    /// 创建新的 Brave Search Provider
+    /// Create a new Brave Search Provider
     ///
     /// - `api_key`: Brave Search API Key
     pub fn new(api_key: impl Into<String>) -> Self {
@@ -37,15 +37,15 @@ impl BraveSearchProvider {
         }
     }
 
-    /// 从环境变量创建
+    /// Create from environment variable
     ///
-    /// 读取 `BRAVE_SEARCH_API_KEY` 环境变量。
+    /// Reads the `BRAVE_SEARCH_API_KEY` environment variable.
     pub fn from_env() -> Option<Self> {
         std::env::var("BRAVE_SEARCH_API_KEY").ok().map(Self::new)
     }
 }
 
-/// Brave Search API 响应结构
+/// Brave Search API response structure
 #[derive(Debug, Deserialize)]
 struct BraveResponse {
     web: Option<BraveWebResults>,
@@ -85,21 +85,21 @@ impl SearchProvider for BraveSearchProvider {
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: format!("Brave Search 请求失败: {}", e),
+                message: format!("Brave Search request failed: {}", e),
             })?;
 
         let status = response.status();
         if status.as_u16() == 401 {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: "Brave Search API Key 无效或已过期".into(),
+                message: "Brave Search API Key is invalid or expired".into(),
             }
             .into());
         }
         if status.as_u16() == 429 {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: "Brave Search API 调用次数已达上限".into(),
+                message: "Brave Search API rate limit exceeded".into(),
             }
             .into());
         }
@@ -108,7 +108,7 @@ impl SearchProvider for BraveSearchProvider {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
                 message: format!(
-                    "Brave Search 返回错误 ({}): {}",
+                    "Brave Search returned error ({}): {}",
                     status,
                     truncate_chars(&body, 200)
                 ),
@@ -122,7 +122,7 @@ impl SearchProvider for BraveSearchProvider {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "web_search".into(),
-                    message: format!("Brave Search 响应解析失败: {}", e),
+                    message: format!("Brave Search response parsing failed: {}", e),
                 })?;
 
         let results = brave_resp.web.and_then(|w| w.results).unwrap_or_default();
@@ -154,7 +154,7 @@ mod tests {
     fn test_urlencode() {
         assert_eq!(urlencode("hello world"), "hello%20world");
         assert_eq!(urlencode("rust-lang"), "rust-lang");
-        assert_eq!(urlencode("你好"), "%E4%BD%A0%E5%A5%BD");
+        assert_eq!(urlencode("café"), "caf%C3%A9");
     }
 
     #[test]

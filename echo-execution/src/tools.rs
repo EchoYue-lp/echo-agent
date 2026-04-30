@@ -1,6 +1,7 @@
-//! 工具系统核心框架
+//! Tool system core — `ToolManager` and tool trait re-exports.
 //!
-//! 提供 [`ToolManager`] 和工具 trait 的 re-export。
+//! The [`ToolManager`] handles registration, execution, concurrency control,
+//! and timeout/retry for all tools in an agent session.
 
 use echo_core::error::{Result, ToolError};
 use echo_core::llm::types::ToolDefinition;

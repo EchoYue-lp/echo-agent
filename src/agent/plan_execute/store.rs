@@ -9,70 +9,70 @@ use std::sync::Arc;
 /// Lightweight plan summary for listing/search
 #[derive(Debug, Clone)]
 pub struct PlanSummary {
-    /// 计划唯一标识符
+    /// Plan unique identifier
     pub id: String,
-    /// 可读的短标识符（用于 URL 等场景）
+    /// Human-readable short identifier (for URLs, etc.)
     pub slug: Option<String>,
-    /// 计划目标描述
+    /// Plan goal description
     pub goal: Option<String>,
-    /// 计划版本号（用于乐观锁）
+    /// Plan version number (for optimistic locking)
     pub version: u32,
-    /// 计划总步骤数
+    /// Total number of steps in the plan
     pub total_steps: usize,
-    /// 已完成的步骤数
+    /// Number of completed steps
     pub completed_steps: usize,
 }
 
 /// Trait for plan persistence operations
 pub trait PlanStore: Send + Sync {
-    /// 保存计划到存储
+    /// Save plan to storage
     ///
-    /// # 参数
-    /// * `plan` - 要保存的计划
+    /// # Parameters
+    /// * `plan` - The plan to save
     fn save_plan<'a>(
         &'a self,
         plan: &'a crate::agent::plan_execute::types::Plan,
     ) -> BoxFuture<'a, Result<()>>;
-    /// 根据计划ID加载计划
+    /// Load plan by plan ID
     ///
-    /// # 参数
-    /// * `plan_id` - 计划唯一标识符
-    /// # 返回
-    /// * `Ok(Some(plan))` - 找到计划
-    /// * `Ok(None)` - 计划不存在
+    /// # Parameters
+    /// * `plan_id` - Plan unique identifier
+    /// # Returns
+    /// * `Ok(Some(plan))` - Plan found
+    /// * `Ok(None)` - Plan does not exist
     fn load_plan<'a>(
         &'a self,
         plan_id: &'a str,
     ) -> BoxFuture<'a, Result<Option<crate::agent::plan_execute::types::Plan>>>;
-    /// 根据slug加载计划
+    /// Load plan by slug
     ///
-    /// # 参数
-    /// * `slug` - 计划的可读短标识符
-    /// # 返回
-    /// * `Ok(Some(plan))` - 找到计划
-    /// * `Ok(None)` - 计划不存在
+    /// # Parameters
+    /// * `slug` - Human-readable short identifier for the plan
+    /// # Returns
+    /// * `Ok(Some(plan))` - Plan found
+    /// * `Ok(None)` - Plan does not exist
     fn load_plan_by_slug<'a>(
         &'a self,
         slug: &'a str,
     ) -> BoxFuture<'a, Result<Option<crate::agent::plan_execute::types::Plan>>>;
-    /// 列出计划摘要列表
+    /// List plan summaries
     ///
-    /// # 参数
-    /// * `limit` - 返回结果的最大数量
+    /// # Parameters
+    /// * `limit` - Maximum number of results to return
     fn list_plans<'a>(&'a self, limit: usize) -> BoxFuture<'a, Result<Vec<PlanSummary>>>;
-    /// 删除计划
+    /// Delete a plan
     ///
-    /// # 参数
-    /// * `plan_id` - 计划唯一标识符
-    /// # 返回
-    /// * `Ok(true)` - 删除成功
-    /// * `Ok(false)` - 计划不存在
+    /// # Parameters
+    /// * `plan_id` - Plan unique identifier
+    /// # Returns
+    /// * `Ok(true)` - Deletion succeeded
+    /// * `Ok(false)` - Plan does not exist
     fn delete_plan<'a>(&'a self, plan_id: &'a str) -> BoxFuture<'a, Result<bool>>;
-    /// 搜索计划
+    /// Search plans
     ///
-    /// # 参数
-    /// * `query` - 搜索关键词
-    /// * `limit` - 返回结果的最大数量
+    /// # Parameters
+    /// * `query` - Search keyword
+    /// * `limit` - Maximum number of results to return
     fn search_plans<'a>(
         &'a self,
         query: &'a str,
@@ -88,10 +88,10 @@ pub struct SqlitePlanStore {
 const PLAN_NAMESPACE: &[&str] = &["plans"];
 
 impl SqlitePlanStore {
-    /// 创建基于 SQLite 存储的计划存储
+    /// Create a SQLite-backed plan store
     ///
-    /// # 参数
-    /// * `store` - 底层存储实现
+    /// # Parameters
+    /// * `store` - Underlying storage implementation
     pub fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
     }
@@ -268,10 +268,10 @@ mod tests {
 
     fn sample_plan() -> Plan {
         Plan::new(vec![
-            PlanStep::new("分析代码结构"),
-            PlanStep::new("优化性能").with_dependencies(vec!["step_0".to_string()]),
+            PlanStep::new("Analyze code structure"),
+            PlanStep::new("Optimize performance").with_dependencies(vec!["step_0".to_string()]),
         ])
-        .with_goal("性能优化")
+        .with_goal("Performance optimization")
         .with_slug("test-plan")
     }
 
@@ -288,7 +288,7 @@ mod tests {
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
         assert_eq!(loaded.steps.len(), 2);
-        assert_eq!(loaded.goal.as_deref(), Some("性能优化"));
+        assert_eq!(loaded.goal.as_deref(), Some("Performance optimization"));
         assert_eq!(loaded.steps[1].dependencies, vec!["step_0"]);
     }
 

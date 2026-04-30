@@ -1,9 +1,9 @@
-//! 浏览器/Web 自动化工具
+//! Browser/Web automation tools
 //!
-//! 提供 Web 内容获取和处理能力：
-//! - web_fetch: 获取并解析网页内容
-//! - web_extract: 从 HTML 中提取结构化内容（标题/正文/链接）
-//! - web_search: 搜索并返回结果页摘要
+//! Provides web content fetching and processing capabilities:
+//! - web_fetch: fetch and parse web page content
+//! - web_extract: extract structured content from HTML (title/body/links)
+//! - web_search: search and return result page summaries
 
 use futures::future::BoxFuture;
 use scraper::{Html, Selector};
@@ -23,7 +23,7 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "获取网页内容并提取为可读文本。支持 CSS 选择器提取指定区域"
+        "Fetch web page content and extract as readable text. Supports CSS selector for targeted extraction"
     }
 
     fn parameters(&self) -> Value {
@@ -32,15 +32,15 @@ impl Tool for WebFetchTool {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "要获取的网页 URL"
+                    "description": "Web page URL to fetch"
                 },
                 "selector": {
                     "type": "string",
-                    "description": "CSS 选择器，只提取匹配区域的内容（可选）"
+                    "description": "CSS selector, only extract content from matching regions (optional)"
                 },
                 "max_length": {
                     "type": "integer",
-                    "description": "返回内容的最大字符数（默认 10000）"
+                    "description": "Maximum character count for returned content (default 10000)"
                 }
             },
             "required": ["url"]
@@ -54,17 +54,17 @@ impl Tool for WebFetchTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("url".to_string()))?;
 
-            // 验证 URL
+            // Validate URL
             let parsed = Url::parse(url_str).map_err(|_| ToolError::InvalidParameter {
                 name: "url".to_string(),
-                message: format!("无效的 URL: {}", url_str),
+                message: format!("Invalid URL: {}", url_str),
             })?;
 
             let scheme = parsed.scheme();
             if scheme != "http" && scheme != "https" {
                 return Err(ToolError::InvalidParameter {
                     name: "url".to_string(),
-                    message: "仅支持 http/https 协议".to_string(),
+                    message: "Only http/https protocols are supported".to_string(),
                 }
                 .into());
             }
@@ -80,7 +80,7 @@ impl Tool for WebFetchTool {
                 .build()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "web_fetch".to_string(),
-                    message: format!("创建 HTTP 客户端失败: {}", e),
+                    message: format!("Failed to create HTTP client: {}", e),
                 })?;
 
             let response =
@@ -90,12 +90,15 @@ impl Tool for WebFetchTool {
                     .await
                     .map_err(|e| ToolError::ExecutionFailed {
                         tool: "web_fetch".to_string(),
-                        message: format!("请求失败: {}", e),
+                        message: format!("Request failed: {}", e),
                     })?;
 
             let status = response.status();
             if !status.is_success() {
-                return Ok(ToolResult::success(format!("HTTP {}: 请求失败", status)));
+                return Ok(ToolResult::success(format!(
+                    "HTTP {}: request failed",
+                    status
+                )));
             }
 
             let html = response
@@ -103,16 +106,16 @@ impl Tool for WebFetchTool {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "web_fetch".to_string(),
-                    message: format!("读取响应失败: {}", e),
+                    message: format!("Failed to read response: {}", e),
                 })?;
 
             let document = Html::parse_document(&html);
             let text = if let Some(sel_str) = parameters.get("selector").and_then(|v| v.as_str()) {
-                // CSS 选择器模式
+                // CSS selector mode
                 let selector =
                     Selector::parse(sel_str).map_err(|_| ToolError::InvalidParameter {
                         name: "selector".to_string(),
-                        message: format!("无效的 CSS 选择器: {}", sel_str),
+                        message: format!("Invalid CSS selector: {}", sel_str),
                     })?;
                 document
                     .select(&selector)
@@ -120,13 +123,17 @@ impl Tool for WebFetchTool {
                     .collect::<Vec<_>>()
                     .join("\n")
             } else {
-                // 提取正文：去掉 script/style 标签，获取 body 文本
+                // Extract body text: remove script/style tags, get body text
                 remove_noise(&document)
             };
 
             let text = clean_text(&text);
             let truncated = if text.len() > max_length {
-                format!("{}...(截断，原长度 {})", &text[..max_length], text.len())
+                format!(
+                    "{}...(truncated, original length {})",
+                    &text[..max_length],
+                    text.len()
+                )
             } else {
                 text
             };
@@ -146,7 +153,7 @@ impl Tool for WebExtractTool {
     }
 
     fn description(&self) -> &str {
-        "从 HTML 内容中提取结构化信息：标题、所有链接、段落、表格等"
+        "Extract structured information from HTML content: title, all links, paragraphs, tables, etc."
     }
 
     fn parameters(&self) -> Value {
@@ -155,12 +162,12 @@ impl Tool for WebExtractTool {
             "properties": {
                 "html": {
                     "type": "string",
-                    "description": "要解析的 HTML 内容"
+                    "description": "HTML content to parse"
                 },
                 "extract_type": {
                     "type": "string",
                     "enum": ["links", "headings", "paragraphs", "tables", "all"],
-                    "description": "提取类型（默认 'all'）"
+                    "description": "Extraction type (default 'all')"
                 }
             },
             "required": ["html"]
@@ -245,7 +252,7 @@ impl Tool for WebExtractTool {
 
             if result.as_object().is_none_or(|o| o.is_empty()) {
                 Ok(ToolResult::success_json(serde_json::json!({
-                    "error": "未能从 HTML 中提取到有意义的结构化内容"
+                    "error": "Could not extract meaningful structured content from the HTML"
                 })))
             } else {
                 Ok(ToolResult::success_json(result))
@@ -259,7 +266,7 @@ impl Tool for WebExtractTool {
 fn remove_noise(document: &Html) -> String {
     let html_str = document.root_element().html();
     html2text::from_read(html_str.as_bytes(), 80).unwrap_or_else(|_| {
-        // 回退：简单提取所有文本
+        // Fallback: simple extraction of all text
         let text: String = document.root_element().text().collect::<Vec<_>>().join(" ");
         let re = regex::Regex::new(r"\s+").unwrap();
         re.replace_all(&text, " ").to_string()
@@ -267,13 +274,13 @@ fn remove_noise(document: &Html) -> String {
 }
 
 fn clean_text(text: &str) -> String {
-    // 合并多行空白
+    // Collapse multiple blank lines
     let re = regex::Regex::new(r"\n{3,}").unwrap();
     let text = re.replace_all(text, "\n\n");
-    // 合并空格
+    // Collapse multiple spaces
     let re2 = regex::Regex::new(r" {2,}").unwrap();
     let text = re2.replace_all(&text, " ");
-    // 合并只有空白的行
+    // Collapse whitespace-only lines
     let re3 = regex::Regex::new(r"\n\s*\n\s*\n").unwrap();
     re3.replace_all(&text, "\n\n").to_string()
 }

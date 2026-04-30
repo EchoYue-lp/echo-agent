@@ -1,8 +1,8 @@
 //! Feishu Webhook Server
 //!
-//! HTTP 事件推送模式，需要公网 IP。
+//! HTTP event push mode; requires a public IP.
 //!
-//! 用于接收飞书推送的事件消息。
+//! Used to receive event messages pushed by Feishu.
 
 use super::super::super::types::*;
 use axum::response::IntoResponse;
@@ -17,21 +17,21 @@ use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
-/// 飞书事件类型
+/// Feishu event type
 const FEISHU_IM_MESSAGE_RECEIVE: &str = "im.message.receive_v1";
 
-/// 已处理事件去重缓存 TTL
+/// TTL for processed event dedup cache
 const DEDUP_TTL_SECS: u64 = 300;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// 验证飞书 Webhook 签名（常量时间比较，防止时序攻击）
+/// Verify Feishu Webhook signature (constant-time comparison to prevent timing attacks).
 ///
-/// 飞书签名算法：
-/// 1. 拼接 `timestamp + "\n" + nonce + "\n" + body`
-/// 2. 使用 signing_key 计算 HMAC-SHA256
-/// 3. Base64 编码得到签名
-/// 4. 比较请求头中的 `X-Lark-Signature` 与计算值
+/// Feishu signature algorithm:
+/// 1. Concatenate `timestamp + "\n" + nonce + "\n" + body`
+/// 2. Compute HMAC-SHA256 using signing_key
+/// 3. Base64-encode to get the signature
+/// 4. Compare `X-Lark-Signature` header with the computed value
 fn verify_feishu_signature(
     signing_key: &str,
     timestamp: &str,
@@ -46,10 +46,10 @@ fn verify_feishu_signature(
     mac.update(msg.as_bytes());
     let computed = mac.finalize().into_bytes();
 
-    // Base64 编码计算结果
+    // Base64-encode the computed result
     let computed_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, computed);
 
-    // 常量时间比较，防止时序攻击
+    // Constant-time comparison to prevent timing attacks
     if computed_b64.len() != expected_signature.len() {
         return false;
     }
@@ -59,17 +59,17 @@ fn verify_feishu_signature(
         .into()
 }
 
-/// Webhook 状态
+/// Webhook state
 struct WebhookState {
     handler: Arc<dyn MessageHandler>,
     verification_token: Option<String>,
-    /// 签名密钥（用于 HMAC 签名验证）
+    /// Signing key (for HMAC signature verification)
     signing_key: Option<String>,
-    /// 已处理事件去重缓存（message_id -> 处理时间）
+    /// Processed event dedup cache (message_id -> processing time)
     processed_events: DashMap<String, Instant>,
 }
 
-/// 处理飞书事件
+/// Handle Feishu event
 async fn handle_event(
     State(state): State<Arc<WebhookState>>,
     headers: axum::http::HeaderMap,
@@ -81,7 +81,7 @@ async fn handle_event(
         return axum::Json(json!({ "challenge": challenge })).into_response();
     }
 
-    // 2. 验证 verification_token
+    // 2. Verify verification_token
     if let Some(ref expected_token) = state.verification_token {
         let actual_token = body.get("header").and_then(|h| h["token"].as_str());
         if actual_token != Some(expected_token.as_str()) {
@@ -94,7 +94,7 @@ async fn handle_event(
         }
     }
 
-    // 3. HMAC 签名验证（如果配置了 signing_key）
+    // 3. HMAC signature verification (if signing_key is configured)
     if let Some(ref signing_key) = state.signing_key {
         let timestamp = headers
             .get("X-Lark-Request-Timestamp")
@@ -109,7 +109,7 @@ async fn handle_event(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        // 将 body 序列化为 JSON 字符串用于签名验证
+        // Serialize body to JSON string for signature verification
         let body_str = serde_json::to_string(&body).unwrap_or_default();
 
         if !verify_feishu_signature(signing_key, timestamp, nonce, &body_str, signature) {
@@ -124,14 +124,14 @@ async fn handle_event(
         debug!("Feishu webhook: signature verification passed");
     }
 
-    // 4. 验证事件类型
+    // 4. Verify event type
     let event_type = body["header"]["event_type"].as_str();
     if event_type != Some(FEISHU_IM_MESSAGE_RECEIVE) {
         debug!("Feishu webhook: ignoring event type: {:?}", event_type);
         return axum::Json(json!({})).into_response();
     }
 
-    // 5. 解析消息
+    // 5. Parse message
     let event = &body["event"];
     let message = &event["message"];
 
@@ -141,7 +141,7 @@ async fn handle_event(
 
     let message_id = message["message_id"].as_str().unwrap_or("").to_string();
 
-    // 6. 去重检查（飞书 Webhook 超时会重试投递）
+    // 6. Dedup check (Feishu Webhook retries on timeout)
     if !message_id.is_empty() {
         if state.processed_events.contains_key(&message_id) {
             debug!(
@@ -150,12 +150,12 @@ async fn handle_event(
             );
             return axum::Json(json!({})).into_response();
         }
-        // 先标记为已处理，再异步处理（防止重试期间重复）
+        // Mark as processed first, then process async (prevents duplicates during retries)
         state
             .processed_events
             .insert(message_id.clone(), Instant::now());
 
-        // 定期清理过期缓存
+        // Periodically clean up expired cache entries
         let ttl = Duration::from_secs(DEDUP_TTL_SECS);
         state.processed_events.retain(|_, v| v.elapsed() < ttl);
     }
@@ -164,7 +164,7 @@ async fn handle_event(
     let chat_id = message["chat_id"].as_str().unwrap_or("").to_string();
     let chat_type_str = message["chat_type"].as_str().unwrap_or("p2p").to_string();
 
-    // 只处理文本消息
+    // Only handle text messages
     if message_type != "text" {
         debug!(
             "Feishu webhook: ignoring non-text message: {}",
@@ -173,7 +173,7 @@ async fn handle_event(
         return axum::Json(json!({})).into_response();
     }
 
-    // 解析文本内容
+    // Parse text content
     let content_str = message["content"].as_str().unwrap_or("{}").to_string();
     let content: serde_json::Value = serde_json::from_str(&content_str).unwrap_or_default();
     let text = content["text"].as_str().unwrap_or("").to_string();
@@ -187,7 +187,7 @@ async fn handle_event(
         .unwrap_or("unknown")
         .to_string();
 
-    // 7. 立即返回 200，然后异步处理（避免飞书超时重试）
+    // 7. Immediately return 200, then process async (avoids Feishu timeout retries)
     let handler = state.handler.clone();
     tokio::spawn(async move {
         let chat_type = if chat_type_str == "group" {
@@ -214,7 +214,7 @@ async fn handle_event(
     axum::Json(json!({})).into_response()
 }
 
-/// 启动 Webhook Server
+/// Start Webhook Server
 pub(super) async fn run_webhook_server(
     bind_addr: String,
     webhook_path: String,

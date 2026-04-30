@@ -1,34 +1,34 @@
-//! LLM 熔断器（Circuit Breaker）
+//! LLM Circuit Breaker
 //!
-//! 防止 LLM 服务持续不可用时 Agent 陷入无效重试循环。
+//! Prevents the Agent from entering a futile retry loop when the LLM service is persistently unavailable.
 //!
-//! ## 状态机
+//! ## State Machine
 //!
 //! ```text
-//! Closed ──(连续失败 ≥ failure_threshold)──→ Open
-//!                                             │
-//!                                     (等待 timeout 后)
-//!                                             ↓
-//! Closed ←──(成功 ≥ success_threshold)── HalfOpen
-//! Open   ←──(失败)──────────────────────── HalfOpen
+//! Closed ──(consecutive failures ≥ failure_threshold)──→ Open
+//!                                                        │
+//!                                                 (after timeout)
+//!                                                        ↓
+//! Closed ←──(successes ≥ success_threshold)── HalfOpen
+//! Open   ←──(failure)───────────────────────── HalfOpen
 //! ```
 //!
-//! - **Closed**：正常工作，记录失败次数
-//! - **Open**：拒绝所有请求，等待 timeout 后转入 HalfOpen
-//! - **HalfOpen**：允许少量探测请求，根据结果决定恢复或重新打开
+//! - **Closed**: Normal operation, recording failure count
+//! - **Open**: Reject all requests, transition to HalfOpen after timeout
+//! - **HalfOpen**: Allow a limited number of probe requests, decide whether to recover or re-open
 
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-/// 熔断器配置
+/// Circuit breaker configuration
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerConfig {
-    /// 连续失败次数阈值，达到后进入 Open 状态
+    /// Consecutive failure threshold for entering Open state
     pub failure_threshold: u32,
-    /// HalfOpen 状态下连续成功次数，达到后恢复 Closed
+    /// Consecutive success threshold in HalfOpen state for recovering to Closed
     pub success_threshold: u32,
-    /// Open 状态持续时间，超时后自动转入 HalfOpen
+    /// Open state duration; after timeout, automatically transitions to HalfOpen
     pub timeout: Duration,
 }
 
@@ -42,20 +42,20 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-/// 熔断器内部状态
+/// Circuit breaker internal state
 #[derive(Debug)]
 enum State {
-    /// 正常，记录连续失败次数
+    /// Normal, recording consecutive failure count
     Closed { consecutive_failures: u32 },
-    /// 熔断，记录打开时刻
+    /// Open (tripped), recording when it opened
     Open { opened_at: Instant },
-    /// 半开，记录连续成功次数
+    /// Half-open, recording consecutive success count
     HalfOpen { consecutive_successes: u32 },
 }
 
-/// 熔断器
+/// Circuit Breaker
 ///
-/// 线程安全，可在多个 async 任务间共享（`Arc<CircuitBreaker>`）。
+/// Thread-safe, can be shared across multiple async tasks (`Arc<CircuitBreaker>`).
 pub struct CircuitBreaker {
     state: Mutex<State>,
     config: CircuitBreakerConfig,
@@ -79,30 +79,30 @@ impl CircuitBreaker {
         }
     }
 
-    /// 使用默认配置创建熔断器
+    /// Create a circuit breaker with default configuration.
     pub fn default_config() -> Self {
         Self::new(CircuitBreakerConfig::default())
     }
 
-    /// 纯查询：检查当前是否处于 Open 状态（不改变任何状态）。
+    /// Pure query: check whether currently in Open state (does not change any state).
     ///
-    /// 仅用于监控和日志，不触发状态转换。
+    /// For monitoring and logging only; does not trigger state transitions.
     pub fn is_open(&self) -> bool {
         let state = self.state.lock();
         matches!(&*state, State::Open { .. })
     }
 
-    /// 尝试推进状态：若 Open 且已超过 timeout，自动转入 HalfOpen。
+    /// Attempt to advance state: if Open and timeout has elapsed, transition to HalfOpen automatically.
     ///
-    /// 返回 `true` 表示请求应被拒绝（仍处于 Open 状态），
-    /// 返回 `false` 表示可以继续处理（Closed 或 HalfOpen）。
+    /// Returns `true` if the request should be rejected (still in Open state),
+    /// returns `false` if processing may proceed (Closed or HalfOpen).
     ///
-    /// 在 HalfOpen 状态下，最多允许 1 个探测请求同时进行，
-    /// 避免恢复期间的 thundering herd 问题。
+    /// In HalfOpen state, at most 1 probe request is allowed concurrently,
+    /// avoiding thundering herd during recovery.
     ///
-    /// 调用方应在请求完成后调用 `record_success()` 或 `record_failure()`，
-    /// 这两个方法会自动释放探测配额。
-    /// 若请求被拒绝，调用方应调用 `record_rejected()` 来更新统计。
+    /// Callers should invoke `record_success()` or `record_failure()` after the request completes,
+    /// which will automatically release the probe quota.
+    /// If the request is rejected, callers should invoke `record_rejected()` to update statistics.
     pub fn try_advance(&self) -> bool {
         let mut state = self.state.lock();
         match &*state {
@@ -139,19 +139,19 @@ impl CircuitBreaker {
         }
     }
 
-    /// 记录一次被拒绝的请求（在 Open 状态下）。
+    /// Record a rejected request (while in Open state).
     pub fn record_rejected(&self) {
         self.rejected_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 获取被拒绝的请求总数（用于监控）。
+    /// Get the total number of rejected requests (for monitoring).
     pub fn rejected_count(&self) -> u32 {
         self.rejected_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 记录一次成功调用
+    /// Record a successful call.
     pub fn record_success(&self) {
         // Release probe slot if any
         self.probes_in_flight
@@ -192,7 +192,7 @@ impl CircuitBreaker {
         }
     }
 
-    /// 记录一次失败调用
+    /// Record a failed call.
     pub fn record_failure(&self) {
         // Release probe slot if any
         self.probes_in_flight
@@ -238,7 +238,7 @@ impl CircuitBreaker {
         }
     }
 
-    /// 获取当前状态描述（用于日志/监控）
+    /// Get a human-readable description of the current state (for logging/monitoring).
     pub fn state_name(&self) -> &'static str {
         let state = self.state.lock();
         match &*state {
@@ -248,7 +248,7 @@ impl CircuitBreaker {
         }
     }
 
-    /// 获取当前连续失败次数（仅 Closed 状态下有意义）
+    /// Get the current consecutive failure count (meaningful only in Closed state).
     pub fn consecutive_failures(&self) -> u32 {
         let state = self.state.lock();
         match &*state {

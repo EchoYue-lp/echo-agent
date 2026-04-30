@@ -3,11 +3,45 @@ members = [".", "echo-core", "echo-macros", "echo-execution", "echo-integration"
 
 [package]
 name = "echo_agent"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
-description = "AI Agent framework with ReAct loop, multi-provider LLM, tool execution, and A2A HTTP server"
+description = "Production-grade AI Agent framework for Rust — ReAct engine, multi-agent, memory, streaming, MCP, IM channels, workflows"
 repository = "https://github.com/EchoYue-lp/echo-agent"
+homepage = "https://github.com/EchoYue-lp/echo-agent"
+documentation = "https://docs.rs/echo_agent"
+readme = "README.md"
+keywords = ["ai", "agent", "llm", "react", "mcp"]
+categories = ["development-tools", "asynchronous", "web-programming::http-client"]
+
+exclude = [
+    "docs/",
+    "/skills/",
+    ".github/",
+    ".claude/",
+    ".idea/",
+    "echo-agent.example.yaml",
+    "echo-agent.yaml",
+    ".env",
+    ".env1",
+    ".example.env",
+    "mcp.json.example",
+    "mcp.json",
+    ".playwright-mcp/",
+    "**/.DS_Store",
+    "Cargo.lock",
+    "cargo",
+]
+
+[package.metadata.docs.rs]
+features = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules"]
+rustdoc-args = ["--cfg", "docsrs"]
+# NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
+# unconditionally enables `feature="nightly"` on nightly compilers, then uses
+# `core::unicode::{Case_Ignorable, Cased}` which was removed in Rust nightly 1.97+.
+# Upstream fix: https://github.com/pola-rs/polars/commit/67422be6 (not yet published to crates.io).
+# Re-enable `data` once polars releases a version containing this fix.
 
 [features]
 default = ["full"]
@@ -36,12 +70,12 @@ content-guard = []
 project-rules = []
 
 [dependencies]
-echo_core = { version = "0.1.1", path = "echo-core", features = ["reqwest", "guard"] }
-echo_macros = { version = "0.1.1", path = "echo-macros" }
-echo_execution = { version = "0.1.1", path = "echo-execution" }
-echo_integration = { version = "0.1.1", path = "echo-integration" }
-echo_state = { version = "0.1.1", path = "echo-state" }
-echo_orchestration = { version = "0.1.1", path = "echo-orchestration" }
+echo_core = { version = "0.1.2", path = "echo-core", features = ["reqwest", "guard"] }
+echo_macros = { version = "0.1.2", path = "echo-macros" }
+echo_execution = { version = "0.1.2", path = "echo-execution" }
+echo_integration = { version = "0.1.2", path = "echo-integration" }
+echo_state = { version = "0.1.2", path = "echo-state" }
+echo_orchestration = { version = "0.1.2", path = "echo-orchestration" }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
@@ -49,7 +83,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 serde_json = "1.0.143"
 serde = { version = "1.0.228", features = ["derive"] }
 schemars = "0.8"
-dotenv = "0.15"
+dotenvy = "0.15"
 futures = "0.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -75,7 +109,7 @@ lopdf = { version = "0.34", optional = true }
 calamine = { version = "0.26", optional = true }
 docx-rs = { version = "0.4", optional = true }
 encoding_rs = { version = "0.8", optional = true }
-polars = { version = "0.46", features = ["lazy", "csv", "json", "parquet", "dtype-full", "strings", "is_in", "regex"], optional = true }
+polars = { version = "0.53", features = ["lazy", "csv", "json", "parquet", "dtype-full", "strings", "is_in", "regex"], optional = true }
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "any"], optional = true }
 

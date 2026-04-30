@@ -1,4 +1,4 @@
-//! DAG 工作流：Agent 以有向无环图组织，按拓扑序执行，独立节点自动并发。
+//! DAG workflow: agents organized as a directed acyclic graph, executed in topological order with independent nodes running concurrently.
 
 use super::{SharedAgent, StepOutput, Workflow, WorkflowOutput, shared_agent};
 use echo_core::agent::Agent;
@@ -8,25 +8,25 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 use tracing::{debug, info};
 
-/// DAG 中的节点
+/// A node in the DAG
 pub struct DagNode {
     pub id: String,
     pub agent: SharedAgent,
 }
 
-/// DAG 中的有向边（from → to 表示 to 依赖 from 的输出）
+/// Directed edge in the DAG (from -> to means to depends on from's output)
 #[derive(Debug, Clone)]
 pub struct DagEdge {
     pub from: String,
     pub to: String,
 }
 
-/// DAG 工作流：节点按拓扑序执行，无依赖关系的节点自动并发。
+/// DAG workflow: nodes execute in topological order; independent nodes run concurrently.
 ///
-/// 每个节点接收其所有前驱节点的输出（以换行拼接）作为输入；
-/// 入度为零的根节点接收工作流的原始输入。
+/// Each node receives the concatenated outputs of all its predecessors (joined by newlines) as input;
+/// root nodes with zero in-degree receive the workflow's original input.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,no_run
 /// use echo_core::agent::{Agent, AgentEvent};
@@ -73,7 +73,7 @@ pub struct DagEdge {
 ///     .edge("analyze", "write")
 ///     .build()?;
 ///
-/// let output = wf.run("分析 2025 年 AI Agent 生态").await?;
+/// let output = wf.run("Analyze the 2025 AI Agent ecosystem").await?;
 /// println!("{}", output.result);
 /// # Ok(())
 /// # }
@@ -118,7 +118,7 @@ impl Workflow for DagWorkflow {
                 nodes = self.node_order.len(),
                 edges = self.edges.len(),
                 roots = ready.len(),
-                "🔀 DAG 工作流开始执行"
+                "🔀 DAG workflow started"
             );
 
             while !ready.is_empty() {
@@ -127,7 +127,7 @@ impl Workflow for DagWorkflow {
                 debug!(
                     workflow = "dag",
                     batch = ?batch,
-                    "⚡ 并发执行 {} 个节点",
+                    "⚡ Executing {} nodes concurrently",
                     batch.len()
                 );
 
@@ -174,7 +174,7 @@ impl Workflow for DagWorkflow {
                         node = %node_id,
                         agent = %agent_name,
                         elapsed_ms = elapsed.as_millis(),
-                        "✓ 节点完成"
+                        "✓ Node completed"
                     );
 
                     step_outputs.push(StepOutput {
@@ -199,7 +199,7 @@ impl Workflow for DagWorkflow {
                 }
             }
 
-            // 最终结果取所有出度为零的叶子节点的输出
+            // Final result: collect output from all leaf nodes (out-degree = 0)
             let leaf_nodes: Vec<&str> = self
                 .node_order
                 .iter()
@@ -223,26 +223,26 @@ impl Workflow for DagWorkflow {
     }
 }
 
-/// [`DagWorkflow`] 构建器
+/// [`DagWorkflow`] builder
 pub struct DagWorkflowBuilder {
     nodes: Vec<(String, SharedAgent)>,
     edges: Vec<DagEdge>,
 }
 
 impl DagWorkflowBuilder {
-    /// 注册一个命名节点
+    /// Register a named node
     pub fn node(mut self, id: impl Into<String>, agent: impl Agent + 'static) -> Self {
         self.nodes.push((id.into(), shared_agent(agent)));
         self
     }
 
-    /// 注册一个命名节点（使用已包装的 SharedAgent）
+    /// Register a named node (using an already-wrapped SharedAgent)
     pub fn node_shared(mut self, id: impl Into<String>, agent: SharedAgent) -> Self {
         self.nodes.push((id.into(), agent));
         self
     }
 
-    /// 添加有向边：`from` 的输出将流入 `to` 的输入
+    /// Add a directed edge: `from`'s output will flow into `to`'s input
     pub fn edge(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
         self.edges.push(DagEdge {
             from: from.into(),
@@ -251,7 +251,7 @@ impl DagWorkflowBuilder {
         self
     }
 
-    /// 构建 DAG 工作流，验证无环并计算拓扑序
+    /// Build the DAG workflow, validate acyclicity, and compute topological order
     pub fn build(self) -> Result<DagWorkflow> {
         let node_ids: HashSet<&str> = self.nodes.iter().map(|(id, _)| id.as_str()).collect();
 
@@ -287,7 +287,7 @@ impl DagWorkflowBuilder {
     }
 }
 
-// ── DAG 算法 ──────────────────────────────────────────────────────────────────
+// ── DAG Algorithms ──────────────────────────────────────────────────────────────────
 
 fn build_predecessors(edges: &[DagEdge]) -> HashMap<&str, Vec<String>> {
     let mut preds: HashMap<&str, Vec<String>> = HashMap::new();
@@ -419,7 +419,7 @@ fn detect_cycle(nodes: &[String], edges: &[DagEdge]) -> Option<Vec<String>> {
     None
 }
 
-// ── 单元测试 ──────────────────────────────────────────────────────────────────
+// ── Unit Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

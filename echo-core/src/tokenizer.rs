@@ -1,24 +1,25 @@
-//! Token 估算 trait、使用量追踪与成本估算
+//! Token estimation trait, usage tracking, and cost estimation
 //!
-//! 为 [`ContextManager`] 提供可插拔的 token 计数能力，替代固定的 `chars / 4` 启发式。
+//! Provides a pluggable token counting capability for [`ContextManager`], replacing the
+//! fixed `chars / 4` heuristic.
 //!
-//! # 内置实现
+//! # Built-in Implementations
 //!
-//! | 类型 | 算法 | 精度 |
-//! |------|------|------|
-//! | [`HeuristicTokenizer`] | ASCII 权重 1，CJK 权重 2，总和 / 4 | 中（中英混合场景推荐） |
-//! | [`SimpleTokenizer`] | `字节数 / 4 + 1` | 低（向后兼容） |
+//! | Type | Algorithm | Accuracy |
+//! |------|----------|----------|
+//! | [`HeuristicTokenizer`] | ASCII weight 1, CJK weight 2, total / 4 | Medium (recommended for mixed Chinese/English) |
+//! | [`SimpleTokenizer`] | `byte_count / 4 + 1` | Low (backward compatible) |
 //!
-//! # 使用量追踪
+//! # Usage Tracking
 //!
-//! [`TokenUsageTracker`] 提供跨请求的 token 累积统计与成本估算，
-//! 对标 Claude Code / ChatGPT 的 token 用量展示能力。
+//! [`TokenUsageTracker`] provides cross-request token accumulation statistics and cost
+//! estimation, comparable to the token usage display capabilities of Claude Code / ChatGPT.
 //!
-//! # 扩展
+//! # Extension
 //!
-//! 实现 [`Tokenizer`] trait 可接入精确 tokenizer（如 tiktoken-rs）。
+//! Implement the [`Tokenizer`] trait to integrate an exact tokenizer (e.g. tiktoken-rs).
 
-/// Token 计数器抽象
+/// Token counter abstraction
 pub trait Tokenizer: Send + Sync {
     /// Estimate how many model tokens the input text will consume.
     fn count_tokens(&self, text: &str) -> usize;
@@ -30,19 +31,20 @@ impl Tokenizer for Box<dyn Tokenizer> {
     }
 }
 
-/// 启发式 Tokenizer，使用字符权重估算 token 数量。
+/// Heuristic Tokenizer that estimates token count using character weights.
 ///
-/// **注意：这是一个粗略估算器，不是精确的 token 计数器。**
+/// **Note: This is a rough estimator, not an exact token counter.**
 ///
-/// 估算规则：
-/// - ASCII 字符权重 1（约 4 字符 = 1 token）
-/// - CJK 及其他非 ASCII 字符权重 2（约 1-2 字符 = 1 token）
-/// - 总权重 / 4 得到估算 token 数
-/// - 空字符串返回 0
+/// Estimation rules:
+/// - ASCII characters weight 1 (~4 chars = 1 token)
+/// - CJK and other non-ASCII characters weight 2 (~1-2 chars = 1 token)
+/// - Total weight / 4 yields the estimated token count
+/// - Empty string returns 0
 ///
-/// 相比 `字节数 / 4`，对中日韩内容的精度提升约 40-60%，
-/// 但仍不应用于需要精确 token 计数的场景（如配额管理、计费等）。
-/// 对于精确计数，请使用 tiktoken 或模型原生 tokenizer。
+/// Compared to `byte_count / 4`, accuracy for CJK content improves by ~40-60%,
+/// but it should still not be used for scenarios requiring exact token counting
+/// (e.g., quota management, billing, etc.).
+/// For exact counting, use tiktoken or a model-native tokenizer.
 pub struct HeuristicTokenizer;
 
 impl Tokenizer for HeuristicTokenizer {
@@ -55,7 +57,7 @@ impl Tokenizer for HeuristicTokenizer {
     }
 }
 
-/// 简单 Tokenizer：`字节数 / 4 + 1`（向后兼容旧行为）
+/// Simple Tokenizer: `byte_count / 4 + 1` (backward compatible with old behavior)
 pub struct SimpleTokenizer;
 
 impl Tokenizer for SimpleTokenizer {
@@ -64,24 +66,24 @@ impl Tokenizer for SimpleTokenizer {
     }
 }
 
-// ── Token 使用量追踪 ─────────────────────────────────────────────────────────
+// ── Token Usage Tracking ─────────────────────────────────────────────────────────
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 单次 LLM 请求的 token 使用量快照
+/// Token usage snapshot for a single LLM request
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsageSnapshot {
-    /// 提示 token 数
+    /// Prompt token count
     pub prompt_tokens: u32,
-    /// 补全 token 数
+    /// Completion token count
     pub completion_tokens: u32,
-    /// 总 token 数
+    /// Total token count
     pub total_tokens: u32,
 }
 
 impl TokenUsageSnapshot {
-    /// 从 API 返回的 Usage 构造（total 为 None 时自动求和）
+    /// Construct from API usage response (auto-sum when total is None)
     pub fn new(prompt: u32, completion: u32, total: Option<u32>) -> Self {
         Self {
             prompt_tokens: prompt,
@@ -91,19 +93,19 @@ impl TokenUsageSnapshot {
     }
 }
 
-/// 模型定价（每百万 token，USD）
+/// Model pricing (per million tokens, USD)
 #[derive(Debug, Clone)]
 pub struct ModelPricing {
-    /// 模型名称匹配模式（前缀匹配）
+    /// Model name match pattern (prefix match)
     pub model_pattern: String,
-    /// 输入价格 $/1M tokens
+    /// Input price $/1M tokens
     pub input_price_per_mtok: f64,
-    /// 输出价格 $/1M tokens
+    /// Output price $/1M tokens
     pub output_price_per_mtok: f64,
 }
 
 impl ModelPricing {
-    /// 计算单次请求的估算费用
+    /// Compute the estimated cost for a single request.
     pub fn estimate_cost(&self, usage: &TokenUsageSnapshot) -> f64 {
         let input_cost = (usage.prompt_tokens as f64 / 1_000_000.0) * self.input_price_per_mtok;
         let output_cost =
@@ -112,7 +114,7 @@ impl ModelPricing {
     }
 }
 
-/// 常见模型定价表
+/// Common model pricing table
 static DEFAULT_PRICING: std::sync::LazyLock<Vec<ModelPricing>> = std::sync::LazyLock::new(|| {
     vec![
         // OpenAI
@@ -183,7 +185,7 @@ static DEFAULT_PRICING: std::sync::LazyLock<Vec<ModelPricing>> = std::sync::Lazy
             input_price_per_mtok: 0.55,
             output_price_per_mtok: 2.19,
         },
-        // 通义千问 (Qwen)
+        // Qwen (Tongyi Qianwen)
         ModelPricing {
             model_pattern: "qwen-max".into(),
             input_price_per_mtok: 2.0,
@@ -199,7 +201,7 @@ static DEFAULT_PRICING: std::sync::LazyLock<Vec<ModelPricing>> = std::sync::Lazy
             input_price_per_mtok: 0.12,
             output_price_per_mtok: 0.36,
         },
-        // Fallback — 放在最后
+        // Fallback — placed last
         ModelPricing {
             model_pattern: "default".into(),
             input_price_per_mtok: 1.0,
@@ -208,9 +210,9 @@ static DEFAULT_PRICING: std::sync::LazyLock<Vec<ModelPricing>> = std::sync::Lazy
     ]
 });
 
-/// 线程安全的 Token 使用量追踪器
+/// Thread-safe token usage tracker.
 ///
-/// 对标 Claude Code / ChatGPT 的 token 用量展示。
+/// Comparable to the token usage display of Claude Code / ChatGPT.
 ///
 /// ```rust
 /// use echo_core::tokenizer::TokenUsageTracker;
@@ -242,7 +244,7 @@ impl TokenUsageTracker {
         }
     }
 
-    /// 记录一次请求的 token 使用量
+    /// Record token usage for a single request.
     pub fn record(&self, prompt: u32, completion: u32, total: Option<u32>) {
         self.total_prompt_tokens
             .fetch_add(prompt as u64, Ordering::Relaxed);
@@ -253,21 +255,21 @@ impl TokenUsageTracker {
         self.request_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 从 API 返回的 Usage 记录
+    /// Record usage from an API response.
     pub fn record_usage(&self, usage: &crate::llm::types::Usage) {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let completion = usage.completion_tokens.unwrap_or(0);
         self.record(prompt, completion, usage.total_tokens);
     }
 
-    /// 设置自定义定价（覆盖内置定价表）
+    /// Set custom pricing (overrides the built-in pricing table).
     pub fn set_custom_pricing(&self, pricing: Vec<ModelPricing>) {
         if let Ok(mut guard) = self.custom_pricing.lock() {
             *guard = Some(pricing);
         }
     }
 
-    /// 查找匹配当前模型的定价
+    /// Find pricing matching the current model.
     fn find_pricing(&self) -> Option<ModelPricing> {
         let custom = self.custom_pricing.lock().ok()?;
         let pricing_list = match custom.as_ref() {
@@ -286,7 +288,7 @@ impl TokenUsageTracker {
             .cloned()
     }
 
-    /// 估算总费用（USD）
+    /// Estimate total cost (USD).
     pub fn estimate_total_cost(&self) -> Option<f64> {
         let pricing = self.find_pricing()?;
         let prompt = self.total_prompt_tokens.load(Ordering::Relaxed) as f64;
@@ -297,7 +299,7 @@ impl TokenUsageTracker {
         )
     }
 
-    /// 获取使用量汇总
+    /// Get usage summary.
     pub fn summary(&self) -> UsageSummary {
         let total_prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
         let total_completion = self.total_completion_tokens.load(Ordering::Relaxed);
@@ -314,7 +316,7 @@ impl TokenUsageTracker {
         }
     }
 
-    /// 重置所有计数器
+    /// Reset all counters.
     pub fn reset(&self) {
         self.total_prompt_tokens.store(0, Ordering::Relaxed);
         self.total_completion_tokens.store(0, Ordering::Relaxed);
@@ -323,7 +325,7 @@ impl TokenUsageTracker {
     }
 }
 
-/// Token 使用量汇总快照
+/// Token usage summary snapshot
 #[derive(Debug, Clone)]
 pub struct UsageSummary {
     pub model_name: String,
@@ -338,11 +340,11 @@ impl std::fmt::Display for UsageSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Token 用量 [{model}]:
-  请求次数:   {requests}
-  输入 token: {prompt} (预估 ${input_cost:.4})
-  输出 token: {completion} (预估 ${output_cost:.4})
-  总计 token: {total} (预估 ${total_cost:.4})",
+            "Token Usage [{model}]:
+  Requests:   {requests}
+  Input tokens:  {prompt} (est. ${input_cost:.4})
+  Output tokens: {completion} (est. ${output_cost:.4})
+  Total tokens:  {total} (est. ${total_cost:.4})",
             model = self.model_name,
             requests = self.request_count,
             prompt = self.total_prompt_tokens,
@@ -373,15 +375,15 @@ mod tests {
     #[test]
     fn test_heuristic_cjk() {
         let t = HeuristicTokenizer;
-        // 4 CJK chars → weight 8 → 8/4 = 2 tokens
-        assert_eq!(t.count_tokens("你好世界"), 2);
+        // 4 non-ASCII chars → weight 8 → 8/4 = 2 tokens
+        assert_eq!(t.count_tokens("éñôà"), 2);
     }
 
     #[test]
     fn test_heuristic_mixed() {
         let t = HeuristicTokenizer;
-        // "hello 你好" → 6 ASCII(6) + 2 CJK(4) = weight 10 → 10/4 = 2
-        assert_eq!(t.count_tokens("hello 你好"), 2);
+        // "hello éñ" → 6 ASCII(6) + 2 non-ASCII(4) = weight 10 → 10/4 = 2
+        assert_eq!(t.count_tokens("hello éñ"), 2);
     }
 
     #[test]

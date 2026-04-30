@@ -1,9 +1,9 @@
-//! 统一重试策略
+//! Unified retry policy
 //!
-//! 提供 [`RetryPolicy`] 配置和 [`with_retry`] 执行包装器，
-//! 供 LLM / MCP / A2A / Sandbox 等所有外部调用统一使用。
+//! Provides [`RetryPolicy`] configuration and the [`with_retry`] execution wrapper,
+//! for unified use by all external calls: LLM / MCP / A2A / Sandbox, etc.
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust,no_run
 //! use echo_core::retry::{RetryPolicy, with_retry};
@@ -15,7 +15,7 @@
 //!     .jitter(true);
 //!
 //! let result = with_retry(&policy, || async {
-//!     // 可能失败的异步操作
+//!     // Potentially-failing async operation
 //!     Ok::<_, String>("success".to_string())
 //! }).await;
 //! # result
@@ -28,18 +28,18 @@ use std::future::Future;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-/// 统一重试策略配置
+/// Unified retry policy configuration
 ///
-/// 所有外部调用（LLM / MCP / A2A / Sandbox）应通过此策略控制重试行为。
+/// All external calls (LLM / MCP / A2A / Sandbox) should control retry behavior via this policy.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
-    /// 最大重试次数（0 = 不重试，只执行一次）
+    /// Maximum number of retries (0 = no retry, single attempt only)
     pub max_retries: u32,
-    /// 初始等待时间（指数退避的基数）
+    /// Initial wait duration (base for exponential backoff)
     pub base_delay: Duration,
-    /// 最大等待时间上限
+    /// Maximum wait duration cap
     pub max_delay: Duration,
-    /// 是否添加随机抖动（防止多客户端同时重试的惊群效应）
+    /// Whether to add random jitter (prevents thundering herd with multiple clients retrying simultaneously)
     pub jitter: bool,
 }
 
@@ -66,7 +66,7 @@ impl RetryPolicy {
         self
     }
 
-    /// 不重试（仅执行一次）
+    /// No retry (single attempt only).
     pub fn no_retry() -> Self {
         Self {
             max_retries: 0,
@@ -76,9 +76,9 @@ impl RetryPolicy {
         }
     }
 
-    /// 计算第 `attempt` 次重试的等待时间（attempt 从 1 开始）
+    /// Calculate the wait duration for retry attempt `attempt` (0-indexed: attempt 1 = first retry).
     ///
-    /// 注意：attempt=0 表示首次执行（无延迟），返回 Duration::ZERO
+    /// Note: attempt=0 means the first execution (no delay), returns Duration::ZERO.
     pub fn delay_for(&self, attempt: u32) -> Duration {
         // 首次执行无延迟
         if attempt == 0 {
@@ -112,11 +112,11 @@ impl Default for RetryPolicy {
     }
 }
 
-/// 使用给定的重试策略执行异步操作。
+/// Execute an async operation with the given retry policy.
 ///
-/// `is_retryable` 用于判断错误是否值得重试，返回 `false` 时立即终止。
+/// `is_retryable` determines whether an error is worth retrying; returns `false` to abort immediately.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,no_run
 /// use echo_core::retry::{RetryPolicy, with_retry_if};
@@ -151,7 +151,7 @@ where
                 attempt = attempt,
                 max = policy.max_retries,
                 delay_ms = delay.as_millis() as u64,
-                "重试中..."
+                "Retrying..."
             );
             tokio::time::sleep(delay).await;
         }
@@ -159,12 +159,12 @@ where
         match op().await {
             Ok(val) => {
                 if attempt > 0 {
-                    debug!(attempt, "重试成功");
+                    debug!(attempt, "Retry succeeded");
                 }
                 return Ok(val);
             }
             Err(e) if attempt < policy.max_retries && is_retryable(&e) => {
-                warn!(attempt, error = %e, "可重试错误");
+                warn!(attempt, error = %e, "Retryable error");
                 last_err = Some(e);
             }
             Err(e) => return Err(e),
@@ -174,7 +174,7 @@ where
     Err(last_err.expect("with_retry_if: invariants guarantee last_err is set after retry loop"))
 }
 
-/// 使用给定的重试策略执行异步操作（所有错误均视为可重试）。
+/// Execute an async operation with the given retry policy (all errors are considered retryable).
 pub async fn with_retry<F, Fut, T, E>(policy: &RetryPolicy, op: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,

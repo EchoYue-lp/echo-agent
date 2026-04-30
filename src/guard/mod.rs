@@ -1,17 +1,36 @@
-//! 护栏系统
+//! Content filtering and safety guardrails.
 //!
-//! 对用户输入、LLM 输出和工具调用进行安全过滤，支持基于规则和基于 LLM 的两种检查模式。
+//! Guards inspect user input, LLM output, and tool calls, blocking or modifying
+//! unsafe content. Two guard types are supported:
 //!
-//! 核心 trait、结果类型与内置具体实现都直接来自 `echo_core::guard`；
-//! 根 crate 仅保留模块路径兼容层。
-//! 如需直接依赖拆分后的 crate，可使用 [`crate::workspace::core::guard`]。
+//! - **Rule-based** (`RuleGuard`, `RuleGuardBuilder`) — Pattern matching, length limits, regex
+//! - **LLM-based** (`LlmGuard`) — AI-powered content classification
 //!
-//! # 核心类型
+//! # Quick Start
 //!
-//! - [`Guard`]: 护栏 trait，所有检查器必须实现
-//! - [`GuardManager`]: 管理多个 Guard，按顺序执行并短路
-//! - [`GuardResult`]: 检查结果（放行 / 阻断 / 警告）
-//! - [`GuardDirection`]: 检查方向（输入 / 输出 / 工具输入 / 工具输出）
+//! ```rust,ignore
+//! use echo_agent::prelude::*;
+//!
+//! # fn main() -> echo_agent::error::Result<()> {
+//! let guard = RuleGuardBuilder::new("safety")
+//!     .max_input_length(10000)
+//!     .build();
+//! let agent = ReactAgentBuilder::new()
+//!     .model("qwen3-max")
+//!     .with_guard(Box::new(guard))
+//!     .build()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Key Types
+//!
+//! | Type | Description |
+//! |------|-------------|
+//! | [`Guard`] | Trait — implement to create custom guards |
+//! | [`GuardManager`] | Runs multiple guards in sequence, short-circuits on block |
+//! | [`GuardResult`] | `Pass` / `Block { reason }` / `Warn { message }` |
+//! | [`GuardDirection`] | `Input` / `Output` / `ToolInput` / `ToolOutput` |
 
 pub mod llm;
 pub mod rule;

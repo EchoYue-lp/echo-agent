@@ -1,26 +1,25 @@
-//! Agent 模块
+//! Agent module
 //!
-//! 定义 [`Agent`] 核心 trait、事件枚举 [`AgentEvent`] 和回调接口 [`AgentCallback`]。
+//! Defines the core [`Agent`] trait, event enum [`AgentEvent`], and callback interface [`AgentCallback`].
 //!
-//! ## 内置 Agent 范式
+//! ## Built-in Agent Paradigms
 //!
-//! | 模块 | 范式 | Feature |
-//! |------|------|---------|
-//! | [`react`] | ReAct（Think-Act-Observe） | 始终可用 |
+//! | Module | Paradigm | Feature |
+//! |--------|----------|---------|
+//! | [`react`] | ReAct (Think-Act-Observe) | always available |
 //! | [`plan_execute`] | Plan-and-Execute | `plan-execute` |
 //! | [`self_reflection`] | Self-Reflection | `self-reflection` |
-//! | [`subagent`] | Subagent 子代理系统 | `subagent` |
+//! | [`subagent`] | Subagent system | `subagent` |
 //!
-//! # 快速开始
+//! # Quick Start
 //!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
 //!
 //! # fn main() -> echo_agent::error::Result<()> {
-//! // 使用 Builder 创建 Agent
 //! let agent = ReactAgentBuilder::new()
 //!     .model("qwen3-max")
-//!     .system_prompt("你是一个有帮助的助手")
+//!     .system_prompt("You are a helpful assistant")
 //!     .enable_tools()
 //!     .build()?;
 //!
@@ -36,10 +35,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
 
-/// SubAgent 注册表类型别名
+/// SubAgent registry type alias
 pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
 
-// ── 核心子模块 ──────────────────────────────────────────────────────────────
+// ── Core sub-modules ───────────────────────────────────────────────────────
 
 pub mod config;
 pub mod react;
@@ -60,5 +59,5 @@ pub use crate::agent::react::structured::StructuredAgent;
 pub use config::{AgentConfig, AgentRole};
 pub use runner::Runner;
 
-/// AgentBuilder 是 ReactAgentBuilder 的别名，用于宏和极简 API
+/// Alias for backward compatibility with macros and minimal API.
 pub type AgentBuilder = ReactAgentBuilder;

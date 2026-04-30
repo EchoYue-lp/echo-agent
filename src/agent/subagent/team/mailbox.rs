@@ -63,7 +63,7 @@ pub struct MailboxMessage {
 impl MailboxMessage {
     /// Create a new mailbox message with current timestamp.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `from` - Sender agent name.
     /// * `to` - Recipient agent name.
     /// * `kind` - Message kind.
@@ -151,7 +151,7 @@ pub struct MailboxSender {
 impl MailboxSender {
     /// Send a message through the mailbox.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `msg` - Message to send.
     pub async fn send(&self, msg: MailboxMessage) -> Result<()> {
         self.tx

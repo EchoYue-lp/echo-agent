@@ -69,14 +69,14 @@ impl ImageFetchTool {
         let response = self.client.get(url).send().await.map_err(|e| {
             crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                 tool: "image_fetch".into(),
-                message: format!("下载图片失败: {}", e),
+                message: format!("Failed to download image: {}", e),
             })
         })?;
 
         if !response.status().is_success() {
             return Err(crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                 tool: "image_fetch".into(),
-                message: format!("HTTP 错误: {}", response.status()),
+                message: format!("HTTP error: {}", response.status()),
             }));
         }
 
@@ -95,7 +95,7 @@ impl ImageFetchTool {
         let bytes = response.bytes().await.map_err(|e| {
             crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                 tool: "image_fetch".into(),
-                message: format!("读取图片数据失败: {}", e),
+                message: format!("Failed to read image data: {}", e),
             })
         })?;
 
@@ -122,8 +122,8 @@ impl Tool for ImageFetchTool {
     }
 
     fn description(&self) -> &str {
-        "从 URL 下载图片并转换为 base64 编码，支持用于 LLM 多模态输入。\
-         参数：url - 图片 URL（必填），max_size_mb - 最大文件大小 MB（可选，默认 10MB）"
+        "Downloads an image from a URL and converts it to base64 encoding, suitable for LLM multimodal input. \
+         Parameters: url - image URL (required), max_size_mb - maximum file size in MB (optional, default 10MB)"
     }
 
     fn parameters(&self) -> Value {
@@ -132,11 +132,11 @@ impl Tool for ImageFetchTool {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "图片 URL（支持 http:// 或 https://）"
+                    "description": "Image URL (supports http:// or https://)"
                 },
                 "max_size_mb": {
                     "type": "integer",
-                    "description": "最大文件大小限制（MB，默认 10）"
+                    "description": "Maximum file size limit (MB, default 10)"
                 }
             },
             "required": ["url"]
@@ -151,11 +151,11 @@ impl Tool for ImageFetchTool {
                 .ok_or_else(|| ToolError::MissingParameter("url".to_string()))?;
 
             if url.trim().is_empty() {
-                return Ok(ToolResult::error("URL 不能为空"));
+                return Ok(ToolResult::error("URL cannot be empty"));
             }
 
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Ok(ToolResult::error("URL 必须以 http:// 或 https:// 开头"));
+                return Ok(ToolResult::error("URL must start with http:// or https://"));
             }
 
             let max_size_mb = parameters
@@ -185,7 +185,7 @@ impl Tool for ImageFetchTool {
                     && !content_type.starts_with("image/")
                 {
                     return Ok(ToolResult::error(format!(
-                        "URL 不指向图片文件，Content-Type: {}",
+                        "URL does not point to an image file, Content-Type: {}",
                         content_type
                     )));
                 }
@@ -195,13 +195,13 @@ impl Tool for ImageFetchTool {
             let response = self.client.get(url).send().await.map_err(|e| {
                 crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                     tool: "image_fetch".into(),
-                    message: format!("下载图片失败: {}", e),
+                    message: format!("Failed to download image: {}", e),
                 })
             })?;
 
             if !response.status().is_success() {
                 return Ok(ToolResult::error(format!(
-                    "HTTP 错误: {}",
+                    "HTTP error: {}",
                     response.status()
                 )));
             }
@@ -211,7 +211,7 @@ impl Tool for ImageFetchTool {
                 && len > max_bytes as u64
             {
                 return Ok(ToolResult::error(format!(
-                    "图片过大: {} bytes，超过限制 {} MB",
+                    "Image too large: {} bytes, exceeds limit of {} MB",
                     len, max_size_mb
                 )));
             }
@@ -231,14 +231,14 @@ impl Tool for ImageFetchTool {
             let bytes = response.bytes().await.map_err(|e| {
                 crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                     tool: "image_fetch".into(),
-                    message: format!("读取图片数据失败: {}", e),
+                    message: format!("Failed to read image data: {}", e),
                 })
             })?;
 
             // Verify size again after download
             if bytes.len() > max_bytes {
                 return Ok(ToolResult::error(format!(
-                    "图片过大: {} bytes，超过限制 {} MB",
+                    "Image too large: {} bytes, exceeds limit of {} MB",
                     bytes.len(),
                     max_size_mb
                 )));
@@ -251,14 +251,14 @@ impl Tool for ImageFetchTool {
             let data_uri = format!("data:image/{};base64,{}", mime_subtype, base64_data);
 
             let mut output = format!(
-                "URL: {}\nContent-Type: {}\n大小: {} bytes\nBase64 长度: {} 字符\n\n数据 URI: {}",
+                "URL: {}\nContent-Type: {}\nSize: {} bytes\nBase64 length: {} chars\n\nData URI: {}",
                 url,
                 content_type,
                 bytes.len(),
                 base64_data.len(),
                 &data_uri[..data_uri.len().min(200)]
             );
-            output.push_str("...\n\n提示: 使用 data_uri 作为 ContentPart::ImageUrl 的 url 字段。");
+            output.push_str("...\n\nTip: Use data_uri as the url field of ContentPart::ImageUrl.");
 
             Ok(ToolResult::success(output))
         })

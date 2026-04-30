@@ -1,13 +1,25 @@
 [package]
 name = "echo_integration"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Integration layer for echo-agent framework (providers, mcp, channels)"
 repository = "https://github.com/EchoYue-lp/echo-agent"
+homepage = "https://github.com/EchoYue-lp/echo-agent"
+documentation = "https://docs.rs/echo_integration"
+keywords = ["ai", "agent", "llm", "mcp"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+exclude = ["**/.DS_Store"]
 
 [dependencies]
-echo_core = { version = "0.1.1", path = "../echo-core" }
+echo_core = { version = "0.1.2", path = "../echo-core" }
 # From echo-providers
 reqwest = { version = "0.12", features = ["json", "stream"] }
 async-stream = "0.3"
@@ -17,7 +29,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 futures = "0.3"
 tracing = "0.1"
-dotenv = "0.15"
+dotenvy = "0.15"
 # From echo-mcp
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 # From echo-channels

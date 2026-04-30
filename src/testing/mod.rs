@@ -1,24 +1,25 @@
-//! 测试基础设施
+//! Testing infrastructure
 //!
-//! 提供在不依赖真实 LLM / 外部服务的情况下测试 echo-agent 各组件的工具集。
+//! Provides a set of utilities for testing echo-agent components without
+//! depending on real LLMs / external services.
 //!
-//! | 类型 | 用途 |
-//! |------|------|
-//! | [`MockLlmClient`] | 替代真实 LLM，用于测试 `SummaryCompressor` 等内部依赖 `LlmClient` 的组件 |
-//! | [`MockTool`] | 替代真实工具，用于测试 Agent 的工具调用 / 错误处理行为 |
-//! | [`MockAgent`] | 替代真实 SubAgent，用于测试多 Agent 编排逻辑 |
-//! | [`FailingMockAgent`] | 总是返回错误，用于测试编排的容错路径 |
+//! | Type | Purpose |
+//! |------|---------|
+//! | [`MockLlmClient`] | Replaces a real LLM, used for testing `SummaryCompressor` and other components that depend on `LlmClient` |
+//! | [`MockTool`] | Replaces a real tool, used for testing Agent tool call / error handling behavior |
+//! | [`MockAgent`] | Replaces a real SubAgent, used for testing multi-Agent orchestration logic |
+//! | [`FailingMockAgent`] | Always returns an error, used for testing orchestration fault-tolerance paths |
 //!
-//! # 设计原则
+//! # Design Principles
 //!
-//! - **零网络请求**：所有 Mock 都完全在内存中运行
-//! - **可脚本化**：通过 `with_response()` / `with_error()` 精确控制返回值
-//! - **可观测**：通过 `call_count()` / `last_args()` 等方法检查调用情况
-//! - **线程安全**：内部使用 `Arc<Mutex<_>>`，可安全地在多任务测试中共享
+//! - **Zero network requests**: All mocks run entirely in memory
+//! - **Scriptable**: Precisely control return values via `with_response()` / `with_error()`
+//! - **Observable**: Inspect invocations via `call_count()` / `last_args()` and similar methods
+//! - **Thread-safe**: Uses `Arc<Mutex<_>>` internally, safe to share across multi-task tests
 //!
-//! # 使用示例
+//! # Usage Examples
 //!
-//! ## 测试压缩器（`MockLlmClient`）
+//! ## Testing a compressor (`MockLlmClient`)
 //!
 //! ```rust,no_run
 //! use echo_agent::testing::MockLlmClient;
@@ -30,17 +31,17 @@
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
 //! let mock_llm = Arc::new(
-//!     MockLlmClient::new().with_response("这是 LLM 生成的摘要内容")
+//!     MockLlmClient::new().with_response("This is LLM-generated summary content")
 //! );
 //!
 //! let compressor = SummaryCompressor::new(mock_llm.clone(), DefaultSummaryPrompt, 2);
 //! let input = CompressionInput {
 //!     messages: vec![
-//!         Message::user("消息1".to_string()),
-//!         Message::assistant("回复1".to_string()),
-//!         Message::user("消息2".to_string()),
-//!         Message::assistant("回复2".to_string()),
-//!         Message::user("消息3".to_string()),
+//!         Message::user("message1".to_string()),
+//!         Message::assistant("reply1".to_string()),
+//!         Message::user("message2".to_string()),
+//!         Message::assistant("reply2".to_string()),
+//!         Message::user("message3".to_string()),
 //!     ],
 //!     token_limit: 100,
 //!     current_query: None,
@@ -48,12 +49,12 @@
 //!
 //! let output = compressor.compress(input).await?;
 //! assert!(!output.messages.is_empty());
-//! assert_eq!(mock_llm.call_count(), 1);  // 确认 LLM 被调用了一次
+//! assert_eq!(mock_llm.call_count(), 1);  // Confirm LLM was called once
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ## 测试工具行为（`MockTool`）
+//! ## Testing tool behavior (`MockTool`)
 //!
 //! ```rust
 //! use echo_agent::testing::MockTool;
@@ -64,7 +65,7 @@
 //! # async fn main() {
 //! let tool = MockTool::new("weather")
 //!     .with_response(r#"{"city":"Beijing","temp":25}"#)
-//!     .with_failure("API 服务不可用");
+//!     .with_failure("API service unavailable");
 //!
 //! let r1 = tool.execute(HashMap::new()).await.unwrap();
 //! assert!(r1.success);
@@ -76,7 +77,7 @@
 //! # }
 //! ```
 //!
-//! ## 测试多 Agent 编排（`MockAgent`）
+//! ## Testing multi-Agent orchestration (`MockAgent`)
 //!
 //! ```rust
 //! use echo_agent::testing::MockAgent;
@@ -85,10 +86,10 @@
 //! # #[tokio::main]
 //! # async fn main() {
 //! let mut agent = MockAgent::new("math_agent")
-//!     .with_response("结果是 42");
+//!     .with_response("The result is 42");
 //!
 //! let answer = agent.execute("6 * 7 = ?").await.unwrap();
-//! assert_eq!(answer, "结果是 42");
+//! assert_eq!(answer, "The result is 42");
 //! assert_eq!(agent.calls()[0], "6 * 7 = ?");
 //! # }
 //! ```

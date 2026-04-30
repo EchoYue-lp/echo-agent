@@ -1,7 +1,7 @@
-//! 图表生成工具
+//! Chart generation tool
 //!
-//! 通过 vega-lite v5 JSON 规范生成数据可视化图表。
-//! 支持 line、bar、pie、scatter、area、heatmap、boxplot 等类型。
+//! Generate data visualization charts via vega-lite v5 JSON specification.
+//! Supports line, bar, pie, scatter, area, heatmap, boxplot, and more.
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::error::{Result, ToolError};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
-// ── generate_chart 工具 ──────────────────────────────────────────────────────
+// ── generate_chart tool ──────────────────────────────────────────────────────
 
 pub struct GenerateChartTool;
 
@@ -19,9 +19,8 @@ impl Tool for GenerateChartTool {
     }
 
     fn description(&self) -> &str {
-        "生成数据可视化图表（vega-lite v5 JSON 规范）。\
-         支持 line（折线）、bar（柱状）、pie（饼图）、scatter（散点）、area（面积）、\
-         heatmap（热力图）、boxplot（箱线图）。"
+        "Generate data visualization charts (vega-lite v5 JSON spec). \
+         Supports line, bar, pie, scatter, area, heatmap, boxplot."
     }
 
     fn parameters(&self) -> Value {
@@ -30,37 +29,37 @@ impl Tool for GenerateChartTool {
             "properties": {
                 "chart_type": {
                     "type": "string",
-                    "description": "图表类型",
+                    "description": "Chart type",
                     "enum": ["line", "bar", "pie", "scatter", "area", "heatmap", "boxplot"]
                 },
                 "title": {
                     "type": "string",
-                    "description": "图表标题"
+                    "description": "Chart title"
                 },
                 "x_field": {
                     "type": "string",
-                    "description": "X 轴字段名（饼图中用作颜色分组）"
+                    "description": "X axis field name (used as color grouping in pie charts)"
                 },
                 "y_field": {
                     "type": "string",
-                    "description": "Y 轴字段名（饼图中用作数值）"
+                    "description": "Y axis field name (used as value in pie charts)"
                 },
                 "color_field": {
                     "type": "string",
-                    "description": "颜色分组字段名（可选）"
+                    "description": "Color grouping field name (optional)"
                 },
                 "data": {
                     "type": "array",
-                    "description": "图表数据（JSON 对象数组，每个对象的键对应字段名）",
+                    "description": "Chart data (array of JSON objects, each object's key maps to a field name)",
                     "items": {"type": "object"}
                 },
                 "width": {
                     "type": "integer",
-                    "description": "图表宽度（像素，默认 600）"
+                    "description": "Chart width in pixels (default 600)"
                 },
                 "height": {
                     "type": "integer",
-                    "description": "图表高度（像素，默认 400）"
+                    "description": "Chart height in pixels (default 400)"
                 }
             },
             "required": ["chart_type", "data", "x_field", "y_field"]
@@ -123,7 +122,7 @@ impl Tool for GenerateChartTool {
     }
 }
 
-// ── Vega-Lite 规范构建 ───────────────────────────────────────────────────────
+// ── Vega-Lite Spec Builder ───────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn build_vega_lite_spec(

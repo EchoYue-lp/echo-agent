@@ -1,14 +1,14 @@
-//! 长期记忆 Store
+//! Long-term memory Store
 //!
-//! 以 `namespace / key / value` 三元组组织数据，namespace 是 `&[&str]` 切片
-//! （如 `&["alice", "memories"]`），天然支持多用户/多 Agent 隔离。
+//! Data is organized as `namespace / key / value` triples, where namespace is a `&[&str]` slice
+//! (e.g. `&["alice", "memories"]`), naturally supporting multi-user/multi-agent isolation.
 //!
-//! ## 内置实现
+//! ## Built-in implementations
 //!
-//! - [`InMemoryStore`]：进程内存，适合测试
-//! - [`FileStore`]：JSON 文件持久化，零额外依赖
+//! - [`InMemoryStore`]: In-process memory, suitable for testing
+//! - [`FileStore`]: JSON file persistence, zero extra dependencies
 //!
-//! ## 快速上手
+//! ## Quick start
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -19,12 +19,12 @@
 //! let store = Arc::new(FileStore::new("~/.echo-agent/store.json")?);
 //!
 //! store.put(&["alice", "memories"], "pref-001", serde_json::json!({
-//!     "content": "用户偏好深色主题",
+//!     "content": "User prefers dark theme",
 //!     "importance": 8
 //! })).await?;
 //!
-//! let items = store.search(&["alice", "memories"], "主题", 5).await?;
-//! println!("{} 条相关记忆", items.len());
+//! let items = store.search(&["alice", "memories"], "theme", 5).await?;
+//! println!("{} relevant memories", items.len());
 //! # Ok(())
 //! # }
 //! ```
@@ -42,20 +42,20 @@ use tracing::{debug, info};
 
 // ── StoreItem ────────────────────────────────────────────────────────────────
 
-/// Store 中的单条记录
+/// A single record in the Store
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreItem {
-    /// 命名空间（如 `["user_123", "memories"]`）
+    /// Namespace (e.g. `["user_123", "memories"]`)
     pub namespace: Vec<String>,
-    /// 条目唯一键
+    /// Unique key for the item
     pub key: String,
-    /// 任意 JSON 值
+    /// Arbitrary JSON value
     pub value: Value,
-    /// 创建时间（Unix 秒）
+    /// Creation time (Unix seconds)
     pub created_at: u64,
-    /// 最后更新时间（Unix 秒）
+    /// Last update time (Unix seconds)
     pub updated_at: u64,
-    /// 检索相关度分数（仅 `search` 返回时非 None）
+    /// Relevance score from search (non-None only when returned by `search`)
     pub score: Option<f32>,
 }
 
@@ -73,18 +73,18 @@ impl StoreItem {
     }
 }
 
-/// 检索模式
+/// Search mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SearchMode {
-    /// 仅关键词检索
+    /// Keyword search only
     Keyword,
-    /// 仅语义检索
+    /// Semantic search only
     Semantic,
-    /// 关键词 + 语义混合检索
+    /// Hybrid keyword + semantic search
     Hybrid,
 }
 
-/// 统一检索请求
+/// Unified search request
 #[derive(Debug, Clone, Copy)]
 pub struct SearchQuery<'a> {
     pub text: &'a str,
@@ -120,9 +120,9 @@ impl<'a> SearchQuery<'a> {
 
 // ── Store trait ───────────────────────────────────────────────────────────────
 
-/// 长期记忆的统一存储接口
+/// Unified storage interface for long-term memory
 pub trait Store: Send + Sync {
-    /// 写入或更新一条记录（upsert）
+    /// Write or update a record (upsert)
     fn put<'a>(
         &'a self,
         namespace: &'a [&'a str],
@@ -130,14 +130,14 @@ pub trait Store: Send + Sync {
         value: Value,
     ) -> BoxFuture<'a, Result<()>>;
 
-    /// 按 key 精确获取
+    /// Exact fetch by key
     fn get<'a>(
         &'a self,
         namespace: &'a [&'a str],
         key: &'a str,
     ) -> BoxFuture<'a, Result<Option<StoreItem>>>;
 
-    /// 关键词检索，返回最多 `limit` 条（按相关度排序）
+    /// Keyword search, returns at most `limit` items (sorted by relevance)
     fn search<'a>(
         &'a self,
         namespace: &'a [&'a str],
@@ -145,9 +145,9 @@ pub trait Store: Send + Sync {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
 
-    /// 统一检索入口。
+    /// Unified search entry point.
     ///
-    /// 默认仅支持关键词检索；语义/混合检索由具体实现显式覆盖。
+    /// By default only supports keyword search; semantic/hybrid search must be explicitly overridden by concrete implementations.
     fn search_with<'a>(
         &'a self,
         namespace: &'a [&'a str],
@@ -168,25 +168,25 @@ pub trait Store: Send + Sync {
         })
     }
 
-    /// 删除指定 key，返回是否存在并删除
+    /// Delete the specified key, returns whether it existed and was deleted
     fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>>;
 
-    /// 列举满足 `prefix` 前缀的所有命名空间
+    /// List all namespaces matching the given `prefix`
     fn list_namespaces<'a>(
         &'a self,
         prefix: Option<&'a [&'a str]>,
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>>;
 
-    /// 列出命名空间中的所有条目（无关键词过滤、无分页限制）。
+    /// List all entries in the namespace (no keyword filter, no pagination limit).
     ///
-    /// 用于需要完整枚举的场景（如 task store 的 `load_all()`），
-    /// 避免使用 `search` 做分页时因空查询匹配所有条目导致的无限循环。
+    /// Used for scenarios that require full enumeration (e.g. `load_all()` in a task store),
+    /// avoiding infinite loops caused by empty queries matching all entries when using `search` for pagination.
     fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
 }
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
 
-/// 进程内存 Store，不持久化，适合测试和短生命周期使用
+/// In-process memory Store, no persistence, suitable for testing and short-lived use
 ///
 /// # 示例
 ///
@@ -203,7 +203,7 @@ pub trait Store: Send + Sync {
 /// # }
 /// ```
 pub struct InMemoryStore {
-    /// namespace_key → items
+    /// namespace_key -> items
     data: RwLock<HashMap<String, HashMap<String, StoreItem>>>,
 }
 
@@ -342,9 +342,9 @@ impl Store for InMemoryStore {
 
 // ── FileStore ─────────────────────────────────────────────────────────────────
 
-/// 基于 JSON 文件的持久化 Store
+/// JSON file-based persistent Store
 ///
-/// 存储格式：
+/// Storage format:
 /// ```json
 /// {
 ///   "user_123/memories": {
@@ -358,7 +358,7 @@ pub struct FileStore {
 }
 
 impl FileStore {
-    /// 打开或创建 Store 文件，自动建父目录
+    /// Open or create the Store file, auto-create parent directories
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = expand_tilde(path.as_ref());
         if let Some(parent) = path.parent() {
@@ -368,7 +368,7 @@ impl FileStore {
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| MemoryError::IoError(e.to_string()))?;
             serde_json::from_str(&raw).unwrap_or_else(|e| {
-                tracing::warn!("Store 文件解析失败，从空状态开始: {e}");
+                tracing::warn!("Store file parse failed, starting from empty state: {e}");
                 HashMap::new()
             })
         } else {
@@ -379,7 +379,7 @@ impl FileStore {
             .values()
             .map(|b: &HashMap<String, StoreItem>| b.len())
             .sum();
-        info!(path = %path.display(), namespaces = ns_count, items = item_count, "🗄️ FileStore 初始化");
+        info!(path = %path.display(), namespaces = ns_count, items = item_count, "FileStore initialized");
         Ok(Self {
             path,
             data: RwLock::new(data),
@@ -390,7 +390,7 @@ impl FileStore {
         let data = self.data.read().await;
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
-        // 原子写入：先写临时文件再 rename，避免写入中途崩溃导致数据损坏
+        // Atomic write: write to a temp file first then rename, avoiding data corruption from mid-write crashes
         let tmp = format!("{}.tmp", self.path.display());
         tokio::fs::write(&tmp, &json)
             .await
@@ -398,11 +398,11 @@ impl FileStore {
         tokio::fs::rename(&tmp, &self.path)
             .await
             .map_err(|e| MemoryError::IoError(e.to_string()))?;
-        debug!(path = %self.path.display(), "💾 Store 已持久化");
+        debug!(path = %self.path.display(), "Store persisted");
         Ok(())
     }
 
-    /// 批量写入：将多条记录写入内存后一次性刷盘，减少 IO 开销。
+    /// Batch write: write multiple records to memory then flush to disk once, reducing IO overhead.
     pub async fn put_batch(
         &self,
         entries: impl IntoIterator<Item = (Vec<&str>, &str, Value)>,
@@ -425,8 +425,8 @@ impl FileStore {
         self.flush().await
     }
 
-    /// 将内存中的数据刷盘。可用于定时刷盘场景，配合 `put()` 使用
-    /// 以避免每次写入都触发磁盘 IO。
+    /// Flush in-memory data to disk. Can be used in periodic flush scenarios together with `put()`
+    /// to avoid triggering disk IO on every write.
     ///
     /// # 示例
     ///
@@ -509,7 +509,7 @@ impl Store for FileStore {
                 })
                 .collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            debug!(namespace = %ns_key, query = %query, hits = scored.len(), "🔍 Store 检索");
+            debug!(namespace = %ns_key, query = %query, hits = scored.len(), "Store search");
             Ok(scored
                 .into_iter()
                 .take(limit)
@@ -569,7 +569,7 @@ impl Store for FileStore {
     }
 }
 
-// ── 私有工具函数 ──────────────────────────────────────────────────────────────
+// ── Private utility functions ───────────────────────────────────────────────────
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -588,7 +588,7 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// 计算 JSON Value 与关键词的匹配度（匹配关键词数 / 总关键词数）
+/// Calculate the match score between a JSON Value and keywords (matched keyword count / total keyword count)
 fn value_relevance_score(value: &Value, keywords: &[String]) -> f32 {
     if keywords.is_empty() {
         return 1.0;
@@ -624,7 +624,7 @@ fn value_to_searchable_text(value: &Value) -> String {
     }
 }
 
-// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+// ── Unit tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -694,15 +694,19 @@ mod tests {
         let ns = &["user", "memories"];
 
         store
-            .put(ns, "k1", json!({"content": "Rust 编程语言"}))
+            .put(ns, "k1", json!({"content": "Rust programming language"}))
             .await
             .unwrap();
         store
-            .put(ns, "k2", json!({"content": "Python 机器学习"}))
+            .put(ns, "k2", json!({"content": "Python machine learning"}))
             .await
             .unwrap();
         store
-            .put(ns, "k3", json!({"content": "JavaScript 前端开发"}))
+            .put(
+                ns,
+                "k3",
+                json!({"content": "JavaScript frontend development"}),
+            )
             .await
             .unwrap();
 
@@ -741,7 +745,7 @@ mod tests {
         let ns = &["user", "memories"];
 
         store.put(ns, "key1", json!({"count": 1})).await.unwrap();
-        store.put(ns, "key1", json!({"count": 2})).await.unwrap(); // 更新
+        store.put(ns, "key1", json!({"count": 2})).await.unwrap(); // update
 
         let item = store.get(ns, "key1").await.unwrap().unwrap();
         assert_eq!(item.value["count"], 2);

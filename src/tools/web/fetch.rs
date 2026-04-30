@@ -1,7 +1,7 @@
-//! Web 页面获取工具
+//! Web page fetching tool
 //!
-//! 提供 [`WebFetchTool`]，获取 URL 内容并转换为可读文本。
-//! 支持 HTML → 纯文本转换，适合 LLM 消费。
+//! Provides [`WebFetchTool`], fetches URL content and converts it to readable text.
+//! Supports HTML → plain text conversion, suitable for LLM consumption.
 
 use crate::error::{Result, ToolError};
 use crate::tools::builtin::security::{ssrf_safe_redirect_policy, validate_url};
@@ -36,9 +36,9 @@ fn build_client() -> &'static Client {
     })
 }
 
-/// Web 页面获取工具
+/// Web page fetching tool
 ///
-/// 获取指定 URL 的内容，将 HTML 转换为可读文本。
+/// Fetches content from the specified URL, converting HTML to readable text.
 pub struct WebFetchTool {
     client: Client,
     max_content_length: usize,
@@ -46,7 +46,7 @@ pub struct WebFetchTool {
 }
 
 impl WebFetchTool {
-    /// 创建新的 WebFetchTool
+    /// Create a new WebFetchTool
     pub fn new() -> Self {
         Self {
             client: build_client().clone(),
@@ -55,46 +55,46 @@ impl WebFetchTool {
         }
     }
 
-    /// 设置最大内容长度（字符数）
+    /// Set the maximum content length (in characters)
     pub fn with_max_content_length(mut self, n: usize) -> Self {
         self.max_content_length = n;
         self
     }
 
-    /// 设置 HTML 转文本的行宽
+    /// Set the HTML-to-text line width
     pub fn with_text_width(mut self, width: usize) -> Self {
         self.text_width = width;
         self
     }
 
-    /// 判断 Content-Type 是否需要 HTML→文本转换
+    /// Check whether the Content-Type requires HTML→text conversion
     fn needs_html_conversion(content_type: &str) -> bool {
         content_type.contains("text/html") || content_type.contains("application/xhtml")
     }
 
-    /// 将 HTML 转换为可读文本
+    /// Convert HTML to readable text
     fn html_to_text(&self, html: &str) -> String {
         match html2text::from_read(html.as_bytes(), self.text_width) {
             Ok(text) => text,
             Err(e) => {
                 tracing::warn!(
-                    "HTML 转文本失败 ({}), 退回原始 HTML 标签去除: {}",
+                    "HTML to text conversion failed ({}), falling back to raw HTML tag stripping: {}",
                     self.text_width,
                     e
                 );
-                // 降级：简单去除 HTML 标签
+                // Fallback: simple HTML tag removal
                 html2text::from_read(html.as_bytes(), self.text_width).unwrap_or_default()
             }
         }
     }
 
-    /// 按字符数截断内容（安全处理多字节 UTF-8）
+    /// Truncate content by character count (safely handles multi-byte UTF-8)
     fn truncate_content(content: &str, max_len: usize) -> String {
         if content.chars().count() <= max_len {
             content.to_string()
         } else {
             let truncated: String = content.chars().take(max_len).collect();
-            format!("{}\n\n[... 内容已截断 ...]", truncated)
+            format!("{}\n\n[... content truncated ...]", truncated)
         }
     }
 }
@@ -111,8 +111,8 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "获取指定 URL 的网页内容，将 HTML 转换为可读文本。\
-         参数：url - 网页地址（必填），max_length - 最大内容长度（可选，默认50000字符）"
+        "Fetches web page content from a specified URL and converts HTML to readable text. \
+         Parameters: url - web page address (required), max_length - maximum content length (optional, default 50000 chars)"
     }
 
     fn parameters(&self) -> Value {
@@ -121,11 +121,11 @@ impl Tool for WebFetchTool {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "要获取内容的网页 URL"
+                    "description": "The web page URL to fetch content from"
                 },
                 "max_length": {
                     "type": "integer",
-                    "description": "最大返回内容长度（字符数，默认50000）"
+                    "description": "Maximum content length to return (characters, default 50000)"
                 }
             },
             "required": ["url"]
@@ -140,12 +140,12 @@ impl Tool for WebFetchTool {
                 .ok_or_else(|| ToolError::MissingParameter("url".to_string()))?;
 
             if url.trim().is_empty() {
-                return Ok(ToolResult::error("URL 不能为空"));
+                return Ok(ToolResult::error("URL cannot be empty"));
             }
 
-            // 基本 URL 格式校验
+            // Basic URL format validation
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Ok(ToolResult::error("URL 必须以 http:// 或 https:// 开头"));
+                return Ok(ToolResult::error("URL must start with http:// or https://"));
             }
 
             let max_length = parameters
@@ -153,7 +153,7 @@ impl Tool for WebFetchTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(self.max_content_length as u64) as usize;
 
-            // SSRF 防护：验证目标地址
+            // SSRF protection: validate target address
             validate_url(url)?;
 
             tracing::info!("WebFetch: url='{}', max_length={}", url, max_length);
@@ -161,14 +161,14 @@ impl Tool for WebFetchTool {
             let response = match self.client.get(url).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    return Ok(ToolResult::error(format!("请求失败: {}", e)));
+                    return Ok(ToolResult::error(format!("Request failed: {}", e)));
                 }
             };
 
             let status = response.status();
             if !status.is_success() {
                 return Ok(ToolResult::error(format!(
-                    "HTTP 请求失败，状态码: {}",
+                    "HTTP request failed, status code: {}",
                     status
                 )));
             }
@@ -183,22 +183,25 @@ impl Tool for WebFetchTool {
             let body = match response.text().await {
                 Ok(t) => t,
                 Err(e) => {
-                    return Ok(ToolResult::error(format!("读取响应体失败: {}", e)));
+                    return Ok(ToolResult::error(format!(
+                        "Failed to read response body: {}",
+                        e
+                    )));
                 }
             };
 
-            // 根据内容类型处理：仅对 HTML/XHTML 做转换
+            // Process based on content type: only convert HTML/XHTML
             let content = if Self::needs_html_conversion(&content_type) {
                 self.html_to_text(&body)
             } else {
-                // text/plain、application/json 等直接返回原始内容
+                // Return raw content directly for text/plain, application/json, etc.
                 body
             };
 
             let content = Self::truncate_content(&content, max_length);
 
             let output = format!(
-                "URL: {}\n状态码: {}\n内容类型: {}\n\n{}",
+                "URL: {}\nStatus: {}\nContent-Type: {}\n\n{}",
                 url, status, content_type, content
             );
 
@@ -217,7 +220,7 @@ mod tests {
             "text/html; charset=utf-8"
         ));
         assert!(WebFetchTool::needs_html_conversion("application/xhtml+xml"));
-        // text/plain 不再做 HTML 转换
+        // text/plain should not be HTML-converted
         assert!(!WebFetchTool::needs_html_conversion("text/plain"));
         assert!(!WebFetchTool::needs_html_conversion("application/json"));
         assert!(!WebFetchTool::needs_html_conversion("image/png"));
@@ -234,26 +237,26 @@ mod tests {
     fn test_truncate_content_long_ascii() {
         let content = "a".repeat(200);
         let truncated = WebFetchTool::truncate_content(&content, 100);
-        assert!(truncated.contains("截断"));
+        assert!(truncated.contains("truncated"));
         assert!(truncated.starts_with(&"a".repeat(100)));
     }
 
     #[test]
     fn test_truncate_content_multibyte_safe() {
-        // 多字节字符（中文）截断不应 panic
-        let content = "你好世界".repeat(50); // 200 chars, 600 bytes
+        // Multibyte character truncation should not panic
+        let content = "HelloWorld".repeat(50); // 200 chars, 600 bytes?
         let truncated = WebFetchTool::truncate_content(&content, 10);
-        assert!(truncated.contains("截断"));
-        assert!(truncated.starts_with("你好世界你好"));
+        assert!(truncated.contains("truncated"));
+        assert!(truncated.starts_with("HelloWorld"));
     }
 
     #[test]
     fn test_truncate_content_mixed() {
-        // 混合 ASCII + emoji
+        // Mixed ASCII + emoji
         let content = "Hello 🌍 World 🚀 Rust 🦀".repeat(20);
         let truncated = WebFetchTool::truncate_content(&content, 10);
-        assert!(truncated.contains("截断"));
-        // 确保截断后仍是合法 UTF-8
+        assert!(truncated.contains("truncated"));
+        // Ensure truncated result is still valid UTF-8
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
     }
 

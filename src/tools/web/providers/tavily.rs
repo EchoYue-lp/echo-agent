@@ -1,16 +1,16 @@
 //! Tavily Search API Provider
 //!
-//! 通过 Tavily AI 搜索 API 实现 AI 优化搜索，需要 API Key。
+//! AI-optimized search via the Tavily AI Search API, requires an API Key.
 //!
-//! # 特点
+//! # Features
 //!
-//! - AI 优化的搜索结果，摘要质量更高
-//! - 支持自动提取网页内容
-//! - 专为 AI Agent 设计
+//! - AI-optimized search results with higher quality summaries
+//! - Supports automatic web content extraction
+//! - Designed specifically for AI Agents
 //!
-//! # 获取 API Key
+//! # Getting an API Key
 //!
-//! 前往 <https://tavily.com/> 注册获取 API Key。
+//! Visit <https://tavily.com/> to register and get an API Key.
 
 use super::utils::truncate_chars;
 use super::{SearchProvider, SearchResult};
@@ -22,14 +22,14 @@ use std::time::Duration;
 
 /// Tavily Search API Provider
 ///
-/// 使用 Tavily AI 搜索 API 进行搜索，需要 API Key。
+/// Searches via the Tavily AI Search API, requires an API Key.
 pub struct TavilyProvider {
     client: Client,
     api_key: String,
 }
 
 impl TavilyProvider {
-    /// 创建新的 Tavily Provider
+    /// Create a new Tavily Provider
     ///
     /// - `api_key`: Tavily API Key
     pub fn new(api_key: impl Into<String>) -> Self {
@@ -43,15 +43,15 @@ impl TavilyProvider {
         }
     }
 
-    /// 从环境变量创建
+    /// Create from environment variable
     ///
-    /// 读取 `TAVILY_API_KEY` 环境变量。
+    /// Reads the `TAVILY_API_KEY` environment variable.
     pub fn from_env() -> Option<Self> {
         std::env::var("TAVILY_API_KEY").ok().map(Self::new)
     }
 }
 
-/// Tavily 搜索请求体
+/// Tavily search request body
 #[derive(Serialize)]
 struct TavilyRequest {
     api_key: String,
@@ -72,7 +72,7 @@ impl std::fmt::Debug for TavilyRequest {
     }
 }
 
-/// Tavily 搜索响应
+/// Tavily search response
 #[derive(Debug, Deserialize)]
 struct TavilyResponse {
     results: Vec<TavilyResult>,
@@ -110,21 +110,21 @@ impl SearchProvider for TavilyProvider {
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: format!("Tavily 请求失败: {}", e),
+                message: format!("Tavily request failed: {}", e),
             })?;
 
         let status = response.status();
         if status.as_u16() == 401 {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: "Tavily API Key 无效或已过期".into(),
+                message: "Tavily API Key is invalid or expired".into(),
             }
             .into());
         }
         if status.as_u16() == 429 {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: "Tavily API 调用次数已达上限".into(),
+                message: "Tavily API rate limit exceeded".into(),
             }
             .into());
         }
@@ -133,7 +133,7 @@ impl SearchProvider for TavilyProvider {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
                 message: format!(
-                    "Tavily 返回错误 ({}): {}",
+                    "Tavily returned error ({}): {}",
                     status,
                     truncate_chars(&body, 200)
                 ),
@@ -147,7 +147,7 @@ impl SearchProvider for TavilyProvider {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "web_search".into(),
-                    message: format!("Tavily 响应解析失败: {}", e),
+                    message: format!("Tavily response parsing failed: {}", e),
                 })?;
 
         Ok(tavily_resp

@@ -26,7 +26,7 @@ type AgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
 pub trait AgentFactory: Send + Sync {
     /// Create an agent instance asynchronously.
     ///
-    /// # 返回
+    /// # Returns
     /// A boxed future that resolves to a `Result<Box<dyn Agent>>`.
     fn create(&self) -> BoxFuture<'static, Result<Box<dyn Agent>>>;
 }
@@ -45,7 +45,7 @@ where
 {
     /// Create a new function-based agent factory.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `f` - Async closure that creates an agent when invoked.
     pub fn new(f: F) -> Self {
         Self { f }

@@ -90,14 +90,15 @@ impl ReactAgent {
                     pattern: tool_name.clone(),
                 },
                 behavior: echo_core::tools::permission::RuleBehavior::Ask {
-                    suggestions: vec!["允许".to_string(), "拒绝".to_string()],
+                    suggestions: vec!["Allow".to_string(), "Deny".to_string()],
                 },
                 source: RuleSource::Session,
-                description: Some(format!("工具 {} 需要人工审批", tool_name)),
+                description: Some(format!("Tool {} requires human approval", tool_name)),
             };
 
-            // add_need_appeal_tool 是同步 API，不能在运行中的 Tokio runtime 里 block_on。
-            // 这里先登记规则，等到后续异步执行阶段再安全刷入 PermissionService。
+            // add_need_appeal_tool is a synchronous API and cannot call block_on()
+            // inside a running Tokio runtime. Register the rule here first, then
+            // safely flush it to PermissionService during a later async execution phase.
             if let Ok(mut pending) = self.approval.pending_permission_rules.lock() {
                 pending.push(rule);
             } else {
@@ -122,38 +123,38 @@ impl ReactAgent {
 
     // ── Context compression ──────────────────────────────────────────────────
 
-    /// 设置上下文压缩器
+    /// Set context compressor
     ///
-    /// # 参数
-    /// * `compressor` - 实现了 `ContextCompressor` trait 的压缩器实例
+    /// # Parameters
+    /// * `compressor` - Compressor instance implementing the `ContextCompressor` trait
     ///
-    /// # 说明
-    /// 上下文压缩器用于在 token 数量超过限制时自动压缩对话历史，
-    /// 移除不重要的消息以减少 token 消耗。
+    /// # Description
+    /// The context compressor automatically compresses conversation history when the token count exceeds the limit,
+    /// removing less important messages to reduce token consumption.
     pub async fn set_compressor(&self, compressor: impl ContextCompressor + 'static) {
         self.memory.context.lock().await.set_compressor(compressor);
     }
 
-    /// 获取上下文统计信息
+    /// Get context statistics
     ///
-    /// # 返回值
-    /// 返回元组 `(消息数量, 估计的 token 数量)`
+    /// # Returns
+    /// Returns tuple `(message count, estimated token count)`
     pub async fn context_stats(&self) -> (usize, usize) {
         let ctx = self.memory.context.lock().await;
         (ctx.messages().len(), ctx.token_estimate())
     }
 
-    /// 使用指定压缩器强制压缩上下文
+    /// Force compress context using the specified compressor
     ///
-    /// # 参数
-    /// * `compressor` - 用于压缩的压缩器实例
+    /// # Parameters
+    /// * `compressor` - Compressor instance to use for compression
     ///
-    /// # 返回值
-    /// 返回压缩统计信息，包含压缩前后的 token 数量等
+    /// # Returns
+    /// Returns compression statistics, including token counts before and after
     ///
-    /// # 说明
-    /// 该方法会绕过自动压缩阈值，立即使用指定的压缩器压缩上下文，
-    /// 通常用于手动控制压缩时机或测试压缩效果。
+    /// # Description
+    /// This method bypasses the automatic compression threshold and immediately compresses the context
+    /// using the specified compressor. Typically used for manual compression control or testing compression effects.
     pub async fn force_compress_with(
         &self,
         compressor: &dyn ContextCompressor,
@@ -166,10 +167,10 @@ impl ReactAgent {
             .await
     }
 
-    /// 列出所有已注册的工具名称
+    /// List all registered tool names
     ///
-    /// # 返回值
-    /// 已注册工具的名称列表
+    /// # Returns
+    /// List of registered tool names
     pub fn list_tools(&self) -> Vec<&str> {
         self.tools.tool_manager.list_tools()
     }
@@ -196,14 +197,14 @@ impl ReactAgent {
         }
     }
 
-    /// 批量注册子代理
+    /// Batch register subagents
     ///
-    /// # 参数
-    /// * `agents` - 子代理实例列表
+    /// # Parameters
+    /// * `agents` - List of subagent instances
     ///
-    /// # 说明
-    /// 每个子代理会自动包装为默认的 Sync 模式 `SubagentDefinition`。
-    /// 如需更精细的控制，请使用 `register_subagent_with_definition()` 方法。
+    /// # Description
+    /// Each subagent is automatically wrapped in a default Sync-mode `SubagentDefinition`.
+    /// For more fine-grained control, use the `register_subagent_with_definition()` method.
     pub fn register_agents(&mut self, agents: Vec<Box<dyn Agent>>) {
         for agent in agents {
             self.register_agent(agent)
@@ -212,25 +213,25 @@ impl ReactAgent {
 
     // ── Basic config ─────────────────────────────────────────────────────────
 
-    /// 运行时设置 LLM 模型名称
+    /// Set LLM model name at runtime
     ///
-    /// # 参数
-    /// * `model_name` - 新的 LLM 模型名称
+    /// # Parameters
+    /// * `model_name` - New LLM model name
     ///
-    /// # 说明
-    /// 该方法允许在运行时动态切换 Agent 使用的 LLM 模型。
+    /// # Description
+    /// This method allows dynamically switching the LLM model used by the Agent at runtime.
     pub fn set_model(&mut self, model_name: &str) {
         self.config.model_name = model_name.to_string();
     }
 
-    /// 添加 Agent 回调
+    /// Add Agent callback
     ///
-    /// # 参数
-    /// * `callback` - 实现了 `AgentCallback` trait 的回调实例
+    /// # Parameters
+    /// * `callback` - Callback instance implementing the `AgentCallback` trait
     ///
-    /// # 说明
-    /// 回调会在 Agent 执行过程中触发不同事件时被调用，用于监控、日志记录等。
-    /// 与配置构建器的 `with_callback` 不同，此方法可在运行时动态添加回调。
+    /// # Description
+    /// Callbacks are invoked when different events are triggered during Agent execution, for monitoring, logging, etc.
+    /// Unlike the config builder's `with_callback`, this method can add callbacks dynamically at runtime.
     pub fn add_callback(&mut self, callback: Arc<dyn crate::agent::AgentCallback>) {
         self.config.callbacks.push(callback);
     }
@@ -467,29 +468,29 @@ impl ReactAgent {
 
     // ── MCP ──────────────────────────────────────────────────────────────────
 
-    /// 注册 MCP（Model Context Protocol）工具
+    /// Register MCP (Model Context Protocol) tools
     ///
-    /// # 参数
-    /// * `tools` - MCP 工具实例列表
+    /// # Parameters
+    /// * `tools` - List of MCP tool instances
     ///
-    /// # 说明
-    /// 将 MCP 工具注册到 Agent 的工具管理器中，使其可用于工具调用。
+    /// # Description
+    /// Registers MCP tools into the Agent's tool manager, making them available for tool calls.
     pub fn register_mcp_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         self.add_tools(tools);
     }
 
     #[cfg(feature = "mcp")]
-    /// 根据 MCP 服务器配置连接 MCP 服务器
+    /// Connect to an MCP server based on MCP server configuration
     ///
-    /// # 参数
-    /// * `config` - MCP 服务器配置
+    /// # Parameters
+    /// * `config` - MCP server configuration
     ///
-    /// # 返回值
-    /// 返回连接成功后创建的 `McpClient` 实例
+    /// # Returns
+    /// Returns the `McpClient` instance created after successful connection
     ///
-    /// # 说明
-    /// 该方法会根据配置连接到 MCP 服务器，获取服务器提供的工具，
-    /// 并将其注册到 Agent 的工具管理器中。
+    /// # Description
+    /// This method connects to the MCP server based on the configuration, retrieves the tools provided by the server,
+    /// and registers them into the Agent's tool manager.
     pub async fn connect_mcp_from_config(
         &mut self,
         config: McpServerConfig,
@@ -516,18 +517,18 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "mcp")]
-    /// 从 JSON 字符串配置连接 MCP 服务器
+    /// Connect to an MCP server from a JSON string configuration
     ///
-    /// # 参数
-    /// * `name` - MCP 服务器名称
-    /// * `json_config_str` - JSON 格式的 MCP 服务器配置字符串
+    /// # Parameters
+    /// * `name` - MCP server name
+    /// * `json_config_str` - JSON-formatted MCP server configuration string
     ///
-    /// # 返回值
-    /// 返回连接成功后创建的 `McpClient` 实例
+    /// # Returns
+    /// Returns the `McpClient` instance created after successful connection
     ///
-    /// # 说明
-    /// 该方法解析 JSON 格式的配置字符串，转换为 MCP 服务器配置，
-    /// 然后调用 `connect_mcp_from_config` 进行连接。
+    /// # Description
+    /// This method parses the JSON-formatted configuration string, converts it to MCP server configuration,
+    /// then calls `connect_mcp_from_config` to connect.
     pub async fn connect_mcp_from_json(
         &mut self,
         name: &str,
@@ -539,21 +540,21 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "mcp")]
-    /// 从配置文件加载并连接多个 MCP 服务器
+    /// Load and connect to multiple MCP servers from a configuration file
     ///
-    /// # 参数
-    /// * `path` - MCP 配置文件路径（支持 `.json` 或 `.yaml` 格式）
+    /// # Parameters
+    /// * `path` - MCP configuration file path (supports `.json` or `.yaml` format)
     ///
-    /// # 返回值
-    /// 返回成功连接的 `McpClient` 实例列表
+    /// # Returns
+    /// Returns a list of successfully connected `McpClient` instances
     ///
-    /// # 说明
-    /// 1. 解析 MCP 配置文件（支持 JSON 或 YAML 格式）
-    /// 2. 为每个服务器配置调用 `connect_mcp_from_config`
-    /// 3. 收集所有成功连接的客户端
-    /// 4. 连接失败的服务器会被跳过并记录警告日志
+    /// # Description
+    /// 1. Parse the MCP configuration file (supports JSON or YAML format)
+    /// 2. Call `connect_mcp_from_config` for each server configuration
+    /// 3. Collect all successfully connected clients
+    /// 4. Failed server connections are skipped with a warning log
     ///
-    /// # 示例
+    /// # Example
     /// ```rust
     /// use echo_agent::prelude::*;
     ///
@@ -598,64 +599,64 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "mcp")]
-    /// 获取已连接的 MCP 客户端
+    /// Get a connected MCP client
     ///
-    /// # 参数
-    /// * `name` - MCP 服务器名称
+    /// # Parameters
+    /// * `name` - MCP server name
     ///
-    /// # 返回值
-    /// 返回对应名称的 MCP 客户端引用，如果未找到则返回 `None`
+    /// # Returns
+    /// Returns a reference to the MCP client with the given name, or `None` if not found
     ///
-    /// # 说明
-    /// 该方法用于获取已连接的 MCP 客户端，以便直接调用客户端的方法。
-    /// 客户端通过 `connect_mcp_from_config` 或 `load_mcp_from_file` 连接。
+    /// # Description
+    /// This method retrieves a connected MCP client for direct method invocation.
+    /// Clients are connected via `connect_mcp_from_config` or `load_mcp_from_file`.
     pub fn mcp_client(&self, name: &str) -> Option<&Arc<McpClient>> {
         self.tools.mcp_manager.get_client(name)
     }
 
     #[cfg(feature = "mcp")]
-    /// 列出所有已连接的 MCP 服务器名称
+    /// List all connected MCP server names
     ///
-    /// # 返回值
-    /// 已连接的 MCP 服务器名称列表
+    /// # Returns
+    /// List of connected MCP server names
     ///
-    /// # 说明
-    /// 该方法返回当前所有已成功连接的 MCP 服务器的名称，
-    /// 可用于展示连接状态或供用户选择特定的服务器。
+    /// # Description
+    /// This method returns the names of all currently successfully connected MCP servers,
+    /// useful for displaying connection status or letting users select a specific server.
     pub fn list_mcp_servers(&self) -> Vec<&str> {
         self.tools.mcp_manager.server_names()
     }
 
     #[cfg(feature = "mcp")]
-    /// 断开与指定 MCP 服务器的连接
+    /// Disconnect from a specified MCP server
     ///
-    /// # 参数
-    /// * `name` - 要断开的 MCP 服务器名称
+    /// # Parameters
+    /// * `name` - Name of the MCP server to disconnect
     ///
-    /// # 返回值
-    /// `true` 表示成功断开连接，`false` 表示未找到该名称的服务器
+    /// # Returns
+    /// `true` if successfully disconnected, `false` if the server name was not found
     ///
-    /// # 说明
-    /// 该方法会断开与指定 MCP 服务器的连接，并移除相关的工具注册。
-    /// 断开连接后，该服务器提供的工具将不再可用。
+    /// # Description
+    /// This method disconnects from the specified MCP server and removes related tool registrations.
+    /// After disconnection, tools provided by that server will no longer be available.
     pub async fn disconnect_mcp(&mut self, name: &str) -> bool {
         self.tools.mcp_manager.disconnect(name).await
     }
 
     // ── System Prompt ────────────────────────────────────────────────────────
 
-    /// 设置 Agent 的系统提示词
+    /// Set the Agent's system prompt
     ///
-    /// # 参数
-    /// * `prompt` - 新的系统提示词
+    /// # Parameters
+    /// * `prompt` - New system prompt
     ///
-    /// # 说明
-    /// 该方法会更新 Agent 的系统提示词，并同步更新上下文管理器中的系统提示。
-    /// 系统提示词定义了 Agent 的角色、行为规范和任务指令。
+    /// # Description
+    /// This method updates the Agent's system prompt and synchronizes the update in the context manager.
+    /// The system prompt defines the Agent's role, behavior guidelines, and task instructions.
     ///
-    /// # 注意
-    /// 设置系统提示词会覆盖之前的所有系统提示内容。
-    /// 如果之前通过技能注入添加了提示词，也会被覆盖。
+    /// # Note
+    /// Setting the system prompt overwrites all previous system prompt content.
+    /// If prompts were previously injected via skills, they will also be overwritten.
     pub async fn set_system_prompt(&mut self, prompt: String) {
         self.config.system_prompt = prompt.clone();
         self.memory.context.lock().await.update_system(prompt);

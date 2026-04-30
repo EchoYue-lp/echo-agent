@@ -1,4 +1,4 @@
-//! 审计日志核心 trait 和事件类型
+//! Audit logging core trait and event types
 
 use crate::error::Result;
 use crate::guard::GuardDirection;
@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 审计事件
+/// Audit event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     /// Time when the event was recorded.
@@ -37,7 +37,7 @@ impl AuditEvent {
     }
 }
 
-/// 审计事件类型
+/// Audit event types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuditEventType {
@@ -93,26 +93,26 @@ pub enum AuditEventType {
         /// Final response content.
         content: String,
     },
-    /// 审批请求已发起
+    /// Approval request was initiated
     ApprovalRequested {
-        /// 工具名称
+        /// Tool name
         tool: String,
-        /// 参数哈希（用于匹配缓存）
+        /// Argument hash (for cache matching)
         args_hash: String,
-        /// 风险等级
+        /// Risk level
         risk_level: String,
     },
-    /// 审批决策已返回
+    /// Approval decision was returned
     ApprovalCompleted {
-        /// 工具名称
+        /// Tool name
         tool: String,
-        /// 决策结果
+        /// Decision result
         decision: String,
-        /// 审批范围
+        /// Approval scope
         scope: String,
-        /// 拒绝原因（如果有）
+        /// Rejection reason (if any)
         reason: Option<String>,
-        /// 从请求到决策的耗时（毫秒）
+        /// Duration from request to decision (milliseconds)
         duration_ms: u64,
     },
 }

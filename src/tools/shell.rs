@@ -1,6 +1,6 @@
-//! Shell 命令执行工具
+//! Shell command execution tool
 //!
-//! ⚠️ 安全策略：仅允许白名单中的安全命令，使用直接 argv 执行（拒绝 shell 注入）
+//! Security policy: only allows safe commands in the whitelist, uses direct argv execution (rejects shell injection)
 
 use super::{Tool, ToolParameters, ToolResult};
 use crate::error::{Result, ToolError};
@@ -14,98 +14,98 @@ use tokio::process::Command;
 
 static ALLOWED_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        // ===== 文件查看 =====
+        // ===== File viewing =====
         "ls", "cat", "head", "tail", "less", "more", "file", "stat", "wc",
-        // ===== 目录操作（只读）=====
-        "pwd", "tree", "find", "du", // ===== 代码相关 =====
-        "git", "cargo", "rustc", "clippy", "rustfmt", // ===== 搜索与查找 =====
-        "grep", "rg", "ag", "fd", // ===== 文本处理（只读）=====
+        // ===== Directory operations (read-only) =====
+        "pwd", "tree", "find", "du", // ===== Code related =====
+        "git", "cargo", "rustc", "clippy", "rustfmt", // ===== Search & find =====
+        "grep", "rg", "ag", "fd", // ===== Text processing (read-only) =====
         "echo", "printf", "cut", "sort", "uniq", "diff",
-        // ===== 系统信息（只读）=====
+        // ===== System info (read-only) =====
         "which", "whereis", "env", "date", "uname",
     ])
 });
 
 static REQUIRE_APPROVAL_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        // ===== 文件删除/修改（需要确认）=====
-        "rm", "rmdir", "mv", "cp", // ===== 网络操作（需要确认）=====
-        "curl", "wget", "nc", // ===== 进程操作（需要确认）=====
-        "kill", "killall", "pkill", // ===== 包管理（需要确认）=====
+        // ===== File deletion/modification (requires confirmation) =====
+        "rm", "rmdir", "mv", "cp", // ===== Network operations (requires confirmation) =====
+        "curl", "wget", "nc", // ===== Process operations (requires confirmation) =====
+        "kill", "killall", "pkill", // ===== Package management (requires confirmation) =====
         "apt", "apt-get", "yum", "dnf", "brew", "pip", "pip3", "npm", "yarn", "pnpm",
-        // ===== 脚本执行（需要确认）=====
+        // ===== Script execution (requires confirmation) =====
         "bash", "sh", "zsh", "fish", "python", "python3", "node", "perl", "ruby", "php",
-        // ===== 文本处理（可能修改文件）=====
+        // ===== Text processing (may modify files) =====
         "sed", "awk",
     ])
 });
 
 static DANGEROUS_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        // ===== 极度危险（数据破坏）=====
-        "dd", "shred", "mkfs", "fdisk", // ===== 权限提升 =====
-        "sudo", "su", // ===== 权限修改 =====
-        "chmod", "chown", "chgrp", // ===== 系统操作 =====
+        // ===== Extremely dangerous (data destruction) =====
+        "dd", "shred", "mkfs", "fdisk", // ===== Privilege escalation =====
+        "sudo", "su", // ===== Permission modification =====
+        "chmod", "chown", "chgrp", // ===== System operations =====
         "reboot", "shutdown", "halt", "poweroff", "init",
-        // ===== 高危网络操作 =====
+        // ===== High-risk network operations =====
         "nmap",
     ])
 });
 
 static GIT_SAFE_SUBCOMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        // 只读操作
+        // Read-only operations
         "status", "log", "show", "diff", "branch", "tag", "ls-files", "ls-tree", "remote", "config",
-        // 需要人工确认的修改操作
+        // Modifying operations requiring user confirmation
         "add", "commit", "checkout", "switch", "stash",
     ])
 });
 
 static CARGO_SAFE_SUBCOMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        // 只读/构建操作
+        // Read-only / build operations
         "check", "build", "test", "clippy", "fmt", "tree", "search", "metadata",
-        // 需要确认的操作
+        // Requires confirmation
         "clean", "update",
     ])
 });
 
-/// Shell 元字符列表（用于拒绝 shell 语法，防止注入）
+/// Shell metacharacter list (used to reject shell syntax and prevent injection)
 ///
-/// 这些字符在 `sh -c` 中有特殊含义。本工具使用直接 argv 执行，
-/// 因此包含这些字符的命令会被拒绝。
+/// These characters have special meaning in `sh -c`. This tool uses direct argv execution,
+/// so commands containing these characters will be rejected.
 const SHELL_METACHARACTERS: &[char] = &[
-    '|',  // 管道
-    ';',  // 命令分隔
-    '&',  // 后台/条件执行
-    '$',  // 变量/命令替换
-    '`',  // 反引号命令替换
-    '>',  // 重定向输出
-    '<',  // 重定向输入
-    '(',  // 子 shell
-    ')',  // 子 shell
-    '\n', // 换行注入
+    '|',  // pipe
+    ';',  // command separator
+    '&',  // background/conditional execution
+    '$',  // variable/command substitution
+    '`',  // backtick command substitution
+    '>',  // redirect output
+    '<',  // redirect input
+    '(',  // subshell
+    ')',  // subshell
+    '\n', // newline injection
 ];
 
-/// 命令安全性检查结果
+/// Command safety check result
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandSafety {
-    /// 安全，可以执行
+    /// Safe to execute
     Safe,
-    /// 需要额外确认
+    /// Requires additional confirmation
     RequiresApproval(String),
-    /// 危险，拒绝执行
+    /// Dangerous, execution rejected
     Dangerous(String),
 }
 
-/// Shell 命令执行工具（带安全检查）
+/// Shell command execution tool (with safety checks)
 ///
-/// 可选集成沙箱执行器：当设置了 `sandbox` 后，所有命令通过沙箱执行，
-/// 提供额外的隔离和资源限制。
+/// Optional sandbox executor integration: when `sandbox` is set, all commands execute through the sandbox,
+/// providing additional isolation and resource limits.
 pub struct ShellTool {
-    /// 是否启用严格模式（默认 true）
+    /// Whether strict mode is enabled (default true)
     strict_mode: bool,
-    /// 可选的沙箱执行器
+    /// Optional sandbox executor
     sandbox: Option<Arc<dyn SandboxExecutor>>,
 }
 
@@ -116,7 +116,7 @@ impl Default for ShellTool {
 }
 
 impl ShellTool {
-    /// 创建新的 Shell 工具（默认严格模式）
+    /// Create a new Shell tool (default strict mode)
     pub fn new() -> Self {
         Self {
             strict_mode: true,
@@ -124,7 +124,7 @@ impl ShellTool {
         }
     }
 
-    /// 创建非严格模式的 Shell 工具（不推荐！）
+    /// Create a non-strict mode Shell tool (not recommended!)
     pub fn new_permissive() -> Self {
         Self {
             strict_mode: false,
@@ -132,29 +132,29 @@ impl ShellTool {
         }
     }
 
-    /// 设置沙箱执行器，命令将通过沙箱执行
+    /// Set the sandbox executor; commands will be executed through the sandbox
     pub fn with_sandbox(mut self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
         self.sandbox = Some(sandbox);
         self
     }
 
-    /// 检查命令中是否包含 shell 元字符
+    /// Check if the command contains shell metacharacters
     ///
-    /// 注意：在引号内的元字符是安全的（作为字面参数传递），
-    /// 但本工具采用保守策略，只要发现元字符就拒绝执行。
-    /// 这是为了防止 `ls; rm -rf /` 或 `echo $(id)` 等注入。
+    /// Note: metacharacters inside quotes are safe (passed as literal arguments),
+    /// but this tool takes a conservative approach and rejects any metacharacter found.
+    /// This prevents injection attacks like `ls; rm -rf /` or `echo $(id)`.
     fn has_shell_metacharacters(&self, cmd: &str) -> bool {
         cmd.contains(SHELL_METACHARACTERS)
     }
 
-    /// 检查命令是否安全
+    /// Check whether a command is safe
     pub fn check_command_safety(&self, command: &str) -> CommandSafety {
-        // 首先检查 shell 元字符（防止注入）
+        // First check for shell metacharacters (prevent injection)
         if self.has_shell_metacharacters(command) {
             return CommandSafety::Dangerous(format!(
-                "命令包含 shell 元字符（| ; & $ ` > < () 等），已拒绝执行。\
-                 \n本工具仅支持简单命令（程序名 + 参数），不支持管道、重定向、命令替换等 shell 语法。\
-                 \n命令: {}",
+                "Command contains shell metacharacters (| ; & $ ` > < () etc.), execution rejected.\
+                 \nThis tool only supports simple commands (program + args), not pipes, redirects, command substitution, or other shell syntax.\
+                 \nCommand: {}",
                 command
             ));
         }
@@ -163,42 +163,42 @@ impl ShellTool {
             Some(parts) => parts,
             None => {
                 return CommandSafety::Dangerous(format!(
-                    "命令解析失败，可能包含未闭合引号或非法参数格式: {}",
+                    "Command parsing failed, possibly unclosed quotes or malformed arguments: {}",
                     command
                 ));
             }
         };
         if parts.is_empty() {
-            return CommandSafety::Dangerous("空命令".to_string());
+            return CommandSafety::Dangerous("Empty command".to_string());
         }
 
         let base_cmd = parts[0].as_str();
 
-        // 1. 检查是否在危险命令黑名单中（明确拒绝）
+        // 1. Check if in the dangerous command blocklist (explicit rejection)
         if DANGEROUS_COMMANDS.contains(base_cmd) {
             return CommandSafety::Dangerous(format!(
-                "命令 '{}' 在危险命令黑名单中，已拒绝执行",
+                "Command '{}' is in the dangerous command blocklist, execution rejected",
                 base_cmd
             ));
         }
 
-        // 2. 检查是否需要人工确认
+        // 2. Check if manual confirmation is required
         if REQUIRE_APPROVAL_COMMANDS.contains(base_cmd) {
             return CommandSafety::RequiresApproval(format!(
-                "命令 '{}' 可能造成系统变更，需要人工确认",
+                "Command '{}' may cause system changes, requires manual confirmation",
                 base_cmd
             ));
         }
 
-        // 3. 严格模式：必须在白名单中
+        // 3. Strict mode: must be in the whitelist
         if self.strict_mode && !ALLOWED_COMMANDS.contains(base_cmd) {
             return CommandSafety::Dangerous(format!(
-                "命令 '{}' 不在安全白名单中，已拒绝执行",
+                "Command '{}' is not in the safe whitelist, execution rejected",
                 base_cmd
             ));
         }
 
-        // 4. 特殊命令的子命令检查
+        // 4. Subcommand check for special commands
         match base_cmd {
             "git" => self.check_git_command(&parts),
             "cargo" => self.check_cargo_command(&parts),
@@ -206,7 +206,7 @@ impl ShellTool {
         }
     }
 
-    /// 检查 git 子命令
+    /// Check git subcommand
     fn check_git_command(&self, parts: &[String]) -> CommandSafety {
         if parts.len() < 2 {
             return CommandSafety::Safe;
@@ -214,46 +214,49 @@ impl ShellTool {
 
         let subcommand = parts[1].as_str();
 
-        // 检查 git 操作
+        // Check git operation
         match subcommand {
-            // 网络操作（需要确认）
+            // Network operations (require confirmation)
             "push" | "pull" | "fetch" | "clone" => CommandSafety::RequiresApproval(format!(
-                "git {} 涉及网络操作，需要确认",
+                "git {} involves network operations, requires confirmation",
                 subcommand
             )),
-            // 强制重置（危险，拒绝）
+            // Force reset (dangerous, reject)
             "reset" => {
                 if parts.iter().any(|part| part == "--hard") {
                     CommandSafety::Dangerous(
-                        "git reset --hard 会丢失数据，已拒绝。如需执行请手动操作".to_string(),
+                        "git reset --hard will lose data, rejected. Please execute manually if needed".to_string(),
                     )
                 } else {
                     CommandSafety::RequiresApproval(
-                        "git reset 会修改 Git 状态，需要确认".to_string(),
+                        "git reset will modify Git state, requires confirmation".to_string(),
                     )
                 }
             }
-            // 清理未跟踪文件（需要确认）
-            "clean" => {
-                CommandSafety::RequiresApproval("git clean 会删除未跟踪文件，需要确认".to_string())
-            }
-            // 安全的子命令
+            // Clean untracked files (requires confirmation)
+            "clean" => CommandSafety::RequiresApproval(
+                "git clean will delete untracked files, requires confirmation".to_string(),
+            ),
+            // Safe subcommands
             cmd if GIT_SAFE_SUBCOMMANDS.contains(cmd) => {
                 if cmd == "commit" || cmd == "add" || cmd == "checkout" {
-                    CommandSafety::RequiresApproval(format!("git {} 会修改仓库，需要确认", cmd))
+                    CommandSafety::RequiresApproval(format!(
+                        "git {} will modify the repository, requires confirmation",
+                        cmd
+                    ))
                 } else {
                     CommandSafety::Safe
                 }
             }
-            // 未知子命令（需要确认）
+            // Unknown subcommand (requires confirmation)
             _ => CommandSafety::RequiresApproval(format!(
-                "git {} 不在已知安全列表中，需要确认",
+                "git {} is not in the known safe list, requires confirmation",
                 subcommand
             )),
         }
     }
 
-    /// 检查 cargo 子命令
+    /// Check cargo subcommand
     fn check_cargo_command(&self, parts: &[String]) -> CommandSafety {
         if parts.len() < 2 {
             return CommandSafety::Safe;
@@ -262,24 +265,29 @@ impl ShellTool {
         let subcommand = parts[1].as_str();
 
         match subcommand {
-            // 包安装/发布（需要确认）
+            // Package install/publish (requires confirmation)
             "install" | "uninstall" | "publish" => CommandSafety::RequiresApproval(format!(
-                "cargo {} 涉及包安装/发布，需要确认",
+                "cargo {} involves package installation/publishing, requires confirmation",
                 subcommand
             )),
-            // 运行程序（需要确认）
-            "run" => CommandSafety::RequiresApproval("cargo run 会执行程序，需要确认".to_string()),
-            // 已知安全命令
+            // Run programs (requires confirmation)
+            "run" => CommandSafety::RequiresApproval(
+                "cargo run will execute a program, requires confirmation".to_string(),
+            ),
+            // Known safe commands
             cmd if CARGO_SAFE_SUBCOMMANDS.contains(cmd) => {
                 if cmd == "clean" || cmd == "update" {
-                    CommandSafety::RequiresApproval(format!("cargo {} 会修改项目，需要确认", cmd))
+                    CommandSafety::RequiresApproval(format!(
+                        "cargo {} will modify the project, requires confirmation",
+                        cmd
+                    ))
                 } else {
                     CommandSafety::Safe
                 }
             }
-            // 未知子命令（需要确认）
+            // Unknown subcommand (requires confirmation)
             _ => CommandSafety::RequiresApproval(format!(
-                "cargo {} 不在已知安全列表中，需要确认",
+                "cargo {} is not in the known safe list, requires confirmation",
                 subcommand
             )),
         }
@@ -292,7 +300,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "执行受限的 shell 命令（仅允许安全的只读操作和代码相关命令）。参数：command - 要执行的命令。注意：仅支持简单命令（程序名 + 参数），不支持管道、重定向、命令替换等 shell 语法。"
+        "Execute restricted shell commands (only safe read-only operations and code-related commands are allowed). Parameter: command - the command to execute. Note: only simple commands (program + args) are supported; pipes, redirects, command substitution, and other shell syntax are not allowed."
     }
 
     fn parameters(&self) -> Value {
@@ -301,7 +309,7 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "要执行的命令（仅限白名单中的安全命令，不支持管道/重定向/命令替换等 shell 语法）"
+                    "description": "The command to execute (only safe commands in the whitelist; shell syntax like pipes/redirects/command substitution is not supported)"
                 }
             },
             "required": ["command"]
@@ -319,27 +327,29 @@ impl Tool for ShellTool {
                 CommandSafety::Safe => {}
                 CommandSafety::RequiresApproval(reason) => {
                     return Ok(ToolResult::error(format!(
-                        "⚠️  需要人工确认：{}\n命令：{}\n\n请使用 human_loop 模块进行确认后再执行。",
+                        "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
                         reason, command
                     )));
                 }
                 CommandSafety::Dangerous(reason) => {
                     return Ok(ToolResult::error(format!(
-                        "🚫 安全拒绝：{}\n命令：{}\n\n如需执行此类操作，请手动在终端中执行。",
+                        "🚫 Safety rejection: {}\nCommand: {}\n\nTo perform this operation, please execute it manually in the terminal.",
                         reason, command
                     )));
                 }
             }
 
-            // 解析命令为 argv（程序名 + 参数列表）
+            // Parse command into argv (program name + argument list)
             let parts = shlex_split(command).ok_or_else(|| ToolError::ExecutionFailed {
                 tool: self.name().to_string(),
-                message: "命令解析失败，可能包含未闭合引号或非法参数格式".to_string(),
+                message:
+                    "Command parsing failed, possibly unclosed quotes or malformed argument format"
+                        .to_string(),
             })?;
             let program = parts[0].as_str();
             let args = &parts[1..];
 
-            // 如果配置了沙箱，通过沙箱执行（使用 program 模式，避免 shell 注入）
+            // If sandbox is configured, execute via sandbox (using program mode to avoid shell injection)
             if let Some(sandbox) = &self.sandbox {
                 let sandbox_cmd = SandboxCommand::program(program, args.to_vec());
                 match sandbox.execute(sandbox_cmd).await {
@@ -348,15 +358,18 @@ impl Tool for ShellTool {
                             Ok(ToolResult::success(result.stdout))
                         } else {
                             Ok(ToolResult::error(format!(
-                                "命令执行失败，退出码: {}\n标准输出: {}\n错误输出: {}",
+                                "Command execution failed, exit code: {}\nstdout: {}\nstderr: {}",
                                 result.exit_code, result.stdout, result.stderr
                             )))
                         }
                     }
-                    Err(e) => Ok(ToolResult::error(format!("沙箱执行失败: {}", e))),
+                    Err(e) => Ok(ToolResult::error(format!(
+                        "Sandbox execution failed: {}",
+                        e
+                    ))),
                 }
             } else {
-                // 直接执行（无沙箱，使用直接 argv 模式，拒绝 sh -c 注入）
+                // Direct execution (no sandbox, using direct argv mode to reject sh -c injection)
                 match Command::new(program).args(args).output().await {
                     Ok(output) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -366,14 +379,17 @@ impl Tool for ShellTool {
                             Ok(ToolResult::success(stdout))
                         } else {
                             Ok(ToolResult::error(format!(
-                                "命令执行失败，退出码: {:?}\n标准输出: {}\n错误输出: {}",
+                                "Command execution failed, exit code: {:?}\nstdout: {}\nstderr: {}",
                                 output.status.code(),
                                 stdout,
                                 stderr
                             )))
                         }
                     }
-                    Err(e) => Ok(ToolResult::error(format!("无法执行命令: {}", e))),
+                    Err(e) => Ok(ToolResult::error(format!(
+                        "Unable to execute command: {}",
+                        e
+                    ))),
                 }
             }
         })
@@ -389,7 +405,7 @@ mod tests {
     fn test_safe_commands() {
         let tool = ShellTool::new();
 
-        // 安全命令
+        // Safe commands
         assert_eq!(tool.check_command_safety("ls -la"), CommandSafety::Safe);
         assert_eq!(tool.check_command_safety("pwd"), CommandSafety::Safe);
         assert_eq!(
@@ -407,46 +423,52 @@ mod tests {
     fn test_shell_injection_rejected() {
         let tool = ShellTool::new();
 
-        // 管道注入
+        // Pipe injection
         match tool.check_command_safety("ls | rm -rf /tmp") {
             CommandSafety::Dangerous(_) => {}
-            other => panic!("管道注入应被拒绝，但得到: {:?}", other),
+            other => panic!("Pipe injection should be rejected, got: {:?}", other),
         }
 
-        // 命令替换注入
+        // Command substitution injection
         match tool.check_command_safety("echo $(id)") {
             CommandSafety::Dangerous(_) => {}
-            other => panic!("命令替换注入应被拒绝，但得到: {:?}", other),
+            other => panic!(
+                "Command substitution injection should be rejected, got: {:?}",
+                other
+            ),
         }
 
-        // 反引号注入
+        // Backtick injection
         match tool.check_command_safety("echo `id`") {
             CommandSafety::Dangerous(_) => {}
-            other => panic!("反引号注入应被拒绝，但得到: {:?}", other),
+            other => panic!("Backtick injection should be rejected, got: {:?}", other),
         }
 
-        // 分号注入
+        // Semicolon injection
         match tool.check_command_safety("ls; rm -rf /tmp/x") {
             CommandSafety::Dangerous(_) => {}
-            other => panic!("分号注入应被拒绝，但得到: {:?}", other),
+            other => panic!("Semicolon injection should be rejected, got: {:?}", other),
         }
 
-        // 重定向注入
+        // Redirect injection
         match tool.check_command_safety("cat file > /etc/passwd") {
             CommandSafety::Dangerous(_) => {}
-            other => panic!("重定向注入应被拒绝，但得到: {:?}", other),
+            other => panic!("Redirect injection should be rejected, got: {:?}", other),
         }
 
-        // 条件执行注入
+        // Conditional execution injection
         match tool.check_command_safety("echo hello && rm -rf /") {
             CommandSafety::Dangerous(_) => {}
-            other => panic!("条件执行注入应被拒绝，但得到: {:?}", other),
+            other => panic!(
+                "Conditional execution injection should be rejected, got: {:?}",
+                other
+            ),
         }
 
-        // 子 shell 注入
+        // Subshell injection
         match tool.check_command_safety("$(dangerous)") {
             CommandSafety::Dangerous(_) => {}
-            other => panic!("子 shell 注入应被拒绝，但得到: {:?}", other),
+            other => panic!("Subshell injection should be rejected, got: {:?}", other),
         }
     }
 
@@ -454,25 +476,25 @@ mod tests {
     fn test_require_approval_commands() {
         let tool = ShellTool::new();
 
-        // 需要确认的命令
+        // Commands requiring confirmation
         match tool.check_command_safety("rm -rf /tmp/test") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("rm 命令应该需要确认"),
+            _ => panic!("rm command should require confirmation"),
         }
 
         match tool.check_command_safety("curl http://example.com") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("curl 命令应该需要确认"),
+            _ => panic!("curl command should require confirmation"),
         }
 
         match tool.check_command_safety("npm install package") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("npm 命令应该需要确认"),
+            _ => panic!("npm command should require confirmation"),
         }
 
         match tool.check_command_safety("python script.py") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("python 命令应该需要确认"),
+            _ => panic!("python command should require confirmation"),
         }
     }
 
@@ -480,25 +502,25 @@ mod tests {
     fn test_dangerous_commands() {
         let tool = ShellTool::new();
 
-        // 极度危险的命令（明确拒绝）
+        // Extremely dangerous commands (explicitly rejected)
         match tool.check_command_safety("dd if=/dev/zero of=/dev/sda") {
             CommandSafety::Dangerous(_) => {}
-            _ => panic!("dd 命令应该被拒绝"),
+            _ => panic!("dd command should be rejected"),
         }
 
         match tool.check_command_safety("sudo apt install") {
             CommandSafety::Dangerous(_) => {}
-            _ => panic!("sudo 命令应该被拒绝"),
+            _ => panic!("sudo command should be rejected"),
         }
 
         match tool.check_command_safety("chmod 777 /etc/passwd") {
             CommandSafety::Dangerous(_) => {}
-            _ => panic!("chmod 命令应该被拒绝"),
+            _ => panic!("chmod command should be rejected"),
         }
 
         match tool.check_command_safety("reboot") {
             CommandSafety::Dangerous(_) => {}
-            _ => panic!("reboot 命令应该被拒绝"),
+            _ => panic!("reboot command should be rejected"),
         }
     }
 
@@ -506,36 +528,36 @@ mod tests {
     fn test_git_commands() {
         let tool = ShellTool::new();
 
-        // Git 安全命令
+        // Git safe commands
         assert_eq!(tool.check_command_safety("git log"), CommandSafety::Safe);
         assert_eq!(tool.check_command_safety("git diff"), CommandSafety::Safe);
         assert_eq!(tool.check_command_safety("git status"), CommandSafety::Safe);
 
-        // Git 需要确认的命令
+        // Git commands requiring confirmation
         match tool.check_command_safety("git commit -m 'test'") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("git commit 应该需要确认"),
+            _ => panic!("git commit should require confirmation"),
         }
 
         match tool.check_command_safety("git push origin main") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("git push 应该需要确认"),
+            _ => panic!("git push should require confirmation"),
         }
 
         match tool.check_command_safety("git add .") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("git add 应该需要确认"),
+            _ => panic!("git add should require confirmation"),
         }
 
         match tool.check_command_safety("git clean -fd") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("git clean 应该需要确认"),
+            _ => panic!("git clean should require confirmation"),
         }
 
-        // Git 危险命令
+        // Git dangerous commands
         match tool.check_command_safety("git reset --hard HEAD~1") {
             CommandSafety::Dangerous(_) => {}
-            _ => panic!("git reset --hard 应该被拒绝"),
+            _ => panic!("git reset --hard should be rejected"),
         }
     }
 
@@ -543,7 +565,7 @@ mod tests {
     fn test_cargo_commands() {
         let tool = ShellTool::new();
 
-        // Cargo 安全命令
+        // Cargo safe commands
         assert_eq!(
             tool.check_command_safety("cargo check"),
             CommandSafety::Safe
@@ -558,30 +580,30 @@ mod tests {
             CommandSafety::Safe
         );
 
-        // Cargo 需要确认的命令
+        // Cargo commands requiring confirmation
         match tool.check_command_safety("cargo run") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("cargo run 应该需要确认"),
+            _ => panic!("cargo run should require confirmation"),
         }
 
         match tool.check_command_safety("cargo install some-package") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("cargo install 应该需要确认"),
+            _ => panic!("cargo install should require confirmation"),
         }
 
         match tool.check_command_safety("cargo clean") {
             CommandSafety::RequiresApproval(_) => {}
-            _ => panic!("cargo clean 应该需要确认"),
+            _ => panic!("cargo clean should require confirmation"),
         }
     }
 
     #[test]
     fn test_unknown_command_in_strict_mode() {
-        let tool = ShellTool::new(); // 默认严格模式
+        let tool = ShellTool::new(); // default strict mode
 
         match tool.check_command_safety("unknown_command") {
             CommandSafety::Dangerous(_) => {}
-            _ => panic!("严格模式下应该拒绝未知命令"),
+            _ => panic!("Unknown commands should be rejected in strict mode"),
         }
     }
 
@@ -589,52 +611,70 @@ mod tests {
     async fn test_shell_tool_execution() {
         let tool = ShellTool::new();
 
-        // 测试安全命令
+        // Test safe command
         let mut params = HashMap::new();
         params.insert("command".to_string(), serde_json::json!("echo hello"));
         let result = tool.execute(params).await.unwrap();
         assert!(result.success);
         assert!(result.output.contains("hello"));
 
-        // 测试需要确认的命令
+        // Test command requiring confirmation
         let mut params = HashMap::new();
         params.insert("command".to_string(), serde_json::json!("rm test.txt"));
         let result = tool.execute(params).await.unwrap();
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("确认"));
+        assert!(result.error.as_ref().unwrap().contains("confirmation"));
 
-        // 测试危险命令
+        // Test dangerous command
         let mut params = HashMap::new();
         params.insert("command".to_string(), serde_json::json!("sudo reboot"));
         let result = tool.execute(params).await.unwrap();
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("拒绝"));
+        assert!(result.error.unwrap().contains("rejection"));
     }
 
     #[tokio::test]
     async fn test_shell_injection_rejected_in_execution() {
         let tool = ShellTool::new();
 
-        // 管道注入 → 被拒绝
+        // Pipe injection → rejected
         let mut params = HashMap::new();
         params.insert("command".to_string(), serde_json::json!("ls | rm -rf /tmp"));
         let result = tool.execute(params).await.unwrap();
-        assert!(!result.success, "管道注入应被拒绝");
-        assert!(result.error.as_ref().unwrap().contains("shell 元字符"));
+        assert!(!result.success, "Pipe injection should be rejected");
+        assert!(
+            result
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("shell metacharacters")
+        );
 
-        // 命令替换 → 被拒绝
+        // Command substitution → rejected
         let mut params = HashMap::new();
         params.insert("command".to_string(), serde_json::json!("echo $(id)"));
         let result = tool.execute(params).await.unwrap();
-        assert!(!result.success, "命令替换应被拒绝");
-        assert!(result.error.as_ref().unwrap().contains("shell 元字符"));
+        assert!(!result.success, "Command substitution should be rejected");
+        assert!(
+            result
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("shell metacharacters")
+        );
 
-        // 分号注入 → 被拒绝
+        // Semicolon injection → rejected
         let mut params = HashMap::new();
         params.insert("command".to_string(), serde_json::json!("ls; echo pwned"));
         let result = tool.execute(params).await.unwrap();
-        assert!(!result.success, "分号注入应被拒绝");
-        assert!(result.error.as_ref().unwrap().contains("shell 元字符"));
+        assert!(!result.success, "Semicolon injection should be rejected");
+        assert!(
+            result
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("shell metacharacters")
+        );
     }
 
     #[tokio::test]

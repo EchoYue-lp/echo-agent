@@ -1,13 +1,13 @@
-//! A2A HTTP 服务层
+//! A2A HTTP service layer.
 //!
-//! 基于 axum 提供完整的 A2A HTTP 服务器，包括：
-//! - `GET /.well-known/agent.json` — Agent Card 发现端点
-//! - `POST /` — JSON-RPC 任务请求（同步 + SSE 流式）
+//! Provides a full A2A HTTP server based on axum, including:
+//! - `GET /.well-known/agent.json` — Agent Card discovery endpoint
+//! - `POST /` — JSON-RPC task requests (sync + SSE streaming)
 //! - `GET /health` — K8s liveness probe
 //! - `GET /ready` — K8s readiness probe
-//! - 可选的 JWT Bearer Token 鉴权中间件
+//! - Optional JWT Bearer Token auth middleware
 //!
-//! # 使用方式
+//! # Usage
 //!
 //! ```rust,no_run
 //! use echo_agent::a2a::{A2AServer, AgentCard, serve};
@@ -40,18 +40,18 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{info, warn};
 
-/// 默认请求体大小限制（1MB）
+/// Default request body size limit (1 MB).
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// A2A 服务端共享状态
+/// A2A server shared state.
 #[derive(Clone)]
 struct AppState {
     server: Arc<A2AServer>,
 }
 
-/// 启动 A2A HTTP 服务器（无鉴权，默认 1MB 请求体限制）
+/// Start A2A HTTP server (no auth, default 1 MB body limit).
 ///
-/// 绑定到指定地址，提供 Agent Card 发现、JSON-RPC 任务处理、健康检查等端点。
+/// Binds to the given address and serves Agent Card discovery, JSON-RPC task handling, health checks, etc.
 pub async fn serve(server: A2AServer, bind_addr: &str) -> crate::error::Result<()> {
     serve_inner(
         server,
@@ -62,10 +62,10 @@ pub async fn serve(server: A2AServer, bind_addr: &str) -> crate::error::Result<(
     .await
 }
 
-/// 启动 A2A HTTP 服务器（带 JWT 鉴权，默认 1MB 请求体限制）
+/// Start A2A HTTP server (with JWT auth, default 1 MB body limit).
 ///
-/// 所有 `/` 端点的请求必须携带有效的 `Authorization: Bearer <token>` 头。
-/// `/health` 和 `/ready` 端点不受鉴权限制。
+/// All `/` endpoint requests must carry a valid `Authorization: Bearer <token>` header.
+/// `/health` and `/ready` endpoints are not subject to authentication.
 pub async fn serve_with_auth(
     server: A2AServer,
     bind_addr: &str,
@@ -74,7 +74,7 @@ pub async fn serve_with_auth(
     serve_inner(server, bind_addr, jwt_config, DEFAULT_MAX_BODY_BYTES).await
 }
 
-/// 启动 A2A HTTP 服务器（从 [ServerConfig]，无鉴权）
+/// Start A2A HTTP server (from `ServerConfig`, no auth).
 pub async fn serve_from_config(
     server: A2AServer,
     config: &crate::config::ServerConfig,
@@ -83,7 +83,7 @@ pub async fn serve_from_config(
     serve_inner(server, &addr, JwtConfig::disabled(), config.max_body_bytes).await
 }
 
-/// 启动 A2A HTTP 服务器（从 [ServerConfig]，带 JWT 鉴权）
+/// Start A2A HTTP server (from `ServerConfig`, with JWT auth)
 pub async fn serve_from_config_with_auth(
     server: A2AServer,
     config: &crate::config::ServerConfig,
@@ -93,7 +93,7 @@ pub async fn serve_from_config_with_auth(
     serve_inner(server, &addr, jwt_config, config.max_body_bytes).await
 }
 
-/// 内部统一实现
+/// Internal unified implementation
 async fn serve_inner(
     server: A2AServer,
     bind_addr: &str,
@@ -107,7 +107,7 @@ async fn serve_inner(
     let jwt_enabled = jwt_config.is_enabled();
     let jwt_state = Arc::new(jwt_config);
 
-    // 需要鉴权的路由组
+    // Auth-protected route group
     let protected = Router::new()
         .route("/.well-known/agent.json", get(agent_card))
         .route("/", get(|| async { "A2A Server" }).post(handle_json_rpc));
@@ -121,7 +121,7 @@ async fn serve_inner(
         protected
     };
 
-    // 健康检查端点不受鉴权限制
+    // Health check endpoints are not subject to authentication
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -131,24 +131,24 @@ async fn serve_inner(
 
     let listener = TcpListener::bind(bind_addr)
         .await
-        .map_err(|e| crate::error::ReactError::Other(format!("绑定地址失败: {e}")))?;
+        .map_err(|e| crate::error::ReactError::Other(format!("Bind address failed: {e}")))?;
 
     info!(
         addr = %bind_addr,
         jwt = %jwt_enabled,
         max_body_bytes = %max_body_bytes,
-        "A2A HTTP 服务器已启动"
+        "A2A HTTP server started"
     );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|e| crate::error::ReactError::Other(format!("服务器错误: {e}")))?;
+        .map_err(|e| crate::error::ReactError::Other(format!("Server error: {e}")))?;
 
-    info!("A2A HTTP 服务器已优雅关闭");
+    info!("A2A HTTP server shut down gracefully");
     Ok(())
 }
 
-/// 等待 SIGINT 或 SIGTERM 信号，用于优雅关闭
+/// Wait for SIGINT or SIGTERM signal for graceful shutdown
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()
@@ -169,15 +169,15 @@ async fn shutdown_signal() {
 
     tokio::select! {
         _ = ctrl_c => {
-            info!("收到 SIGINT 信号，正在优雅关闭...");
+            info!("Received SIGINT signal, shutting down gracefully...");
         }
         _ = terminate => {
-            info!("收到 SIGTERM 信号，正在优雅关闭...");
+            info!("Received SIGTERM signal, shutting down gracefully...");
         }
     }
 }
 
-// ── 端点处理器 ─────────────────────────────────────────────────────────────────
+// ── Endpoint handlers ─────────────────────────────────────────────────────────
 
 /// `GET /.well-known/agent.json`
 async fn agent_card(State(state): State<AppState>) -> Response {
@@ -199,7 +199,7 @@ async fn agent_card(State(state): State<AppState>) -> Response {
 
 /// `GET /health` — K8s liveness probe
 ///
-/// 只要进程存活就返回 200。
+/// Returns 200 as long as the process is alive.
 async fn health() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -210,7 +210,7 @@ async fn health() -> impl IntoResponse {
 
 /// `GET /ready` — K8s readiness probe
 ///
-/// 返回 200 表示服务可接受请求。
+/// Returns 200 to indicate the service is ready to accept requests.
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     let _ = state.server.agent_card();
     (
@@ -220,7 +220,7 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-/// `POST /` — JSON-RPC 处理
+/// `POST /` — JSON-RPC handler
 async fn handle_json_rpc(State(state): State<AppState>, body: String) -> Response {
     let method = parse_method(&body);
 
@@ -231,7 +231,7 @@ async fn handle_json_rpc(State(state): State<AppState>, body: String) -> Respons
     }
 }
 
-/// 同步 JSON-RPC 响应
+/// Synchronous JSON-RPC response
 async fn handle_sync(state: AppState, body: &str) -> Response {
     let response_json = state.server.handle_request(body).await;
     (
@@ -242,7 +242,7 @@ async fn handle_sync(state: AppState, body: &str) -> Response {
         .into_response()
 }
 
-/// SSE 流式响应（tasks/sendSubscribe）
+/// SSE streaming response (tasks/sendSubscribe)
 async fn handle_sse(state: AppState, body: &str) -> Response {
     let server = state.server.clone();
     let body_owned = body.to_string();
@@ -259,7 +259,7 @@ async fn handle_sse(state: AppState, body: &str) -> Response {
             Sse::new(sse_stream).into_response()
         }
         Err(e) => {
-            warn!(error = %e, "A2A SSE: 流处理失败");
+            warn!(error = %e, "A2A SSE: stream processing failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
@@ -270,7 +270,7 @@ async fn handle_sse(state: AppState, body: &str) -> Response {
     }
 }
 
-/// 从 JSON-RPC 请求体中快速提取 method 字段
+/// Quickly extract the method field from a JSON-RPC request body
 fn parse_method(body: &str) -> Option<String> {
     let body = body.trim();
 

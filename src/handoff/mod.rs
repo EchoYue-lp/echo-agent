@@ -1,15 +1,16 @@
-//! Handoff 模块 — Agent 间控制权转移
+//! Handoff module — control transfer between Agents
 //!
-//! 支持将当前 Agent 的执行控制权转移给另一个 Agent，并传递上下文信息。
+//! Supports transferring execution control from the current Agent to another Agent,
+//! along with context information.
 //!
-//! # 核心概念
+//! # Core concepts
 //!
-//! - [`HandoffTarget`]: 描述要转移到的目标 Agent
-//! - [`HandoffContext`][]: 携带的上下文数据（消息历史、元数据等）
-//! - [`HandoffResult`][]: 转移执行后的结果
-//! - [`HandoffManager`]: 管理 Agent 注册和 Handoff 执行
+//! - [`HandoffTarget`]: Describes the target Agent to transfer to
+//! - [`HandoffContext`][]: Context data carried along (message history, metadata, etc.)
+//! - [`HandoffResult`][]: Result after handoff execution
+//! - [`HandoffManager`]: Manages Agent registration and handoff execution
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust,no_run
 //! use echo_agent::handoff::{HandoffManager, HandoffTarget, HandoffContext};
@@ -21,17 +22,17 @@
 //! # async fn main() -> echo_agent::error::Result<()> {
 //! let mut manager = HandoffManager::new();
 //!
-//! // 注册 Agent
-//! let agent = ReactAgentBuilder::simple("qwen3-max", "我是翻译助手")?;
+//! // Register agent
+//! let agent = ReactAgentBuilder::simple("qwen3-max", "I am a translation assistant")?;
 //! manager.register("translator", agent);
 //!
-//! // 执行 Handoff
+//! // Execute handoff
 //! let target = HandoffTarget::new("translator")
-//!     .with_message("请将以下内容翻译为英文：你好世界");
+//!     .with_message("Please translate the following to English: Hello world");
 //! let context = HandoffContext::new()
 //!     .with_metadata("source_lang", "zh");
 //! let result = manager.handoff(target, context).await?;
-//! println!("翻译结果: {}", result.output);
+//! println!("Translation result: {}", result.output);
 //! # Ok(())
 //! # }
 //! ```
@@ -51,19 +52,19 @@ pub use tool::HandoffTool;
 
 // ── HandoffTarget ────────────────────────────────────────────────────────────
 
-/// 描述 Handoff 的目标 Agent 及要执行的任务
+/// Describes the target Agent for handoff and the task to execute
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffTarget {
-    /// 目标 Agent 名称（需已在 HandoffManager 中注册）
+    /// Target agent name (must be registered in HandoffManager)
     pub agent_name: String,
-    /// 要传递给目标 Agent 的任务消息
+    /// Task message to pass to the target agent
     pub message: Option<String>,
-    /// 是否传递完整的对话历史给目标 Agent
+    /// Whether to pass the full conversation history to the target agent
     pub transfer_history: bool,
 }
 
 impl HandoffTarget {
-    /// 创建一个新的 HandoffTarget 指向指定 Agent。
+    /// Create a new HandoffTarget pointing to the specified agent.
     pub fn new(agent_name: impl Into<String>) -> Self {
         Self {
             agent_name: agent_name.into(),
@@ -72,13 +73,13 @@ impl HandoffTarget {
         }
     }
 
-    /// 设置要传递给目标 Agent 的消息
+    /// Set the message to pass to the target agent
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = Some(message.into());
         self
     }
 
-    /// 开启对话历史传递
+    /// Enable conversation history transfer
     pub fn with_history(mut self) -> Self {
         self.transfer_history = true;
         self
@@ -87,36 +88,36 @@ impl HandoffTarget {
 
 // ── HandoffContext ───────────────────────────────────────────────────────────
 
-/// Handoff 时携带的上下文信息
+/// Context information carried during handoff
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandoffContext {
-    /// 源 Agent 名称
+    /// Source agent name
     pub source_agent: Option<String>,
-    /// 对话历史（当 transfer_history 为 true 时填充）
+    /// Conversation history (populated when transfer_history is true)
     pub messages: Vec<Message>,
-    /// 自定义元数据（键值对）
+    /// Custom metadata (key-value pairs)
     pub metadata: HashMap<String, String>,
 }
 
 impl HandoffContext {
-    /// 创建一个新的 HandoffContext（默认值）。
+    /// Create a new HandoffContext (default values).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 设置源 Agent 名称
+    /// Set the source agent name
     pub fn with_source(mut self, source: impl Into<String>) -> Self {
         self.source_agent = Some(source.into());
         self
     }
 
-    /// 设置对话历史
+    /// Set the conversation history
     pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
         self.messages = messages;
         self
     }
 
-    /// 添加元数据
+    /// Add metadata
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
@@ -125,69 +126,69 @@ impl HandoffContext {
 
 // ── HandoffResult ────────────────────────────────────────────────────────────
 
-/// Handoff 执行结果
+/// Handoff execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffResult {
-    /// 目标 Agent 名称
+    /// Target agent name
     pub target_agent: String,
-    /// 源 Agent 名称（如果有）
+    /// Source agent name (if any)
     pub source_agent: Option<String>,
-    /// 执行输出
+    /// Execution output
     pub output: String,
-    /// 是否建议将控制权交还给源 Agent
+    /// Whether to suggest returning control to the source agent
     pub return_to_source: bool,
 }
 
 // ── HandoffManager ───────────────────────────────────────────────────────────
 
-/// Handoff 管理器：负责 Agent 注册和 Handoff 执行调度
+/// Handoff manager: responsible for Agent registration and handoff execution dispatch
 pub struct HandoffManager {
     agents: HashMap<String, Arc<Mutex<Box<dyn Agent>>>>,
 }
 
 impl HandoffManager {
-    /// 创建一个新的 HandoffManager 实例。
+    /// Create a new HandoffManager instance.
     pub fn new() -> Self {
         Self {
             agents: HashMap::new(),
         }
     }
 
-    /// 注册一个 Agent（接受任意实现 Agent trait 的类型）
+    /// Register an Agent (accepts any type implementing the Agent trait)
     pub fn register(&mut self, name: impl Into<String>, agent: impl Agent + 'static) {
         let name = name.into();
         self.agents
             .insert(name, Arc::new(Mutex::new(Box::new(agent))));
     }
 
-    /// 注册一个已封装的 Agent
+    /// Register a boxed Agent
     pub fn register_boxed(&mut self, name: impl Into<String>, agent: Box<dyn Agent>) {
         let name = name.into();
         self.agents.insert(name, Arc::new(Mutex::new(agent)));
     }
 
-    /// 注册一个已包装为 Arc<Mutex<Box<dyn Agent>>> 的 Agent
+    /// Register a pre-wrapped `Arc<Mutex<Box<dyn Agent>>>` agent
     pub fn register_shared(&mut self, name: impl Into<String>, agent: Arc<Mutex<Box<dyn Agent>>>) {
         self.agents.insert(name.into(), agent);
     }
 
-    /// 获取已注册的 Agent 名称列表
+    /// Get the list of registered agent names
     pub fn registered_agents(&self) -> Vec<&str> {
         self.agents.keys().map(|s| s.as_str()).collect()
     }
 
-    /// 检查 Agent 是否已注册
+    /// Check whether an agent is registered
     pub fn has_agent(&self, name: &str) -> bool {
         self.agents.contains_key(name)
     }
 
-    /// 执行 Handoff：将控制权转移到目标 Agent
+    /// Execute a handoff: transfer control to the target agent
     ///
-    /// 流程：
-    /// 1. 查找目标 Agent
-    /// 2. 构建上下文提示（包含元数据和历史）
-    /// 3. 调用目标 Agent 执行
-    /// 4. 返回结果
+    /// Process:
+    /// 1. Look up the target agent
+    /// 2. Build a context prompt (including metadata and history)
+    /// 3. Invoke the target agent to execute
+    /// 4. Return the result
     pub async fn handoff(
         &self,
         target: HandoffTarget,
@@ -195,7 +196,7 @@ impl HandoffManager {
     ) -> Result<HandoffResult> {
         let agent_arc = self.agents.get(&target.agent_name).ok_or_else(|| {
             ReactError::Agent(AgentError::InitializationFailed(format!(
-                "Handoff 目标 Agent '{}' 未注册。可用 Agent: {:?}",
+                "Handoff target agent '{}' is not registered. Available agents: {:?}",
                 target.agent_name,
                 self.registered_agents()
             )))
@@ -206,29 +207,29 @@ impl HandoffManager {
             target = %target.agent_name,
             transfer_history = %target.transfer_history,
             metadata_keys = ?context.metadata.keys().collect::<Vec<_>>(),
-            "🤝 执行 Handoff"
+            "🤝 Executing handoff"
         );
 
-        // 构建发送给目标 Agent 的完整提示（在锁外执行，避免持锁时间过长）
+        // Build the full prompt to send to the target agent (execute outside the lock to avoid holding it too long)
         let full_prompt = {
             let mut prompt_parts = Vec::new();
 
-            // 添加来源信息
+            // Add source information
             if let Some(source) = &context.source_agent {
-                prompt_parts.push(format!("[Handoff 来源: Agent '{}']", source));
+                prompt_parts.push(format!("[Handoff source: Agent '{}']", source));
             }
 
-            // 添加元数据
+            // Add metadata
             if !context.metadata.is_empty() {
                 let meta_lines: Vec<String> = context
                     .metadata
                     .iter()
                     .map(|(k, v)| format!("  - {}: {}", k, v))
                     .collect();
-                prompt_parts.push(format!("[上下文元数据]\n{}", meta_lines.join("\n")));
+                prompt_parts.push(format!("[Context metadata]\n{}", meta_lines.join("\n")));
             }
 
-            // 添加历史摘要
+            // Add history summary
             if target.transfer_history && !context.messages.is_empty() {
                 let history_summary: Vec<String> = context
                     .messages
@@ -239,12 +240,15 @@ impl HandoffManager {
                             .map(|c| format!("{}: {}", msg.role, c))
                     })
                     .collect();
-                prompt_parts.push(format!("[对话历史]\n{}", history_summary.join("\n")));
+                prompt_parts.push(format!(
+                    "[Conversation history]\n{}",
+                    history_summary.join("\n")
+                ));
             }
 
-            // 添加任务消息
+            // Add task message
             if let Some(message) = &target.message {
-                prompt_parts.push(format!("[任务]\n{}", message));
+                prompt_parts.push(format!("[Task]\n{}", message));
             }
 
             prompt_parts.join("\n\n")
@@ -253,10 +257,10 @@ impl HandoffManager {
         debug!(
             target = %target.agent_name,
             prompt_len = full_prompt.len(),
-            "📨 发送 Handoff 提示"
+            "📨 Sending handoff prompt"
         );
 
-        // 使用 spawn 避免在 execute 期间持锁阻塞其他 handoff 请求
+        // Use spawn to avoid holding the lock and blocking other handoff requests during execute
         let agent_arc_clone = agent_arc.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -273,7 +277,7 @@ impl HandoffManager {
         info!(
             target = %target.agent_name,
             output_len = output.len(),
-            "✅ Handoff 执行完成"
+            "Handoff execution completed"
         );
 
         Ok(HandoffResult {
@@ -284,10 +288,10 @@ impl HandoffManager {
         })
     }
 
-    /// 执行 Handoff 链：依次将控制权传递给多个 Agent
+    /// Execute a handoff chain: transfer control to multiple Agents in sequence
     ///
-    /// 每个 Agent 的输出会作为下一个 Agent 的输入。
-    /// 完整的对话历史会在链中传递。
+    /// Each Agent's output is used as the input for the next Agent.
+    /// The full conversation history is passed along the chain.
     pub async fn handoff_chain(
         &self,
         targets: Vec<HandoffTarget>,
@@ -297,7 +301,7 @@ impl HandoffManager {
         let mut current_context = initial_context;
 
         for target in targets {
-            // 确保链中的 handoff 传递历史
+            // Ensure history is transferred throughout the chain
             let mut target_with_history = target.clone();
             target_with_history.transfer_history = true;
 
@@ -305,21 +309,21 @@ impl HandoffManager {
                 .handoff(target_with_history, current_context.clone())
                 .await?;
 
-            // 为下一个 Agent 更新上下文，保留所有元数据和消息历史
-            // 添加本次交互到消息历史
+            // Update context for the next Agent, preserving all metadata and message history
+            // Add this interaction to the message history
             let mut updated_messages = current_context.messages.clone();
 
-            // 构建本次交互的提示（模拟 handoff 内部构建的提示）
-            // 但实际上，我们需要知道发送给 Agent 的确切提示
-            // 简化：将任务消息作为 user 消息，输出作为 assistant 消息
+            // Build a prompt for this interaction (simulating the prompt built internally by handoff)
+            // In practice, we would need to know the exact prompt sent to the Agent
+            // Simplified: treat the task message as a user message and the output as an assistant message
             if let Some(task_msg) = &target.message {
                 updated_messages.push(Message::user(task_msg.clone()));
             }
 
-            // 添加 Agent 的输出
+            // Add the Agent's output
             updated_messages.push(Message::assistant(result.output.clone()));
 
-            // 更新上下文：保留所有元数据，添加新的消息历史
+            // Update the context: preserve all metadata, add the new message history
             current_context = HandoffContext {
                 source_agent: Some(result.target_agent.clone()),
                 messages: updated_messages,
@@ -350,11 +354,11 @@ mod tests {
     #[test]
     fn test_handoff_target() {
         let target = HandoffTarget::new("agent_b")
-            .with_message("请处理此任务")
+            .with_message("Please process this task")
             .with_history();
 
         assert_eq!(target.agent_name, "agent_b");
-        assert_eq!(target.message.as_deref(), Some("请处理此任务"));
+        assert_eq!(target.message.as_deref(), Some("Please process this task"));
         assert!(target.transfer_history);
     }
 

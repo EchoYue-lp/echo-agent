@@ -90,7 +90,7 @@ async fn health_check() -> Result<ToolResult> {
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
         .with_env_filter(

@@ -1,6 +1,7 @@
-//! 人工介入审批子系统
+//! Human-in-the-loop approval subsystem
 //!
-//! 集中管理 human-in-the-loop 审批流程所需的 Provider、权限服务、待刷新规则。
+//! Centralized management of Provider, permission service, and pending refresh rules
+//! required by the human-in-the-loop approval workflow.
 
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
@@ -8,10 +9,10 @@ use crate::human_loop::{HumanLoopProvider, PermissionService};
 use echo_core::tools::permission::PermissionRule;
 use std::sync::Arc;
 
-/// 人工介入审批子系统
+/// Human-in-the-loop approval subsystem
 ///
-/// 聚合审批 Provider、统一权限服务、待刷新权限规则。
-/// 仅在 `human-loop` feature 启用时有实际字段。
+/// Aggregates approval Provider, unified permission service, and pending permission rules.
+/// Only has actual fields when the `human-loop` feature is enabled.
 pub(crate) struct ApprovalSubsystem {
     #[cfg(feature = "human-loop")]
     pub(crate) approval_provider: Arc<dyn HumanLoopProvider>,

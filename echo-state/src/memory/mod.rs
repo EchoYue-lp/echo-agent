@@ -1,15 +1,15 @@
-//! 记忆系统
+//! Memory system
 //!
-//! 分多层，职责各不相同：
+//! Layered architecture, each with distinct responsibilities:
 //!
-//! | 层次 | 实现 | 作用域 |
+//! | Layer | Implementation | Scope |
 //! |------|------|--------|
-//! | 短期上下文 | [`compression::ContextManager`] | 单次 `execute()` 内 |
-//! | 线程状态 | [`Checkpointer`] / [`FileCheckpointer`] | 跨进程恢复同一线程 |
-//! | 对话历史 | [`ConversationStore`] / `SqliteConversationStore` | transcript 投影、历史浏览、多用户隔离 |
-//! | 长期记忆 | [`Store`] / [`FileStore`] / `SqliteStore` | 跨会话、跨用户共享 |
+//! | Short-term context | [`compression::ContextManager`] | Within a single `execute()` call |
+//! | Thread state | [`Checkpointer`] / [`FileCheckpointer`] | Cross-process recovery of the same thread |
+//! | Conversation history | [`ConversationStore`] / `SqliteConversationStore` | Transcript projection, history browsing, multi-user isolation |
+//! | Long-term memory | [`Store`] / [`FileStore`] / `SqliteStore` | Cross-session, cross-user sharing |
 //!
-//! ## 线程状态持久化（Checkpointer）
+//! ## Thread state persistence (Checkpointer)
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -18,13 +18,13 @@
 //!
 //! # async fn example() -> Result<()> {
 //! let cp = Arc::new(FileCheckpointer::new("~/.echo-agent/checkpoints.json")?);
-//! // 将 `cp` 接入你自己的 agent/runtime 层，或通过 `echo_agent` façade 使用。
+//! // Wire `cp` into your own agent/runtime layer, or use it through the `echo_agent` façade.
 //! let _ = cp;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! ## 对话持久化（ConversationStore）
+//! ## Conversation persistence (ConversationStore)
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -34,7 +34,7 @@
 //!     conversation_id: "conv-001".to_string(),
 //!     user_id: "default".to_string(),
 //!     agent_type: None,
-//!     title: Some("Rust 讨论".to_string()),
+//!     title: Some("Rust discussion".to_string()),
 //! }).await?;
 //! store.save_messages("conv-001", &[/* messages */]).await?;
 //! let msgs = store.get_messages("conv-001").await?;
@@ -42,7 +42,7 @@
 //! # }
 //! ```
 //!
-//! ## 长期 KV 存储（Store）
+//! ## Long-term KV storage (Store)
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -52,10 +52,10 @@
 //! # async fn example() -> Result<()> {
 //! let store = Arc::new(FileStore::new("~/.echo-agent/store.json")?);
 //! store.put(&["alice", "memories"], "pref-001", serde_json::json!({
-//!     "content": "用户偏好深色主题",
+//!     "content": "User prefers dark theme",
 //!     "importance": 8
 //! })).await?;
-//! let items = store.search(&["alice", "memories"], "主题", 3).await?;
+//! let items = store.search(&["alice", "memories"], "theme", 3).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -90,7 +90,7 @@ pub use store::{FileStore, InMemoryStore, SearchMode, SearchQuery, Store, StoreI
 #[cfg(test)]
 pub use test_utils::MockEmbedder;
 
-/// 测试用嵌入器（仅在测试时可见）
+/// Test embedder (visible only in tests)
 #[cfg(test)]
 mod test_utils {
     use crate::memory::embedder::Embedder;

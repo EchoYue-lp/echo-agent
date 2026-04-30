@@ -1,4 +1,4 @@
-//! QQ Bot ChannelPlugin 实现
+//! QQ Bot ChannelPlugin implementation
 
 use super::super::super::types::*;
 use super::api::*;
@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-/// QQ Bot 通道配置
+/// QQ Bot channel configuration
 #[derive(Debug, Clone)]
 pub struct QqConfig {
     /// QQ Bot App ID
@@ -33,10 +33,10 @@ impl QqConfig {
 
 // ── Channel ───────────────────────────────────────────────────────────────────
 
-/// QQ Bot IM 通道实现
+/// QQ Bot IM channel implementation
 pub struct QqChannel {
     config: QqConfig,
-    /// 共享 HTTP 客户端（复用连接池）
+    /// Shared HTTP client (connection pool reuse)
     http: reqwest::Client,
     token_manager: Option<Arc<TokenManager>>,
     send_tx: Option<mpsc::Sender<OutboundMessage>>,
@@ -83,18 +83,18 @@ impl ChannelPlugin for QqChannel {
     async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()> {
         info!("Starting QQ Bot channel...");
 
-        // 1. 初始化 Token 管理器
+        // 1. Initialize token manager
         let token_manager = Arc::new(TokenManager::new(
             self.config.app_id.clone(),
             self.config.client_secret.clone(),
         ));
         self.token_manager = Some(token_manager.clone());
 
-        // 2. 启动后台消息发送 task
+        // 2. Start background message sending task
         let (send_tx, mut send_rx) = mpsc::channel::<OutboundMessage>(256);
         let token_manager_clone = token_manager.clone();
 
-        // 3. 创建 wrapper handler —— 调用 inner 处理后自动发送回复
+        // 3. Create wrapper handler — calls inner handler then auto-sends reply
         let send_tx_clone = send_tx.clone();
         self.send_tx = Some(send_tx);
         let wrapper = Arc::new(QqMessageHandler {
@@ -102,7 +102,7 @@ impl ChannelPlugin for QqChannel {
             send_tx: send_tx_clone,
         });
 
-        // 4. 启动消息发送 task
+        // 4. Start message sending task
         let http_for_send = self.http.clone();
         let token_manager_clone2 = token_manager.clone();
         let _send_task = tokio::spawn(async move {
@@ -131,12 +131,12 @@ impl ChannelPlugin for QqChannel {
             }
         });
 
-        // 5. 启动 Gateway 连接循环（带指数退避重连）
+        // 5. Start Gateway connection loop (with exponential backoff reconnect)
         let http_for_gw = self.http.clone();
         let gateway_handle = tokio::spawn(async move {
             let mut reconnect_delay: u64 = 1;
             const MAX_DELAY: u64 = 60;
-            // 连接时间超过此阈值视为稳定，重置退避延迟
+            // If connection exceeds this threshold it is considered stable; reset backoff delay
             const STABLE_THRESHOLD_SECS: u64 = 60;
 
             loop {
@@ -178,7 +178,7 @@ impl ChannelPlugin for QqChannel {
                     }
                 }
 
-                // 连接稳定运行超过阈值则重置退避延迟
+                // If connection ran stably beyond threshold, reset backoff delay
                 if connected_at.elapsed().as_secs() >= STABLE_THRESHOLD_SECS {
                     reconnect_delay = 1;
                 } else {
@@ -239,7 +239,7 @@ impl ChannelPlugin for QqChannel {
     }
 }
 
-/// Wrapper: 调用 inner handler 处理后自动将回复通过 send_tx 发出
+/// Wrapper: calls inner handler then automatically sends reply via send_tx
 struct QqMessageHandler {
     inner: Arc<dyn MessageHandler>,
     send_tx: mpsc::Sender<OutboundMessage>,

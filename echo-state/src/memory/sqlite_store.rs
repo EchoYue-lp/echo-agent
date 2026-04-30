@@ -1,16 +1,17 @@
-//! SQLite 持久化 Store（FTS5 全文检索 + 可选向量搜索）
+//! SQLite persistent Store (FTS5 full-text search + optional vector search)
 //!
-//! 生产级持久化存储，基于 SQLite + FTS5 全文搜索引擎，可选集成向量相似度检索。
+//! Production-grade persistent storage, based on SQLite + FTS5 full-text search engine,
+//! with optional vector similarity retrieval integration.
 //!
-//! ## 存储结构
+//! ## Storage structure
 //!
-//! | 表 | 用途 |
+//! | Table | Purpose |
 //! |----|------|
-//! | `store_items` | KV 主表（namespace, key, value, 时间戳） |
-//! | `store_fts` | FTS5 全文索引（自动同步） |
-//! | `store_vectors` | 向量表（可选，存储嵌入向量） |
+//! | `store_items` | KV main table (namespace, key, value, timestamps) |
+//! | `store_fts` | FTS5 full-text index (auto-synced) |
+//! | `store_vectors` | Vector table (optional, stores embedding vectors) |
 //!
-//! ## 快速上手
+//! ## Quick start
 //!
 //! ```rust,no_run
 //! use echo_core::error::Result;
@@ -19,23 +20,23 @@
 //! use std::sync::Arc;
 //!
 //! # async fn example() -> Result<()> {
-//! // 基础用法：FTS5 全文检索
+//! // Basic usage: FTS5 full-text search
 //! let store = Arc::new(SqliteStore::new("~/.echo-agent/memory.db")?);
 //!
 //! store.put(&["alice", "memories"], "pref-001", serde_json::json!({
-//!     "content": "用户偏好深色主题",
+//!     "content": "User prefers dark theme",
 //!     "importance": 8
 //! })).await?;
 //!
-//! // FTS5 全文检索
-//! let items = store.search(&["alice", "memories"], "深色 主题", 5).await?;
+//! // FTS5 full-text search
+//! let items = store.search(&["alice", "memories"], "dark theme", 5).await?;
 //!
-//! // 带混合检索（需要 Embedder）
+//! // With hybrid search (requires Embedder)
 //! use echo_state::memory::{Embedder, HttpEmbedder};
 //! let embedder: Arc<dyn Embedder> = Arc::new(HttpEmbedder::from_env());
 //! let store = Arc::new(SqliteStore::with_embedder("~/.echo-agent/memory.db", embedder)?);
 //! let items = store
-//!     .search_with(&["alice", "memories"], echo_state::memory::SearchQuery::hybrid("主题偏好", 5))
+//!     .search_with(&["alice", "memories"], echo_state::memory::SearchQuery::hybrid("theme preference", 5))
 //!     .await?;
 //! # Ok(())
 //! # }
@@ -55,19 +56,19 @@ use tracing::{debug, info, warn};
 
 // ── SqliteStore ─────────────────────────────────────────────────────────────
 
-/// SQLite 持久化 Store，支持 FTS5 全文检索与可选向量搜索
+/// SQLite persistent Store with FTS5 full-text search and optional vector search
 pub struct SqliteStore {
     embedder: Option<Arc<dyn Embedder>>,
     path: PathBuf,
 }
 
 impl SqliteStore {
-    /// 打开或创建 SQLite 数据库，自动建表和 FTS5 索引
+    /// Open or create a SQLite database, auto-create tables and FTS5 index
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         Self::open(path, None)
     }
 
-    /// 打开或创建 SQLite 数据库，启用向量搜索
+    /// Open or create a SQLite database with vector search enabled
     pub fn with_embedder(path: impl AsRef<Path>, embedder: Arc<dyn Embedder>) -> Result<Self> {
         Self::open(path, Some(embedder))
     }
@@ -75,7 +76,8 @@ impl SqliteStore {
     fn open(path: impl AsRef<Path>, embedder: Option<Arc<dyn Embedder>>) -> Result<Self> {
         let path = expand_tilde(path.as_ref());
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| memory_io_error("创建目录失败", e))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| memory_io_error("failed to create directory", e))?;
         }
 
         let conn = Self::open_connection_at(&path)?;
@@ -90,22 +92,22 @@ impl SqliteStore {
             path = %path.display(),
             items = item_count,
             vector = embedder.is_some(),
-            "🗄️ SqliteStore 初始化"
+            "SqliteStore initialized"
         );
 
         Ok(Self { embedder, path })
     }
 
     fn open_connection_at(path: &Path) -> Result<Connection> {
-        let conn =
-            Connection::open(path).map_err(|e| memory_io_error("打开 SQLite 数据库失败", e))?;
+        let conn = Connection::open(path)
+            .map_err(|e| memory_io_error("failed to open SQLite database", e))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA cache_size=10000;
              PRAGMA temp_store=MEMORY;",
         )
-        .map_err(|e| memory_io_error("SQLite PRAGMA 设置失败", e))?;
+        .map_err(|e| memory_io_error("SQLite PRAGMA settings failed", e))?;
         Ok(conn)
     }
 
@@ -126,9 +128,9 @@ impl SqliteStore {
 
             CREATE INDEX IF NOT EXISTS idx_store_ns ON store_items(namespace);",
         )
-        .map_err(|e| memory_io_error("创建主表失败", e))?;
+        .map_err(|e| memory_io_error("failed to create main table", e))?;
 
-        // FTS5 全文索引（content= 外部内容表模式不适合此场景，使用独立表）
+        // FTS5 full-text index (content= external content table mode is not suitable for this scenario; use independent table)
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS store_fts USING fts5(
                 namespace,
@@ -137,9 +139,9 @@ impl SqliteStore {
                 tokenize='unicode61'
             );",
         )
-        .map_err(|e| memory_io_error("创建 FTS5 索引失败", e))?;
+        .map_err(|e| memory_io_error("failed to create FTS5 index", e))?;
 
-        // 向量表（可选，用于余弦相似度检索）
+        // Vector table (optional, for cosine similarity retrieval)
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS store_vectors (
                 namespace TEXT NOT NULL,
@@ -148,20 +150,20 @@ impl SqliteStore {
                 PRIMARY KEY (namespace, key)
             );",
         )
-        .map_err(|e| memory_io_error("创建向量表失败", e))?;
+        .map_err(|e| memory_io_error("failed to create vector table", e))?;
 
         Ok(())
     }
 
-    /// 从 JSON Value 提取可搜索文本
+    /// Extract searchable text from a JSON Value
     fn extract_searchable_text(value: &Value) -> String {
         match value {
             Value::String(s) => s.clone(),
             Value::Object(map) => {
-                // 优先使用 content 字段
+                // Prefer the content field
                 if let Some(content) = map.get("content").and_then(|v| v.as_str()) {
                     let mut text = content.to_string();
-                    // 追加 tags
+                    // Append tags
                     if let Some(tags) = map.get("tags").and_then(|v| v.as_array()) {
                         for tag in tags {
                             if let Some(t) = tag.as_str() {
@@ -188,7 +190,7 @@ impl SqliteStore {
         }
     }
 
-    /// 将 f32 向量序列化为 bytes（little-endian）
+    /// Serialize an f32 vector to bytes (little-endian)
     fn vec_to_bytes(vec: &[f32]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(vec.len() * 4);
         for &v in vec {
@@ -197,7 +199,7 @@ impl SqliteStore {
         bytes
     }
 
-    /// 从 bytes 反序列化为 f32 向量
+    /// Deserialize bytes back to an f32 vector
     fn bytes_to_vec(bytes: &[u8]) -> Vec<f32> {
         bytes
             .chunks_exact(4)
@@ -205,7 +207,7 @@ impl SqliteStore {
             .collect()
     }
 
-    /// 余弦相似度
+    /// Cosine similarity
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         if a.len() != b.len() || a.is_empty() {
             return 0.0;
@@ -222,7 +224,7 @@ impl SqliteStore {
 }
 
 impl SqliteStore {
-    /// 根据 key 列表从主表获取完整条目（统一 score）
+    /// Fetch complete items from the main table by key list (unified score)
     fn fetch_items(
         &self,
         conn: &Connection,
@@ -260,7 +262,7 @@ impl SqliteStore {
         Ok(results)
     }
 
-    /// 根据 (key, score) 列表从主表获取完整条目
+    /// Fetch complete items from the main table by (key, score) list
     fn fetch_items_with_scores(
         &self,
         conn: &Connection,
@@ -315,7 +317,7 @@ impl SqliteStore {
         let query_vec = match embedder.embed(query).await {
             Ok(v) => v,
             Err(e) => {
-                warn!(error = %e, "⚠️ 查询嵌入计算失败，回退到 FTS5 检索");
+                warn!(error = %e, "Query embedding calculation failed, falling back to FTS5 search");
                 return self.search(namespace, query, limit).await;
             }
         };
@@ -324,7 +326,7 @@ impl SqliteStore {
             let conn = self.open_connection()?;
             let mut stmt = conn
                 .prepare("SELECT key, vector FROM store_vectors WHERE namespace = ?1")
-                .map_err(|e| memory_io_error("查询向量表失败", e))?;
+                .map_err(|e| memory_io_error("failed to query vector table", e))?;
 
             let mut scored: Vec<(f32, String)> = stmt
                 .query_map(params![ns_key], |row| {
@@ -332,7 +334,7 @@ impl SqliteStore {
                     let bytes: Vec<u8> = row.get(1)?;
                     Ok((key, bytes))
                 })
-                .map_err(|e| memory_io_error("查询向量失败", e))?
+                .map_err(|e| memory_io_error("failed to query vectors", e))?
                 .filter_map(|r| r.ok())
                 .map(|(key, bytes)| {
                     let vec = Self::bytes_to_vec(&bytes);
@@ -347,11 +349,11 @@ impl SqliteStore {
         };
 
         if scored.is_empty() {
-            debug!(ns = %ns_key, "向量索引为空，回退到 FTS5 检索");
+            debug!(ns = %ns_key, "Vector index is empty, falling back to FTS5 search");
             return self.search(namespace, query, limit).await;
         }
 
-        debug!(ns = %ns_key, query = %query, hits = scored.len(), "🔍 语义检索完成");
+        debug!(ns = %ns_key, query = %query, hits = scored.len(), "Semantic search completed");
 
         let conn = self.open_connection()?;
         let mut results = Vec::with_capacity(scored.len());
@@ -407,9 +409,9 @@ impl Store for SqliteStore {
                 // If any step fails, the whole transaction rolls back.
                 let tx = conn
                     .transaction()
-                    .map_err(|e| memory_io_error("开启事务失败", e))?;
+                    .map_err(|e| memory_io_error("failed to begin transaction", e))?;
 
-                // Upsert 主表
+                // Upsert into main table
                 tx.execute(
                     "INSERT INTO store_items (namespace, key, value, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?4)
@@ -418,26 +420,26 @@ impl Store for SqliteStore {
                         updated_at = excluded.updated_at",
                     params![ns_key, key, value_json, now],
                 )
-                .map_err(|e| memory_io_error("写入主表失败", e))?;
+                .map_err(|e| memory_io_error("failed to write to main table", e))?;
 
-                // 更新 FTS5 索引（先删后插）
+                // Update FTS5 index (delete then insert)
                 tx.execute(
                     "DELETE FROM store_fts WHERE namespace = ?1 AND key = ?2",
                     params![ns_key, key],
                 )
-                .map_err(|e| memory_io_error("删除 FTS 索引失败", e))?;
+                .map_err(|e| memory_io_error("failed to delete FTS index", e))?;
 
                 tx.execute(
                     "INSERT INTO store_fts (namespace, key, content) VALUES (?1, ?2, ?3)",
                     params![ns_key, key, search_text],
                 )
-                .map_err(|e| memory_io_error("写入 FTS 索引失败", e))?;
+                .map_err(|e| memory_io_error("failed to write FTS index", e))?;
 
                 tx.commit()
-                    .map_err(|e| memory_io_error("提交事务失败", e))?;
+                    .map_err(|e| memory_io_error("failed to commit transaction", e))?;
             }
 
-            // 向量索引更新（如果有 embedder）
+            // Vector index update (if embedder is available)
             if let Some(ref embedder) = self.embedder {
                 match embedder.embed(&search_text).await {
                     Ok(vec) => {
@@ -449,11 +451,11 @@ impl Store for SqliteStore {
                              ON CONFLICT(namespace, key) DO UPDATE SET vector = excluded.vector",
                             params![ns_key, key, bytes],
                         )
-                        .map_err(|e| memory_io_error("写入向量表失败", e))?;
-                        debug!(ns = %ns_key, key = %key, dims = vec.len(), "📌 向量索引已更新");
+                        .map_err(|e| memory_io_error("failed to write to vector table", e))?;
+                        debug!(ns = %ns_key, key = %key, dims = vec.len(), "Vector index updated");
                     }
                     Err(e) => {
-                        warn!(key = %key, error = %e, "⚠️ 嵌入计算失败，该条目不加入向量索引");
+                        warn!(key = %key, error = %e, "Embedding calculation failed, item will not be added to vector index");
                     }
                 }
             }
@@ -497,7 +499,7 @@ impl Store for SqliteStore {
                     }))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(memory_io_error("查询失败", e).into()),
+                Err(e) => Err(memory_io_error("query failed", e).into()),
             }
         })
     }
@@ -512,7 +514,7 @@ impl Store for SqliteStore {
             let ns_key = namespace.join("/");
             let conn = self.open_connection()?;
 
-            // FTS5 查询语法：将空格分隔的词用 OR 连接
+            // FTS5 query syntax: join space-separated words with OR
             let keywords: Vec<&str> = query
                 .split(|c: char| c.is_whitespace() || "，。！？、；：,.!?;:".contains(c))
                 .filter(|s| !s.is_empty())
@@ -528,7 +530,7 @@ impl Store for SqliteStore {
                 .collect::<Vec<_>>()
                 .join(" OR ");
 
-            // 首先尝试 FTS5 MATCH 搜索
+            // First try FTS5 MATCH search
             let matched_keys: Vec<(String, f64)> = {
                 let mut stmt = conn
                     .prepare(
@@ -538,20 +540,20 @@ impl Store for SqliteStore {
                          ORDER BY score
                          LIMIT ?3",
                     )
-                    .map_err(|e| memory_io_error("FTS 查询准备失败", e))?;
+                    .map_err(|e| memory_io_error("FTS query preparation failed", e))?;
 
                 stmt.query_map(params![ns_key, fts_query, limit as i64], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
                 })
-                .map_err(|e| memory_io_error("FTS 查询失败", e))?
+                .map_err(|e| memory_io_error("FTS query failed", e))?
                 .filter_map(|r| r.ok())
                 .collect()
             };
 
-            // FTS5 无结果时回退到 LIKE 模糊匹配（适用于 CJK 等非拉丁文字）。
-            // 对多关键词查询，按单个关键词分别匹配，而不是要求原文包含整段连续子串。
+            // When FTS5 returns no results, fall back to LIKE fuzzy matching (suitable for CJK and other non-Latin scripts).
+            // For multi-keyword queries, match individual keywords separately rather than requiring the original text to contain the entire contiguous substring.
             if matched_keys.is_empty() {
-                debug!(namespace = %ns_key, query = %query, "FTS5 无结果，回退到 LIKE 模糊匹配");
+                debug!(namespace = %ns_key, query = %query, "FTS5 returned no results, falling back to LIKE fuzzy matching");
                 let mut fallback_keys = Vec::new();
                 for keyword in &keywords {
                     let like_pattern = format!("%{}%", keyword.replace('%', "\\%"));
@@ -561,14 +563,14 @@ impl Store for SqliteStore {
                              WHERE f.namespace = ?1 AND f.content LIKE ?2
                              LIMIT ?3",
                         )
-                        .map_err(|e| memory_io_error("LIKE 查询准备失败", e))?;
+                        .map_err(|e| memory_io_error("LIKE query preparation failed", e))?;
 
                     let current_limit = (limit.saturating_sub(fallback_keys.len())).max(1) as i64;
                     let keyword_keys = stmt
                         .query_map(params![ns_key, like_pattern, current_limit], |row| {
                             row.get::<_, String>(0)
                         })
-                        .map_err(|e| memory_io_error("LIKE 查询失败", e))?
+                        .map_err(|e| memory_io_error("LIKE query failed", e))?
                         .filter_map(|r| r.ok());
 
                     for key in keyword_keys {
@@ -592,7 +594,7 @@ impl Store for SqliteStore {
                 namespace = %ns_key,
                 query = %query,
                 hits = matched_keys.len(),
-                "🔍 FTS5 检索"
+                "FTS5 search"
             );
 
             let keys_with_scores: Vec<(String, Option<f32>)> = matched_keys
@@ -614,16 +616,16 @@ impl Store for SqliteStore {
                     "DELETE FROM store_items WHERE namespace = ?1 AND key = ?2",
                     params![ns_key, key],
                 )
-                .map_err(|e| memory_io_error("删除主表失败", e))?;
+                .map_err(|e| memory_io_error("failed to delete from main table", e))?;
 
-            // 清理 FTS 索引
+            // Clean up FTS index
             conn.execute(
                 "DELETE FROM store_fts WHERE namespace = ?1 AND key = ?2",
                 params![ns_key, key],
             )
-            .map_err(|e| memory_io_error("删除 FTS 索引失败", e))?;
+            .map_err(|e| memory_io_error("failed to delete FTS index", e))?;
 
-            // 清理向量索引
+            // Clean up vector index
             let _ = conn.execute(
                 "DELETE FROM store_vectors WHERE namespace = ?1 AND key = ?2",
                 params![ns_key, key],
@@ -648,9 +650,9 @@ impl Store for SqliteStore {
                         .prepare(
                             "SELECT DISTINCT namespace FROM store_items WHERE namespace LIKE ?1",
                         )
-                        .map_err(|e| memory_io_error("查询命名空间失败", e))?;
+                        .map_err(|e| memory_io_error("failed to query namespaces", e))?;
                     stmt.query_map(params![pattern], |row| row.get::<_, String>(0))
-                        .map_err(|e| memory_io_error("查询命名空间失败", e))?
+                        .map_err(|e| memory_io_error("failed to query namespaces", e))?
                         .filter_map(|r| r.ok())
                         .map(|ns| ns.split('/').map(String::from).collect())
                         .collect()
@@ -658,9 +660,9 @@ impl Store for SqliteStore {
                 None => {
                     let mut stmt = conn
                         .prepare("SELECT DISTINCT namespace FROM store_items")
-                        .map_err(|e| memory_io_error("查询命名空间失败", e))?;
+                        .map_err(|e| memory_io_error("failed to query namespaces", e))?;
                     stmt.query_map([], |row| row.get::<_, String>(0))
-                        .map_err(|e| memory_io_error("查询命名空间失败", e))?
+                        .map_err(|e| memory_io_error("failed to query namespaces", e))?
                         .filter_map(|r| r.ok())
                         .map(|ns| ns.split('/').map(String::from).collect())
                         .collect()
@@ -758,7 +760,7 @@ impl Store for SqliteStore {
     }
 }
 
-// ── 工具函数 ────────────────────────────────────────────────────────────────
+// ── Utility functions ─────────────────────────────────────────────────────────
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -767,7 +769,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-// ── 单元测试 ────────────────────────────────────────────────────────────────
+// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -841,15 +843,23 @@ mod tests {
         let ns = &["user", "memories"];
 
         store
-            .put(ns, "k1", json!({"content": "Rust 编程语言 系统级"}))
+            .put(
+                ns,
+                "k1",
+                json!({"content": "Rust programming language systems-level"}),
+            )
             .await
             .unwrap();
         store
-            .put(ns, "k2", json!({"content": "Python 机器学习 深度学习"}))
+            .put(
+                ns,
+                "k2",
+                json!({"content": "Python machine learning deep learning"}),
+            )
             .await
             .unwrap();
         store
-            .put(ns, "k3", json!({"content": "JavaScript 前端 React"}))
+            .put(ns, "k3", json!({"content": "JavaScript frontend React"}))
             .await
             .unwrap();
 
@@ -893,11 +903,15 @@ mod tests {
         let ns = &["search", "cjk"];
 
         store
-            .put(ns, "k1", json!({"content": "这条记忆会在数据库关闭后保留"}))
+            .put(
+                ns,
+                "k1",
+                json!({"content": "this memory persists after database closes"}),
+            )
             .await
             .unwrap();
 
-        let results = store.search(ns, "记忆 保留", 5).await.unwrap();
+        let results = store.search(ns, "memory persist", 5).await.unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].key, "k1");
     }
@@ -912,14 +926,18 @@ mod tests {
         {
             let store = SqliteStore::new(&db_path).unwrap();
             store
-                .put(ns, "k1", json!({"content": "这条记忆会在数据库关闭后保留"}))
+                .put(
+                    ns,
+                    "k1",
+                    json!({"content": "this memory persists after database closes"}),
+                )
                 .await
                 .unwrap();
         }
 
         {
             let store = SqliteStore::new(&db_path).unwrap();
-            let results = store.search(ns, "记忆 保留", 5).await.unwrap();
+            let results = store.search(ns, "memory persist", 5).await.unwrap();
             assert!(!results.is_empty());
             assert_eq!(results[0].key, "k1");
         }

@@ -1,9 +1,9 @@
-//! 文本文件处理工具
+//! Text file processing tools
 //!
-//! 提供文本文件读取和处理能力，支持：
-//! - 读取各种文本格式文件
-//! - 文本搜索和统计
-//! - 编码检测
+//! Provides text file reading and processing capabilities, supporting:
+//! - Reading various text format files
+//! - Text search and statistics
+//! - Encoding detection
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -14,7 +14,7 @@ use crate::tools::{Tool, ToolParameters, ToolResult};
 
 const TOOL_NAME: &str = "text_tools";
 
-/// 文本文件读取工具
+/// Text file reading tool
 pub struct TextReadTool;
 
 impl Tool for TextReadTool {
@@ -23,7 +23,7 @@ impl Tool for TextReadTool {
     }
 
     fn description(&self) -> &str {
-        "读取文本文件内容，支持各种文本格式。自动检测编码。"
+        "Read text file content, supports various text formats. Auto-detects encoding."
     }
 
     fn parameters(&self) -> Value {
@@ -32,19 +32,19 @@ impl Tool for TextReadTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "文本文件的绝对路径"
+                    "description": "Absolute path to the text file"
                 },
                 "start_line": {
                     "type": "integer",
-                    "description": "起始行号（默认 1）"
+                    "description": "Start line number (default 1)"
                 },
                 "line_count": {
                     "type": "integer",
-                    "description": "读取行数（默认 100，-1 表示全部）"
+                    "description": "Number of lines to read (default 100, -1 means all)"
                 },
                 "encoding": {
                     "type": "string",
-                    "description": "文件编码（如 'utf-8', 'gbk'），默认自动检测"
+                    "description": "File encoding (e.g. 'utf-8', 'gbk'), default auto-detect"
                 }
             },
             "required": ["file_path"]
@@ -62,7 +62,7 @@ impl Tool for TextReadTool {
                 .get("start_line")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1)
-                .max(1) as usize; // 确保至少为 1
+                .max(1) as usize; // Ensure it's at least 1
 
             let line_count = parameters
                 .get("line_count")
@@ -74,22 +74,22 @@ impl Tool for TextReadTool {
             let security = SecurityConfig::global();
             let path = security.validate_file(file_path)?;
 
-            // 读取文件
+            // Read file
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("读取文件失败: {}", e),
+                message: format!("Failed to read file: {}", e),
             })?;
 
-            // 尝试解码（优先 UTF-8，失败则尝试其他编码）
+            // Try to decode (prefer UTF-8, fall back to other encodings)
             let content = String::from_utf8(bytes.clone()).unwrap_or_else(|_| {
-                // 尝试 GBK 解码
+                // Try GBK decoding
                 encoding_rs::GBK.decode(&bytes).0.into_owned()
             });
 
             let lines: Vec<&str> = content.lines().collect();
             let total_lines = lines.len();
 
-            // 应用预览行数限制
+            // Apply preview row limit
             let max_preview = security.limits.max_preview_rows;
             let effective_line_count = if line_count < 0 {
                 max_preview
@@ -97,11 +97,11 @@ impl Tool for TextReadTool {
                 (line_count as usize).min(max_preview)
             };
 
-            // 计算读取范围
+            // Calculate read range
             let start = (start_line - 1).min(total_lines);
             let end = (start + effective_line_count).min(total_lines);
 
-            // 结构化输出
+            // Structured output
             let preview_lines_data: Vec<Value> = lines[start..end]
                 .iter()
                 .enumerate()
@@ -127,7 +127,7 @@ impl Tool for TextReadTool {
     }
 }
 
-/// 文本搜索工具
+/// Text search tool
 pub struct TextSearchTool;
 
 impl Tool for TextSearchTool {
@@ -136,7 +136,7 @@ impl Tool for TextSearchTool {
     }
 
     fn description(&self) -> &str {
-        "在文本文件中搜索内容，支持正则表达式。"
+        "Search content in text files, supports regular expressions."
     }
 
     fn parameters(&self) -> Value {
@@ -145,19 +145,19 @@ impl Tool for TextSearchTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "文本文件的绝对路径"
+                    "description": "Absolute path to the text file"
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "搜索模式（支持正则表达式）"
+                    "description": "Search pattern (supports regular expressions)"
                 },
                 "context": {
                     "type": "integer",
-                    "description": "显示匹配行前后的上下文行数（默认 0）"
+                    "description": "Number of context lines before and after matches (default 0)"
                 },
                 "ignore_case": {
                     "type": "boolean",
-                    "description": "是否忽略大小写（默认 false）"
+                    "description": "Whether to ignore case (default false)"
                 }
             },
             "required": ["file_path", "pattern"]
@@ -189,16 +189,16 @@ impl Tool for TextSearchTool {
             let security = SecurityConfig::global();
             let path = security.validate_file(file_path)?;
 
-            // 读取文件
+            // Read file
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("读取文件失败: {}", e),
+                message: format!("Failed to read file: {}", e),
             })?;
 
             let content = String::from_utf8(bytes.clone())
                 .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
 
-            // 使用安全的正则表达式构建
+            // Build safe regex
             let re = if ignore_case {
                 regex::RegexBuilder::new(pattern)
                     .case_insensitive(true)
@@ -207,7 +207,7 @@ impl Tool for TextSearchTool {
                     .build()
                     .map_err(|e| ToolError::InvalidParameter {
                         name: "pattern".to_string(),
-                        message: format!("无效的正则表达式: {}", e),
+                        message: format!("Invalid regex: {}", e),
                     })?
             } else {
                 create_safe_regex(pattern, &security.limits)?
@@ -217,7 +217,7 @@ impl Tool for TextSearchTool {
             let mut matches = Vec::new();
             let mut match_count = 0;
 
-            // 限制匹配数量
+            // Limit match count
             let max_matches = security.limits.max_preview_rows;
 
             for (idx, line) in lines.iter().enumerate() {
@@ -228,7 +228,7 @@ impl Tool for TextSearchTool {
                 if re.is_match(line) {
                     match_count += 1;
 
-                    // 添加上下文
+                    // Add context lines
                     if context > 0 {
                         let start = idx.saturating_sub(context);
                         let end = (idx + context + 1).min(lines.len());
@@ -263,7 +263,7 @@ impl Tool for TextSearchTool {
     }
 }
 
-/// 文本统计工具
+/// Text statistics tool
 pub struct TextStatsTool;
 
 impl Tool for TextStatsTool {
@@ -272,7 +272,7 @@ impl Tool for TextStatsTool {
     }
 
     fn description(&self) -> &str {
-        "统计文本文件的信息：行数、字数、字符数等。"
+        "Statistics for text files: line count, word count, character count, etc."
     }
 
     fn parameters(&self) -> Value {
@@ -281,7 +281,7 @@ impl Tool for TextStatsTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "文本文件的绝对路径"
+                    "description": "Absolute path to the text file"
                 }
             },
             "required": ["file_path"]
@@ -298,16 +298,16 @@ impl Tool for TextStatsTool {
             let security = SecurityConfig::global();
             let path = security.validate_file(file_path)?;
 
-            // 读取文件
+            // Read file
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("读取文件失败: {}", e),
+                message: format!("Failed to read file: {}", e),
             })?;
 
             let content = String::from_utf8(bytes.clone())
                 .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
 
-            // 统计
+            // Statistics
             let lines = content.lines().count();
             let chars = content.chars().count();
             let words = content.split_whitespace().count();
@@ -348,7 +348,7 @@ impl Tool for TextStatsTool {
     }
 }
 
-/// 文本处理工具
+/// Text processing tool
 pub struct TextProcessTool;
 
 impl Tool for TextProcessTool {
@@ -357,7 +357,7 @@ impl Tool for TextProcessTool {
     }
 
     fn description(&self) -> &str {
-        "对文本进行处理：提取行、合并、去重等操作。"
+        "Process text: extract, merge, deduplicate lines, etc."
     }
 
     fn parameters(&self) -> Value {
@@ -366,15 +366,15 @@ impl Tool for TextProcessTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "文本文件的绝对路径"
+                    "description": "Absolute path to the text file"
                 },
                 "operation": {
                     "type": "string",
-                    "description": "操作类型：'unique'（去重）、'sort'（排序）、'reverse'（反转行）、'trim'（去除空白行）、'head'（前N行）、'tail'（后N行）"
+                    "description": "Operation type: 'unique' (deduplicate), 'sort' (sort), 'reverse' (reverse lines), 'trim' (remove blank lines), 'head' (first N lines), 'tail' (last N lines)"
                 },
                 "count": {
                     "type": "integer",
-                    "description": "用于 head/tail 操作的行数"
+                    "description": "Number of lines for head/tail operations"
                 }
             },
             "required": ["file_path", "operation"]
@@ -401,10 +401,10 @@ impl Tool for TextProcessTool {
             let security = SecurityConfig::global();
             let path = security.validate_file(file_path)?;
 
-            // 读取文件
+            // Read file
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("读取文件失败: {}", e),
+                message: format!("Failed to read file: {}", e),
             })?;
 
             let content = String::from_utf8(bytes.clone())
@@ -439,7 +439,7 @@ impl Tool for TextProcessTool {
                 _ => {
                     return Err(ToolError::InvalidParameter {
                         name: "operation".to_string(),
-                        message: format!("不支持的操作: '{}'", operation),
+                        message: format!("Unsupported operation: '{}'", operation),
                     }
                     .into());
                 }
@@ -459,7 +459,7 @@ impl Tool for TextProcessTool {
     }
 }
 
-/// 文本导出工具
+/// Text export tool
 pub struct TextExportTool;
 
 impl Tool for TextExportTool {
@@ -468,7 +468,7 @@ impl Tool for TextExportTool {
     }
 
     fn description(&self) -> &str {
-        "将处理后的文本导出到新文件。"
+        "Export processed text to a new file."
     }
 
     fn parameters(&self) -> Value {
@@ -477,15 +477,15 @@ impl Tool for TextExportTool {
             "properties": {
                 "input_file": {
                     "type": "string",
-                    "description": "输入文本文件路径"
+                    "description": "Input text file path"
                 },
                 "output_file": {
                     "type": "string",
-                    "description": "输出文件路径"
+                    "description": "Output file path"
                 },
                 "operation": {
                     "type": "string",
-                    "description": "可选操作：'unique'、'sort'、'trim' 等"
+                    "description": "Optional operation: 'unique', 'sort', 'trim', etc."
                 }
             },
             "required": ["input_file", "output_file"]
@@ -509,16 +509,16 @@ impl Tool for TextExportTool {
             let security = SecurityConfig::global();
             let path = security.validate_file(input_file)?;
 
-            // 读取文件
+            // Read file
             let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("读取文件失败: {}", e),
+                message: format!("Failed to read file: {}", e),
             })?;
 
             let mut content = String::from_utf8(bytes.clone())
                 .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
 
-            // 执行操作
+            // Execute operation
             if let Some(op) = operation {
                 let mut lines: Vec<&str> = content.lines().collect();
                 match op {
@@ -534,23 +534,23 @@ impl Tool for TextExportTool {
                 content = lines.join("\n");
             }
 
-            // 创建输出目录
+            // Create output directory
             let output_path = security.validate_output_file(output_file)?;
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("创建输出目录失败: {}", e),
+                    message: format!("Failed to create output directory: {}", e),
                 })?;
             }
 
-            // 写入文件
+            // Write file
             std::fs::write(output_path, content).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("写入文件失败: {}", e),
+                message: format!("Failed to write file: {}", e),
             })?;
 
             Ok(ToolResult::success(format!(
-                "文本已导出: {} -> {}",
+                "Text exported: {} -> {}",
                 input_file, output_file
             )))
         })

@@ -1,4 +1,4 @@
-//! Planner — 负责将用户任务分解为结构化执行计划
+//! Planner — responsible for decomposing user tasks into structured execution plans
 
 use super::types::Plan;
 use super::types::{PlanOutput, PlanStep, PlanStepOutput, plan_output_schema};
@@ -10,25 +10,25 @@ use reqwest::Client;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// Planner trait — 接收任务描述，返回执行计划
+/// Planner trait — accepts a task description and returns an execution plan
 pub trait Planner: Send + Sync {
-    /// 根据任务描述生成执行计划
+    /// Generate an execution plan based on the task description
     fn plan<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<Plan>>;
 }
 
 // ── LlmPlanner ───────────────────────────────────────────────────────────────
 
-/// 规划输出模式
+/// Planner output mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlannerOutputMode {
-    /// 使用 JSON Schema 强制结构化输出（推荐，可靠性最高）
+    /// Use JSON Schema to enforce structured output (recommended, highest reliability)
     #[default]
     JsonSchema,
-    /// 使用 JsonObject + 自由文本解析（兼容性更好）
+    /// Use JsonObject + free-text parsing (better compatibility)
     JsonText,
 }
 
-/// 基于 LLM 的 Planner：调用大模型来分解任务
+/// LLM-based Planner: calls a large language model to decompose tasks
 pub struct LlmPlanner {
     model: String,
     client: Arc<Client>,
@@ -38,10 +38,10 @@ pub struct LlmPlanner {
 }
 
 impl LlmPlanner {
-    /// 创建基于 LLM 的规划器
+    /// Create an LLM-based planner
     ///
-    /// # 参数
-    /// * `model` - 用于规划任务的 LLM 模型标识符
+    /// # Parameters
+    /// * `model` - LLM model identifier for planning tasks
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
@@ -57,58 +57,58 @@ impl LlmPlanner {
         }
     }
 
-    /// 使用自定义 LLM 配置
+    /// Use custom LLM configuration
     pub fn with_llm_config(mut self, config: LlmConfig) -> Self {
         self.llm_config = Some(config);
         self
     }
 
-    /// 自定义系统提示词
+    /// Custom system prompt
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
         self
     }
 
-    /// 设置输出模式
+    /// Set output mode
     pub fn with_output_mode(mut self, mode: PlannerOutputMode) -> Self {
         self.output_mode = mode;
         self
     }
 
     fn default_system_prompt() -> &'static str {
-        "你是一个任务规划专家。给定一个任务，你需要将其分解为具体可执行的步骤。\n\n\
-        规则：\n\
-        1. 每个步骤必须是明确、可执行的\n\
-        2. 步骤之间要有逻辑顺序\n\
-        3. 每个步骤应该只做一件事\n\
-        4. 步骤描述应该简洁但充分\n\
-        5. 如果某个步骤依赖另一个步骤的结果，在 dependencies 中填写被依赖步骤的描述关键词\n\
-        6. 互相独立的步骤不要设置依赖关系\n\n\
-        请严格按 JSON Schema 返回结构化数据。"
+        "You are a task planning expert. Given a task, you need to decompose it into concrete, executable steps.\n\n\
+        Rules:\n\
+        1. Each step must be explicit and executable\n\
+        2. Steps must have a logical order\n\
+        3. Each step should do only one thing\n\
+        4. Step descriptions should be concise but sufficient\n\
+        5. If a step depends on the result of another step, fill in dependency description keywords in the dependencies field\n\
+        6. Mutually independent steps should not have dependency relationships\n\n\
+        Please strictly return structured data according to the JSON Schema."
     }
 
-    /// 尝试将 LLM 原始响应解析为 PlanOutput
+    /// Attempt to parse LLM raw response as PlanOutput
     fn parse_structured_output(content: &str) -> Result<PlanOutput> {
-        // 1. 直接解析
+        // 1. Direct parse
         if let Ok(output) = serde_json::from_str::<PlanOutput>(content) {
             return Ok(output);
         }
 
-        // 2. 从 markdown code block 提取
+        // 2. Extract from markdown code block
         let json_str = crate::utils::json_parse::extract_json_from_markdown(content);
         if let Ok(output) = serde_json::from_str::<PlanOutput>(&json_str) {
             return Ok(output);
         }
 
-        // 3. 尝试修复常见问题
+        // 3. Try to fix common issues
         Self::try_auto_fix(&json_str)
     }
 
-    /// 尝试自动修复常见 JSON 问题
+    /// Try to auto-fix common JSON issues
     fn try_auto_fix(json_str: &str) -> Result<PlanOutput> {
         let trimmed = json_str.trim();
 
-        // 修复：裸数组 → 包装为 {"steps": [...]}
+        // Fix: bare array → wrap as {"steps": [...]}
         if trimmed.starts_with('[') {
             let wrapped = format!("{{\"steps\": {}}}", trimmed);
             let fixed = crate::utils::json_parse::clean_json(&wrapped);
@@ -118,7 +118,7 @@ impl LlmPlanner {
             }
         }
 
-        // 修复：尾部逗号、引号等
+        // Fix: trailing commas, quotes, etc.
         let fixed = crate::utils::json_parse::clean_json(trimmed);
 
         match serde_json::from_str::<PlanOutput>(&fixed) {
@@ -128,7 +128,7 @@ impl LlmPlanner {
             }
             Err(e) => {
                 warn!(error = %e, "Failed to parse plan output even after auto-fix");
-                // 最后兜底：构造单步计划
+                // Last resort fallback: construct single-step plan
                 Ok(PlanOutput {
                     steps: vec![PlanStepOutput {
                         description: trimmed.to_string(),
@@ -140,7 +140,7 @@ impl LlmPlanner {
         }
     }
 
-    /// 解析旧格式（兼容 JsonText 模式）
+    /// Parse legacy format (compatible with JsonText mode)
     fn parse_steps_legacy(response: &str) -> Vec<PlanStep> {
         let json_str = crate::utils::json_parse::extract_json_from_markdown(response);
 
@@ -156,7 +156,7 @@ impl LlmPlanner {
                 .collect();
         }
 
-        // 回退：按行拆分
+        // Fallback: split by lines
         response
             .lines()
             .map(|line| line.trim())
@@ -171,9 +171,9 @@ impl LlmPlanner {
             .collect()
     }
 
-    /// 将 PlanOutput 转换为 Plan，解析依赖关系
+    /// Convert PlanOutput to Plan, resolving dependency relationships
     fn resolve_plan_output(output: PlanOutput, goal: &str) -> Plan {
-        // 构建描述→索引的映射（用于模糊匹配依赖）
+        // Build description→index mapping (for fuzzy matching dependencies)
         let desc_to_idx: Vec<(String, usize)> = output
             .steps
             .iter()
@@ -185,17 +185,17 @@ impl LlmPlanner {
             .steps
             .into_iter()
             .map(|step_output| {
-                // 解析依赖：尝试模糊匹配到步骤索引
+                // Resolve dependencies: attempt fuzzy matching to step indices
                 let deps: Vec<String> = step_output
                     .dependencies
                     .iter()
                     .filter_map(|dep_desc| {
-                        // 精确匹配优先
+                        // Exact match first
                         let exact = desc_to_idx.iter().find(|(d, _)| d == dep_desc);
                         if let Some((_, idx)) = exact {
                             return Some(format!("step_{}", idx));
                         }
-                        // 模糊匹配：包含关键词
+                        // Fuzzy match: contains keyword
                         let fuzzy = desc_to_idx
                             .iter()
                             .find(|(d, _)| d.contains(dep_desc) || dep_desc.contains(d));
@@ -225,7 +225,10 @@ impl Planner for LlmPlanner {
 
             let messages = vec![
                 Message::system(self.system_prompt.clone()),
-                Message::user(format!("请为以下任务制定执行计划：\n\n{}", task)),
+                Message::user(format!(
+                    "Please create an execution plan for the following task:\n\n{}",
+                    task
+                )),
             ];
 
             let response_format = match self.output_mode {
@@ -285,16 +288,16 @@ impl Planner for LlmPlanner {
 
 // ── StaticPlanner ────────────────────────────────────────────────────────────
 
-/// 静态 Planner：使用预定义的步骤列表（适用于测试或固定工作流）
+/// Static Planner: uses a predefined step list (suitable for testing or fixed workflows)
 pub struct StaticPlanner {
     steps: Vec<String>,
 }
 
 impl StaticPlanner {
-    /// 创建静态规划器，使用预定义的步骤列表
+    /// Create a static planner with a predefined step list
     ///
-    /// # 参数
-    /// * `steps` - 预定义步骤列表（字符串或可转换为字符串的类型）
+    /// # Parameters
+    /// * `steps` - Predefined step list (strings or types that can be converted to strings)
     pub fn new(steps: Vec<impl Into<String>>) -> Self {
         Self {
             steps: steps.into_iter().map(|s| s.into()).collect(),
@@ -317,17 +320,17 @@ mod tests {
 
     #[test]
     fn test_parse_structured_output_json() {
-        let response = r#"{"steps":[{"description":"分析代码结构","dependencies":[],"expected_output":"代码结构报告"},{"description":"识别性能瓶颈","dependencies":["分析代码结构"]}]}"#;
+        let response = r#"{"steps":[{"description":"Analyze code structure","dependencies":[],"expected_output":"Code structure report"},{"description":"Identify performance bottlenecks","dependencies":["Analyze code structure"]}]}"#;
         let output = LlmPlanner::parse_structured_output(response).unwrap();
         assert_eq!(output.steps.len(), 2);
-        assert_eq!(output.steps[0].description, "分析代码结构");
-        assert_eq!(output.steps[1].dependencies, vec!["分析代码结构"]);
+        assert_eq!(output.steps[0].description, "Analyze code structure");
+        assert_eq!(output.steps[1].dependencies, vec!["Analyze code structure"]);
     }
 
     #[test]
     fn test_parse_structured_output_markdown() {
         let response = r#"```json
-{"steps":[{"description":"步骤一"},{"description":"步骤二"}]}
+{"steps":[{"description":"Step one"},{"description":"Step two"}]}
 ```"#;
         let output = LlmPlanner::parse_structured_output(response).unwrap();
         assert_eq!(output.steps.len(), 2);
@@ -335,23 +338,23 @@ mod tests {
 
     #[test]
     fn test_auto_fix_array_wrapping() {
-        let response = r#"[{"description":"步骤A"},{"description":"步骤B"}]"#;
+        let response = r#"[{"description":"Step A"},{"description":"Step B"}]"#;
         let output = LlmPlanner::parse_structured_output(response).unwrap();
         assert_eq!(output.steps.len(), 2);
     }
 
     #[test]
     fn test_auto_fix_trailing_comma() {
-        let response = r#"{"steps":[{"description":"步骤A",}]}"#;
+        let response = r#"{"steps":[{"description":"Step A",}]}"#;
         let output = LlmPlanner::parse_structured_output(response).unwrap();
         assert_eq!(output.steps.len(), 1);
     }
 
     #[test]
     fn test_auto_fix_fallback() {
-        let response = "无法解析的文本";
+        let response = "Unparseable text";
         let output = LlmPlanner::parse_structured_output(response).unwrap();
-        assert_eq!(output.steps.len(), 1); // 兜底为单步计划
+        assert_eq!(output.steps.len(), 1); // Fallback to single-step plan
     }
 
     #[test]
@@ -359,14 +362,14 @@ mod tests {
         let output = PlanOutput {
             steps: vec![
                 PlanStepOutput {
-                    description: "分析代码".into(),
+                    description: "Analyze code".into(),
                     dependencies: vec![],
                     expected_output: None,
                 },
                 PlanStepOutput {
-                    description: "优化性能".into(),
-                    dependencies: vec!["分析代码".into()],
-                    expected_output: Some("优化报告".into()),
+                    description: "Optimize performance".into(),
+                    dependencies: vec!["Analyze code".into()],
+                    expected_output: Some("Optimization report".into()),
                 },
             ],
         };
@@ -374,41 +377,45 @@ mod tests {
         assert_eq!(plan.steps.len(), 2);
         assert!(plan.steps[0].dependencies.is_empty());
         assert_eq!(plan.steps[1].dependencies, vec!["step_0"]);
-        assert_eq!(plan.steps[1].expected_output, Some("优化报告".to_string()));
+        assert_eq!(
+            plan.steps[1].expected_output,
+            Some("Optimization report".to_string())
+        );
     }
 
     #[test]
     fn test_parse_steps_legacy_json() {
         let response = r#"```json
-[{"description": "步骤一"}, {"description": "步骤二"}]
+[{"description": "Step one"}, {"description": "Step two"}]
 ```"#;
         let steps = LlmPlanner::parse_steps_legacy(response);
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].description, "步骤一");
-        assert_eq!(steps[1].description, "步骤二");
+        assert_eq!(steps[0].description, "Step one");
+        assert_eq!(steps[1].description, "Step two");
     }
 
     #[test]
     fn test_parse_steps_legacy_plain_json() {
-        let response = r#"[{"description": "分析代码"}, {"description": "优化性能"}]"#;
+        let response =
+            r#"[{"description": "Analyze code"}, {"description": "Optimize performance"}]"#;
         let steps = LlmPlanner::parse_steps_legacy(response);
         assert_eq!(steps.len(), 2);
     }
 
     #[test]
     fn test_parse_steps_legacy_fallback() {
-        let response = "1. 第一步\n2. 第二步\n3. 第三步";
+        let response = "1. First step\n2. Second step\n3. Third step";
         let steps = LlmPlanner::parse_steps_legacy(response);
         assert_eq!(steps.len(), 3);
     }
 
     #[tokio::test]
     async fn test_static_planner() {
-        let planner = StaticPlanner::new(vec!["步骤A", "步骤B", "步骤C"]);
-        let plan = planner.plan("测试任务").await.unwrap();
+        let planner = StaticPlanner::new(vec!["Step A", "Step B", "Step C"]);
+        let plan = planner.plan("Test task").await.unwrap();
         assert_eq!(plan.steps.len(), 3);
-        assert_eq!(plan.steps[0].description, "步骤A");
-        assert_eq!(plan.goal.as_deref(), Some("测试任务"));
+        assert_eq!(plan.steps[0].description, "Step A");
+        assert_eq!(plan.goal.as_deref(), Some("Test task"));
     }
 
     #[test]

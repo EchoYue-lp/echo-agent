@@ -1,52 +1,67 @@
-//! 统一配置管理
+//! Unified configuration management.
 //!
-//! 从 `echo-agent.yaml` 加载全局配置。
+//! Loads global configuration from `echo-agent.yaml`.
 //!
-//! # 配置文件搜索顺序
+//! # Config File Search Order
 //!
-//! 1. `--config <PATH>` 指定的路径
-//! 2. `./echo-agent.yaml`
-//! 3. `~/.echo-agent/config.yaml`
-//! 4. 无配置文件时使用默认值
+//! 1. `--config <PATH>` (explicit path)
+//! 2. `./echo-agent.yaml` (current directory)
+//! 3. `~/.echo-agent/config.yaml` (user home)
+//! 4. Built-in defaults (no file required)
 //!
-//! # 示例
+//! # Quick Start
 //!
-//! ```no_run
+//! ```rust,no_run
 //! use echo_agent::config::{load_config, apply_env_overrides};
 //! use echo_agent::prelude::*;
 //!
+//! # fn main() -> echo_agent::error::Result<()> {
 //! let mut cfg = load_config(None);
 //! apply_env_overrides(&mut cfg);
-//! let agent = ReactAgent::new(cfg.to_agent_config());
+//! let config = cfg.to_agent_config();
+//! let agent = ReactAgentBuilder::new()
+//!     .model(&cfg.model.name)
+//!     .system_prompt(&cfg.agent.system_prompt)
+//!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! # Key Types
+//!
+//! | Type | Description |
+//! |------|-------------|
+//! | [`AppConfig`] | Top-level config struct (model, agent, mcp, channels, server, logging) |
+//! | [`ModelConfig`] | Model name, temperature, max_tokens |
+//! | [`AgentYamlConfig`] | System prompt, iterations, feature toggles |
 
 use crate::agent::AgentConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-// ── 配置结构体 ─────────────────────────────────────────────────────
+// ── Config structs ────────────────────────────────────────────────────
 
-/// 顶层应用配置
+/// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct AppConfig {
-    /// 模型配置（名称、温度、最大 token 数）
+    /// Model configuration (name, temperature, max_tokens).
     pub model: ModelConfig,
-    /// Agent 行为配置（系统提示、迭代次数、启用功能）
+    /// Agent behaviour configuration (system prompt, iterations, feature toggles).
     pub agent: AgentYamlConfig,
-    /// MCP（模型上下文协议）配置
+    /// MCP (Model Context Protocol) configuration.
     pub mcp: McpYamlConfig,
-    /// 即时通讯通道配置（QQ、飞书）
+    /// IM channel configuration (QQ, Feishu).
     pub channels: ChannelsConfig,
-    /// 服务端配置（主机、端口）
+    /// Server configuration (host, port).
     pub server: ServerConfig,
-    /// 日志级别配置
+    /// Logging level configuration.
     pub logging: LoggingConfig,
 }
 
 impl AppConfig {
-    /// 转换为库的 AgentConfig（builder 风格）
+    /// Convert to the library's `AgentConfig` (builder style).
     pub fn to_agent_config(&self) -> AgentConfig {
         AgentConfig::standard(
             &self.model.name,
@@ -67,15 +82,15 @@ impl AppConfig {
     }
 }
 
-/// 模型配置
+/// Model configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// 模型名称（如 "qwen-plus", "gpt-4o", "claude-3.5-sonnet"）
+    /// Model name (e.g. "qwen-plus", "gpt-4o", "claude-3.5-sonnet").
     pub name: String,
-    /// 最大生成 token 数（None 表示使用模型默认值）
+    /// Maximum tokens to generate (None means use model default).
     pub max_tokens: Option<u32>,
-    /// 温度参数（0.0 ～ 2.0，None 表示使用模型默认值）
+    /// Temperature parameter (0.0–2.0, None means use model default).
     pub temperature: Option<f32>,
 }
 
@@ -89,25 +104,25 @@ impl Default for ModelConfig {
     }
 }
 
-/// Agent 配置（YAML 映射）
+/// Agent configuration (YAML mapping).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AgentYamlConfig {
-    /// Agent 名称（用于日志和工具描述）
+    /// Agent name (used in logs and tool descriptions).
     pub name: String,
-    /// 系统提示词（影响 Agent 行为风格）
+    /// System prompt (shapes agent behaviour and tone).
     pub system_prompt: String,
-    /// 最大迭代次数（单轮对话内最多执行多少步思考）
+    /// Maximum iterations (max reasoning steps per conversation turn).
     pub max_iterations: usize,
-    /// 是否启用工具（False 时 Agent 只能进行纯文本对话）
+    /// Enable tools (when false, agent does text-only conversation).
     pub enable_tools: bool,
-    /// 是否启用记忆存储（跨会话记忆）
+    /// Enable memory storage (cross-session memory).
     pub enable_memory: bool,
-    /// 是否启用人工审批（敏感操作需要用户确认）
+    /// Enable human-in-the-loop approval (user confirmation for sensitive actions).
     pub enable_human_in_loop: bool,
-    /// 记忆存储路径（SQLite 文件位置）
+    /// Memory storage path.
     pub memory_path: String,
-    /// 工具执行超时（毫秒），默认 120_000（2 分钟），适用于 MCP 工具等长时间调用
+    /// Tool execution timeout in milliseconds (default 120_000 = 2 min), used for MCP tools and other long-running calls.
     pub tool_timeout_ms: u64,
 }
 
@@ -115,7 +130,7 @@ impl Default for AgentYamlConfig {
     fn default() -> Self {
         Self {
             name: "echo-assistant".to_string(),
-            system_prompt: "你是一个智能助手，可以帮助用户回答问题、执行任务。".to_string(),
+            system_prompt: "You are an intelligent assistant that helps users answer questions and complete tasks.".to_string(),
             max_iterations: 10,
             enable_tools: true,
             enable_memory: true,
@@ -126,51 +141,51 @@ impl Default for AgentYamlConfig {
     }
 }
 
-/// MCP 配置
+/// MCP configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct McpYamlConfig {
-    /// MCP 配置文件路径（mcp.json）
+    /// Path to the MCP configuration file (mcp.json).
     pub config_path: Option<String>,
 }
 
-/// IM 通道配置
+/// IM channel configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct ChannelsConfig {
-    /// QQ 机器人配置
+    /// QQ Bot configuration.
     pub qq: QqChannelConfig,
-    /// 飞书机器人配置
+    /// Feishu Bot configuration.
     pub feishu: FeishuChannelConfig,
-    /// 会话管理配置
+    /// Session management configuration.
     pub session: SessionYamlConfig,
 }
 
-/// QQ Bot 通道配置
+/// QQ Bot channel configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct QqChannelConfig {
-    /// 是否启用 QQ 通道
+    /// Whether the QQ channel is enabled.
     pub enabled: bool,
-    /// QQ 开发者平台 App ID
+    /// QQ Developer Platform App ID.
     pub app_id: String,
-    /// QQ 开发者平台 Client Secret
+    /// QQ Developer Platform Client Secret.
     pub client_secret: String,
 }
 
-/// 飞书通道配置
+/// Feishu channel configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct FeishuChannelConfig {
-    /// 是否启用飞书通道
+    /// Whether the Feishu channel is enabled.
     pub enabled: bool,
-    /// 飞书开发者平台 App ID
+    /// Feishu Developer Platform App ID.
     pub app_id: String,
-    /// 飞书开发者平台 App Secret
+    /// Feishu Developer Platform App Secret.
     pub app_secret: String,
-    /// 连接模式: "long_poll"（长轮询）或 "webhook"（Webhook 回调）
+    /// Connection mode: "long_poll" or "webhook".
     pub mode: String,
 }
 
@@ -185,15 +200,15 @@ impl Default for FeishuChannelConfig {
     }
 }
 
-/// IM 会话配置
+/// IM session configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SessionYamlConfig {
-    /// 会话超时时间（分钟），超过此时间后会话自动重置
+    /// Session timeout in minutes; the session auto-resets after this duration.
     pub timeout_minutes: u64,
-    /// 触发会话重置的关键词列表（用户消息包含这些词时会重置会话）
+    /// Keywords that trigger a session reset when present in the user message.
     pub reset_keywords: Vec<String>,
-    /// 触发会话重置的命令列表（用户消息以这些命令开头时会重置会话）
+    /// Commands that trigger a session reset when the user message starts with one.
     pub reset_commands: Vec<String>,
 }
 
@@ -202,9 +217,9 @@ impl Default for SessionYamlConfig {
         Self {
             timeout_minutes: 60,
             reset_keywords: vec![
-                "重置对话".to_string(),
-                "新对话".to_string(),
-                "清除记忆".to_string(),
+                "reset conversation".to_string(),
+                "new conversation".to_string(),
+                "clear memory".to_string(),
             ],
             reset_commands: vec![
                 "/reset".to_string(),
@@ -215,15 +230,15 @@ impl Default for SessionYamlConfig {
     }
 }
 
-/// 服务配置
+/// Server configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ServerConfig {
-    /// 监听主机（如 "0.0.0.0" 或 "127.0.0.1"）
+    /// Host to listen on (e.g. "0.0.0.0" or "127.0.0.1").
     pub host: String,
-    /// 监听端口
+    /// Port to listen on.
     pub port: u16,
-    /// 请求体最大字节数（默认 1MB，用于 A2A HTTP 服务）
+    /// Maximum request body size in bytes (default 1 MB, for A2A HTTP service).
     pub max_body_bytes: usize,
 }
 
@@ -237,11 +252,11 @@ impl Default for ServerConfig {
     }
 }
 
-/// 日志配置
+/// Logging configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
-    /// 日志级别（"debug", "info", "warn", "error"）
+    /// Log level ("debug", "info", "warn", "error").
     pub level: String,
 }
 
@@ -253,9 +268,9 @@ impl Default for LoggingConfig {
     }
 }
 
-// ── 配置加载 ────────────────────────────────────────────────────────
+// ── Config loading ───────────────────────────────────────────────────
 
-/// 配置文件搜索路径
+/// Config file search paths.
 fn config_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(explicit) = std::env::var("ECHO_AGENT_CONFIG")
@@ -271,22 +286,23 @@ fn config_search_paths() -> Vec<PathBuf> {
 }
 
 fn load_from_file(path: &PathBuf) -> Result<AppConfig, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| format!("读取配置文件失败: {}", e))?;
-    serde_yaml::from_str(&content).map_err(|e| format!("解析配置文件失败: {}", e))
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read config file: {}", e))?;
+    serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
 }
 
-/// 加载配置（搜索默认路径）
+/// Load configuration (searches default paths).
 pub fn load_config(explicit_path: Option<&str>) -> AppConfig {
     if let Some(path_str) = explicit_path {
         let path = PathBuf::from(path_str);
         match load_from_file(&path) {
             Ok(config) => {
-                tracing::info!("已加载配置: {}", path.display());
+                tracing::info!("Config loaded: {}", path.display());
                 return config;
             }
             Err(e) => {
-                tracing::error!("加载配置文件 {} 失败: {}", path.display(), e);
-                tracing::info!("使用默认配置");
+                tracing::error!("Failed to load config {}: {}", path.display(), e);
+                tracing::info!("Using default config");
                 return AppConfig::default();
             }
         }
@@ -296,23 +312,24 @@ pub fn load_config(explicit_path: Option<&str>) -> AppConfig {
         if path.exists() {
             match load_from_file(&path) {
                 Ok(config) => {
-                    tracing::info!("已加载配置: {}", path.display());
+                    tracing::info!("Config loaded: {}", path.display());
                     return config;
                 }
                 Err(e) => {
-                    tracing::warn!("加载配置文件 {} 失败: {}", path.display(), e);
+                    tracing::warn!("Failed to load config {}: {}", path.display(), e);
                 }
             }
         }
     }
 
-    tracing::info!("未找到配置文件，使用默认配置");
+    tracing::info!("No config file found, using defaults");
     AppConfig::default()
 }
 
-/// 合并基础环境变量覆盖。
+/// Apply basic environment variable overrides.
 ///
-/// 仅保留配置文件路径、渠道密钥等基础引导项；模型选择必须来自 YAML。
+/// Only covers config file path, channel keys, and other bootstrap items;
+/// model selection must come from YAML.
 pub fn apply_env_overrides(config: &mut AppConfig) {
     if let Ok(v) = std::env::var("QQ_APP_ID") {
         config.channels.qq.app_id = v;
@@ -337,7 +354,7 @@ pub fn apply_env_overrides(config: &mut AppConfig) {
     }
 }
 
-// ── 单元测试 ────────────────────────────────────────────────────────
+// ── Unit tests ───────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

@@ -1,11 +1,12 @@
-//! 声明式便捷宏
+//! Declarative convenience macros
 //!
-//! 提供 `agent!`、`messages!`、`tool_params!`、`chat_request!` 等宏，
-//! 用于快速构建常见对象，降低框架使用门槛。
+//! Provides `agent!`, `messages!`, `tool_params!`, `chat_request!` and other
+//! macros for quickly building common objects, lowering the framework's
+//! entry barrier.
 
-/// 快速创建 Agent（声明式语法，替代 builder 链式调用）。
+/// Quickly create an Agent (declarative syntax, replaces builder chaining).
 ///
-/// # 示例
+/// # Examples
 ///
 /// ```rust,no_run
 /// use echo_agent::prelude::*;
@@ -14,13 +15,13 @@
 /// # fn example() -> echo_agent::error::Result<()> {
 /// let mut agent = echo_agent::agent! {
 ///     model: "qwen3-max",
-///     system_prompt: "你是一个有帮助的助手",
+///     system_prompt: "You are a helpful assistant",
 /// }?;
 ///
-/// // 带工具
+/// // With tools
 /// let mut agent = echo_agent::agent! {
 ///     model: "qwen3-max",
-///     system_prompt: "你是助手",
+///     system_prompt: "You are an assistant",
 ///     tools: [MockTool::new("calculator"), MockTool::new("weather")],
 ///     max_iterations: 15,
 /// }?;
@@ -96,18 +97,18 @@ macro_rules! agent {
     };
 }
 
-/// 快速构建消息列表。
+/// Quickly build a message list.
 ///
-/// # 示例
+/// # Examples
 ///
 /// ```rust
 /// use echo_agent::messages;
 /// use echo_agent::llm::types::Message;
 ///
 /// let msgs = messages![
-///     system("你是一个助手"),
-///     user("你好"),
-///     assistant("你好！有什么可以帮助你的？"),
+///     system("You are an assistant"),
+///     user("Hello"),
+///     assistant("Hello! How can I help you?"),
 ///     user("1+1=?"),
 /// ];
 ///
@@ -123,16 +124,16 @@ macro_rules! messages {
     };
 }
 
-/// 快速构建工具参数 JSON Schema。
+/// Quickly build tool parameter JSON Schema.
 ///
-/// # 示例
+/// # Examples
 ///
 /// ```rust
 /// use echo_agent::tool_params;
 ///
 /// let schema = tool_params! {
-///     "expression" => (string, required, "数学表达式"),
-///     "precision"  => (number, "小数精度"),
+///     "expression" => (string, required, "Math expression"),
+///     "precision"  => (number, "Decimal precision"),
 /// };
 /// ```
 #[macro_export]
@@ -196,16 +197,16 @@ macro_rules! __tool_param_field {
     };
 }
 
-/// 快速构建聊天请求。
+/// Quickly build a chat request.
 ///
-/// # 示例
+/// # Examples
 ///
 /// ```rust
 /// use echo_agent::chat_request;
 /// use echo_agent::llm::types::Message;
 ///
 /// let req = chat_request!(
-///     messages: [system("你是助手"), user("你好")],
+///     messages: [system("You are an assistant"), user("Hello")],
 ///     temperature: 0.7,
 ///     max_tokens: 2048,
 /// );
@@ -246,14 +247,14 @@ mod tests {
     #[test]
     fn messages_macro_basic() {
         let msgs = messages![
-            system("你是助手"),
-            user("你好"),
-            assistant("你好！有什么可以帮助你的？"),
+            system("You are an assistant"),
+            user("Hello"),
+            assistant("Hello! How can I help you?"),
         ];
 
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content.as_text_ref(), Some("你是助手"));
+        assert_eq!(msgs[0].content.as_text_ref(), Some("You are an assistant"));
         assert_eq!(msgs[1].role, "user");
         assert_eq!(msgs[2].role, "assistant");
     }
@@ -274,8 +275,8 @@ mod tests {
     #[test]
     fn tool_params_macro_basic() {
         let schema = tool_params! {
-            "expression" => (string, required, "数学表达式"),
-            "precision"  => (number, "小数精度"),
+            "expression" => (string, required, "Math expression"),
+            "precision"  => (number, "Decimal precision"),
         };
 
         let obj = schema.as_object().unwrap();
@@ -287,7 +288,7 @@ mod tests {
 
         let expr_prop = props["expression"].as_object().unwrap();
         assert_eq!(expr_prop["type"], "string");
-        assert_eq!(expr_prop["description"], "数学表达式");
+        assert_eq!(expr_prop["description"], "Math expression");
 
         let required = obj["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
@@ -297,8 +298,8 @@ mod tests {
     #[test]
     fn tool_params_macro_all_required() {
         let schema = tool_params! {
-            "a" => (number, required, "参数a"),
-            "b" => (number, required, "参数b"),
+            "a" => (number, required, "param a"),
+            "b" => (number, required, "param b"),
         };
         let required = schema["required"].as_array().unwrap();
         assert_eq!(required.len(), 2);
@@ -307,7 +308,7 @@ mod tests {
     #[test]
     fn tool_params_macro_none_required() {
         let schema = tool_params! {
-            "hint" => (string, "可选提示"),
+            "hint" => (string, "optional hint"),
         };
         let required = schema["required"].as_array().unwrap();
         assert!(required.is_empty());
@@ -316,7 +317,7 @@ mod tests {
     #[test]
     fn chat_request_macro_basic() {
         let req = chat_request!(
-            messages: [system("你是助手"), user("你好")],
+            messages: [system("You are an assistant"), user("Hello")],
             temperature: 0.7,
             max_tokens: 2048,
         );
@@ -342,7 +343,7 @@ mod tests {
     fn agent_macro_basic() {
         let result = agent! {
             model: "test-model",
-            system_prompt: "你是助手",
+            system_prompt: "You are an assistant",
         };
         assert!(result.is_ok());
     }
@@ -353,7 +354,7 @@ mod tests {
 
         let result = agent! {
             model: "test-model",
-            system_prompt: "你是计算助手",
+            system_prompt: "You are a calculation assistant",
             name: "calc",
             tools: [FinalAnswerTool],
             max_iterations: 5,

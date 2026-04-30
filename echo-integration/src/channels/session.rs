@@ -1,11 +1,11 @@
-//! Session Manager —— IM 通道会话管理
+//! Session Manager — IM channel session management
 //!
-//! 提供框架级的会话生命周期管理：
-//! - 为每个用户维护独立会话（按 channel_id + sender_id 隔离）
-//! - 超时自动重置（空闲超过指定时间后，下条消息开始新会话）
-//! - 关键词/命令重置（用户发送特定指令即可重置）
+//! Provides framework-level session lifecycle management:
+//! - Maintains independent sessions per user (isolated by channel_id + sender_id)
+//! - Auto-reset on timeout (after idle period, next message starts a new session)
+//! - Keyword/command reset (user can reset by sending a specific command)
 //!
-//! ## 使用方式
+//! ## Usage
 //!
 //! ```rust,no_run
 //! use async_trait::async_trait;
@@ -33,8 +33,8 @@
 //!
 //! let config = SessionConfig::default()
 //!     .with_timeout_minutes(30)
-//!     .with_reset_keywords(vec!["重置对话".into(), "新对话".into()])
-//!     .with_reset_reply("✅ 对话已重置");
+//!     .with_reset_keywords(vec!["reset chat".into(), "new chat".into()])
+//!     .with_reset_reply("Conversation has been reset.");
 //!
 //! let handler = SessionHandler::new(config, || -> Box<dyn MessageHandler> {
 //!     Box::new(DummyHandler)
@@ -51,90 +51,90 @@ use tracing::info;
 
 // ── SessionConfig ────────────────────────────────────────────────────────────
 
-/// 会话配置
+/// Session configuration
 #[derive(Clone)]
 pub struct SessionConfig {
-    /// 会话超时时间（默认 60 分钟）
+    /// Session timeout duration (default: 60 minutes)
     pub timeout: Duration,
-    /// 重置关键词列表（精确匹配，忽略大小写，支持 Unicode）
+    /// Reset keyword list (exact match, case-insensitive, Unicode-aware)
     pub reset_keywords: Vec<String>,
-    /// 重置命令前缀（以此开头的消息视为命令，如 "/"）
+    /// Reset command prefix (messages starting with this are treated as commands, e.g. "/")
     pub command_prefix: Option<String>,
-    /// 命令名列表（与 command_prefix 配合，如 ["reset", "clear", "new"]）
+    /// Command name list (used with command_prefix, e.g. ["reset", "clear", "new"])
     pub reset_commands: Vec<String>,
-    /// 重置后的回复文本
+    /// Reply text after reset
     pub reset_reply: String,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(60 * 60), // 1 小时
+            timeout: Duration::from_secs(60 * 60), // 1 hour
             reset_keywords: vec![
-                "重置对话".into(),
-                "新对话".into(),
-                "清除记忆".into(),
-                "重新开始".into(),
+                "reset chat".into(),
+                "new chat".into(),
+                "clear memory".into(),
+                "start over".into(),
             ],
             command_prefix: Some("/".into()),
             reset_commands: vec!["reset".into(), "clear".into(), "new".into()],
-            reset_reply: "✅ 对话已重置，请开始新的对话。".into(),
+            reset_reply: "Conversation has been reset. You may start a new conversation.".into(),
         }
     }
 }
 
 impl SessionConfig {
-    /// 设置超时时间（分钟）
+    /// Set timeout in minutes
     pub fn with_timeout_minutes(mut self, minutes: u64) -> Self {
         self.timeout = Duration::from_secs(minutes * 60);
         self
     }
 
-    /// 设置超时时间
+    /// Set timeout duration
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// 设置重置关键词（替换默认值）
+    /// Set reset keywords (replaces defaults)
     pub fn with_reset_keywords(mut self, keywords: Vec<String>) -> Self {
         self.reset_keywords = keywords;
         self
     }
 
-    /// 追加重置关键词
+    /// Add a reset keyword
     pub fn add_reset_keyword(mut self, keyword: impl Into<String>) -> Self {
         self.reset_keywords.push(keyword.into());
         self
     }
 
-    /// 设置命令前缀（None 表示禁用命令模式）
+    /// Set the command prefix (None disables command mode)
     pub fn with_command_prefix(mut self, prefix: Option<String>) -> Self {
         self.command_prefix = prefix;
         self
     }
 
-    /// 设置重置命令列表（替换默认值）
+    /// Set reset command list (replaces defaults)
     pub fn with_reset_commands(mut self, commands: Vec<String>) -> Self {
         self.reset_commands = commands;
         self
     }
 
-    /// 设置重置后的回复文本
+    /// Set the reply text after reset
     pub fn with_reset_reply(mut self, reply: impl Into<String>) -> Self {
         self.reset_reply = reply.into();
         self
     }
 
-    /// 检查文本是否为重置指令。
+    /// Check if the text is a reset command.
     ///
-    /// 使用 `to_lowercase()` 进行 Unicode 安全的大小写忽略比较，
-    /// 正确支持中文关键词（`eq_ignore_ascii_case` 不适用于非 ASCII 字符）。
+    /// Uses `to_lowercase()` for Unicode-safe case-insensitive comparison,
+    /// correctly supporting non-ASCII keywords (`eq_ignore_ascii_case` does not apply to non-ASCII characters).
     pub fn is_reset(&self, text: &str) -> bool {
         let trimmed = text.trim();
         let lower = trimmed.to_lowercase();
 
-        // 关键词匹配（Unicode 安全）
+        // Keyword match (Unicode-safe)
         if self
             .reset_keywords
             .iter()
@@ -143,7 +143,7 @@ impl SessionConfig {
             return true;
         }
 
-        // 命令前缀匹配
+        // Command prefix match
         if let Some(ref prefix) = self.command_prefix
             && let Some(cmd) = trimmed.strip_prefix(prefix.as_str())
         {
@@ -164,10 +164,10 @@ impl SessionConfig {
 
 // ── Session ──────────────────────────────────────────────────────────────────
 
-/// 会话 key：(channel_id, sender_id)
+/// Session key: (channel_id, sender_id)
 type SessionKey = (String, String);
 
-/// 单个用户会话
+/// Single user session
 struct Session {
     handler: Box<dyn MessageHandler>,
     last_active: Instant,
@@ -175,16 +175,16 @@ struct Session {
 
 // ── SessionFactory ───────────────────────────────────────────────────────────
 
-/// 会话工厂 —— 创建新的 MessageHandler 实例
+/// Session factory — creates new MessageHandler instances.
 ///
-/// 每次需要新会话时调用，返回一个全新的 MessageHandler。
-/// 使用者通常在闭包中创建 Agent 并包装为 MessageHandler。
+/// Called whenever a new session is needed, returning a brand new MessageHandler.
+/// Users typically create an Agent inside a closure and wrap it as a MessageHandler.
 pub trait SessionFactory: Send + Sync {
-    /// 创建新的消息处理器（新会话）
+    /// Create a new message handler (new session)
     fn create(&self) -> Box<dyn MessageHandler>;
 }
 
-/// 闭包实现的 SessionFactory
+/// Closure-based SessionFactory implementation
 impl<F> SessionFactory for F
 where
     F: Fn() -> Box<dyn MessageHandler> + Send + Sync,
@@ -196,26 +196,26 @@ where
 
 // ── SessionHandler ───────────────────────────────────────────────────────────
 
-/// 会话结束回调参数
+/// Session end callback parameters
 pub struct SessionEndInfo {
     pub channel_id: String,
     pub sender_id: String,
     pub reason: SessionEndReason,
 }
 
-/// 会话结束原因
+/// Reason for session ending
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEndReason {
-    /// 被用户命令重置
+    /// Reset by user command
     CommandReset,
-    /// 超时后被替换
+    /// Replaced after timeout
     TimeoutReplaced,
 }
 
-/// 会话管理 Handler
+/// Session management handler.
 ///
-/// 包装 SessionFactory，为每个用户维护独立的 MessageHandler 实例。
-/// 自动处理超时重置和关键词重置。
+/// Wraps a SessionFactory, maintaining independent MessageHandler instances per user.
+/// Automatically handles timeout resets and keyword-based resets.
 pub struct SessionHandler {
     config: SessionConfig,
     factory: Arc<dyn SessionFactory>,
@@ -224,10 +224,10 @@ pub struct SessionHandler {
 }
 
 impl SessionHandler {
-    /// 创建 SessionHandler
+    /// Create a SessionHandler.
     ///
-    /// - `config`: 会话配置
-    /// - `factory`: 创建新会话的工厂函数
+    /// - `config`: Session configuration
+    /// - `factory`: Factory function for creating new sessions
     pub fn new(config: SessionConfig, factory: impl SessionFactory + 'static) -> Self {
         Self {
             config,
@@ -237,12 +237,12 @@ impl SessionHandler {
         }
     }
 
-    /// 使用默认配置创建
+    /// Create with default configuration
     pub fn with_defaults(factory: impl SessionFactory + 'static) -> Self {
         Self::new(SessionConfig::default(), factory)
     }
 
-    /// 设置会话结束回调（用于资源清理等）
+    /// Set session end callback (for resource cleanup, etc.)
     pub fn with_on_session_end<F>(mut self, callback: F) -> Self
     where
         F: Fn(SessionEndInfo) + Send + Sync + 'static,
@@ -251,12 +251,12 @@ impl SessionHandler {
         self
     }
 
-    /// 获取当前活跃会话数
+    /// Get the current number of active sessions
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
     }
 
-    /// 获取或创建会话（原子操作，使用 DashMap entry API 防止竞态条件）
+    /// Get or create a session (atomic operation, uses DashMap entry API to prevent race conditions)
     fn get_or_create(&self, key: &SessionKey) -> Arc<Mutex<Session>> {
         let handler = self.factory.clone();
         self.sessions
@@ -286,7 +286,7 @@ impl MessageHandler for SessionHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
         let key = (msg.channel_id.clone(), msg.sender_id.clone());
 
-        // ── 关键词/命令重置 ────────────────────────────────────────────
+        // ── Keyword/Command Reset ──────────────────────────────────────────────
         if self.config.is_reset(&msg.text) {
             if let Some((old_key, _old_session)) = self.sessions.remove(&key) {
                 self.notify_session_end(old_key.0, old_key.1, SessionEndReason::CommandReset);
@@ -303,11 +303,11 @@ impl MessageHandler for SessionHandler {
             ));
         }
 
-        // ── 获取或创建 session（原子操作） ─────────────────────────────
+        // ── Get or create session (atomic) ──────────────────────────────────
         let session = self.get_or_create(&key);
         let mut guard = session.lock().await;
 
-        // ── 超时重置 ──────────────────────────────────────────────────
+        // ── Timeout Reset ────────────────────────────────────────────────────
         if guard.last_active.elapsed() >= self.config.timeout {
             info!(
                 "Session timeout for ({}, {}), elapsed {:?}",
@@ -325,13 +325,13 @@ impl MessageHandler for SessionHandler {
 
         guard.last_active = Instant::now();
 
-        // ── 转发给实际 handler ────────────────────────────────────────
+        // ── Forward to actual handler ────────────────────────────────────────
         guard.handler.handle(msg).await
     }
 
     async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
-        // reply 由 channel wrapper 处理，这里直接透传
-        // SessionHandler 层面不需要额外操作
+        // reply is handled by the channel wrapper; passthrough here
+        // No additional operations needed at the SessionHandler level
         Ok(())
     }
 }

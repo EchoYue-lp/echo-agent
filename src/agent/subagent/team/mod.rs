@@ -93,7 +93,7 @@ pub struct Team {
 impl Team {
     /// Create a new team with a leader.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `id` - Unique team identifier.
     /// * `name` - Human-readable team name.
     /// * `leader_name` - Name of the leader agent (must be added later via `add_member`).
@@ -117,7 +117,7 @@ impl Team {
 
     /// Add a member to the team.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `name` - Member name (must be unique within the team).
     /// * `role` - Role of the member (leader, worker, reviewer).
     /// * `agent` - Agent instance.
@@ -145,10 +145,10 @@ impl Team {
 
     /// Get a member by name.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `name` - Member name.
     ///
-    /// # 返回
+    /// # Returns
     /// Reference to the team member if found, `None` otherwise.
     pub fn get_member(&self, name: &str) -> Option<&TeamMember> {
         self.members.get(name)
@@ -156,10 +156,10 @@ impl Team {
 
     /// Get a member's mailbox sender (for sending messages).
     ///
-    /// # 参数
+    /// # Parameters
     /// * `name` - Member name.
     ///
-    /// # 返回
+    /// # Returns
     /// Mailbox sender for the member if found, `None` otherwise.
     pub fn get_mailbox_sender(&self, name: &str) -> Option<mailbox::MailboxSender> {
         self.members.get(name).map(|m| m.mailbox.sender())
@@ -167,7 +167,7 @@ impl Team {
 
     /// List all member names.
     ///
-    /// # 返回
+    /// # Returns
     /// Vector of member names.
     pub fn member_names(&self) -> Vec<String> {
         self.members.keys().cloned().collect()
@@ -175,7 +175,7 @@ impl Team {
 
     /// List worker names.
     ///
-    /// # 返回
+    /// # Returns
     /// Vector of names of members with `TeamRole::Worker` role.
     pub fn worker_names(&self) -> Vec<String> {
         self.members
@@ -187,7 +187,7 @@ impl Team {
 
     /// Number of members.
     ///
-    /// # 返回
+    /// # Returns
     /// Count of team members.
     pub fn len(&self) -> usize {
         self.members.len()
@@ -195,7 +195,7 @@ impl Team {
 
     /// Check if the team has no members.
     ///
-    /// # 返回
+    /// # Returns
     /// `true` if the team has zero members.
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
@@ -203,7 +203,7 @@ impl Team {
 
     /// Get all members (for iteration).
     ///
-    /// # 返回
+    /// # Returns
     /// Iterator over team member references.
     pub fn members(&self) -> impl Iterator<Item = &TeamMember> {
         self.members.values()

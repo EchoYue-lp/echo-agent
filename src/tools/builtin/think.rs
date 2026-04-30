@@ -1,16 +1,16 @@
-/// Think 工具（可选注册，非默认行为）。
+/// Think tool (optional registration, not enabled by default).
 ///
-/// # 背景
+/// # Background
 ///
-/// 框架已切换到**（CoT via 系统提示）**：
-/// `ReactAgent` 在 `enable_tool=true` 时自动将 CoT 引导语追加到系统提示，
-/// 让 LLM 以文本 content 形式输出推理过程，天然兼容流式（Token 事件）。
+/// The framework has switched to **(CoT via system prompt)**:
+/// `ReactAgent` automatically appends CoT guidance to the system prompt when `enable_tool=true`,
+/// letting the LLM output reasoning as text content, natively compatible with streaming (Token events).
 ///
-/// 本工具**不再默认注册**，仅供以下场景手动 opt-in：
-/// - 需要在对话历史中以结构化工具调用记录每次推理
-/// - 非流式任务，且希望推理以 tool_result 形式存入上下文
+/// This tool is **no longer registered by default**, only for manual opt-in in these scenarios:
+/// - When structured tool-call records of each reasoning step are needed in the conversation history
+/// - Non-streaming tasks where reasoning should be stored as tool_result in context
 ///
-/// # 用法
+/// # Usage
 ///
 /// ```rust,no_run
 /// use echo_agent::tools::builtin::think::ThinkTool;
@@ -21,9 +21,10 @@
 /// agent.add_tool(Box::new(ThinkTool));
 /// ```
 ///
-/// > **注意**：在 `execute_stream` 流式路径中，注册本工具后模型推理内容将写入
-/// > 工具调用参数而非 `content` 字段，导致推理阶段无 `AgentEvent::Token` 事件。
-/// > 流式场景请依赖 CoT 系统提示（默认行为），无需注册本工具。
+/// > **Note**: In the `execute_stream` streaming path, registering this tool causes model reasoning
+/// > content to be written to tool call parameters instead of the `content` field, resulting in no
+/// > `AgentEvent::Token` events during the reasoning phase.
+/// > For streaming scenarios, rely on the CoT system prompt (default behavior); no need to register this tool.
 use futures::future::BoxFuture;
 
 use crate::error::ToolError;
@@ -40,7 +41,7 @@ impl Tool for ThinkTool {
     }
 
     fn description(&self) -> &str {
-        "在采取行动前，使用此工具记录推理和分析过程。参数：reasoning - 你对问题的分析和计划。"
+        "Before taking action, use this tool to record your reasoning and analysis process. Parameter: reasoning - your analysis and plan for the problem."
     }
 
     fn parameters(&self) -> Value {
@@ -49,7 +50,7 @@ impl Tool for ThinkTool {
             "properties": {
                 "reasoning": {
                     "type": "string",
-                    "description": "你的思考过程：分析问题、制定计划、推理步骤"
+                    "description": "Your reasoning process: analyze the problem, formulate a plan, reasoning steps"
                 }
             },
             "required": ["reasoning"]
@@ -68,7 +69,7 @@ impl Tool for ThinkTool {
 
             info!("Think: {}", reasoning);
 
-            // 将推理内容回显到上下文，让下一轮 LLM 调用能看到完整推理记录
+            // Echo reasoning back to context so the next LLM call can see the full reasoning record
             Ok(ToolResult::success(reasoning.to_string()))
         })
     }

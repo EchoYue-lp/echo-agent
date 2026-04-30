@@ -7,32 +7,33 @@ use crate::tools::files::files::{
     UpdateFileTool, WriteFileTool,
 };
 
-/// 文件系统技能
+/// Filesystem skill
 ///
-/// 为 Agent 提供本地文件系统读写能力：
-/// - `create_file`：创建文件
-/// - `delete_file`：删除文件
-/// - `read_file`：读取文件内容
-/// - `write_file`：覆盖写入文件
-/// - `update_file`：更新文件
-/// - `append_file`：追加写入文件
-/// - `move_file`：移动文件
-/// - `list_dir`：列出目录内容
+/// Provides the Agent with local filesystem read/write capabilities:
+/// - `create_file`: create files
+/// - `delete_file`: delete files
+/// - `read_file`: read file content
+/// - `write_file`: overwrite file
+/// - `update_file`: update file
+/// - `append_file`: append to file
+/// - `move_file`: move files
+/// - `list_dir`: list directory contents
 ///
-/// # 安全说明
-/// 通过 `with_base_dir()` 可限制 Agent 只能访问指定目录及其子目录，
-/// 防止路径穿越攻击（`../../../etc/passwd` 等）。
+/// # Security
+/// Use `with_base_dir()` to restrict the Agent to only access a specified
+/// directory and its subdirectories, preventing path traversal attacks
+/// (`../../../etc/passwd`, etc.).
 ///
-/// # 使用方式
+/// # Usage
 /// ```rust
 /// use echo_agent::prelude::{FileSystemSkill, AgentConfig, ReactAgent};
 ///
 /// let config = AgentConfig::new("qwen3-max", "filesystem", "You are a file manager");
 /// let mut agent = ReactAgent::new(config);
-/// // 不限制路径（谨慎使用）
+/// // No path restriction (use with caution)
 /// agent.add_skill(Box::new(FileSystemSkill::new()));
 ///
-/// // 限制在 /workspace 目录下
+/// // Restrict to /workspace directory
 /// agent.add_skill(Box::new(FileSystemSkill::with_base_dir("/workspace")));
 /// ```
 pub struct FileSystemSkill {
@@ -40,12 +41,12 @@ pub struct FileSystemSkill {
 }
 
 impl FileSystemSkill {
-    /// 创建不限制路径的文件系统 Skill
+    /// Create a filesystem Skill without path restrictions
     pub fn new() -> Self {
         Self { base_dir: None }
     }
 
-    /// 创建限制在指定目录下的文件系统 Skill
+    /// Create a filesystem Skill restricted to a specified directory
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
@@ -65,7 +66,7 @@ impl Skill for FileSystemSkill {
     }
 
     fn description(&self) -> &str {
-        "本地文件系统读写能力：创建文件、删除文件、移动文件路径、读取文件内容、写入文件内容、追加文件、修改文件内容，以及列出目录内容"
+        "Local filesystem read/write capability: create files, delete files, move file paths, read file content, write file content, append to files, modify file content, and list directory contents"
     }
 
     fn tools(&self) -> Vec<Box<dyn Tool>> {
@@ -108,23 +109,23 @@ impl Skill for FileSystemSkill {
 
     fn system_prompt_injection(&self) -> Option<String> {
         let restriction = if let Some(base) = &self.base_dir {
-            format!("（操作范围限制在 '{}' 目录下）", base.display())
+            format!(" (operations restricted to '{}' directory)", base.display())
         } else {
-            "（无路径限制，操作时请谨慎）".to_string()
+            " (no path restriction, exercise caution when operating)".to_string()
         };
 
         Some(format!(
-            "\n\n## 文件系统能力（FileSystem Skill）{restriction}\n\
-             你可以操作本地文件系统，请合理使用以下工具：\n\
-             - `create_file(path)`：创建文件，适合创建一个空文件等\n\
-             - `delete_file(path)`：删除文件，适合删除 配置、日志、代码等不需要的旧文件\n\
-             - `move_file(old_path, new_path)`：移动文件路径，需要移动文件路径等\n\
-             - `read_file(path)`：读取文件内容，适合查看配置、日志、代码等\n\
-             - `write_file(path, content)`：覆盖写入文件，会清空原有内容\n\
-             - `update_file(path, old_content, new_content)`：修改文件内容，用新内容替换旧内容（精确替换，首次匹配）\n\
-             - `append_file(path, content)`：在文件末尾追加内容，不会清空原有内容\n\
-             - `list_dir(path)`：列出目录下的文件和子目录\n\
-             **注意**：write_file 会覆盖原文件，如需保留原内容请先 read_file 再决定使用 write_file 还是 append_file。"
+            "\n\n## Filesystem Capability (FileSystem Skill){restriction}\n\
+             You can operate on the local filesystem. Please use the following tools appropriately:\n\
+             - `create_file(path)`: Create a file, suitable for creating an empty file, etc.\n\
+             - `delete_file(path)`: Delete a file, suitable for removing unwanted old files such as configs, logs, code, etc.\n\
+             - `move_file(old_path, new_path)`: Move a file path, for relocating files\n\
+             - `read_file(path)`: Read file content, suitable for viewing configs, logs, code, etc.\n\
+             - `write_file(path, content)`: Overwrite file content, clears existing content\n\
+             - `update_file(path, old_content, new_content)`: Modify file content, replace old content with new content (exact match, first occurrence)\n\
+             - `append_file(path, content)`: Append content to the end of a file, does not clear existing content\n\
+             - `list_dir(path)`: List files and subdirectories in a directory\n\
+             **Note**: write_file overwrites the original file; if you need to preserve original content, read_file first, then decide whether to use write_file or append_file."
         ))
     }
 }

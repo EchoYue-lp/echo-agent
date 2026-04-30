@@ -1,4 +1,4 @@
-//! 组合评估器 — 聚合多个 Critic 的评估结果
+//! Composite evaluator — aggregates evaluation results from multiple Critics
 
 use crate::agent::self_reflection::critic::Critic;
 use crate::agent::self_reflection::types::Critique;
@@ -6,20 +6,20 @@ use crate::error::Result;
 use futures::future::BoxFuture;
 use tracing::{debug, info};
 
-/// 组合策略
+/// Composite strategy
 #[derive(Debug, Clone)]
 pub enum CompositeStrategy {
-    /// 所有 Critic 都必须通过（AND 逻辑）
+    /// All Critics must pass (AND logic)
     AllMustPass,
-    /// 取平均分
+    /// Average score
     Average,
-    /// 取最低分（悲观策略）
+    /// Minimum score (pessimistic strategy)
     Minimum,
-    /// 加权平均
+    /// Weighted average
     Weighted(Vec<f64>),
 }
 
-/// 组合评估器：聚合多个 Critic
+/// Composite evaluator: aggregates multiple Critics
 pub struct CompositeCritic {
     critics: Vec<Box<dyn Critic>>,
     strategy: CompositeStrategy,
@@ -27,14 +27,14 @@ pub struct CompositeCritic {
 }
 
 impl CompositeCritic {
-    /// 创建组合评估器
+    /// Create a composite evaluator
     ///
-    /// # 参数
-    /// * `strategy` - 组合策略，决定如何聚合多个 Critic 的评估结果
+    /// # Parameters
+    /// * `strategy` - Composite strategy, determines how to aggregate evaluation results from multiple Critics
     ///
-    /// # 默认配置
-    /// * 通过阈值：7.0
-    /// * 初始 Critic 列表为空（需通过 `add_critic` 添加）
+    /// # Default configuration
+    /// * Pass threshold: 7.0
+    /// * Initial Critic list is empty (add via `add_critic`)
     pub fn new(strategy: CompositeStrategy) -> Self {
         Self {
             critics: Vec::new(),
@@ -43,28 +43,28 @@ impl CompositeCritic {
         }
     }
 
-    /// 添加评估器到组合
+    /// Add an evaluator to the composite
     ///
-    /// # 参数
-    /// * `critic` - 要添加的评估器实例，需实现 `Critic` trait
+    /// # Parameters
+    /// * `critic` - Evaluator instance to add, must implement `Critic` trait
     ///
-    /// # 说明
-    /// 可以链式调用多次，添加多个评估器。
+    /// # Description
+    /// Can be chained multiple times to add multiple evaluators.
     pub fn add_critic(mut self, critic: impl Critic + 'static) -> Self {
         self.critics.push(Box::new(critic));
         self
     }
 
-    /// 设置通过阈值
+    /// Set pass threshold
     ///
-    /// # 参数
-    /// * `threshold` - 评估通过的最低分数（范围 0.0-10.0）
+    /// # Parameters
+    /// * `threshold` - Minimum score for evaluation to pass (range 0.0-10.0)
     ///
-    /// # 说明
-    /// 对于 `CompositeStrategy::Average`、`Minimum`、`Weighted` 策略，
-    /// 聚合后的分数 ≥ threshold 时评估结果为通过。
-    /// 对于 `CompositeStrategy::AllMustPass`，阈值仅影响评分显示，
-    /// 实际通过逻辑要求所有子评估器都通过。
+    /// # Description
+    /// For `CompositeStrategy::Average`, `Minimum`, `Weighted` strategies,
+    /// the aggregated score >= threshold means the evaluation passes.
+    /// For `CompositeStrategy::AllMustPass`, the threshold only affects score display,
+    /// the actual pass logic requires all sub-evaluators to pass.
     pub fn with_pass_threshold(mut self, threshold: f64) -> Self {
         self.pass_threshold = threshold;
         self
@@ -134,7 +134,7 @@ impl Critic for CompositeCritic {
                 }
             };
 
-            // 合并反馈
+            // Merge feedback
             let feedback = critiques
                 .iter()
                 .map(|c| format!("[{}] {}", c.score, c.feedback))
@@ -175,19 +175,19 @@ mod tests {
     #[tokio::test]
     async fn test_composite_all_must_pass() {
         let critic = CompositeCritic::new(CompositeStrategy::AllMustPass)
-            .add_critic(StaticCritic::new(9.0, true, "好"))
-            .add_critic(StaticCritic::new(5.0, false, "差"));
+            .add_critic(StaticCritic::new(9.0, true, "Good"))
+            .add_critic(StaticCritic::new(5.0, false, "Bad"));
 
         let result = critic.critique("task", "answer", "").await.unwrap();
-        assert!(!result.passed); // 第二个未通过
+        assert!(!result.passed); // Second one did not pass
         assert_eq!(result.score, 7.0); // (9 + 5) / 2
     }
 
     #[tokio::test]
     async fn test_composite_all_pass() {
         let critic = CompositeCritic::new(CompositeStrategy::AllMustPass)
-            .add_critic(StaticCritic::new(9.0, true, "好"))
-            .add_critic(StaticCritic::new(8.0, true, "也不错"));
+            .add_critic(StaticCritic::new(9.0, true, "Good"))
+            .add_critic(StaticCritic::new(8.0, true, "Also good"));
 
         let result = critic.critique("task", "answer", "").await.unwrap();
         assert!(result.passed);
@@ -196,8 +196,8 @@ mod tests {
     #[tokio::test]
     async fn test_composite_average() {
         let critic = CompositeCritic::new(CompositeStrategy::Average)
-            .add_critic(StaticCritic::new(8.0, true, "好"))
-            .add_critic(StaticCritic::new(6.0, false, "一般"));
+            .add_critic(StaticCritic::new(8.0, true, "Good"))
+            .add_critic(StaticCritic::new(6.0, false, "Mediocre"));
 
         let result = critic.critique("task", "answer", "").await.unwrap();
         assert_eq!(result.score, 7.0);
@@ -207,8 +207,8 @@ mod tests {
     #[tokio::test]
     async fn test_composite_minimum() {
         let critic = CompositeCritic::new(CompositeStrategy::Minimum)
-            .add_critic(StaticCritic::new(9.0, true, "好"))
-            .add_critic(StaticCritic::new(4.0, false, "差"));
+            .add_critic(StaticCritic::new(9.0, true, "Good"))
+            .add_critic(StaticCritic::new(4.0, false, "Bad"));
 
         let result = critic.critique("task", "answer", "").await.unwrap();
         assert_eq!(result.score, 4.0);
@@ -218,8 +218,8 @@ mod tests {
     #[tokio::test]
     async fn test_composite_weighted() {
         let critic = CompositeCritic::new(CompositeStrategy::Weighted(vec![0.7, 0.3]))
-            .add_critic(StaticCritic::new(10.0, true, "完美"))
-            .add_critic(StaticCritic::new(0.0, false, "失败"));
+            .add_critic(StaticCritic::new(10.0, true, "Perfect"))
+            .add_critic(StaticCritic::new(0.0, false, "Failed"));
 
         let result = critic.critique("task", "answer", "").await.unwrap();
         // (10.0 * 0.7 + 0.0 * 0.3) / (0.7 + 0.3) = 7.0

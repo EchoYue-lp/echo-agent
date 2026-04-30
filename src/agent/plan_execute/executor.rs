@@ -1,16 +1,16 @@
-//! Executor — 负责执行计划中的单个步骤
+//! Executor — responsible for executing individual steps in a plan
 
 use crate::agent::Agent;
 use crate::error::Result;
 use futures::future::BoxFuture;
 use tracing::{debug, info};
 
-/// Executor trait — 执行单个步骤
+/// Executor trait — executes a single step
 pub trait Executor: Send + Sync {
-    /// 执行单个步骤
+    /// Execute a single step
     ///
-    /// - `step_description`: 步骤描述
-    /// - `context`: 执行上下文（之前步骤的结果等）
+    /// - `step_description`: Step description
+    /// - `context`: Execution context (results from previous steps, etc.)
     fn execute_step<'a>(
         &'a mut self,
         step_description: &'a str,
@@ -20,26 +20,26 @@ pub trait Executor: Send + Sync {
 
 // ── ReactExecutor ────────────────────────────────────────────────────────────
 
-/// 使用 ReactAgent 作为 Executor：每个步骤通过完整的 ReAct 循环执行
+/// Uses ReactAgent as the Executor: each step is executed through a full ReAct loop
 pub struct ReactExecutor {
     agent: Box<dyn Agent>,
 }
 
 impl ReactExecutor {
-    /// 从实现 Agent trait 的类型创建 ReactExecutor
+    /// Create a ReactExecutor from a type implementing the Agent trait
     ///
-    /// # 参数
-    /// * `agent` - 用于执行步骤的 Agent 实例
+    /// # Parameters
+    /// * `agent` - Agent instance for executing steps
     pub fn new(agent: impl Agent + 'static) -> Self {
         Self {
             agent: Box::new(agent),
         }
     }
 
-    /// 从已装箱的 Agent trait 对象创建 ReactExecutor
+    /// Create a ReactExecutor from an already-boxed Agent trait object
     ///
-    /// # 参数
-    /// * `agent` - 已装箱的 Agent trait 对象
+    /// # Parameters
+    /// * `agent` - Already-boxed Agent trait object
     pub fn from_boxed(agent: Box<dyn Agent>) -> Self {
         Self { agent }
     }
@@ -61,14 +61,14 @@ impl Executor for ReactExecutor {
             info!(
                 agent = %self.agent.name(),
                 step = %step_description,
-                "⚡ ReactExecutor 执行步骤"
+                "⚡ ReactExecutor executing step"
             );
 
             let result = self.agent.execute(&prompt).await?;
             debug!(
                 agent = %self.agent.name(),
                 output_len = result.len(),
-                "✅ 步骤执行完成"
+                "✅ Step execution complete"
             );
 
             Ok(result)
@@ -78,16 +78,16 @@ impl Executor for ReactExecutor {
 
 // ── SimpleExecutor ───────────────────────────────────────────────────────────
 
-/// 简单 Executor：直接调用 LLM（无工具），适用于纯推理步骤
+/// Simple Executor: calls LLM directly (no tools), suitable for pure reasoning steps
 pub struct SimpleExecutor {
     agent: Box<dyn Agent>,
 }
 
 impl SimpleExecutor {
-    /// 从实现 Agent trait 的类型创建 SimpleExecutor
+    /// Create a SimpleExecutor from a type implementing the Agent trait
     ///
-    /// # 参数
-    /// * `agent` - 用于执行步骤的 Agent 实例
+    /// # Parameters
+    /// * `agent` - Agent instance for executing steps
     pub fn new(agent: impl Agent + 'static) -> Self {
         Self {
             agent: Box::new(agent),

@@ -1,8 +1,9 @@
-//! 声明式工作流加载器
+//! Declarative workflow loader
 //!
-//! 支持从 YAML / JSON 文件加载图工作流定义，降低非 Rust 用户的使用门槛。
+//! Supports loading graph workflow definitions from YAML / JSON files, lowering
+//! the entry barrier for non-Rust users.
 //!
-//! # YAML 格式示例
+//! # YAML Format Example
 //!
 //! ```yaml
 //! name: my_workflow
@@ -10,13 +11,13 @@
 //!   - name: researcher
 //!     type: agent
 //!     model: qwen3-max
-//!     system_prompt: "你是一个研究助手"
+//!     system_prompt: "You are a research assistant"
 //!     input_key: task
 //!     output_key: research
 //!   - name: writer
 //!     type: agent
 //!     model: qwen3-max
-//!     system_prompt: "你是一个写作助手"
+//!     system_prompt: "You are a writing assistant"
 //!     input_key: research
 //!     output_key: result
 //! edges:
@@ -28,7 +29,7 @@
 //! max_steps: 50
 //! ```
 //!
-//! # JSON 格式示例
+//! # JSON format example
 //!
 //! ```json
 //! {
@@ -54,43 +55,43 @@ use crate::workflow::SharedState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// 工作流声明式定义
+/// Workflow declarative definition
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkflowDefinition {
-    /// 工作流名称
+    /// Workflow name
     pub name: String,
-    /// 节点定义列表
+    /// List of node definitions
     pub nodes: Vec<NodeDefinition>,
-    /// 边定义列表
+    /// List of edge definitions
     pub edges: Vec<EdgeDefinition>,
-    /// 入口节点名
+    /// Entry node name
     pub entry: String,
-    /// 结束节点名列表
+    /// List of finish node names
     #[serde(default)]
     pub finish: Vec<String>,
-    /// 最大执行步数（可选，默认 100）
+    /// Maximum execution steps (optional, default 100)
     #[serde(default)]
     pub max_steps: Option<usize>,
 }
 
-/// 节点定义
+/// Node definition
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeDefinition {
-    /// 节点名称
+    /// Node name
     pub name: String,
-    /// 节点类型："agent" | "function" | "router"
+    /// Node type: "agent" | "function" | "router"
     #[serde(rename = "type")]
     pub node_type: String,
-    /// Agent 模型名称（仅 type=agent）
+    /// Agent model name (only for type=agent)
     #[serde(default)]
     pub model: Option<String>,
-    /// Agent 系统提示词（仅 type=agent）
+    /// Agent system prompt (only for type=agent)
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// 从 state 读取输入的 key（仅 type=agent，默认 "input"）
+    /// Key to read input from state (only for type=agent, default "input")
     #[serde(default = "default_input_key")]
     pub input_key: String,
-    /// 输出写入 state 的 key（仅 type=agent，默认 "output"）
+    /// Key to write output to state (only for type=agent, default "output")
     #[serde(default = "default_output_key")]
     pub output_key: String,
 }
@@ -102,41 +103,41 @@ fn default_output_key() -> String {
     "output".to_string()
 }
 
-/// 边定义
+/// Edge definition
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EdgeDefinition {
-    /// 起始节点
+    /// Source node
     pub from: String,
-    /// 目标节点（固定边）
+    /// Target node (fixed edge)
     #[serde(default)]
     pub to: Option<String>,
-    /// 条件表达式（条件边）——简单的 state key 检查
+    /// Conditional expression (conditional edge) — simple state key check
     #[serde(default)]
     pub condition: Option<ConditionDefinition>,
-    /// 并行目标节点列表（fan-out 边）
+    /// Parallel target node list (fan-out edge)
     #[serde(default)]
     pub parallel: Option<Vec<String>>,
-    /// 并行汇聚后的下一个节点
+    /// Next node after parallel convergence
     #[serde(default)]
     pub then: Option<String>,
 }
 
-/// 条件定义（简化版：基于 state key 的值比较）
+/// Condition definition (simplified: value comparison based on state key)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConditionDefinition {
-    /// state 中的 key
+    /// Key in state
     pub key: String,
-    /// 期望值
+    /// Expected value
     pub equals: serde_json::Value,
-    /// 匹配时进入的节点
+    /// Node to go to on match
     pub then: String,
-    /// 不匹配时进入的节点
+    /// Node to go to on mismatch
     #[serde(rename = "else")]
     pub else_node: String,
 }
 
 impl WorkflowDefinition {
-    /// 从 YAML 文件加载
+    /// Load from a YAML file
     pub fn from_yaml(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
             ReactError::Agent(AgentError::InitializationFailed(format!(
@@ -146,7 +147,7 @@ impl WorkflowDefinition {
         Self::from_yaml_str(&content)
     }
 
-    /// 从 YAML 字符串解析
+    /// Parse from a YAML string
     pub fn from_yaml_str(yaml: &str) -> Result<Self> {
         serde_yaml::from_str(yaml).map_err(|e| {
             ReactError::Agent(AgentError::InitializationFailed(format!(
@@ -155,7 +156,7 @@ impl WorkflowDefinition {
         })
     }
 
-    /// 从 JSON 文件加载
+    /// Load from a JSON file
     pub fn from_json(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
             ReactError::Agent(AgentError::InitializationFailed(format!(
@@ -165,7 +166,7 @@ impl WorkflowDefinition {
         Self::from_json_str(&content)
     }
 
-    /// 从 JSON 字符串解析
+    /// Parse from a JSON string
     pub fn from_json_str(json: &str) -> Result<Self> {
         serde_json::from_str(json).map_err(|e| {
             ReactError::Agent(AgentError::InitializationFailed(format!(
@@ -174,12 +175,12 @@ impl WorkflowDefinition {
         })
     }
 
-    /// 构建 Graph（不带 LLM 配置，Agent 使用环境变量配置）
+    /// Build Graph (without LLM config, Agent uses environment variable configuration)
     pub fn build_graph(self) -> Result<Graph> {
         self.build_graph_with_llm_config(None)
     }
 
-    /// 构建 Graph（可选注入 LLM 配置）
+    /// Build Graph (optional LLM configuration injection)
     pub fn build_graph_with_llm_config(self, llm_config: Option<&LlmConfig>) -> Result<Graph> {
         let mut builder = GraphBuilder::new(&self.name);
 
@@ -190,7 +191,7 @@ impl WorkflowDefinition {
                     let prompt = node_def
                         .system_prompt
                         .as_deref()
-                        .unwrap_or("你是一个有帮助的助手");
+                        .unwrap_or("You are a helpful assistant");
 
                     let mut agent_builder = ReactAgentBuilder::new()
                         .name(&node_def.name)
@@ -276,9 +277,9 @@ impl WorkflowDefinition {
     }
 }
 
-/// 从 YAML 文件加载图工作流
+/// Load a graph workflow from a YAML file
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,no_run
 /// use echo_agent::workflow::loader::load_graph_from_yaml;
@@ -292,17 +293,17 @@ pub fn load_graph_from_yaml(path: impl AsRef<Path>) -> Result<crate::workflow::G
     WorkflowDefinition::from_yaml(path)?.build_graph()
 }
 
-/// 从 JSON 文件加载图工作流
+/// Load a graph workflow from a JSON file
 pub fn load_graph_from_json(path: impl AsRef<Path>) -> Result<crate::workflow::Graph> {
     WorkflowDefinition::from_json(path)?.build_graph()
 }
 
-/// 从 YAML 字符串加载图工作流
+/// Load a graph workflow from a YAML string
 pub fn load_graph_from_yaml_str(yaml: &str) -> Result<crate::workflow::Graph> {
     WorkflowDefinition::from_yaml_str(yaml)?.build_graph()
 }
 
-/// 从 JSON 字符串加载图工作流
+/// Load a graph workflow from a JSON string
 pub fn load_graph_from_json_str(json: &str) -> Result<crate::workflow::Graph> {
     WorkflowDefinition::from_json_str(json)?.build_graph()
 }
@@ -321,7 +322,7 @@ nodes:
   - name: worker
     type: agent
     model: qwen3-max
-    system_prompt: "你是助手"
+    system_prompt: "You are an assistant"
     input_key: task
     output_key: result
 edges:

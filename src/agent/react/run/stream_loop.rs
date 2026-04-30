@@ -1,4 +1,4 @@
-//! 流式执行循环
+//! Streaming execution loop
 
 use super::super::{ReactAgent, StepType, TOOL_FINAL_ANSWER};
 use super::execution::{ToolExecutionFailure, ToolExecutionOutcome};
@@ -13,12 +13,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{Instrument, debug, info, info_span};
 
-/// 流式执行的模式配置
+/// Streaming execution mode configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamMode {
-    /// 单轮执行模式：重置上下文，从 checkpoint 恢复
+    /// Single-round execution mode: reset context, restore from checkpoint
     Execute,
-    /// 多轮对话模式：保留上下文，不重置
+    /// Multi-round conversation mode: preserve context, do not reset
     Chat,
 }
 
@@ -31,23 +31,23 @@ impl std::fmt::Display for StreamMode {
     }
 }
 
-/// 流式执行的初始化参数
+/// Streaming execution initialization parameters
 pub(crate) struct StreamInit {
-    /// 用户输入文本（用于审计日志和记忆召回）
+    /// User input text (for audit logs and memory recall)
     pub text: String,
-    /// 可选的预构建 Message（多模态场景），None 时自动构造文本消息
+    /// Optional pre-built Message (multimodal scenarios), auto-constructs text message when None
     pub message: Option<Message>,
-    /// 日志标签（如 "" 或 "（多模态）"）
+    /// Log label (e.g. "" or "(multimodal)")
     pub label: String,
 }
 
 impl ReactAgent {
-    /// 处理流式响应的 chunk，收集内容并返回事件
+    /// Process streaming response chunk, collect content and return events
     ///
-    /// `in_reasoning` 跟踪是否正在输出 reasoning_content（Qwen3/DeepSeek 思考过程）。
-    /// 当首次遇到 reasoning_content 时发出 ThinkStart，
-    /// 当 reasoning 结束后首次遇到 content 或 tool_calls 时发出 ThinkEnd。
-    /// 这样 ThinkStart/ThinkEnd 只包裹思考过程，而不是整个 LLM 响应。
+    /// `in_reasoning` tracks whether reasoning_content is being output (Qwen3/DeepSeek thinking process).
+    /// ThinkStart is emitted when reasoning_content is first encountered,
+    /// ThinkEnd is emitted when content or tool_calls is first encountered after reasoning ends.
+    /// This way ThinkStart/ThinkEnd only wraps the thinking process, not the entire LLM response.
     #[allow(clippy::type_complexity)]
     pub(crate) fn process_stream_chunk(
         chunk: &crate::llm::types::ChatCompletionChunk,
@@ -58,7 +58,7 @@ impl ReactAgent {
         let mut events = Vec::new();
 
         if let Some(choice) = chunk.choices.first() {
-            // 处理 reasoning_content（Qwen3/DeepSeek 思考过程）
+            // Handle reasoning_content (Qwen3/DeepSeek thinking process)
             if let Some(reasoning) = &choice.delta.reasoning_content
                 && !reasoning.is_empty()
             {
@@ -66,11 +66,11 @@ impl ReactAgent {
                     *in_reasoning = true;
                     events.push(AgentEvent::ThinkStart);
                 }
-                // 注意：reasoning 只作为思考过程展示，不混入 content_buffer
+                // Note: reasoning is only displayed as thinking process, not mixed into content_buffer
                 events.push(AgentEvent::Token(reasoning.clone()));
             }
 
-            // 当 reasoning 结束后首次遇到 content，关闭思考块
+            // When content is first encountered after reasoning ends, close the thinking block
             if let Some(content) = &choice.delta.content
                 && !content.is_empty()
             {
@@ -86,7 +86,7 @@ impl ReactAgent {
             }
 
             if let Some(delta_calls) = &choice.delta.tool_calls {
-                // 当 reasoning 结束后首次遇到 tool_calls，关闭思考块
+                // When tool_calls is first encountered after reasoning ends, close the thinking block
                 if *in_reasoning {
                     *in_reasoning = false;
                     events.push(AgentEvent::ThinkEnd {
@@ -120,7 +120,7 @@ impl ReactAgent {
         events
     }
 
-    /// 将收集的 tool_call_map 转换为结构化的工具调用列表
+    /// Convert the collected tool_call_map into structured tool call lists
     pub(crate) fn build_tool_calls_from_map(
         tool_call_map: &HashMap<u32, (String, String, String)>,
     ) -> (Vec<LlmToolCall>, Vec<(String, String, Value)>) {
@@ -149,7 +149,7 @@ impl ReactAgent {
         (msg_tool_calls, steps)
     }
 
-    /// 流式执行的 LLM 请求（带重试）
+    /// Create streaming LLM request (with retries)
     #[tracing::instrument(skip(self, messages), fields(agent = %self.config.agent_name, model = %self.config.model_name, msg_count = messages.len()))]
     pub(crate) async fn create_llm_stream(
         &self,
@@ -172,7 +172,7 @@ impl ReactAgent {
         let temperature = self.config.temperature;
         let max_tokens = self.config.max_tokens;
 
-        info!(agent = %agent, model = %model_name, "📡 创建 LLM 流式请求");
+        info!(agent = %agent, model = %model_name, "📡 Creating LLM streaming request");
 
         let circuit_breaker = self.guard.circuit_breaker.clone();
         let stream_result =
@@ -204,11 +204,11 @@ impl ReactAgent {
         Ok(Box::pin(stream))
     }
 
-    /// 流式执行的统一入口
+    /// Unified entry point for streaming execution
     ///
-    /// 根据 `mode` 参数决定：
-    /// - `StreamMode::Execute`：重置上下文，从 checkpoint 恢复，适合单轮任务
-    /// - `StreamMode::Chat`：保留上下文，适合多轮对话
+    /// Decides based on `mode` parameter:
+    /// - `StreamMode::Execute`: reset context, restore from checkpoint, suitable for single-round tasks
+    /// - `StreamMode::Chat`: preserve context, suitable for multi-round conversations
     #[tracing::instrument(skip(self), fields(agent = %self.config.agent_name, model = %self.config.model_name, mode = %mode))]
     pub(crate) async fn run_stream(
         &self,
@@ -226,11 +226,11 @@ impl ReactAgent {
         .await
     }
 
-    /// 流式执行的统一入口（多模态消息版本）
+    /// Unified entry point for streaming execution (multimodal message version)
     ///
-    /// 与 `run_stream` 相同，但接受预构建的 `Message` 而非 `&str`，
-    /// 支持包含图片、文件等 content parts 的多模态输入。
-    /// 根据 `mode` 参数决定上下文重置行为。
+    /// Same as `run_stream`, but accepts a pre-built `Message` instead of `&str`,
+    /// supporting multimodal input with content parts such as images and files.
+    /// Context reset behavior is decided by the `mode` parameter.
     #[tracing::instrument(skip(self), fields(agent = %self.config.agent_name, model = %self.config.model_name, mode = %mode))]
     pub(crate) async fn run_stream_with_message(
         &self,
@@ -242,7 +242,7 @@ impl ReactAgent {
             StreamInit {
                 text,
                 message: Some(message),
-                label: "（多模态）".to_string(),
+                label: "(multimodal)".to_string(),
             },
             mode,
         )
@@ -255,7 +255,7 @@ impl ReactAgent {
         init: StreamInit,
         mode: StreamMode,
     ) -> Result<futures::stream::BoxStream<'_, Result<AgentEvent>>> {
-        // 在 try_stream! 外部准备上下文，避免生命周期问题
+        // Prepare context outside try_stream! to avoid lifetime issues
         let recalled = if let Some(ref msg) = init.message {
             self.prepare_stream_context_with_message(mode, msg).await
         } else {
@@ -271,10 +271,10 @@ impl ReactAgent {
             let agent = self.config.agent_name.clone();
             let callbacks = self.config.callbacks.clone();
 
-            // 根据模式输出不同的日志
+            // Log differently based on mode
             match mode {
-                StreamMode::Execute => info!(agent = %agent, "🌊 Agent 开始流式执行任务{label}"),
-                StreamMode::Chat => info!(agent = %agent, "🌊 Agent 开始流式多轮对话{label}"),
+                StreamMode::Execute => info!(agent = %agent, "🌊 Agent starting streaming task execution{label}"),
+                StreamMode::Chat => info!(agent = %agent, "🌊 Agent starting streaming multi-round conversation{label}"),
             }
 
             if recalled > 0 {
@@ -288,7 +288,7 @@ impl ReactAgent {
                     cb.on_iteration(&agent, iteration).await;
                 }
 
-                debug!(agent = %agent, iteration = iteration + 1, "--- 流式迭代{label} ---");
+                debug!(agent = %agent, iteration = iteration + 1, "--- Streaming iteration{label} ---");
 
                 let messages = context.lock().await.prepare(None).await?;
 
@@ -296,11 +296,11 @@ impl ReactAgent {
                     cb.on_think_start(&agent, &messages).await;
                 }
 
-                // 创建 LLM 流
+                // Create LLM stream
                 let llm_stream = self.create_llm_stream(messages.clone()).await?;
                 let mut llm_stream = Box::pin(llm_stream);
 
-                // 收集流式响应
+                // Collect streaming response
                 let mut content_buffer = String::new();
                 let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
                 let mut last_usage: Option<crate::llm::types::Usage> = None;
@@ -325,7 +325,7 @@ impl ReactAgent {
                     .and_then(|u| u.completion_tokens)
                     .unwrap_or(0) as usize;
 
-                // 如果推理流结束后仍处于思考状态（模型仅输出 reasoning 无 content），关闭思考块
+                // If still in reasoning state after stream ends (model only output reasoning without content), close the thinking block
                 if in_reasoning {
                     yield AgentEvent::ThinkEnd {
                         prompt_tokens,
@@ -333,14 +333,14 @@ impl ReactAgent {
                     };
                 }
 
-                // 判断是否有工具调用
+                // Check if there are tool calls
                 let has_tool_calls = !tool_call_map.is_empty();
 
                 if has_tool_calls {
-                    // 构建工具调用
+                    // Build tool calls
                     let (msg_tool_calls, steps) = Self::build_tool_calls_from_map(&tool_call_map);
 
-                    // 发出 ToolCall 事件
+                    // Emit ToolCall events
                     for (_, name, args) in &steps {
                         yield AgentEvent::ToolCall {
                             name: name.clone(),
@@ -348,7 +348,7 @@ impl ReactAgent {
                         };
                     }
 
-                    // 触发 on_think_end 回调
+                    // Trigger on_think_end callbacks
                     {
                         let think_steps: Vec<StepType> = steps.iter().map(|(id, name, args)| {
                             StepType::Call {
@@ -362,11 +362,11 @@ impl ReactAgent {
                         }
                     }
 
-                    // 将 assistant 消息推送到上下文
+                    // Push assistant message to context
                     context.lock().await.push(Message::assistant_with_tools(msg_tool_calls));
 
-                    // 分离审批工具和并发工具
-                    // 审批工具强制串行执行，非审批工具并发执行
+                    // Separate approval tools and concurrent tools
+                    // Approval tools are forced to execute serially, non-approval tools execute concurrently
                     #[cfg(feature = "human-loop")]
                     let (approval_steps, concurrent_steps) = {
                         let mut approval = Vec::new();
@@ -386,7 +386,7 @@ impl ReactAgent {
                         Vec<(String, String, Value)>,
                     ) = (Vec::new(), steps);
 
-                    // 并发执行非审批工具
+                    // Execute non-approval tools concurrently
                     if !concurrent_steps.is_empty() {
                         let max_concurrency = self.tools.tool_manager.max_concurrency();
                         let concurrent_len = concurrent_steps.len();
@@ -396,7 +396,7 @@ impl ReactAgent {
                             agent = %agent,
                             tools = ?tool_names,
                             max_concurrency = ?max_concurrency,
-                            "⚡ 流式并发执行 {} 个工具调用",
+                            "⚡ Streaming concurrent execution of {} tool calls",
                             concurrent_len,
                         );
 
@@ -464,7 +464,7 @@ impl ReactAgent {
                                         output: output.clone(),
                                     };
 
-                                    // 检测 vega-lite 图表输出
+                                    // Detect vega-lite chart output
                                     #[cfg(feature = "chart")]
                                     if output.contains("vega-lite")
                                         && let Ok(spec) =
@@ -484,7 +484,7 @@ impl ReactAgent {
                                         for cb in &callbacks {
                                             cb.on_final_answer(&agent, &output).await;
                                         }
-                                        info!(agent = %agent, "🏁 流式执行完成{label}");
+                                        info!(agent = %agent, "🏁 Streaming execution completed{label}");
 
                                         self.log_final_answer_audit(&output).await;
                                         self.save_checkpoint().await;
@@ -510,7 +510,7 @@ impl ReactAgent {
 
                     }
 
-                    // 串行执行审批工具
+                    // Execute approval tools serially
                     for (tool_call_id, function_name, arguments) in approval_steps {
                         match self
                             .execute_tool_feedback(&function_name, &arguments)
@@ -522,7 +522,7 @@ impl ReactAgent {
                                     output: output.clone(),
                                 };
 
-                                // 检测 vega-lite 图表输出
+                                // Detect vega-lite chart output
                                 #[cfg(feature = "chart")]
                                 if output.contains("vega-lite")
                                     && let Ok(spec) =
@@ -542,7 +542,7 @@ impl ReactAgent {
                                     for cb in &callbacks {
                                         cb.on_final_answer(&agent, &output).await;
                                     }
-                                    info!(agent = %agent, "🏁 流式执行完成{label}");
+                                    info!(agent = %agent, "🏁 Streaming execution completed{label}");
 
                                     self.log_final_answer_audit(&output).await;
                                     self.save_checkpoint().await;
@@ -568,7 +568,7 @@ impl ReactAgent {
 
                     self.auto_snapshot(iteration).await;
                 } else if !content_buffer.is_empty() {
-                    // 纯文本响应
+                    // Plain text response
                     let think_steps = vec![StepType::Thought(content_buffer.clone())];
                     for cb in &callbacks {
                         cb.on_think_end(&agent, &think_steps, prompt_tokens, completion_tokens).await;

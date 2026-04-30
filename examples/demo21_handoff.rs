@@ -11,7 +11,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     println!("=== Handoff 示例：Agent 间控制权转移 ===\n");

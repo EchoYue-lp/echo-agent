@@ -1,18 +1,30 @@
 [package]
 name = "echo_orchestration"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Orchestration layer for echo-agent framework (workflow, human-loop, tasks)"
 repository = "https://github.com/EchoYue-lp/echo-agent"
+homepage = "https://github.com/EchoYue-lp/echo-agent"
+documentation = "https://docs.rs/echo_orchestration"
+keywords = ["ai", "agent", "workflow", "orchestration"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+exclude = ["**/.DS_Store"]
 
 [features]
 default = []
 websocket = ["dep:tokio-tungstenite"]
 
 [dependencies]
-echo_core = { version = "0.1.1", path = "../echo-core" }
-echo_state = { version = "0.1.1", path = "../echo-state" }
+echo_core = { version = "0.1.2", path = "../echo-core" }
+echo_state = { version = "0.1.2", path = "../echo-state" }
 
 # From echo-workflow
 tokio = { version = "1", features = ["full"] }

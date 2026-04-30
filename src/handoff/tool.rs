@@ -1,4 +1,4 @@
-//! Handoff 内置工具 — 让 LLM 在 ReAct 循环中主动触发 Agent 间 Handoff
+//! Handoff built-in tool — allows LLM to actively trigger inter-Agent Handoff during the ReAct loop
 
 use crate::handoff::{HandoffContext, HandoffManager, HandoffTarget};
 use crate::tools::{Tool, ToolParameters, ToolResult};
@@ -7,15 +7,15 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Handoff 工具：注册到 Agent 的工具列表后，LLM 可通过调用此工具触发 Handoff
+/// Handoff tool: after registering in the Agent's tool list, LLM can trigger a Handoff by calling this tool
 pub struct HandoffTool {
     manager: Arc<Mutex<HandoffManager>>,
-    /// 当前 Agent 名称（作为 source）
+    /// Current Agent name (used as source)
     source_agent: String,
 }
 
 impl HandoffTool {
-    /// 创建一个新的 HandoffTool 实例。
+    /// Create a new HandoffTool instance.
     pub fn new(manager: Arc<Mutex<HandoffManager>>, source_agent: impl Into<String>) -> Self {
         Self {
             manager,
@@ -30,7 +30,7 @@ impl Tool for HandoffTool {
     }
 
     fn description(&self) -> &str {
-        "将当前任务的控制权转移给另一个 Agent。当你判断某个任务更适合由其他专业 Agent 处理时，使用此工具进行 Handoff。"
+        "Transfer control of the current task to another Agent. Use this tool when you determine a task is better suited for a specialized Agent."
     }
 
     fn parameters(&self) -> Value {
@@ -39,20 +39,20 @@ impl Tool for HandoffTool {
             "properties": {
                 "target_agent": {
                     "type": "string",
-                    "description": "目标 Agent 的名称"
+                    "description": "Name of the target Agent"
                 },
                 "message": {
                     "type": "string",
-                    "description": "要传递给目标 Agent 的任务描述"
+                    "description": "Task description to pass to the target Agent"
                 },
                 "transfer_history": {
                     "type": "boolean",
-                    "description": "是否传递对话历史给目标 Agent",
+                    "description": "Whether to transfer conversation history to the target Agent",
                     "default": false
                 },
                 "metadata": {
                     "type": "object",
-                    "description": "要传递的额外元数据（键值对）",
+                    "description": "Additional metadata to pass (key-value pairs)",
                     "additionalProperties": { "type": "string" }
                 }
             },
@@ -81,16 +81,16 @@ impl Tool for HandoffTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            // 构建 HandoffTarget
+            // Build HandoffTarget
             let mut target = HandoffTarget::new(&target_agent).with_message(&message);
             if transfer_history {
                 target = target.with_history();
             }
 
-            // 构建 HandoffContext
+            // Build HandoffContext
             let mut context = HandoffContext::new().with_source(&self.source_agent);
 
-            // 添加额外元数据
+            // Add additional metadata
             if let Some(meta) = params.get("metadata")
                 && let Some(obj) = meta.as_object()
             {
@@ -104,10 +104,10 @@ impl Tool for HandoffTool {
             let manager = self.manager.lock().await;
             match manager.handoff(target, context).await {
                 Ok(result) => Ok(ToolResult::success(format!(
-                    "[Handoff 完成] Agent '{}' 返回:\n{}",
+                    "[Handoff complete] Agent '{}' returned:\n{}",
                     result.target_agent, result.output
                 ))),
-                Err(e) => Ok(ToolResult::error(format!("Handoff 失败: {}", e))),
+                Err(e) => Ok(ToolResult::error(format!("Handoff failed: {}", e))),
             }
         })
     }

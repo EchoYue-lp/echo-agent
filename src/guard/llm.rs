@@ -1,6 +1,6 @@
 //! LLM guard façade
 //!
-//! 权威实现位于 `echo_core::guard::llm`；此模块仅保留
-//! `echo_agent::guard::llm::*` 的兼容路径。
+//! The authoritative implementation resides in `echo_core::guard::llm`; this module
+//! only keeps the compatibility path for `echo_agent::guard::llm::*`.
 
 pub use echo_core::guard::llm::*;

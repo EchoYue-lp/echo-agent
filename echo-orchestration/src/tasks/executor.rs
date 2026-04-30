@@ -249,7 +249,7 @@ impl TaskContext {
             return String::new();
         }
 
-        let mut parts = vec!["上游依赖任务的执行结果：".to_string()];
+        let mut parts = vec!["Execution results of upstream dependent tasks:".to_string()];
         for (id, result) in &self.upstream_results {
             // UTF-8 safe truncation
             let preview = if result.len() > char_limit {
@@ -479,7 +479,7 @@ impl TaskExecutor {
                     .map(|(id, err)| format!("{}: {}", id, err))
                     .collect::<Vec<_>>()
                     .join("; ");
-                let block_reason = format!("上游任务失败: {}", error_summary);
+                let block_reason = format!("Upstream task failed: {}", error_summary);
                 let _ =
                     manager.update_task_status(&task_id, TaskStatus::Blocked(block_reason.clone()));
                 return TaskExecutionResult::failure(

@@ -534,7 +534,7 @@ impl Config {
     /// 每次调用都重新读取文件，不使用缓存。
     /// 如需缓存请使用 [`load_cached`](Self::load_cached)。
     pub fn load() -> Result<Self> {
-        dotenv::dotenv().ok();
+        dotenvy::dotenv().ok();
 
         if let Some(config) = Self::from_config_file()? {
             tracing::info!("已从配置文件加载模型配置");

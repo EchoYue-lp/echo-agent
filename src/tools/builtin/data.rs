@@ -1,12 +1,12 @@
-//! 数据处理工具
+//! Data processing tools
 //!
-//! 基于 Polars 提供数据处理能力，支持：
-//! - CSV/JSON/Parquet 文件读取
-//! - 数据过滤、聚合、排序
-//! - 统计计算
-//! - 数据转换
-//! - 数据概况分析（维度/指标识别）
-//! - TopN / 贡献占比 / 数值分箱
+//! Data processing capabilities based on Polars, supporting:
+//! - CSV/JSON/Parquet file reading
+//! - Data filtering, aggregation, sorting
+//! - Statistical computation
+//! - Data transformation
+//! - Data profiling (dimension/metric identification)
+//! - TopN / contribution analysis / numeric binning
 
 use std::path::Path;
 
@@ -20,9 +20,9 @@ use crate::tools::{Tool, ToolParameters, ToolResult};
 
 const TOOL_NAME: &str = "data_tools";
 
-// ── 共享数据加载辅助函数 ────────────────────────────────────────────
+// ── Shared data loading helpers ──────────────────────────────────────
 
-/// 根据文件扩展名检测格式
+/// Detect format based on file extension
 fn detect_format<'a>(path: &'a Path, hint: Option<&'a str>) -> &'a str {
     hint.unwrap_or_else(|| match path.extension().and_then(|e| e.to_str()) {
         Some("csv") | Some("txt") | Some("tsv") => "csv",
@@ -32,13 +32,13 @@ fn detect_format<'a>(path: &'a Path, hint: Option<&'a str>) -> &'a str {
     })
 }
 
-/// 加载 DataFrame（eager），支持 CSV/JSON/Parquet
+/// Load DataFrame (eager), supports CSV/JSON/Parquet
 fn load_dataframe(path: &Path, format: Option<&str>) -> Result<DataFrame> {
     let fmt = detect_format(path, format);
 
     let file = std::fs::File::open(path).map_err(|e| ToolError::ExecutionFailed {
         tool: TOOL_NAME.to_string(),
-        message: format!("打开文件失败: {}", e),
+        message: format!("Failed to open file: {}", e),
     })?;
 
     match fmt {
@@ -46,54 +46,52 @@ fn load_dataframe(path: &Path, format: Option<&str>) -> Result<DataFrame> {
             .finish()
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("读取 CSV 失败: {}", e),
+                message: format!("Failed to read CSV: {}", e),
             })?),
         "json" => {
             let file2 = std::fs::File::open(path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("打开 JSON 文件失败: {}", e),
+                message: format!("Failed to open JSON file: {}", e),
             })?;
             Ok(JsonReader::new(file2)
                 .finish()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("读取 JSON 失败: {}", e),
+                    message: format!("Failed to read JSON: {}", e),
                 })?)
         }
         "parquet" => {
             let file2 = std::fs::File::open(path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("打开 Parquet 文件失败: {}", e),
+                message: format!("Failed to open Parquet file: {}", e),
             })?;
             Ok(ParquetReader::new(file2)
                 .finish()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("读取 Parquet 失败: {}", e),
+                    message: format!("Failed to read Parquet: {}", e),
                 })?)
         }
         _ => Err(ToolError::InvalidParameter {
             name: "format".to_string(),
-            message: format!("不支持的文件格式: '{}'", fmt),
+            message: format!("Unsupported file format: '{}'", fmt),
         }
         .into()),
     }
 }
 
-/// 加载 LazyFrame，支持 CSV/JSON/Parquet
+/// Load LazyFrame, supports CSV/JSON/Parquet
 fn load_lazyframe(path: &Path, format: Option<&str>) -> Result<LazyFrame> {
     let fmt = detect_format(path, format);
     let path_str = path.to_string_lossy().to_string();
 
     match fmt {
-        "csv" => {
-            Ok(LazyCsvReader::new(path_str)
-                .finish()
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("读取 CSV 失败: {}", e),
-                })?)
-        }
+        "csv" => Ok(LazyCsvReader::new(PlRefPath::from(path_str.as_str()))
+            .finish()
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: TOOL_NAME.to_string(),
+                message: format!("Failed to read CSV: {}", e),
+            })?),
         "json" => {
             // For JSON, we use the eager reader and convert to LazyFrame
             let df = load_dataframe(path, Some("json"))?;
@@ -102,25 +100,25 @@ fn load_lazyframe(path: &Path, format: Option<&str>) -> Result<LazyFrame> {
         "parquet" => {
             let file = std::fs::File::open(path).map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("打开 Parquet 文件失败: {}", e),
+                message: format!("Failed to open Parquet file: {}", e),
             })?;
             let df = ParquetReader::new(file)
                 .finish()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("读取 Parquet 失败: {}", e),
+                    message: format!("Failed to read Parquet: {}", e),
                 })?;
             Ok(df.lazy())
         }
         _ => Err(ToolError::InvalidParameter {
             name: "format".to_string(),
-            message: format!("不支持的文件格式: '{}'", fmt),
+            message: format!("Unsupported file format: '{}'", fmt),
         }
         .into()),
     }
 }
 
-/// 判断列的数值类型
+/// Check if a column type is numeric
 fn is_numeric(dtype: &DataType) -> bool {
     matches!(
         dtype,
@@ -137,7 +135,7 @@ fn is_numeric(dtype: &DataType) -> bool {
     )
 }
 
-/// 判断列是否是日期时间类型
+/// Check if a column type is temporal
 fn is_temporal(dtype: &DataType) -> bool {
     matches!(
         dtype,
@@ -145,7 +143,7 @@ fn is_temporal(dtype: &DataType) -> bool {
     )
 }
 
-/// 分类列的类型
+/// Column category type
 #[derive(Debug, PartialEq)]
 enum ColumnCategory {
     Dimension,
@@ -165,8 +163,8 @@ fn classify_column(dtype: &DataType, distinct_count: usize, row_count: usize) ->
         0.0
     };
 
-    // 低基数（< 10% 或 < 50 个不同值）→ 维度
-    // 字符串类型 → 维度
+    // Low cardinality (< 10% or < 50 distinct values) → dimension
+    // String type → dimension
     if is_numeric(dtype) {
         if distinct_ratio < 0.1 || distinct_count < 50 {
             ColumnCategory::Dimension
@@ -186,7 +184,7 @@ fn classify_column(dtype: &DataType, distinct_count: usize, row_count: usize) ->
     }
 }
 
-// ── 数据读取工具 ────────────────────────────────────────────────────
+// ── Data reader tool ─────────────────────────────────────────────────
 
 pub struct DataReadTool;
 
@@ -196,7 +194,7 @@ impl Tool for DataReadTool {
     }
 
     fn description(&self) -> &str {
-        "读取数据文件（CSV、JSON、Parquet），返回基本信息和前几行数据预览。"
+        "Read data files (CSV, JSON, Parquet), returning basic info and a preview of the first rows."
     }
 
     fn parameters(&self) -> Value {
@@ -205,15 +203,15 @@ impl Tool for DataReadTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "format": {
                     "type": "string",
-                    "description": "文件格式：'csv'、'json' 或 'parquet'（可选，自动检测）"
+                    "description": "File format: 'csv', 'json', or 'parquet' (optional, auto-detected)"
                 },
                 "preview_rows": {
                     "type": "integer",
-                    "description": "预览行数（默认 10）"
+                    "description": "Number of preview rows (default 10)"
                 }
             },
             "required": ["file_path"]
@@ -242,7 +240,7 @@ impl Tool for DataReadTool {
 
             let effective_preview_rows = preview_rows.min(security.limits.max_preview_rows);
 
-            // 基本信息
+            // Basic info
             let shape = df.shape();
             let columns: Vec<String> = df
                 .get_column_names()
@@ -274,7 +272,7 @@ impl Tool for DataReadTool {
     }
 }
 
-// ── 数据过滤工具 ────────────────────────────────────────────────────
+// ── Data filter tool ─────────────────────────────────────────────────
 
 pub struct DataFilterTool;
 
@@ -284,7 +282,7 @@ impl Tool for DataFilterTool {
     }
 
     fn description(&self) -> &str {
-        "对数据文件进行过滤，支持条件表达式（比较、AND/OR组合、包含匹配等）。返回过滤后的数据预览。"
+        "Filter a data file, supporting conditional expressions (comparisons, AND/OR combinations, contains matching, etc.). Returns a preview of the filtered data."
     }
 
     fn parameters(&self) -> Value {
@@ -293,15 +291,15 @@ impl Tool for DataFilterTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "filter": {
                     "type": "string",
-                    "description": "过滤条件。支持: 'col > 100', 'col == \"value\"', 'col contains \"text\"', 'A > 10 AND B < 5', 'col starts_with \"prefix\"'"
+                    "description": "Filter condition. Supports: 'col > 100', 'col == \"value\"', 'col contains \"text\"', 'A > 10 AND B < 5', 'col starts_with \"prefix\"'"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "返回结果行数限制（可选）"
+                    "description": "Result row count limit (optional)"
                 }
             },
             "required": ["file_path", "filter"]
@@ -337,7 +335,7 @@ impl Tool for DataFilterTool {
                 .collect()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("执行过滤失败: {}", e),
+                    message: format!("Filter execution failed: {}", e),
                 })?;
 
             let max_rows = security.limits.max_preview_rows;
@@ -356,7 +354,7 @@ impl Tool for DataFilterTool {
     }
 }
 
-// ── 数据聚合工具 ────────────────────────────────────────────────────
+// ── Data aggregation tool ────────────────────────────────────────────
 
 pub struct DataAggregateTool;
 
@@ -366,7 +364,7 @@ impl Tool for DataAggregateTool {
     }
 
     fn description(&self) -> &str {
-        "对数据进行分组聚合操作：分组统计、求和、均值、计数、去重计数、方差、标准差、中位数、p25/p75/p90/p95/任意百分位数等。支持的操作：sum, mean/avg, min, max, count, count_distinct/n_unique, variance/var, stddev/std, median, p25/p75/p90/p95, percentile:N/pct:N, first, last。示例：aggregate_data(file_path='sales.csv', group_by='region', aggregations='sales:sum,profit:mean,users:count_distinct,revenue:p95')"
+        "Group aggregation operations on data: group stats, sum, mean, count, distinct count, variance, stddev, median, p25/p75/p90/p95/arbitrary percentile, etc. Supported operations: sum, mean/avg, min, max, count, count_distinct/n_unique, variance/var, stddev/std, median, p25/p75/p90/p95, percentile:N/pct:N, first, last. Example: aggregate_data(file_path='sales.csv', group_by='region', aggregations='sales:sum,profit:mean,users:count_distinct,revenue:p95')"
     }
 
     fn parameters(&self) -> Value {
@@ -375,15 +373,15 @@ impl Tool for DataAggregateTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "group_by": {
                     "type": "string",
-                    "description": "分组列名（可选，多个用逗号分隔）"
+                    "description": "Group-by column name (optional, comma-separated for multiple)"
                 },
                 "aggregations": {
                     "type": "string",
-                    "description": "聚合操作，格式: '列名:操作'，多个用逗号分隔。操作: sum, mean/avg, min, max, count, count_distinct, variance, stddev, median, p90, p95, percentile:N 等"
+                    "description": "Aggregation operations, format: 'column:op', comma-separated for multiple. Ops: sum, mean/avg, min, max, count, count_distinct, variance, stddev, median, p90, p95, percentile:N, etc."
                 }
             },
             "required": ["file_path", "aggregations"]
@@ -422,7 +420,7 @@ impl Tool for DataAggregateTool {
                 .collect()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("执行聚合失败: {}", e),
+                    message: format!("Aggregation execution failed: {}", e),
                 })?;
 
             let data_json = df_to_json(&df)?;
@@ -437,7 +435,7 @@ impl Tool for DataAggregateTool {
     }
 }
 
-// ── 数据统计工具（修复版：真正计算统计量）─────────────────────────
+// ── Data stats tool ──────────────────────────────────────────────────
 
 pub struct DataStatsTool;
 
@@ -447,7 +445,7 @@ impl Tool for DataStatsTool {
     }
 
     fn description(&self) -> &str {
-        "按列计算详细统计信息（不做分组）：计数、空值及空值率、去重数及去重率、均值、标准差、方差、最小值、最大值、中位数、p25/p75/p90/p95等百分位数；对字符串列还展示最短/最长/平均长度和最高频值。与 aggregate_data 的区别：data_stats 是按列整体统计（不分组），aggregate_data 是分组聚合。示例：data_stats(file_path='data.csv', columns='age,income,region')"
+        "Compute detailed per-column statistics (no grouping): count, nulls and null rate, distinct count and distinct rate, mean, stddev, variance, min, max, median, p25/p75/p90/p95 percentiles; for string columns also shows shortest/longest/average length and most frequent value. Difference from aggregate_data: data_stats is per-column overall stats (no grouping), aggregate_data is grouped aggregation. Example: data_stats(file_path='data.csv', columns='age,income,region')"
     }
 
     fn parameters(&self) -> Value {
@@ -456,11 +454,11 @@ impl Tool for DataStatsTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "columns": {
                     "type": "string",
-                    "description": "要计算统计的列名，多个用逗号分隔（可选，默认所有数值列）"
+                    "description": "Column names to compute statistics for, comma-separated (optional, defaults to all numeric columns)"
                 }
             },
             "required": ["file_path"]
@@ -493,7 +491,7 @@ impl Tool for DataStatsTool {
 
             let mut columns_json = Vec::new();
 
-            // 筛选要统计的列
+            // Filter columns to compute stats for
             let target_cols: Vec<String> = if let Some(ref filter) = column_filter {
                 filter.iter().map(|s| s.to_string()).collect()
             } else {
@@ -506,7 +504,7 @@ impl Tool for DataStatsTool {
                     Err(_) => {
                         columns_json.push(serde_json::json!({
                             "name": col_name,
-                            "error": "列不存在",
+                            "error": "Column not found",
                         }));
                         continue;
                     }
@@ -531,7 +529,7 @@ impl Tool for DataStatsTool {
                     "null_pct": (null_pct * 100.0).round() / 100.0,
                 });
 
-                // 去重计数
+                // Distinct count
                 if let Ok(unique_count) = c.n_unique() {
                     let unique_pct = if total > 0 {
                         (unique_count as f64 / total as f64) * 100.0
@@ -543,7 +541,7 @@ impl Tool for DataStatsTool {
                         serde_json::json!((unique_pct * 100.0).round() / 100.0);
                 }
 
-                // 数值统计
+                // Numeric statistics
                 if is_numeric(dtype) && non_null_count > 0 {
                     let series = c.as_materialized_series();
                     let chunked = match dtype {
@@ -628,7 +626,7 @@ impl Tool for DataStatsTool {
                     }
                 }
 
-                // 字符串列统计
+                // String column statistics
                 if matches!(dtype, DataType::String) && non_null_count > 0 {
                     let series = c.as_materialized_series();
                     let ca = series.str().map_err(|e| ToolError::ExecutionFailed {
@@ -647,7 +645,7 @@ impl Tool for DataStatsTool {
                         });
                     }
 
-                    // Top 3 频次值
+                    // Top 3 frequent values
                     let freq: std::collections::HashMap<&str, usize> =
                         ca.iter()
                             .flatten()
@@ -682,7 +680,7 @@ impl Tool for DataStatsTool {
     }
 }
 
-// ── 数据转换工具 ────────────────────────────────────────────────────
+// ── Data transform tool ──────────────────────────────────────────────
 
 pub struct DataTransformTool;
 
@@ -692,7 +690,7 @@ impl Tool for DataTransformTool {
     }
 
     fn description(&self) -> &str {
-        "对数据进行转换操作：排序、选择列、重命名列、删除列等。"
+        "Transform data: sort, select columns, rename columns, drop columns, etc."
     }
 
     fn parameters(&self) -> Value {
@@ -701,19 +699,19 @@ impl Tool for DataTransformTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "operation": {
                     "type": "string",
-                    "description": "操作类型：'sort'（排序）、'select'（选择列）、'drop'（删除列）、'rename'（重命名列）"
+                    "description": "Operation type: 'sort', 'select' (select columns), 'drop' (remove columns), 'rename' (rename columns)"
                 },
                 "params": {
                     "type": "string",
-                    "description": "操作参数。sort: '列名:asc/desc'；select: 'col1,col2'；drop: 'col1,col2'；rename: '旧名:新名'（一对）或 'old1:new1,old2:new2'（多对）"
+                    "description": "Operation params. sort: 'col:asc/desc'; select: 'col1,col2'; drop: 'col1,col2'; rename: 'old:new' (one pair) or 'old1:new1,old2:new2' (multiple pairs)"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "返回结果行数限制（可选）"
+                    "description": "Result row count limit (optional)"
                 }
             },
             "required": ["file_path", "operation", "params"]
@@ -774,7 +772,7 @@ impl Tool for DataTransformTool {
                 }
                 "drop" => {
                     let drop_cols: Vec<&str> = params.split(',').map(|s| s.trim()).collect();
-                    lf.drop(drop_cols)
+                    lf.drop(cols(drop_cols))
                 }
                 "rename" => {
                     let mut renamed = lf;
@@ -794,7 +792,7 @@ impl Tool for DataTransformTool {
                     return Err(ToolError::InvalidParameter {
                         name: "operation".to_string(),
                         message: format!(
-                            "不支持的操作: '{}'，请使用 sort/select/drop/rename",
+                            "Unsupported operation: '{}', please use sort/select/drop/rename",
                             operation
                         ),
                     }
@@ -806,7 +804,7 @@ impl Tool for DataTransformTool {
                 .collect()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("执行转换失败: {}", e),
+                    message: format!("Transform execution failed: {}", e),
                 })?;
 
             let max_rows = security.limits.max_preview_rows;
@@ -823,7 +821,7 @@ impl Tool for DataTransformTool {
     }
 }
 
-// ── 数据导出工具 ────────────────────────────────────────────────────
+// ── Data export tool ─────────────────────────────────────────────────
 
 pub struct DataExportTool;
 
@@ -833,7 +831,7 @@ impl Tool for DataExportTool {
     }
 
     fn description(&self) -> &str {
-        "将处理后的数据导出为 CSV、JSON 或 Parquet 文件。"
+        "Export processed data to CSV, JSON, or Parquet file."
     }
 
     fn parameters(&self) -> Value {
@@ -842,23 +840,23 @@ impl Tool for DataExportTool {
             "properties": {
                 "input_file": {
                     "type": "string",
-                    "description": "输入数据文件路径"
+                    "description": "Input data file path"
                 },
                 "output_file": {
                     "type": "string",
-                    "description": "输出文件路径"
+                    "description": "Output file path"
                 },
                 "format": {
                     "type": "string",
-                    "description": "输出格式：'csv'、'json' 或 'parquet'"
+                    "description": "Output format: 'csv', 'json', or 'parquet'"
                 },
                 "filter": {
                     "type": "string",
-                    "description": "可选的过滤条件"
+                    "description": "Optional filter condition"
                 },
                 "columns": {
                     "type": "string",
-                    "description": "可选的列选择"
+                    "description": "Optional column selection"
                 }
             },
             "required": ["input_file", "output_file", "format"]
@@ -902,7 +900,7 @@ impl Tool for DataExportTool {
 
             let mut df = lf.collect().map_err(|e| ToolError::ExecutionFailed {
                 tool: TOOL_NAME.to_string(),
-                message: format!("处理数据失败: {}", e),
+                message: format!("Data processing failed: {}", e),
             })?;
 
             let max_export_rows = security.limits.max_preview_rows;
@@ -916,7 +914,7 @@ impl Tool for DataExportTool {
             {
                 std::fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("创建输出目录失败: {}", e),
+                    message: format!("Failed to create output directory: {}", e),
                 })?;
             }
 
@@ -925,13 +923,13 @@ impl Tool for DataExportTool {
                     let mut file = std::fs::File::create(&output_path).map_err(|e| {
                         ToolError::ExecutionFailed {
                             tool: TOOL_NAME.to_string(),
-                            message: format!("创建输出文件失败: {}", e),
+                            message: format!("Failed to create output file: {}", e),
                         }
                     })?;
                     CsvWriter::new(&mut file).finish(&mut df).map_err(|e| {
                         ToolError::ExecutionFailed {
                             tool: TOOL_NAME.to_string(),
-                            message: format!("写入 CSV 失败: {}", e),
+                            message: format!("Failed to write CSV: {}", e),
                         }
                     })?;
                 }
@@ -940,27 +938,27 @@ impl Tool for DataExportTool {
                     std::fs::write(&output_path, serde_json::to_string_pretty(&json_value)?)
                         .map_err(|e| ToolError::ExecutionFailed {
                             tool: TOOL_NAME.to_string(),
-                            message: format!("写入 JSON 失败: {}", e),
+                            message: format!("Failed to write JSON: {}", e),
                         })?;
                 }
                 "parquet" => {
                     let file = std::fs::File::create(&output_path).map_err(|e| {
                         ToolError::ExecutionFailed {
                             tool: TOOL_NAME.to_string(),
-                            message: format!("创建输出文件失败: {}", e),
+                            message: format!("Failed to create output file: {}", e),
                         }
                     })?;
                     ParquetWriter::new(file).finish(&mut df).map_err(|e| {
                         ToolError::ExecutionFailed {
                             tool: TOOL_NAME.to_string(),
-                            message: format!("写入 Parquet 失败: {}", e),
+                            message: format!("Failed to write Parquet: {}", e),
                         }
                     })?;
                 }
                 _ => {
                     return Err(ToolError::InvalidParameter {
                         name: "format".to_string(),
-                        message: format!("不支持的导出格式: '{}'", format),
+                        message: format!("Unsupported export format: '{}'", format),
                     }
                     .into());
                 }
@@ -978,7 +976,7 @@ impl Tool for DataExportTool {
     }
 }
 
-// ── 新增：数据概况分析工具（维度/指标识别） ──────────────────────
+// ── Data profiling tool (dimension/metric identification) ────────────
 
 pub struct DataProfileTool;
 
@@ -988,7 +986,7 @@ impl Tool for DataProfileTool {
     }
 
     fn description(&self) -> &str {
-        "【快速理解数据结构 - 首选工具】自动识别每一列是维度还是指标：计算缺失率、去重率、数值列的[min,max,mean,sum]、字符串列的长度范围、以及前5个样本值。输出还会给出列分类总结（维度/指标/时间列分别有多少），并建议后续可用的分析工具（topn_data、contribution_data、bin_data 等）。不返回明细数据，仅做概况扫描。示例：profile_data(file_path='sales.csv')"
+        "[Quick data understanding - preferred tool] Automatically identifies each column as dimension or metric: computes missing rate, distinct rate, [min,max,mean,sum] for numeric columns, length range for string columns, and top 5 sample values. Output also includes column classification summary (dimension/metric/time column counts) and suggests follow-up analysis tools (topn_data, contribution_data, bin_data, etc.). Does not return detailed data, only a profile scan. Example: profile_data(file_path='sales.csv')"
     }
 
     fn parameters(&self) -> Value {
@@ -997,7 +995,7 @@ impl Tool for DataProfileTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 }
             },
             "required": ["file_path"]
@@ -1078,7 +1076,7 @@ impl Tool for DataProfileTool {
                     "distinct_pct": distinct_pct,
                 });
 
-                // 数值列：范围/统计
+                // Numeric columns: range/stats
                 if is_numeric(dtype) && (row_count - null_count) > 0 {
                     let series = c.as_materialized_series();
                     if let Ok(f64_series) = series.cast(&DataType::Float64)
@@ -1100,7 +1098,7 @@ impl Tool for DataProfileTool {
                     }
                 }
 
-                // 字符串列：长度信息
+                // String columns: length info
                 if matches!(dtype, DataType::String) && (row_count - null_count) > 0 {
                     let series = c.as_materialized_series();
                     if let Ok(ca) = series.str() {
@@ -1119,7 +1117,7 @@ impl Tool for DataProfileTool {
                     }
                 }
 
-                // 样本值 (top 5)
+                // Sample values (top 5)
                 let sample_count = 5.min(row_count - null_count);
                 if sample_count > 0 {
                     let mut sample_values: Vec<String> = Vec::new();
@@ -1144,20 +1142,25 @@ impl Tool for DataProfileTool {
                 columns_json.push(col_json);
             }
 
-            // 建议
+            // Suggestions
             let mut suggestions: Vec<String> = Vec::new();
             if metric_count > 0 && dim_count > 0 {
                 suggestions.push(format!(
-                    "使用 topn_data 分析维度对指标的排名（{} 个维度 x {} 个指标）",
+                    "Use topn_data to analyze dimension rankings on metrics ({} dims x {} metrics)",
                     dim_count, metric_count
                 ));
-                suggestions.push("使用 contribution_data 分析各维度的贡献占比".to_string());
+                suggestions.push(
+                    "Use contribution_data to analyze contribution ratios by dimension".to_string(),
+                );
             }
             if metric_count >= 2 {
-                suggestions.push("指标列之间可能存在相关关系，可进一步探索".to_string());
+                suggestions.push(
+                    "Metric columns may have correlations worth further exploration".to_string(),
+                );
             }
             if metric_count > 0 {
-                suggestions.push("使用 bin_data 对指标列进行分布分析".to_string());
+                suggestions
+                    .push("Use bin_data to analyze the distribution of metric columns".to_string());
             }
 
             let result = serde_json::json!({
@@ -1179,7 +1182,7 @@ impl Tool for DataProfileTool {
     }
 }
 
-// ── 新增：TopN 分析工具 ─────────────────────────────────────────────
+// ── TopN analysis tool ───────────────────────────────────────────────
 
 pub struct DataTopNTool;
 
@@ -1189,7 +1192,7 @@ impl Tool for DataTopNTool {
     }
 
     fn description(&self) -> &str {
-        "对指标列排序取 Top N。不指定分组维度时全局排序取前N名；指定分组维度（dimension_columns）后，每个维度组内取前N名。适合分析'销售额最高的10个产品'、'各地区销售额前三的品类'等问题。示例：topn_data(file_path='sales.csv', metric_column='revenue', dimension_columns='region', top_n=3)"
+        "Sort by a metric column and take Top N. Without dimension columns, returns global top N; with dimension_columns specified, returns top N within each group. Suitable for questions like 'top 10 products by sales', 'top 3 categories by revenue in each region'. Example: topn_data(file_path='sales.csv', metric_column='revenue', dimension_columns='region', top_n=3)"
     }
 
     fn parameters(&self) -> Value {
@@ -1198,23 +1201,23 @@ impl Tool for DataTopNTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "metric_column": {
                     "type": "string",
-                    "description": "排序指标列名"
+                    "description": "Metric column name for sorting"
                 },
                 "dimension_columns": {
                     "type": "string",
-                    "description": "分组维度列（可选，逗号分隔）。不指定则全局排序"
+                    "description": "Grouping dimension columns (optional, comma-separated). Global sort if not specified"
                 },
                 "top_n": {
                     "type": "integer",
-                    "description": "返回前N条（默认10）"
+                    "description": "Return top N rows (default 10)"
                 },
                 "ascending": {
                     "type": "boolean",
-                    "description": "是否升序排列（默认false，即降序）"
+                    "description": "Whether to sort ascending (default false, i.e., descending)"
                 }
             },
             "required": ["file_path", "metric_column"]
@@ -1253,19 +1256,19 @@ impl Tool for DataTopNTool {
             let df = load_dataframe(&path, format)?;
 
             let result_df = if let Some(dim_str) = dim_cols_str {
-                // 分组 TopN：每个分组内取 top_n 条记录
+                // Grouped TopN: take top_n records within each group
                 let dim_cols: Vec<&str> = dim_str.split(',').map(|s| s.trim()).collect();
                 let group_cols: Vec<Expr> = dim_cols.iter().map(|&d| col(d)).collect();
 
-                // 收集所有列名（用于 agg 阶段的 head 操作）
+                // Collect all column names (for head operation in agg phase)
                 let all_col_names: Vec<String> = df
                     .get_column_names()
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
 
-                // 按指标列排序后，group_by + agg 使用 head(N) 获取每组前N条
-                // 这是 Polars 实现组内 TopN 的正确方式
+                // After sorting by metric column, group_by + agg uses head(N) to get top N per group
+                // This is the correct way to implement within-group TopN with Polars
                 let sort_desc = !ascending;
                 let agg_exprs: Vec<Expr> = all_col_names
                     .iter()
@@ -1289,8 +1292,8 @@ impl Tool for DataTopNTool {
                     },
                 );
 
-                // 对每个组，按已排序的顺序取 TopN 行
-                // group_by + agg(all().sort_by(metric).head(n)) 确保组内取前n
+                // For each group, take TopN rows in sorted order
+                // group_by + agg(all().sort_by(metric).head(n)) ensures top n within each group
                 sorted
                     .group_by(group_cols)
                     .agg(agg_exprs)
@@ -1303,10 +1306,10 @@ impl Tool for DataTopNTool {
                     .collect()
                     .map_err(|e| ToolError::ExecutionFailed {
                         tool: TOOL_NAME.to_string(),
-                        message: format!("分组TopN执行失败: {}", e),
+                        message: format!("Grouped TopN execution failed: {}", e),
                     })?
             } else {
-                // 全局 TopN
+                // Global TopN
                 df.lazy()
                     .sort(
                         [metric_col],
@@ -1326,7 +1329,7 @@ impl Tool for DataTopNTool {
                     .collect()
                     .map_err(|e| ToolError::ExecutionFailed {
                         tool: TOOL_NAME.to_string(),
-                        message: format!("TopN排序失败: {}", e),
+                        message: format!("TopN sort failed: {}", e),
                     })?
             };
 
@@ -1347,7 +1350,7 @@ impl Tool for DataTopNTool {
     }
 }
 
-// ── 新增：贡献占比分析工具 ─────────────────────────────────────────
+// ── Contribution ratio analysis tool ─────────────────────────────────
 
 pub struct DataContributionTool;
 
@@ -1357,7 +1360,7 @@ impl Tool for DataContributionTool {
     }
 
     fn description(&self) -> &str {
-        "计算维度列各值对指标列的贡献占比（百分比）和累计占比（帕累托分析/80-20法则）。输出维度值、指标值、占比(%)、累计(%)。超过 top_n 的维度值合并为'其他'。适合回答'各地区销售额占比'、'哪些品类贡献了80%的收入？（帕累托分析）'等问题。示例：contribution_data(file_path='sales.csv', dimension_column='category', metric_column='revenue', top_n=15)"
+        "Calculate contribution ratio (percentage) and cumulative ratio (Pareto analysis / 80-20 rule) of each dimension value to the metric column. Outputs dimension value, metric value, ratio (%), cumulative (%). Dimension values beyond top_n are merged into 'Other'. Suitable for questions like 'sales ratio by region', 'which categories contribute 80% of revenue? (Pareto analysis)'. Example: contribution_data(file_path='sales.csv', dimension_column='category', metric_column='revenue', top_n=15)"
     }
 
     fn parameters(&self) -> Value {
@@ -1366,19 +1369,19 @@ impl Tool for DataContributionTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "dimension_column": {
                     "type": "string",
-                    "description": "维度列名（用于分组的列）"
+                    "description": "Dimension column name (column used for grouping)"
                 },
                 "metric_column": {
                     "type": "string",
-                    "description": "指标列名（用于求和计算的列）"
+                    "description": "Metric column name (column used for sum calculation)"
                 },
                 "top_n": {
                     "type": "integer",
-                    "description": "展示前N个维度值（默认20，其余归为\"其他\"）"
+                    "description": "Show top N dimension values (default 20, rest grouped as \"Other\")"
                 }
             },
             "required": ["file_path", "dimension_column", "metric_column"]
@@ -1432,7 +1435,7 @@ impl Tool for DataContributionTool {
                 .collect()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("分组聚合失败: {}", e),
+                    message: format!("Group aggregation failed: {}", e),
                 })?;
 
             let total: f64 = agg_df
@@ -1449,7 +1452,7 @@ impl Tool for DataContributionTool {
                     "dimension_column": dim_col,
                     "metric_column": metric_col,
                     "total": 0.0,
-                    "error": "指标总计为 0，无法计算占比",
+                    "error": "Metric total is 0, cannot calculate ratio",
                 })));
             }
 
@@ -1523,7 +1526,7 @@ impl Tool for DataContributionTool {
     }
 }
 
-// ── 新增：数值分箱工具 ─────────────────────────────────────────────
+// ── Numeric binning tool ─────────────────────────────────────────────
 
 pub struct DataBinTool;
 
@@ -1533,7 +1536,7 @@ impl Tool for DataBinTool {
     }
 
     fn description(&self) -> &str {
-        "对数值列进行分箱（等宽/等频），统计每箱的记录数和指标汇总。适合分析数据分布、生成直方图数据。"
+        "Bin numeric columns (equal-width / equal-frequency), counting records per bin and summarizing metrics. Suitable for analyzing data distribution and generating histogram data."
     }
 
     fn parameters(&self) -> Value {
@@ -1542,19 +1545,19 @@ impl Tool for DataBinTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "column": {
                     "type": "string",
-                    "description": "要分箱的数值列名"
+                    "description": "Numeric column name to bin"
                 },
                 "num_bins": {
                     "type": "integer",
-                    "description": "分箱数量（默认10）"
+                    "description": "Number of bins (default 10)"
                 },
                 "method": {
                     "type": "string",
-                    "description": "分箱方法：'equal_width'（等宽，默认）或 'equal_frequency'（等频）"
+                    "description": "Binning method: 'equal_width' (default) or 'equal_frequency'"
                 }
             },
             "required": ["file_path", "column"]
@@ -1593,7 +1596,7 @@ impl Tool for DataBinTool {
                 .column(col_name)
                 .map_err(|_| ToolError::InvalidParameter {
                     name: "column".to_string(),
-                    message: format!("列 '{}' 不存在", col_name),
+                    message: format!("Column '{}' not found", col_name),
                 })?;
 
             let series = c.as_materialized_series();
@@ -1611,7 +1614,9 @@ impl Tool for DataBinTool {
                 .collect();
 
             if values.is_empty() {
-                return Ok(ToolResult::success("该列没有有效数值数据".to_string()));
+                return Ok(ToolResult::success(
+                    "This column has no valid numeric data".to_string(),
+                ));
             }
 
             let mut sorted = values.clone();
@@ -1718,7 +1723,7 @@ impl Tool for DataBinTool {
     }
 }
 
-// ── 新增：比率/表达式计算工具 ──────────────────────────────────────
+// ── Ratio / expression computation tool ──────────────────────────────
 
 pub struct DataRatioTool;
 
@@ -1728,7 +1733,7 @@ impl Tool for DataRatioTool {
     }
 
     fn description(&self) -> &str {
-        "计算列之间的算术表达式和比率。支持 +、-、*、/ 和括号组合，可指定分组维度计算组内比率。适合计算利润率、转化率、同比/环比、占比等指标。示例：ratio_data(file_path='sales.csv', expressions='profit_margin:(revenue-cost)/revenue*100, ratio:cost/revenue')"
+        "Compute arithmetic expressions and ratios between columns. Supports +, -, *, / and parentheses, with optional grouping dimensions for within-group ratios. Suitable for computing profit margin, conversion rate, YoY/MoM, proportions, etc. Example: ratio_data(file_path='sales.csv', expressions='profit_margin:(revenue-cost)/revenue*100, ratio:cost/revenue')"
     }
 
     fn parameters(&self) -> Value {
@@ -1737,19 +1742,19 @@ impl Tool for DataRatioTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "数据文件的绝对路径"
+                    "description": "Absolute path to the data file"
                 },
                 "expressions": {
                     "type": "string",
-                    "description": "表达式定义，逗号分隔。格式：'别名:表达式'。表达式支持 +、-、*、/ 和括号，可引用列名和数字常量。示例：'margin:(revenue-cost)/revenue*100, ratio:a/b'"
+                    "description": "Expression definitions, comma-separated. Format: 'alias:expression'. Expressions support +, -, *, / and parentheses, referencing column names and numeric constants. Example: 'margin:(revenue-cost)/revenue*100, ratio:a/b'"
                 },
                 "dimension_columns": {
                     "type": "string",
-                    "description": "分组维度列名（可选，逗号分隔）。指定后会在每个分组内计算表达式"
+                    "description": "Grouping dimension column names (optional, comma-separated). When specified, expressions are computed within each group"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "返回行数限制（默认50）"
+                    "description": "Row count limit (default 50)"
                 }
             },
             "required": ["file_path", "expressions"]
@@ -1782,34 +1787,34 @@ impl Tool for DataRatioTool {
 
             let df = load_dataframe(&path, format)?;
 
-            // 收集有效的列名
+            // Collect valid column names
             let valid_columns: Vec<String> = df
                 .get_column_names()
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
 
-            // 解析表达式
+            // Parse expressions
             let parsed_exprs = parse_ratio_expressions(exprs_str, &valid_columns)?;
 
-            // 构建 Polars 表达式
+            // Build Polars expressions
             let mut polars_exprs: Vec<Expr> = Vec::new();
             for (alias, _) in &parsed_exprs {
                 let polars_expr = build_ratio_expr(exprs_str, &valid_columns, alias)?;
                 polars_exprs.push(polars_expr);
             }
 
-            // 如果有分组列，先分组再计算；否则直接 select
+            // If grouping columns exist, group first then compute; otherwise select directly
             let result_df = if let Some(dim_str) = dim_cols_str {
                 let dim_cols: Vec<&str> = dim_str.split(',').map(|s| s.trim()).collect();
 
-                // 验证所有分组列存在
+                // Validate all grouping columns exist
                 for dc in &dim_cols {
                     if !valid_columns.iter().any(|c| c == dc) {
                         return Err(ToolError::InvalidParameter {
                             name: "dimension_columns".to_string(),
                             message: format!(
-                                "分组列 '{}' 不存在。可用列: {}",
+                                "Group column '{}' not found. Available columns: {}",
                                 dc,
                                 valid_columns.join(", ")
                             ),
@@ -1841,10 +1846,10 @@ impl Tool for DataRatioTool {
                     .collect()
                     .map_err(|e| ToolError::ExecutionFailed {
                         tool: TOOL_NAME.to_string(),
-                        message: format!("分组比率计算失败: {}", e),
+                        message: format!("Grouped ratio calculation failed: {}", e),
                     })?
             } else {
-                // 无分组：直接 select 表达式列 + 所有原始列的前几行作为上下文
+                // No grouping: directly select expression columns + first rows of all original columns as context
                 let mut all_exprs: Vec<Expr> = valid_columns.iter().map(col).collect();
                 all_exprs.extend(polars_exprs);
 
@@ -1857,7 +1862,7 @@ impl Tool for DataRatioTool {
                     .collect()
                     .map_err(|e| ToolError::ExecutionFailed {
                         tool: TOOL_NAME.to_string(),
-                        message: format!("表达式计算失败: {}", e),
+                        message: format!("Expression evaluation failed: {}", e),
                     })?
             };
 
@@ -1874,8 +1879,8 @@ impl Tool for DataRatioTool {
     }
 }
 
-/// 解析 ratio 表达式字符串，返回 (alias, expression) 列表
-/// 格式: "alias1:expr1, alias2:expr2"
+/// Parse ratio expression string, returns (alias, expression) list
+/// Format: "alias1:expr1, alias2:expr2"
 fn parse_ratio_expressions(
     expr_str: &str,
     valid_columns: &[String],
@@ -1916,7 +1921,7 @@ fn parse_ratio_expressions(
         return Err(ToolError::InvalidParameter {
             name: "expressions".to_string(),
             message: format!(
-                "表达式格式错误: '{}'。正确格式: 'alias:expression'，例如 'profit_margin:(revenue-cost)/revenue*100'",
+                "Expression format error: '{}'. Correct format: 'alias:expression', e.g. 'profit_margin:(revenue-cost)/revenue*100'",
                 expr_str
             ),
         }
@@ -1926,11 +1931,14 @@ fn parse_ratio_expressions(
     Ok(result)
 }
 
-/// 解析单个 "alias:expression" 对
+/// Parse a single "alias:expression" pair
 fn parse_single_expression(spec: &str, _valid_columns: &[String]) -> Result<(String, String)> {
     let colon_pos = spec.find(':').ok_or_else(|| ToolError::InvalidParameter {
         name: "expressions".to_string(),
-        message: format!("表达式 '{}' 缺少冒号分隔符。格式: '别名:表达式'", spec),
+        message: format!(
+            "Expression '{}' is missing colon separator. Format: 'alias:expression'",
+            spec
+        ),
     })?;
 
     let alias = spec[..colon_pos].trim().to_string();
@@ -1939,16 +1947,16 @@ fn parse_single_expression(spec: &str, _valid_columns: &[String]) -> Result<(Str
     if alias.is_empty() || expr.is_empty() {
         return Err(ToolError::InvalidParameter {
             name: "expressions".to_string(),
-            message: format!("表达式 '{}' 的别名或表达式为空", spec),
+            message: format!("Expression '{}' has empty alias or expression", spec),
         }
         .into());
     }
 
-    // 别名不能是数字
+    // Alias cannot be a number
     if alias.parse::<f64>().is_ok() {
         return Err(ToolError::InvalidParameter {
             name: "expressions".to_string(),
-            message: format!("别名 '{}' 不能是纯数字", alias),
+            message: format!("Alias '{}' cannot be a numeric value", alias),
         }
         .into());
     }
@@ -1956,7 +1964,7 @@ fn parse_single_expression(spec: &str, _valid_columns: &[String]) -> Result<(Str
     Ok((alias, expr))
 }
 
-/// 根据表达式和别名构建 Polars Expr（针对单个已解析的表达式）
+/// Build a Polars Expr from expression and alias (for a single parsed expression)
 fn build_ratio_expr(exprs_str: &str, valid_columns: &[String], target_alias: &str) -> Result<Expr> {
     let parsed = parse_ratio_expressions(exprs_str, valid_columns)?;
     for (alias, expr_text) in &parsed {
@@ -1966,12 +1974,12 @@ fn build_ratio_expr(exprs_str: &str, valid_columns: &[String], target_alias: &st
     }
     Err(ToolError::InvalidParameter {
         name: "expressions".to_string(),
-        message: format!("找不到别名 '{}' 对应的表达式", target_alias),
+        message: format!("Cannot find expression for alias '{}'", target_alias),
     }
     .into())
 }
 
-/// 将单个算术表达式编译为 Polars Expr
+/// Compile a single arithmetic expression into a Polars Expr
 fn build_single_polars_expr(
     expr_text: &str,
     valid_columns: &[String],
@@ -1980,11 +1988,11 @@ fn build_single_polars_expr(
     let tokens = tokenize_expr(expr_text, valid_columns)?;
     let (_, expr) = parse_expr_tokens(&tokens, 0, valid_columns)?;
 
-    // 尝试用 cast 确保是 Float64 类型
+    // Try casting to ensure Float64 type
     Ok(expr.alias(alias))
 }
 
-/// Token 类型
+/// Token type
 #[derive(Debug, Clone, PartialEq)]
 enum ExprToken {
     ColRef(String),
@@ -1997,7 +2005,7 @@ enum ExprToken {
     RParen,
 }
 
-/// 将表达式字符串拆分为 token
+/// Tokenize an expression string
 fn tokenize_expr(expr_text: &str, valid_columns: &[String]) -> Result<Vec<ExprToken>> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = expr_text.chars().collect();
@@ -2007,7 +2015,7 @@ fn tokenize_expr(expr_text: &str, valid_columns: &[String]) -> Result<Vec<ExprTo
     while i < len {
         let ch = chars[i];
 
-        // 跳过空白
+        // Skip whitespace
         if ch.is_whitespace() {
             i += 1;
             continue;
@@ -2039,7 +2047,7 @@ fn tokenize_expr(expr_text: &str, valid_columns: &[String]) -> Result<Vec<ExprTo
                 i += 1;
             }
             _ if ch.is_ascii_digit() || ch == '.' => {
-                // 数字字面量
+                // Number literal
                 let start = i;
                 while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
                     i += 1;
@@ -2047,24 +2055,24 @@ fn tokenize_expr(expr_text: &str, valid_columns: &[String]) -> Result<Vec<ExprTo
                 let num_str: String = chars[start..i].iter().collect();
                 let num: f64 = num_str.parse().map_err(|_| ToolError::InvalidParameter {
                     name: "expressions".to_string(),
-                    message: format!("无法解析数字: '{}'", num_str),
+                    message: format!("Cannot parse number: '{}'", num_str),
                 })?;
                 tokens.push(ExprToken::Number(num));
             }
             _ if ch.is_alphabetic() || ch == '_' => {
-                // 标识符（列名）
+                // Identifier (column name)
                 let start = i;
                 while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
 
-                // 检查是否是有效列名
+                // Check if it's a valid column name
                 if !valid_columns.iter().any(|c| c == &ident) {
                     return Err(ToolError::InvalidParameter {
                         name: "expressions".to_string(),
                         message: format!(
-                            "表达式中的列 '{}' 不存在。可用列: {}",
+                            "Column '{}' in expression does not exist. Available columns: {}",
                             ident,
                             valid_columns.join(", ")
                         ),
@@ -2077,7 +2085,7 @@ fn tokenize_expr(expr_text: &str, valid_columns: &[String]) -> Result<Vec<ExprTo
             _ => {
                 return Err(ToolError::InvalidParameter {
                     name: "expressions".to_string(),
-                    message: format!("表达式中的无效字符: '{}'", ch),
+                    message: format!("Invalid character in expression: '{}'", ch),
                 }
                 .into());
             }
@@ -2087,8 +2095,8 @@ fn tokenize_expr(expr_text: &str, valid_columns: &[String]) -> Result<Vec<ExprTo
     Ok(tokens)
 }
 
-/// 递归下降解析表达式 token 流
-/// 文法: expr = term (('+' | '-') term)*
+/// Recursive descent parser for expression token stream
+/// Grammar: expr = term (('+' | '-') term)*
 ///       term = factor (('*' | '/') factor)*
 ///       factor = NUMBER | ColRef | '(' expr ')'
 fn parse_expr_tokens(
@@ -2118,7 +2126,7 @@ fn parse_expr_tokens(
     Ok((p, left))
 }
 
-/// 解析 term: factor (('*' | '/') factor)*
+/// Parse term: factor (('*' | '/') factor)*
 fn parse_term(tokens: &[ExprToken], pos: usize, valid_columns: &[String]) -> Result<(usize, Expr)> {
     let (pos, mut left) = parse_factor(tokens, pos, valid_columns)?;
 
@@ -2142,7 +2150,7 @@ fn parse_term(tokens: &[ExprToken], pos: usize, valid_columns: &[String]) -> Res
     Ok((p, left))
 }
 
-/// 解析 factor: NUMBER | ColRef | '(' expr ')'
+/// Parse factor: NUMBER | ColRef | '(' expr ')'
 fn parse_factor(
     tokens: &[ExprToken],
     pos: usize,
@@ -2151,7 +2159,7 @@ fn parse_factor(
     if pos >= tokens.len() {
         return Err(ToolError::InvalidParameter {
             name: "expressions".to_string(),
-            message: "表达式不完整：缺少操作数".to_string(),
+            message: "Incomplete expression: missing operand".to_string(),
         }
         .into());
     }
@@ -2166,22 +2174,22 @@ fn parse_factor(
             } else {
                 Err(ToolError::InvalidParameter {
                     name: "expressions".to_string(),
-                    message: "表达式缺少右括号 ')'".to_string(),
+                    message: "Expression is missing closing parenthesis ')'".to_string(),
                 }
                 .into())
             }
         }
         _ => Err(ToolError::InvalidParameter {
             name: "expressions".to_string(),
-            message: "表达式意外 token: 期望数字、列名或 '(' 但得到了操作符".to_string(),
+            message: "Unexpected token in expression: expected number, column name, or '(' but got operator".to_string(),
         }
         .into()),
     }
 }
 
-// ── 辅助函数 ──────────────────────────────────────────────────────────
+// ── Helper functions ──────────────────────────────────────────────────
 
-/// 格式化 Polars 值
+/// Format a Polars value
 fn format_value(value: &AnyValue) -> String {
     match value {
         AnyValue::Null => "-".to_string(),
@@ -2202,7 +2210,7 @@ fn format_value(value: &AnyValue) -> String {
     }
 }
 
-/// 将 DataFrame 转换为 JSON 数组
+/// Convert DataFrame to a JSON array
 fn df_to_json(df: &DataFrame) -> Result<Value> {
     let columns: Vec<String> = df
         .get_column_names()
@@ -2228,7 +2236,7 @@ fn df_to_json(df: &DataFrame) -> Result<Value> {
     Ok(Value::Array(records))
 }
 
-/// 将 AnyValue 转换为 JSON Value
+/// Convert AnyValue to JSON Value
 fn any_value_to_json(value: &AnyValue) -> Value {
     match value {
         AnyValue::Null => Value::Null,
@@ -2253,9 +2261,9 @@ fn any_value_to_json(value: &AnyValue) -> Value {
     }
 }
 
-/// 解析过滤表达式（扩展版：支持 AND/OR、contains、starts_with、ends_with、in）
+/// Parse filter expression (extended: supports AND/OR, contains, starts_with, ends_with, in)
 fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
-    // 先尝试拆分 AND / OR
+    // Try splitting by AND / OR first
     for separator in [" AND ", " and ", " OR ", " or "] {
         let parts: Vec<&str> = if let Some(pos) = expr_str.find(separator) {
             let left = &expr_str[..pos];
@@ -2278,7 +2286,7 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
 
     let s = expr_str.trim();
 
-    // 数值比较
+    // Numeric comparison
     if let Ok(re) = regex::Regex::new(r"^(\w+)\s*>=\s*([\d.]+)$")
         && let Some(cap) = re.captures(s)
     {
@@ -2322,7 +2330,7 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
         return Ok(col(col_name).lt(lit(val)));
     }
 
-    // 字符串比较
+    // String comparison
     if let Ok(re) = regex::Regex::new(r#"^(\w+)\s*==\s*"([^"]+)"$"#)
         && let Some(cap) = re.captures(s)
     {
@@ -2338,7 +2346,7 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
         return Ok(col(col_name).neq(lit(val)));
     }
 
-    // 字符串包含/开头/结尾匹配
+    // String contains/starts_with/ends_with matching
     if let Ok(re) = regex::Regex::new(r#"^(\w+)\s+contains\s+"([^"]+)"$"#)
         && let Some(cap) = re.captures(s)
     {
@@ -2361,7 +2369,7 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
         return Ok(col(col_name).str().ends_with(lit(val)));
     }
 
-    // IN 表达式
+    // IN expression
     if let Ok(re) = regex::Regex::new(r#"(?s)^(\w+)\s+in\s*\((.+)\)$"#)
         && let Some(cap) = re.captures(s)
     {
@@ -2373,21 +2381,21 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
             .collect();
         if !vals.is_empty() {
             let series = Series::new(PlSmallStr::EMPTY, vals);
-            return Ok(col(col_name).is_in(lit(series)));
+            return Ok(col(col_name).is_in(lit(series), false));
         }
     }
 
     Err(ToolError::InvalidParameter {
         name: "filter".to_string(),
         message: format!(
-            "无法解析过滤表达式: '{}'。支持格式: col > 10, col == \"val\", col contains \"sub\", col starts_with \"pre\", col in (\"a\",\"b\"), A > 10 AND B < 5",
+            "Cannot parse filter expression: '{}'. Supported formats: col > 10, col == \"val\", col contains \"sub\", col starts_with \"pre\", col in (\"a\",\"b\"), A > 10 AND B < 5",
             expr_str
         ),
     }
     .into())
 }
 
-/// 解析聚合表达式（扩展版：支持更多操作）
+/// Parse aggregation expression (extended: supports more operations)
 fn parse_aggregations(agg_str: &str) -> Result<Vec<Expr>> {
     let mut exprs = Vec::new();
 
@@ -2396,7 +2404,10 @@ fn parse_aggregations(agg_str: &str) -> Result<Vec<Expr>> {
         if parts.len() != 2 {
             return Err(ToolError::InvalidParameter {
                 name: "aggregations".to_string(),
-                message: format!("聚合表达式格式错误: '{}'，应为 '列名:操作'", part),
+                message: format!(
+                    "Aggregation expression format error: '{}', expected 'column:operation'",
+                    part
+                ),
             }
             .into());
         }
@@ -2431,7 +2442,7 @@ fn parse_aggregations(agg_str: &str) -> Result<Vec<Expr>> {
             "first" => col(col_name).first().alias(format!("{}_first", col_name)),
             "last" => col(col_name).last().alias(format!("{}_last", col_name)),
             _ => {
-                // 支持 percentile:N 自定义百分位
+                // Support percentile:N for custom percentile
                 if op.starts_with("percentile:") || op.starts_with("pct:") {
                     let pct_str = op
                         .strip_prefix("percentile:")
@@ -2439,12 +2450,12 @@ fn parse_aggregations(agg_str: &str) -> Result<Vec<Expr>> {
                         .unwrap_or("50");
                     let pct: f64 = pct_str.parse().map_err(|_| ToolError::InvalidParameter {
                         name: "aggregations".to_string(),
-                        message: format!("百分位数值格式错误: '{}'", pct_str),
+                        message: format!("Invalid percentile format: '{}'", pct_str),
                     })?;
                     if !(0.0..=100.0).contains(&pct) {
                         return Err(ToolError::InvalidParameter {
                             name: "aggregations".to_string(),
-                            message: format!("百分位数必须在 0-100 之间: {}", pct),
+                            message: format!("Percentile must be between 0 and 100: {}", pct),
                         }
                         .into());
                     }
@@ -2456,7 +2467,7 @@ fn parse_aggregations(agg_str: &str) -> Result<Vec<Expr>> {
                     return Err(ToolError::InvalidParameter {
                         name: "aggregations".to_string(),
                         message: format!(
-                            "不支持的聚合操作: '{}'。支持: sum, mean/avg, min, max, count, count_distinct, variance, stddev, median, p25, p75, p90, p95, percentile:N, first, last",
+                            "Unsupported aggregation operation: '{}'. Supported: sum, mean/avg, min, max, count, count_distinct, variance, stddev, median, p25, p75, p90, p95, percentile:N, first, last",
                             op
                         ),
                     }

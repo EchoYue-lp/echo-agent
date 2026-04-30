@@ -1,94 +1,56 @@
-//! Tools façade
+//! Tool system — define and register tools for agents to call.
 //!
-//! 此模块由两部分组成：
-//! - `echo_execution::tools` 提供共享的 `ToolManager` 与核心工具抽象
-//! - 根 crate 下的 `builtin` / `files` / `shell` / `web` / `media` 提供产品层工具
+//! Tools are the primary way agents interact with the world: calling APIs, reading
+//! files, executing code, searching the web, and more.
 //!
-//! 如需直接依赖拆分后的 crate，可使用 [`crate::workspace::execution::tools`]。
+//! # Defining a Tool — The `#[tool]` Macro
 //!
-//! # 核心类型
+//! The recommended way to define a tool is with the [`#[tool]`](macro@crate::tool) macro:
 //!
-//! - [`Tool`]: 工具接口 trait，所有工具必须实现
-//! - [`ToolManager`][]: 工具管理器，负责注册和执行
-//! - [`ToolResult`][]: 工具执行结果
-//! - [`ToolExecutionConfig`][]: 执行配置（超时、重试、并发）
+//! ```rust,no_run
+//! use echo_agent::{tool, prelude::*};
 //!
-//! # 快速开始
-//!
-//! ```rust
-//! use echo_agent::tools::ToolManager;
-//!
-//! // 创建工具管理器
-//! let manager = ToolManager::new();
-//!
-//! // 列出已注册工具
-//! println!("已注册工具: {:?}", manager.list_tools());
+//! #[tool(name = "add", description = "Add two numbers")]
+//! async fn add(a: f64, b: f64) -> Result<ToolResult> {
+//!     Ok(ToolResult::success(format!("{}", a + b)))
+//! }
 //! ```
 //!
-//! # 自定义工具
+//! This generates `AddParams`, `AddTool`, and a full `Tool` trait implementation
+//! with automatic JSON Schema generation.
 //!
-//! ```rust
+//! # Registering Tools
+//!
+//! ```rust,ignore
 //! use echo_agent::prelude::*;
-//! use futures::future::BoxFuture;
 //!
-//! /// 简单的计算器工具
-//! struct Calculator;
-//!
-//! impl Tool for Calculator {
-//!     fn name(&self) -> &str {
-//!         "calculator"
-//!     }
-//!
-//!     fn description(&self) -> &str {
-//!         "执行简单的数学计算"
-//!     }
-//!
-//!     fn parameters(&self) -> serde_json::Value {
-//!         serde_json::json!({
-//!             "type": "object",
-//!             "properties": {
-//!                 "expression": {
-//!                     "type": "string",
-//!                     "description": "数学表达式，如 '1+2*3'"
-//!                 }
-//!             },
-//!             "required": ["expression"]
-//!         })
-//!     }
-//!
-//!     fn execute(&self, params: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
-//!         Box::pin(async move {
-//!             let expr = params.get("expression")
-//!                 .and_then(|v| v.as_str())
-//!                 .unwrap_or("");
-//!
-//!             // 简化示例：只处理加法
-//!             let result = if expr.contains('+') {
-//!                 let parts: Vec<&str> = expr.split('+').collect();
-//!                 if parts.len() == 2 {
-//!                     let a: i64 = parts[0].trim().parse().unwrap_or(0);
-//!                     let b: i64 = parts[1].trim().parse().unwrap_or(0);
-//!                     Some(a + b)
-//!                 } else {
-//!                     None
-//!                 }
-//!             } else {
-//!                 None
-//!             };
-//!
-//!             match result {
-//!                 Some(n) => Ok(ToolResult::success(format!("计算结果: {}", n))),
-//!                 None => Ok(ToolResult::error("不支持的表达式")),
-//!             }
-//!         })
-//!     }
-//! }
-//!
-//! # fn main() {
-//! let tool = Calculator;
-//! assert_eq!(tool.name(), "calculator");
+//! # fn main() -> echo_agent::error::Result<()> {
+//! let agent = ReactAgentBuilder::new()
+//!     .model("qwen3-max")
+//!     .register_tool(Arc::new(AddTool))
+//!     .build()?;
+//! # Ok(())
 //! # }
 //! ```
+//!
+//! # Built-in Tools
+//!
+//! | Module | Tools | Feature |
+//! |--------|-------|---------|
+//! | [`builtin`] | `ThinkTool`, `FinalAnswerTool`, memory tools, data tools, git, RAG, chart | various |
+//! | [`web`] | `WebSearchTool`, `WebFetchTool` | `web` |
+//! | [`media`] | `ImageFetchTool`, PDF/Excel/Word tools | `media` |
+//! | [`files`] | File read/write/list/delete tools | default |
+//! | [`shell`] | Shell command execution (sandboxed) | default |
+//!
+//! # Key Types
+//!
+//! | Type | Description |
+//! |------|-------------|
+//! | [`Tool`] | Trait — implement `name()`, `description()`, `parameters()`, `execute()` |
+//! | [`ToolManager`] | Registry — register, list, execute tools with concurrency control |
+//! | [`ToolResult`] | `ToolResult::success(...)` / `ToolResult::error(...)` |
+//! | [`ToolExecutionConfig`] | Timeout, retry count, max concurrency per tool |
 
 /// Built-in tools (security, think, etc.)
 pub mod builtin;

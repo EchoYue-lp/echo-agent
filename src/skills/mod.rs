@@ -1,4 +1,4 @@
-//! Skill System — agentskills.io aligned（核心 re-export from echo_skills crate + builtin skills）
+//! Skill System — agentskills.io aligned (core re-export from echo_execution::skills + builtin skills)
 //!
 //! Two kinds of skills:
 //!
@@ -11,6 +11,16 @@
 
 /// Built-in skills provided by the Echo Agent framework.
 pub mod builtin;
+
+/// File-based external skill loading (re-export from echo_execution).
+pub mod external {
+    pub use echo_execution::skills::external::*;
+}
+
+/// Skill hook system (re-export from echo_execution).
+pub mod hooks {
+    pub use echo_execution::skills::hooks::*;
+}
 
 // Re-export all types from echo_execution::skills
 pub use echo_execution::skills::*;

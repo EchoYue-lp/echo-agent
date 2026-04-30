@@ -1,14 +1,14 @@
-//! Web 搜索工具
+//! Web search tool
 //!
-//! 提供 [`WebSearchTool`]，通过 [`SearchProvider`] 抽象支持多种搜索引擎。
-//! 默认使用 [`DuckDuckGoProvider`]（免费，无需 API Key）。
+//! Provides [`WebSearchTool`] with support for multiple search engines via [`SearchProvider`].
+//! Defaults to [`DuckDuckGoProvider`] (free, no API key required).
 //!
-//! # 用法
+//! # Usage
 //!
 //! ```rust,no_run
 //! use echo_agent::tools::web::WebSearchTool;
 //!
-//! // 使用 DuckDuckGo（免费兜底）
+//! // Use DuckDuckGo (free fallback)
 //! let tool = WebSearchTool::with_duckduckgo();
 //! ```
 
@@ -24,17 +24,17 @@ use serde_json::Value;
 const DEFAULT_MAX_RESULTS: usize = 5;
 const MAX_ALLOWED_RESULTS: usize = 10;
 
-/// Web 搜索工具
+/// Web search tool
 ///
-/// 支持通过不同搜索引擎 Provider 进行 Web 搜索。
-/// 内置 DuckDuckGo 作为免费兜底方案。
+/// Supports web search through different search engine Providers.
+/// Built-in DuckDuckGo as the free fallback option.
 pub struct WebSearchTool {
     provider: Box<dyn SearchProvider>,
     default_max_results: usize,
 }
 
 impl WebSearchTool {
-    /// 使用自定义 Provider 创建
+    /// Create with a custom Provider
     pub fn new(provider: Box<dyn SearchProvider>) -> Self {
         Self {
             provider,
@@ -42,49 +42,49 @@ impl WebSearchTool {
         }
     }
 
-    /// 使用 DuckDuckGo（免费兜底）创建
+    /// Create with DuckDuckGo (free fallback)
     pub fn with_duckduckgo() -> Self {
         Self::new(Box::new(DuckDuckGoProvider::new()))
     }
 
-    /// 使用 Brave Search（需 API Key）创建
+    /// Create with Brave Search (requires API key)
     pub fn with_brave(api_key: impl Into<String>) -> Self {
         Self::new(Box::new(BraveSearchProvider::new(api_key)))
     }
 
-    /// 使用 Tavily（需 API Key，AI 优化搜索）创建
+    /// Create with Tavily (requires API key, AI-optimized search)
     pub fn with_tavily(api_key: impl Into<String>) -> Self {
         Self::new(Box::new(TavilyProvider::new(api_key)))
     }
 
-    /// 自动选择最佳可用 Provider 创建
+    /// Auto-select the best available Provider
     ///
-    /// 优先级：Tavily > Brave > DuckDuckGo
+    /// Priority: Tavily > Brave > DuckDuckGo
     ///
-    /// 从环境变量读取 API Key：
-    /// - `TAVILY_API_KEY` → Tavily（AI 优化，最高质量）
-    /// - `BRAVE_SEARCH_API_KEY` → Brave Search（高质量）
-    /// - 无 Key → DuckDuckGo（免费兜底）
+    /// Reads API keys from environment variables:
+    /// - `TAVILY_API_KEY` → Tavily (AI-optimized, highest quality)
+    /// - `BRAVE_SEARCH_API_KEY` → Brave Search (high quality)
+    /// - No key → DuckDuckGo (free fallback)
     pub fn auto() -> Self {
         if let Some(provider) = TavilyProvider::from_env() {
-            tracing::info!("WebSearch: 自动选择 Tavily Provider");
+            tracing::info!("WebSearch: auto-selected Tavily Provider");
             return Self::new(Box::new(provider));
         }
         if let Some(provider) = BraveSearchProvider::from_env() {
-            tracing::info!("WebSearch: 自动选择 Brave Provider");
+            tracing::info!("WebSearch: auto-selected Brave Provider");
             return Self::new(Box::new(provider));
         }
-        tracing::info!("WebSearch: 无 API Key，使用 DuckDuckGo Provider");
+        tracing::info!("WebSearch: no API key, falling back to DuckDuckGo Provider");
         Self::with_duckduckgo()
     }
 
-    /// 设置默认最大结果数
+    /// Set the default maximum number of results
     pub fn with_max_results(mut self, n: usize) -> Self {
         self.default_max_results = n.clamp(1, MAX_ALLOWED_RESULTS);
         self
     }
 
-    /// 获取当前 Provider 名称
+    /// Get the current Provider name
     pub fn provider_name(&self) -> &str {
         self.provider.name()
     }
@@ -96,8 +96,8 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "在互联网上搜索信息。返回搜索结果的标题、链接和摘要。\
-         参数：query - 搜索关键词（必填），max_results - 最大返回结果数（可选，默认5，最大10）"
+        "Search for information on the internet. Returns search result titles, links, and snippets. \
+         Parameters: query - search keywords (required), max_results - max results returned (optional, default 5, max 10)"
     }
 
     fn parameters(&self) -> Value {
@@ -106,11 +106,11 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "搜索关键词"
+                    "description": "Search keywords"
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": format!("最大返回结果数（默认{}，最大{}）", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
+                    "description": format!("Maximum number of results (default {}, max {})", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
                 }
             },
             "required": ["query"]
@@ -125,7 +125,7 @@ impl Tool for WebSearchTool {
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
             if query.trim().is_empty() {
-                return Ok(ToolResult::error("搜索关键词不能为空"));
+                return Ok(ToolResult::error("Search query cannot be empty"));
             }
 
             let max_results = parameters
@@ -147,7 +147,7 @@ impl Tool for WebSearchTool {
                     serde_json::to_value(&results).unwrap_or_default(),
                 )),
                 Err(e) => Ok(ToolResult::error(format!(
-                    "搜索失败 (provider: {}): {}",
+                    "Search failed (provider: {}): {}",
                     self.provider.name(),
                     e
                 ))),

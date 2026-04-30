@@ -1,4 +1,4 @@
-//! Agent 配置
+//! Agent configuration
 
 use crate::agent::AgentCallback;
 use crate::llm::ResponseFormat;
@@ -6,103 +6,104 @@ use crate::tools::ToolExecutionConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Agent 角色枚举，决定其在多 Agent 系统中的职责范围。
+/// Agent role enum, determining its responsibility scope in a multi-agent system.
 ///
-/// # 当前用途
+/// # Current usage
 ///
-/// - `Orchestrator`：在 `TaskExecutor::build_execute_fn`（`react/planning.rs`）中使用。
-///   编排者会优先将任务分派给已注册的 SubAgent 执行，而非直接调用 LLM。
-///   适用于多 Agent 协作场景中的"领导者"角色。
+/// - `Orchestrator`: Used in `TaskExecutor::build_execute_fn` (`react/planning.rs`).
+///   The orchestrator prioritizes dispatching tasks to registered SubAgents
+///   rather than calling the LLM directly.
+///   Suitable for the "leader" role in multi-agent collaboration scenarios.
 ///
-/// - `Worker`（默认）：直接通过 LLM 执行任务，不尝试分派给 SubAgent。
-///   适用于独立执行具体任务的 Agent。
+/// - `Worker` (default): Executes tasks directly via LLM without dispatching to SubAgents.
+///   Suitable for agents that independently perform specific tasks.
 ///
-/// # 注意
+/// # Note
 ///
-/// 该角色字段目前**仅**在 TaskExecutor 的执行逻辑中影响行为。
-/// 在其他模块（ReactAgent、PlanExecute 等）中不产生额外效果。
+/// This role field currently **only** affects behavior in the TaskExecutor's execution logic.
+/// It has no additional effect in other modules (ReactAgent, PlanExecute, etc.).
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum AgentRole {
-    /// 编排者：负责任务规划、分配和协调子 agent，不持有具体业务工具。
-    /// 在 TaskExecutor 中会优先分派给 SubAgent。
+    /// Orchestrator: responsible for task planning, allocation, and coordinating sub-agents; does not hold business tools.
+    /// Prioritizes dispatching to SubAgents in TaskExecutor.
     Orchestrator,
-    /// 执行者（默认）：专注于具体任务执行，只携带业务工具，
-    /// 不持有任务管理/子 agent 调度能力。直接通过 LLM 执行任务。
+    /// Worker (default): focuses on specific task execution, only carries business tools,
+    /// does not hold task management/sub-agent scheduling capabilities. Executes tasks directly via LLM.
     #[default]
     Worker,
 }
 
-/// Agent 运行时配置
+/// Agent runtime configuration
 ///
-/// 通过构建器链式调用设置各项参数，再传入 [`ReactAgent::new`]。
+/// Configure parameters via builder chain calls, then pass to `ReactAgent::new`.
 pub struct AgentConfig {
     pub(crate) model_name: String,
     pub(crate) system_prompt: String,
     pub(crate) agent_name: String,
-    /// 最大迭代轮次，防止死循环
+    /// Maximum iteration rounds, prevents infinite loops
     pub(crate) max_iterations: usize,
-    /// 工具白名单（空 = 不限制，可调用所有已注册工具）
+    /// Tool allowlist (empty = no restriction, all registered tools can be called)
     pub(crate) allowed_tools: Vec<String>,
     pub(crate) role: AgentRole,
-    /// 是否允许注册并调用业务工具（如数学、天气等）
+    /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
     pub(crate) enable_tool: bool,
-    /// 是否启用任务规划能力（plan/create_task/update_task 工具）
+    /// Whether to enable task planning capability (plan/create_task/update_task tools)
     pub(crate) enable_task: bool,
-    /// 是否启用 human-in-loop 工具
+    /// Whether to enable human-in-loop tool
     pub(crate) enable_human_in_loop: bool,
-    /// 是否启用 subagent 调度工具（agent_tool）
+    /// Whether to enable subagent dispatch tool (agent_tool)
     pub(crate) enable_subagent: bool,
-    /// 上下文 token 上限，超过时自动触发压缩（`usize::MAX` 表示不限制）
+    /// Context token limit; auto-triggers compression when exceeded (`usize::MAX` means no limit)
     pub(crate) token_limit: usize,
     pub(crate) callbacks: Vec<Arc<dyn AgentCallback>>,
-    /// LLM 调用失败后最大重试次数（0 = 不重试，默认 3）
+    /// Maximum retry count after LLM call failure (0 = no retry, default 3)
     pub(crate) llm_max_retries: usize,
-    /// LLM 重试初始等待（毫秒），指数退避翻倍（默认 500）
+    /// LLM retry initial delay (ms), doubles with exponential backoff (default 500)
     pub(crate) llm_retry_delay_ms: u64,
-    /// 工具执行失败时将错误信息回传给 LLM，而非直接让 Agent 失败（默认 true）
+    /// On tool execution failure, feed the error back to the LLM instead of failing the Agent directly (default true)
     pub(crate) tool_error_feedback: bool,
-    /// 启用思维链（CoT）系统提示注入（默认 true）。
+    /// Enable chain-of-thought (CoT) system prompt injection (default true).
     pub(crate) enable_cot: bool,
-    /// 工具执行配置：超时、重试策略、并行并发度
+    /// Tool execution config: timeout, retry strategy, parallel concurrency
     pub(crate) tool_execution: ToolExecutionConfig,
-    /// 是否启用长期记忆 Store（remember/recall/forget 工具 + 上下文自动注入）
+    /// Whether to enable long-term memory Store (remember/recall/forget tools + automatic context injection)
     pub(crate) enable_memory: bool,
-    /// 长期记忆 Store 文件路径（默认 `~/.echo-agent/store.json`）
+    /// Long-term memory Store file path (default `~/.echo-agent/store.json`)
     pub(crate) memory_path: String,
-    /// 会话标识，用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文。
+    /// Session identifier, used by Checkpointer to restore historical context of the same conversation across process restarts.
     pub(crate) session_id: Option<String>,
-    /// 对话标识，用于 ConversationStore 持久化 transcript/history 投影。
+    /// Conversation identifier, used by ConversationStore to persist transcript/history projections.
     pub(crate) conversation_id: Option<String>,
-    /// Checkpointer 文件路径（默认 `~/.echo-agent/checkpoints.json`）
+    /// Checkpointer file path (default `~/.echo-agent/checkpoints.json`)
     pub(crate) checkpointer_path: String,
-    /// 结构化输出格式（None = 默认文本）
+    /// Structured output format (None = default text)
     pub(crate) response_format: Option<ResponseFormat>,
-    /// 单次工具输出的最大 token 数（None = 不限制）。
-    /// 超限时自动截断并在末尾追加 `[输出已截断，共 N tokens]` 提示。
+    /// Maximum token count for a single tool output (None = no limit).
+    /// Automatically truncated when exceeded, with a `[Output truncated, N tokens total]` hint appended.
     pub(crate) max_tool_output_tokens: Option<usize>,
-    /// 当可用 token 余量低于此比例时，在 think() 前主动触发压缩。
-    /// 取值 0.0–1.0，默认 0.2（即剩余不到 20% 时触发）。
+    /// When available token ratio falls below this threshold, proactively trigger compression before think().
+    /// Value range 0.0–1.0, default 0.2 (i.e., triggers when less than 20% remains).
     pub(crate) compress_threshold_ratio: f64,
-    /// LLM 温度参数（0.0 ～ 2.0，None 表示使用模型默认值）
+    /// LLM temperature parameter (0.0–2.0, None means use model default)
     pub(crate) temperature: Option<f32>,
-    /// 最大生成 token 数（None 表示使用模型默认值）
+    /// Maximum generation token count (None means use model default)
     pub(crate) max_tokens: Option<u32>,
-    /// 是否自动加载项目规则文件（`.echo-agent/AGENT.md`），默认 true
+    /// Whether to automatically load project rules file (`.echo-agent/AGENT.md`), default true
     pub(crate) auto_project_rules: bool,
-    /// 工作目录（用于搜索项目规则文件），None 表示使用当前目录
+    /// Working directory (for searching project rules files), None means use current directory
     pub(crate) working_dir: Option<PathBuf>,
 }
 
 impl AgentConfig {
-    /// 创建新的 Agent 配置
+    /// Create a new Agent configuration
     ///
-    /// # 参数
-    /// * `model_name` - 使用的 LLM 模型名称（对应配置中的模型标识）
-    /// * `agent_name` - Agent 的名称，用于标识和日志输出
-    /// * `system_prompt` - 系统提示词，定义 Agent 的角色和能力
+    /// # Parameters
+    /// * `model_name` - LLM model name to use (corresponds to model identifier in config)
+    /// * `agent_name` - Agent name, used for identification and logging
+    /// * `system_prompt` - System prompt, defines the Agent's role and capabilities
     ///
-    /// # 返回值
-    /// 返回默认配置的 AgentConfig 实例，后续可通过链式调用进一步配置
+    /// # Returns
+    /// Returns a default AgentConfig instance; further configuration via chain calls
     pub fn new(model_name: &str, agent_name: &str, system_prompt: &str) -> Self {
         Self {
             model_name: model_name.to_string(),
@@ -137,11 +138,11 @@ impl AgentConfig {
         }
     }
 
-    // ── 预设配置（易用性优化）──────────────────────────────────────────────────────
+    // ── Preset Configurations (usability optimizations) ───────────────────────────────
 
-    /// 创建最小配置的 Agent（无工具、无记忆）
+    /// Create a minimal Agent (no tools, no memory)
     ///
-    /// 适用于简单的对话场景。
+    /// Suitable for simple conversation scenarios.
     pub fn minimal(model_name: &str, system_prompt: &str) -> Self {
         Self::new(model_name, "assistant", system_prompt)
             .enable_tool(false)
@@ -149,18 +150,18 @@ impl AgentConfig {
             .enable_cot(false)
     }
 
-    /// 创建标准配置的 Agent（启用工具、思维链）
+    /// Create a standard Agent (tools + chain-of-thought enabled)
     ///
-    /// 适用于大多数 Agent 场景。
+    /// Suitable for most Agent scenarios.
     pub fn standard(model_name: &str, agent_name: &str, system_prompt: &str) -> Self {
         Self::new(model_name, agent_name, system_prompt)
             .enable_tool(true)
             .enable_cot(true)
     }
 
-    /// 创建完整功能的 Agent（工具、记忆、规划）
+    /// Create a full-featured Agent (tools, memory, planning)
     ///
-    /// 适用于复杂的自主 Agent 场景。
+    /// Suitable for complex autonomous Agent scenarios.
     pub fn full_featured(model_name: &str, agent_name: &str, system_prompt: &str) -> Self {
         Self::new(model_name, agent_name, system_prompt)
             .enable_tool(true)
@@ -169,7 +170,7 @@ impl AgentConfig {
             .enable_cot(true)
     }
 
-    /// 启用所有功能（工具、记忆、规划）- Builder 链式调用版本
+    /// Enable all features (tools, memory, planning) - Builder chain call version
     pub fn with_full_features(mut self) -> Self {
         self.enable_tool = true;
         self.enable_memory = true;
@@ -178,526 +179,526 @@ impl AgentConfig {
         self
     }
 
-    /// 启用基本工具功能（工具 + 思维链）- Builder 链式调用版本
+    /// Enable basic tool features (tools + chain-of-thought) - Builder chain call version
     pub fn with_tools(mut self) -> Self {
         self.enable_tool = true;
         self.enable_cot = true;
         self
     }
 
-    // ── 原有 Builder 方法 ──────────────────────────────────────────────────────────
+    // ── Original Builder Methods ─────────────────────────────────────────────────────
 
-    /// 设置 Agent 角色
+    /// Set Agent role
     ///
-    /// # 参数
-    /// * `role` - Agent 角色（`AgentRole::Orchestrator` 或 `AgentRole::Worker`）
+    /// # Parameters
+    /// * `role` - Agent role (`AgentRole::Orchestrator` or `AgentRole::Worker`)
     ///
-    /// # 说明
-    /// - `Orchestrator`：编排者角色，负责任务规划、分配和协调子 agent
-    /// - `Worker`：执行者角色，专注于具体任务执行
+    /// # Description
+    /// - `Orchestrator`: orchestrator role, responsible for task planning, allocation, and coordinating sub-agents
+    /// - `Worker`: worker role, focused on specific task execution
     pub fn role(mut self, role: AgentRole) -> Self {
         self.role = role;
         self
     }
 
-    /// 启用或禁用工具调用功能
+    /// Enable or disable tool calling
     ///
-    /// # 参数
-    /// * `enabled` - `true` 启用工具调用，`false` 禁用
+    /// # Parameters
+    /// * `enabled` - `true` to enable tool calling, `false` to disable
     ///
-    /// # 说明
-    /// 启用后 Agent 可以调用已注册的业务工具（如数学计算、文件操作等）
+    /// # Description
+    /// When enabled, the Agent can call registered business tools (e.g., math, file operations, etc.)
     pub fn enable_tool(mut self, enabled: bool) -> Self {
         self.enable_tool = enabled;
         self
     }
 
-    /// 启用或禁用任务规划能力
+    /// Enable or disable task planning capability
     ///
-    /// # 参数
-    /// * `enabled` - `true` 启用任务规划，`false` 禁用
+    /// # Parameters
+    /// * `enabled` - `true` to enable task planning, `false` to disable
     ///
-    /// # 说明
-    /// 启用后 Agent 可以使用 `plan`、`create_task`、`update_task` 等任务管理工具
+    /// # Description
+    /// When enabled, the Agent can use task management tools such as `plan`, `create_task`, `update_task`
     pub fn enable_task(mut self, enabled: bool) -> Self {
         self.enable_task = enabled;
         self
     }
 
-    /// 启用或禁用人工介入（Human-in-the-Loop）功能
+    /// Enable or disable Human-in-the-Loop functionality
     ///
-    /// # 参数
-    /// * `enabled` - `true` 启用人机交互，`false` 禁用
+    /// # Parameters
+    /// * `enabled` - `true` to enable human interaction, `false` to disable
     ///
-    /// # 说明
-    /// 启用后 Agent 在需要审批或确认时可以通过 `human_in_loop` 工具请求人工介入
+    /// # Description
+    /// When enabled, the Agent can request human intervention via the `human_in_loop` tool when approval or confirmation is needed
     pub fn enable_human_in_loop(mut self, enabled: bool) -> Self {
         self.enable_human_in_loop = enabled;
         self
     }
 
-    /// 启用或禁用子代理调度功能
+    /// Enable or disable subagent dispatch
     ///
-    /// # 参数
-    /// * `enabled` - `true` 启用子代理调度，`false` 禁用
+    /// # Parameters
+    /// * `enabled` - `true` to enable subagent dispatch, `false` to disable
     ///
-    /// # 说明
-    /// 启用后 Agent 可以使用 `agent_tool` 工具调度其他子 Agent 执行任务
+    /// # Description
+    /// When enabled, the Agent can use the `agent_tool` tool to dispatch other sub-agents for task execution
     pub fn enable_subagent(mut self, enabled: bool) -> Self {
         self.enable_subagent = enabled;
         self
     }
 
-    /// 设置工具白名单
+    /// Set tool allowlist
     ///
-    /// # 参数
-    /// * `tools` - 允许调用的工具名称列表
+    /// # Parameters
+    /// * `tools` - List of allowed tool names
     ///
-    /// # 说明
-    /// - 如果列表为空，则不限制，可调用所有已注册工具
-    /// - 如果列表非空，则只能调用列表中的工具
+    /// # Description
+    /// - If the list is empty, no restriction; all registered tools can be called
+    /// - If the list is non-empty, only tools in the list can be called
     pub fn allowed_tools(mut self, tools: Vec<String>) -> Self {
         self.allowed_tools.extend(tools);
         self
     }
 
-    /// 获取工具白名单
+    /// Get tool allowlist
     ///
-    /// # 返回值
-    /// 返回当前允许调用的工具名称切片
+    /// # Returns
+    /// Returns a slice of currently allowed tool names
     pub fn get_allowed_tools(&self) -> &[String] {
         &self.allowed_tools
     }
 
-    /// 检查工具调用功能是否启用
+    /// Check if tool calling is enabled
     ///
-    /// # 返回值
-    /// `true` 表示工具调用已启用，`false` 表示已禁用
+    /// # Returns
+    /// `true` if tool calling is enabled, `false` if disabled
     pub fn is_tool_enabled(&self) -> bool {
         self.enable_tool
     }
 
-    /// 检查任务规划能力是否启用
+    /// Check if task planning is enabled
     ///
-    /// # 返回值
-    /// `true` 表示任务规划已启用，`false` 表示已禁用
+    /// # Returns
+    /// `true` if task planning is enabled, `false` if disabled
     pub fn is_task_enabled(&self) -> bool {
         self.enable_task
     }
 
-    /// 检查人工介入（Human-in-the-Loop）功能是否启用
+    /// Check if Human-in-the-Loop is enabled
     ///
-    /// # 返回值
-    /// `true` 表示人工介入功能已启用，`false` 表示已禁用
+    /// # Returns
+    /// `true` if human-in-the-loop is enabled, `false` if disabled
     pub fn is_human_in_loop_enabled(&self) -> bool {
         self.enable_human_in_loop
     }
 
-    /// 检查子代理调度功能是否启用
+    /// Check if subagent dispatch is enabled
     ///
-    /// # 返回值
-    /// `true` 表示子代理调度功能已启用，`false` 表示已禁用
+    /// # Returns
+    /// `true` if subagent dispatch is enabled, `false` if disabled
     pub fn is_subagent_enabled(&self) -> bool {
         self.enable_subagent
     }
 
-    /// 设置最大迭代轮次
+    /// Set maximum iteration rounds
     ///
-    /// # 参数
-    /// * `max_iterations` - 最大迭代次数，防止死循环
+    /// # Parameters
+    /// * `max_iterations` - Maximum iteration count, prevents infinite loops
     ///
-    /// # 说明
-    /// Agent 在执行过程中最多进行指定次数的迭代，超过此限制会终止执行
+    /// # Description
+    /// The Agent performs at most the specified number of iterations during execution; exceeding this limit terminates execution
     pub fn max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
         self
     }
 
-    /// 设置 Agent 名称
+    /// Set Agent name
     ///
-    /// # 参数
-    /// * `agent_name` - Agent 的名称，用于标识和日志输出
+    /// # Parameters
+    /// * `agent_name` - Agent name, used for identification and logging
     pub fn agent_name(mut self, agent_name: &str) -> Self {
         self.agent_name = agent_name.to_string();
         self
     }
 
-    /// 设置 LLM 模型名称
+    /// Set LLM model name
     ///
-    /// # 参数
-    /// * `model_name` - 使用的 LLM 模型名称（对应配置中的模型标识）
+    /// # Parameters
+    /// * `model_name` - LLM model name to use (corresponds to model identifier in config)
     pub fn model_name(mut self, model_name: &str) -> Self {
         self.model_name = model_name.to_string();
         self
     }
 
-    /// 运行时设置模型名称（可变引用版本）
+    /// Set model name at runtime (mutable reference version)
     pub fn set_model_name(&mut self, model_name: &str) {
         self.model_name = model_name.to_string();
     }
 
-    /// 设置系统提示词
+    /// Set system prompt
     ///
-    /// # 参数
-    /// * `system_prompt` - 系统提示词，定义 Agent 的角色和能力
+    /// # Parameters
+    /// * `system_prompt` - System prompt, defines the Agent's role and capabilities
     pub fn system_prompt(mut self, system_prompt: &str) -> Self {
         self.system_prompt = system_prompt.to_string();
         self
     }
 
-    /// 设置上下文 token 上限
+    /// Set context token limit
     ///
-    /// # 参数
-    /// * `limit` - 上下文 token 上限，超过时自动触发压缩（`usize::MAX` 表示不限制）
+    /// # Parameters
+    /// * `limit` - Context token limit; auto-triggers compression when exceeded (`usize::MAX` means no limit)
     pub fn token_limit(mut self, limit: usize) -> Self {
         self.token_limit = limit;
         self
     }
 
-    /// 添加 Agent 回调
+    /// Add Agent callback
     ///
-    /// # 参数
-    /// * `callback` - 实现了 `AgentCallback` trait 的回调实例
+    /// # Parameters
+    /// * `callback` - Callback instance implementing the `AgentCallback` trait
     ///
-    /// # 说明
-    /// 回调会在 Agent 执行过程中触发不同事件时被调用，用于监控、日志记录等
+    /// # Description
+    /// Callbacks are invoked when different events are triggered during Agent execution, for monitoring, logging, etc.
     pub fn with_callback(mut self, callback: Arc<dyn AgentCallback>) -> Self {
         self.callbacks.push(callback);
         self
     }
 
-    /// 设置 LLM 调用失败后最大重试次数
+    /// Set maximum retry count after LLM call failure
     ///
-    /// # 参数
-    /// * `retries` - 最大重试次数（0 = 不重试，默认 3）
+    /// # Parameters
+    /// * `retries` - Maximum retry count (0 = no retry, default 3)
     pub fn llm_max_retries(mut self, retries: usize) -> Self {
         self.llm_max_retries = retries;
         self
     }
 
-    /// 设置 LLM 重试初始等待时间
+    /// Set LLM retry initial delay
     ///
-    /// # 参数
-    /// * `delay_ms` - 初始等待时间（毫秒），指数退避翻倍（默认 500）
+    /// # Parameters
+    /// * `delay_ms` - Initial delay (milliseconds), doubles with exponential backoff (default 500)
     pub fn llm_retry_delay_ms(mut self, delay_ms: u64) -> Self {
         self.llm_retry_delay_ms = delay_ms;
         self
     }
 
-    /// 启用或禁用工具错误反馈
+    /// Enable or disable tool error feedback
     ///
-    /// # 参数
-    /// * `enabled` - `true` 启用工具错误反馈，`false` 禁用
+    /// # Parameters
+    /// * `enabled` - `true` to enable tool error feedback, `false` to disable
     ///
-    /// # 说明
-    /// 启用后，工具执行失败时将错误信息回传给 LLM，而非直接让 Agent 失败
+    /// # Description
+    /// When enabled, tool execution failures feed the error back to the LLM instead of failing the Agent directly
     pub fn tool_error_feedback(mut self, enabled: bool) -> Self {
         self.tool_error_feedback = enabled;
         self
     }
 
-    /// 获取会话标识
+    /// Get session identifier
     ///
-    /// # 返回值
-    /// 会话标识的引用，如果没有设置则返回 `None`
+    /// # Returns
+    /// Reference to session identifier, or `None` if not set
     ///
-    /// # 说明
-    /// 会话标识用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文
+    /// # Description
+    /// The session identifier is used by Checkpointer to restore the same conversation's historical context across process restarts
     pub fn get_session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
 
-    /// 获取对话标识
+    /// Get conversation identifier
     ///
-    /// # 返回值
-    /// 对话标识的引用，如果没有设置则返回 `None`
+    /// # Returns
+    /// Reference to conversation identifier, or `None` if not set
     ///
-    /// # 说明
-    /// 对话标识用于 `ConversationStore` 中的 transcript/history 投影；
-    /// 它与用于恢复线程状态的 `session_id` 是两个独立概念。
+    /// # Description
+    /// The conversation identifier is used for `ConversationStore` transcript/history projections;
+    /// it is a separate concept from `session_id`, which is used for restoring thread state.
     pub fn get_conversation_id(&self) -> Option<&str> {
         self.conversation_id.as_deref()
     }
 
-    /// 获取 LLM 调用失败后最大重试次数
+    /// Get maximum retry count after LLM call failure
     ///
-    /// # 返回值
-    /// 最大重试次数
+    /// # Returns
+    /// Maximum retry count
     pub fn get_llm_max_retries(&self) -> usize {
         self.llm_max_retries
     }
 
-    /// 获取 LLM 重试初始等待时间
+    /// Get LLM retry initial delay
     ///
-    /// # 返回值
-    /// 初始等待时间（毫秒）
+    /// # Returns
+    /// Initial delay (milliseconds)
     pub fn get_llm_retry_delay_ms(&self) -> u64 {
         self.llm_retry_delay_ms
     }
 
-    /// 获取工具错误反馈设置状态
+    /// Get tool error feedback setting
     ///
-    /// # 返回值
-    /// `true` 表示工具错误反馈已启用，`false` 表示已禁用
+    /// # Returns
+    /// `true` if tool error feedback is enabled, `false` if disabled
     pub fn get_tool_error_feedback(&self) -> bool {
         self.tool_error_feedback
     }
 
-    /// 获取最大迭代轮次
+    /// Get maximum iteration rounds
     ///
-    /// # 返回值
-    /// 最大迭代次数
+    /// # Returns
+    /// Maximum iteration count
     pub fn get_max_iterations(&self) -> usize {
         self.max_iterations
     }
 
-    /// 获取上下文 token 上限
+    /// Get context token limit
     ///
-    /// # 返回值
-    /// 上下文 token 上限，`usize::MAX` 表示不限制
+    /// # Returns
+    /// Context token limit, `usize::MAX` means no limit
     pub fn get_token_limit(&self) -> usize {
         self.token_limit
     }
 
-    /// 检查思维链（CoT）是否启用
+    /// Check if chain-of-thought (CoT) is enabled
     ///
-    /// # 返回值
-    /// `true` 表示思维链已启用，`false` 表示已禁用
+    /// # Returns
+    /// `true` if CoT is enabled, `false` if disabled
     pub fn is_cot_enabled(&self) -> bool {
         self.enable_cot
     }
 
-    /// 检查长期记忆是否启用
+    /// Check if long-term memory is enabled
     ///
-    /// # 返回值
-    /// `true` 表示长期记忆已启用，`false` 表示已禁用
+    /// # Returns
+    /// `true` if long-term memory is enabled, `false` if disabled
     pub fn is_memory_enabled(&self) -> bool {
         self.enable_memory
     }
 
-    /// 获取长期记忆存储文件路径
+    /// Get long-term memory store file path
     ///
-    /// # 返回值
-    /// 长期记忆存储文件路径
+    /// # Returns
+    /// Long-term memory store file path
     pub fn get_memory_path(&self) -> &str {
         &self.memory_path
     }
 
-    /// 获取检查点文件路径
+    /// Get checkpointer file path
     ///
-    /// # 返回值
-    /// 检查点文件路径
+    /// # Returns
+    /// Checkpointer file path
     pub fn get_checkpointer_path(&self) -> &str {
         &self.checkpointer_path
     }
 
-    /// 获取工具执行配置
+    /// Get tool execution configuration
     ///
-    /// # 返回值
-    /// 工具执行配置的引用（包含超时、重试策略、并行并发度等设置）
+    /// # Returns
+    /// Reference to tool execution configuration (includes timeout, retry strategy, parallel concurrency, etc.)
     pub fn get_tool_execution(&self) -> &crate::tools::ToolExecutionConfig {
         &self.tool_execution
     }
 
-    /// 获取结构化输出格式
+    /// Get structured output format
     ///
-    /// # 返回值
-    /// 结构化输出格式的引用，如果没有设置则返回 `None`
+    /// # Returns
+    /// Reference to structured output format, or `None` if not set
     pub fn get_response_format(&self) -> Option<&crate::llm::ResponseFormat> {
         self.response_format.as_ref()
     }
 
-    /// 获取 LLM 模型名称
+    /// Get LLM model name
     ///
-    /// # 返回值
-    /// LLM 模型名称
+    /// # Returns
+    /// LLM model name
     pub fn get_model_name(&self) -> &str {
         &self.model_name
     }
 
-    /// 获取系统提示词
+    /// Get system prompt
     ///
-    /// # 返回值
-    /// 系统提示词
+    /// # Returns
+    /// System prompt
     pub fn get_system_prompt(&self) -> &str {
         &self.system_prompt
     }
 
-    /// 获取 Agent 名称
+    /// Get Agent name
     ///
-    /// # 返回值
-    /// Agent 名称
+    /// # Returns
+    /// Agent name
     pub fn get_agent_name(&self) -> &str {
         &self.agent_name
     }
 
-    /// 启用或禁用思维链（CoT）
+    /// Enable or disable chain-of-thought (CoT)
     ///
-    /// # 参数
-    /// * `enabled` - `true` 启用思维链，`false` 禁用
+    /// # Parameters
+    /// * `enabled` - `true` to enable CoT, `false` to disable
     ///
-    /// # 说明
-    /// 启用思维链后，Agent 会在系统提示词中注入 CoT 相关指令
+    /// # Description
+    /// When CoT is enabled, the Agent injects CoT-related instructions into the system prompt
     pub fn enable_cot(mut self, enabled: bool) -> Self {
         self.enable_cot = enabled;
         self
     }
 
-    /// 启用或禁用长期记忆
+    /// Enable or disable long-term memory
     ///
-    /// # 参数
-    /// * `enabled` - `true` 启用长期记忆，`false` 禁用
+    /// # Parameters
+    /// * `enabled` - `true` to enable long-term memory, `false` to disable
     ///
-    /// # 说明
-    /// 启用长期记忆后，Agent 可以使用 remember/recall/forget 工具，并支持上下文自动注入
+    /// # Description
+    /// When enabled, the Agent can use remember/recall/forget tools, with automatic context injection support
     pub fn enable_memory(mut self, enabled: bool) -> Self {
         self.enable_memory = enabled;
         self
     }
 
-    /// 设置长期记忆存储文件路径
+    /// Set long-term memory store file path
     ///
-    /// # 参数
-    /// * `path` - 长期记忆存储文件路径
+    /// # Parameters
+    /// * `path` - Long-term memory store file path
     pub fn memory_path(mut self, path: &str) -> Self {
         self.memory_path = path.to_string();
         self
     }
 
-    /// 设置会话标识
+    /// Set session identifier
     ///
-    /// # 参数
-    /// * `id` - 会话标识
+    /// # Parameters
+    /// * `id` - Session identifier
     ///
-    /// # 说明
-    /// 会话标识用于 Checkpointer 在跨进程启动时恢复同一对话的历史上下文
+    /// # Description
+    /// The session identifier is used by Checkpointer to restore the same conversation's historical context across process restarts
     pub fn session_id(mut self, id: &str) -> Self {
         self.session_id = Some(id.to_string());
         self
     }
 
-    /// 设置对话标识
+    /// Set conversation identifier
     ///
-    /// # 参数
-    /// * `id` - 对话标识
+    /// # Parameters
+    /// * `id` - Conversation identifier
     ///
-    /// # 说明
-    /// 对话标识用于 `ConversationStore` 持久化 transcript/history 投影，
-    /// 与 `session_id` 不同，它不承担线程状态恢复职责。
+    /// # Description
+    /// The conversation identifier is used by `ConversationStore` to persist transcript/history projections.
+    /// Unlike `session_id`, it does not handle thread state restoration.
     pub fn conversation_id(mut self, id: &str) -> Self {
         self.conversation_id = Some(id.to_string());
         self
     }
 
-    /// 设置检查点文件路径
+    /// Set checkpointer file path
     ///
-    /// # 参数
-    /// * `path` - 检查点文件路径
+    /// # Parameters
+    /// * `path` - Checkpointer file path
     pub fn checkpointer_path(mut self, path: &str) -> Self {
         self.checkpointer_path = path.to_string();
         self
     }
 
-    /// 设置工具执行配置
+    /// Set tool execution configuration
     ///
-    /// # 参数
-    /// * `config` - 工具执行配置（包含超时、重试策略、并行并发度等设置）
+    /// # Parameters
+    /// * `config` - Tool execution configuration (includes timeout, retry strategy, parallel concurrency, etc.)
     pub fn tool_execution(mut self, config: ToolExecutionConfig) -> Self {
         self.tool_execution = config;
         self
     }
 
-    /// 设置结构化输出格式
+    /// Set structured output format
     ///
-    /// # 参数
-    /// * `fmt` - 结构化输出格式
+    /// # Parameters
+    /// * `fmt` - Structured output format
     pub fn response_format(mut self, fmt: ResponseFormat) -> Self {
         self.response_format = Some(fmt);
         self
     }
 
-    /// 设置单次工具输出的最大 token 数，超限自动截断
+    /// Set maximum token count for a single tool output; automatically truncated when exceeded
     pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
         self.max_tool_output_tokens = Some(max);
         self
     }
 
-    /// 获取单次工具输出的最大 token 数
+    /// Get maximum token count for a single tool output
     ///
-    /// # 返回值
-    /// 最大 token 数，`None` 表示不限制
+    /// # Returns
+    /// Maximum token count, `None` means no limit
     pub fn get_max_tool_output_tokens(&self) -> Option<usize> {
         self.max_tool_output_tokens
     }
 
-    /// 设置主动压缩阈值比例（0.0–1.0），默认 0.2
+    /// Set proactive compression threshold ratio (0.0–1.0), default 0.2
     pub fn compress_threshold_ratio(mut self, ratio: f64) -> Self {
         self.compress_threshold_ratio = ratio.clamp(0.0, 1.0);
         self
     }
 
-    /// 获取主动压缩阈值比例
+    /// Get proactive compression threshold ratio
     ///
-    /// # 返回值
-    /// 压缩阈值比例（0.0–1.0），默认 0.2
+    /// # Returns
+    /// Compression threshold ratio (0.0–1.0), default 0.2
     pub fn get_compress_threshold_ratio(&self) -> f64 {
         self.compress_threshold_ratio
     }
 
-    /// 启用或禁用自动项目规则加载
+    /// Enable or disable automatic project rules loading
     ///
-    /// # 参数
-    /// * `enabled` - `true` 自动从工作目录搜索 `.echo-agent/AGENT.md` 并注入 system prompt
+    /// # Parameters
+    /// * `enabled` - `true` to automatically search for `.echo-agent/AGENT.md` in the working directory and inject into system prompt
     pub fn auto_project_rules(mut self, enabled: bool) -> Self {
         self.auto_project_rules = enabled;
         self
     }
 
-    /// 设置工作目录（用于搜索项目规则文件）
+    /// Set working directory (for searching project rules files)
     ///
-    /// # 参数
-    /// * `path` - 工作目录路径，None 表示使用当前目录
+    /// # Parameters
+    /// * `path` - Working directory path, None means use current directory
     pub fn working_dir(mut self, path: Option<PathBuf>) -> Self {
         self.working_dir = path;
         self
     }
 
-    /// 设置 LLM 温度参数
+    /// Set LLM temperature parameter
     ///
-    /// # 参数
-    /// * `temperature` - 温度值（0.0 ～ 2.0，None 表示使用模型默认值）
+    /// # Parameters
+    /// * `temperature` - Temperature value (0.0–2.0, None means use model default)
     pub fn temperature(mut self, temperature: Option<f32>) -> Self {
         self.temperature = temperature;
         self
     }
 
-    /// 获取 LLM 温度参数
+    /// Get LLM temperature parameter
     ///
-    /// # 返回值
-    /// 温度值，`None` 表示使用模型默认值
+    /// # Returns
+    /// Temperature value, `None` means use model default
     pub fn get_temperature(&self) -> Option<f32> {
         self.temperature
     }
 
-    /// 设置最大生成 token 数
+    /// Set maximum generation token count
     ///
-    /// # 参数
-    /// * `max_tokens` - 最大 token 数（None 表示使用模型默认值）
+    /// # Parameters
+    /// * `max_tokens` - Maximum token count (None means use model default)
     pub fn max_tokens(mut self, max_tokens: Option<u32>) -> Self {
         self.max_tokens = max_tokens;
         self
     }
 
-    /// 获取最大生成 token 数
+    /// Get maximum generation token count
     ///
-    /// # 返回值
-    /// 最大 token 数，`None` 表示使用模型默认值
+    /// # Returns
+    /// Maximum token count, `None` means use model default
     pub fn get_max_tokens(&self) -> Option<u32> {
         self.max_tokens
     }
 }
 
-// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+// ── Unit Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

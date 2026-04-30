@@ -1,4 +1,4 @@
-//! 并发工作流：所有 Agent 并行执行同一输入，结果通过合并函数聚合。
+//! Concurrent workflow: all agents execute the same input in parallel; results are aggregated via a merge function.
 
 use super::{SharedAgent, StepOutput, Workflow, WorkflowOutput, shared_agent};
 use echo_core::agent::Agent;
@@ -7,16 +7,16 @@ use futures::future::BoxFuture;
 use std::time::Instant;
 use tracing::{debug, info};
 
-/// 结果合并函数
+/// Result merge function
 type MergeFn = Box<dyn Fn(Vec<String>) -> String + Send + Sync>;
 
 fn default_merge(results: Vec<String>) -> String {
     results.join("\n---\n")
 }
 
-/// 并发工作流：注册的 Agent 全部并行执行，结果通过 `merge` 函数合并。
+/// Concurrent workflow: all registered agents execute in parallel; results are merged via a `merge` function.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,no_run
 /// use echo_core::agent::{Agent, AgentEvent};
@@ -58,11 +58,11 @@ fn default_merge(results: Vec<String>) -> String {
 ///     .agent(agent_x)
 ///     .agent(agent_y)
 ///     .merge(|results| {
-///         format!("综合分析：\n{}", results.join("\n\n"))
+///         format!("Combined analysis:\n{}", results.join("\n\n"))
 ///     })
 ///     .build();
 ///
-/// let output = wf.run("分析 AI Agent 的发展趋势").await?;
+/// let output = wf.run("Analyze AI Agent development trends").await?;
 /// println!("{}", output.result);
 /// # Ok(())
 /// # }
@@ -90,7 +90,7 @@ impl Workflow for ConcurrentWorkflow {
             info!(
                 workflow = "concurrent",
                 agents = agent_count,
-                "⚡ 并发执行 {} 个 Agent",
+                "⚡ Executing {} agents concurrently",
                 agent_count
             );
 
@@ -103,7 +103,7 @@ impl Workflow for ConcurrentWorkflow {
                     let step_start = Instant::now();
                     let agent = agent_handle.lock().await;
                     let agent_name = agent.name().to_string();
-                    debug!(workflow = "concurrent", agent = %agent_name, "▶ 开始执行");
+                    debug!(workflow = "concurrent", agent = %agent_name, "▶ Starting execution");
                     let result = agent.execute(&input).await;
                     let elapsed = step_start.elapsed();
                     (agent_name, input, result, elapsed)
@@ -123,7 +123,7 @@ impl Workflow for ConcurrentWorkflow {
                     workflow = "concurrent",
                     agent = %agent_name,
                     elapsed_ms = elapsed.as_millis(),
-                    "✓ Agent 完成"
+                    "✓ Agent completed"
                 );
 
                 step_outputs.push(StepOutput {
@@ -146,26 +146,26 @@ impl Workflow for ConcurrentWorkflow {
     }
 }
 
-/// [`ConcurrentWorkflow`] 构建器
+/// [`ConcurrentWorkflow`] builder
 pub struct ConcurrentWorkflowBuilder {
     agents: Vec<SharedAgent>,
     merge: Option<MergeFn>,
 }
 
 impl ConcurrentWorkflowBuilder {
-    /// 添加一个并发执行的 Agent
+    /// Add an agent to execute concurrently
     pub fn agent(mut self, agent: impl Agent + 'static) -> Self {
         self.agents.push(shared_agent(agent));
         self
     }
 
-    /// 添加一个已包装的 SharedAgent
+    /// Add an already-wrapped SharedAgent
     pub fn agent_shared(mut self, agent: SharedAgent) -> Self {
         self.agents.push(agent);
         self
     }
 
-    /// 设置结果合并函数（默认以 `\n---\n` 连接）
+    /// Set the result merge function (default joins with `\n---\n`)
     pub fn merge(mut self, f: impl Fn(Vec<String>) -> String + Send + Sync + 'static) -> Self {
         self.merge = Some(Box::new(f));
         self

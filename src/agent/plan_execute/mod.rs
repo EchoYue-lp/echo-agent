@@ -1,13 +1,13 @@
-//! Plan-and-Execute 引擎
+//! Plan-and-Execute engine
 //!
-//! 与 ReAct 平级的执行策略，将 **规划** 和 **执行** 显式分离为两个独立阶段。
+//! An execution strategy at the same level as ReAct, explicitly separating **planning** and **execution** into two independent phases.
 //!
-//! # 统一执行模型
+//! # Unified execution model
 //!
-//! `Plan` 通过 `to_task_dag()` 转换为 `Task` DAG，使用 `TaskManager` 进行依赖调度。
-//! 支持增量重规划：当步骤失败时，仅重新规划受影响的下游子图。
+//! `Plan` is converted to a `Task` DAG via `to_task_dag()`, using `TaskManager` for dependency scheduling.
+//! Supports incremental replanning: when a step fails, only the affected downstream subgraph is replanned.
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust,no_run
 //! use echo_agent::agent::plan_execute::{PlanExecuteAgent, LlmPlanner, ReactExecutor};
@@ -19,13 +19,13 @@
 //! let executor_agent = ReactAgentBuilder::new()
 //!     .model("qwen3-max")
 //!     .name("executor")
-//!     .system_prompt("你是一个任务执行助手")
+//!     .system_prompt("You are a task execution assistant")
 //!     .enable_tools()
 //!     .build()?;
 //! let executor = ReactExecutor::new(executor_agent);
 //!
 //! let mut agent = PlanExecuteAgent::new("plan_agent", planner, executor);
-//! let result = agent.execute("帮我分析并优化这段代码的性能").await?;
+//! let result = agent.execute("Help me analyze and optimize this code's performance").await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -67,17 +67,17 @@ pub enum ExecutionMode {
     /// Parallel execution via `TaskExecutor` with a custom execution function.
     /// Independent steps run concurrently, bounded by `max_concurrent`.
     Parallel {
-        /// 任务执行函数，用于并行执行计划步骤
+        /// Task execution function for executing plan steps in parallel
         execute_fn: TaskExecuteFn,
-        /// 最大并发任务数量限制
+        /// Maximum concurrent task limit
         max_concurrent: usize,
     },
 }
 
 /// Plan-and-Execute Agent
 ///
-/// Planner 生成计划 → `to_task_dag()` 转为 Task DAG → `TaskManager` 调度 → Executor 逐步执行。
-/// 支持增量重规划（失败时仅重新规划下游子图）。
+/// Planner generates plan → `to_task_dag()` converts to Task DAG → `TaskManager` schedules → Executor executes step by step.
+/// Supports incremental replanning (only replans the failed downstream subgraph).
 pub struct PlanExecuteAgent<P: Planner, E: Executor> {
     name: String,
     planner: RwLock<P>,
@@ -88,22 +88,22 @@ pub struct PlanExecuteAgent<P: Planner, E: Executor> {
 }
 
 impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
-    /// 创建 Plan-and-Execute Agent 实例
+    /// Create a Plan-and-Execute Agent instance
     ///
-    /// # 参数
-    /// * `name` - Agent 名称
-    /// * `planner` - 规划器实例，实现 `Planner` trait
-    /// * `executor` - 执行器实例，实现 `Executor` trait
+    /// # Parameters
+    /// * `name` - Agent name
+    /// * `planner` - Planner instance implementing the `Planner` trait
+    /// * `executor` - Executor instance implementing the `Executor` trait
     ///
-    /// # 返回值
-    /// 新的 `PlanExecuteAgent` 实例
+    /// # Returns
+    /// A new `PlanExecuteAgent` instance
     ///
-    /// # 默认配置
-    /// - 最大重规划次数：3
-    /// - 启用重规划：是
-    /// - 执行模式：顺序执行（`ExecutionMode::Sequential`）
+    /// # Default configuration
+    /// - Maximum replan count: 3
+    /// - Replanning enabled: yes
+    /// - Execution mode: Sequential (`ExecutionMode::Sequential`)
     ///
-    /// # 示例
+    /// # Example
     /// ```rust
     /// use echo_agent::agent::plan_execute::{PlanExecuteAgent, SimpleExecutor, StaticPlanner};
     /// use echo_agent::agent::Agent;
@@ -111,14 +111,14 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     ///
     /// # #[tokio::main]
     /// # async fn main() -> echo_agent::error::Result<()> {
-    /// let planner = StaticPlanner::new(vec!["分析问题", "给出结论"]);
+    /// let planner = StaticPlanner::new(vec!["Analyze the problem", "Provide conclusion"]);
     /// let executor = SimpleExecutor::new(
     ///     MockAgent::new("executor")
-    ///         .with_response("已完成步骤 1")
-    ///         .with_response("已完成步骤 2"),
+    ///         .with_response("Completed step 1")
+    ///         .with_response("Completed step 2"),
     /// );
     /// let mut agent = PlanExecuteAgent::new("plan_agent", planner, executor);
-    /// let result = agent.execute("帮我分析这个问题").await?;
+    /// let result = agent.execute("Help me analyze this problem").await?;
     /// assert!(!result.trim().is_empty());
     /// # Ok(())
     /// # }
@@ -134,36 +134,36 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
         }
     }
 
-    /// 设置最大重规划次数
+    /// Set maximum replan count
     ///
-    /// # 参数
-    /// * `n` - 最大重规划次数
+    /// # Parameters
+    /// * `n` - Maximum replan count
     ///
-    /// # 返回值
-    /// 返回 `Self` 以便链式调用
+    /// # Returns
+    /// Returns `Self` for chained calls
     ///
-    /// # 说明
-    /// 当步骤执行失败时，Agent 会尝试重新规划受影响的下游步骤。
-    /// 该方法限制重规划的最大次数，避免无限循环。
+    /// # Description
+    /// When a step execution fails, the Agent attempts to replan affected downstream steps.
+    /// This method limits the maximum number of replans to avoid infinite loops.
     ///
-    /// # 默认值
-    /// 默认最大重规划次数为 3。
+    /// # Default
+    /// Default maximum replan count is 3.
     pub fn max_replans(mut self, n: usize) -> Self {
         self.max_replans = n;
         self
     }
 
-    /// 禁用重规划功能
+    /// Disable replanning
     ///
-    /// # 返回值
-    /// 返回 `Self` 以便链式调用
+    /// # Returns
+    /// Returns `Self` for chained calls
     ///
-    /// # 说明
-    /// 禁用重规划后，当步骤执行失败时，Agent 不会尝试重新规划，
-    /// 而是直接返回错误。适用于对执行稳定性要求较高的场景。
+    /// # Description
+    /// When replanning is disabled, the Agent will not attempt to replan on step failure,
+    /// and will return an error directly. Suitable for scenarios requiring high execution stability.
     ///
-    /// # 默认值
-    /// 默认启用重规划功能。
+    /// # Default
+    /// Replanning is enabled by default.
     pub fn disable_replan(mut self) -> Self {
         self.enable_replan = false;
         self
@@ -199,19 +199,19 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
         self
     }
 
-    /// 核心执行循环
+    /// Core execution loop
     async fn run_plan_execute(&self, task: &str) -> Result<String> {
         let agent = self.name.clone();
 
-        // ── 阶段 1: 规划 ──────────────────────────────────────
-        info!(agent = %agent, "📐 Plan-and-Execute: 阶段1 - 生成计划");
+        // ── Phase 1: Planning ──────────────────────────────────────
+        info!(agent = %agent, "📐 Plan-and-Execute: Phase 1 - Generate plan");
         let mut plan = self.planner.write().await.plan(task).await?;
 
-        // 验证并自动修复计划
+        // Validate and auto-fix plan
         let issues = plan.validate();
         for issue in &issues {
             if matches!(issue.severity, IssueSeverity::Error) {
-                warn!(agent = %agent, issue = %issue.message, "⚠️ 计划验证发现问题");
+                warn!(agent = %agent, issue = %issue.message, "⚠️ Plan validation found issues");
             }
         }
         plan.auto_fix();
@@ -226,7 +226,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
             warn!(
                 agent = %agent,
                 count = remaining_errors.len(),
-                "⚠️ 自动修复后仍有 {} 个未解决的问题",
+                "⚠️ {} unresolved issues remain after auto-fix",
                 remaining_errors.len()
             );
         }
@@ -234,7 +234,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
         info!(
             agent = %agent,
             steps = plan.steps.len(),
-            "📋 计划生成完成，共 {} 个步骤",
+            "📋 Plan generation complete, {} total steps",
             plan.steps.len()
         );
 
@@ -243,13 +243,13 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                 agent = %agent,
                 step = i + 1,
                 description = %step.description,
-                "  步骤 {}: {}",
+                "  Step {}: {}",
                 i + 1,
                 step.description
             );
         }
 
-        // ── 阶段 2: 执行（Plan → Task DAG → 依赖调度） ────────
+        // ── Phase 2: Execute (Plan → Task DAG → dependency scheduling) ────────
         match &self.execution_mode {
             ExecutionMode::Parallel { .. } => {
                 self.run_parallel_execution(task, &agent, &plan).await
@@ -260,7 +260,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
 
     /// Parallel execution path using TaskExecutor
     async fn run_parallel_execution(&self, task: &str, agent: &str, plan: &Plan) -> Result<String> {
-        info!(agent = %agent, "🚀 Plan-and-Execute: 阶段2 - 并行执行计划");
+        info!(agent = %agent, "🚀 Plan-and-Execute: Phase 2 - Execute plan in parallel");
 
         let (execute_fn, max_concurrent) = match &self.execution_mode {
             ExecutionMode::Parallel {
@@ -288,10 +288,10 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
         let _results = executor.execute_all().await?;
 
         let (completed, total) = executor.get_progress();
-        info!(agent = %agent, "📊 并行执行完成: {}/{} 任务成功", completed, total);
+        info!(agent = %agent, "📊 Parallel execution complete: {}/{} tasks succeeded", completed, total);
 
-        // ── 阶段 3: 汇总结果 ─────────────────────────────────
-        info!(agent = %agent, "📝 Plan-and-Execute: 阶段3 - 汇总结果");
+        // ── Phase 3: Summarize results ─────────────────────────────────
+        info!(agent = %agent, "📝 Plan-and-Execute: Phase 3 - Summarize results");
 
         let all_tasks = task_manager.get_all_tasks();
         let results: Vec<StepResult> = all_tasks
@@ -306,7 +306,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
             .collect();
 
         let summary = self.summarize_results(task, &results).await?;
-        info!(agent = %agent, "🏁 Plan-and-Execute 执行完毕");
+        info!(agent = %agent, "🏁 Plan-and-Execute execution complete");
         Ok(summary)
     }
 
@@ -319,8 +319,8 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     ) -> Result<String> {
         let agent = agent.to_string();
 
-        // ── 阶段 2: 执行（Plan → Task DAG → 依赖调度） ────────
-        info!(agent = %agent, "🚀 Plan-and-Execute: 阶段2 - 顺序执行计划");
+        // ── Phase 2: Execute (Plan → Task DAG → dependency scheduling) ────────
+        info!(agent = %agent, "🚀 Plan-and-Execute: Phase 2 - Execute plan sequentially");
 
         let task_manager = Arc::new(TaskManager::new());
         let dag_tasks = plan.to_task_dag();
@@ -337,7 +337,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                 if task_manager.is_all_completed() {
                     break;
                 }
-                warn!(agent = %agent, "⚠️ 没有可执行任务且未全部完成，可能存在依赖死锁");
+                warn!(agent = %agent, "⚠️ No executable tasks and not all completed, possible dependency deadlock");
                 break;
             }
 
@@ -357,7 +357,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                 info!(
                     agent = %agent,
                     step = step_idx + 1,
-                    "⚡ 执行步骤 {}: {}",
+                    "⚡ Execute step {}: {}",
                     step_idx + 1,
                     task_item.description
                 );
@@ -370,7 +370,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                     .await
                 {
                     Ok(output) => {
-                        info!(agent = %agent, step = step_idx + 1, "✅ 步骤 {} 执行成功", step_idx + 1);
+                        info!(agent = %agent, step = step_idx + 1, "✅ Step {} executed successfully", step_idx + 1);
                         let _ = task_manager.update_task(&task_id, TaskStatus::Completed);
                         task_manager.set_task_result(&task_id, output.clone());
                         all_results.push(StepResult {
@@ -381,30 +381,30 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                         });
                     }
                     Err(e) => {
-                        warn!(agent = %agent, step = step_idx + 1, error = %e, "❌ 步骤 {} 执行失败", step_idx + 1);
+                        warn!(agent = %agent, step = step_idx + 1, error = %e, "❌ Step {} execution failed", step_idx + 1);
                         let _ =
                             task_manager.update_task(&task_id, TaskStatus::Failed(e.to_string()));
-                        task_manager.set_task_result(&task_id, format!("执行失败: {}", e));
+                        task_manager.set_task_result(&task_id, format!("Execution failed: {}", e));
                         all_results.push(StepResult {
                             step_index: step_idx,
                             description: task_item.description.clone(),
-                            output: format!("执行失败: {}", e),
+                            output: format!("Execution failed: {}", e),
                             success: false,
                         });
 
-                        // 增量重规划：只重新规划失败的下游子图
+                        // Incremental replanning: only replan the failed downstream subgraph
                         if self.enable_replan && replan_count < self.max_replans {
                             replan_count += 1;
                             info!(
                                 agent = %agent,
                                 replan = replan_count,
                                 max = self.max_replans,
-                                "🔄 触发增量重规划 ({}/{})",
+                                "🔄 Triggering incremental replan ({}/{})",
                                 replan_count,
                                 self.max_replans
                             );
 
-                            // 使用 downstream_steps 识别受影响的下游子图
+                            // Use downstream_steps to identify affected downstream subgraph
                             let affected: Vec<String> = plan
                                 .downstream_steps_recursive(step_idx)
                                 .iter()
@@ -424,7 +424,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                             info!(
                                 agent = %agent,
                                 affected = affected.len(),
-                                "🔄 影响的下游步骤: {:?}",
+                                "🔄 Affected downstream steps: {:?}",
                                 affected_descs
                             );
 
@@ -435,10 +435,10 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                                 .collect();
 
                             let replan_prompt = format!(
-                                "原始任务: {}\n\n已完成的步骤:\n{}\n\n失败的步骤: {}\n错误: {}\n\n\
-                                受影响的下游步骤:\n{}\n\n\
-                                请根据以上情况重新制定受影响步骤的计划。\n\
-                                注意：只规划受影响的步骤，不要重复已完成的步骤。",
+                                "Original task: {}\n\nCompleted steps:\n{}\n\nFailed step: {}\nError: {}\n\n\
+                                Affected downstream steps:\n{}\n\n\
+                                Please re-plan the affected steps based on the above information.\n\
+                                Note: only plan the affected steps, do not repeat completed steps.",
                                 task,
                                 completed_steps.join("\n"),
                                 task_item.description,
@@ -455,7 +455,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                                     // Update the plan variable with the new plan for consistency
                                     plan = new_plan;
 
-                                    // 只移除受影响的下游任务（而非所有非终止任务）
+                                    // Only remove affected downstream tasks (not all non-terminal tasks)
                                     let to_remove: Vec<String> = task_manager
                                         .get_all_tasks()
                                         .iter()
@@ -476,14 +476,14 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                                         agent = %agent,
                                         removed = to_remove.len(),
                                         new_tasks = new_count,
-                                        "📋 增量重规划完成，移除 {} 个受影响任务，新增 {} 个任务",
+                                        "📋 Incremental replan complete, removed {} affected tasks, added {} new tasks",
                                         to_remove.len(),
                                         new_count
                                     );
-                                    break; // 重新开始执行循环
+                                    break; // Restart execution loop
                                 }
                                 Err(replan_err) => {
-                                    warn!(agent = %agent, error = %replan_err, "⚠️ 重新规划失败，继续执行剩余步骤");
+                                    warn!(agent = %agent, error = %replan_err, "⚠️ Replan failed, continuing with remaining steps");
                                 }
                             }
                         }
@@ -491,34 +491,34 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
                 }
             }
 
-            // 检查是否全部完成
+            // Check if all are complete
             if task_manager.is_all_completed() {
                 break;
             }
         }
 
-        // ── 阶段 3: 汇总结果 ─────────────────────────────────
-        info!(agent = %agent, "📝 Plan-and-Execute: 阶段3 - 汇总结果");
+        // ── Phase 3: Summarize results ─────────────────────────────────
+        info!(agent = %agent, "📝 Plan-and-Execute: Phase 3 - Summarize results");
 
         let (completed, total) = task_manager.get_progress();
-        info!(agent = %agent, "📊 执行完成: {}/{} 任务成功", completed, total);
+        info!(agent = %agent, "📊 Execution complete: {}/{} tasks succeeded", completed, total);
 
         let summary = self.summarize_results(task, &all_results).await?;
-        info!(agent = %agent, "🏁 Plan-and-Execute 执行完毕");
+        info!(agent = %agent, "🏁 Plan-and-Execute execution complete");
 
         Ok(summary)
     }
 
-    /// 构建步骤上下文（从已有结果）
+    /// Build step context from existing results
     fn build_step_context_from_results(&self, results: &[StepResult]) -> String {
         if results.is_empty() {
             return String::new();
         }
 
-        let mut parts = vec!["已完成步骤的结果：".to_string()];
+        let mut parts = vec!["Completed step results:".to_string()];
         for r in results {
             parts.push(format!(
-                "  - 步骤 {}: {} → {}",
+                "  - Step {}: {} → {}",
                 r.step_index + 1,
                 r.description,
                 if r.output.len() > 200 {
@@ -538,14 +538,14 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
         parts.join("\n")
     }
 
-    /// 汇总所有步骤结果
+    /// Summarize all step results
     async fn summarize_results(&self, task: &str, results: &[StepResult]) -> Result<String> {
         let results_text: Vec<String> = results
             .iter()
             .map(|r| {
-                let status = if r.success { "成功" } else { "失败" };
+                let status = if r.success { "Success" } else { "Failed" };
                 format!(
-                    "步骤 {} [{}]: {} → {}",
+                    "Step {} [{}]: {} → {}",
                     r.step_index + 1,
                     status,
                     r.description,
@@ -555,7 +555,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
             .collect();
 
         let summary_prompt = format!(
-            "原始任务: {}\n\n执行结果:\n{}\n\n请根据以上执行结果，给出最终的总结答案。",
+            "Original task: {}\n\nExecution results:\n{}\n\nPlease provide the final summary answer based on the above execution results.",
             task,
             results_text.join("\n")
         );
@@ -597,14 +597,14 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
                 let agent = self.name.clone();
 
                 // ── Phase 1: Planning ──
-                info!(agent = %agent, "📐 Plan-and-Execute (stream): 生成计划");
+                info!(agent = %agent, "📐 Plan-and-Execute (stream): Generate plan");
                 let mut plan = self.planner.write().await.plan(&task_owned).await?;
 
                 // Validate and auto-fix
                 let issues = plan.validate();
                 for issue in &issues {
                     if matches!(issue.severity, IssueSeverity::Error) {
-                        warn!(agent = %agent, issue = %issue.message, "⚠️ 计划验证发现问题");
+                        warn!(agent = %agent, issue = %issue.message, "⚠️ Plan validation found issues");
                     }
                 }
                 plan.auto_fix();
@@ -619,7 +619,7 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
                     warn!(
                         agent = %agent,
                         count = remaining_errors.len(),
-                        "⚠️ 自动修复后仍有 {} 个未解决的问题",
+                        "⚠️ {} unresolved issues remain after auto-fix",
                         remaining_errors.len()
                     );
                 }
@@ -677,11 +677,11 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
                             }
                             Err(e) => {
                                 let _ = task_manager.update_task(&task_id, TaskStatus::Failed(e.to_string()));
-                                task_manager.set_task_result(&task_id, format!("执行失败: {}", e));
+                                task_manager.set_task_result(&task_id, format!("Execution failed: {}", e));
                                 all_results.push(StepResult {
                                     step_index: step_idx,
                                     description: task_item.description.clone(),
-                                    output: format!("执行失败: {}", e),
+                                    output: format!("Execution failed: {}", e),
                                     success: false,
                                 });
                                 yield AgentEvent::StepEnd { step_index: step_idx, success: false };
@@ -702,7 +702,7 @@ impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteA
                                         .map(|r| format!("  - {}: {}", r.description, r.output))
                                         .collect();
                                     let replan_prompt = format!(
-                                        "原始任务: {}\n\n已完成的步骤:\n{}\n\n失败的步骤: {}\n错误: {}\n\n请重新制定受影响步骤的计划。",
+                                        "Original task: {}\n\nCompleted steps:\n{}\n\nFailed step: {}\nError: {}\n\nPlease re-plan the affected steps.",
                                         task_owned, completed_steps.join("\n"), task_item.description, e
                                     );
 

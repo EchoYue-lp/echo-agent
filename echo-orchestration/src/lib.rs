@@ -1,6 +1,21 @@
 //! # echo_orchestration
 //!
-//! Orchestration layer: workflow, human-in-the-loop, and task management.
+//! Orchestration layer for the [echo-agent](https://crates.io/crates/echo_agent) framework.
+//!
+//! ## Modules
+//!
+//! | Module | Description |
+//! |--------|-------------|
+//! | [`workflow`] | Graph workflow engine — `GraphBuilder`, `Graph`, streaming events |
+//! | [`human_loop`] | Human-in-the-loop approvals — console, webhook, WebSocket, permission pipeline |
+//! | [`tasks`] | DAG task management — `TaskManager`, scheduling, hooks, events |
+//!
+//! ## Feature Flags
+//!
+//! - `websocket` — Enable `WebSocketHumanLoopProvider` for WebSocket-based approvals
+//!
+//! Most users should depend on `echo_agent` (the facade crate) instead of
+//! depending on `echo_orchestration` directly.
 
 pub mod human_loop;
 pub mod tasks;

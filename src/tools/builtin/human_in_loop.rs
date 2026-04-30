@@ -7,11 +7,12 @@ use crate::error::ToolError;
 use crate::human_loop::{HumanLoopProvider, HumanLoopRequest, HumanLoopResponse};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
-/// LLM 触发的人工介入工具。
+/// LLM-triggered human-in-the-loop tool.
 ///
-/// 当 LLM 不确定用户意图、需要额外信息或需要用户确认时调用。
-/// 通过注入的 [`HumanLoopProvider`] 以异步方式向用户请求输入，
-/// 支持命令行、HTTP Webhook、WebSocket 等多种渠道。
+/// Called when the LLM is uncertain about user intent, needs additional
+/// information, or requires user confirmation. Uses the injected
+/// [`HumanLoopProvider`] to asynchronously request user input, supporting
+/// multiple channels such as CLI, HTTP Webhook, WebSocket, etc.
 pub struct HumanInLoop {
     provider: Arc<dyn HumanLoopProvider>,
 }
@@ -28,7 +29,7 @@ impl Tool for HumanInLoop {
     }
 
     fn description(&self) -> &str {
-        "当你不确定用户意图、需要额外信息、或需要用户确认时使用此工具。"
+        "Use this tool when you are uncertain about user intent, need additional information, or require user confirmation."
     }
 
     fn parameters(&self) -> Value {
@@ -37,15 +38,15 @@ impl Tool for HumanInLoop {
             "properties": {
                 "reasoning": {
                     "type": "string",
-                    "description": "触发原因：为什么需要人工介入？意图不明确时由 LLM 给出；工具存在风险时由用户确认。"
+                    "description": "Trigger reason: why is human intervention needed? Provided by LLM when intent is unclear; user confirmation when tool has risks."
                 },
                 "tool": {
                     "type": "string",
-                    "description": "引起触发的工具名称（可选）"
+                    "description": "Name of the tool that triggered this (optional)"
                 },
                 "approval_type": {
                     "type": "string",
-                    "description": "触发类型：LLM 主动触发时填 'LLM'，工具触发时填 'tool'"
+                    "description": "Trigger type: 'LLM' when the LLM triggers it, 'tool' when a tool triggers it"
                 }
             },
             "required": ["reasoning", "approval_type"]
@@ -70,34 +71,37 @@ impl Tool for HumanInLoop {
             let tool = parameters
                 .get("tool")
                 .and_then(|t| t.as_str())
-                .unwrap_or("无");
+                .unwrap_or("None");
 
             let prompt = format!(
-                "需要你给予帮助。\n触发类型：{approval_type}\n触发原因：{reasoning}\n触发工具：{tool}\n\n请直接回复你的意见或确认："
+                "I need your help.\nTrigger type: {approval_type}\nTrigger reason: {reasoning}\nTrigger tool: {tool}\n\nPlease reply directly with your opinion or confirmation:"
             );
 
             let req = HumanLoopRequest::input(prompt);
             let result_text = match self.provider.request(req).await? {
                 HumanLoopResponse::Text(text) => text,
-                HumanLoopResponse::Approved => "用户已确认".to_string(),
+                HumanLoopResponse::Approved => "User confirmed".to_string(),
                 HumanLoopResponse::ApprovedWithScope { scope } => {
-                    format!("用户已确认（scope: {:?}）", scope)
+                    format!("User confirmed (scope: {:?})", scope)
                 }
                 HumanLoopResponse::ModifiedArgs { args, scope } => {
-                    format!("用户修改参数后确认（args: {}, scope: {:?}）", args, scope)
+                    format!(
+                        "User confirmed after modifying arguments (args: {}, scope: {:?})",
+                        args, scope
+                    )
                 }
                 HumanLoopResponse::Rejected { reason } => {
                     format!(
-                        "用户已拒绝{}",
-                        reason.map(|r| format!("，原因：{r}")).unwrap_or_default()
+                        "User rejected{}",
+                        reason.map(|r| format!(", reason: {r}")).unwrap_or_default()
                     )
                 }
-                HumanLoopResponse::Timeout => "等待用户输入超时".to_string(),
-                HumanLoopResponse::Deferred => "用户推迟决策".to_string(),
+                HumanLoopResponse::Timeout => "Timed out waiting for user input".to_string(),
+                HumanLoopResponse::Deferred => "User deferred the decision".to_string(),
             };
 
             Ok(ToolResult::success(format!(
-                "用户回复（触发原因：{reasoning}，工具：{tool}）：{result_text}"
+                "User response (trigger reason: {reasoning}, tool: {tool}): {result_text}"
             )))
         })
     }

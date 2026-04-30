@@ -1,4 +1,4 @@
-//! Agent 核心 trait、事件和回调接口
+//! Agent core trait, events, and callback interfaces
 
 use crate::error::{ReactError, Result};
 use crate::llm::ToolDefinition;
@@ -9,167 +9,167 @@ use futures::stream::StreamExt as _;
 use serde_json::Value;
 pub use tokio_util::sync::CancellationToken;
 
-/// Agent 执行过程中产生的事件
+/// Events produced during Agent execution
 ///
-/// 覆盖 Agent 生命周期的各个阶段，便于实现进度条、日志、UI 更新等。
+/// Cover each phase of the Agent lifecycle for progress bars, logs, UI updates, etc.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AgentEvent {
-    // ── LLM 交互 ──────────────────────────────────────────────────────────
-    /// LLM 正在生成 token（流式）
+    // ── LLM Interaction ──────────────────────────────────────────────────────────
+    /// LLM is generating a token (streaming)
     Token(String),
-    /// LLM 推理开始
+    /// LLM reasoning started
     ThinkStart,
-    /// LLM 推理结束
+    /// LLM reasoning ended
     ThinkEnd {
-        /// 提示词消耗的 token 数量
+        /// Number of prompt tokens consumed
         prompt_tokens: usize,
-        /// 补全消耗的 token 数量
+        /// Number of completion tokens consumed
         completion_tokens: usize,
     },
 
-    // ── 工具调用 ──────────────────────────────────────────────────────────
-    /// 准备调用工具
+    // ── Tool Invocation ──────────────────────────────────────────────────────────
+    /// Preparing to invoke a tool
     ToolCall {
-        /// 工具名称
+        /// Tool name
         name: String,
-        /// 工具参数（JSON 格式）
+        /// Tool arguments (JSON format)
         args: Value,
     },
-    /// 工具执行完毕
+    /// Tool execution completed
     ToolResult {
-        /// 工具名称
+        /// Tool name
         name: String,
-        /// 工具执行结果（字符串格式）
+        /// Tool execution result (string format)
         output: String,
     },
-    /// 工具执行出错
+    /// Tool execution error
     ToolError {
-        /// 工具名称
+        /// Tool name
         name: String,
-        /// 错误信息
+        /// Error message
         error: String,
     },
 
-    // ── 步骤级事件 ────────────────────────────────────────────────────────
-    /// Plan-and-Execute 引擎生成了计划
+    // ── Step-level Events ────────────────────────────────────────────────────────
+    /// Plan-and-Execute engine generated a plan
     PlanGenerated {
-        /// 计划步骤描述列表
+        /// List of plan step descriptions
         steps: Vec<String>,
     },
-    /// 计划步骤开始执行
+    /// Plan step execution started
     StepStart {
-        /// 步骤索引（0-based）
+        /// Step index (0-based)
         step_index: usize,
-        /// 步骤描述
+        /// Step description
         description: String,
     },
-    /// 计划步骤执行结束
+    /// Plan step execution ended
     StepEnd {
-        /// 步骤索引（0-based）
+        /// Step index (0-based)
         step_index: usize,
-        /// 步骤执行是否成功
+        /// Whether the step executed successfully
         success: bool,
     },
 
-    // ── 护栏 & 安全 ──────────────────────────────────────────────────────
-    /// 护栏被触发
+    // ── Guard & Safety ──────────────────────────────────────────────────────
+    /// A guard was triggered
     GuardTriggered {
-        /// 护栏名称
+        /// Guard name
         guard: String,
-        /// 是否被阻断
+        /// Whether the action was blocked
         blocked: bool,
     },
 
-    // ── 记忆 & 编排 ──────────────────────────────────────────────────────
-    /// 长期记忆已召回
+    // ── Memory & Orchestration ──────────────────────────────────────────────────────
+    /// Long-term memory was recalled
     MemoryRecalled {
-        /// 召回的记忆条目数量
+        /// Number of recalled memory entries
         count: usize,
     },
-    /// Agent 间 Handoff 开始
+    /// Agent-to-agent handoff started
     HandoffStart {
-        /// 来源 Agent 名称
+        /// Source agent name
         from: String,
-        /// 目标 Agent 名称
+        /// Target agent name
         to: String,
     },
-    /// Agent 间 Handoff 结束
+    /// Agent-to-agent handoff ended
     HandoffEnd {
-        /// 目标 Agent 名称
+        /// Target agent name
         to: String,
     },
 
-    // ── 自省反思 ──────────────────────────────────────────────────────────
-    /// 反思迭代开始
+    // ── Introspection / Reflection ──────────────────────────────────────────────────────────
+    /// Reflection iteration started
     ReflectionStart {
-        /// 当前迭代次数（从 1 开始）
+        /// Current iteration number (starting from 1)
         iteration: usize,
     },
-    /// 反思迭代结束
+    /// Reflection iteration ended
     ReflectionEnd {
-        /// 迭代次数（从 1 开始）
+        /// Iteration number (starting from 1)
         iteration: usize,
-        /// 反思评分（0.0-1.0）
+        /// Reflection score (0.0-1.0)
         score: f64,
-        /// 是否通过反思
+        /// Whether reflection passed
         passed: bool,
     },
-    /// 评估者生成了评价结果
+    /// Evaluator produced a critique
     CritiqueGenerated {
-        /// 评价分数（0.0-1.0）
+        /// Critique score (0.0-1.0)
         score: f64,
-        /// 是否通过评估
+        /// Whether the evaluation passed
         passed: bool,
-        /// 评估反馈文本
+        /// Evaluation feedback text
         feedback: String,
     },
-    /// 正在基于反思修正回答
+    /// Refining answer based on reflection
     Refining {
-        /// 当前迭代次数（从 1 开始）
+        /// Current iteration number (starting from 1)
         iteration: usize,
     },
 
-    // ── 可视化 ────────────────────────────────────────────────────────────
-    /// 图表生成（vega-lite JSON 规范）
+    // ── Visualization ────────────────────────────────────────────────────────────
+    /// Chart generation (vega-lite JSON spec)
     Chart { spec: Value },
 
-    // ── 错误 ────────────────────────────────────────────────────────────
-    /// 通用 Agent 错误（非工具执行错误，如 LLM 调用失败、护栏拦截等）
+    // ── Errors ────────────────────────────────────────────────────────────
+    /// Generic Agent error (non-tool errors, e.g. LLM call failure, guard rejection, etc.)
     Error {
-        /// 错误来源（如 "llm", "guard", "config"）
+        /// Error source (e.g. "llm", "guard", "config")
         source: String,
-        /// 错误信息
+        /// Error message
         message: String,
     },
 
-    // ── 终态 ──────────────────────────────────────────────────────────────
-    /// 最终回答
+    // ── Terminal States ──────────────────────────────────────────────────────────────
+    /// Final answer
     FinalAnswer(String),
-    /// 被取消
+    /// Cancelled
     Cancelled,
 }
 
-/// Agent 运行所处的生命周期阶段
+/// The lifecycle phase an Agent event belongs to
 ///
-/// 将 `AgentEvent` 的各个变体映射到统一的阶段模型，便于：
-/// - **状态持久化**：checkpoint 只在阶段边界处创建
-/// - **前端渲染**：按阶段路由到对应的 UI 组件，无需逐 variant match
-/// - **开发者理解**：新接入者先看阶段再看具体事件
+/// Maps each variant of `AgentEvent` into a unified phase model for:
+/// - **State persistence**: checkpoints are only created at phase boundaries
+/// - **Frontend rendering**: route to the corresponding UI component per phase, without matching every variant
+/// - **Developer understanding**: newcomers first understand phases, then specific events
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AgentPhase {
-    /// LLM 推理中（Token → ThinkStart → ThinkEnd）
+    /// LLM reasoning in progress (Token → ThinkStart → ThinkEnd)
     Thinking,
-    /// 工具执行中（ToolCall → ToolResult / ToolError）
+    /// Tool execution in progress (ToolCall → ToolResult / ToolError)
     Acting,
-    /// 计划制定与步骤执行（PlanGenerated / StepStart / StepEnd）
+    /// Plan formulation and step execution (PlanGenerated / StepStart / StepEnd)
     Planning,
-    /// 自省反思与修正（ReflectionStart / CritiqueGenerated / Refining / ReflectionEnd）
+    /// Reflection and refinement (ReflectionStart / CritiqueGenerated / Refining / ReflectionEnd)
     Reflecting,
-    /// Agent 间切换（HandoffStart → HandoffEnd）
+    /// Agent-to-agent switching (HandoffStart → HandoffEnd)
     HandingOff,
-    /// 已产出最终结果或已取消
+    /// Final result produced or cancelled
     Terminal,
 }
 
@@ -208,11 +208,11 @@ impl AgentEvent {
         self.total_tokens()
     }
 
-    /// 返回当前事件所属的生命周期阶段
+    /// Return the lifecycle phase of this event
     ///
-    /// 用于前端按阶段路由渲染、状态机状态推导等场景。
+    /// Used for frontend phase-routed rendering, state machine derivation, and similar scenarios.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```
     /// use echo_core::agent::{AgentEvent, AgentPhase};
@@ -255,12 +255,12 @@ impl AgentEvent {
         }
     }
 
-    /// 是否为可持久化的快照点（阶段边界事件）
+    /// Whether this is a persistable snapshot point (phase boundary event)
     ///
-    /// 在这些事件发生时，Agent 状态处于"稳定点"——没有进行中的 LLM 调用或工具执行，
-    /// 适合进行 checkpoint 保存，用于断点续传或 Time Travel 调试。
+    /// When these events occur, the Agent state is at a "stable point" — no in-flight LLM calls
+    /// or tool executions, suitable for checkpoint save, resume-from-checkpoint, or Time Travel debugging.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```
     /// use echo_core::agent::AgentEvent;
@@ -286,27 +286,27 @@ impl AgentEvent {
     }
 }
 
-/// LLM 响应解析后的步骤类型
+/// Parsed step type from LLM response
 #[derive(Debug)]
-/// LLM 响应解析后的步骤类型
 pub enum StepType {
-    /// 思考步骤（内部推理）
+    /// Thought step (internal reasoning)
     Thought(String),
-    /// 工具调用步骤
+    /// Tool invocation step
     Call {
-        /// 工具调用 ID（唯一标识符）
+        /// Tool call ID (unique identifier)
         tool_call_id: String,
-        /// 函数名称
+        /// Function name
         function_name: String,
-        /// 函数参数（JSON 格式）
+        /// Function arguments (JSON format)
         arguments: Value,
     },
 }
 
-/// Agent 统一执行接口
+/// Unified Agent execution interface
 ///
-/// 约定一个可变借用驱动的执行模型，便于 Agent 在内部维护对话状态、
-/// 工具缓存或连接句柄，同时让工作流层可以通过 `Mutex` 安全串行化访问。
+/// Establishes an execution model that is driven by a mutable borrow, allowing the Agent
+/// to internally maintain dialogue state, tool caches, or connection handles, while the
+/// workflow layer can safely serialize access through `Mutex`.
 pub trait Agent: Send + Sync {
     /// Human-readable agent name used in logs, events, and orchestration.
     fn name(&self) -> &str;
@@ -432,7 +432,7 @@ pub trait Agent: Send + Sync {
     fn reset(&self) {}
 }
 
-/// Agent 生命周期回调接口
+/// Agent lifecycle callback interface
 pub trait AgentCallback: Send + Sync {
     /// Called before the model starts a reasoning step.
     fn on_think_start<'a>(

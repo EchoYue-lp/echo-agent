@@ -1,10 +1,10 @@
-//! DuckDuckGo 搜索 Provider
+//! DuckDuckGo search Provider
 //!
-//! 双策略实现：
-//! 1. **HTML 搜索**（`html.duckduckgo.com`）：完整搜索结果，但可能被反爬 CAPTCHA 拦截
-//! 2. **Instant Answer API**（`api.duckduckgo.com`）：返回摘要和相关主题，稳定免费
+//! Dual-strategy implementation:
+//! 1. **HTML search** (`html.duckduckgo.com`): full search results, but may be blocked by anti-scraping CAPTCHA
+//! 2. **Instant Answer API** (`api.duckduckgo.com`): returns abstracts and related topics, stable and free
 //!
-//! 当 HTML 搜索被拦截时自动降级到 API。
+//! Automatically falls back to the API when HTML search is blocked.
 
 use super::utils::{percent_decode, truncate_chars, urlencode};
 use super::{SearchProvider, SearchResult};
@@ -16,9 +16,9 @@ use serde::Deserialize;
 use std::time::Duration;
 use tracing::warn;
 
-/// DuckDuckGo 搜索 Provider（免费，无需 API Key）
+/// DuckDuckGo search Provider (free, no API Key required)
 ///
-/// 优先使用 HTML 搜索获取完整结果；若被反爬拦截则自动降级到 Instant Answer API。
+/// Prefers HTML search for full results; automatically falls back to Instant Answer API if blocked by anti-scraping.
 pub struct DuckDuckGoProvider {
     client: Client,
 }
@@ -38,9 +38,9 @@ impl DuckDuckGoProvider {
         Self { client }
     }
 
-    /// 从 DuckDuckGo 重定向 URL 中提取实际 URL
+    /// Extract the actual URL from a DuckDuckGo redirect URL
     fn extract_url(href: &str) -> String {
-        // 精确匹配查询参数 uddg=（前面必须是 ? 或 &）
+        // Exact match query parameter uddg= (preceded by ? or &)
         let search = "?uddg=";
         if let Some(pos) = href.find(search) {
             let encoded = &href[pos + search.len()..];
@@ -77,7 +77,7 @@ impl SearchProvider for DuckDuckGoProvider {
     async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
         let encoded_query = urlencode(query);
 
-        // 策略 1: HTML 搜索
+        // Strategy 1: HTML search
         let url = format!("https://html.duckduckgo.com/html/?q={}", encoded_query);
         let response = self
             .client
@@ -88,13 +88,13 @@ impl SearchProvider for DuckDuckGoProvider {
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: format!("DuckDuckGo 请求失败: {}", e),
+                message: format!("DuckDuckGo request failed: {}", e),
             })?;
 
         if !response.status().is_success() {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: format!("DuckDuckGo 返回错误状态: {}", response.status()),
+                message: format!("DuckDuckGo returned error status: {}", response.status()),
             }
             .into());
         }
@@ -104,34 +104,36 @@ impl SearchProvider for DuckDuckGoProvider {
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: format!("读取响应体失败: {}", e),
+                message: format!("Failed to read response body: {}", e),
             })?;
 
-        // 检测 CAPTCHA / 反爬页面
+        // Detect CAPTCHA / anti-scraping page
         if html.contains("anomaly-modal") || html.contains("bots use DuckDuckGo") {
-            warn!("DuckDuckGo HTML 搜索被反爬拦截，降级到 Instant Answer API");
+            warn!(
+                "DuckDuckGo HTML search blocked by anti-scraping, falling back to Instant Answer API"
+            );
             return self.search_via_api(query, max_results).await;
         }
 
-        // 尝试解析 HTML 搜索结果
+        // Attempt to parse HTML search results
         let results = parse_ddg_html(&html, max_results)?;
         if !results.is_empty() {
             return Ok(results);
         }
 
-        // HTML 解析无结果，降级到 API
-        warn!("DuckDuckGo HTML 未解析到结果，降级到 Instant Answer API");
+        // HTML parsing returned no results, falling back to API
+        warn!("DuckDuckGo HTML parsing returned no results, falling back to Instant Answer API");
         self.search_via_api(query, max_results).await
     }
 }
 
-// ── Instant Answer API 降级 ───────────────────────────────────────────────────
+// ── Instant Answer API fallback ───────────────────────────────────────────────────
 
 impl DuckDuckGoProvider {
-    /// 使用 DuckDuckGo Instant Answer API 搜索
+    /// Search using the DuckDuckGo Instant Answer API
     ///
-    /// 返回摘要（Abstract）和相关主题（RelatedTopics）。
-    /// 不如完整搜索全面，但稳定可靠，不受反爬影响。
+    /// Returns the abstract (Abstract) and related topics (RelatedTopics).
+    /// Less comprehensive than full search, but stable and reliable, unaffected by anti-scraping.
     async fn search_via_api(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
         let url = format!(
             "https://api.duckduckgo.com/?q={}&format=json&no_html=1",
@@ -145,13 +147,13 @@ impl DuckDuckGoProvider {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "web_search".into(),
-                    message: format!("DuckDuckGo API 请求失败: {}", e),
+                    message: format!("DuckDuckGo API request failed: {}", e),
                 })?;
 
         if !response.status().is_success() {
             return Err(ToolError::ExecutionFailed {
                 tool: "web_search".into(),
-                message: format!("DuckDuckGo API 返回错误: {}", response.status()),
+                message: format!("DuckDuckGo API returned error: {}", response.status()),
             }
             .into());
         }
@@ -162,12 +164,12 @@ impl DuckDuckGoProvider {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "web_search".into(),
-                    message: format!("DuckDuckGo API 响应解析失败: {}", e),
+                    message: format!("DuckDuckGo API response parsing failed: {}", e),
                 })?;
 
         let mut results = Vec::new();
 
-        // Abstract 作为首条结果
+        // Abstract as the first result
         if !api_resp.abstract_text.is_empty() && !api_resp.abstract_url.is_empty() {
             results.push(SearchResult {
                 title: api_resp
@@ -179,7 +181,7 @@ impl DuckDuckGoProvider {
             });
         }
 
-        // RelatedTopics 补充
+        // Supplement with RelatedTopics
         for topic in &api_resp.related_topics {
             if results.len() >= max_results {
                 break;
@@ -188,7 +190,7 @@ impl DuckDuckGoProvider {
                 let text = rt.get("Text").and_then(|v| v.as_str()).unwrap_or("");
                 let url = rt.get("FirstURL").and_then(|v| v.as_str()).unwrap_or("");
                 if !text.is_empty() && !url.is_empty() {
-                    // 从文本中提取标题（第一个 ' - ' 之前的部分）
+                    // Extract the title from the text (the part before the first ' - ')
                     let title = text.split(" - ").next().unwrap_or(text).to_string();
                     results.push(SearchResult {
                         title,
@@ -203,7 +205,7 @@ impl DuckDuckGoProvider {
     }
 }
 
-/// DuckDuckGo Instant Answer API 响应
+/// DuckDuckGo Instant Answer API response
 #[derive(Debug, Deserialize)]
 struct DdgApiResponse {
     #[serde(rename = "AbstractText")]
@@ -216,7 +218,7 @@ struct DdgApiResponse {
     related_topics: Vec<serde_json::Value>,
 }
 
-// ── HTML 搜索结果解析 ─────────────────────────────────────────────────────────
+// ── HTML search result parsing ─────────────────────────────────────────────────────────
 
 fn parse_ddg_html(html: &str, max_results: usize) -> Result<Vec<SearchResult>> {
     let document = Html::parse_document(html);

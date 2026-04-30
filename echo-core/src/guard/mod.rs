@@ -1,4 +1,4 @@
-//! 护栏系统核心 trait 和类型
+//! Guard system core trait and types
 
 #[cfg(feature = "guard")]
 pub mod content;
@@ -13,16 +13,16 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// 护栏检查方向
+/// Guard check direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardDirection {
-    /// 用户输入方向检查
+    /// User input direction check
     Input,
-    /// 模型输出方向检查
+    /// Model output direction check
     Output,
-    /// 工具输入参数检查
+    /// Tool input parameter check
     ToolInput,
-    /// 工具输出结果检查
+    /// Tool output result check
     ToolOutput,
 }
 
@@ -37,17 +37,17 @@ impl std::fmt::Display for GuardDirection {
     }
 }
 
-/// 护栏检查结果
+/// Guard check result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GuardResult {
     Pass,
     Block {
-        /// 阻断原因
+        /// Block reason
         reason: String,
     },
     /// Multiple warnings collected from all guards.
     Warn {
-        /// 警告原因列表
+        /// Warning reason list
         reasons: Vec<String>,
     },
 }
@@ -58,16 +58,16 @@ impl GuardResult {
     }
 }
 
-/// 护栏 trait
+/// Guard trait
 pub trait Guard: Send + Sync {
-    /// 获取护栏名称
+    /// Get the guard name
     fn name(&self) -> &str;
 
-    /// 检查内容
+    /// Check content
     ///
-    /// # 参数
-    /// * `content` - 待检查的内容
-    /// * `direction` - 检查方向
+    /// # Parameters
+    /// * `content` - Content to check
+    /// * `direction` - Check direction
     fn check<'a>(
         &'a self,
         content: &'a str,
@@ -75,7 +75,7 @@ pub trait Guard: Send + Sync {
     ) -> BoxFuture<'a, Result<GuardResult>>;
 }
 
-/// 护栏管理器
+/// Guard manager
 pub struct GuardManager {
     guards: Vec<Arc<dyn Guard>>,
 }
@@ -87,33 +87,34 @@ impl Default for GuardManager {
 }
 
 impl GuardManager {
-    /// 创建空的护栏管理器
+    /// Create an empty guard manager
     pub fn new() -> Self {
         Self { guards: Vec::new() }
     }
 
-    /// 添加护栏
+    /// Add a guard
     pub fn add(&mut self, guard: Arc<dyn Guard>) {
         self.guards.push(guard);
     }
 
-    /// 从护栏列表创建管理器
+    /// Create a manager from a list of guards
     pub fn from_guards(guards: Vec<Arc<dyn Guard>>) -> Self {
         Self { guards }
     }
 
-    /// 检查是否为空（未添加任何护栏）
+    /// Check if empty (no guards added)
     pub fn is_empty(&self) -> bool {
         self.guards.is_empty()
     }
 
-    /// 并行执行所有护栏检查。
+    /// Run all guard checks in parallel.
     ///
-    /// - 所有护栏同时启动（受并发度上限约束），而非串行执行。
-    /// - 一旦发现 `Block` 结果，取消其他仍在运行的检查（通过 `CancellationToken`）。
-    /// - 收集所有 `Warn` 理由到 `Vec<String>`。
+    /// - All guards start simultaneously (subject to concurrency cap), rather than running serially.
+    /// - Once a `Block` result is detected, cancel other in-flight checks (via `CancellationToken`).
+    /// - Collect all `Warn` reasons into `Vec<String>`.
     ///
-    /// 并发度上限为 16，防止护栏数量过多时创建海量任务。
+    /// The concurrency cap is 16 to prevent spawning an excessive number of tasks
+    /// when many guards are registered.
     pub async fn check_all(&self, content: &str, direction: GuardDirection) -> Result<GuardResult> {
         if self.guards.is_empty() {
             return Ok(GuardResult::Pass);
@@ -150,12 +151,12 @@ impl GuardManager {
 
             match result {
                 Ok(GuardResult::Block { reason }) => {
-                    cancel.cancel(); // 取消其他仍在运行的检查
+                    cancel.cancel(); // cancel other in-flight checks
                     tracing::warn!(
                         guard = guard_name,
                         direction = %direction,
                         reason = %reason,
-                        "护栏阻断"
+                        "Guard blocked content"
                     );
                     return Ok(GuardResult::Block { reason });
                 }
@@ -164,7 +165,7 @@ impl GuardManager {
                 }
                 Ok(GuardResult::Pass) => {}
                 Err(e) => {
-                    tracing::error!(guard = guard_name, error = %e, "护栏检查出错");
+                    tracing::error!(guard = guard_name, error = %e, "Guard check error");
                     warnings.push(format!("{} error: {}", guard_name, e));
                 }
             }

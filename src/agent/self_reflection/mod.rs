@@ -1,16 +1,17 @@
-//! Self-Reflection 引擎
+//! Self-Reflection engine
 //!
-//! 在 ReAct 基础上引入"评估 → 反思 → 修正"闭环，通过语言反馈让 Agent 从错误中学习。
+//! Introduces an "Evaluate → Reflect → Refine" closed loop on top of ReAct,
+//! enabling the Agent to learn from mistakes through linguistic feedback.
 //!
-//! # 三组件模型 + 情景记忆
+//! # Three-component model + Episodic Memory
 //!
 //! ```text
-//! Actor(生成) → Evaluator(评估) → Reflector(反思) → 修正 → 循环
-//!                     ↓                              ↓
-//!               Episodic Memory（跨任务经验存储）
+//! Actor(generate) → Evaluator(evaluate) → Reflector(reflect) → Refine → loop
+//!                         ↓                                ↓
+//!               Episodic Memory (cross-task experience storage)
 //! ```
 //!
-//! # 示例
+//! # Example
 //!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
@@ -21,7 +22,7 @@
 //! let generator = ReactAgentBuilder::new()
 //!     .model("qwen3-max")
 //!     .name("writer")
-//!     .system_prompt("你是一个技术文档撰写专家。")
+//!     .system_prompt("You are a technical documentation expert.")
 //!     .build()?;
 //!
 //! let critic = LlmCritic::new("qwen3-max").with_pass_threshold(8.0);
@@ -30,10 +31,10 @@
 //!     .max_reflections(3);
 //!
 //! let result = agent
-//!     .execute("解释 Rust 所有权的核心概念，要求通俗易懂且准确。")
+//!     .execute("Explain the core concepts of Rust ownership — make it accessible and accurate.")
 //!     .await?;
 //!
-//! println!("最终结果:\n{}", result);
+//! println!("Final result:\n{}", result);
 //! # Ok(())
 //! # }
 //! ```
@@ -66,7 +67,7 @@ use crate::agent::plan_execute::Executor;
 
 /// Self-Reflection Agent
 ///
-/// 三阶段循环：生成 → 评估 → 反思修正，配合情景记忆实现跨任务学习。
+/// Three-phase loop: Generate → Evaluate → Reflect & Refine, with episodic memory for cross-task learning.
 pub struct SelfReflectionAgent<C: Critic> {
     name: String,
     generator: Box<dyn Agent>,
@@ -83,17 +84,17 @@ pub struct SelfReflectionAgent<C: Critic> {
 }
 
 impl<C: Critic> SelfReflectionAgent<C> {
-    /// 创建 Self-Reflection Agent
+    /// Create a Self-Reflection Agent
     ///
-    /// # 参数
-    /// * `name` - Agent 名称（用于标识和日志记录）
-    /// * `generator` - 生成器 Agent（如 ReactAgent），负责生成初始响应
-    /// * `critic` - 评估器（Critic），负责评估生成质量并提供反馈
+    /// # Parameters
+    /// * `name` - Agent name (used for identification and logging)
+    /// * `generator` - Generator Agent (e.g. ReactAgent), responsible for generating initial responses
+    /// * `critic` - Critic (evaluator), responsible for evaluating generation quality and providing feedback
     ///
-    /// # 默认配置
-    /// * 最大反思次数：3
-    /// * 通过阈值：7.0（评分 ≥ 7.0 视为通过）
-    /// * 情景记忆容量：10 条经验
+    /// # Default configuration
+    /// * Max reflections: 3
+    /// * Pass threshold: 7.0 (score ≥ 7.0 is considered pass)
+    /// * Episodic memory capacity: 10 experiences
     pub fn new(name: impl Into<String>, generator: impl Agent + 'static, critic: C) -> Self {
         Self {
             name: name.into(),
@@ -110,19 +111,19 @@ impl<C: Critic> SelfReflectionAgent<C> {
         }
     }
 
-    /// 最大反思迭代次数（默认 3）
+    /// Maximum reflection iterations (default 3)
     pub fn max_reflections(mut self, n: usize) -> Self {
         self.max_reflections = n;
         self
     }
 
-    /// 通过阈值（0.0 - 10.0，默认 7.0）
+    /// Pass threshold (0.0 - 10.0, default 7.0)
     pub fn pass_threshold(mut self, threshold: f64) -> Self {
         self.pass_threshold = threshold;
         self
     }
 
-    /// 自定义修正提示词构建器
+    /// Custom refinement prompt builder
     pub fn refinement_prompt_builder(
         mut self,
         builder: impl RefinementPromptBuilder + 'static,
@@ -131,7 +132,7 @@ impl<C: Critic> SelfReflectionAgent<C> {
         self
     }
 
-    /// 自定义反思提示词构建器
+    /// Custom reflection prompt builder
     pub fn reflection_prompt_builder(
         mut self,
         builder: impl ReflectionPromptBuilder + 'static,
@@ -140,47 +141,50 @@ impl<C: Critic> SelfReflectionAgent<C> {
         self
     }
 
-    /// 设置情景记忆容量上限（默认 10）
+    /// Set episodic memory capacity limit (default 10)
     pub fn memory_limit(mut self, limit: usize) -> Self {
         self.memory_limit = limit;
         self
     }
 
-    /// 设置持久化存储
+    /// Set persistent storage
     pub fn with_store(mut self, store: Arc<dyn ReflectionStore>) -> Self {
         self.store = Some(store);
         self
     }
 
-    /// 核心执行循环
+    /// Core execution loop
     async fn run_reflection_loop(&self, task: &str) -> Result<String> {
         let agent = self.name.clone();
 
-        // ── 阶段 1: 生成初始响应 ──────────────────────────────────────
-        info!(agent = %agent, "🎯 Self-Reflection: 生成初始响应");
+        // ── Phase 1: Generate initial response ──────────────────────────────────────
+        info!(agent = %agent, "🎯 Self-Reflection: generating initial response");
 
         let memory_context = self.build_memory_context();
         let enhanced_task = if memory_context.is_empty() {
             task.to_string()
         } else {
-            format!("{}\n\n参考以下过往经验教训：\n{}", task, memory_context)
+            format!(
+                "{}\n\nRefer to the following past experiences and lessons:\n{}",
+                task, memory_context
+            )
         };
 
         let mut current_answer = self.generator.execute(&enhanced_task).await?;
         let mut records: Vec<ReflectionRecord> = Vec::new();
 
-        // ── 阶段 2: 评估 → 反思 → 修正循环 ──────────────────────────
+        // ── Phase 2: Evaluate → Reflect → Refine loop ──────────────────────────
         for iteration in 0..self.max_reflections {
             info!(
                 agent = %agent,
                 iteration = iteration + 1,
                 max = self.max_reflections,
-                "🔍 Self-Reflection: 第 {}/{} 轮评估",
+                "🔍 Self-Reflection: round {}/{} evaluation",
                 iteration + 1,
                 self.max_reflections
             );
 
-            // 评估
+            // Evaluate
             let context = self.build_critique_context(&records);
             let critique = self
                 .critic
@@ -191,12 +195,12 @@ impl<C: Critic> SelfReflectionAgent<C> {
                 agent = %agent,
                 score = critique.score,
                 passed = critique.passed,
-                "📊 评估结果: {:.1}/10.0 ({})",
+                "📊 Evaluation result: {:.1}/10.0 ({})",
                 critique.score,
-                if critique.passed { "通过" } else { "未通过" }
+                if critique.passed { "pass" } else { "fail" }
             );
 
-            // 通过质量阈值
+            // Passed quality threshold
             if critique.passed && critique.score >= self.pass_threshold {
                 records.push(ReflectionRecord {
                     iteration,
@@ -206,14 +210,14 @@ impl<C: Critic> SelfReflectionAgent<C> {
                     refined_answer: None,
                 });
 
-                info!(agent = %agent, "✅ Self-Reflection: 评估通过");
+                info!(agent = %agent, "✅ Self-Reflection: evaluation passed");
 
-                // 存储成功经验
+                // Store successful experience
                 self.persist_records(task, &records).await;
                 return Ok(current_answer);
             }
 
-            // 反思：分析失败原因
+            // Reflect: analyze failure reasons
             let reflection_prompt = self.reflection_prompt_builder.build_reflection_prompt(
                 task,
                 &current_answer,
@@ -221,9 +225,9 @@ impl<C: Critic> SelfReflectionAgent<C> {
             );
 
             let reflection_text = self.generator.execute(&reflection_prompt).await?;
-            debug!(agent = %agent, reflection = %reflection_text, "💡 反思文本");
+            debug!(agent = %agent, reflection = %reflection_text, "💡 Reflection text");
 
-            // 构建修正提示词
+            // Build refinement prompt
             let refinement_prompt = self.refinement_prompt_builder.build_prompt(
                 task,
                 &current_answer,
@@ -232,8 +236,8 @@ impl<C: Critic> SelfReflectionAgent<C> {
                 iteration,
             );
 
-            // 修正
-            info!(agent = %agent, iteration = iteration + 1, "🔧 Self-Reflection: 修正回答");
+            // Refine
+            info!(agent = %agent, iteration = iteration + 1, "🔧 Self-Reflection: refining answer");
             let refined = self.generator.execute(&refinement_prompt).await?;
 
             records.push(ReflectionRecord {
@@ -246,13 +250,13 @@ impl<C: Critic> SelfReflectionAgent<C> {
 
             current_answer = refined;
 
-            // 提取并存储经验教训
+            // Extract and store lessons learned
             self.extract_experience(&records);
         }
 
         info!(
             agent = %agent,
-            "🏁 Self-Reflection: 达到最大反思次数 {}",
+            "🏁 Self-Reflection: reached max reflection iterations {}",
             self.max_reflections
         );
 
@@ -260,7 +264,7 @@ impl<C: Critic> SelfReflectionAgent<C> {
         Ok(current_answer)
     }
 
-    /// 构建情景记忆上下文文本
+    /// Build episodic memory context text
     fn build_memory_context(&self) -> String {
         if self.episodic_memory.read().unwrap().is_empty() {
             return String::new();
@@ -276,16 +280,16 @@ impl<C: Critic> SelfReflectionAgent<C> {
             .join("\n")
     }
 
-    /// 构建评估上下文（之前轮次的记录）
+    /// Build evaluation context (records from previous rounds)
     fn build_critique_context(&self, records: &[ReflectionRecord]) -> String {
         if records.is_empty() {
             return String::new();
         }
 
-        let mut parts = vec!["之前轮次的评估记录：".to_string()];
+        let mut parts = vec!["Evaluation records from previous rounds:".to_string()];
         for r in records {
             parts.push(format!(
-                "  轮次 {}: 评分 {:.1} — {}",
+                "  Round {}: score {:.1} — {}",
                 r.iteration + 1,
                 r.critique.score,
                 r.critique.feedback
@@ -294,16 +298,16 @@ impl<C: Critic> SelfReflectionAgent<C> {
         parts.join("\n")
     }
 
-    /// 从反思记录中提取经验教训
+    /// Extract lessons learned from reflection records
     fn extract_experience(&self, records: &[ReflectionRecord]) {
         for r in records {
             if r.critique.passed {
                 continue;
             }
-            // 从反馈中提取简短教训
+            // Extract brief lessons from feedback
             let feedback = &r.critique.feedback;
             let lesson = if feedback.len() > 100 {
-                // 使用 char_indices 安全截断
+                // Safe truncation using char_indices
                 let end = feedback
                     .char_indices()
                     .take_while(|(idx, _)| *idx < 100)
@@ -320,9 +324,9 @@ impl<C: Critic> SelfReflectionAgent<C> {
                 .suggestions
                 .first()
                 .cloned()
-                .unwrap_or_else(|| "未识别具体错误模式".to_string());
+                .unwrap_or_else(|| "Unrecognized error pattern".to_string());
 
-            // 去重：如果已有相似经验则增加引用计数
+            // Dedup: increment use count if similar experience already exists
             let _found = {
                 let mut memory = self.episodic_memory.write().unwrap();
                 let similar = memory.iter_mut().find(|e| e.lesson == lesson);
@@ -344,10 +348,10 @@ impl<C: Critic> SelfReflectionAgent<C> {
         }
     }
 
-    /// 持久化记录 — 缓冲后批量写入
+    /// Persist records — buffer then batch write
     ///
-    /// 将记录添加到待写入缓冲区，当缓冲区大小达到阈值时自动 flush。
-    /// 这减少了频繁的 I/O 操作，提升性能。
+    /// Add records to a pending write buffer and auto-flush when the buffer reaches the threshold.
+    /// This reduces frequent I/O operations and improves performance.
     async fn persist_records(&self, task: &str, records: &[ReflectionRecord]) {
         if self.store.is_none() {
             return;
@@ -367,7 +371,7 @@ impl<C: Critic> SelfReflectionAgent<C> {
         }
     }
 
-    /// 立即刷新所有待写入的记录
+    /// Immediately flush all pending records
     pub async fn flush_pending_records(&self) {
         if self.pending_records.read().unwrap().is_empty() {
             return;
@@ -425,19 +429,19 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
             let stream = async_stream::try_stream! {
                 let agent = self.name.clone();
 
-                // ── Phase 1: 生成初始响应 ──
-                info!(agent = %agent, "🎯 Self-Reflection (stream): 生成初始响应");
+                // ── Phase 1: Generate initial response ──
+                info!(agent = %agent, "🎯 Self-Reflection (stream): generating initial response");
                 let memory_context = self.build_memory_context();
                 let enhanced_task = if memory_context.is_empty() {
                     task_owned.clone()
                 } else {
-                    format!("{}\n\n参考以下过往经验教训：\n{}", task_owned, memory_context)
+                    format!("{}\n\nRefer to the following past experiences and lessons:\n{}", task_owned, memory_context)
                 };
 
                 let mut current_answer = self.generator.execute(&enhanced_task).await?;
                 let mut records: Vec<ReflectionRecord> = Vec::new();
 
-                // ── Phase 2: 评估 → 反思 → 修正循环 ──
+                // ── Phase 2: Evaluate → Reflect → Refine loop ──
                 for iteration in 0..self.max_reflections {
                     yield AgentEvent::ReflectionStart { iteration };
 
@@ -454,7 +458,7 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
                         feedback: critique.feedback.clone(),
                     };
 
-                    // 通过
+                    // Passed
                     if critique.passed && critique.score >= self.pass_threshold {
                         let score = critique.score;
                         records.push(ReflectionRecord {
@@ -477,12 +481,12 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
                         return;
                     }
 
-                    // 反思
+                    // Reflect
                     let reflection_prompt = self.reflection_prompt_builder
                         .build_reflection_prompt(&task_owned, &current_answer, &critique);
                     let reflection_text = self.generator.execute(&reflection_prompt).await?;
 
-                    // 修正
+                    // Refine
                     yield AgentEvent::Refining { iteration };
                     let refinement_prompt = self.refinement_prompt_builder.build_prompt(
                         &task_owned,
@@ -527,11 +531,11 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
 // ── ReflectiveExecutor ──────────────────────────────────────────────────────
 
 #[cfg(feature = "plan-execute")]
-/// 反思执行器：将 Self-Reflection 作为 Plan-and-Execute 的 Executor 使用
+/// Reflective executor: use Self-Reflection as a Plan-and-Execute Executor
 ///
-/// 每个 Plan 步骤都经过"生成 → 评估 → 修正"闭环。
+/// Each Plan step goes through the "Generate → Evaluate → Refine" closed loop.
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust,no_run
 /// use echo_agent::prelude::*;
@@ -543,7 +547,7 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
 /// let generator = ReactAgentBuilder::new()
 ///     .model("qwen3-max")
 ///     .name("step_executor")
-///     .system_prompt("你是任务执行助手")
+///     .system_prompt("You are a task execution assistant")
 ///     .build()?;
 ///
 /// let critic = LlmCritic::new("qwen3-max");
@@ -554,7 +558,7 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
 ///
 /// let planner = LlmPlanner::new("qwen3-max");
 /// let mut agent = PlanExecuteAgent::new("plan_agent", planner, executor);
-/// let result = agent.execute("分析并优化代码性能").await?;
+/// let result = agent.execute("Analyze and optimize the code performance").await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -564,19 +568,19 @@ pub struct ReflectiveExecutor {
 
 #[cfg(feature = "plan-execute")]
 impl ReflectiveExecutor {
-    /// 创建 ReflectiveExecutor
+    /// Create a ReflectiveExecutor
     ///
-    /// # 参数
-    /// * `agent` - 已配置好的 SelfReflectionAgent（需使用 LlmCritic 作为评估器）
+    /// # Parameters
+    /// * `agent` - A pre-configured SelfReflectionAgent (must use LlmCritic as evaluator)
     ///
-    /// # 说明
-    /// 用于将 Self-Reflection Agent 适配为 Plan-and-Execute 架构中的 Executor，
-    /// 使其能够作为 PlanStep 的执行器使用。
+    /// # Description
+    /// Adapts the Self-Reflection Agent as an Executor in the Plan-and-Execute architecture,
+    /// allowing it to be used as a PlanStep executor.
     pub fn new(agent: SelfReflectionAgent<LlmCritic>) -> Self {
         Self { agent }
     }
 
-    /// 使用默认配置快速创建
+    /// Quick creation with default configuration
     pub fn simple(model: &str, system_prompt: &str) -> Result<Self> {
         let generator = crate::agent::ReactAgentBuilder::new()
             .model(model)
@@ -606,7 +610,7 @@ impl Executor for ReflectiveExecutor {
             info!(
                 agent = %self.agent.name(),
                 step = %step_description,
-                "⚡ ReflectiveExecutor 执行步骤（含反思）"
+                "⚡ ReflectiveExecutor executing step (with reflection)"
             );
 
             self.agent.execute(&task).await
@@ -620,18 +624,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_self_reflection_passes_immediately() {
-        let generator = crate::testing::MockAgent::new("mock").with_response("这是回答");
+        let generator = crate::testing::MockAgent::new("mock").with_response("This is an answer");
         let critic = StaticCritic::always_pass();
 
         let agent = SelfReflectionAgent::new("test", generator, critic).max_reflections(3);
 
-        let result = agent.execute("测试任务").await.unwrap();
-        assert_eq!(result, "这是回答");
+        let result = agent.execute("Test task").await.unwrap();
+        assert_eq!(result, "This is an answer");
     }
 
     #[tokio::test]
     async fn test_self_reflection_always_fails() {
-        // MockAgent 有多个响应，用于生成 + 反思 + 修正
+        // MockAgent has multiple responses for generate + reflect + refine
         let generator = crate::testing::MockAgent::new("mock").with_responses([
             "answer1",
             "reflection",
@@ -641,8 +645,8 @@ mod tests {
 
         let agent = SelfReflectionAgent::new("test", generator, critic).max_reflections(2);
 
-        let result = agent.execute("测试任务").await.unwrap();
-        // 即使始终失败也返回最后的回答
+        let result = agent.execute("Test task").await.unwrap();
+        // Return the last answer even if always failing
         assert!(!result.is_empty());
     }
 
@@ -653,10 +657,10 @@ mod tests {
 
         let agent = SelfReflectionAgent::new("test", generator, critic);
 
-        // 先执行一次积累经验
-        agent.execute("任务1").await.unwrap();
+        // Execute once to accumulate experience
+        agent.execute("Task1").await.unwrap();
 
-        // 重置
+        // Reset
         agent.reset();
         assert!(agent.episodic_memory.read().unwrap().is_empty());
     }

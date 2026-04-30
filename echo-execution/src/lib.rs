@@ -1,11 +1,17 @@
 //! # echo_execution
 //!
-//! Execution layer: sandbox, skills, and tools.
+//! Execution layer for the [echo-agent](https://crates.io/crates/echo_agent) framework.
 //!
-//! This crate contains the low-level runtime for:
-//! - multi-layer sandbox execution (Local / Docker / K8s)
-//! - file-based skill loading, activation, hooks, and script execution
-//! - tool registry / execution primitives shared by higher-level agent crates
+//! ## Modules
+//!
+//! | Module | Description |
+//! |--------|-------------|
+//! | [`sandbox`] | Multi-layer code execution: `LocalSandbox`, `DockerSandbox`, `K8sSandbox` |
+//! | [`skills`] | File-based skill system: discover → activate → use, with hooks |
+//! | [`tools`] | `ToolManager` — registry, execution, concurrency control |
+//!
+//! Most users should depend on `echo_agent` (the facade crate) instead of
+//! depending on `echo_execution` directly.
 
 pub mod sandbox;
 pub mod skills;

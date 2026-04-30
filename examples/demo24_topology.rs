@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     println!("=== Agent 拓扑可视化示例 ===\n");
 

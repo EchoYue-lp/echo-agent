@@ -1,4 +1,4 @@
-//! 公共工具模块
+//! Common utility modules
 
 pub mod json_parse;
 pub mod time;

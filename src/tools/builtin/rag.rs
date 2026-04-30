@@ -1,9 +1,9 @@
-//! RAG (检索增强生成) 工具
+//! RAG (Retrieval-Augmented Generation) tools
 //!
-//! 提供文档分块、向量索引和语义检索能力：
-//! - rag_index: 文档分块并建立向量索引
-//! - rag_search: 语义搜索已索引的文档
-//! - rag_chunk_document: 文档分块预览（不索引）
+//! Provides document chunking, vector indexing, and semantic retrieval capabilities:
+//! - rag_index: chunk documents and build vector index
+//! - rag_search: semantic search over indexed documents
+//! - rag_chunk_document: document chunking preview (without indexing)
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -13,23 +13,23 @@ use tokio::sync::RwLock;
 use crate::error::{Result, ToolError};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
-// ── 共享向量存储 ────────────────────────────────────────────────────────────
+// ── Shared vector store ───────────────────────────────────────────────────
 
-/// 文档分块
+/// Document chunk
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct DocumentChunk {
     id: String,
     content: String,
     embedding: Vec<f32>,
-    /// 文档来源标识（可选）
+    /// Document source identifier (optional)
     source: Option<String>,
-    /// 块索引（在文档中的第几个块）
+    /// Chunk index (position within the document)
     chunk_index: usize,
-    /// 总块数
+    /// Total number of chunks
     total_chunks: usize,
 }
 
-/// 内存向量存储
+/// In-memory vector store
 struct VectorStore {
     chunks: Vec<DocumentChunk>,
 }
@@ -66,7 +66,7 @@ fn global_vector_store() -> Arc<RwLock<VectorStore>> {
         .clone()
 }
 
-/// 余弦相似度
+/// Cosine similarity
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -81,7 +81,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-/// 段落感知的文本分块
+/// Paragraph-aware text chunking
 fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     let paragraphs: Vec<&str> = text.split("\n\n").collect();
     let mut chunks: Vec<String> = Vec::new();
@@ -99,7 +99,7 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
         }
 
         if para.len() > chunk_size {
-            // 大段落需要进一步拆分（按句子）
+            // Oversized paragraph needs further sentence-level splitting
             if !current.is_empty() {
                 chunks.push(current.trim().to_string());
                 current = String::new();
@@ -121,7 +121,7 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     chunks
 }
 
-/// 按句子分块（处理超大段落）
+/// Chunk by sentences (handles oversized paragraphs)
 fn chunk_by_sentences(text: &str, chunk_size: usize, _overlap: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -139,7 +139,7 @@ fn chunk_by_sentences(text: &str, chunk_size: usize, _overlap: usize) -> Vec<Str
 
     if !current.trim().is_empty() {
         if !chunks.is_empty() && current.len() < chunk_size / 3 {
-            // 剩余小片段合并到前一个 chunk
+            // Merge small remainder into previous chunk
             let last = chunks.pop().unwrap();
             chunks.push(format!("{} {}", last, current.trim()));
         } else {
@@ -150,9 +150,9 @@ fn chunk_by_sentences(text: &str, chunk_size: usize, _overlap: usize) -> Vec<Str
     chunks
 }
 
-// ── 嵌入辅助 ────────────────────────────────────────────────────────────────
+// ── Embedding helper ────────────────────────────────────────────────────────────────
 
-/// 对一批文本生成嵌入向量
+/// Generate embeddings for a batch of texts
 async fn generate_embeddings(texts: &[String]) -> Result<Vec<Vec<f32>>> {
     use echo_state::memory::{Embedder, HttpEmbedder};
 
@@ -165,7 +165,7 @@ async fn generate_embeddings(texts: &[String]) -> Result<Vec<Vec<f32>>> {
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "rag".to_string(),
-                message: format!("嵌入生成失败: {}", e),
+                message: format!("Embedding generation failed: {}", e),
             })?;
         embeddings.push(vec);
     }
@@ -173,7 +173,7 @@ async fn generate_embeddings(texts: &[String]) -> Result<Vec<Vec<f32>>> {
     Ok(embeddings)
 }
 
-// ── rag_index 工具 ──────────────────────────────────────────────────────────
+// ── rag_index tool ──────────────────────────────────────────────────────────
 
 pub struct RagIndexTool;
 
@@ -183,9 +183,9 @@ impl Tool for RagIndexTool {
     }
 
     fn description(&self) -> &str {
-        "将文档分块并建立向量索引，支持后续语义检索。\
-         需要配置 EMBEDDING_API_KEY 环境变量（或兼容的 OPENAI_API_KEY / EMBEDDING_APIKEY）。\
-         分块大小默认 1000 字符，重叠默认 100 字符。"
+        "Chunk documents and build a vector index for semantic retrieval. \
+         Requires EMBEDDING_API_KEY env var (or compatible OPENAI_API_KEY / EMBEDDING_APIKEY). \
+         Default chunk size 1000 chars, overlap 100 chars."
     }
 
     fn parameters(&self) -> Value {
@@ -194,19 +194,19 @@ impl Tool for RagIndexTool {
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "要索引的文档文本内容"
+                    "description": "Document text content to index"
                 },
                 "source": {
                     "type": "string",
-                    "description": "文档来源标识（如文件名、URL），用于结果溯源"
+                    "description": "Document source identifier (e.g. filename, URL) for result traceability"
                 },
                 "chunk_size": {
                     "type": "integer",
-                    "description": "分块大小（字符数，默认 1000）"
+                    "description": "Chunk size in characters (default 1000)"
                 },
                 "overlap": {
                     "type": "integer",
-                    "description": "块间重叠字符数（默认 100）"
+                    "description": "Overlap characters between chunks (default 100)"
                 }
             },
             "required": ["content"]
@@ -235,21 +235,28 @@ impl Tool for RagIndexTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as usize;
 
-            // 分块
+            // Chunk text
             let texts = chunk_text(content, chunk_size, overlap);
             let total_chunks = texts.len();
 
             if texts.is_empty() {
-                return Ok(ToolResult::success("文档内容为空，已跳过索引".to_string()));
+                return Ok(ToolResult::success(
+                    "Document content is empty, index skipped".to_string(),
+                ));
             }
 
-            // 生成嵌入
+            // Generate embeddings
             let embeddings = match generate_embeddings(&texts).await {
                 Ok(e) => e,
-                Err(e) => return Ok(ToolResult::error(format!("嵌入生成失败: {}", e))),
+                Err(e) => {
+                    return Ok(ToolResult::error(format!(
+                        "Embedding generation failed: {}",
+                        e
+                    )));
+                }
             };
 
-            // 构建分块并存储
+            // Build chunks and store
             let chunks: Vec<DocumentChunk> = texts
                 .into_iter()
                 .zip(embeddings)
@@ -268,17 +275,17 @@ impl Tool for RagIndexTool {
             store.write().await.add_chunks(chunks);
 
             Ok(ToolResult::success(format!(
-                "成功索引 {} 个文档块{}",
+                "Successfully indexed {} document chunks{}",
                 total_chunks,
                 source
-                    .map(|s| format!("（来源: {}）", s))
+                    .map(|s| format!(" (source: {})", s))
                     .unwrap_or_default()
             )))
         })
     }
 }
 
-// ── rag_search 工具 ─────────────────────────────────────────────────────────
+// ── rag_search tool ─────────────────────────────────────────────────────────
 
 pub struct RagSearchTool;
 
@@ -288,8 +295,8 @@ impl Tool for RagSearchTool {
     }
 
     fn description(&self) -> &str {
-        "对已索引的文档进行语义搜索，返回最相关的 top_k 个片段及其相似度分数。\
-         需要先使用 rag_index 建好索引。"
+        "Semantic search over indexed documents, returning top_k most relevant chunks with similarity scores. \
+         Requires prior rag_index to build the index."
     }
 
     fn parameters(&self) -> Value {
@@ -298,11 +305,11 @@ impl Tool for RagSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "搜索查询"
+                    "description": "Search query"
                 },
                 "top_k": {
                     "type": "integer",
-                    "description": "返回结果数量（默认 5）"
+                    "description": "Number of results to return (default 5)"
                 }
             },
             "required": ["query"]
@@ -321,20 +328,30 @@ impl Tool for RagSearchTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(5) as usize;
 
-            // 生成查询嵌入
+            // Generate query embedding
             let query_embedding = match generate_embeddings(&[query.to_string()]).await {
                 Ok(mut e) if !e.is_empty() => e.remove(0),
-                Ok(_) => return Ok(ToolResult::error("嵌入生成返回空结果".to_string())),
-                Err(e) => return Ok(ToolResult::error(format!("嵌入生成失败: {}", e))),
+                Ok(_) => {
+                    return Ok(ToolResult::error(
+                        "Embedding generation returned empty result".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    return Ok(ToolResult::error(format!(
+                        "Embedding generation failed: {}",
+                        e
+                    )));
+                }
             };
 
-            // 搜索
+            // Search
             let store = global_vector_store();
             let results = store.read().await.search(&query_embedding, top_k);
 
             if results.is_empty() {
                 return Ok(ToolResult::success(
-                    "未找到相关文档。请先使用 rag_index 索引文档。".to_string(),
+                    "No relevant documents found. Please use rag_index to index documents first."
+                        .to_string(),
                 ));
             }
 
@@ -363,7 +380,7 @@ impl Tool for RagSearchTool {
     }
 }
 
-// ── rag_chunk_document 工具 ─────────────────────────────────────────────────
+// ── rag_chunk_document tool ─────────────────────────────────────────────────
 
 pub struct RagChunkDocumentTool;
 
@@ -373,7 +390,7 @@ impl Tool for RagChunkDocumentTool {
     }
 
     fn description(&self) -> &str {
-        "预览文档分块结果（不会建立索引）。用于检查分块策略和调整参数。"
+        "Preview document chunking results (does not build an index). Use to inspect chunking strategy and tune parameters."
     }
 
     fn parameters(&self) -> Value {
@@ -382,15 +399,15 @@ impl Tool for RagChunkDocumentTool {
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "要分块的文本内容"
+                    "description": "Text content to chunk"
                 },
                 "chunk_size": {
                     "type": "integer",
-                    "description": "分块大小（字符数，默认 1000）"
+                    "description": "Chunk size in characters (default 1000)"
                 },
                 "overlap": {
                     "type": "integer",
-                    "description": "块间重叠字符数（默认 100）"
+                    "description": "Overlap characters between chunks (default 100)"
                 }
             },
             "required": ["content"]
@@ -417,7 +434,7 @@ impl Tool for RagChunkDocumentTool {
             let chunks = chunk_text(content, chunk_size, overlap);
 
             if chunks.is_empty() {
-                return Ok(ToolResult::success("文档内容为空".to_string()));
+                return Ok(ToolResult::success("Document content is empty".to_string()));
             }
 
             let items: Vec<Value> = chunks

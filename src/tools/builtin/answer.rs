@@ -11,7 +11,7 @@ impl Tool for FinalAnswerTool {
     }
 
     fn description(&self) -> &str {
-        "当你已经收集到足够信息可以回答用户问题时，调用此工具返回最终答案"
+        "Call this tool to return the final answer when you have gathered enough information to respond to the user"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -20,7 +20,7 @@ impl Tool for FinalAnswerTool {
             "properties": {
                 "answer": {
                     "type": "string",
-                    "description": "最终答案"
+                    "description": "The final answer"
                 }
             },
             "required": ["answer"]

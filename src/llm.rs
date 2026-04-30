@@ -1,21 +1,18 @@
-//! LLM façade
+//! LLM client façade — provider abstraction and chat APIs.
 //!
-//! 此模块本身不维护独立的 LLM 协议实现，而是作为 façade 统一重导出：
-//! - `echo_core::llm`: 核心 trait 与通用请求/响应类型
-//! - `echo_integration::providers`: provider 实现与配置加载
+//! Unified interface over multiple LLM providers. All clients implement the
+//! [`LlmClient`] trait, providing both `chat()` and `chat_stream()` methods.
 //!
-//! 如果调用方需要绕过 façade、直接依赖拆分后的 workspace crate，
-//! 可使用 [`crate::workspace::core::llm`] 与 [`crate::workspace::integration::providers`]。
+//! # Supported Providers
 //!
-//! # 核心类型
+//! | Client | Backend | Feature |
+//! |--------|---------|---------|
+//! | [`OpenAiClient`] / [`DefaultLlmClient`] | OpenAI & compatible APIs | default |
+//! | [`AnthropicClient`] | Native Claude API | `a2a` |
+//! | [`OllamaClient`] | Local Ollama | default |
+//! | [`ProviderFactory`] | Dynamic provider selection from config | default |
 //!
-//! - [`LlmClient`]: LLM 客户端 trait
-//! - [`OpenAiClient`]: OpenAI 兼容客户端
-//! - [`ChatRequest`][]: 聊天请求
-//! - [`ChatResponse`][]: 聊天响应
-//! - [`ChatChunk`][]: 流式响应块
-//!
-//! # 示例：简单对话
+//! # Quick Start
 //!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
@@ -23,18 +20,16 @@
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
 //! let client = OpenAiClient::from_env("qwen3-max")?;
-//!
 //! let response = client.chat(ChatRequest {
-//!     messages: vec![Message::user("你好".to_string())],
+//!     messages: vec![Message::user("Hello".to_string())],
 //!     ..Default::default()
 //! }).await?;
-//!
 //! println!("{}", response.content().unwrap_or_default());
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! # 示例：流式对话
+//! # Streaming
 //!
 //! ```rust,no_run
 //! use echo_agent::prelude::*;
@@ -43,15 +38,13 @@
 //! # #[tokio::main]
 //! # async fn main() -> echo_agent::error::Result<()> {
 //! let client = OpenAiClient::from_env("qwen3-max")?;
-//!
 //! let mut stream = client.chat_stream(ChatRequest {
-//!     messages: vec![Message::user("讲个笑话".to_string())],
+//!     messages: vec![Message::user("Tell me a joke".to_string())],
 //!     ..Default::default()
 //! }).await?;
-//!
 //! while let Some(chunk) = stream.next().await {
 //!     if let Some(content) = chunk?.delta.content {
-//!         print!("{}", content);
+//!         print!("{content}");
 //!     }
 //! }
 //! # Ok(())

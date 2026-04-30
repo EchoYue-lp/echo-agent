@@ -34,7 +34,7 @@ impl Tool for AgentDispatchTool {
     }
 
     fn description(&self) -> &str {
-        "将任务分派给专用 SubAgent 执行。作为编排者，应优先使用此工具将计算、数据获取等任务委托给专业的 SubAgent，而不是自己直接回答。"
+        "Dispatch a task to a specialized SubAgent for execution. As the orchestrator, prefer using this tool to delegate computation, data fetching, etc. to professional SubAgents rather than answering directly."
     }
 
     fn parameters(&self) -> Value {
@@ -44,16 +44,16 @@ impl Tool for AgentDispatchTool {
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "子 Agent 名称"
+                    "description": "SubAgent name"
                 },
                 "task": {
                     "type": "string",
-                    "description": "要分配给子 Agent 的具体任务描述，应包含必要的上下文信息"
+                    "description": "Specific task description to assign to the SubAgent, should include necessary context"
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate"],
-                    "description": "执行模式：sync-同步等待（默认）, fork-继承上下文独立运行, teammate-并行协作"
+                    "description": "Execution mode: sync - synchronous wait (default), fork - independent with inherited context, teammate - parallel collaboration"
                 }
             },
             "required": ["agent_name", "task"]

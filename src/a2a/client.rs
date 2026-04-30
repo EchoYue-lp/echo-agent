@@ -1,10 +1,10 @@
-//! A2A HTTP 客户端
+//! A2A HTTP client
 //!
-//! 用于发现和调用远程 A2A 兼容 Agent。
+//! For discovering and invoking remote A2A-compatible Agents.
 //!
-//! 支持同步和流式两种任务模式：
-//! - [`send_task`](A2AClient::send_task) — 同步等待任务完成
-//! - [`send_task_streaming`](A2AClient::send_task_streaming) — SSE 流式接收实时事件
+//! Supports both sync and streaming task modes:
+//! - [`send_task`](A2AClient::send_task) — Synchronously wait for task completion
+//! - [`send_task_streaming`](A2AClient::send_task_streaming) — Receive real-time events via SSE streaming
 
 use super::types::*;
 use crate::error::{ReactError, Result};
@@ -13,7 +13,7 @@ use reqwest::Client;
 use std::pin::Pin;
 use tracing::{debug, info, warn};
 
-/// A2A 客户端 — 发现和调用远程 Agent
+/// A2A client — discover and invoke remote Agents
 pub struct A2AClient {
     client: Client,
 }
@@ -26,11 +26,11 @@ impl A2AClient {
         }
     }
 
-    /// 发现远程 Agent：获取 Agent Card
+    /// Discover a remote Agent: fetch Agent Card
     ///
-    /// 从 `{base_url}/.well-known/agent.json` 获取 Agent Card。
+    /// Fetches the Agent Card from `{base_url}/.well-known/agent.json`.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use echo_agent::a2a::A2AClient;
@@ -39,9 +39,9 @@ impl A2AClient {
     /// # async fn main() -> echo_agent::error::Result<()> {
     /// let client = A2AClient::new();
     /// let card = client.discover("http://localhost:8080").await?;
-    /// println!("发现 Agent: {} - {:?}", card.name, card.description);
+    /// println!("Discovered agent: {} - {:?}", card.name, card.description);
     /// for skill in &card.skills {
-    ///     println!("  技能: {} - {:?}", skill.name, skill.description);
+    ///     println!("  Skill: {} - {:?}", skill.name, skill.description);
     /// }
     /// # Ok(())
     /// # }
@@ -49,20 +49,20 @@ impl A2AClient {
     pub async fn discover(&self, base_url: &str) -> Result<AgentCard> {
         let url = format!("{}/.well-known/agent.json", base_url.trim_end_matches('/'));
 
-        info!(url = %url, "A2A: 发现远程 Agent");
+        info!(url = %url, "A2A: discovering remote Agent");
 
         let response = self
             .client
             .get(&url)
             .send()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 发现请求失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A discovery request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ReactError::Other(format!(
-                "A2A 发现失败: HTTP {}: {}",
+                "A2A discovery failed: HTTP {}: {}",
                 status, body
             )));
         }
@@ -70,12 +70,12 @@ impl A2AClient {
         let card: AgentCard = response
             .json()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A Agent Card 解析失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A Agent Card parse failed: {}", e)))?;
 
         info!(
             agent = %card.name,
             skills = card.skills.len(),
-            "A2A: 发现 Agent '{}' ({}个技能)",
+            "A2A: discovered Agent '{}' ({} skills)",
             card.name,
             card.skills.len()
         );
@@ -83,9 +83,9 @@ impl A2AClient {
         Ok(card)
     }
 
-    /// 向远程 Agent 发送任务（同步等待完成）
+    /// Send a task to a remote Agent (wait synchronously for completion)
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use echo_agent::a2a::A2AClient;
@@ -93,9 +93,9 @@ impl A2AClient {
     /// # #[tokio::main]
     /// # async fn main() -> echo_agent::error::Result<()> {
     /// let client = A2AClient::new();
-    /// let result = client.send_task("http://localhost:8080", "请翻译'你好'为英文").await?;
+    /// let result = client.send_task("http://localhost:8080", "Please translate 'hello' to Chinese").await?;
     /// if let Some(task) = result {
-    ///     println!("任务状态: {}", task.status.state);
+    ///     println!("Task status: {}", task.status.state);
     /// }
     /// # Ok(())
     /// # }
@@ -104,7 +104,7 @@ impl A2AClient {
         self.send_task_with_session(agent_url, message, None).await
     }
 
-    /// 向远程 Agent 发送任务（带会话 ID）
+    /// Send a task to a remote Agent (with session ID)
     pub async fn send_task_with_session(
         &self,
         agent_url: &str,
@@ -125,7 +125,7 @@ impl A2AClient {
         info!(
             url = %agent_url,
             message_len = message.len(),
-            "A2A: 发送任务"
+            "A2A: sending task"
         );
 
         let response = self
@@ -134,34 +134,34 @@ impl A2AClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 任务发送失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A send task failed: {}", e)))?;
 
         let task_response: A2ATaskResponse = response
             .json()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 响应解析失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A response parse failed: {}", e)))?;
 
         if let Some(error) = task_response.error {
             return Err(ReactError::Other(format!(
-                "A2A 远程错误 [{}]: {}",
+                "A2A remote error [{}]: {}",
                 error.code, error.message
             )));
         }
 
         debug!(
             task_id = ?task_response.result.as_ref().map(|t| &t.id),
-            "A2A: 任务发送完成"
+            "A2A: task send completed"
         );
 
         Ok(task_response.result)
     }
 
-    /// 向远程 Agent 流式发送任务（SSE）
+    /// Send a task to a remote Agent with SSE streaming
     ///
-    /// 发送 `tasks/sendSubscribe` 请求，解析服务端返回的 SSE 事件流。
-    /// 返回 `A2AStreamEvent` 的异步 Stream，调用方可逐事件处理。
+    /// Sends a `tasks/sendSubscribe` request and parses the SSE event stream returned by the server.
+    /// Returns an async stream of `A2AStreamEvent` that the caller can process event by event.
     ///
-    /// # 示例
+    /// # Example
     ///
     /// ```rust,no_run
     /// use echo_agent::a2a::{A2AClient, A2AStreamEvent, TaskState};
@@ -171,13 +171,13 @@ impl A2AClient {
     /// # async fn main() -> echo_agent::error::Result<()> {
     /// let client = A2AClient::new();
     /// let mut stream = client
-    ///     .send_task_streaming("http://localhost:8080", "翻译'你好'")
+    ///     .send_task_streaming("http://localhost:8080", "Translate 'hello'")
     ///     .await?;
     ///
     /// while let Some(event) = stream.next().await {
     ///     match event {
     ///         A2AStreamEvent::StatusUpdate(e) => {
-    ///             println!("状态: {}", e.status.state);
+    ///             println!("Status: {}", e.status.state);
     ///             if e.is_final { break; }
     ///         }
     ///         A2AStreamEvent::ArtifactUpdate(e) => {
@@ -201,7 +201,7 @@ impl A2AClient {
             .await
     }
 
-    /// 向远程 Agent 流式发送任务（带会话 ID）
+    /// Send a task to a remote Agent with SSE streaming (with session ID)
     pub async fn send_task_streaming_with_session(
         &self,
         agent_url: &str,
@@ -219,7 +219,7 @@ impl A2AClient {
             },
         };
 
-        info!(url = %agent_url, "A2A: 发送流式任务");
+        info!(url = %agent_url, "A2A: sending streaming task");
 
         let response = self
             .client
@@ -228,13 +228,13 @@ impl A2AClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 流式请求失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A streaming request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ReactError::Other(format!(
-                "A2A 流式请求失败: HTTP {}: {}",
+                "A2A streaming request failed: HTTP {}: {}",
                 status, body
             )));
         }
@@ -252,12 +252,12 @@ impl A2AClient {
                     Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
                         Ok(s) => s,
                         Err(e) => {
-                            warn!("A2A SSE: UTF-8 解码失败: {}", e);
+                            warn!("A2A SSE: UTF-8 decode failed: {}", e);
                             continue;
                         }
                     },
                     Err(e) => {
-                        warn!("A2A SSE: 读取块失败: {}", e);
+                        warn!("A2A SSE: read chunk failed: {}", e);
                         break;
                     }
                 };
@@ -294,7 +294,7 @@ impl A2AClient {
         Ok(Box::pin(event_stream))
     }
 
-    /// 查询远程任务状态
+    /// Query remote task status
     pub async fn get_task(&self, agent_url: &str, task_id: &str) -> Result<Option<A2ATask>> {
         let request = A2ATaskRequest {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -313,12 +313,12 @@ impl A2AClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 任务查询失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A task query failed: {}", e)))?;
 
         let task_response: A2ATaskResponse = response
             .json()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 响应解析失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A response parse failed: {}", e)))?;
 
         if let Some(error) = task_response.error {
             return Err(ReactError::Other(format!(
@@ -330,7 +330,7 @@ impl A2AClient {
         Ok(task_response.result)
     }
 
-    /// 取消远程任务
+    /// Cancel a remote task
     pub async fn cancel_task(&self, agent_url: &str, task_id: &str) -> Result<Option<A2ATask>> {
         let request = A2ATaskRequest {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -349,12 +349,12 @@ impl A2AClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 任务取消失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A task cancel failed: {}", e)))?;
 
         let task_response: A2ATaskResponse = response
             .json()
             .await
-            .map_err(|e| ReactError::Other(format!("A2A 响应解析失败: {}", e)))?;
+            .map_err(|e| ReactError::Other(format!("A2A response parse failed: {}", e)))?;
 
         if let Some(error) = task_response.error {
             return Err(ReactError::Other(format!(
@@ -366,10 +366,10 @@ impl A2AClient {
         Ok(task_response.result)
     }
 
-    // ── 内部辅助 ─────────────────────────────────────────────────────────────
+    // ── Internal helpers ─────────────────────────────────────────────────────
 
     fn parse_sse_data(data: &str) -> Option<A2AStreamEvent> {
-        // SSE data 可能是 A2AStreamResponse（带 jsonrpc 包装）或直接是 A2AStreamEvent
+        // SSE data may be an A2AStreamResponse (with jsonrpc wrapper) or directly an A2AStreamEvent
         if let Ok(stream_resp) = serde_json::from_str::<A2AStreamResponse>(data) {
             return stream_resp.result;
         }

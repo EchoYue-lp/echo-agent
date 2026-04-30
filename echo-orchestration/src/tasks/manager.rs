@@ -1,4 +1,4 @@
-//! 任务管理器
+//! Task manager
 
 use super::events::TaskEventBus;
 use super::hooks::TaskHookContext;
@@ -8,8 +8,8 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// DAG 任务集合管理器，负责任务的增删改查和依赖调度。
-/// 使用 `DashMap` 实现并发安全，可配合 `Arc<TaskManager>` 在异步任务间共享。
+/// DAG task collection manager, responsible for task CRUD and dependency scheduling.
+/// Uses `DashMap` for concurrency safety, can be shared across async tasks with `Arc<TaskManager>`.
 pub struct TaskManager {
     pub(crate) tasks: DashMap<String, Task>,
     hooks: TaskHookRegistry,
@@ -25,7 +25,7 @@ impl TaskManager {
         }
     }
 
-    /// 创建带日志 hooks 的管理器
+    /// Create a manager with logging hooks
     pub fn with_logging() -> Self {
         Self {
             tasks: DashMap::new(),
@@ -34,7 +34,7 @@ impl TaskManager {
         }
     }
 
-    /// 创建带事件总线的管理器
+    /// Create a manager with an event bus
     pub fn with_event_bus() -> Self {
         Self {
             tasks: DashMap::new(),
@@ -43,7 +43,7 @@ impl TaskManager {
         }
     }
 
-    /// 创建带日志 hooks 和事件总线的管理器
+    /// Create a manager with logging hooks and an event bus
     pub fn with_logging_and_events() -> Self {
         let mut bus = TaskEventBus::new();
         bus.register(Arc::new(super::events::LoggingListener));
@@ -54,12 +54,12 @@ impl TaskManager {
         }
     }
 
-    /// 获取事件总线引用（如果已配置）
+    /// Get the event bus reference (if configured)
     pub fn event_bus(&self) -> Option<&TaskEventBus> {
         self.event_bus.as_ref()
     }
 
-    /// 获取事件总线的 Arc 引用（用于跨任务共享）
+    /// Get the Arc reference of the event bus (for cross-task sharing)
     pub fn event_bus_arc(&self) -> Option<Arc<TaskEventBus>> {
         self.event_bus.as_ref().map(|b| Arc::new(b.clone()))
     }
@@ -73,16 +73,16 @@ impl TaskManager {
         self.tasks.insert(task.id.clone(), task);
     }
 
-    /// 获取任务（克隆）
+    /// Get a task (clone)
     pub fn get_task(&self, id: &str) -> Option<Task> {
         self.tasks.get(id).map(|r| r.value().clone())
     }
 
-    /// 更新任务状态（带状态机校验）
+    /// Update task status (with state machine validation)
     ///
-    /// 如果当前状态不允许转换到目标状态，返回 `Err`。
-    /// 同时通过事件总线广播状态变更。
-    /// 仅当状态实际改变（old_status != new_status）时才发送事件。
+    /// If current state does not allow transition to target state, return `Err`.
+    /// Also broadcasts the state change via the event bus.
+    /// Sends an event only when the state actually changes (old_status != new_status).
     pub fn update_task(&self, id: &str, status: TaskStatus) -> Result<(), String> {
         if let Some(mut task) = self.tasks.get_mut(id) {
             let old_status = task.status.clone();
@@ -90,7 +90,7 @@ impl TaskManager {
             task.status = new_status.clone();
             task.updated_at = super::time::now_secs();
 
-            // 仅当状态实际改变时才发送事件
+            // Only send events when the state actually changes
             if old_status != new_status
                 && let Some(ref bus) = self.event_bus
             {
@@ -100,7 +100,7 @@ impl TaskManager {
                     new_status: new_status.clone(),
                 });
 
-                // 如果进入终态，发送对应的具体事件
+                // If entering a terminal state, send the corresponding specific event
                 match &new_status {
                     TaskStatus::Completed => {
                         let result = task.result.clone().unwrap_or_default();
@@ -126,12 +126,12 @@ impl TaskManager {
         }
     }
 
-    /// `update_task` 的别名，executor 使用
+    /// Alias for `update_task`, used by executor
     pub fn update_task_status(&self, id: &str, status: TaskStatus) -> Result<(), String> {
         self.update_task(id, status)
     }
 
-    /// 设置任务结果
+    /// Set task result
     pub fn set_task_result(&self, id: &str, result: String) {
         if let Some(mut task) = self.tasks.get_mut(id) {
             task.result = Some(result);
@@ -139,7 +139,7 @@ impl TaskManager {
         }
     }
 
-    /// 记录任务执行
+    /// Record task execution
     pub fn record_task_execution(
         &self,
         id: &str,
@@ -162,12 +162,12 @@ impl TaskManager {
         }
     }
 
-    /// 清空所有任务
+    /// Clear all tasks
     pub fn clear(&self) {
         self.tasks.clear();
     }
 
-    /// 取消指定任务
+    /// Cancel a specific task
     pub fn cancel_task(&self, id: &str) -> bool {
         match self.update_task(id, TaskStatus::Cancelled) {
             Ok(()) => true,
@@ -175,7 +175,7 @@ impl TaskManager {
         }
     }
 
-    /// 取消所有任务
+    /// Cancel all tasks
     pub fn cancel_all(&self) {
         let task_ids: Vec<String> = self.tasks.iter().map(|r| r.key().clone()).collect();
         for id in task_ids {
@@ -183,9 +183,9 @@ impl TaskManager {
         }
     }
 
-    // ── 查询 ──────────────────────────────────────────────────────────────
+    // ── Queries ──────────────────────────────────────────────────────────────
 
-    /// 获取所有任务（克隆）
+    /// Get all tasks (cloned)
     pub fn get_all_tasks(&self) -> Vec<Task> {
         self.tasks.iter().map(|r| r.value().clone()).collect()
     }
@@ -214,7 +214,7 @@ impl TaskManager {
             .collect()
     }
 
-    /// 获取所有可执行的任务（依赖已满足），返回克隆
+    /// Get all executable tasks (dependencies satisfied), returns clones
     pub fn get_ready_tasks(&self) -> Vec<Task> {
         self.tasks
             .iter()
@@ -232,7 +232,7 @@ impl TaskManager {
             .collect()
     }
 
-    /// 获取进度统计
+    /// Get progress statistics
     pub fn get_progress(&self) -> (usize, usize) {
         let completed = self
             .tasks
@@ -243,33 +243,33 @@ impl TaskManager {
         (completed, total)
     }
 
-    /// 获取下一个应该执行的任务
+    /// Get the next task to execute
     pub fn get_next_task(&self) -> Option<Task> {
         let mut ready = self.get_ready_tasks();
         ready.sort_by_key(|task| std::cmp::Reverse(task.priority));
         ready.into_iter().next()
     }
 
-    /// 检查是否所有任务都已终结
+    /// Check if all tasks have reached a terminal state
     pub fn is_all_completed(&self) -> bool {
         self.tasks.iter().all(|r| r.value().status.is_terminal())
     }
 
-    /// 生成适合注入 LLM 上下文的任务进度摘要
+    /// Generate a task progress summary suitable for injection into LLM context
     pub fn get_summary(&self) -> String {
         let (completed, total) = self.get_progress();
         let pending = self.get_pending_tasks().len();
         let in_progress = self.get_in_progress_tasks().len();
 
         format!(
-            "任务进度: {}/{} 完成 | {} 待处理 | {} 进行中",
+            "Task progress: {}/{} completed | {} pending | {} in progress",
             completed, total, pending, in_progress
         )
     }
 
-    /// 获取依赖指定任务的所有下游任务 ID
+    /// Get all downstream task IDs that depend on the specified task
     ///
-    /// 当 task_id 完成时，可以调用此方法查找哪些任务可能变为就绪。
+    /// When a task_id completes, call this method to find which tasks may become ready.
     pub fn get_dependent_tasks(&self, task_id: &str) -> Vec<String> {
         self.tasks
             .iter()
@@ -278,9 +278,9 @@ impl TaskManager {
             .collect()
     }
 
-    /// 当指定任务完成后，唤醒依赖它的任务
+    /// When the specified task completes, wake up tasks that depend on it
     ///
-    /// 返回新变为就绪的任务 ID 列表。
+    /// Returns a list of task IDs that newly became ready.
     pub fn wake_dependents(&self, completed_task_id: &str) -> Vec<String> {
         let dependents = self.get_dependent_tasks(completed_task_id);
         let mut newly_ready = Vec::new();
@@ -289,7 +289,7 @@ impl TaskManager {
             if let Some(task) = self.tasks.get(dep_id)
                 && task.status == TaskStatus::Pending
             {
-                // 检查该任务的所有依赖是否都已完成
+                // Check if all dependencies of this task have completed
                 let all_deps_done = task.dependencies.iter().all(|dep_id| {
                     self.tasks
                         .get(dep_id)
@@ -307,12 +307,12 @@ impl TaskManager {
 
     // ── Hooks ─────────────────────────────────────────────────────────────
 
-    /// 获取 hooks 注册表的引用
+    /// Get the hooks registry reference
     pub fn hooks(&self) -> &TaskHookRegistry {
         &self.hooks
     }
 
-    /// 创建 hook 上下文
+    /// Create hook context
     pub fn create_hook_context(
         &self,
         task_id: &str,
@@ -326,9 +326,9 @@ impl TaskManager {
         })
     }
 
-    // ── DAG 分析（内部） ──────────────────────────────────────────────────
+    // ── DAG Analysis (internal) ──────────────────────────────────────────────
 
-    /// 深度优先搜索检测循环
+    /// Depth-first search to detect cycles
     pub(crate) fn dfs_detect_cycle(
         &self,
         task_id: &str,
@@ -360,7 +360,7 @@ impl TaskManager {
         visited.insert(task_id.to_string(), VisitState::Visited);
     }
 
-    /// 检查是否存在循环依赖
+    /// Check if cyclic dependencies exist
     pub fn has_circular_dependencies(&self) -> bool {
         !self.detect_circular_dependencies().is_empty()
     }
@@ -386,9 +386,9 @@ impl TaskManager {
         current_chain.pop();
     }
 
-    // ── 持久化 ──────────────────────────────────────────────────────────────
+    // ── Persistence ──────────────────────────────────────────────────────────
 
-    /// 从 TaskStore 加载所有任务到内存
+    /// Load all tasks from TaskStore into memory
     pub async fn load_from_store(
         &self,
         store: &dyn super::store::TaskStore,
@@ -400,7 +400,7 @@ impl TaskManager {
         Ok(())
     }
 
-    /// 将所有任务持久化到 TaskStore
+    /// Persist all tasks to TaskStore
     pub async fn save_to_store(
         &self,
         store: &dyn super::store::TaskStore,
@@ -409,7 +409,7 @@ impl TaskManager {
         store.save_all(&tasks).await
     }
 
-    /// 从检查点恢复任务状态
+    /// Restore task state from checkpoint
     pub async fn restore_from_checkpoint(&self, checkpoint: &super::store::ExecutionCheckpoint) {
         for task in &checkpoint.tasks {
             self.tasks.insert(task.id.clone(), task.clone());

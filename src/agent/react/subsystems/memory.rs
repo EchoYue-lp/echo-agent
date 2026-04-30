@@ -1,6 +1,7 @@
-//! 记忆与持久化子系统
+//! Memory and persistence subsystem
 //!
-//! 集中管理上下文窗口、长期记忆存储、状态快照、Checkpoint、对话历史投影。
+//! Centralized management of context window, long-term memory store, state snapshots,
+//! Checkpoint, and conversation history projection.
 
 use crate::compression::ContextManager;
 use crate::memory::checkpointer::Checkpointer;
@@ -8,10 +9,10 @@ use crate::memory::snapshot::SnapshotManager;
 use crate::memory::store::Store;
 use std::sync::Arc;
 
-/// 记忆与持久化子系统
+/// Memory and persistence subsystem
 ///
-/// 聚合对话上下文、长期记忆 Store、状态快照、线程 Checkpoint、
-/// 对话历史投影 Store。
+/// Aggregates conversation context, long-term memory Store, state snapshots,
+/// thread Checkpoint, and conversation history projection Store.
 pub(crate) struct MemorySubsystem {
     pub(crate) context: Arc<tokio::sync::Mutex<ContextManager>>,
     pub(crate) store: Option<Arc<dyn Store>>,

@@ -7,55 +7,55 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 impl ReactAgent {
-    /// 任务规划模式：三阶段执行（规划 → 框架驱动并行执行 → 汇总）
+    /// Task planning mode: three-phase execution (Plan → Framework-driven parallel execution → Summarize)
     ///
-    /// 与传统 LLM 驱动的执行不同，本方法在执行阶段完全脱离 LLM，
-    /// 由 `TaskExecutor` 基于 DAG 依赖自动调度并行执行。
+    /// Unlike traditional LLM-driven execution, this method completely decouples from the LLM during the execution phase,
+    /// using `TaskExecutor` to automatically schedule parallel execution based on DAG dependencies.
     ///
-    /// # 三阶段流程
+    /// # Three-phase workflow
     ///
-    /// 1. **规划阶段**（LLM）：Agent 使用工具创建子任务 DAG
-    /// 2. **执行阶段**（框架）：TaskExecutor 并行调度就绪任务，使用自定义执行函数
-    /// 3. **汇总阶段**（LLM）：将所有任务结果交给 LLM 生成最终答案
+    /// 1. **Planning phase** (LLM): Agent uses tools to create a sub-task DAG
+    /// 2. **Execution phase** (Framework): TaskExecutor schedules ready tasks in parallel, using custom execution functions
+    /// 3. **Summary phase** (LLM): All task results are fed to the LLM to generate the final answer
     pub async fn execute_with_planning(&self, task: &str) -> crate::error::Result<String> {
         let agent = self.config.agent_name.clone();
 
-        // 重置消息历史和任务管理器，确保每次规划都是干净的 session
+        // Reset message history and task manager to ensure a clean session for each planning run
         self.reset_messages().await;
         self.tools.task_manager.clear();
 
-        info!(agent = %agent, "🎯 启动任务规划模式");
-        info!(agent = %agent, task = %task, "📋 用户任务");
+        info!(agent = %agent, "🎯 Starting task planning mode");
+        info!(agent = %agent, task = %task, "📋 User task");
 
-        // 未启用规划能力或未注册规划工具时，降级到普通执行
+        // When planning capability is not enabled or planning tools are not registered, fall back to normal execution
         if !self.has_planning_tools() {
             warn!(
                 agent = %agent,
-                "⚠️ 当前 agent 未启用规划能力或未注册完整规划工具集，自动降级为普通执行模式"
+                "⚠️ Current agent does not have planning enabled or lacks complete planning toolset, automatically falling back to normal execution mode"
             );
             return self.run_direct(task).await;
         }
 
         // ════════════════════════════════════════════════════════════════════
-        // 阶段 1：规划（LLM 驱动）
+        // Phase 1: Planning (LLM-driven)
         // ════════════════════════════════════════════════════════════════════
-        info!(agent = %agent, phase = "planning", "📐 阶段1: 制定计划");
+        info!(agent = %agent, phase = "planning", "📐 Phase 1: Creating plan");
 
         self.plan_tasks(task).await?;
 
-        // 规划阶段结束后仍无任务，回退普通执行
+        // If no tasks were created after the planning phase, fall back to normal execution
         if self.tools.task_manager.get_all_tasks().is_empty() {
             warn!(
                 agent = %agent,
-                "⚠️ 规划阶段未创建任务，自动降级为普通执行模式"
+                "⚠️ No tasks created during planning phase, automatically falling back to normal execution mode"
             );
             return self.run_direct(task).await;
         }
 
         // ════════════════════════════════════════════════════════════════════
-        // 阶段 2：执行（框架驱动，不经过 LLM）
+        // Phase 2: Execution (framework-driven, no LLM involvement)
         // ════════════════════════════════════════════════════════════════════
-        info!(agent = %agent, phase = "execution", "🚀 阶段2: 并行执行任务");
+        info!(agent = %agent, phase = "execution", "🚀 Phase 2: Executing tasks in parallel");
 
         let config = TaskExecutorConfig {
             max_concurrent: 5,
@@ -64,12 +64,12 @@ impl ReactAgent {
             ..Default::default()
         };
 
-        // 构建执行函数：使用 LLM 执行每个任务
+        // Build execution function: use LLM to execute each task
         let execute_fn = self.build_execute_fn();
         let executor =
             TaskExecutor::new(self.tools.task_manager.clone(), config).with_execute_fn(execute_fn);
 
-        // 执行全部任务（事件驱动调度，自动 wake_dependents）
+        // Execute all tasks (event-driven scheduling, auto wake_dependents)
         let results = executor.execute_all().await?;
 
         for result in &results {
@@ -78,7 +78,7 @@ impl ReactAgent {
                 task_id = %result.task_id,
                 status = ?result.status,
                 duration_ms = result.duration.as_millis(),
-                "  ✓ 任务 [{}] 执行完成 ({:?})",
+                "  ✓ Task [{}] execution completed ({:?})",
                 result.task_id,
                 result.status
             );
@@ -87,15 +87,15 @@ impl ReactAgent {
         let (completed, total) = executor.get_progress();
         info!(
             agent = %agent,
-            "📊 执行完成: {}/{} 任务成功",
+            "📊 Execution complete: {}/{} tasks succeeded",
             completed,
             total
         );
 
         // ════════════════════════════════════════════════════════════════════
-        // 阶段 3：汇总结果（LLM 驱动）
+        // Phase 3: Summarize results (LLM-driven)
         // ════════════════════════════════════════════════════════════════════
-        info!(agent = %agent, phase = "summary", "📝 阶段3: 生成最终答案");
+        info!(agent = %agent, phase = "summary", "📝 Phase 3: Generating final answer");
 
         let task_results_summary = self
             .tools
@@ -103,7 +103,7 @@ impl ReactAgent {
             .get_all_tasks()
             .iter()
             .map(|t| {
-                let result_str = t.result.as_deref().unwrap_or("无结果");
+                let result_str = t.result.as_deref().unwrap_or("No result");
                 format!(
                     "  - [{}] {:?}: {} → {}",
                     t.id, t.status, t.description, result_str
@@ -113,39 +113,39 @@ impl ReactAgent {
             .join("\n");
 
         self.memory.context.lock().await.push(Message::user(format!(
-            "所有任务已完成。以下是各任务的执行结果：\n{}\n\n\
-            请根据以上结果，使用 final_answer 工具给出最终答案。\n\
-            **注意**：不要再创建新任务或执行其他操作，直接给出最终答案。",
+            "All tasks have been completed. Below are the execution results for each task:\n{}\n\n\
+            Based on the above results, use the final_answer tool to provide the final answer.\n\
+            **Note**: Do not create new tasks or perform other operations; provide the final answer directly.",
             task_results_summary
         )));
 
         for _ in 0..self.config.max_iterations {
             let steps = self.think().await?;
             if let Some(answer) = self.process_steps(steps).await? {
-                info!(agent = %agent, "🏁 任务规划模式执行完毕");
+                info!(agent = %agent, "🏁 Task planning mode execution complete");
                 return Ok(answer);
             }
         }
 
-        warn!(agent = %agent, max = self.config.max_iterations, "达到最大迭代次数");
+        warn!(agent = %agent, max = self.config.max_iterations, "Reached maximum iteration count");
         Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
             self.config.max_iterations,
         )))
     }
 
-    /// 规划阶段：LLM 通过工具调用创建任务 DAG
+    /// Planning phase: LLM creates task DAG via tool calls
     async fn plan_tasks(&self, task: &str) -> crate::error::Result<()> {
         let agent = self.config.agent_name.clone();
 
         let planning_prompt = format!(
             "{}\n\n\
-            请先使用 think 工具分析问题，然后用 plan 工具制定计划，最后用 create_task 逐个创建所有子任务。\n\n\
-            **重要：任务拆分规则**\n\
-            - 将问题拆分为尽可能细粒度的子任务，每个子任务只做一件事\n\
-            - 互相独立的子任务不要设置依赖关系，让它们可以并行执行\n\
-            - 只有当一个任务真正需要另一个任务的结果时，才设置 dependencies\n\
-            - 尽量构建宽而浅的 DAG（有向无环图），而非线性链\n\
-            - **必须创建全部子任务后规划才算完成，不要只创建部分就停止**",
+            Please first use the think tool to analyze the problem, then use the plan tool to create a plan, and finally use create_task to create each sub-task one by one.\n\n\
+            **Important: Task decomposition rules**\n\
+            - Break the problem down into the most granular sub-tasks possible; each sub-task should do only one thing\n\
+            - Do not set dependencies for mutually independent sub-tasks; let them execute in parallel\n\
+            - Only set dependencies when one task truly needs another task's result\n\
+            - Build a wide and shallow DAG (directed acyclic graph) rather than a linear chain\n\
+            - **Planning is only complete after all sub-tasks are created; do not stop after creating only a portion**",
             task
         );
 
@@ -159,7 +159,7 @@ impl ReactAgent {
         let mut has_created_tasks = false;
 
         for round in 0..planning_max_rounds {
-            debug!(agent = %agent, round = round + 1, "📐 规划轮次");
+            debug!(agent = %agent, round = round + 1, "📐 Planning round");
             let steps = self.think().await?;
             let mut created_task_this_round = false;
 
@@ -175,7 +175,7 @@ impl ReactAgent {
                     }
                     let result = self.execute_tool(&function_name, &arguments).await?;
                     if function_name == "final_answer" {
-                        info!(agent = %agent, "🏁 规划阶段已生成最终答案");
+                        info!(agent = %agent, "🏁 Final answer generated during planning phase");
                         return Ok(());
                     }
                     self.memory.context.lock().await.push(Message::tool_result(
@@ -195,7 +195,7 @@ impl ReactAgent {
                 info!(
                     agent = %agent,
                     task_count = task_count,
-                    "📐 规划完成，共创建 {} 个子任务",
+                    "📐 Planning complete, {} sub-tasks created",
                     task_count
                 );
                 break;
@@ -205,10 +205,10 @@ impl ReactAgent {
         Ok(())
     }
 
-    /// 构建任务执行函数
+    /// Build the task execution function
     ///
-    /// 默认执行逻辑：将任务描述发送给 LLM 获取执行结果。
-    /// 对于编排者角色，优先将任务分派给 SubAgent 执行。
+    /// Default execution logic: send the task description to the LLM to obtain execution results.
+    /// For orchestrator role, prioritize dispatching tasks to SubAgents for execution.
     fn build_execute_fn(&self) -> TaskExecuteFn {
         let agent_name = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
@@ -245,14 +245,14 @@ impl ReactAgent {
                     format!("{}\n\n{}", upstream_context, ctx.description)
                 };
 
-                // 默认使用 LLM 执行任务
+                // Default: use LLM to execute task
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
                     .unwrap_or_default();
                 let messages = vec![
                     crate::llm::types::Message::system(
-                        "你是任务执行助手。请完成以下任务，直接给出结果。".to_string(),
+                        "You are a task execution assistant. Please complete the following task and provide the result directly.".to_string(),
                     ),
                     crate::llm::types::Message::user(user_prompt),
                 ];
@@ -282,7 +282,7 @@ impl ReactAgent {
         })
     }
 
-    /// 使用自定义执行函数的任务规划模式
+    /// Task planning mode with custom execution function
     pub async fn execute_with_planning_fn(
         &self,
         task: &str,
@@ -318,7 +318,7 @@ impl ReactAgent {
             .get_all_tasks()
             .iter()
             .map(|t| {
-                let result_str = t.result.as_deref().unwrap_or("无结果");
+                let result_str = t.result.as_deref().unwrap_or("No result");
                 format!(
                     "  - [{}] {:?}: {} → {}",
                     t.id, t.status, t.description, result_str
@@ -328,8 +328,8 @@ impl ReactAgent {
             .join("\n");
 
         self.memory.context.lock().await.push(Message::user(format!(
-            "所有任务已完成。以下是各任务的执行结果：\n{}\n\n\
-            请根据以上结果，使用 final_answer 工具给出最终答案。",
+            "All tasks have been completed. Below are the execution results for each task:\n{}\n\n\
+            Based on the above results, use the final_answer tool to provide the final answer.",
             task_results_summary
         )));
 

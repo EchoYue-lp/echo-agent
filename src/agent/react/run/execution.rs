@@ -1,4 +1,4 @@
-//! 工具执行（调用、护栏、截断）
+//! Tool execution (invocation, guards, truncation)
 
 use super::super::{ReactAgent, TOOL_FINAL_ANSWER};
 use super::context::HookMessageBatches;
@@ -40,10 +40,10 @@ impl ReactAgent {
             cb.on_tool_start(&agent, tool_name, input).await;
         }
 
-        info!(agent = %agent, tool = %tool_name, "🔧 开始执行工具");
-        debug!(agent = %agent, tool = %tool_name, params = %input, "工具参数详情");
+        info!(agent = %agent, tool = %tool_name, "🔧 Starting tool execution");
+        debug!(agent = %agent, tool = %tool_name, params = %input, "Tool parameter details");
 
-        // ── PreToolUse hooks（审批前执行，允许 hook 拦截或修改参数）──
+        // ── PreToolUse hooks (execute before approval, allow hook to intercept or modify params) ──
         let mut effective_params = params;
         let mut hook_modified_input = input.clone();
         let has_hooks = {
@@ -82,9 +82,9 @@ impl ReactAgent {
             }
         }
 
-        // ── 统一审批检查 ──
+        // ── Unified approval check ──
         // PermissionService → PermissionPolicy
-        // 返回用户在审批时修改的参数（如有）
+        // Returns the user-modified parameters during approval (if any)
         let approval_modified_args = self
             .check_tool_approval(tool_name, &hook_modified_input)
             .await
@@ -93,7 +93,7 @@ impl ReactAgent {
                 hook_messages: hook_messages.clone(),
             })?;
 
-        // 如果用户在审批时修改了参数，覆盖工具的实际执行参数
+        // If the user modified parameters during approval, override actual execution parameters
         if let Some(modified) = approval_modified_args
             && let Value::Object(map) = &modified
         {
@@ -112,7 +112,7 @@ impl ReactAgent {
                 // Apply softening logic for tool execution errors (connection failures etc.)
                 // so transient MCP/network errors don't terminate the agent stream.
                 let error_msg = error.to_string();
-                warn!(agent = %agent, tool = %tool_name, error = %error_msg, "💥 工具执行失败");
+                warn!(agent = %agent, tool = %tool_name, error = %error_msg, "💥 Tool execution failed");
                 for cb in &callbacks {
                     cb.on_tool_error(&agent, tool_name, &error).await;
                 }
@@ -123,11 +123,11 @@ impl ReactAgent {
                         agent = %agent,
                         tool = %tool_name,
                         error = %error,
-                        "⚠️ 工具错误已转为观测值回传 LLM"
+                        "⚠️ Tool error converted to observation and sent back to LLM"
                     );
                     return Ok(ToolExecutionOutcome {
                         output: format!(
-                            "[工具执行失败] {error}\n提示：请根据错误信息调整参数后重试，或换用其他工具。"
+                            "[Tool execution failed] {error}\nTip: adjust parameters based on the error and retry, or try other tools."
                         ),
                         hook_messages,
                     });
@@ -164,12 +164,12 @@ impl ReactAgent {
         }
 
         if result.success {
-            info!(agent = %agent, tool = %tool_name, "📤 工具执行成功");
-            debug!(agent = %agent, tool = %tool_name, output = %result.output, "工具返回详情");
+            info!(agent = %agent, tool = %tool_name, "📤 Tool executed successfully");
+            debug!(agent = %agent, tool = %tool_name, output = %result.output, "Tool output details");
 
             // Run output guard checks to prevent malicious content injection
             if let Some(guard_output) = self.check_tool_output_guard(&result.output).await {
-                debug!(agent = %agent, tool = %tool_name, "🛡️ 工具输出经护栏过滤");
+                debug!(agent = %agent, tool = %tool_name, "🛡️ Tool output filtered by guard");
                 for cb in callbacks.iter() {
                     cb.on_tool_end(&agent, tool_name, &guard_output).await;
                 }
@@ -195,7 +195,7 @@ impl ReactAgent {
                 .error
                 .clone()
                 .unwrap_or_else(|| result.output.clone());
-            warn!(agent = %agent, tool = %tool_name, error = %error_msg, "💥 工具执行失败");
+            warn!(agent = %agent, tool = %tool_name, error = %error_msg, "💥 Tool execution failed");
             let err = ReactError::from(ToolError::ExecutionFailed {
                 tool: tool_name.to_string(),
                 message: error_msg.clone(),
@@ -210,11 +210,11 @@ impl ReactAgent {
                     agent = %agent,
                     tool = %tool_name,
                     error = %err,
-                    "⚠️ 工具错误已转为观测值回传 LLM"
+                    "⚠️ Tool error converted to observation and sent back to LLM"
                 );
                 Ok(ToolExecutionOutcome {
                     output: format!(
-                        "[工具执行失败] {err}\n提示：请根据错误信息调整参数后重试，或换用其他工具。"
+                        "[Tool execution failed] {err}\nTip: adjust parameters based on the error and retry, or try other tools."
                     ),
                     hook_messages,
                 })
@@ -227,7 +227,7 @@ impl ReactAgent {
         }
     }
 
-    /// 执行工具，保留工具返回的真实错误信息
+    /// Execute tool, preserving the real error information returned by the tool
     pub(crate) async fn execute_tool(&self, tool_name: &str, input: &Value) -> Result<String> {
         match self
             .execute_tool_feedback_raw(tool_name, input, false)
@@ -246,10 +246,10 @@ impl ReactAgent {
         }
     }
 
-    /// 对工具输出进行 token 预算截断。
+    /// Truncate tool output based on token budget.
     ///
-    /// 当 `max_tool_output_tokens` 已配置且输出估算 token 超限时，
-    /// 截断文本并在尾部追加 `[输出已截断，共 N tokens]` 提示。
+    /// When `max_tool_output_tokens` is configured and the estimated output tokens
+    /// exceed the limit, truncate the text and append a `[Output truncated, total N tokens]` notice.
     pub(crate) async fn truncate_tool_output(&self, output: String) -> String {
         let Some(max_tokens) = self.config.max_tool_output_tokens else {
             return output;
@@ -262,27 +262,27 @@ impl ReactAgent {
             return output;
         }
 
-        // 按字符比例估算截断位置
+        // Estimate truncation position by character ratio
         let ratio = max_tokens as f64 / token_count as f64;
         let char_limit = (output.len() as f64 * ratio * 0.95) as usize;
         let truncated: String = output.chars().take(char_limit).collect();
         let suffix = format!(
-            "\n[输出已截断，共 {} tokens，保留前 {} tokens]",
+            "\n[Output truncated, total {} tokens, keeping first {} tokens]",
             token_count, max_tokens
         );
         format!("{truncated}{suffix}")
     }
 
-    /// 对工具输出进行护栏检查，防止恶意内容注入
+    /// Perform guard check on tool output to prevent malicious content injection
     ///
-    /// 如果配置了护栏管理器，会对输出进行安全检查。
-    /// 返回 `Some(filtered_output)` 表示输出被过滤/修改，
-    /// 返回 `None` 表示输出正常，无需修改。
+    /// If a guard manager is configured, output is checked for safety.
+    /// Returns `Some(filtered_output)` if output was filtered/modified,
+    /// returns `None` if output is fine and needs no modification.
     pub(crate) async fn check_tool_output_guard(&self, output: &str) -> Option<String> {
         let gm = self.guard.guard_manager.as_ref()?;
         let result = gm.check_all(output, GuardDirection::Output).await.ok()?;
         if let crate::guard::GuardResult::Block { reason } = &result {
-            info!(agent = %self.config.agent_name, reason = %reason, "🛡️ 工具输出被护栏阻断");
+            info!(agent = %self.config.agent_name, reason = %reason, "🛡️ Tool output blocked by guard");
             if let Some(al) = &self.guard.audit_logger {
                 let event = crate::audit::AuditEvent::now(
                     self.config.session_id.clone(),
@@ -295,18 +295,18 @@ impl ReactAgent {
                 );
                 let _ = al.log(event).await;
             }
-            Some(format!("输出内容已被安全护栏过滤: {reason}"))
+            Some(format!("Output content filtered by safety guard: {reason}"))
         } else {
             None
         }
     }
 
-    /// 执行工具，并根据 `tool_error_feedback` 配置决定失败时的行为：
-    /// - `true`（默认）：将错误信息转换为工具观测值回传给 LLM，让模型自行纠错
-    /// - `false`：直接向上抛出 `Err`，与旧行为一致
+    /// Execute tool, deciding failure behavior based on `tool_error_feedback` config:
+    /// - `true` (default): convert error info to a tool observation sent back to LLM so the model can self-correct
+    /// - `false`: propagate `Err` upwards directly, matching legacy behavior
     ///
-    /// `final_answer` 工具始终保持原始错误语义，不会被软化。
-    /// 工具输出会经过 `truncate_tool_output` 进行 token 预算截断。
+    /// The `final_answer` tool always preserves original error semantics and is never softened.
+    /// Tool output goes through `truncate_tool_output` for token budget truncation.
     pub(crate) async fn execute_tool_feedback(
         &self,
         tool_name: &str,

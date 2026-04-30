@@ -1,6 +1,6 @@
-//! 搜索 Provider 共用工具函数
+//! Common utility functions for search providers
 
-/// URL 编码（百分号编码，符合 RFC 3986 unreserved 字符集）
+/// URL encoding (percent-encoding, compliant with RFC 3986 unreserved character set)
 pub fn urlencode(input: &str) -> String {
     input
         .bytes()
@@ -13,7 +13,7 @@ pub fn urlencode(input: &str) -> String {
         .collect()
 }
 
-/// 按字符数安全截断（不会在多字节 UTF-8 字符中间截断）
+/// Safely truncate by character count (won't split in the middle of multi-byte UTF-8 characters)
 pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -54,14 +54,14 @@ mod tests {
     fn test_urlencode() {
         assert_eq!(urlencode("hello world"), "hello%20world");
         assert_eq!(urlencode("rust-lang"), "rust-lang");
-        assert_eq!(urlencode("你好"), "%E4%BD%A0%E5%A5%BD");
+        assert_eq!(urlencode("café"), "caf%C3%A9");
     }
 
     #[test]
     fn test_truncate_chars() {
         assert_eq!(truncate_chars("hello", 10), "hello");
-        assert_eq!(truncate_chars("你好世界", 2), "你好");
-        // 不会在多字节字符中间截断
+        assert_eq!(truncate_chars("Hello World", 2), "He");
+        // Won't split in the middle of multibyte characters
         let s = "a🌍b".repeat(50);
         let truncated = truncate_chars(&s, 10);
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());

@@ -1,8 +1,8 @@
-//! 安全模块 - 路径验证和资源限制
+//! Security module - path validation and resource limits
 //!
-//! 提供统一的文件访问安全控制：
-//! - 路径沙箱：防止路径遍历攻击
-//! - 资源限制：防止 DoS 和 OOM
+//! Provides unified file access security controls:
+//! - Path sandbox: prevents path traversal attacks
+//! - Resource limits: prevents DoS and OOM
 
 use std::net::ToSocketAddrs;
 use std::path::{Component, Path, PathBuf};
@@ -14,45 +14,45 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, ToolError};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 资源限制配置
+// Resource Limits Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 资源限制配置
+/// Resource limits configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
-    /// 最大文件大小（字节），默认 50MB
+    /// Maximum file size in bytes, default 50MB
     #[serde(default = "default_max_file_size")]
     pub max_file_size: u64,
 
-    /// 最大预览行数，默认 10000
+    /// Maximum preview rows, default 10000
     #[serde(default = "default_max_preview_rows")]
     pub max_preview_rows: usize,
 
-    /// 最大预览字符数，默认 100KB
+    /// Maximum preview characters, default 100KB
     #[serde(default = "default_max_preview_chars")]
     pub max_preview_chars: usize,
 
-    /// PDF 最大预览页数，默认 50
+    /// Maximum PDF preview pages, default 50
     #[serde(default = "default_max_preview_pages")]
     pub max_preview_pages: usize,
 
-    /// 最大图片像素数，默认 4096*4096 = 16M
+    /// Maximum image pixels, default 4096*4096 = 16M
     #[serde(default = "default_max_image_pixels")]
     pub max_image_pixels: usize,
 
-    /// HTTP 请求超时（秒），默认 30
+    /// HTTP request timeout in seconds, default 30
     #[serde(default = "default_http_timeout_secs")]
     pub http_timeout_secs: u64,
 
-    /// HTTP 最大响应体大小（字节），默认 10MB
+    /// HTTP maximum response body size in bytes, default 10MB
     #[serde(default = "default_http_max_size")]
     pub http_max_size: u64,
 
-    /// 正则表达式超时（秒），默认 5
+    /// Regex timeout in seconds, default 5
     #[serde(default = "default_regex_timeout_secs")]
     pub regex_timeout_secs: u64,
 
-    /// 正则表达式最大内存（字节），默认 10MB
+    /// Regex maximum memory in bytes, default 10MB
     #[serde(default = "default_regex_max_size")]
     pub regex_max_size: usize,
 }
@@ -110,41 +110,41 @@ impl Default for ResourceLimits {
 }
 
 impl ResourceLimits {
-    /// 创建默认限制配置
+    /// Create default limits configuration
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 获取 HTTP 超时 Duration
+    /// Get HTTP timeout Duration
     pub fn http_timeout(&self) -> Duration {
         Duration::from_secs(self.http_timeout_secs)
     }
 
-    /// 获取正则表达式超时 Duration
+    /// Get regex timeout Duration
     pub fn regex_timeout(&self) -> Duration {
         Duration::from_secs(self.regex_timeout_secs)
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 路径验证器
+// Path Validator
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 路径验证器
+/// Path validator
 ///
-/// 确保文件访问在允许的目录范围内，防止路径遍历攻击。
+/// Ensures file access is within allowed directory ranges, preventing path traversal attacks.
 #[derive(Debug, Clone)]
 pub struct PathValidator {
-    /// 允许的根目录列表（空 = 允许所有）
+    /// List of allowed root directories (empty = allow all)
     allowed_roots: Vec<PathBuf>,
 
-    /// 禁止的路径列表
+    /// List of denied paths
     denied_paths: Vec<PathBuf>,
 
-    /// 资源限制
+    /// Resource limits
     limits: ResourceLimits,
 
-    /// 是否启用验证（用于测试或信任环境）
+    /// Whether validation is enabled (for testing or trusted environments)
     enabled: bool,
 }
 
@@ -160,38 +160,38 @@ impl Default for PathValidator {
 }
 
 impl PathValidator {
-    /// 创建新的路径验证器
+    /// Create a new path validator
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 设置允许的根目录
+    /// Set allowed root directories
     pub fn with_allowed_roots(mut self, roots: &[&str]) -> Self {
         self.allowed_roots = roots.iter().map(PathBuf::from).collect();
         self
     }
 
-    /// 设置禁止的路径
+    /// Set denied paths
     pub fn with_denied_paths(mut self, paths: &[&str]) -> Self {
         self.denied_paths = paths.iter().map(PathBuf::from).collect();
         self
     }
 
-    /// 设置资源限制
+    /// Set resource limits
     pub fn with_limits(mut self, limits: ResourceLimits) -> Self {
         self.limits = limits;
         self
     }
 
-    /// 启用/禁用验证
+    /// Enable/disable validation
     pub fn with_enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
     }
 
-    /// 验证文件路径
+    /// Validate file path
     ///
-    /// 返回规范化后的路径，或错误
+    /// Returns the canonicalized path, or an error
     pub fn validate_file(&self, path: &str) -> Result<PathBuf> {
         if !self.enabled {
             return Ok(PathBuf::from(path));
@@ -199,33 +199,33 @@ impl PathValidator {
 
         let path = Path::new(path);
 
-        // 1. 检查是否为绝对路径
+        // 1. Check if path is absolute
         if !path.is_absolute() {
             return Err(ToolError::InvalidPath {
                 path: path.display().to_string(),
-                reason: "路径必须是绝对路径".to_string(),
+                reason: "Path must be absolute".to_string(),
             }
             .into());
         }
 
-        // 2. 规范化路径（解析 .. 和 .）
+        // 2. Normalize path (resolve .. and .)
         let canonical = path.canonicalize().map_err(|e| ToolError::InvalidPath {
             path: path.display().to_string(),
-            reason: format!("路径不存在或无法访问: {}", e),
+            reason: format!("Path does not exist or cannot be accessed: {}", e),
         })?;
 
-        // 3. 检查是否在禁止列表中
+        // 3. Check if in denied list
         for denied in &self.denied_paths {
             if canonical.starts_with(denied) {
                 return Err(ToolError::AccessDenied {
                     path: path.display().to_string(),
-                    reason: "路径在禁止列表中".to_string(),
+                    reason: "Path is in the denied list".to_string(),
                 }
                 .into());
             }
         }
 
-        // 4. 检查是否在允许的根目录内（如果配置了）
+        // 4. Check if within allowed root directories (if configured)
         if !self.allowed_roots.is_empty() {
             let is_allowed = self.allowed_roots.iter().any(|root| {
                 if let Ok(root_canonical) = root.canonicalize() {
@@ -238,16 +238,16 @@ impl PathValidator {
             if !is_allowed {
                 return Err(ToolError::AccessDenied {
                     path: path.display().to_string(),
-                    reason: "路径不在允许的目录范围内".to_string(),
+                    reason: "Path is not within allowed directory scope".to_string(),
                 }
                 .into());
             }
         }
 
-        // 5. 检查文件大小
+        // 5. Check file size
         let metadata = std::fs::metadata(&canonical).map_err(|e| ToolError::ExecutionFailed {
             tool: "path_validator".to_string(),
-            message: format!("无法获取文件信息: {}", e),
+            message: format!("Unable to get file info: {}", e),
         })?;
 
         if metadata.len() > self.limits.max_file_size {
@@ -261,12 +261,13 @@ impl PathValidator {
         Ok(canonical)
     }
 
-    /// 验证输出文件路径。
+    /// Validate output file path.
     ///
-    /// 与 `validate_file()` 不同，输出路径允许文件尚不存在，但仍会：
-    /// - 要求绝对路径
-    /// - 规范化 `.` / `..`
-    /// - 检查 denied_paths / allowed_roots
+    /// Unlike `validate_file()`, output paths allow the file to not yet exist,
+    /// but still:
+    /// - Require absolute paths
+    /// - Normalize `.` / `..`
+    /// - Check denied_paths / allowed_roots
     pub fn validate_output_file(&self, path: &str) -> Result<PathBuf> {
         if !self.enabled {
             return Ok(PathBuf::from(path));
@@ -276,7 +277,7 @@ impl PathValidator {
         if !path.is_absolute() {
             return Err(ToolError::InvalidPath {
                 path: path.display().to_string(),
-                reason: "路径必须是绝对路径".to_string(),
+                reason: "Path must be absolute".to_string(),
             }
             .into());
         }
@@ -290,7 +291,7 @@ impl PathValidator {
             {
                 return Err(ToolError::AccessDenied {
                     path: path.display().to_string(),
-                    reason: "路径在禁止列表中".to_string(),
+                    reason: "Path is in the denied list".to_string(),
                 }
                 .into());
             }
@@ -306,7 +307,7 @@ impl PathValidator {
             if !is_allowed {
                 return Err(ToolError::AccessDenied {
                     path: path.display().to_string(),
-                    reason: "路径不在允许的目录范围内".to_string(),
+                    reason: "Path is not within allowed directory scope".to_string(),
                 }
                 .into());
             }
@@ -315,35 +316,35 @@ impl PathValidator {
         Ok(normalized)
     }
 
-    /// 验证并获取文件内容大小
+    /// Validate and get file content size
     pub fn get_file_size(path: &Path) -> Result<u64> {
         let metadata = std::fs::metadata(path).map_err(|e| ToolError::ExecutionFailed {
             tool: "path_validator".to_string(),
-            message: format!("无法获取文件信息: {}", e),
+            message: format!("Unable to get file info: {}", e),
         })?;
         Ok(metadata.len())
     }
 
-    /// 获取资源限制
+    /// Get resource limits
     pub fn limits(&self) -> &ResourceLimits {
         &self.limits
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 全局安全配置
+// Global Security Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
 use std::sync::OnceLock;
 
 static GLOBAL_SECURITY: OnceLock<Arc<SecurityConfig>> = OnceLock::new();
 
-/// 安全配置
+/// Security configuration
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
-    /// 路径验证器，限制文件访问范围
+    /// Path validator, limits file access scope
     pub path_validator: PathValidator,
-    /// 资源限制（内存、CPU、并发等）
+    /// Resource limits (memory, CPU, concurrency, etc.)
     pub limits: ResourceLimits,
 }
 
@@ -357,29 +358,29 @@ impl Default for SecurityConfig {
 }
 
 impl SecurityConfig {
-    /// 获取全局安全配置
+    /// Get global security configuration
     pub fn global() -> Arc<Self> {
         GLOBAL_SECURITY
             .get_or_init(|| Arc::new(Self::default()))
             .clone()
     }
 
-    /// 设置全局安全配置
+    /// Set global security configuration
     pub fn set_global(config: Self) {
         let _ = GLOBAL_SECURITY.set(Arc::new(config));
     }
 
-    /// 验证文件路径
+    /// Validate file path
     pub fn validate_file(&self, path: &str) -> Result<PathBuf> {
         self.path_validator.validate_file(path)
     }
 
-    /// 验证输出文件路径（允许目标文件尚不存在）。
+    /// Validate output file path (allows target file to not yet exist).
     pub fn validate_output_file(&self, path: &str) -> Result<PathBuf> {
         self.path_validator.validate_output_file(path)
     }
 
-    /// 检查文件大小
+    /// Check file size
     pub fn check_file_size(&self, size: u64) -> Result<()> {
         if size > self.limits.max_file_size {
             return Err(ToolError::FileTooLarge {
@@ -393,10 +394,10 @@ impl SecurityConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 安全 HTTP 客户端
+// Safe HTTP Client
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 创建安全配置的 HTTP 客户端
+/// Create a safely configured HTTP client
 pub fn create_safe_http_client(limits: &ResourceLimits) -> Result<reqwest::Client> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(limits.http_timeout_secs))
@@ -405,19 +406,19 @@ pub fn create_safe_http_client(limits: &ResourceLimits) -> Result<reqwest::Clien
         .build()
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "http_client".to_string(),
-            message: format!("创建 HTTP 客户端失败: {}", e),
+            message: format!("Failed to create HTTP client: {}", e),
         })?;
 
     Ok(client)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 安全正则表达式
+// Safe Regex
 // ─────────────────────────────────────────────────────────────────────────────
 
 use regex::RegexBuilder;
 
-/// 创建安全配置的正则表达式
+/// Create a safely configured regex
 pub fn create_safe_regex(pattern: &str, limits: &ResourceLimits) -> Result<regex::Regex> {
     RegexBuilder::new(pattern)
         .size_limit(limits.regex_max_size)
@@ -426,27 +427,27 @@ pub fn create_safe_regex(pattern: &str, limits: &ResourceLimits) -> Result<regex
         .map_err(|e| {
             ToolError::InvalidParameter {
                 name: "pattern".to_string(),
-                message: format!("无效的正则表达式: {}", e),
+                message: format!("Invalid regex: {}", e),
             }
             .into()
         })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SSRF 防护
+// SSRF Protection
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 验证 URL 的目标地址，拒绝请求私有/链路本地 IP（SSRF 防护）
+/// Validate URL target address, rejecting requests to private/link-local IPs (SSRF protection)
 pub fn validate_url(url_str: &str) -> Result<()> {
     let host = extract_host(url_str)?;
 
-    // 将主机名解析为 IP 地址
+    // Resolve hostname to IP address
     let addr_str = format!("{}:0", host);
     let addrs = addr_str
         .to_socket_addrs()
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "security".to_string(),
-            message: format!("SSRF 防护：DNS 解析失败: {}", e),
+            message: format!("SSRF protection: DNS resolution failed: {}", e),
         })?;
 
     for addr in addrs {
@@ -454,7 +455,10 @@ pub fn validate_url(url_str: &str) -> Result<()> {
         if is_private_ip(&ip) {
             return Err(ToolError::AccessDenied {
                 path: url_str.to_string(),
-                reason: format!("SSRF 防护：拒绝访问私有 IP 地址 {}", ip),
+                reason: format!(
+                    "SSRF protection: rejecting access to private IP address {}",
+                    ip
+                ),
             }
             .into());
         }
@@ -463,26 +467,26 @@ pub fn validate_url(url_str: &str) -> Result<()> {
     Ok(())
 }
 
-/// 从 URL 字符串提取主机名（不依赖 url crate）
+/// Extract hostname from URL string (without url crate dependency)
 fn extract_host(url_str: &str) -> Result<&str> {
     let rest = url_str
         .strip_prefix("http://")
         .or_else(|| url_str.strip_prefix("https://"))
         .ok_or_else(|| ToolError::InvalidParameter {
             name: "url".to_string(),
-            message: "URL 必须以 http:// 或 https:// 开头".to_string(),
+            message: "URL must start with http:// or https://".to_string(),
         })?;
 
-    // 提取 authority（host:port）
+    // Extract authority (host:port)
     let authority = rest.split('/').next().unwrap_or(rest);
-    // 去除 ?query
+    // Remove ?query
     let authority = authority.split('?').next().unwrap_or(authority);
-    // 去除 :port
+    // Remove :port
     let authority = authority.split(':').next().unwrap_or(authority);
-    // 去除 userinfo@ —— 取最后一个 @ 之后的部分
+    // Remove userinfo@ -- take everything after the last @
     let host = authority.rsplit('@').next().unwrap_or(authority);
 
-    // 处理 IPv6: [::1] → ::1
+    // Handle IPv6: [::1] → ::1
     let host = host
         .strip_prefix('[')
         .and_then(|h| h.split(']').next())
@@ -491,7 +495,7 @@ fn extract_host(url_str: &str) -> Result<&str> {
     if host.is_empty() {
         return Err(ToolError::InvalidParameter {
             name: "url".to_string(),
-            message: "URL 缺少主机名".to_string(),
+            message: "URL missing hostname".to_string(),
         }
         .into());
     }
@@ -499,7 +503,7 @@ fn extract_host(url_str: &str) -> Result<&str> {
     Ok(host)
 }
 
-/// 判断 IP 地址是否为私有/链路本地地址
+/// Check if an IP address is private/link-local
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -529,15 +533,15 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// 创建 SSRF 安全的重定向策略
+/// Create an SSRF-safe redirect policy
 pub fn ssrf_safe_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() > 5 {
-            return attempt.error("SSRF 保护：重定向次数过多");
+            return attempt.error("SSRF protection: too many redirects");
         }
         match validate_url(attempt.url().as_str()) {
             Ok(()) => attempt.follow(),
-            Err(e) => attempt.error(format!("SSRF 保护：重定向目标被阻止: {}", e)),
+            Err(e) => attempt.error(format!("SSRF protection: redirect target blocked: {}", e)),
         }
     })
 }
@@ -552,7 +556,7 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         return Err(ToolError::InvalidPath {
             path: path.display().to_string(),
-            reason: "路径必须是绝对路径".to_string(),
+            reason: "Path must be absolute".to_string(),
         }
         .into());
     }
@@ -588,8 +592,8 @@ mod tests {
             .with_allowed_roots(&["/tmp"])
             .with_enabled(true);
 
-        // 这个测试取决于实际文件系统
-        // 在实际使用中应该创建测试文件
+        // This test depends on the actual filesystem
+        // In practice, a test file should be created
     }
 
     #[test]

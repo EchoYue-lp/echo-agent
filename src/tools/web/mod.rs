@@ -1,11 +1,11 @@
-//! Web 工具模块
+//! Web tools module
 //!
-//! 提供 Web 搜索和页面获取能力：
+//! Provides web search and page fetching capabilities:
 //!
-//! - [`WebSearchTool`][]: 在互联网上搜索信息
-//! - [`WebFetchTool`][]: 获取网页内容并转换为可读文本
+//! - [`WebSearchTool`][]: Search for information on the internet
+//! - [`WebFetchTool`][]: Fetch web page content and convert to readable text
 //!
-//! # 快速开始
+//! # Quick Start
 //!
 //! ```rust,no_run
 //! use echo_agent::tools::web::{WebSearchTool, WebFetchTool};

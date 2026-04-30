@@ -121,7 +121,7 @@ impl AnthropicClient {
                                 source: data_url_to_image_source(&image_url.url),
                             }),
                             ContentPart::File { name, .. } => Some(ContentBlock::Text {
-                                text: format!("\n[附件: {name}]"),
+                                text: format!("\n[Attachment: {name}]"),
                             }),
                         })
                         .collect();
@@ -516,7 +516,7 @@ enum ImageSource {
     },
 }
 
-/// 将 data URL 解析为 Anthropic ImageSource
+/// Parse a data URL into an Anthropic ImageSource
 fn data_url_to_image_source(url: &str) -> ImageSource {
     if let Some(rest) = url.strip_prefix("data:")
         && let Some((media_type, b64_data)) = rest.split_once(';')

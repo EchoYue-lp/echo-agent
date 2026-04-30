@@ -13,7 +13,7 @@ impl Tool for PlanTool {
     }
 
     fn description(&self) -> &str {
-        "分析复杂问题并制定详细的执行计划。将大任务拆解为多个有序的子任务。"
+        "Analyze complex problems and create a detailed execution plan. Break large tasks into ordered sub-tasks."
     }
 
     fn parameters(&self) -> Value {
@@ -22,11 +22,11 @@ impl Tool for PlanTool {
             "properties": {
                 "analysis": {
                     "type": "string",
-                    "description": "对问题的深入分析：难点、需要的信息、可能的方法"
+                    "description": "In-depth analysis of the problem: challenges, required info, possible approaches"
                 },
                 "strategy": {
                     "type": "string",
-                    "description": "解决策略：说明如何一步步解决这个问题"
+                    "description": "Solution strategy: describe how to solve the problem step by step"
                 }
             },
             "required": ["analysis", "strategy"]
@@ -49,7 +49,7 @@ impl Tool for PlanTool {
                 .ok_or_else(|| ToolError::MissingParameter("strategy".to_string()))?;
 
             let plan = format!(
-                "📋 计划已制定\n\n分析:\n{}\n\n策略:\n{}\n\n请使用 create_task 创建具体的子任务",
+                "📋 Plan created\n\nAnalysis:\n{}\n\nStrategy:\n{}\n\nUse create_task to create specific sub-tasks",
                 analysis, strategy
             );
 

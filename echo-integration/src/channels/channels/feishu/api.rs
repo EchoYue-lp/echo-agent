@@ -1,8 +1,8 @@
 //! Feishu HTTP API
 //!
-//! 1. 获取 WebSocket 连接 URL（长连接模式）
-//! 2. 获取 tenant_access_token（用于发送消息）
-//! 3. 发送消息 API
+//! 1. Get WebSocket connection URL (long connection mode)
+//! 2. Get tenant_access_token (for sending messages)
+//! 3. Send message API
 
 use echo_core::error::{ChannelError, ReactError, Result};
 use reqwest::Client;
@@ -14,24 +14,24 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-/// 飞书 API 基础地址
+/// Feishu API base URL
 pub const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
 
-/// 飞书国际版 API 基础地址
+/// Lark (international) API base URL
 pub const LARK_API_BASE: &str = "https://open.larksuite.com/open-apis";
 
-/// 飞书 WebSocket endpoint 基础地址（不带 /open-apis）
+/// Feishu WebSocket endpoint base URL (without /open-apis)
 pub const FEISHU_WS_BASE: &str = "https://open.feishu.cn";
 
-/// 飞书国际版 WebSocket endpoint 基础地址（不带 /open-apis）
+/// Lark (international) WebSocket endpoint base URL (without /open-apis)
 pub const LARK_WS_BASE: &str = "https://open.larksuite.com";
 
-/// 获取 WebSocket endpoint 的路径
+/// Path to get the WebSocket endpoint
 pub const WS_ENDPOINT_PATH: &str = "/callback/ws/endpoint";
 
 // ── HTTP Client ───────────────────────────────────────────────────────────────
 
-/// 创建 reqwest HTTP 客户端
+/// Create a reqwest HTTP client
 pub fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(30))
@@ -41,7 +41,7 @@ pub fn http_client() -> Client {
 
 // ── WebSocket Endpoint API ────────────────────────────────────────────────────
 
-/// Endpoint 响应结构
+/// Endpoint response structure
 #[derive(Debug, Deserialize)]
 pub struct EndpointResponse {
     pub code: i32,
@@ -50,39 +50,39 @@ pub struct EndpointResponse {
     pub data: Option<EndpointData>,
 }
 
-/// Endpoint 数据
+/// Endpoint data
 #[derive(Debug, Deserialize)]
 pub struct EndpointData {
-    /// WebSocket 连接 URL（包含 device_id 和 service_id）
+    /// WebSocket connection URL (contains device_id and service_id)
     #[serde(rename = "URL")]
     pub url: String,
 
-    /// 客户端配置（可选）
+    /// Client configuration (optional)
     #[serde(rename = "ClientConfig")]
     pub client_config: Option<ClientConfig>,
 }
 
-/// 服务端下发的客户端配置
+/// Client configuration delivered by the server
 #[derive(Debug, Deserialize)]
 pub struct ClientConfig {
-    /// 重连次数
+    /// Reconnect count
     #[serde(rename = "ReconnectCount")]
     pub reconnect_count: Option<i32>,
 
-    /// 重连间隔（秒）
+    /// Reconnect interval (seconds)
     #[serde(rename = "ReconnectInterval")]
     pub reconnect_interval: Option<i32>,
 
-    /// 首次重连随机抖动（秒）
+    /// Initial reconnect random jitter (seconds)
     #[serde(rename = "ReconnectNonce")]
     pub reconnect_nonce: Option<i32>,
 
-    /// Ping 间隔（秒）
+    /// Ping interval (seconds)
     #[serde(rename = "PingInterval")]
     pub ping_interval: Option<i32>,
 }
 
-/// 获取 WebSocket 连接 URL
+/// Get WebSocket connection URL
 pub async fn get_ws_endpoint(
     client: &Client,
     domain: &str,
@@ -120,7 +120,7 @@ pub async fn get_ws_endpoint(
         ChannelError::NetworkError(format!("Failed to parse endpoint response: {}", e))
     })?;
 
-    // 检查错误码
+    // Check error code
     match resp.code {
         0 => {}
         1 => {
@@ -158,7 +158,7 @@ pub async fn get_ws_endpoint(
         )));
     }
 
-    // 解析 URL 获取 device_id 和 service_id
+    // Parse URL to get device_id and service_id
     let parsed_url = url::Url::parse(&data.url)
         .map_err(|e| ChannelError::ConnectionError(format!("Invalid endpoint URL: {}", e)))?;
 
@@ -182,16 +182,16 @@ pub async fn get_ws_endpoint(
     Ok((data.url, service_id, data.client_config))
 }
 
-// ── Token 管理 ────────────────────────────────────────────────────────────────
+// ── Token Management ────────────────────────────────────────────────────────────
 
-/// tenant_access_token 管理器
+/// tenant_access_token manager
 pub struct TokenManager {
     app_id: String,
     app_secret: String,
     domain: String,
     token: Arc<Mutex<Option<String>>>,
     expires_at: Arc<AtomicU64>,
-    /// 防止并发重复刷新
+    /// Prevent concurrent duplicate refresh
     refresh_lock: Arc<Mutex<()>>,
     http: Client,
 }
@@ -225,9 +225,9 @@ impl TokenManager {
         if let Some(token) = self.get_cached().await {
             return Ok(token);
         }
-        // 加锁防止并发重复刷新
+        // Lock to prevent concurrent duplicate refresh
         let _lock = self.refresh_lock.lock().await;
-        // 拿到锁后再检查一次，可能其他协程已刷新
+        // Double-check after acquiring lock; another coroutine may have already refreshed
         if let Some(token) = self.get_cached().await {
             return Ok(token);
         }
@@ -294,9 +294,9 @@ impl TokenManager {
     }
 }
 
-// ── 发送消息 ─────────────────────────────────────────────────────────────────
+// ── Send Message ──────────────────────────────────────────────────────────────
 
-/// 发送飞书消息
+/// Send a Feishu message
 pub async fn send_message(
     client: &Client,
     domain: &str,
@@ -355,7 +355,7 @@ pub async fn send_message(
         ))));
     }
 
-    // 返回消息 ID
+    // Return message ID
     let message_id = json["data"]["message_id"]
         .as_str()
         .unwrap_or("")
@@ -365,7 +365,7 @@ pub async fn send_message(
     Ok(message_id)
 }
 
-/// 发送文本消息
+/// Send a text message
 pub async fn send_text_message(
     client: &Client,
     domain: &str,
@@ -387,7 +387,7 @@ pub async fn send_text_message(
     .await
 }
 
-/// 发送卡片消息
+/// Send a card message
 pub async fn send_card_message(
     client: &Client,
     domain: &str,
@@ -408,7 +408,7 @@ pub async fn send_card_message(
     .await
 }
 
-/// 回复消息（在话题中回复）
+/// Reply to a message (reply in thread)
 pub async fn reply_message(
     client: &Client,
     domain: &str,
@@ -466,7 +466,7 @@ pub async fn reply_message(
     Ok(reply_id)
 }
 
-/// 更新卡片消息
+/// Update a card message
 pub async fn patch_card_message(
     client: &Client,
     domain: &str,
@@ -515,7 +515,7 @@ pub async fn patch_card_message(
     Ok(())
 }
 
-/// 添加消息表情反应
+/// Add an emoji reaction to a message
 pub async fn add_reaction(
     client: &Client,
     domain: &str,
@@ -546,7 +546,7 @@ pub async fn add_reaction(
     if !res.status().is_success() {
         let text = res.text().await.unwrap_or_default();
         warn!("Feishu: add reaction failed: {}", text);
-        // 不返回错误，表情反应失败不影响主流程
+        // Do not return an error; reaction failure does not affect the main flow
     }
 
     Ok(())

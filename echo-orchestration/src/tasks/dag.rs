@@ -1,10 +1,10 @@
-//! DAG 依赖分析（循环检测、拓扑排序、依赖链查询、Mermaid 可视化）
+//! DAG dependency analysis (cycle detection, topological sort, dependency chain query, Mermaid visualization)
 
 use super::manager::TaskManager;
 use std::collections::HashMap;
 
 impl TaskManager {
-    /// 检测循环依赖，返回所有循环路径
+    /// Detect cyclic dependencies, return all cycle paths
     pub fn detect_circular_dependencies(&self) -> Vec<Vec<String>> {
         let mut cycles = Vec::new();
         let mut visited: HashMap<String, super::manager::VisitState> = HashMap::new();
@@ -20,7 +20,7 @@ impl TaskManager {
         cycles
     }
 
-    /// 获取拓扑排序（如果存在循环依赖则返回错误）
+    /// Get topological sort (returns error if cyclic dependencies exist)
     pub fn get_topological_order(&self) -> Result<Vec<String>, String> {
         let cycles = self.detect_circular_dependencies();
         if !cycles.is_empty() {
@@ -29,12 +29,12 @@ impl TaskManager {
                 .map(|cycle| format!("[{}]", cycle.join(" -> ")))
                 .collect();
             return Err(format!(
-                "存在循环依赖，无法进行拓扑排序: {}",
+                "Cyclic dependency exists, cannot perform topological sort: {}",
                 cycle_strs.join(", ")
             ));
         }
 
-        // Kahn 算法拓扑排序
+        // Kahn's algorithm for topological sort
         let mut in_degree: HashMap<String, usize> = HashMap::new();
         let mut adj_list: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -89,7 +89,7 @@ impl TaskManager {
         Ok(result)
     }
 
-    /// 生成依赖图的可视化（Mermaid 格式）
+    /// Generate a visualization of the dependency graph (Mermaid format)
     pub fn visualize_dependencies(&self) -> String {
         let mut mermaid = String::from("graph TD\n");
 
@@ -107,7 +107,7 @@ impl TaskManager {
         mermaid
     }
 
-    /// 获取依赖链（从指定任务到根节点）
+    /// Get dependency chain (from the specified task to the root node)
     pub fn get_dependency_chain(&self, task_id: &str) -> Vec<Vec<String>> {
         let mut chains = Vec::new();
         let mut current_chain = Vec::new();

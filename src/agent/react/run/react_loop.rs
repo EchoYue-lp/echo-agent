@@ -1,4 +1,4 @@
-//! ReAct 循环核心（think / process_steps / run_react_loop）
+//! ReAct loop core (think / process_steps / run_react_loop)
 
 use super::super::{ReactAgent, StepType, TOOL_FINAL_ANSWER};
 use super::execution::{ToolExecutionFailure, ToolExecutionOutcome};
@@ -11,17 +11,17 @@ use serde_json::Value;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 impl ReactAgent {
-    /// 调用 LLM 推理，返回本轮的步骤列表。
+    /// Call LLM for reasoning, returning the list of steps for this round.
     ///
-    /// 每次调用前先通过 `ContextManager::prepare` 自动压缩超限的历史消息，
-    /// 再将压缩后的消息列表传给 LLM；LLM 的响应追加回 context。
+    /// Before each call, `ContextManager::prepare` auto-compresses overflow history messages,
+    /// then the compressed message list is passed to the LLM; the LLM response is appended back to context.
     #[tracing::instrument(skip(self), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
     pub(crate) async fn think(&self) -> Result<Vec<StepType>> {
         let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
         let mut res = Vec::new();
 
-        debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM 思考中...");
+        debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM thinking...");
 
         // ContextManager::prepare handles compression internally — no need for duplicate pre-check here.
         let messages = self.memory.context.lock().await.prepare(None).await?;
@@ -39,12 +39,12 @@ impl ReactAgent {
         let temperature = self.config.temperature;
         let max_tokens = self.config.max_tokens;
 
-        // 熔断器检查
+        // Circuit breaker check
         let circuit_breaker = self.guard.circuit_breaker.clone();
         if let Some(cb) = &circuit_breaker
             && cb.is_open()
         {
-            warn!(agent = %agent, "🔴 熔断器已开启，跳过 LLM 请求");
+            warn!(agent = %agent, "🔴 Circuit breaker open, skip LLM request");
             return Err(ReactError::Agent(AgentError::InitializationFailed(
                 "LLM service unavailable (circuit breaker open)".to_string(),
             )));
@@ -75,7 +75,7 @@ impl ReactAgent {
                 temperature = request.temperature,
                 max_tokens = request.max_tokens,
                 last_msg = ?last_msg_preview,
-                "📤 LLM 请求"
+                "📤 LLM request"
             );
             let response = super::retry::retry_llm_call(
                 &agent,
@@ -94,7 +94,7 @@ impl ReactAgent {
                 finish_reason = ?response.finish_reason,
                 has_tool_calls = response.has_tool_calls(),
                 content_preview = ?response.content().map(|c| c.chars().take(200).collect::<String>()),
-                "📥 LLM 响应"
+                "📥 LLM response"
             );
             let usage = response.raw.usage.clone();
             let finish_reason = response.finish_reason.clone();
@@ -115,7 +115,7 @@ impl ReactAgent {
                 temperature,
                 max_tokens,
                 last_msg = ?last_msg_preview,
-                "📤 LLM 请求"
+                "📤 LLM request"
             );
             let response = super::retry::retry_llm_call(
                 &agent,
@@ -161,7 +161,7 @@ impl ReactAgent {
                 finish_reason = ?finish_reason,
                 has_tool_calls = message.tool_calls.as_ref().is_some_and(|t| !t.is_empty()),
                 content_preview = ?message.content.as_text().map(|c| c.chars().take(200).collect::<String>()),
-                "📥 LLM 响应"
+                "📥 LLM response"
             );
             (message, usage, finish_reason)
         };
@@ -179,7 +179,7 @@ impl ReactAgent {
             finish_reason = ?finish_reason,
             content_debug = ?message.content,
             reasoning_preview = ?message.reasoning_content.as_ref().map(|r| r.chars().take(200).collect::<String>()),
-            "🔍 LLM 响应诊断"
+            "🔍 LLM response diagnostics"
         );
 
         if let Some(tool_calls) = &message.tool_calls
@@ -193,7 +193,7 @@ impl ReactAgent {
             info!(
                 agent = %agent,
                 tools = ?tool_names,
-                "🧠 LLM 决定调用 {} 个工具",
+                "🧠 LLM decided to call {} tools",
                 tool_calls.len()
             );
             for call in tool_calls {
@@ -205,13 +205,13 @@ impl ReactAgent {
             }
         } else if let Some(content) = message.content.as_text_ref() {
             self.memory.context.lock().await.push(message.clone());
-            debug!(agent = %agent, "🧠 LLM 返回文本响应");
+            debug!(agent = %agent, "🧠 LLM returned text response");
             res.push(StepType::Thought(content.to_string()));
         } else if message.reasoning_content.is_some() || message.content.as_text_ref().is_none() {
-            // 不要推入 context：Empty content + 无 tool_calls 的消息发给 API 会报
-            // "content field is required" 错误；reasoning_content 是模型内部思考，
-            // 不需要传回下一轮请求。
-            debug!(agent = %agent, "🧠 LLM 仅返回推理内容或空响应，继续迭代");
+            // Don't push to context: messages with empty content + no tool_calls sent to the API
+            // cause "content field is required" errors; reasoning_content is the model's internal
+            // thought process and doesn't need to be passed back to the next round.
+            debug!(agent = %agent, "🧠 LLM returned only reasoning content or empty response, continue iterating");
         }
 
         let prompt_tokens = usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0) as usize;
@@ -227,9 +227,9 @@ impl ReactAgent {
         Ok(res)
     }
 
-    /// 处理一轮思考产生的步骤：
-    /// - 有工具调用 → 并行执行（需要审批的工具强制串行），`final_answer` 时返回答案
-    /// - 无工具调用 → 纯文本响应视为最终答案，直接返回
+    /// Process steps produced by one think round:
+    /// - Tool calls → execute in parallel (approval-required tools are serialized), return answer on `final_answer`
+    /// - No tool calls → plain text response treated as final answer, returned directly
     #[tracing::instrument(skip(self, steps), fields(agent = %self.config.agent_name, tool_count = steps.iter().filter(|s| matches!(s, StepType::Call { .. })).count()))]
     pub(crate) async fn process_steps(&self, steps: Vec<StepType>) -> Result<Option<String>> {
         let agent = self.config.agent_name.clone();
@@ -246,7 +246,7 @@ impl ReactAgent {
                     tool_calls.push((tool_call_id, function_name, arguments));
                 }
                 StepType::Thought(content) => {
-                    debug!(agent = %agent, "🤔 思考: {}", content);
+                    debug!(agent = %agent, "🤔 Thought: {}", content);
                     last_thought = Some(content);
                 }
             }
@@ -263,7 +263,7 @@ impl ReactAgent {
                 agent = %agent,
                 tools = ?tool_names,
                 max_concurrency = ?max_concurrency,
-                "⚡ 并发执行 {} 个工具调用",
+                "⚡ Concurrently executing {} tool calls",
                 tool_calls.len()
             );
         }
@@ -345,7 +345,7 @@ impl ReactAgent {
                 result.clone(),
             ));
             if function_name == TOOL_FINAL_ANSWER {
-                info!(agent = %agent, "🏁 最终答案已生成");
+                info!(agent = %agent, "🏁 Final answer generated");
                 final_answer = Some(result);
             }
         }
@@ -361,7 +361,7 @@ impl ReactAgent {
                 result.clone(),
             ));
             if function_name == TOOL_FINAL_ANSWER {
-                info!(agent = %agent, "🏁 最终答案已生成");
+                info!(agent = %agent, "🏁 Final answer generated");
                 return Ok(Some(result));
             }
         }
@@ -373,19 +373,19 @@ impl ReactAgent {
         Ok(None)
     }
 
-    /// 核心 ReAct 循环（注入记忆 → 追加消息 → think/act 迭代）。
-    /// `run_direct` 和 `run_chat_direct` 共享此实现。
+    /// Core ReAct loop (inject memories → append message → think/act iteration).
+    /// `run_direct` and `run_chat_direct` share this implementation.
     #[tracing::instrument(skip(self, message), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
     pub(crate) async fn run_react_loop(&self, message: &str) -> Result<String> {
         let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
 
-        // 输入护栏检查
+        // Input guard check
         if let Some(gm) = &self.guard.guard_manager {
-            info!(agent = %agent, direction = "input", "🛡️ 护栏检查开始");
+            info!(agent = %agent, direction = "input", "🛡️ Guard check started");
             let result = gm.check_all(message, GuardDirection::Input).await?;
             if let crate::guard::GuardResult::Block { reason } = &result {
-                info!(agent = %agent, reason = %reason, "🛡️ 输入被护栏阻断");
+                info!(agent = %agent, reason = %reason, "🛡️ Input blocked by guard");
                 if let Some(al) = &self.guard.audit_logger {
                     let event = crate::audit::AuditEvent::now(
                         self.config.session_id.clone(),
@@ -398,7 +398,7 @@ impl ReactAgent {
                     );
                     let _ = al.log(event).await;
                 }
-                return Ok(format!("请求被安全护栏拦截: {reason}"));
+                return Ok(format!("Request blocked by safety guard: {reason}"));
             }
         }
 
@@ -406,8 +406,8 @@ impl ReactAgent {
 
         match self.recall_long_term_memories(message).await {
             Ok(items) if !items.is_empty() => {
-                debug!(agent = %agent, count = items.len(), "📚 注入相关长期记忆");
-                let mut lines = vec!["[相关历史记忆]".to_string()];
+                debug!(agent = %agent, count = items.len(), "📚 Injecting relevant long-term memories");
+                let mut lines = vec!["[Related historical memories]".to_string()];
                 for (i, item) in items.iter().enumerate() {
                     let content_str = item
                         .value
@@ -417,7 +417,7 @@ impl ReactAgent {
                         .unwrap_or_else(|| item.value.to_string());
                     lines.push(format!("{}. {}", i + 1, content_str));
                 }
-                lines.push("[以上记忆供参考，请结合当前问题作答]".to_string());
+                lines.push("[Above memories are for reference, please answer based on the current question]".to_string());
                 self.memory
                     .context
                     .lock()
@@ -426,7 +426,7 @@ impl ReactAgent {
             }
             Ok(_) => {}
             Err(e) => {
-                warn!(agent = %agent, error = %e, "⚠️ 长期记忆检索失败，跳过注入");
+                warn!(agent = %agent, error = %e, "⚠️ Long-term memory retrieval failed, skipping injection");
             }
         }
 
@@ -437,13 +437,13 @@ impl ReactAgent {
             .push(Message::user(message.to_string()));
 
         for iteration in 0..self.config.max_iterations {
-            info!(agent = %agent, iteration = iteration + 1, "🔄 ReAct 迭代开始");
+            info!(agent = %agent, iteration = iteration + 1, "🔄 ReAct iteration starting");
 
             for cb in &callbacks {
                 cb.on_iteration(&agent, iteration).await;
             }
 
-            debug!(agent = %agent, iteration = iteration + 1, "--- 迭代 ---");
+            debug!(agent = %agent, iteration = iteration + 1, "--- Iteration ---");
 
             let think_model = self.config.model_name.clone();
             let steps = self
@@ -456,17 +456,17 @@ impl ReactAgent {
                     model = %think_model,
                     iteration = iteration + 1,
                     max_iterations = self.config.max_iterations,
-                    "⚠️ LLM 返回空响应，继续下一轮迭代"
+                    "⚠️ LLM returned empty response, continue to next iteration"
                 );
                 continue;
             }
 
             if let Some(mut answer) = self.process_steps(steps).await? {
-                // 输出护栏检查
+                // Output guard check
                 if let Some(gm) = &self.guard.guard_manager {
                     let result = gm.check_all(&answer, GuardDirection::Output).await?;
                     if let crate::guard::GuardResult::Block { reason } = &result {
-                        info!(agent = %agent, reason = %reason, "🛡️ 输出被护栏阻断");
+                        info!(agent = %agent, reason = %reason, "🛡️ Output blocked by guard");
                         if let Some(al) = &self.guard.audit_logger {
                             let event = crate::audit::AuditEvent::now(
                                 self.config.session_id.clone(),
@@ -479,17 +479,17 @@ impl ReactAgent {
                             );
                             let _ = al.log(event).await;
                         }
-                        answer = format!("回复内容已被安全护栏过滤: {reason}");
+                        answer = format!("Response content filtered by safety guard: {reason}");
                     }
                 }
 
-                // 最终快照
+                // Final snapshot
                 self.auto_snapshot(iteration).await;
 
                 for cb in &callbacks {
                     cb.on_final_answer(&agent, &answer).await;
                 }
-                info!(agent = %agent, "🏁 执行完毕");
+                info!(agent = %agent, "🏁 Execution complete");
 
                 self.log_final_answer_audit(&answer).await;
                 self.persist_runtime_state().await;
@@ -497,11 +497,11 @@ impl ReactAgent {
                 return Ok(answer);
             }
 
-            // 迭代中间快照（尚未产生最终答案）
+            // Intermediate iteration snapshot (final answer not yet produced)
             self.auto_snapshot(iteration).await;
         }
 
-        warn!(agent = %agent, max = self.config.max_iterations, "达到最大迭代次数");
+        warn!(agent = %agent, max = self.config.max_iterations, "Maximum iterations reached");
         Err(ReactError::from(AgentError::MaxIterationsExceeded(
             self.config.max_iterations,
         )))

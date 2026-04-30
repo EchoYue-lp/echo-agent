@@ -148,7 +148,7 @@ impl SubagentHookRegistry {
 
     /// Register a hook implementation.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `hook` - Hook implementation to add.
     pub fn register(&mut self, hook: Arc<dyn SubagentHooks>) {
         self.hooks.push(hook);
@@ -156,7 +156,7 @@ impl SubagentHookRegistry {
 
     /// Call `before_dispatch` on all registered hooks.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `ctx` - Hook context.
     pub async fn before_dispatch(&self, ctx: &SubagentHookContext) {
         for hook in &self.hooks {
@@ -166,7 +166,7 @@ impl SubagentHookRegistry {
 
     /// Call `after_dispatch` on all registered hooks.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `ctx` - Hook context.
     /// * `result` - Subagent execution result.
     pub async fn after_dispatch(&self, ctx: &SubagentHookContext, result: &SubagentResult) {
@@ -192,7 +192,7 @@ impl SubagentHookRegistry {
 
     /// Call `on_cancelled` on all registered hooks.
     ///
-    /// # 参数
+    /// # Parameters
     /// * `ctx` - Hook context.
     pub async fn on_cancelled(&self, ctx: &SubagentHookContext) {
         for hook in &self.hooks {

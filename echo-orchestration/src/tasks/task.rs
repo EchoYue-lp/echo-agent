@@ -1,30 +1,30 @@
-//! 任务定义
+//! Task definitions
 
 use serde::{Deserialize, Serialize};
 
-/// 任务状态
+/// Task status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
-    /// 待处理
+    /// Pending
     Pending,
-    /// 进行中
+    /// In progress
     InProgress,
-    /// 已完成
+    /// Completed
     Completed,
-    /// 已取消
+    /// Cancelled
     Cancelled,
-    /// 失败
+    /// Failed
     Failed(String),
-    /// 阻塞
+    /// Blocked
     Blocked(String),
-    /// 超时
+    /// Timed out
     TimedOut { error: String },
-    /// 重试中
+    /// Retrying
     Retrying { attempt: u32, last_error: String },
 }
 
 impl TaskStatus {
-    /// 是否为终态（不会再变化）
+    /// Whether this is a terminal state (will not change further)
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -35,7 +35,7 @@ impl TaskStatus {
         )
     }
 
-    /// 状态转换是否合法
+    /// Whether the state transition is valid
     pub fn can_transition_to(&self, target: &TaskStatus) -> bool {
         match self {
             TaskStatus::Pending => {
@@ -62,9 +62,9 @@ impl TaskStatus {
         }
     }
 
-    /// 执行状态转换，校验合法性后返回新状态
+    /// Execute state transition, return new state after validating legality
     ///
-    /// 如果转换不合法，返回包含详细错误信息的 `Err`。
+    /// If the transition is invalid, return `Err` with detailed error info.
     pub fn transition_to(&self, target: TaskStatus) -> Result<TaskStatus, String> {
         if !self.can_transition_to(&target) {
             return Err(format!(
@@ -78,34 +78,34 @@ impl TaskStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
-    /// 任务 ID
+    /// Task ID
     pub id: String,
-    /// 任务描述
+    /// Task description
     pub description: String,
-    /// 任务状态
+    /// Task status
     pub status: TaskStatus,
-    /// 依赖的任务 ID 列表
+    /// List of dependent task IDs
     pub dependencies: Vec<String>,
-    /// 优先级 (0-10, 10 最高)
+    /// Priority (0-10, 10 is highest)
     pub priority: u8,
-    /// 任务结果
+    /// Task result
     pub result: Option<String>,
-    /// 执行理由或备注
+    /// Execution rationale or notes
     pub reasoning: Option<String>,
-    /// 分配给执行的 Agent 名称
+    /// Name of the Agent assigned to execute this task
     pub assigned_agent: Option<String>,
-    /// 标签（用于分类和过滤）
+    /// Tags (for categorization and filtering)
     pub tags: Vec<String>,
     pub parent_id: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
-    /// 任务主题/标题（用于日志和事件）
+    /// Task topic/title (for logging and events)
     pub subject: String,
-    /// 超时时间（秒），0 表示不超时
+    /// Timeout in seconds, 0 means no timeout
     pub timeout_secs: u64,
-    /// 最大重试次数
+    /// Maximum retry count
     pub max_retries: u32,
-    /// 当前已重试次数
+    /// Current retry count
     pub retry_count: u32,
 }
 
@@ -161,32 +161,32 @@ impl Task {
         self
     }
 
-    /// 指定执行的 Agent
+    /// Specify the Agent to execute
     pub fn with_assigned_agent(mut self, agent: impl Into<String>) -> Self {
         self.assigned_agent = Some(agent.into());
         self
     }
 
-    /// 添加标签
+    /// Add tags
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.tags = tags;
         self
     }
 
-    /// 添加单个标签
+    /// Add a single tag
     pub fn add_tag(&mut self, tag: impl Into<String>) {
         self.tags.push(tag.into());
     }
 
-    /// 是否已取消
+    /// Whether already cancelled
     pub fn is_cancelled(&self) -> bool {
         self.status == TaskStatus::Cancelled
     }
 
-    /// 取消任务（使用状态机校验）
+    /// Cancel the task (using state machine validation)
     ///
-    /// 仅当当前状态允许转换为 `Cancelled` 时才成功。
-    /// 返回 `true` 表示取消成功，`false` 表示当前状态不允许取消。
+    /// Succeeds only when the current state allows transition to `Cancelled`.
+    /// Returns `true` if cancellation succeeded, `false` if current state does not allow cancellation.
     pub fn cancel(&mut self) -> bool {
         match self.status.transition_to(TaskStatus::Cancelled) {
             Ok(new_status) => {
@@ -197,7 +197,7 @@ impl Task {
         }
     }
 
-    /// 记录一次执行结果
+    /// Record an execution result
     pub fn record_execution(
         &mut self,
         attempt: u32,
@@ -211,7 +211,7 @@ impl Task {
             self.result = Some(r);
         }
         if let Some(dur) = duration_secs {
-            let _ = dur; // 记录执行时长（可用于未来统计）
+            let _ = dur; // Record execution duration (usable for future statistics)
         }
         if let Some(err) = error {
             self.reasoning = Some(format!("Attempt {} failed: {}", attempt, err));

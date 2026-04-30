@@ -1,6 +1,6 @@
-//! 基于 LLM 的护栏
+//! LLM-based guard
 //!
-//! 将待检内容发送给审查 LLM，由模型判断是否安全。
+//! Sends content to a review LLM for safety judgment.
 
 use super::{Guard, GuardDirection, GuardResult};
 use crate::error::Result;
@@ -20,19 +20,19 @@ const DEFAULT_SYSTEM_PROMPT: &str = r#"你是一个内容安全审查系统。�
 {"safe": true} 或 {"safe": false, "reason": "阻断原因"}
 "#;
 
-/// LLM 护栏
+/// LLM guard
 ///
-/// 使用独立的 LLM 客户端对内容进行安全审查。
+/// Uses an independent LLM client for content safety review.
 pub struct LlmGuard {
     guard_name: String,
     client: Arc<dyn LlmClient>,
     system_prompt: String,
-    /// 哪些方向需要检查（为空时检查所有方向）
+    /// Directions to check (when empty, checks all directions)
     directions: Vec<GuardDirection>,
 }
 
 impl LlmGuard {
-    /// 使用默认审查提示词
+    /// Use the default review prompt
     pub fn new(name: impl Into<String>, client: Arc<dyn LlmClient>) -> Self {
         Self {
             guard_name: name.into(),
@@ -42,7 +42,7 @@ impl LlmGuard {
         }
     }
 
-    /// 自定义审查提示词
+    /// Custom review prompt
     pub fn with_prompt(
         name: impl Into<String>,
         client: Arc<dyn LlmClient>,
@@ -56,7 +56,7 @@ impl LlmGuard {
         }
     }
 
-    /// 限定检查方向
+    /// Restrict check directions
     pub fn with_directions(mut self, directions: Vec<GuardDirection>) -> Self {
         self.directions = directions;
         self
@@ -78,7 +78,8 @@ impl Guard for LlmGuard {
                 return Ok(GuardResult::Pass);
             }
 
-            let user_message = format!("请审查以下 [{direction}] 内容：\n\n{content}");
+            let user_message =
+                format!("Please review the following [{direction}] content:\n\n{content}");
 
             let messages = vec![
                 crate::llm::types::Message::system(self.system_prompt.clone()),

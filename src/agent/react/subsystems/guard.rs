@@ -1,14 +1,16 @@
-//! 护栏与安全子系统
+//! Guardrails and security subsystem
 //!
-//! 集中管理护栏检查、权限策略、审计日志、熔断器等安全相关组件。
+//! Centralized management of guardrail checks, permission policies, audit logs,
+//! circuit breaker, and other security-related components.
 
 use crate::guard::GuardManager;
 use echo_core::circuit_breaker::CircuitBreaker;
 use std::sync::Arc;
 
-/// 护栏与安全子系统
+/// Guardrails and security subsystem
 ///
-/// 聚合输入/输出护栏、工具权限策略、审计日志记录、LLM 熔断器。
+/// Aggregates input/output guardrails, tool permission policies, audit logging,
+/// and LLM circuit breaker.
 pub(crate) struct GuardSubsystem {
     pub(crate) guard_manager: Option<GuardManager>,
     pub(crate) permission_policy: Option<Arc<dyn crate::tools::permission::PermissionPolicy>>,

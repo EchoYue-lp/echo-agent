@@ -1,14 +1,14 @@
-//! A2A HTTP 服务端
+//! A2A HTTP server
 //!
-//! 提供符合 A2A 协议的 HTTP 端点：
-//! - `GET /.well-known/agent.json` — 返回 Agent Card
-//! - `POST /` — 处理 JSON-RPC 任务请求
+//! Provides A2A protocol-compliant HTTP endpoints:
+//! - `GET /.well-known/agent.json` — Returns Agent Card
+//! - `POST /` — Handles JSON-RPC task requests
 //!
-//! 支持的 JSON-RPC 方法：
-//! - `tasks/send`          — 同步发送任务并等待完成
-//! - `tasks/sendSubscribe` — 流式发送任务，通过 SSE 接收实时事件
-//! - `tasks/get`           — 查询任务状态
-//! - `tasks/cancel`        — 取消任务
+//! Supported JSON-RPC methods:
+//! - `tasks/send`          — Synchronously send a task and wait for completion
+//! - `tasks/sendSubscribe` — Stream a task and receive real-time events via SSE
+//! - `tasks/get`           — Query task status
+//! - `tasks/cancel`        — Cancel a task
 
 use super::types::*;
 use crate::agent::Agent;
@@ -22,11 +22,11 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
-/// A2A 服务端
+/// A2A server
 ///
-/// 将一个 Agent 暴露为 A2A 协议兼容的 HTTP 服务。
+/// Exposes an Agent as an A2A protocol-compliant HTTP service.
 ///
-/// # 状态机
+/// # State machine
 ///
 /// ```text
 /// submitted → working → [input-required] → completed / failed
@@ -60,23 +60,24 @@ impl A2AServer {
         }
     }
 
-    /// 获取 Agent Card（用于 `/.well-known/agent.json`）
+    /// Get the Agent Card (for `/.well-known/agent.json`)
     pub fn agent_card(&self) -> &AgentCard {
         &self.card
     }
 
-    /// 返回 Agent Card 的 JSON 字符串
+    /// Return Agent Card as a JSON string
     pub fn agent_card_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(&self.card)
-            .map_err(|e| crate::error::ReactError::Other(format!("Agent Card 序列化失败: {}", e)))
+        serde_json::to_string_pretty(&self.card).map_err(|e| {
+            crate::error::ReactError::Other(format!("Agent Card serialization failed: {}", e))
+        })
     }
 
-    // ── 请求分发 ─────────────────────────────────────────────────────────────
+    // ── Request dispatch ──────────────────────────────────────────────────────
 
-    /// 处理 A2A JSON-RPC 请求（同步方法）
+    /// Handle A2A JSON-RPC request (synchronous methods)
     ///
-    /// 支持 `tasks/send`、`tasks/get`、`tasks/cancel`。
-    /// 对于 `tasks/sendSubscribe`，请使用 [`handle_request_stream`]。
+    /// Supports `tasks/send`, `tasks/get`, `tasks/cancel`.
+    /// For `tasks/sendSubscribe`, use `handle_request_stream` instead.
     pub async fn handle_request(&self, request_json: &str) -> String {
         let request: A2ATaskRequest = match serde_json::from_str(request_json) {
             Ok(req) => req,
@@ -123,12 +124,12 @@ impl A2AServer {
         serde_json::to_string(&response).unwrap_or_default()
     }
 
-    /// 处理流式请求 `tasks/sendSubscribe`
+    /// Handle streaming request `tasks/sendSubscribe`
     ///
-    /// 返回 SSE 事件流，每个事件序列化为一行 JSON（`data: <json>\n\n`）。
-    /// 调用方负责将流写入 HTTP 响应体（Content-Type: text/event-stream）。
+    /// Returns an SSE event stream, each event serialized as one line of JSON (`data: <json>\n\n`).
+    /// The caller is responsible for writing the stream to the HTTP response body (Content-Type: text/event-stream).
     ///
-    /// # 事件序列示例
+    /// # Example event sequence
     ///
     /// ```text
     /// data: {"type":"status","taskId":"...","status":{"state":"submitted"},"final":false}
@@ -159,7 +160,7 @@ impl A2AServer {
         let input_text = request.params.message.text_content();
         let user_message = request.params.message.clone();
 
-        info!(task_id = %task_id, "A2A Stream: 收到流式任务请求");
+        info!(task_id = %task_id, "A2A Stream: received streaming task request");
 
         // submitted
         let initial_task = A2ATask {
@@ -243,7 +244,7 @@ impl A2AServer {
                                     task_id: task_id.clone(),
                                     status: A2ATaskStatus::with_message(
                                         TaskState::Working,
-                                        A2AMessage::agent_text(format!("调用工具: {name}")),
+                                        A2AMessage::agent_text(format!("Calling tool: {name}")),
                                     ),
                                     is_final: false,
                                 });
@@ -267,10 +268,10 @@ impl A2AServer {
                             }
                             Ok(_) => {}
                             Err(e) => {
-                                warn!(task_id = %task_id, error = %e, "A2A Stream: 事件流错误");
+                                warn!(task_id = %task_id, error = %e, "A2A Stream: event stream error");
                                 let status = A2ATaskStatus::with_message(
                                     TaskState::Failed,
-                                    A2AMessage::agent_text(format!("执行失败: {e}")),
+                                    A2AMessage::agent_text(format!("Execution failed: {e}")),
                                 );
                                 Self::update_task_state(&tasks, &task_id, TaskState::Failed, Some(&status)).await;
                                 yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
@@ -309,7 +310,7 @@ impl A2AServer {
 
                     cancel_tokens.write().await.remove(&task_id);
 
-                    info!(task_id = %task_id, "✅ A2A Stream: 任务完成");
+                    info!(task_id = %task_id, "✅ A2A Stream: task completed");
 
                     yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
                         task_id: task_id.clone(),
@@ -318,10 +319,10 @@ impl A2AServer {
                     });
                 }
                 Err(e) => {
-                    warn!(task_id = %task_id, error = %e, "A2A Stream: Agent 执行失败");
+                    warn!(task_id = %task_id, error = %e, "A2A Stream: Agent execution failed");
                     let status = A2ATaskStatus::with_message(
                         TaskState::Failed,
-                        A2AMessage::agent_text(format!("执行失败: {e}")),
+                        A2AMessage::agent_text(format!("Execution failed: {e}")),
                     );
                     Self::update_task_state(&tasks, &task_id, TaskState::Failed, Some(&status)).await;
                     yield A2AStreamEvent::StatusUpdate(TaskStatusUpdateEvent {
@@ -336,9 +337,9 @@ impl A2AServer {
         Ok(Box::pin(stream))
     }
 
-    /// 将流式事件格式化为 SSE `data:` 行
+    /// Format a streaming event as an SSE `data:` line
     ///
-    /// 方便在 HTTP 框架中直接使用：
+    /// Convenient for direct use in HTTP frameworks:
     /// ```rust
     /// use echo_agent::a2a::{A2AServer, A2AStreamEvent, A2ATaskStatus, TaskState, TaskStatusUpdateEvent};
     ///
@@ -374,7 +375,7 @@ impl A2AServer {
 
         let input_text = request.params.message.text_content();
 
-        info!(task_id = %task_id, input_len = input_text.len(), "A2A: 收到任务请求");
+        info!(task_id = %task_id, input_len = input_text.len(), "A2A: received task request");
 
         // submitted → working
         let task = A2ATask {
@@ -403,7 +404,7 @@ impl A2AServer {
         let agent = self.agent.lock().await;
         match agent.execute(&input_text).await {
             Ok(output) => {
-                info!(task_id = %task_id, "A2A: 任务执行完成");
+                info!(task_id = %task_id, "A2A: task execution completed");
 
                 let result_message = A2AMessage::agent_text(&output);
                 let artifact = A2AArtifact {
@@ -441,14 +442,14 @@ impl A2AServer {
                 }
             }
             Err(e) => {
-                warn!(task_id = %task_id, error = %e, "A2A: 任务执行失败");
+                warn!(task_id = %task_id, error = %e, "A2A: task execution failed");
 
                 let failed_task = A2ATask {
                     id: task_id.clone(),
                     session_id: request.params.session_id.clone(),
                     status: A2ATaskStatus::with_message(
                         TaskState::Failed,
-                        A2AMessage::agent_text(format!("执行失败: {}", e)),
+                        A2AMessage::agent_text(format!("Execution failed: {}", e)),
                     ),
                     history: vec![request.params.message.clone()],
                     artifacts: Vec::new(),
@@ -573,7 +574,7 @@ impl A2AServer {
         }
     }
 
-    // ── 内部辅助 ─────────────────────────────────────────────────────────────
+    // ── Internal helpers ─────────────────────────────────────────────────────
 
     async fn update_task_state(
         tasks: &Arc<RwLock<HashMap<String, A2ATask>>>,
@@ -584,14 +585,14 @@ impl A2AServer {
         let mut store = tasks.write().await;
         if let Some(task) = store.get_mut(task_id) {
             if !task.status.state.can_transition_to(state) {
-                warn!(from = ?task.status.state, to = ?state, "A2A: 非法状态转换，跳过");
+                warn!(from = ?task.status.state, to = ?state, "A2A: illegal state transition, skipping");
                 return;
             }
             task.status = status.cloned().unwrap_or_else(|| A2ATaskStatus::new(state));
         }
     }
 
-    /// 清理已完成/失败/取消的任务（由调用方定期调用）
+    /// Clean up completed/failed/canceled tasks (called periodically by the caller)
     pub async fn cleanup_completed_tasks(&self, max_age_secs: u64) {
         let mut tasks = self.tasks.write().await;
         let now = std::time::SystemTime::now()

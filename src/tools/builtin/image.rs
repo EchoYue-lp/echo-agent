@@ -1,7 +1,8 @@
-//! 图片分析工具
+//! Image analysis tools
 //!
-//! 提供图片分析能力，让 Agent 能主动"看图"。
-//! 利用框架已有的多模态支持，通过 base64 编码图片发送给 LLM。
+//! Provides image analysis capabilities, enabling the Agent to "see" images.
+//! Leverages the framework's existing multimodal support by encoding images
+//! as base64 and sending them to the LLM.
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -10,12 +11,12 @@ use super::security::{ResourceLimits, SecurityConfig, create_safe_http_client, v
 use crate::error::{Result, ToolError};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 
-/// 图片分析工具
+/// Image analysis tool
 ///
-/// 支持：
-/// - 从文件路径读取图片
-/// - 从 URL 获取图片
-/// - 从 base64 数据分析
+/// Supports:
+/// - Reading images from file paths
+/// - Fetching images from URLs
+/// - Analyzing from base64 data
 pub struct ImageAnalysisTool;
 
 impl Tool for ImageAnalysisTool {
@@ -24,7 +25,7 @@ impl Tool for ImageAnalysisTool {
     }
 
     fn description(&self) -> &str {
-        "分析图片内容，描述图片中的信息。支持从文件路径、URL 或 base64 数据读取图片。返回图片的详细描述和分析结果。"
+        "Analyze image content, describing the information in the image. Supports reading images from file path, URL, or base64 data. Returns a detailed description and analysis of the image."
     }
 
     fn parameters(&self) -> Value {
@@ -33,15 +34,15 @@ impl Tool for ImageAnalysisTool {
             "properties": {
                 "source": {
                     "type": "string",
-                    "description": "图片来源类型：'file'（文件路径）、'url'（网络地址）或 'base64'（编码数据）"
+                    "description": "Image source type: 'file' (file path), 'url' (network address), or 'base64' (encoded data)"
                 },
                 "data": {
                     "type": "string",
-                    "description": "图片数据：文件路径、URL 或 base64 编码的图片数据"
+                    "description": "Image data: file path, URL, or base64 encoded image data"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "分析提示词，告诉 LLM 你希望从图片中获取什么信息（可选）"
+                    "description": "Analysis prompt, telling the LLM what information you want from the image (optional)"
                 }
             },
             "required": ["source", "data"]
@@ -61,17 +62,17 @@ impl Tool for ImageAnalysisTool {
                 .ok_or_else(|| ToolError::MissingParameter("data".to_string()))?;
 
             let prompt = parameters.get("prompt").and_then(|v| v.as_str()).unwrap_or(
-                "请详细描述这张图片的内容，包括主要元素、颜色、布局和任何可见的文字信息。",
+                "Please describe the contents of this image in detail, including main elements, colors, layout, and any visible text information.",
             );
 
             let security = SecurityConfig::global();
 
-            // 根据来源类型获取图片数据
+            // Get image data based on source type
             let (base64_data, mime_type) = match source {
                 "file" => read_image_from_file(data, &security)?,
                 "url" => fetch_image_from_url(data, &security.limits).await?,
                 "base64" => {
-                    // 验证 base64 数据
+                    // Validate base64 data
                     let mime_type = detect_mime_type_from_base64(data);
                     validate_base64_size(data, &security.limits)?;
                     (data.to_string(), mime_type)
@@ -80,7 +81,7 @@ impl Tool for ImageAnalysisTool {
                     return Err(ToolError::InvalidParameter {
                         name: "source".to_string(),
                         message: format!(
-                            "不支持的来源类型: '{}', 请使用 'file', 'url' 或 'base64'",
+                            "Unsupported source type: '{}', use 'file', 'url', or 'base64'",
                             source
                         ),
                     }
@@ -88,30 +89,30 @@ impl Tool for ImageAnalysisTool {
                 }
             };
 
-            // 返回图片元信息，不返回原始 base64 数据
-            // 注意：将完整 base64 作为文本传给 LLM 会导致上下文膨胀且 LLM 无法"看到"图片
+            // Return image metadata, not raw base64 data
+            // Note: passing full base64 as text to LLM causes context bloat and LLM cannot "see" the image
             let size_kb = base64_data.len() as f64 / 1024.0;
             let estimated_raw_kb = (base64_data.len() as f64 * 3.0 / 4.0) / 1024.0;
             Ok(ToolResult::success(format!(
-                "图片已成功加载。\n- MIME 类型: {}\n- Base64 长度: {:.1} KB\n- 估算原始大小: {:.1} KB\n- 分析提示: {}\n\n提示：图片数据已加载但无法直接以文本形式展示给 LLM。如需分析图片内容，请考虑使用支持多模态的 LLM 模型，或使用浏览器工具查看图片 URL。",
+                "Image successfully loaded.\n- MIME type: {}\n- Base64 size: {:.1} KB\n- Estimated raw size: {:.1} KB\n- Analysis prompt: {}\n\nNote: Image data has been loaded but cannot be displayed as text to the LLM. To analyze image content, consider using a multimodal LLM model, or use browser tools to view the image URL.",
                 mime_type, size_kb, estimated_raw_kb, prompt,
             )))
         })
     }
 }
 
-/// 从文件读取图片并转换为 base64
+/// Read image from file and convert to base64
 fn read_image_from_file(path: &str, security: &SecurityConfig) -> Result<(String, String)> {
     use std::fs;
     let path_obj = security.validate_file(path)?;
 
-    // 4. 检测 MIME 类型（使用文件内容而非扩展名）
+    // 1. Detect MIME type (using file content, not extension)
     let mime_type = detect_image_mime_type(&path_obj);
 
-    // 5. 读取文件
+    // 2. Read file
     let bytes = fs::read(&path_obj).map_err(|e| ToolError::ExecutionFailed {
         tool: "analyze_image".to_string(),
-        message: format!("读取文件失败: {}", e),
+        message: format!("Failed to read file: {}", e),
     })?;
 
     let base64_data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
@@ -119,12 +120,12 @@ fn read_image_from_file(path: &str, security: &SecurityConfig) -> Result<(String
     Ok((base64_data, mime_type))
 }
 
-/// 从 URL 获取图片并转换为 base64
+/// Fetch image from URL and convert to base64
 async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(String, String)> {
-    // SSRF 防护：验证目标地址
+    // SSRF protection: validate target address
     validate_url(url)?;
 
-    // 使用安全配置的 HTTP 客户端
+    // Use securely-configured HTTP client
     let client = create_safe_http_client(limits)?;
 
     let response = client
@@ -133,19 +134,19 @@ async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(Str
         .await
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "analyze_image".to_string(),
-            message: format!("请求图片失败: {}", e),
+            message: format!("Failed to request image: {}", e),
         })?;
 
-    // 检查响应状态
+    // Check response status
     if !response.status().is_success() {
         return Err(ToolError::ExecutionFailed {
             tool: "analyze_image".to_string(),
-            message: format!("HTTP 请求失败: {}", response.status()),
+            message: format!("HTTP request failed: {}", response.status()),
         }
         .into());
     }
 
-    // 检查 Content-Length
+    // Check Content-Length
     if let Some(content_length) = response.headers().get("content-length")
         && let Ok(len_str) = content_length.to_str()
         && let Ok(len) = len_str.parse::<u64>()
@@ -158,28 +159,28 @@ async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(Str
         .into());
     }
 
-    // 从响应头获取 MIME 类型
+    // Get MIME type from response headers
     let mime_type = response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .and_then(|ct| {
-            // 提取主类型（去除 charset 等参数）
+            // Extract main type (remove charset etc.)
             ct.split(';').next()
         })
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "image/png".to_string());
 
-    // 读取响应体
+    // Read response body
     let bytes = response
         .bytes()
         .await
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "analyze_image".to_string(),
-            message: format!("读取图片数据失败: {}", e),
+            message: format!("Failed to read image data: {}", e),
         })?;
 
-    // 再次检查实际大小
+    // Double-check actual size
     if bytes.len() as u64 > limits.http_max_size {
         return Err(ToolError::FileTooLarge {
             size: bytes.len() as u64,
@@ -193,7 +194,7 @@ async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(Str
     Ok((base64_data, mime_type))
 }
 
-/// 使用 magic number 检测图片 MIME 类型
+/// Detect image MIME type using magic number
 fn detect_image_mime_type(path: &std::path::Path) -> String {
     use std::fs::File;
     use std::io::Read;
@@ -226,7 +227,7 @@ fn detect_image_mime_type(path: &std::path::Path) -> String {
         }
     }
 
-    // 回退到扩展名检测
+    // Fallback to extension detection
     match path.extension().and_then(|e| e.to_str()) {
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
@@ -238,9 +239,9 @@ fn detect_image_mime_type(path: &std::path::Path) -> String {
     .to_string()
 }
 
-/// 从 base64 数据头部检测 MIME 类型
+/// Detect MIME type from base64 data header
 fn detect_mime_type_from_base64(data: &str) -> String {
-    // 检查常见图片格式的 base64 头部特征
+    // Check common image format base64 header signatures
     if data.starts_with("iVBORw0KGgo") {
         "image/png"
     } else if data.starts_with("/9j/") {
@@ -250,15 +251,15 @@ fn detect_mime_type_from_base64(data: &str) -> String {
     } else if data.starts_with("UklGR") {
         "image/webp"
     } else {
-        "image/png" // 默认
+        "image/png" // default
     }
     .to_string()
 }
 
-/// 验证 base64 数据大小
+/// Validate base64 data size
 fn validate_base64_size(data: &str, limits: &ResourceLimits) -> Result<()> {
-    // Base64 编码后大小约为原始数据的 4/3
-    // 估算原始大小
+    // Base64 encoding size is about 4/3 of raw data
+    // Estimate raw size
     let estimated_size = (data.len() as u64 * 3) / 4;
 
     if estimated_size > limits.max_file_size {

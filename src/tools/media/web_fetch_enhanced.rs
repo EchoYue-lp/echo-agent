@@ -91,7 +91,10 @@ impl WebFetchToolEnhanced {
         match html2text::from_read(html.as_bytes(), self.text_width) {
             Ok(text) => text,
             Err(e) => {
-                tracing::warn!("HTML 转文本失败: {}, 退回去除标签", e);
+                tracing::warn!(
+                    "HTML to text conversion failed: {}, falling back to tag removal",
+                    e
+                );
                 // Fallback: simple tag removal
                 let re = regex::Regex::new(r"<[^>]+>").unwrap();
                 re.replace_all(html, "").to_string()
@@ -110,7 +113,7 @@ impl WebFetchToolEnhanced {
             content.to_string()
         } else {
             let truncated: String = content.chars().take(max_len).collect();
-            format!("{}\n\n[... 内容已截断 ...]", truncated)
+            format!("{}\n\n[... content truncated ...]", truncated)
         }
     }
 
@@ -120,14 +123,14 @@ impl WebFetchToolEnhanced {
         let response = self.client.get(url).send().await.map_err(|e| {
             crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                 tool: "web_fetch_enhanced".into(),
-                message: format!("下载图片失败: {}", e),
+                message: format!("Failed to download image: {}", e),
             })
         })?;
 
         if !response.status().is_success() {
             return Err(crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                 tool: "web_fetch_enhanced".into(),
-                message: format!("HTTP 错误: {}", response.status()),
+                message: format!("HTTP error: {}", response.status()),
             }));
         }
 
@@ -145,7 +148,7 @@ impl WebFetchToolEnhanced {
         let bytes = response.bytes().await.map_err(|e| {
             crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                 tool: "web_fetch_enhanced".into(),
-                message: format!("读取图片数据失败: {}", e),
+                message: format!("Failed to read image data: {}", e),
             })
         })?;
 
@@ -170,9 +173,9 @@ impl Tool for WebFetchToolEnhanced {
     }
 
     fn description(&self) -> &str {
-        "增强的网页获取工具，支持：HTML 转文本、JSON 格式化、图片下载转 base64。\
-         参数：url - 网址（必填），mode - 模式选择（text/json/image，默认 text），\
-         max_length - 最大内容长度（可选，默认50000字符）"
+        "Enhanced web fetch tool, supports: HTML-to-text, JSON formatting, image download to base64. \
+         Parameters: url - web address (required), mode - processing mode (text/json/image, default text), \
+         max_length - maximum content length (optional, default 50000 chars)"
     }
 
     fn parameters(&self) -> Value {
@@ -181,16 +184,16 @@ impl Tool for WebFetchToolEnhanced {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "要获取内容的 URL"
+                    "description": "The URL to fetch content from"
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["text", "json", "image"],
-                    "description": "处理模式：text-提取文本，image-下载图片转base64，json-返回原始JSON"
+                    "description": "Processing mode: text - extract text, image - download image as base64, json - return raw JSON"
                 },
                 "max_length": {
                     "type": "integer",
-                    "description": "最大返回内容长度（字符数，默认50000）"
+                    "description": "Maximum content length to return (characters, default 50000)"
                 }
             },
             "required": ["url"]
@@ -207,11 +210,11 @@ impl Tool for WebFetchToolEnhanced {
                 })?;
 
             if url.trim().is_empty() {
-                return Ok(ToolResult::error("URL 不能为空"));
+                return Ok(ToolResult::error("URL cannot be empty"));
             }
 
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Ok(ToolResult::error("URL 必须以 http:// 或 https:// 开头"));
+                return Ok(ToolResult::error("URL must start with http:// or https://"));
             }
 
             let mode = parameters
@@ -243,13 +246,13 @@ impl Tool for WebFetchToolEnhanced {
                 let response = client.head(url).send().await.map_err(|e| {
                     crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                         tool: "web_fetch_enhanced".into(),
-                        message: format!("HEAD 请求失败: {}", e),
+                        message: format!("HEAD request failed: {}", e),
                     })
                 })?;
 
                 if !response.status().is_success() {
                     return Ok(ToolResult::error(format!(
-                        "HTTP 错误: {}",
+                        "HTTP error: {}",
                         response.status()
                     )));
                 }
@@ -262,7 +265,7 @@ impl Tool for WebFetchToolEnhanced {
 
                 if !Self::is_image_content_type(content_type) {
                     return Ok(ToolResult::error(format!(
-                        "URL 不是图片，Content-Type: {}",
+                        "URL is not an image, Content-Type: {}",
                         content_type
                     )));
                 }
@@ -273,14 +276,14 @@ impl Tool for WebFetchToolEnhanced {
                         let response = client.get(url).send().await.map_err(|e| {
                             ToolError::ExecutionFailed {
                                 tool: "web_fetch_enhanced".into(),
-                                message: format!("下载图片失败: {}", e),
+                                message: format!("Failed to download image: {}", e),
                             }
                         })?;
 
                         if !response.status().is_success() {
                             return Err(ToolError::ExecutionFailed {
                                 tool: "web_fetch_enhanced".into(),
-                                message: format!("HTTP 错误: {}", response.status()),
+                                message: format!("HTTP error: {}", response.status()),
                             });
                         }
 
@@ -299,7 +302,7 @@ impl Tool for WebFetchToolEnhanced {
                                 .await
                                 .map_err(|e| ToolError::ExecutionFailed {
                                     tool: "web_fetch_enhanced".into(),
-                                    message: format!("读取图片数据失败: {}", e),
+                                    message: format!("Failed to read image data: {}", e),
                                 })?;
 
                         let size = bytes.len();
@@ -317,13 +320,13 @@ impl Tool for WebFetchToolEnhanced {
 
                 // Truncate base64 if too long
                 let data_uri_display = if data_uri.len() > 1000 {
-                    format!("{}... (共 {} 字符)", &data_uri[..1000], data_uri.len())
+                    format!("{}... ({} chars total)", &data_uri[..1000], data_uri.len())
                 } else {
                     data_uri.clone()
                 };
 
                 let output = format!(
-                    "URL: {}\nContent-Type: {}\n大小: {} bytes\n\nBase64 数据 URI:\n{}",
+                    "URL: {}\nContent-Type: {}\nSize: {} bytes\n\nBase64 Data URI:\n{}",
                     url, ct, size, data_uri_display
                 );
 
@@ -334,13 +337,13 @@ impl Tool for WebFetchToolEnhanced {
             let response = client.get(url).send().await.map_err(|e| {
                 crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                     tool: "web_fetch_enhanced".into(),
-                    message: format!("请求失败: {}", e),
+                    message: format!("Request failed: {}", e),
                 })
             })?;
 
             let status = response.status();
             if !status.is_success() {
-                return Ok(ToolResult::error(format!("HTTP 错误: {}", status)));
+                return Ok(ToolResult::error(format!("HTTP error: {}", status)));
             }
 
             let content_type = response
@@ -353,14 +356,14 @@ impl Tool for WebFetchToolEnhanced {
             let body = response.text().await.map_err(|e| {
                 crate::error::ReactError::Tool(ToolError::ExecutionFailed {
                     tool: "web_fetch_enhanced".into(),
-                    message: format!("读取响应体失败: {}", e),
+                    message: format!("Failed to read response body: {}", e),
                 })
             })?;
 
             let content = if mode == "json" {
                 // Return JSON as-is (validated)
                 if serde_json::from_str::<Value>(&body).is_err() {
-                    format!("{}\n\n[警告: 内容不是有效 JSON]", body)
+                    format!("{}\n\n[Warning: content is not valid JSON]", body)
                 } else {
                     body
                 }
@@ -376,7 +379,7 @@ impl Tool for WebFetchToolEnhanced {
             let content = Self::truncate_content(&content, max_length);
 
             let output = format!(
-                "URL: {}\n状态码: {}\n内容类型: {}\n\n{}",
+                "URL: {}\nStatus: {}\nContent-Type: {}\n\n{}",
                 url, status, content_type, content
             );
 
