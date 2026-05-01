@@ -26,7 +26,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-echo-agent = "0.1.2"
+echo-agent = "0.1.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -220,13 +220,13 @@ echo-agent ships with **28+ capabilities** across 6 crates, all accessible throu
 
 ```toml
 # Minimal — just the ReAct engine
-echo-agent = { version = "0.1.2", default-features = false }
+echo-agent = { version = "0.1.3", default-features = false }
 
 # Full (default) — all features enabled
-echo-agent = "0.1.2"
+echo-agent = "0.1.3"
 
 # Pick only what you need
-echo-agent = { version = "0.1.2", default-features = false, features = ["mcp", "web"] }
+echo-agent = { version = "0.1.3", default-features = false, features = ["mcp", "web"] }
 ```
 
 | Feature | Enables | Key Dependencies |

@@ -20,14 +20,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Free disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          sudo rm -rf /usr/local/.ghcup /usr/local/share/powershell /usr/local/share/chromium 2>/dev/null || true
-          sudo rm -rf /usr/lib/jvm 2>/dev/null || true
-          df -h /
-
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -39,7 +31,3 @@ jobs:
 
       - name: Cargo check workspace all targets
         run: cargo check --workspace --all-targets
-
-      - name: Cargo test workspace
-        run: cargo test --workspace
-

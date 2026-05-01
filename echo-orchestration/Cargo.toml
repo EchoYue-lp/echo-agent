@@ -1,6 +1,6 @@
 [package]
 name = "echo_orchestration"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -23,8 +23,8 @@ default = []
 websocket = ["dep:tokio-tungstenite"]
 
 [dependencies]
-echo_core = { version = "0.1.2", path = "../echo-core" }
-echo_state = { version = "0.1.2", path = "../echo-state" }
+echo_core = { version = "0.1.3", path = "../echo-core" }
+echo_state = { version = "0.1.3", path = "../echo-state" }
 
 # From echo-workflow
 tokio = { version = "1", features = ["full"] }

@@ -26,7 +26,7 @@
 
 ```toml
 [dependencies]
-echo-agent = "0.1.2"
+echo-agent = "0.1.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -190,13 +190,13 @@ echo-agent 提供 **28+ 项能力**，跨越 6 个 crate，通过一行 `use ech
 
 ```toml
 # 最小化 —— 仅 ReAct 引擎
-echo-agent = { version = "1.3", default-features = false }
+echo-agent = { version = "0.1.3", default-features = false }
 
 # 完整功能（默认）
-echo-agent = "0.1.2"
+echo-agent = "0.1.3"
 
 # 按需选择
-echo-agent = { version = "1.3", default-features = false, features = ["mcp", "web"] }
+echo-agent = { version = "0.1.3", default-features = false, features = ["mcp", "web"] }
 ```
 
 | Feature | 启用 | 关键依赖 |

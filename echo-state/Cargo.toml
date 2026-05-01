@@ -1,6 +1,6 @@
 [package]
 name = "echo_state"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -22,7 +22,7 @@ exclude = ["**/.DS_Store"]
 sqlite = ["dep:rusqlite"]
 
 [dependencies]
-echo_core = { version = "0.1.2", path = "../echo-core" }
+echo_core = { version = "0.1.3", path = "../echo-core" }
 # From echo-memory
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -38,4 +38,4 @@ reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 # echo_integration and reqwest needed for compression tests (#[ignore] by default)
-echo_integration = { version = "0.1.2", path = "../echo-integration" }
+echo_integration = { version = "0.1.3", path = "../echo-integration" }
