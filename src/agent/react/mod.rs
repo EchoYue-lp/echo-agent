@@ -10,7 +10,9 @@
 //! | `extract.rs` | Structured JSON extraction (`extract_json` / `extract`) |
 
 pub use crate::agent::config::{AgentConfig, AgentRole};
+#[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentRegistry;
+#[cfg(feature = "subagent")]
 use crate::agent::subagent::executor::{SubagentExecutor, SubagentExecutorConfig};
 use crate::agent::{Agent, AgentEvent, CancellationToken};
 use crate::compression::ContextManager;
@@ -30,6 +32,7 @@ use crate::skills::hooks::HookRegistry;
 #[cfg(feature = "tasks")]
 use crate::tasks::TaskManager;
 use crate::tools::ToolManager;
+#[cfg(feature = "subagent")]
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
 #[cfg(feature = "human-loop")]
@@ -182,7 +185,9 @@ impl ReactAgent {
         // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
         let task_manager = Arc::new(TaskManager::default());
+        #[cfg(feature = "subagent")]
         let subagent_registry = Arc::new(SubagentRegistry::new());
+        #[cfg(feature = "subagent")]
         let subagent_executor = Arc::new(SubagentExecutor::new(
             subagent_registry.clone(),
             SubagentExecutorConfig::default(),
@@ -192,6 +197,7 @@ impl ReactAgent {
 
         // ── Feature-gated tool registration ───────────────────────
         // AgentDispatch is controlled by runtime config enable_subagent
+        #[cfg(feature = "subagent")]
         if config.enable_subagent {
             tool_manager.register(Box::new(AgentDispatchTool::new(
                 subagent_executor.clone(),
@@ -228,6 +234,7 @@ impl ReactAgent {
             config,
             tools: ToolExecutionSubsystem {
                 tool_manager,
+                #[cfg(feature = "subagent")]
                 subagent_registry,
                 #[cfg(feature = "tasks")]
                 task_manager,
@@ -305,96 +312,8 @@ impl ReactAgent {
     }
 
     fn register_feature_gated_tools(config: &AgentConfig, tool_manager: &mut ToolManager) {
-        #[cfg(feature = "git")]
         if config.enable_tool {
-            use crate::tools::builtin::git::{
-                GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
-            };
-            tool_manager.register(Box::new(GitStatusTool));
-            tool_manager.register(Box::new(GitDiffTool));
-            tool_manager.register(Box::new(GitLogTool));
-            tool_manager.register(Box::new(GitBlameTool));
-            tool_manager.register(Box::new(GitBranchTool));
-            tool_manager.register(Box::new(GitCommitTool));
-        }
-
-        #[cfg(feature = "rag")]
-        if config.enable_tool {
-            use crate::tools::builtin::rag::{RagChunkDocumentTool, RagIndexTool, RagSearchTool};
-            tool_manager.register(Box::new(RagIndexTool));
-            tool_manager.register(Box::new(RagSearchTool));
-            tool_manager.register(Box::new(RagChunkDocumentTool));
-        }
-
-        #[cfg(feature = "chart")]
-        if config.enable_tool {
-            tool_manager.register(Box::new(crate::tools::builtin::chart::GenerateChartTool));
-        }
-
-        #[cfg(feature = "database")]
-        if config.enable_tool {
-            use crate::tools::builtin::database::{
-                DescribeTableTool, ListTablesTool, SqlQueryTool,
-            };
-            tool_manager.register(Box::new(SqlQueryTool));
-            tool_manager.register(Box::new(ListTablesTool));
-            tool_manager.register(Box::new(DescribeTableTool));
-        }
-
-        #[cfg(feature = "web")]
-        if config.enable_tool {
-            use crate::tools::builtin::browser::{WebExtractTool, WebFetchTool};
-            tool_manager.register(Box::new(WebFetchTool));
-            tool_manager.register(Box::new(WebExtractTool));
-        }
-
-        if config.enable_tool {
-            #[cfg(feature = "media")]
-            {
-                use crate::tools::builtin::excel::{ExcelInfoTool, ExcelReadTool, ExcelToCsvTool};
-                use crate::tools::builtin::image::ImageAnalysisTool;
-                use crate::tools::builtin::pdf::{PdfExtractTool, PdfInfoTool};
-                use crate::tools::builtin::text::{
-                    TextExportTool, TextProcessTool, TextReadTool, TextSearchTool, TextStatsTool,
-                };
-                use crate::tools::builtin::word::{WordInfoTool, WordReadTool, WordStructureTool};
-
-                tool_manager.register(Box::new(ImageAnalysisTool));
-                tool_manager.register(Box::new(PdfExtractTool));
-                tool_manager.register(Box::new(PdfInfoTool));
-                tool_manager.register(Box::new(ExcelReadTool));
-                tool_manager.register(Box::new(ExcelInfoTool));
-                tool_manager.register(Box::new(ExcelToCsvTool));
-                tool_manager.register(Box::new(WordReadTool));
-                tool_manager.register(Box::new(WordInfoTool));
-                tool_manager.register(Box::new(WordStructureTool));
-                tool_manager.register(Box::new(TextReadTool));
-                tool_manager.register(Box::new(TextSearchTool));
-                tool_manager.register(Box::new(TextStatsTool));
-                tool_manager.register(Box::new(TextProcessTool));
-                tool_manager.register(Box::new(TextExportTool));
-            }
-
-            #[cfg(feature = "data")]
-            {
-                use crate::tools::builtin::data::{
-                    DataAggregateTool, DataBinTool, DataContributionTool, DataExportTool,
-                    DataFilterTool, DataProfileTool, DataRatioTool, DataReadTool, DataStatsTool,
-                    DataTopNTool, DataTransformTool,
-                };
-
-                tool_manager.register(Box::new(DataReadTool));
-                tool_manager.register(Box::new(DataFilterTool));
-                tool_manager.register(Box::new(DataAggregateTool));
-                tool_manager.register(Box::new(DataStatsTool));
-                tool_manager.register(Box::new(DataTransformTool));
-                tool_manager.register(Box::new(DataExportTool));
-                tool_manager.register(Box::new(DataProfileTool));
-                tool_manager.register(Box::new(DataTopNTool));
-                tool_manager.register(Box::new(DataContributionTool));
-                tool_manager.register(Box::new(DataBinTool));
-                tool_manager.register(Box::new(DataRatioTool));
-            }
+            echo_tools::register_all_tools(tool_manager);
         }
     }
 
@@ -847,10 +766,7 @@ impl ReactAgent {
     /// Note: this feature requires an explicit, separate `conversation_id`;
     /// `session_id` is only used for thread-state recovery, not as a fallback
     /// for history projection.
-    pub fn set_conversation_store(
-        &mut self,
-        store: Arc<dyn crate::memory::conversation::ConversationStore>,
-    ) {
+    pub fn set_conversation_store(&mut self, store: Arc<dyn crate::memory::ConversationStore>) {
         self.memory.conversation_store = Some(store);
     }
 
@@ -874,6 +790,64 @@ impl ReactAgent {
         }
         // Close WebSocket servers if any (placeholder for future WS integration)
         info!(agent = %self.config.agent_name, "Agent shut down complete");
+    }
+
+    /// Set the maximum number of ReAct loop iterations at runtime.
+    ///
+    /// This allows dynamic adjustment of the agent's reasoning depth — for example,
+    /// `/think low` sets a low iteration count for quick responses, while
+    /// `/think high` allows more reasoning steps.
+    ///
+    /// # Panics
+    /// Panics if `max` is 0 (the loop would never execute).
+    pub fn set_max_iterations(&mut self, max: usize) {
+        assert!(max > 0, "max_iterations must be > 0");
+        self.config.max_iterations = max;
+    }
+
+    /// Delegate a task to a subagent by name.
+    ///
+    /// This is a convenience method that creates a `DispatchRequest` and
+    /// dispatches it through the subagent executor. The subagent must have
+    /// been previously registered via `register_subagent()`.
+    ///
+    /// If no subagent is registered, falls back to executing the task
+    /// directly with `self.chat()`.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_task(&self, task: &str) -> Result<String> {
+        use crate::agent::subagent::executor::DispatchRequest;
+        use crate::agent::subagent::types::ExecutionMode;
+
+        // Check if there are any registered subagents
+        let agents = self.tools.subagent_registry.list_available().await;
+
+        if !agents.is_empty() {
+            let agent_name = agents
+                .first()
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| "default".to_string());
+
+            let req = DispatchRequest {
+                agent_name,
+                task: task.to_string(),
+                mode_override: Some(ExecutionMode::Fork),
+                cancel: CancellationToken::new(),
+                parent_agent: self.config.agent_name.clone(),
+                parent_context: None,
+                delegate_depth: 0,
+            };
+
+            // Re-create a lightweight executor for this dispatch
+            let executor = SubagentExecutor::new(
+                self.tools.subagent_registry.clone(),
+                SubagentExecutorConfig::default(),
+            );
+            let result = executor.dispatch(req).await?;
+            Ok(result.output)
+        } else {
+            // Fallback: execute directly with the current agent
+            <Self as Agent>::chat(self, task).await
+        }
     }
 }
 

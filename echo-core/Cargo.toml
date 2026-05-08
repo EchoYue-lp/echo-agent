@@ -1,6 +1,6 @@
 [package]
 name = "echo_core"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -23,6 +23,8 @@ default = []
 reqwest = ["dep:reqwest"]
 guard = ["dep:regex"]
 permission = ["dep:globset"]
+mcp = []
+channels = []
 
 [dependencies]
 thiserror = "2"
@@ -36,6 +38,7 @@ tracing = "0.1"
 tokio = { version = "1", features = ["time", "macros", "rt-multi-thread"] }
 rand = { version = "0.8", features = ["small_rng"] }
 parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", optional = true }
 regex = { version = "1", optional = true }
 globset = { version = "0.4", optional = true }

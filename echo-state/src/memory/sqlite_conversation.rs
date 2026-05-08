@@ -2,12 +2,12 @@
 //!
 //! Production-grade conversation storage backed by SQLite, with cascading deletes and efficient queries.
 
-use super::conversation::{
+use crate::util::{expand_tilde, memory_io_error};
+use echo_core::error::Result;
+pub use echo_core::memory::conversation::{
     Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
     StoredMessage,
 };
-use crate::util::{expand_tilde, memory_io_error};
-use echo_core::error::Result;
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};

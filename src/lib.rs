@@ -16,6 +16,7 @@ pub mod memory;
 pub mod retry;
 pub mod sandbox;
 pub mod skills;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tokenizer;
 pub mod tools;
@@ -127,11 +128,11 @@ pub mod prelude {
 
     // Compression
     pub use crate::compression::compressor::{
-        DefaultSummaryPrompt, FnSummaryPrompt, HybridCompressor, SlidingWindowCompressor,
-        SummaryCompressor, SummaryPromptBuilder,
+        HybridCompressor, SlidingWindowCompressor, SummaryCompressor, default_summary_prompt,
     };
     pub use crate::compression::{
         CompressionInput, CompressionOutput, ContextCompressor, ContextManager, ForceCompressStats,
+        PrepareResult,
     };
 
     // Tokenizer
@@ -159,12 +160,10 @@ pub mod prelude {
         hooks::{HookAction, HookEvent, HookRegistry, HookResult, HookRule, HooksDefinition},
     };
 
-    // Skills — backward compatibility
-    #[allow(deprecated)]
-    pub use crate::skills::SkillManager;
-
     // Guard
+    #[cfg(feature = "content-guard")]
     pub use crate::guard::llm::LlmGuard;
+    #[cfg(feature = "content-guard")]
     pub use crate::guard::rule::{RuleGuard, RuleGuardBuilder};
     pub use crate::guard::{Guard, GuardDirection, GuardManager, GuardResult};
 
@@ -198,6 +197,7 @@ pub mod prelude {
     pub use crate::error::Result;
 
     // Testing
+    #[cfg(any(test, feature = "testing"))]
     pub use crate::testing::{FailingMockAgent, MockAgent, MockEmbedder, MockLlmClient, MockTool};
 }
 
@@ -258,11 +258,10 @@ pub mod advanced {
     #[cfg(feature = "self-reflection")]
     #[cfg_attr(docsrs, doc(cfg(feature = "self-reflection")))]
     pub use crate::agent::self_reflection::{
-        CompositeCritic, CompositeStrategy, Critic, DefaultRefinementPromptBuilder,
-        DefaultReflectionPromptBuilder, InMemoryReflectionStore, LlmCritic,
-        RefinementPromptBuilder, ReflectionExperience, ReflectionPromptBuilder, ReflectionRecord,
+        CompositeCritic, CompositeStrategy, Critic, Critique, CritiqueOutput,
+        InMemoryReflectionStore, LlmCritic, ReflectionExperience, ReflectionRecord,
         ReflectionStore, SelfReflectionAgent, StaticCritic, ThresholdCritic,
-        critique_output_schema,
+        critique_output_schema, default_refinement_prompt, default_reflection_prompt,
     };
 
     #[cfg(all(feature = "self-reflection", feature = "plan-execute"))]

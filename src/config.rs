@@ -54,6 +54,8 @@ pub struct AppConfig {
     pub mcp: McpYamlConfig,
     /// IM channel configuration (QQ, Feishu).
     pub channels: ChannelsConfig,
+    /// Webhook event callback configuration.
+    pub webhooks: WebhooksConfig,
     /// Server configuration (host, port).
     pub server: ServerConfig,
     /// Logging level configuration.
@@ -62,7 +64,15 @@ pub struct AppConfig {
 
 impl AppConfig {
     /// Convert to the library's `AgentConfig` (builder style).
+    ///
+    /// Note: compressor is NOT set here because `set_compressor` is async.
+    /// Callers should use `apply_compressor` after constructing the agent.
     pub fn to_agent_config(&self) -> AgentConfig {
+        let token_limit = if self.agent.token_limit > 0 {
+            self.agent.token_limit
+        } else {
+            usize::MAX
+        };
         AgentConfig::standard(
             &self.model.name,
             &self.agent.name,
@@ -75,10 +85,46 @@ impl AppConfig {
         .memory_path(&self.agent.memory_path)
         .temperature(self.model.temperature)
         .max_tokens(self.model.max_tokens)
+        .token_limit(token_limit)
         .tool_execution(crate::tools::ToolExecutionConfig {
             timeout_ms: self.agent.tool_timeout_ms,
             ..Default::default()
         })
+    }
+
+    /// Whether auto-compression is configured (token_limit > 0).
+    pub fn has_compressor(&self) -> bool {
+        self.agent.token_limit > 0
+    }
+
+    /// Apply a sliding-window compressor to the agent based on config.
+    ///
+    /// For "summary" or "hybrid" strategies, callers should construct their own
+    /// `SummaryCompressor` / `HybridCompressor` with an `LlmClient` and call
+    /// `agent.set_compressor()` directly.
+    pub async fn apply_compressor(&self, agent: &crate::agent::ReactAgent) {
+        if self.agent.token_limit == 0 {
+            return;
+        }
+        use crate::compression::compressor::SlidingWindowCompressor;
+        let window = self.agent.compress_window.max(2);
+        match self.agent.compress_strategy.as_str() {
+            "sliding" | "" => {
+                agent
+                    .set_compressor(SlidingWindowCompressor::new(window))
+                    .await;
+            }
+            other => {
+                tracing::warn!(
+                    strategy = other,
+                    "Strategy requires LlmClient; falling back to sliding. \
+                     For summary/hybrid, call agent.set_compressor() manually."
+                );
+                agent
+                    .set_compressor(SlidingWindowCompressor::new(window))
+                    .await;
+            }
+        }
     }
 }
 
@@ -124,6 +170,17 @@ pub struct AgentYamlConfig {
     pub memory_path: String,
     /// Tool execution timeout in milliseconds (default 120_000 = 2 min), used for MCP tools and other long-running calls.
     pub tool_timeout_ms: u64,
+    /// Token limit for context auto-compression. When the estimated token count
+    /// exceeds this limit, the configured compressor is triggered automatically.
+    /// Set to 0 to disable auto-compression (default: 0, meaning no limit).
+    pub token_limit: usize,
+    /// Context compression strategy: "sliding" (SlidingWindowCompressor, default),
+    /// "summary" (SummaryCompressor, requires LLM call), "hybrid" (pipeline).
+    /// Only effective when `token_limit > 0`.
+    pub compress_strategy: String,
+    /// Window size for SlidingWindowCompressor (number of recent messages to keep).
+    /// Default: 20. Only effective when compress_strategy is "sliding" or "hybrid".
+    pub compress_window: usize,
 }
 
 impl Default for AgentYamlConfig {
@@ -137,6 +194,9 @@ impl Default for AgentYamlConfig {
             enable_human_in_loop: true,
             memory_path: "~/.echo-agent/memory".to_string(),
             tool_timeout_ms: 120_000,
+            token_limit: 0,
+            compress_strategy: "sliding".to_string(),
+            compress_window: 20,
         }
     }
 }
@@ -266,6 +326,27 @@ impl Default for LoggingConfig {
             level: "info".to_string(),
         }
     }
+}
+
+/// Webhook configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct WebhooksConfig {
+    /// List of webhook endpoints.
+    pub endpoints: Vec<WebhookEntryConfig>,
+}
+
+/// Single webhook endpoint configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebhookEntryConfig {
+    /// Callback URL.
+    pub url: String,
+    /// Event types to subscribe (empty = all).
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// HMAC-SHA256 signing secret (optional).
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 // ── Config loading ───────────────────────────────────────────────────

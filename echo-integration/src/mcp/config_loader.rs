@@ -116,6 +116,9 @@ impl McpServerEntry {
         }
 
         if let Some(command) = &self.command {
+            // 基础安全校验：拒绝包含 shell 元字符的 command
+            validate_stdio_command(command)?;
+
             let env: Vec<(String, String)> = self
                 .env
                 .iter()
@@ -203,4 +206,55 @@ impl McpConfigFile {
     pub fn enabled_count(&self) -> usize {
         self.mcp_servers.values().filter(|e| !e.disabled).count()
     }
+}
+
+// ── 命令注入校验 ──────────────────────────────────────────────────────────────
+
+/// Shell 元字符：在 stdio 模式的 command 字段中不允许出现这些字符，
+/// 防止通过 `mcp.json` 注入恶意 shell 命令（如 `npx; rm -rf /`）。
+const DANGEROUS_SHELL_CHARS: &[char] = &['|', ';', '&', '$', '`', '>', '<', '(', ')', '\n', '\r'];
+
+/// 已知危险的命令前缀，禁止作为 stdio command 使用。
+const BLOCKED_COMMANDS: &[&str] = &[
+    "sudo", "su", "dd", "chmod", "chown", "reboot", "shutdown", "halt",
+];
+
+/// 校验 stdio 模式的 command 字段是否安全。
+///
+/// 检查内容：
+/// 1. 拒绝包含 shell 元字符的 command（防止注入）
+/// 2. 拒绝已知危险命令前缀
+/// 3. 拒绝路径遍历（`..`）
+pub fn validate_stdio_command(command: &str) -> Result<()> {
+    // 1. Shell 元字符检查
+    if command.contains(DANGEROUS_SHELL_CHARS) {
+        return Err(ReactError::Mcp(McpError::ProtocolError(format!(
+            "MCP stdio command 包含 shell 元字符，可能为注入攻击: '{}'",
+            command
+        ))));
+    }
+
+    // 2. 危险命令前缀检查
+    let base_cmd = command.split_whitespace().next().unwrap_or("");
+    let base_name = std::path::Path::new(base_cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(base_cmd);
+
+    if BLOCKED_COMMANDS.contains(&base_name) {
+        return Err(ReactError::Mcp(McpError::ProtocolError(format!(
+            "MCP stdio command 使用了危险命令 '{}'",
+            base_name
+        ))));
+    }
+
+    // 3. 路径遍历检查
+    if command.contains("..") {
+        return Err(ReactError::Mcp(McpError::ProtocolError(format!(
+            "MCP stdio command 包含路径遍历 '..': '{}'",
+            command
+        ))));
+    }
+
+    Ok(())
 }

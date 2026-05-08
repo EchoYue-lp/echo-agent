@@ -44,7 +44,7 @@ Implements the `LlmClient` trait. Use it to test components that accept `Arc<dyn
 
 ```rust
 use echo_agent::testing::MockLlmClient;
-use echo_agent::compression::compressor::{SummaryCompressor, DefaultSummaryPrompt};
+use echo_agent::compression::compressor::SummaryCompressor;
 use std::sync::Arc;
 
 // Create mock with a scripted response queue
@@ -55,7 +55,7 @@ let mock_llm = Arc::new(
 );
 
 // Inject into the compressor
-let compressor = SummaryCompressor::new(mock_llm.clone(), DefaultSummaryPrompt, 2);
+let compressor = SummaryCompressor::new(mock_llm.clone(), 2);
 
 // ... run compression ...
 
@@ -75,12 +75,12 @@ let mock = MockLlmClient::new()
     .with_response("Normal response")
     .with_network_error("Simulated timeout")   // convenience method
     .with_rate_limit_error()                   // 429 Too Many Requests
-    .with_error(ReactError::Llm(LlmError::EmptyResponse)); // custom error
+    .with_error(ReactError::Llm(Box::new(LlmError::EmptyResponse))); // custom error
 
-// Call 1 → "Normal response"
-// Call 2 → Err(NetworkError)
-// Call 3 → Err(ApiError { status: 429 })
-// Call 4 → Err(EmptyResponse)
+// Call 1 → Ok("Normal response")
+// Call 2 → Err(ReactError::Llm(LlmError::NetworkError("Simulated timeout")))
+// Call 3 → Err(ReactError::Llm(LlmError::ApiError { status: 429, .. }))
+// Call 4 → Err(ReactError::Llm(LlmError::EmptyResponse))
 ```
 
 ### API reference
@@ -273,7 +273,7 @@ The same mocks work directly in standard Rust tests:
 ```rust
 #[cfg(test)]
 mod tests {
-    use echo_agent::compression::compressor::{SummaryCompressor, DefaultSummaryPrompt};
+    use echo_agent::compression::compressor::SummaryCompressor;
     use echo_agent::compression::{CompressionInput, ContextCompressor};
     use echo_agent::llm::types::Message;
     use echo_agent::testing::MockLlmClient;
@@ -282,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn test_summary_compressor_calls_llm_once() {
         let mock = Arc::new(MockLlmClient::new().with_response("Summary text"));
-        let compressor = SummaryCompressor::new(mock.clone(), DefaultSummaryPrompt, 2);
+        let compressor = SummaryCompressor::new(mock.clone(), 2);
 
         let input = CompressionInput {
             messages: (0..6).flat_map(|i| vec![
@@ -301,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn test_summary_compressor_propagates_llm_error() {
         let mock = Arc::new(MockLlmClient::new().with_network_error("timeout"));
-        let compressor = SummaryCompressor::new(mock, DefaultSummaryPrompt, 2);
+        let compressor = SummaryCompressor::new(mock, 2);
 
         let input = CompressionInput {
             messages: vec![

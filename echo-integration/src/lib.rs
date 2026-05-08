@@ -4,15 +4,21 @@
 //!
 //! ## Modules
 //!
-//! | Module | Description |
-//! |--------|-------------|
-//! | [`providers`] | LLM clients: `OpenAiClient`, `AnthropicClient`, `OllamaClient`, `ProviderFactory` |
-//! | [`mcp`] | MCP protocol: stdio, SSE, HTTP transports; `McpManager`, `McpServerConfig` |
-//! | [`channels`] | IM integrations: QQ Bot (WebSocket) and Feishu (Webhook) |
+//! | Module | Description | Feature |
+//! |--------|-------------|---------|
+//! | [`providers`] | LLM clients: `OpenAiClient`, `AnthropicClient`, `OllamaClient`, `ProviderFactory` | default |
+//! | [`mcp`] | MCP protocol: stdio, SSE, HTTP transports; `McpManager`, `McpServerConfig` | `mcp` |
+//! | [`channels`] | IM integrations: QQ Bot (WebSocket) and Feishu (Webhook) | `channels` |
 //!
 //! Most users should depend on `echo_agent` (the facade crate) instead of
 //! depending on `echo_integration` directly.
 
-pub mod channels;
+#[cfg(feature = "mcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
+
+#[cfg(feature = "channels")]
+#[cfg_attr(docsrs, doc(cfg(feature = "channels")))]
+pub mod channels;
+
 pub mod providers;

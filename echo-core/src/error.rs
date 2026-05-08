@@ -24,6 +24,7 @@ pub enum ReactError {
     #[error("Config Error: {0}")]
     Config(Box<ConfigError>),
     /// MCP-related error
+    #[cfg(feature = "mcp")]
     #[error("MCP Error: {0}")]
     Mcp(#[from] McpError),
     /// Memory system error
@@ -33,6 +34,7 @@ pub enum ReactError {
     #[error("Sandbox Error: {0}")]
     Sandbox(#[from] SandboxError),
     /// Channel / IM integration error
+    #[cfg(feature = "channels")]
     #[error("Channel Error: {0}")]
     Channel(#[from] ChannelError),
     /// IO error
@@ -209,6 +211,7 @@ pub enum AgentError {
 }
 
 /// MCP-related error
+#[cfg(feature = "mcp")]
 #[derive(Debug, Error)]
 pub enum McpError {
     /// Connection failed
@@ -252,6 +255,7 @@ pub enum SandboxError {
 }
 
 /// Channel / IM integration error
+#[cfg(feature = "channels")]
 #[derive(Debug, Error)]
 pub enum ChannelError {
     /// Network error

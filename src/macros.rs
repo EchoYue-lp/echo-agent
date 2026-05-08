@@ -10,7 +10,6 @@
 ///
 /// ```rust,no_run
 /// use echo_agent::prelude::*;
-/// use echo_agent::testing::MockTool;
 ///
 /// # fn example() -> echo_agent::error::Result<()> {
 /// let mut agent = echo_agent::agent! {
@@ -18,11 +17,11 @@
 ///     system_prompt: "You are a helpful assistant",
 /// }?;
 ///
-/// // With tools
+/// // With tools (use any type implementing Tool, e.g. echo_tools builtins)
 /// let mut agent = echo_agent::agent! {
 ///     model: "qwen3-max",
 ///     system_prompt: "You are an assistant",
-///     tools: [MockTool::new("calculator"), MockTool::new("weather")],
+///     // tools: [my_calculator_tool, my_weather_tool],
 ///     max_iterations: 15,
 /// }?;
 /// # Ok(())

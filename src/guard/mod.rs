@@ -32,7 +32,9 @@
 //! | [`GuardResult`] | `Pass` / `Block { reason }` / `Warn { message }` |
 //! | [`GuardDirection`] | `Input` / `Output` / `ToolInput` / `ToolOutput` |
 
+#[cfg(feature = "content-guard")]
 pub mod llm;
+#[cfg(feature = "content-guard")]
 pub mod rule;
 
 /// Direct re-exports from `echo_core::guard`.

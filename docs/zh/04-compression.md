@@ -54,17 +54,14 @@ use std::sync::Arc;
 let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen3-max"));
 
 // 使用内置摘要提示词
-SummaryCompressor::new(llm.clone(), DefaultSummaryPrompt, 6)
-//                                                         ↑
-//                                        保留最新 6 条消息不摘要
+SummaryCompressor::new(llm.clone(), 6)
+//                                 ↑ 保留最新 6 条消息不摘要
 
 // 使用自定义摘要提示词
-SummaryCompressor::new(
+SummaryCompressor::with_prompt(
     llm.clone(),
-    FnSummaryPrompt(|messages| {
-        format!("请用 3 句话总结以下 {} 条对话：", messages.len())
-    }),
     6,
+    |messages| format!("请用 3 句话总结以下 {} 条对话：", messages.len()),
 )
 ```
 
@@ -81,7 +78,7 @@ use echo_agent::prelude::*;
 
 let compressor = HybridCompressor::builder()
     .stage(SlidingWindowCompressor::new(30))        // 第一阶段：保留最新 30 条
-    .stage(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8)) // 第二阶段：摘要
+    .stage(SummaryCompressor::new(llm, 8))          // 第二阶段：摘要
     .build();
 ```
 
@@ -100,19 +97,33 @@ let config = AgentConfig::new("qwen3-max", "agent", "你是一个助手")
 let mut agent = ReactAgent::new(config);
 
 // 安装压缩器（默认没有，需手动设置）
-agent.set_compressor(SlidingWindowCompressor::new(20));
+agent.set_compressor(SlidingWindowCompressor::new(20)).await;
 
 // 此后所有 execute() 调用都受到自动压缩保护
 let answer = agent.execute("...").await?;
 ```
 
+或使用更推荐的 Builder 模式：
+
+```rust
+use echo_agent::prelude::*;
+
+let mut agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .name("agent")
+    .system_prompt("你是一个助手")
+    .token_limit(4096)
+    .build()?;
+
+agent.set_compressor(SlidingWindowCompressor::new(20)).await;
+```
+
 ### 手动触发压缩
 
 ```rust
-// 使用已安装的压缩器强制压缩
-let stats = agent.force_compress_with(
-    &SlidingWindowCompressor::new(10)
-).await?;
+// 使用指定压缩器强制压缩
+let compressor = SlidingWindowCompressor::new(10);
+let stats = agent.force_compress_with(&compressor).await?;
 
 println!(
     "压缩前 {} 条 / {} token → 压缩后 {} 条 / {} token（裁剪 {} 条）",
@@ -179,4 +190,107 @@ println!("压缩后消息数: {}", messages.len());
 | 长文档分析 | `HybridCompressor`（先滑动窗口，再摘要） |
 | 测试环境 | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-对应示例：`examples/demo05_compressor.rs`
+对应示例：`examples/demo05.rs`
+
+---
+
+## 自定义压缩策略
+
+`ContextCompressor` 是唯一的扩展点。框架围绕它提供两条路径：
+
+```text
+你想做什么？                          怎么做
+────────────────────────────────────────────────────────
+只改摘要提示词的措辞/语言/关注点     →  SummaryCompressor::with_prompt(llm, n, |msgs| ...)
+修改压缩逻辑本身（消息过滤、回退       →  impl ContextCompressor
+  策略、摘要放置位置、增量摘要等）
+快速从一个 async fn 生成压缩器        →  #[compressor] 过程宏
+```
+
+### 自定义摘要提示词
+
+如果你认可 `SummaryCompressor` 的分割/回退/组装逻辑，只是想改发给 LLM 的摘要指令，用 `with_prompt`：
+
+```rust
+use echo_agent::compression::compressor::SummaryCompressor;
+
+// 英文摘要
+let compressor = SummaryCompressor::with_prompt(
+    llm,
+    6,
+    |messages| format!("Summarize the following {} messages in English", messages.len()),
+);
+```
+
+### 完全自定义压缩逻辑
+
+当 `SummaryCompressor` 的行为不满足需求（如：消息过滤、增量摘要、摘要不放入 system 消息、
+不同的失败回退策略、基于 token 预算的动态分割等），直接实现 `ContextCompressor`：
+
+```rust
+use echo_agent::compression::{ContextCompressor, CompressionInput, CompressionOutput};
+use echo_core::error::Result;
+use echo_core::llm::types::Message;
+use futures::future::BoxFuture;
+
+/// 只保留用户消息的压缩器（示例）
+struct UserOnlyCompressor { keep: usize }
+
+impl ContextCompressor for UserOnlyCompressor {
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+        Box::pin(async move {
+            let (system, conv): (Vec<_>, Vec<_>) = input.messages
+                .into_iter()
+                .partition(|m| m.role == "system");
+            let user_msgs: Vec<_> = conv.into_iter()
+                .filter(|m| m.role == "user")
+                .collect();
+            let keep = self.keep.min(user_msgs.len());
+            let evicted = user_msgs[..user_msgs.len() - keep].to_vec();
+            let kept = user_msgs[user_msgs.len() - keep..].to_vec();
+            let mut messages = system;
+            messages.extend(kept);
+            Ok(CompressionOutput { messages, evicted })
+        })
+    }
+}
+```
+
+实现 `ContextCompressor` 时，你可以调用 `default_summary_prompt(messages)` 复用内置的中文摘要模板：
+
+```rust
+use echo_agent::compression::compressor::default_summary_prompt;
+
+let prompt = default_summary_prompt(&messages);
+// prompt 是完整的摘要指令字符串，可直接发给 LLM
+```
+
+### `#[compressor]` 过程宏
+
+从 async fn 快速生成 `ContextCompressor` 实现，无需手写 struct：
+
+```rust
+use echo_agent::compression::{CompressionInput, CompressionOutput};
+use echo_core::error::Result;
+use echo_agent_macros::compressor;
+
+#[compressor]
+async fn tail_only(input: CompressionInput) -> Result<CompressionOutput> {
+    let keep = 10.min(input.messages.len());
+    let evicted = input.messages[..input.messages.len() - keep].to_vec();
+    let messages = input.messages[input.messages.len() - keep..].to_vec();
+    Ok(CompressionOutput { messages, evicted })
+}
+// 自动生成: struct TailOnlyCompressor; impl ContextCompressor for TailOnlyCompressor { ... }
+```
+
+### 架构总览
+
+```text
+ContextCompressor (唯一的压缩策略扩展点)
+ ├── SlidingWindowCompressor  (独立实现，无外部依赖)
+ ├── SummaryCompressor        (内部使用 Box<dyn Fn> 生成摘要提示词)
+ │     ├── new()              (使用 default_summary_prompt)
+ │     └── with_prompt()      (使用自定义闭包)
+ └── HybridCompressor         (串联多个 ContextCompressor)
+```

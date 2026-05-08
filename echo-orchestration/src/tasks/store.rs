@@ -5,7 +5,7 @@
 
 use super::task::{Task, TaskStatus};
 use echo_core::error::Result;
-use echo_state::memory::store::Store;
+use echo_core::memory::store::Store;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 

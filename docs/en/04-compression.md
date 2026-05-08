@@ -54,17 +54,14 @@ use std::sync::Arc;
 let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen-turbo"));
 
 // Built-in summary prompt
-SummaryCompressor::new(llm.clone(), DefaultSummaryPrompt, 6)
-//                                                         ↑
-//                                         keep latest 6 messages unsummarized
+SummaryCompressor::new(llm.clone(), 6)
+//                                 ↑ keep latest 6 messages unsummarized
 
 // Custom summary prompt
-SummaryCompressor::new(
+SummaryCompressor::with_prompt(
     llm.clone(),
-    FnSummaryPrompt(|messages| {
-        format!("Summarize the following {} messages in 3 sentences:", messages.len())
-    }),
     6,
+    |messages| format!("Summarize the following {} messages in 3 sentences:", messages.len()),
 )
 ```
 
@@ -81,7 +78,7 @@ use echo_agent::prelude::*;
 
 let compressor = HybridCompressor::builder()
     .stage(SlidingWindowCompressor::new(30))         // stage 1: keep last 30
-    .stage(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8)) // stage 2: summarize
+    .stage(SummaryCompressor::new(llm, 8))           // stage 2: summarize
     .build();
 ```
 
@@ -100,19 +97,33 @@ let config = AgentConfig::new("qwen3-max", "agent", "You are an assistant")
 let mut agent = ReactAgent::new(config);
 
 // Install the compressor (none by default — must be set explicitly)
-agent.set_compressor(SlidingWindowCompressor::new(20));
+agent.set_compressor(SlidingWindowCompressor::new(20)).await;
 
 // All subsequent execute() calls are protected by auto-compression
 let answer = agent.execute("...").await?;
+```
+
+Or with the builder pattern (recommended):
+
+```rust
+use echo_agent::prelude::*;
+
+let mut agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .name("agent")
+    .system_prompt("You are an assistant")
+    .token_limit(4096)
+    .build()?;
+
+agent.set_compressor(SlidingWindowCompressor::new(20)).await;
 ```
 
 ### Manual Compression
 
 ```rust
 // Force-compress with a specific strategy (without replacing the installed compressor)
-let stats = agent.force_compress_with(
-    &SlidingWindowCompressor::new(10)
-).await?;
+let compressor = SlidingWindowCompressor::new(10);
+let stats = agent.force_compress_with(&compressor).await?;
 
 println!(
     "Before: {} msgs / {} tokens → After: {} msgs / {} tokens (evicted {})",
@@ -178,4 +189,105 @@ ctx.prepare() is called:
 | Long document analysis | `HybridCompressor` (slide then summarize) |
 | Test environment | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-See: `examples/demo05_compressor.rs`
+See: `examples/demo05.rs`
+
+---
+
+## Custom Compression Strategies
+
+`ContextCompressor` is the sole extension point. The framework provides two paths around it:
+
+```text
+What do you want to do?                          How
+──────────────────────────────────────────────────────────────
+Change summary prompt wording/language/focus     →  SummaryCompressor::with_prompt(llm, n, |msgs| ...)
+Change compression logic (message filtering,     →  impl ContextCompressor
+  fallback strategy, output structure, etc.)
+Quickly generate a compressor from an async fn   →  #[compressor] proc macro
+```
+
+### Custom Summary Prompt
+
+If you're happy with `SummaryCompressor`'s splitting/fallback/assembly logic and only want to change the prompt sent to the LLM, use `with_prompt`:
+
+```rust
+use echo_agent::compression::compressor::SummaryCompressor;
+
+let compressor = SummaryCompressor::with_prompt(
+    llm,
+    6,
+    |messages| format!("Summarize the following {} messages in English", messages.len()),
+);
+```
+
+### Fully Custom Compression Logic
+
+When `SummaryCompressor`'s behavior doesn't fit (e.g., message filtering, incremental summaries, different summary placement, custom fallback, token-budget-aware splitting), implement `ContextCompressor` directly:
+
+```rust
+use echo_agent::compression::{ContextCompressor, CompressionInput, CompressionOutput};
+use echo_core::error::Result;
+use echo_core::llm::types::Message;
+use futures::future::BoxFuture;
+
+/// Keep only user messages (example)
+struct UserOnlyCompressor { keep: usize }
+
+impl ContextCompressor for UserOnlyCompressor {
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+        Box::pin(async move {
+            let (system, conv): (Vec<_>, Vec<_>) = input.messages
+                .into_iter()
+                .partition(|m| m.role == "system");
+            let user_msgs: Vec<_> = conv.into_iter()
+                .filter(|m| m.role == "user")
+                .collect();
+            let keep = self.keep.min(user_msgs.len());
+            let evicted = user_msgs[..user_msgs.len() - keep].to_vec();
+            let kept = user_msgs[user_msgs.len() - keep..].to_vec();
+            let mut messages = system;
+            messages.extend(kept);
+            Ok(CompressionOutput { messages, evicted })
+        })
+    }
+}
+```
+
+When implementing `ContextCompressor`, you can call `default_summary_prompt(messages)` to reuse the built-in Chinese summary template:
+
+```rust
+use echo_agent::compression::compressor::default_summary_prompt;
+
+let prompt = default_summary_prompt(&messages);
+// prompt is a complete summary instruction string, ready to send to the LLM
+```
+
+### `#[compressor]` Proc Macro
+
+Generate a `ContextCompressor` implementation from an async fn — no manual struct needed:
+
+```rust
+use echo_agent::compression::{CompressionInput, CompressionOutput};
+use echo_core::error::Result;
+use echo_agent_macros::compressor;
+
+#[compressor]
+async fn tail_only(input: CompressionInput) -> Result<CompressionOutput> {
+    let keep = 10.min(input.messages.len());
+    let evicted = input.messages[..input.messages.len() - keep].to_vec();
+    let messages = input.messages[input.messages.len() - keep..].to_vec();
+    Ok(CompressionOutput { messages, evicted })
+}
+// Auto-generates: struct TailOnlyCompressor; impl ContextCompressor for TailOnlyCompressor { ... }
+```
+
+### Architecture Overview
+
+```text
+ContextCompressor (the sole compression strategy extension point)
+ ├── SlidingWindowCompressor  (standalone, no dependencies)
+ ├── SummaryCompressor        (uses Box<dyn Fn> internally for prompt generation)
+ │     ├── new()              (uses default_summary_prompt)
+ │     └── with_prompt()      (uses custom closure)
+ └── HybridCompressor         (chains multiple ContextCompressors)
+```

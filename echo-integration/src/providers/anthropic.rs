@@ -113,16 +113,14 @@ impl AnthropicClient {
                 MessageContent::Parts(parts) => {
                     let blocks: Vec<ContentBlock> = parts
                         .iter()
-                        .filter_map(|part| match part {
-                            ContentPart::Text { text } => {
-                                Some(ContentBlock::Text { text: text.clone() })
-                            }
-                            ContentPart::ImageUrl { image_url } => Some(ContentBlock::Image {
+                        .map(|part| match part {
+                            ContentPart::Text { text } => ContentBlock::Text { text: text.clone() },
+                            ContentPart::ImageUrl { image_url } => ContentBlock::Image {
                                 source: data_url_to_image_source(&image_url.url),
-                            }),
-                            ContentPart::File { name, .. } => Some(ContentBlock::Text {
+                            },
+                            ContentPart::File { name, .. } => ContentBlock::Text {
                                 text: format!("\n[Attachment: {name}]"),
-                            }),
+                            },
                         })
                         .collect();
                     if blocks.is_empty() {

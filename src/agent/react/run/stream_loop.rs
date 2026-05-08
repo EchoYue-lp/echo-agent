@@ -290,7 +290,18 @@ impl ReactAgent {
 
                 debug!(agent = %agent, iteration = iteration + 1, "--- Streaming iteration{label} ---");
 
-                let messages = context.lock().await.prepare(None).await?;
+                let prepare_result = context.lock().await.prepare(None).await?;
+
+                if let Some(ref stats) = prepare_result.compressed {
+                    yield AgentEvent::ContextCompressed {
+                        before_count: stats.before_count,
+                        after_count: stats.after_count,
+                        before_tokens: stats.before_tokens,
+                        after_tokens: stats.after_tokens,
+                    };
+                }
+
+                let messages = prepare_result.messages;
 
                 for cb in &callbacks {
                     cb.on_think_start(&agent, &messages).await;

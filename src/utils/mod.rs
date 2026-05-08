@@ -1,4 +1,4 @@
-//! Common utility modules
+//! Common utility modules (re-exported from echo_core)
 
-pub mod json_parse;
-pub mod time;
+pub use echo_core::utils::json_parse;
+pub use echo_core::utils::time;

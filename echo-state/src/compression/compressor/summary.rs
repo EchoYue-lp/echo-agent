@@ -7,6 +7,9 @@ use futures::future::BoxFuture;
 use std::sync::Arc;
 use tracing::warn;
 
+/// Type alias for summary prompt builder closures
+pub type SummaryPromptFn = Box<dyn Fn(&[Message]) -> String + Send + Sync>;
+
 const COMPRESSION_PROMPT: &str =
     "你的任务是创建到目前为止对话的详细摘要，密切关注用户的明确请求和你之前的行动。
 此摘要应彻底捕获需求细节和决策，这些对于在不丢失上下文的情况下继续开发工作至关重要。
@@ -26,57 +29,39 @@ const COMPRESSION_PROMPT: &str =
 请确保摘要足够详细，使得另一个AI助手（或你自己在新会话中）能够无缝地继续这个对话和工作。
 ";
 
-/// 摘要提示词构建接口，支持用户自定义摘要策略
-pub trait SummaryPromptBuilder: Send + Sync {
-    fn build(&self, messages: &[Message]) -> String;
-}
-
-/// 默认摘要提示词：指示 LLM 压缩对话历史，保留关键信息
-pub struct DefaultSummaryPrompt;
-
-impl SummaryPromptBuilder for DefaultSummaryPrompt {
-    fn build(&self, messages: &[Message]) -> String {
-        let history = messages
-            .iter()
-            .filter_map(|m| m.content.as_text().map(|c| format!("[{}]: {}", m.role, c)))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        format!(
-            "请将以下对话历史压缩为简洁的摘要。\
-            要求：\n {}。\
-            \n{}\n\n。",
-            COMPRESSION_PROMPT, history
-        )
-    }
-}
-
-/// 用闭包自定义提示词的便捷包装
+/// 使用内置中文模板生成默认摘要提示词。
+///
+/// 公共自由函数，供实现自定义 [`ContextCompressor`] 的用户复用内置模板。
+/// 如果你只是想用默认摘要策略，直接构造 [`SummaryCompressor::new`] 即可，无需调用此函数。
 ///
 /// # 示例
 ///
 /// ```rust
 /// use echo_core::llm::types::Message;
-/// use echo_state::compression::compressor::summary::FnSummaryPrompt;
+/// use echo_state::compression::compressor::default_summary_prompt;
 ///
-/// let prompt = FnSummaryPrompt(|msgs: &[Message]| {
-///     format!("用一段话总结以下对话：\n{:?}", msgs)
-/// });
+/// let messages = vec![Message::user("你好".to_string()), Message::assistant("你好！".to_string())];
+/// let prompt = default_summary_prompt(&messages);
 /// ```
-pub struct FnSummaryPrompt<F>(pub F)
-where
-    F: Fn(&[Message]) -> String + Send + Sync;
+pub fn default_summary_prompt(messages: &[Message]) -> String {
+    let history = messages
+        .iter()
+        .filter_map(|m| m.content.as_text().map(|c| format!("[{}]: {}", m.role, c)))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-impl<F> SummaryPromptBuilder for FnSummaryPrompt<F>
-where
-    F: Fn(&[Message]) -> String + Send + Sync,
-{
-    fn build(&self, messages: &[Message]) -> String {
-        (self.0)(messages)
-    }
+    format!(
+        "请将以下对话历史压缩为简洁的摘要。\
+        要求：\n {}。\
+        \n{}\n\n。",
+        COMPRESSION_PROMPT, history
+    )
 }
 
-/// 摘要压缩：用 LLM 将较早的对话历史压缩成一条摘要 system 消息，保留最近 `keep_recent` 条不变。
+/// LLM 摘要压缩策略。
+///
+/// 将较早的对话历史发送给 LLM 生成摘要，摘要作为一条 `[对话历史摘要]` system 消息插入，
+/// 最近 `keep_recent` 条消息保持原样不动。
 ///
 /// 压缩后的消息结构：
 /// ```text
@@ -85,27 +70,73 @@ where
 /// [最近 keep_recent 条对话消息]
 /// ```
 ///
+/// **失败回退**：当 LLM 调用失败（超时、API 错误等），自动回退到
+/// [`SlidingWindowCompressor`]（保留最近 `keep_recent` 条）。
+///
+/// # 构造方式
+///
+/// - [`SummaryCompressor::new`] — 使用内置中文摘要模板
+/// - [`SummaryCompressor::with_prompt`] — 使用自定义 prompt 闭包
+///
+/// # 完全自定义
+///
+/// 如果你想修改压缩逻辑本身（增量摘要、不同的回退策略、摘要不放入 system 消息等），
+/// 请直接实现 [`ContextCompressor`]。你可以在自己的实现中调用
+/// [`default_summary_prompt()`] 复用内置模板。
+///
 /// 适用场景：
 /// - 长线任务规划（将已完成步骤压缩为状态摘要）
 /// - 需要记住角色设定和重大事件，但不需要保留全部细节
-pub struct SummaryCompressor<P: SummaryPromptBuilder> {
+pub struct SummaryCompressor {
     llm: Arc<dyn LlmClient>,
-    prompt_builder: P,
+    prompt_fn: SummaryPromptFn,
     /// 最近多少条对话消息保持原样（不参与摘要）
     keep_recent: usize,
 }
 
-impl<P: SummaryPromptBuilder> SummaryCompressor<P> {
-    pub fn new(llm: Arc<dyn LlmClient>, prompt_builder: P, keep_recent: usize) -> Self {
+impl SummaryCompressor {
+    /// 使用内置中文摘要模板构造。
+    pub fn new(llm: Arc<dyn LlmClient>, keep_recent: usize) -> Self {
         Self {
             llm,
-            prompt_builder,
+            prompt_fn: Box::new(default_summary_prompt),
+            keep_recent,
+        }
+    }
+
+    /// 使用自定义 prompt 闭包构造。
+    ///
+    /// 闭包接收待摘要的消息切片，返回发给 LLM 的 prompt 字符串。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use echo_state::compression::compressor::SummaryCompressor;
+    /// use echo_core::llm::LlmClient;
+    /// use std::sync::Arc;
+    ///
+    /// # async fn example(llm: Arc<dyn LlmClient>) {
+    /// let compressor = SummaryCompressor::with_prompt(
+    ///     llm,
+    ///     6,
+    ///     |messages| format!("用英文总结以下 {} 条对话的核心结论", messages.len()),
+    /// );
+    /// # }
+    /// ```
+    pub fn with_prompt(
+        llm: Arc<dyn LlmClient>,
+        keep_recent: usize,
+        prompt_fn: impl Fn(&[Message]) -> String + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            llm,
+            prompt_fn: Box::new(prompt_fn),
             keep_recent,
         }
     }
 }
 
-impl<P: SummaryPromptBuilder + 'static> ContextCompressor for SummaryCompressor<P> {
+impl ContextCompressor for SummaryCompressor {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) = input
@@ -127,7 +158,7 @@ impl<P: SummaryPromptBuilder + 'static> ContextCompressor for SummaryCompressor<
             let to_summarize = &conv_msgs[..split_at];
             let to_keep = conv_msgs[split_at..].to_vec();
 
-            let prompt = self.prompt_builder.build(to_summarize);
+            let prompt = (self.prompt_fn)(to_summarize);
 
             // 当 LLM 摘要生成失败（超时、API 错误等），回退到滑动窗口压缩
             let summary = match self.llm.chat_simple(vec![Message::user(prompt)]).await {

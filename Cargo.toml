@@ -1,9 +1,9 @@
 [workspace]
-members = [".", "echo-core", "echo-macros", "echo-execution", "echo-integration", "echo-state", "echo-orchestration"]
+members = [".", "echo-core", "echo-macros", "echo-execution", "echo-integration", "echo-state", "echo-orchestration", "echo-tools"]
 
 [package]
 name = "echo_agent"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -35,7 +35,7 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules"]
+features = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules"]
 rustdoc-args = ["--cfg", "docsrs"]
 # NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
 # unconditionally enables `feature="nightly"` on nightly compilers, then uses
@@ -45,9 +45,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["full"]
-full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "workflow", "self-reflection", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules"]
+full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
-mcp = []
+mcp = ["echo_integration/mcp"]
 sqlite = ["echo_state/sqlite", "dep:rusqlite"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 plan-execute = []
@@ -55,27 +55,30 @@ human-loop = ["echo_orchestration/websocket"]
 handoff = []
 topology = []
 tasks = []
-workflow = []
 self-reflection = []
 subagent = []
-web = ["dep:scraper", "dep:html2text", "dep:url"]
-media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs"]
-data = ["dep:polars"]
-channels = []
-git = []
-database = ["dep:sqlx"]
-rag = []
-chart = []
-content-guard = []
+web = ["dep:scraper", "dep:html2text", "dep:url", "echo_tools/web"]
+media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "echo_tools/media"]
+data = ["dep:polars", "echo_tools/data"]
+channels = ["echo_integration/channels"]
+git = ["echo_tools/git"]
+database = ["dep:sqlx", "echo_tools/database"]
+rag = ["echo_tools/rag"]
+chart = ["echo_tools/chart"]
+content-guard = ["echo_core/guard"]
 project-rules = []
+shell = ["echo_tools/shell"]
+files = ["echo_tools/files"]
+testing = []
 
 [dependencies]
-echo_core = { version = "0.1.3", path = "echo-core", features = ["reqwest", "guard"] }
-echo_macros = { version = "0.1.3", path = "echo-macros" }
-echo_execution = { version = "0.1.3", path = "echo-execution" }
-echo_integration = { version = "0.1.3", path = "echo-integration" }
-echo_state = { version = "0.1.3", path = "echo-state" }
-echo_orchestration = { version = "0.1.3", path = "echo-orchestration" }
+echo_core = { version = "0.1.4", path = "echo-core", features = ["reqwest"] }
+echo_macros = { version = "0.1.4", path = "echo-macros" }
+echo_execution = { version = "0.1.4", path = "echo-execution" }
+echo_integration = { version = "0.1.4", path = "echo-integration" }
+echo_tools = { version = "0.1.4", path = "echo-tools" }
+echo_state = { version = "0.1.4", path = "echo-state" }
+echo_orchestration = { version = "0.1.4", path = "echo-orchestration" }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
@@ -90,6 +93,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
+similar = "2"
 chrono = { version = "0.4", features = ["serde"] }
 shlex = "1"
 async-trait = "0.1"
@@ -145,6 +149,30 @@ required-features = ["web"]
 name = "demo42_browser_mcp"
 path = "examples/demo42_playwright_mcp.rs"
 required-features = ["mcp"]
+
+[[example]]
+name = "demo04_suagent"
+required-features = ["testing"]
+
+[[example]]
+name = "demo12_resilience"
+required-features = ["testing"]
+
+[[example]]
+name = "demo16_testing"
+required-features = ["testing"]
+
+[[example]]
+name = "demo39_workflow"
+required-features = ["testing"]
+
+[[example]]
+name = "demo43_data_tools"
+required-features = ["testing"]
+
+[[example]]
+name = "comprehensive_enterprise"
+required-features = ["testing"]
 
 [dev-dependencies]
 proptest = "1"

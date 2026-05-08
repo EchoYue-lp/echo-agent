@@ -9,30 +9,14 @@
 
 pub mod compressor;
 
+// Re-export from echo_core for backward compatibility
+pub use echo_core::compression::{CompressionInput, CompressionOutput, ContextCompressor};
+
 use crate::compression::compressor::SlidingWindowCompressor;
 use echo_core::error::Result;
 use echo_core::llm::types::{Message, MessageContent};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
-use futures::future::BoxFuture;
 use std::sync::Arc;
-
-/// Compression pipeline input
-pub struct CompressionInput {
-    /// Messages to be compressed
-    pub messages: Vec<Message>,
-    /// Token limit, triggers compression when exceeded
-    pub token_limit: usize,
-    /// Current user query (reserved field for future extensions)
-    pub current_query: Option<String>,
-}
-
-/// Compression pipeline output
-pub struct CompressionOutput {
-    /// Final list of messages to keep and send to the LLM
-    pub messages: Vec<Message>,
-    /// Messages evicted in this compression pass
-    pub evicted: Vec<Message>,
-}
 
 /// Metadata needed to restore protected messages near their original positions.
 struct ProtectedMessage {
@@ -41,19 +25,6 @@ struct ProtectedMessage {
     compressible_after: usize,
     /// Number of protected messages that originally appeared after this message.
     protected_after: usize,
-}
-
-/// Unified interface for all compression strategies (async, supports `dyn` trait object)
-pub trait ContextCompressor: Send + Sync {
-    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>>;
-}
-
-/// Allows `Box<dyn ContextCompressor>` to be passed directly to any function accepting `impl ContextCompressor`,
-/// without introducing an extra wrapper enum.
-impl ContextCompressor for Box<dyn ContextCompressor> {
-    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
-        (**self).compress(input)
-    }
 }
 
 /// Compression statistics returned by `force_compress()`
@@ -68,6 +39,15 @@ pub struct ForceCompressStats {
     pub before_tokens: usize,
     /// Estimated token count after compression
     pub after_tokens: usize,
+}
+
+/// Result of `ContextManager::prepare()` — includes the prepared messages and
+/// optional compression stats if auto-compression was triggered.
+pub struct PrepareResult {
+    /// The prepared message list to send to the LLM.
+    pub messages: Vec<Message>,
+    /// Compression statistics, populated only when auto-compression occurred.
+    pub compressed: Option<ForceCompressStats>,
 }
 
 /// Context manager: maintains full conversation history and automatically triggers compression when tokens exceed the limit.
@@ -89,7 +69,8 @@ pub struct ForceCompressStats {
 /// ctx.push(Message::user("Hello".to_string()));
 ///
 /// // Call prepare() before each LLM call to auto-compress over-limit messages
-/// let messages = ctx.prepare(None).await?;
+/// let result = ctx.prepare(None).await?;
+/// let messages = result.messages;
 /// # Ok(())
 /// # }
 /// ```
@@ -100,7 +81,7 @@ pub struct ForceCompressStats {
 /// use echo_core::error::Result;
 /// use echo_core::llm::LlmClient;
 /// use echo_state::compression::compressor::{
-///     HybridCompressor, SlidingWindowCompressor, SummaryCompressor, DefaultSummaryPrompt,
+///     HybridCompressor, SlidingWindowCompressor, SummaryCompressor,
 /// };
 /// use echo_state::compression::{ContextCompressor, ContextManager};
 /// use std::sync::Arc;
@@ -108,7 +89,7 @@ pub struct ForceCompressStats {
 /// # async fn example(llm: Arc<dyn LlmClient>) -> Result<()> {
 /// let compressor = HybridCompressor::builder()
 ///     .stage(SlidingWindowCompressor::new(30))
-///     .stage(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8))
+///     .stage(SummaryCompressor::new(llm, 8))
 ///     .build();
 ///
 /// let mut ctx = ContextManager::builder(8192)
@@ -440,10 +421,16 @@ impl ContextManager {
     /// excluded from compression and re-inserted after system messages.
     ///
     /// `current_query` is a reserved field; pass `None`.
-    pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<Vec<Message>> {
-        if let Some(compressor) = &self.compressor
+    ///
+    /// Returns a [`PrepareResult`] containing the prepared messages and optional
+    /// compression stats (populated only when auto-compression was triggered).
+    pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<PrepareResult> {
+        let compressed = if let Some(compressor) = &self.compressor
             && Self::estimate_tokens(&self.messages, &*self.tokenizer) > self.token_limit
         {
+            let before_count = self.messages.len();
+            let before_tokens = self.token_estimate();
+
             let (compressible, protected) = self.split_protected(self.messages.clone());
 
             let output = compressor
@@ -454,9 +441,24 @@ impl ContextManager {
                 })
                 .await?;
 
+            let evicted = output.evicted.len();
             self.messages = Self::merge_protected(output.messages, protected);
-        }
-        Ok(self.messages.clone())
+
+            Some(ForceCompressStats {
+                before_count,
+                after_count: self.messages.len(),
+                evicted,
+                before_tokens,
+                after_tokens: self.token_estimate(),
+            })
+        } else {
+            None
+        };
+
+        Ok(PrepareResult {
+            messages: self.messages.clone(),
+            compressed,
+        })
     }
 
     fn estimate_tokens(messages: &[Message], tokenizer: &dyn Tokenizer) -> usize {
@@ -533,16 +535,9 @@ impl ContextManagerBuilder {
 
 #[cfg(test)]
 mod tests {
-    const MODEL: &str = "qwen3-max";
     use super::*;
-    use crate::compression::compressor::{
-        DefaultSummaryPrompt, FnSummaryPrompt, HybridCompressor, SlidingWindowCompressor,
-        SummaryCompressor,
-    };
+    use crate::compression::compressor::SlidingWindowCompressor;
     use echo_core::error::Result;
-    use echo_integration::providers::openai::DefaultLlmClient;
-    use reqwest::Client;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_sliding_window_compressor() -> Result<()> {
@@ -559,7 +554,8 @@ mod tests {
         }
 
         println!("压缩前消息数：{}", ctx.messages().len());
-        let messages = ctx.prepare(None).await?;
+        let result = ctx.prepare(None).await?;
+        let messages = result.messages;
         println!("压缩后消息数：{}", messages.len());
         for m in &messages {
             println!("  [{}] {}", m.role, m.content.as_text_ref().unwrap_or(""));
@@ -605,151 +601,6 @@ mod tests {
             ]
         );
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore] // 需要 LLM API
-    async fn test_summary_compressor_default_prompt() -> Result<()> {
-        println!("\n=== 示例 2：摘要压缩（使用系统默认摘要提示词） ===");
-        let http = Arc::new(Client::new());
-        let llm = Arc::new(DefaultLlmClient::new(http, MODEL));
-
-        let mut ctx2 = ContextManager::builder(50)
-            .compressor(SummaryCompressor::new(llm.clone(), DefaultSummaryPrompt, 2))
-            .build();
-
-        ctx2.push(Message::system("你是任务规划助手。".to_string()));
-        ctx2.push(Message::user("我想学习 Rust 语言".to_string()));
-        ctx2.push(Message::assistant(
-            "好的，Rust 是一门系统编程语言，以内存安全著称。建议从官方 The Book 开始。".to_string(),
-        ));
-        ctx2.push(Message::user("所有权机制怎么理解？".to_string()));
-        ctx2.push(Message::assistant(
-            "所有权是 Rust 核心概念：每个值都有唯一的所有者，所有者离开作用域时值被释放。"
-                .to_string(),
-        ));
-        ctx2.push(Message::user("借用和引用又是什么？".to_string()));
-        ctx2.push(Message::assistant(
-            "借用允许你使用值但不取得所有权：不可变借用（&T）可以有多个，可变借用（&mut T）只能有一个。"
-                .to_string(),
-        ));
-
-        println!("压缩前消息数：{}", ctx2.messages().len());
-        println!("预估 token：{}", ctx2.token_estimate());
-
-        let messages2 = ctx2.prepare(None).await?;
-
-        println!("压缩后消息数：{}", messages2.len());
-        for m in &messages2 {
-            println!(
-                "  [{}] {}",
-                m.role,
-                m.content
-                    .as_text_ref()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80000)
-                    .collect::<String>()
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore] // 需要 LLM API
-    async fn test_summary_compressor_fn_prompt() -> Result<()> {
-        println!("\n=== 示例 3：摘要压缩（使用自定义摘要提示词） ===");
-        let http = Arc::new(Client::new());
-        let llm = Arc::new(DefaultLlmClient::new(http, MODEL));
-
-        let mut ctx2 = ContextManager::builder(50)
-            .compressor(SummaryCompressor::new(
-                llm.clone(),
-                FnSummaryPrompt(|_| "请用中文总结本对话".to_string()),
-                2,
-            ))
-            .build();
-
-        ctx2.push(Message::system("你是任务规划助手。".to_string()));
-        ctx2.push(Message::user("我想学习 Rust 语言".to_string()));
-        ctx2.push(Message::assistant(
-            "好的，Rust 是一门系统编程语言，以内存安全著称。建议从官方 The Book 开始。".to_string(),
-        ));
-        ctx2.push(Message::user("所有权机制怎么理解？".to_string()));
-        ctx2.push(Message::assistant(
-            "所有权是 Rust 核心概念：每个值都有唯一的所有者，所有者离开作用域时值被释放。"
-                .to_string(),
-        ));
-        ctx2.push(Message::user("借用和引用又是什么？".to_string()));
-        ctx2.push(Message::assistant(
-            "借用允许你使用值但不取得所有权：不可变借用（&T）可以有多个，可变借用（&mut T）只能有一个。"
-                .to_string(),
-        ));
-
-        println!("压缩前消息数：{}", ctx2.messages().len());
-        println!("预估 token：{}", ctx2.token_estimate());
-
-        let messages2 = ctx2.prepare(None).await?;
-
-        println!("压缩后消息数：{}", messages2.len());
-        for m in &messages2 {
-            println!(
-                "  [{}] {}",
-                m.role,
-                m.content
-                    .as_text_ref()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80000)
-                    .collect::<String>()
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore] // 需要 LLM API
-    async fn test_hybrid_compressor() -> Result<()> {
-        println!("\n=== 示例 4：混合管道（滑动窗口 → 摘要） ===");
-        let http = Arc::new(Client::new());
-        let llm = Arc::new(DefaultLlmClient::new(http, MODEL));
-
-        let hybrid = HybridCompressor::builder()
-            .stage(SlidingWindowCompressor::new(6))
-            .stage(SummaryCompressor::new(llm.clone(), DefaultSummaryPrompt, 2))
-            .build();
-
-        let mut ctx3 = ContextManager::builder(80).compressor(hybrid).build();
-
-        ctx3.push(Message::system("你是一个项目管理助手。".to_string()));
-        for i in 1..=8 {
-            ctx3.push(Message::user(format!("任务 {} 的进展如何？", i)));
-            ctx3.push(Message::assistant(format!(
-                "任务 {} 已完成，耗时约 {} 小时，质量良好。",
-                i,
-                i * 2
-            )));
-        }
-
-        println!("压缩前消息数：{}", ctx3.messages().len());
-        println!("预估 token：{}", ctx3.token_estimate());
-
-        let messages3 = ctx3.prepare(None).await?;
-
-        println!("压缩后消息数：{}", messages3.len());
-        for m in &messages3 {
-            println!(
-                "  [{}] {}",
-                m.role,
-                m.content
-                    .as_text_ref()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80)
-                    .collect::<String>()
-            );
-        }
         Ok(())
     }
 }

@@ -1,136 +1,19 @@
-//! Short-term thread state persistence (Checkpointer)
+//! Short-term thread state persistence — concrete implementations
 //!
-//! Serialize runtime thread state to a storage backend keyed by `session_id`,
-//! enabling cross-process recovery of the same thread.
-//!
-//! ## Built-in implementations
-//!
-//! | Type | Description |
-//! |------|-------------|
-//! | [`InMemoryCheckpointer`] | In-process memory, cleared on restart, suitable for tests |
-//! | [`FileCheckpointer`] | JSON file persistence, suitable for local single-machine scenarios |
-//!
-//! ## Quick start
-//!
-//! ```rust,no_run
-//! use echo_core::error::Result;
-//! use echo_state::memory::checkpointer::FileCheckpointer;
-//! use std::sync::Arc;
-//!
-//! # async fn example() -> Result<()> {
-//! let cp = Arc::new(FileCheckpointer::new("~/.echo-agent/checkpoints.json")?);
-//! // Wire `cp` into your own agent/runtime layer, or use it through the `echo_agent` façade.
-//! let _ = cp;
-//! # Ok(())
-//! # }
-//! ```
+//! Trait definition and data types live in [`echo_core::memory::checkpointer`].
+//! This module provides [`InMemoryCheckpointer`] and [`FileCheckpointer`].
 
 use crate::util::expand_tilde;
 use echo_core::error::{MemoryError, Result};
 use echo_core::llm::types::Message;
+pub use echo_core::memory::checkpointer::{Checkpoint, Checkpointer, ThreadState};
 use futures::future::BoxFuture;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
-
-// ── Checkpoint ────────────────────────────────────────────────────────────────
-
-/// Snapshot of a single conversation state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Checkpoint {
-    /// Owning session identifier
-    pub session_id: String,
-    /// Unique snapshot ID (UUID v4)
-    pub checkpoint_id: String,
-    /// Complete message history at this point in time
-    pub messages: Vec<Message>,
-    /// Parent snapshot ID, representing checkpoint lineage.
-    #[serde(default)]
-    pub parent_checkpoint_id: Option<String>,
-    /// Summary information persisted together with this thread state.
-    #[serde(default)]
-    pub summary: Option<String>,
-    /// Custom metadata (e.g., execution phase, source, tags).
-    #[serde(default)]
-    pub metadata: Option<Value>,
-    /// Creation time (Unix seconds)
-    pub created_at: u64,
-}
-
-/// Thread-level runtime state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ThreadState {
-    pub messages: Vec<Message>,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub metadata: Option<Value>,
-}
-
-impl ThreadState {
-    pub fn from_messages(messages: Vec<Message>) -> Self {
-        Self {
-            messages,
-            summary: None,
-            metadata: None,
-        }
-    }
-}
-
-impl Checkpoint {
-    pub fn thread_state(&self) -> ThreadState {
-        ThreadState {
-            messages: self.messages.clone(),
-            summary: self.summary.clone(),
-            metadata: self.metadata.clone(),
-        }
-    }
-}
-
-// ── Checkpointer trait ────────────────────────────────────────────────────────
-
-/// Persistence interface for short-term conversation memory
-///
-/// Implementations may be swapped with any storage backend (in-memory, file, database, etc.).
-pub trait Checkpointer: Send + Sync {
-    /// Save the current session's message history, returning the new snapshot ID
-    fn put<'a>(
-        &'a self,
-        session_id: &'a str,
-        messages: Vec<Message>,
-    ) -> BoxFuture<'a, Result<String>>;
-
-    /// Get the latest snapshot for the given session (returns `None` if not found)
-    fn get<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<Checkpoint>>>;
-
-    /// Get all historical snapshots for the given session (reverse chronological order)
-    fn list<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<Checkpoint>>>;
-
-    /// Delete all snapshots for the given session
-    fn delete_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>>;
-
-    /// List all existing session IDs
-    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<String>>>;
-
-    /// Save complete thread state, defaulting to saving only the message list.
-    fn put_state<'a>(
-        &'a self,
-        session_id: &'a str,
-        state: ThreadState,
-    ) -> BoxFuture<'a, Result<String>> {
-        self.put(session_id, state.messages)
-    }
-
-    /// Get the latest thread state, defaulting to recovering from the latest checkpoint.
-    fn get_state<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Option<ThreadState>>> {
-        Box::pin(async move { Ok(self.get(session_id).await?.map(|cp| cp.thread_state())) })
-    }
-}
 
 // ── InMemoryCheckpointer ──────────────────────────────────────────────────────
 
@@ -170,7 +53,7 @@ impl InMemoryCheckpointer {
         checkpoints.into_iter().skip(offset).take(limit).collect()
     }
 
-    /// 清理超过 `days` 天的旧快照，释放内存。
+    /// Clean up snapshots older than `days` days.
     pub async fn cleanup_old(&self, days: u64) -> usize {
         let cutoff = now_secs().saturating_sub(days * 86_400);
         let mut data = self.data.write().await;
@@ -277,25 +160,14 @@ impl Checkpointer for InMemoryCheckpointer {
 
 // ── FileCheckpointer ──────────────────────────────────────────────────────────
 
-/// 基于 JSON 文件的持久化 Checkpointer
-///
-/// 写时立即落盘，读时从内存缓存返回（无需反复解析文件）。
-///
-/// 存储格式（每个 key 为 `session_id`）：
-/// ```json
-/// {
-///   "alice-session-1": [
-///     { "session_id": "alice-session-1", "checkpoint_id": "...", "messages": [...], "created_at": 123 }
-///   ]
-/// }
-/// ```
+/// JSON file-based persistent Checkpointer
 pub struct FileCheckpointer {
     path: PathBuf,
     data: RwLock<HashMap<String, Vec<Checkpoint>>>,
 }
 
 impl FileCheckpointer {
-    /// 打开或创建 Checkpointer 文件，自动建父目录
+    /// Open or create the Checkpointer file, auto-create parent directories
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = expand_tilde(path.as_ref());
         if let Some(parent) = path.parent() {
@@ -305,14 +177,14 @@ impl FileCheckpointer {
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| MemoryError::IoError(e.to_string()))?;
             serde_json::from_str(&raw).unwrap_or_else(|e| {
-                tracing::warn!("Checkpoint 文件解析失败，从空状态开始: {e}");
+                tracing::warn!("Checkpoint file parse failed, starting from empty state: {e}");
                 HashMap::new()
             })
         } else {
             HashMap::new()
         };
         let session_count = data.len();
-        info!(path = %path.display(), sessions = session_count, "🗂️ FileCheckpointer 初始化");
+        info!(path = %path.display(), sessions = session_count, "FileCheckpointer initialized");
         Ok(Self {
             path,
             data: RwLock::new(data),
@@ -345,7 +217,7 @@ impl FileCheckpointer {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(MemoryError::IoError(e.to_string()).into());
         }
-        debug!(path = %self.path.display(), "💾 Checkpoint 已持久化");
+        debug!(path = %self.path.display(), "Checkpoint persisted");
         Ok(())
     }
 
@@ -367,7 +239,7 @@ impl FileCheckpointer {
         Ok(checkpoints.into_iter().skip(offset).take(limit).collect())
     }
 
-    /// 清理超过 `days` 天的旧快照，释放内存并刷盘。
+    /// Clean up snapshots older than `days` days.
     pub async fn cleanup_old(&self, days: u64) -> Result<usize> {
         let cutoff = now_secs().saturating_sub(days * 86_400);
         let mut removed = 0;
@@ -403,7 +275,7 @@ impl Checkpointer for FileCheckpointer {
                 metadata: None,
                 created_at: now_secs(),
             };
-            info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "🔖 保存 Checkpoint");
+            info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "Saving checkpoint");
             {
                 let mut data = self.data.write().await;
                 data.entry(session_id.to_string())
@@ -447,7 +319,7 @@ impl Checkpointer for FileCheckpointer {
                 self.data.write().await.remove(session_id);
             }
             self.flush().await?;
-            info!(session_id = %session_id, "🗑️ 会话 Checkpoint 已删除");
+            info!(session_id = %session_id, "Session checkpoint deleted");
             Ok(())
         })
     }
@@ -472,7 +344,7 @@ impl Checkpointer for FileCheckpointer {
                 metadata: state.metadata,
                 created_at: now_secs(),
             };
-            info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "🔖 保存线程状态");
+            info!(session_id = %session_id, checkpoint_id = %checkpoint_id, "Saving thread state");
             {
                 let mut data = self.data.write().await;
                 data.entry(session_id.to_string())
@@ -485,7 +357,7 @@ impl Checkpointer for FileCheckpointer {
     }
 }
 
-// ── 私有工具函数 ──────────────────────────────────────────────────────────────
+// ── Private utility functions ──────────────────────────────────────────────────────
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -498,7 +370,7 @@ fn new_checkpoint_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-// ── 单元测试 ──────────────────────────────────────────────────────────────────────
+// ── Unit tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -551,7 +423,6 @@ mod tests {
 
         let checkpoints = checkpointer.list("session1").await.unwrap();
         assert_eq!(checkpoints.len(), 2);
-        // 应该是倒序（最新的在前）
         assert_eq!(checkpoints[0].messages[0].content.as_text_ref(), Some("m2"));
     }
 

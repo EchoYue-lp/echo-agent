@@ -102,10 +102,7 @@ pub use config::{LlmConfig, LlmProvider};
 pub use echo_integration::providers::ProviderFactory;
 
 // Wire types for internal use
-#[allow(unused_imports)]
-pub(crate) use types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message,
-};
+pub(crate) use types::{ChatCompletionChunk, ChatCompletionResponse, Message};
 pub use types::{JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition};
 
 /// Compatibility helper for assembling OpenAI-compatible request headers.

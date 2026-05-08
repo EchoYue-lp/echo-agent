@@ -44,7 +44,7 @@
 
 ```rust
 use echo_agent::testing::MockLlmClient;
-use echo_agent::compression::compressor::{SummaryCompressor, DefaultSummaryPrompt};
+use echo_agent::compression::compressor::SummaryCompressor;
 use std::sync::Arc;
 
 // 创建 Mock，预设响应队列
@@ -55,7 +55,7 @@ let mock_llm = Arc::new(
 );
 
 // 注入到压缩器
-let compressor = SummaryCompressor::new(mock_llm.clone(), DefaultSummaryPrompt, 2);
+let compressor = SummaryCompressor::new(mock_llm.clone(), 2);
 
 // ... 执行压缩 ...
 
@@ -75,12 +75,12 @@ let mock = MockLlmClient::new()
     .with_response("正常响应")
     .with_network_error("模拟网络超时")  // 便捷方法
     .with_rate_limit_error()            // 429 限流
-    .with_error(ReactError::Llm(LlmError::EmptyResponse)); // 自定义错误
+    .with_error(ReactError::Llm(Box::new(LlmError::EmptyResponse))); // 自定义错误
 
-// 第 1 次调用 → "正常响应"
-// 第 2 次调用 → Err(NetworkError)
-// 第 3 次调用 → Err(ApiError { status: 429 })
-// 第 4 次调用 → Err(EmptyResponse)
+// 第 1 次调用 → Ok("正常响应")
+// 第 2 次调用 → Err(ReactError::Llm(LlmError::NetworkError("模拟网络超时")))
+// 第 3 次调用 → Err(ReactError::Llm(LlmError::ApiError { status: 429, .. }))
+// 第 4 次调用 → Err(ReactError::Llm(LlmError::EmptyResponse))
 ```
 
 ### API 参考
@@ -278,7 +278,7 @@ assert!(cp.get("session-1").await?.is_none());
 ```rust
 #[cfg(test)]
 mod tests {
-    use echo_agent::compression::compressor::{SummaryCompressor, DefaultSummaryPrompt};
+    use echo_agent::compression::compressor::SummaryCompressor;
     use echo_agent::compression::{CompressionInput, ContextCompressor};
     use echo_agent::llm::types::Message;
     use echo_agent::testing::MockLlmClient;
@@ -287,7 +287,7 @@ mod tests {
     #[tokio::test]
     async fn test_summary_compressor_calls_llm_once() {
         let mock = Arc::new(MockLlmClient::new().with_response("摘要文本"));
-        let compressor = SummaryCompressor::new(mock.clone(), DefaultSummaryPrompt, 2);
+        let compressor = SummaryCompressor::new(mock.clone(), 2);
 
         let input = CompressionInput {
             messages: (0..6).flat_map(|i| vec![
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn test_summary_compressor_propagates_llm_error() {
         let mock = Arc::new(MockLlmClient::new().with_network_error("超时"));
-        let compressor = SummaryCompressor::new(mock, DefaultSummaryPrompt, 2);
+        let compressor = SummaryCompressor::new(mock, 2);
 
         let input = CompressionInput {
             messages: vec![

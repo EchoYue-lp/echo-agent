@@ -181,6 +181,7 @@ impl ReactAgent {
     ///
     /// The agent is automatically wrapped in a default Sync-mode `SubagentDefinition`.
     /// For more control, use `register_subagent_with_definition()`.
+    #[cfg(feature = "subagent")]
     pub fn register_agent(&mut self, agent: Box<dyn Agent>) {
         if !self.config.enable_subagent {
             warn!(
@@ -205,6 +206,7 @@ impl ReactAgent {
     /// # Description
     /// Each subagent is automatically wrapped in a default Sync-mode `SubagentDefinition`.
     /// For more fine-grained control, use the `register_subagent_with_definition()` method.
+    #[cfg(feature = "subagent")]
     pub fn register_agents(&mut self, agents: Vec<Box<dyn Agent>>) {
         for agent in agents {
             self.register_agent(agent)
