@@ -4,4 +4,4 @@ pub mod summary;
 
 pub use hybrid::{HybridCompressor, HybridCompressorBuilder};
 pub use sliding_window::SlidingWindowCompressor;
-pub use summary::{DefaultSummaryPrompt, FnSummaryPrompt, SummaryCompressor, SummaryPromptBuilder};
+pub use summary::{SummaryCompressor, default_summary_prompt};

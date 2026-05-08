@@ -1,20 +1,13 @@
 //! Planner — responsible for decomposing user tasks into structured execution plans
 
-use super::types::Plan;
-use super::types::{PlanOutput, PlanStep, PlanStepOutput, plan_output_schema};
 use crate::error::Result;
 use crate::llm::types::Message;
 use crate::llm::{self, LlmConfig, ResponseFormat};
+use echo_core::agent::{Plan, PlanOutput, PlanStep, PlanStepOutput, Planner, plan_output_schema};
 use futures::future::BoxFuture;
 use reqwest::Client;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-
-/// Planner trait — accepts a task description and returns an execution plan
-pub trait Planner: Send + Sync {
-    /// Generate an execution plan based on the task description
-    fn plan<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<Plan>>;
-}
 
 // ── LlmPlanner ───────────────────────────────────────────────────────────────
 
@@ -286,34 +279,6 @@ impl Planner for LlmPlanner {
     }
 }
 
-// ── StaticPlanner ────────────────────────────────────────────────────────────
-
-/// Static Planner: uses a predefined step list (suitable for testing or fixed workflows)
-pub struct StaticPlanner {
-    steps: Vec<String>,
-}
-
-impl StaticPlanner {
-    /// Create a static planner with a predefined step list
-    ///
-    /// # Parameters
-    /// * `steps` - Predefined step list (strings or types that can be converted to strings)
-    pub fn new(steps: Vec<impl Into<String>>) -> Self {
-        Self {
-            steps: steps.into_iter().map(|s| s.into()).collect(),
-        }
-    }
-}
-
-impl Planner for StaticPlanner {
-    fn plan<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<Plan>> {
-        Box::pin(async move {
-            let steps = self.steps.iter().map(PlanStep::new).collect();
-            Ok(Plan::new(steps).with_goal(task))
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,21 +372,5 @@ mod tests {
         let response = "1. First step\n2. Second step\n3. Third step";
         let steps = LlmPlanner::parse_steps_legacy(response);
         assert_eq!(steps.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_static_planner() {
-        let planner = StaticPlanner::new(vec!["Step A", "Step B", "Step C"]);
-        let plan = planner.plan("Test task").await.unwrap();
-        assert_eq!(plan.steps.len(), 3);
-        assert_eq!(plan.steps[0].description, "Step A");
-        assert_eq!(plan.goal.as_deref(), Some("Test task"));
-    }
-
-    #[test]
-    fn test_plan_output_schema_valid() {
-        let schema = plan_output_schema();
-        assert!(schema.is_object());
-        assert!(schema["properties"]["steps"].is_object());
     }
 }

@@ -3,9 +3,8 @@
 use super::super::ReactAgent;
 use super::stream_loop::StreamMode;
 use crate::llm::types::Message;
-use crate::memory::checkpointer::ThreadState;
-use crate::memory::conversation::{NewConversation, project_messages};
-use crate::memory::store::SearchQuery;
+use crate::memory::conversation::project_messages;
+use crate::memory::{NewConversation, SearchQuery, ThreadState};
 use tracing::{debug, info, warn};
 
 #[derive(Clone, Default)]

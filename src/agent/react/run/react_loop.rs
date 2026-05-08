@@ -24,7 +24,20 @@ impl ReactAgent {
         debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM thinking...");
 
         // ContextManager::prepare handles compression internally — no need for duplicate pre-check here.
-        let messages = self.memory.context.lock().await.prepare(None).await?;
+        let prepare_result = self.memory.context.lock().await.prepare(None).await?;
+
+        if let Some(ref stats) = prepare_result.compressed {
+            tracing::info!(
+                agent = %agent,
+                before = stats.before_count,
+                after = stats.after_count,
+                before_tokens = stats.before_tokens,
+                after_tokens = stats.after_tokens,
+                "📦 Context auto-compressed"
+            );
+        }
+
+        let messages = prepare_result.messages;
 
         for cb in &callbacks {
             cb.on_think_start(&agent, &messages).await;

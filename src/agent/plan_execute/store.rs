@@ -2,83 +2,10 @@
 
 use crate::error::Result;
 use crate::memory::store::Store;
+use echo_core::agent::{Plan, PlanStore, PlanSummary};
 use futures::future::BoxFuture;
 use serde_json::json;
 use std::sync::Arc;
-
-/// Lightweight plan summary for listing/search
-#[derive(Debug, Clone)]
-pub struct PlanSummary {
-    /// Plan unique identifier
-    pub id: String,
-    /// Human-readable short identifier (for URLs, etc.)
-    pub slug: Option<String>,
-    /// Plan goal description
-    pub goal: Option<String>,
-    /// Plan version number (for optimistic locking)
-    pub version: u32,
-    /// Total number of steps in the plan
-    pub total_steps: usize,
-    /// Number of completed steps
-    pub completed_steps: usize,
-}
-
-/// Trait for plan persistence operations
-pub trait PlanStore: Send + Sync {
-    /// Save plan to storage
-    ///
-    /// # Parameters
-    /// * `plan` - The plan to save
-    fn save_plan<'a>(
-        &'a self,
-        plan: &'a crate::agent::plan_execute::types::Plan,
-    ) -> BoxFuture<'a, Result<()>>;
-    /// Load plan by plan ID
-    ///
-    /// # Parameters
-    /// * `plan_id` - Plan unique identifier
-    /// # Returns
-    /// * `Ok(Some(plan))` - Plan found
-    /// * `Ok(None)` - Plan does not exist
-    fn load_plan<'a>(
-        &'a self,
-        plan_id: &'a str,
-    ) -> BoxFuture<'a, Result<Option<crate::agent::plan_execute::types::Plan>>>;
-    /// Load plan by slug
-    ///
-    /// # Parameters
-    /// * `slug` - Human-readable short identifier for the plan
-    /// # Returns
-    /// * `Ok(Some(plan))` - Plan found
-    /// * `Ok(None)` - Plan does not exist
-    fn load_plan_by_slug<'a>(
-        &'a self,
-        slug: &'a str,
-    ) -> BoxFuture<'a, Result<Option<crate::agent::plan_execute::types::Plan>>>;
-    /// List plan summaries
-    ///
-    /// # Parameters
-    /// * `limit` - Maximum number of results to return
-    fn list_plans<'a>(&'a self, limit: usize) -> BoxFuture<'a, Result<Vec<PlanSummary>>>;
-    /// Delete a plan
-    ///
-    /// # Parameters
-    /// * `plan_id` - Plan unique identifier
-    /// # Returns
-    /// * `Ok(true)` - Deletion succeeded
-    /// * `Ok(false)` - Plan does not exist
-    fn delete_plan<'a>(&'a self, plan_id: &'a str) -> BoxFuture<'a, Result<bool>>;
-    /// Search plans
-    ///
-    /// # Parameters
-    /// * `query` - Search keyword
-    /// * `limit` - Maximum number of results to return
-    fn search_plans<'a>(
-        &'a self,
-        query: &'a str,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<PlanSummary>>>;
-}
 
 /// SQLite-backed plan store using the existing SqliteStore
 pub struct SqlitePlanStore {
@@ -96,7 +23,7 @@ impl SqlitePlanStore {
         Self { store }
     }
 
-    fn plan_to_value(plan: &crate::agent::plan_execute::types::Plan) -> serde_json::Value {
+    fn plan_to_value(plan: &Plan) -> serde_json::Value {
         json!({
             "id": plan.id,
             "version": plan.version,
@@ -113,10 +40,7 @@ impl SqlitePlanStore {
 }
 
 impl PlanStore for SqlitePlanStore {
-    fn save_plan<'a>(
-        &'a self,
-        plan: &'a crate::agent::plan_execute::types::Plan,
-    ) -> BoxFuture<'a, Result<()>> {
+    fn save_plan<'a>(&'a self, plan: &'a Plan) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let key = plan.id.as_deref().unwrap_or("unknown");
             let value = Self::plan_to_value(plan);
@@ -127,10 +51,7 @@ impl PlanStore for SqlitePlanStore {
         })
     }
 
-    fn load_plan<'a>(
-        &'a self,
-        plan_id: &'a str,
-    ) -> BoxFuture<'a, Result<Option<crate::agent::plan_execute::types::Plan>>> {
+    fn load_plan<'a>(&'a self, plan_id: &'a str) -> BoxFuture<'a, Result<Option<Plan>>> {
         Box::pin(async move {
             let item = self
                 .store
@@ -150,10 +71,7 @@ impl PlanStore for SqlitePlanStore {
         })
     }
 
-    fn load_plan_by_slug<'a>(
-        &'a self,
-        slug: &'a str,
-    ) -> BoxFuture<'a, Result<Option<crate::agent::plan_execute::types::Plan>>> {
+    fn load_plan_by_slug<'a>(&'a self, slug: &'a str) -> BoxFuture<'a, Result<Option<Plan>>> {
         Box::pin(async move {
             let results = self
                 .store
@@ -164,8 +82,7 @@ impl PlanStore for SqlitePlanStore {
                 })?;
 
             for item in results {
-                if let Ok(plan) =
-                    serde_json::from_value::<crate::agent::plan_execute::types::Plan>(item.value)
+                if let Ok(plan) = serde_json::from_value::<Plan>(item.value)
                     && plan.slug.as_deref() == Some(slug)
                 {
                     return Ok(Some(plan));
@@ -186,9 +103,7 @@ impl PlanStore for SqlitePlanStore {
 
             let mut summaries = Vec::new();
             for item in results {
-                if let Ok(plan) =
-                    serde_json::from_value::<crate::agent::plan_execute::types::Plan>(item.value)
-                {
+                if let Ok(plan) = serde_json::from_value::<Plan>(item.value) {
                     summaries.push(PlanSummary {
                         id: plan.id.clone().unwrap_or_default(),
                         slug: plan.slug.clone(),
@@ -226,9 +141,7 @@ impl PlanStore for SqlitePlanStore {
 
             let mut summaries = Vec::new();
             for item in results {
-                if let Ok(plan) =
-                    serde_json::from_value::<crate::agent::plan_execute::types::Plan>(item.value)
-                {
+                if let Ok(plan) = serde_json::from_value::<Plan>(item.value) {
                     summaries.push(PlanSummary {
                         id: plan.id.clone().unwrap_or_default(),
                         slug: plan.slug.clone(),
@@ -263,8 +176,8 @@ pub fn generate_plan_slug() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::plan_execute::types::{Plan, PlanStep};
     use crate::memory::store::InMemoryStore;
+    use echo_core::agent::{Plan, PlanStep};
 
     fn sample_plan() -> Plan {
         Plan::new(vec![

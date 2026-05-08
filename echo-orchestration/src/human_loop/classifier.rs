@@ -389,9 +389,9 @@ impl Classifier for RuleClassifier {
 /// 1. 构建分类提示词（包含 allow/soft_deny 规则）
 /// 2. 调用 LLM 进行分类
 /// 3. 解析结果并跟踪拒绝次数
-pub struct LlmClassifier<C: LlmClient + ?Sized> {
+pub struct LlmClassifier {
     /// LLM 客户端
-    client: Arc<C>,
+    client: Arc<dyn LlmClient>,
     /// 使用的模型名称
     #[allow(dead_code)] // Used for logging/debugging; will be read in future integration
     model: String,
@@ -401,9 +401,9 @@ pub struct LlmClassifier<C: LlmClient + ?Sized> {
     prompt_template: String,
 }
 
-impl<C: LlmClient + ?Sized> LlmClassifier<C> {
+impl LlmClassifier {
     /// 创建 LLM 分类器
-    pub fn new(client: Arc<C>, model: String) -> Self {
+    pub fn new(client: Arc<dyn LlmClient>, model: String) -> Self {
         Self {
             client,
             model,
@@ -592,7 +592,7 @@ impl<C: LlmClient + ?Sized> LlmClassifier<C> {
 }
 
 #[async_trait]
-impl<C: LlmClient + ?Sized> Classifier for LlmClassifier<C> {
+impl Classifier for LlmClassifier {
     async fn classify(
         &self,
         tool_name: &str,

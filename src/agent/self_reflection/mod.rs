@@ -39,20 +39,15 @@
 //! # }
 //! ```
 
-mod composite;
-mod critic;
 mod llm_critic;
-mod store;
-mod types;
 
-pub use composite::{CompositeCritic, CompositeStrategy};
-pub use critic::{Critic, StaticCritic, ThresholdCritic};
 pub use llm_critic::LlmCritic;
-pub use store::{InMemoryReflectionStore, ReflectionStore};
-pub use types::{
-    Critique, CritiqueOutput, DefaultRefinementPromptBuilder, DefaultReflectionPromptBuilder,
-    RefinementPromptBuilder, ReflectionExperience, ReflectionPromptBuilder, ReflectionRecord,
-    critique_output_schema,
+
+// Re-export core types from echo_core for convenience
+pub use echo_core::agent::{
+    CompositeCritic, CompositeStrategy, Critic, Critique, CritiqueOutput, InMemoryReflectionStore,
+    ReflectionExperience, ReflectionRecord, ReflectionStore, StaticCritic, ThresholdCritic,
+    critique_output_schema, default_refinement_prompt, default_reflection_prompt,
 };
 
 use crate::agent::{Agent, AgentEvent};
@@ -62,20 +57,25 @@ use futures::stream::BoxStream;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 
+/// Type alias for refinement prompt builder closures
+type RefinementPromptFn = Box<dyn Fn(&str, &str, &Critique, &str, usize) -> String + Send + Sync>;
+/// Type alias for reflection prompt builder closures
+type ReflectionPromptFn = Box<dyn Fn(&str, &str, &Critique) -> String + Send + Sync>;
+
 #[cfg(feature = "plan-execute")]
-use crate::agent::plan_execute::Executor;
+use echo_core::agent::Executor;
 
 /// Self-Reflection Agent
 ///
 /// Three-phase loop: Generate → Evaluate → Reflect & Refine, with episodic memory for cross-task learning.
-pub struct SelfReflectionAgent<C: Critic> {
+pub struct SelfReflectionAgent {
     name: String,
     generator: Box<dyn Agent>,
-    critic: C,
+    critic: Box<dyn Critic>,
     max_reflections: usize,
     pass_threshold: f64,
-    refinement_prompt_builder: Box<dyn RefinementPromptBuilder>,
-    reflection_prompt_builder: Box<dyn ReflectionPromptBuilder>,
+    refinement_prompt_builder: RefinementPromptFn,
+    reflection_prompt_builder: ReflectionPromptFn,
     episodic_memory: RwLock<std::collections::VecDeque<ReflectionExperience>>,
     memory_limit: usize,
     store: Option<Arc<dyn ReflectionStore>>,
@@ -83,7 +83,7 @@ pub struct SelfReflectionAgent<C: Critic> {
     pending_records: RwLock<Vec<(String, Vec<ReflectionRecord>)>>,
 }
 
-impl<C: Critic> SelfReflectionAgent<C> {
+impl SelfReflectionAgent {
     /// Create a Self-Reflection Agent
     ///
     /// # Parameters
@@ -95,15 +95,19 @@ impl<C: Critic> SelfReflectionAgent<C> {
     /// * Max reflections: 3
     /// * Pass threshold: 7.0 (score ≥ 7.0 is considered pass)
     /// * Episodic memory capacity: 10 experiences
-    pub fn new(name: impl Into<String>, generator: impl Agent + 'static, critic: C) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        generator: impl Agent + 'static,
+        critic: impl Critic + 'static,
+    ) -> Self {
         Self {
             name: name.into(),
             generator: Box::new(generator),
-            critic,
+            critic: Box::new(critic),
             max_reflections: 3,
             pass_threshold: 7.0,
-            refinement_prompt_builder: Box::new(DefaultRefinementPromptBuilder),
-            reflection_prompt_builder: Box::new(DefaultReflectionPromptBuilder),
+            refinement_prompt_builder: Box::new(default_refinement_prompt),
+            reflection_prompt_builder: Box::new(default_reflection_prompt),
             episodic_memory: RwLock::new(std::collections::VecDeque::with_capacity(10)),
             memory_limit: 10,
             store: None,
@@ -126,18 +130,18 @@ impl<C: Critic> SelfReflectionAgent<C> {
     /// Custom refinement prompt builder
     pub fn refinement_prompt_builder(
         mut self,
-        builder: impl RefinementPromptBuilder + 'static,
+        f: impl Fn(&str, &str, &Critique, &str, usize) -> String + Send + Sync + 'static,
     ) -> Self {
-        self.refinement_prompt_builder = Box::new(builder);
+        self.refinement_prompt_builder = Box::new(f);
         self
     }
 
     /// Custom reflection prompt builder
     pub fn reflection_prompt_builder(
         mut self,
-        builder: impl ReflectionPromptBuilder + 'static,
+        f: impl Fn(&str, &str, &Critique) -> String + Send + Sync + 'static,
     ) -> Self {
-        self.reflection_prompt_builder = Box::new(builder);
+        self.reflection_prompt_builder = Box::new(f);
         self
     }
 
@@ -218,17 +222,14 @@ impl<C: Critic> SelfReflectionAgent<C> {
             }
 
             // Reflect: analyze failure reasons
-            let reflection_prompt = self.reflection_prompt_builder.build_reflection_prompt(
-                task,
-                &current_answer,
-                &critique,
-            );
+            let reflection_prompt =
+                (self.reflection_prompt_builder)(task, &current_answer, &critique);
 
             let reflection_text = self.generator.execute(&reflection_prompt).await?;
             debug!(agent = %agent, reflection = %reflection_text, "💡 Reflection text");
 
             // Build refinement prompt
-            let refinement_prompt = self.refinement_prompt_builder.build_prompt(
+            let refinement_prompt = (self.refinement_prompt_builder)(
                 task,
                 &current_answer,
                 &critique,
@@ -403,7 +404,7 @@ impl<C: Critic> SelfReflectionAgent<C> {
 
 // ── impl Agent ───────────────────────────────────────────────────────────────
 
-impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
+impl Agent for SelfReflectionAgent {
     fn name(&self) -> &str {
         &self.name
     }
@@ -482,13 +483,13 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
                     }
 
                     // Reflect
-                    let reflection_prompt = self.reflection_prompt_builder
-                        .build_reflection_prompt(&task_owned, &current_answer, &critique);
+                    let reflection_prompt = (self.reflection_prompt_builder)(
+                        &task_owned, &current_answer, &critique);
                     let reflection_text = self.generator.execute(&reflection_prompt).await?;
 
                     // Refine
                     yield AgentEvent::Refining { iteration };
-                    let refinement_prompt = self.refinement_prompt_builder.build_prompt(
+                    let refinement_prompt = (self.refinement_prompt_builder)(
                         &task_owned,
                         &current_answer,
                         &critique,
@@ -563,7 +564,7 @@ impl<C: Critic + Send + Sync> Agent for SelfReflectionAgent<C> {
 /// # }
 /// ```
 pub struct ReflectiveExecutor {
-    agent: SelfReflectionAgent<LlmCritic>,
+    agent: SelfReflectionAgent,
 }
 
 #[cfg(feature = "plan-execute")]
@@ -571,12 +572,12 @@ impl ReflectiveExecutor {
     /// Create a ReflectiveExecutor
     ///
     /// # Parameters
-    /// * `agent` - A pre-configured SelfReflectionAgent (must use LlmCritic as evaluator)
+    /// * `agent` - A pre-configured SelfReflectionAgent
     ///
     /// # Description
     /// Adapts the Self-Reflection Agent as an Executor in the Plan-and-Execute architecture,
     /// allowing it to be used as a PlanStep executor.
-    pub fn new(agent: SelfReflectionAgent<LlmCritic>) -> Self {
+    pub fn new(agent: SelfReflectionAgent) -> Self {
         Self { agent }
     }
 

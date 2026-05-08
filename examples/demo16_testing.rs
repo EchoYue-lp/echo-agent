@@ -11,9 +11,7 @@
 //! cargo run --example demo16_testing
 //! ```
 
-use echo_agent::compression::compressor::{
-    DefaultSummaryPrompt, SlidingWindowCompressor, SummaryCompressor,
-};
+use echo_agent::compression::compressor::{SlidingWindowCompressor, SummaryCompressor};
 use echo_agent::compression::{CompressionInput, ContextCompressor};
 use echo_agent::llm::types::Message;
 use echo_agent::memory::checkpointer::{Checkpointer, InMemoryCheckpointer};
@@ -108,7 +106,7 @@ async fn test_summary_compressor() {
 
     let mock_llm = Arc::new(MockLlmClient::new().with_response("【摘要】用户询问了天气。"));
 
-    let compressor = SummaryCompressor::new(mock_llm.clone(), DefaultSummaryPrompt, 2);
+    let compressor = SummaryCompressor::new(mock_llm.clone(), 2);
 
     let messages = vec![
         Message::user("问题 1".to_string()),

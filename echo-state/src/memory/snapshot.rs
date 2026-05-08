@@ -81,7 +81,7 @@ impl SnapshotManager {
     pub fn should_capture(&self, iteration: usize) -> bool {
         match &self.policy {
             SnapshotPolicy::EveryIteration => true,
-            SnapshotPolicy::EveryN(n) => *n > 0 && (iteration + 1).is_multiple_of(*n),
+            SnapshotPolicy::EveryN(n) => *n > 0 && (iteration + 1) % n == 0,
             SnapshotPolicy::Manual => false,
         }
     }

@@ -1,6 +1,7 @@
 //! Tool system core trait and types
 
 pub mod permission;
+pub mod skill;
 
 use crate::error::Result;
 use futures::future::BoxFuture;
@@ -140,6 +141,13 @@ pub enum ToolRiskLevel {
     Standard,
     /// Dangerous operation, irreversible side effects (e.g. execute shell command, delete data, SQL write)
     Dangerous,
+}
+
+/// Trait for types that can register tools.
+///
+/// Decouples tool registration from any concrete tool-manager implementation.
+pub trait ToolRegistrar {
+    fn register(&mut self, tool: Box<dyn Tool>);
 }
 
 /// Tool interface trait

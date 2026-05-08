@@ -54,16 +54,27 @@
 
 /// Built-in tools (security, think, etc.)
 pub mod builtin;
-/// File manipulation tools
-pub mod files;
+/// File manipulation tools (re-export from echo_tools)
+pub mod files {
+    pub use echo_tools::files::*;
+}
 pub mod permission;
-pub mod shell;
+/// Shell tool (re-export from echo_tools)
+pub mod shell {
+    pub use echo_tools::shell::*;
+}
 
+/// Web tools (re-export from echo_tools)
 #[cfg(feature = "web")]
-pub mod web;
+pub mod web {
+    pub use echo_tools::web::*;
+}
 
+/// Media tools (re-export from echo_tools)
 #[cfg(feature = "media")]
-pub mod media;
+pub mod media {
+    pub use echo_tools::media::*;
+}
 
 /// Direct re-exports from `echo_execution::tools`.
 pub mod execution {

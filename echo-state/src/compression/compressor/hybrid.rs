@@ -12,14 +12,14 @@ use futures::future::BoxFuture;
 /// ```rust,no_run
 /// use echo_core::llm::LlmClient;
 /// use echo_state::compression::compressor::{
-///     HybridCompressor, SlidingWindowCompressor, SummaryCompressor, DefaultSummaryPrompt,
+///     HybridCompressor, SlidingWindowCompressor, SummaryCompressor,
 /// };
 /// use std::sync::Arc;
 ///
 /// # async fn example(llm: Arc<dyn LlmClient>) {
 /// let compressor = HybridCompressor::builder()
 ///     .stage(SlidingWindowCompressor::new(20))
-///     .stage(SummaryCompressor::new(llm, DefaultSummaryPrompt, 8))
+///     .stage(SummaryCompressor::new(llm, 8))
 ///     .build();
 /// # }
 /// ```

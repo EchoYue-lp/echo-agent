@@ -1,22 +1,16 @@
-//! 文本嵌入接口
+//! HTTP embedding client (OpenAI-compatible)
 //!
-//! 将文本映射为稠密浮点向量，供 [`EmbeddingStore`](super::EmbeddingStore) 做语义检索。
+//! The [`Embedder`] trait is defined in [`echo_core::memory::embedder`].
+//! This module provides the [`HttpEmbedder`] implementation.
 
 use echo_core::error::{MemoryError, Result};
+pub use echo_core::memory::embedder::Embedder;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::debug;
 
-// ── Embedder trait ────────────────────────────────────────────────────────────
-
-/// 文本嵌入接口：将文本映射为稠密浮点向量
-pub trait Embedder: Send + Sync {
-    /// 计算文本的嵌入向量
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>>;
-}
-
-// ── HTTP 嵌入客户端（OpenAI 兼容接口）────────────────────────────────────────
+// ── HTTP embedding client ────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
@@ -34,66 +28,31 @@ struct EmbedData {
     embedding: Vec<f32>,
 }
 
-/// OpenAI 兼容的 HTTP 嵌入客户端
+/// OpenAI-compatible HTTP embedding client
 ///
-/// 支持 OpenAI、Qwen（DashScope）等兼容 `/v1/embeddings` 接口的服务。
+/// Supports OpenAI, Qwen (DashScope), and other services compatible with the `/v1/embeddings` interface.
 ///
-/// > **注意**：必须使用支持 Embedding 的模型（如 `text-embedding-v3`、
-/// > `text-embedding-3-small`）。对话模型（ChatGPT、DeepSeek-Chat 等）
-/// > 不提供嵌入接口，配置错误会在运行时报 API 错误。
+/// # Environment variables
 ///
-/// # 环境变量
-///
-/// 支持两套命名风格，优先级从高到低：
-///
-/// | 用途 | 优先读取 | 备选 | 最终备选 |
-/// |------|----------|------|--------|
-/// | 完整端点 URL | `EMBEDDING_BASEURL` | — | — |
-/// | 基础 URL（自动拼 `/v1/embeddings`）| `EMBEDDING_API_URL` | — | `https://api.openai.com` |
-/// | API 密钥 | `EMBEDDING_APIKEY` | `EMBEDDING_API_KEY` | `OPENAI_API_KEY` |
-/// | 模型名称 | `EMBEDDING_MODEL` | — | `text-embedding-3-small` |
-///
-/// > `EMBEDDING_BASEURL` 与 `EMBEDDING_API_URL` 二选一：
-/// > - `EMBEDDING_BASEURL`：完整 URL，直接使用（如 `https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings`）
-/// > - `EMBEDDING_API_URL`：仅 base（如 `https://dashscope.aliyuncs.com/compatible-mode`），代码自动追加 `/v1/embeddings`
-///
-/// # 示例
-///
-/// ```rust,no_run
-/// use echo_state::memory::HttpEmbedder;
-///
-/// // 从环境变量自动读取
-/// let embedder = HttpEmbedder::from_env();
-///
-/// // 显式指定 base URL（自动追加 /v1/embeddings）
-/// let embedder = HttpEmbedder::new(
-///     "https://dashscope.aliyuncs.com/compatible-mode",
-///     std::env::var("DASHSCOPE_API_KEY").unwrap_or_default(),
-///     "text-embedding-v3",
-/// );
-///
-/// // 显式指定完整端点 URL
-/// let embedder = HttpEmbedder::with_endpoint(
-///     "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
-///     std::env::var("DASHSCOPE_API_KEY").unwrap_or_default(),
-///     "text-embedding-v3",
-/// );
-/// ```
+/// | Purpose | Priority 1 | Priority 2 | Priority 3 |
+/// |---------|------------|------------|-------------|
+/// | Full endpoint URL | `EMBEDDING_BASEURL` | — | — |
+/// | Base URL (auto-append `/v1/embeddings`) | `EMBEDDING_API_URL` | — | `https://api.openai.com` |
+/// | API key | `EMBEDDING_APIKEY` | `EMBEDDING_API_KEY` | `OPENAI_API_KEY` |
+/// | Model name | `EMBEDDING_MODEL` | — | `text-embedding-3-small` |
 pub struct HttpEmbedder {
     client: reqwest::Client,
     url: String,
     api_key: String,
     model: String,
-    /// 请求超时时间（默认 30 秒）
+    /// Request timeout (default 30s)
     timeout: Duration,
 }
 
 impl HttpEmbedder {
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// 基础 URL 构造：自动在末尾追加 `/v1/embeddings`
-    ///
-    /// `api_url` 传入不含路径的基础 URL，如 `https://api.openai.com`
+    /// Base URL constructor: auto-appends `/v1/embeddings`
     pub fn new(
         api_url: impl Into<String>,
         api_key: impl Into<String>,
@@ -113,9 +72,7 @@ impl HttpEmbedder {
         }
     }
 
-    /// 完整端点 URL 构造：直接使用传入的 URL，不追加任何路径
-    ///
-    /// 适用于已知完整端点地址的场景，如 `https://xxx.com/v1/embeddings`
+    /// Full endpoint URL constructor: uses the URL as-is
     pub fn with_endpoint(
         url: impl Into<String>,
         api_key: impl Into<String>,
@@ -133,7 +90,7 @@ impl HttpEmbedder {
         }
     }
 
-    /// 设置请求超时时间
+    /// Set request timeout
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self.client = reqwest::ClientBuilder::new()
@@ -143,14 +100,8 @@ impl HttpEmbedder {
         self
     }
 
-    /// 从环境变量构建
-    ///
-    /// 同时兼容两套命名风格（`EMBEDDING_BASEURL` / `EMBEDDING_APIKEY` 和
-    /// `EMBEDDING_API_URL` / `EMBEDDING_API_KEY`）。
+    /// Construct from environment variables
     pub fn from_env() -> Self {
-        // ── URL ───────────────────────────────────────────────────────────────
-        // EMBEDDING_BASEURL：完整端点，直接使用
-        // EMBEDDING_API_URL：base URL，自动追加 /v1/embeddings
         let (url, is_full_url) = if let Ok(u) = std::env::var("EMBEDDING_BASEURL") {
             (u, true)
         } else {
@@ -159,13 +110,11 @@ impl HttpEmbedder {
             (base, false)
         };
 
-        // ── API Key ───────────────────────────────────────────────────────────
         let api_key = std::env::var("EMBEDDING_APIKEY")
             .or_else(|_| std::env::var("EMBEDDING_API_KEY"))
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .unwrap_or_default();
 
-        // ── 模型 ──────────────────────────────────────────────────────────────
         let model = std::env::var("EMBEDDING_MODEL")
             .unwrap_or_else(|_| "text-embedding-3-small".to_string());
 
@@ -187,7 +136,7 @@ impl HttpEmbedder {
 impl Embedder for HttpEmbedder {
     fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>>> {
         Box::pin(async move {
-            debug!(model = %self.model, chars = text.len(), "🔢 计算文本嵌入");
+            debug!(model = %self.model, chars = text.len(), "Computing text embedding");
             let req = EmbedRequest {
                 model: &self.model,
                 input: text,
@@ -206,12 +155,14 @@ impl Embedder for HttpEmbedder {
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(MemoryError::IoError(format!("嵌入 API 错误 {status}: {body}")).into());
+                return Err(
+                    MemoryError::IoError(format!("Embedding API error {status}: {body}")).into(),
+                );
             }
 
             let body: EmbedResponse = resp.json().await.map_err(|e| {
                 echo_core::error::ReactError::from(MemoryError::SerializationError(format!(
-                    "嵌入响应解析失败: {e}"
+                    "Failed to parse embedding response: {e}"
                 )))
             })?;
 
@@ -219,7 +170,9 @@ impl Embedder for HttpEmbedder {
                 .into_iter()
                 .next()
                 .map(|d| d.embedding)
-                .ok_or_else(|| MemoryError::IoError("嵌入 API 返回空结果".to_string()).into())
+                .ok_or_else(|| {
+                    MemoryError::IoError("Embedding API returned empty result".to_string()).into()
+                })
         })
     }
 }

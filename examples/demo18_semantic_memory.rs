@@ -1,9 +1,10 @@
 //! demo18_semantic_memory.rs —— Store 语义搜索（向量检索）综合演示
 
 use echo_agent::agent::Agent;
-use echo_agent::memory::store::{InMemoryStore, SearchQuery, Store};
+use echo_agent::memory::store::{InMemoryStore, Store};
 use echo_agent::memory::{Embedder, EmbeddingStore, HttpEmbedder};
 use echo_agent::prelude::*;
+use echo_core::memory::SearchQuery;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;

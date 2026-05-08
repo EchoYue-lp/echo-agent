@@ -4,9 +4,7 @@
 //! Checkpoint, and conversation history projection.
 
 use crate::compression::ContextManager;
-use crate::memory::checkpointer::Checkpointer;
-use crate::memory::snapshot::SnapshotManager;
-use crate::memory::store::Store;
+use crate::memory::{Checkpointer, SnapshotManager, Store};
 use std::sync::Arc;
 
 /// Memory and persistence subsystem
@@ -18,5 +16,5 @@ pub(crate) struct MemorySubsystem {
     pub(crate) store: Option<Arc<dyn Store>>,
     pub(crate) checkpointer: Option<Arc<dyn Checkpointer>>,
     pub(crate) snapshot_manager: Arc<std::sync::RwLock<Option<SnapshotManager>>>,
-    pub(crate) conversation_store: Option<Arc<dyn crate::memory::conversation::ConversationStore>>,
+    pub(crate) conversation_store: Option<Arc<dyn crate::memory::ConversationStore>>,
 }

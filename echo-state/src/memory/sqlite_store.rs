@@ -42,10 +42,10 @@
 //! # }
 //! ```
 
-use super::embedder::Embedder;
-use super::store::{SearchMode, SearchQuery, Store, StoreItem};
 use crate::util::{expand_tilde, memory_io_error};
 use echo_core::error::{MemoryError, Result};
+pub use echo_core::memory::embedder::Embedder;
+pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use serde_json::Value;

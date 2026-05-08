@@ -24,7 +24,7 @@
 //! ```rust,no_run
 //! use echo_agent::testing::MockLlmClient;
 //! use echo_agent::compression::{ContextManager, CompressionInput, ContextCompressor};
-//! use echo_agent::compression::compressor::{SummaryCompressor, DefaultSummaryPrompt};
+//! use echo_agent::compression::compressor::SummaryCompressor;
 //! use echo_agent::llm::types::Message;
 //! use std::sync::Arc;
 //!
@@ -34,7 +34,7 @@
 //!     MockLlmClient::new().with_response("This is LLM-generated summary content")
 //! );
 //!
-//! let compressor = SummaryCompressor::new(mock_llm.clone(), DefaultSummaryPrompt, 2);
+//! let compressor = SummaryCompressor::new(mock_llm.clone(), 2);
 //! let input = CompressionInput {
 //!     messages: vec![
 //!         Message::user("message1".to_string()),

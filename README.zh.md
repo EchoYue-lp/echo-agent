@@ -26,7 +26,7 @@
 
 ```toml
 [dependencies]
-echo-agent = "0.1.3"
+echo-agent = "0.1.4"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -190,13 +190,13 @@ echo-agent 提供 **28+ 项能力**，跨越 6 个 crate，通过一行 `use ech
 
 ```toml
 # 最小化 —— 仅 ReAct 引擎
-echo-agent = { version = "0.1.3", default-features = false }
+echo-agent = { version = "0.1.4", default-features = false }
 
 # 完整功能（默认）
-echo-agent = "0.1.3"
+echo-agent = "0.1.4"
 
 # 按需选择
-echo-agent = { version = "0.1.3", default-features = false, features = ["mcp", "web"] }
+echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "web"] }
 ```
 
 | Feature | 启用 | 关键依赖 |
@@ -845,3 +845,14 @@ cargo clippy
 ## License
 
 MIT &copy; echo-agent contributors
+
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=EchoYue-lp%2Fecho-agent&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=EchoYue-lp/echo-agent&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=EchoYue-lp/echo-agent&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=EchoYue-lp/echo-agent&type=date&legend=top-left" />
+ </picture>
+</a>

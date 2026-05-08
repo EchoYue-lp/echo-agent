@@ -6,7 +6,7 @@
 //!
 //! | Module | Contents |
 //! |--------|----------|
-//! | [`agent`] | `Agent` trait, `AgentEvent`, `AgentCallback`, `CancellationToken` |
+//! | [`agent`] | `Agent` trait, `AgentEvent`, `AgentCallback`, `CancellationToken`, `Critic` trait with built-in implementations, `Executor` trait with built-in implementations, reflection types and store |
 //! | [`llm`] | `LlmClient` trait, `ChatRequest`/`ChatResponse`/`ChatChunk` types |
 //! | [`tools`] | `Tool` trait, `ToolResult`, `ToolPermission`, permission model |
 //! | [`error`] | Unified `Error` enum covering all failure modes |
@@ -21,10 +21,14 @@
 pub mod agent;
 pub mod audit;
 pub mod circuit_breaker;
+pub mod compression;
 pub mod error;
 pub mod guard;
 pub mod llm;
+pub mod memory;
 pub mod project_rules;
 pub mod retry;
+pub mod sandbox;
 pub mod tokenizer;
 pub mod tools;
+pub mod utils;

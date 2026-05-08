@@ -10,7 +10,13 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
+pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult};
+
+impl ToolRegistrar for ToolManager {
+    fn register(&mut self, tool: Box<dyn Tool>) {
+        self.register(tool);
+    }
+}
 
 /// 工具管理器
 ///

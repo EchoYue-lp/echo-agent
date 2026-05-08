@@ -3,7 +3,7 @@ use crate::agent::Agent;
 use crate::agent::config::AgentConfig;
 use crate::llm::types::Message;
 use crate::sandbox::SandboxManager;
-use crate::skills::builtin::shell::ShellSkill;
+use crate::skills::builtin::ShellSkill;
 use crate::skills::external::loader::DiscoveryScope;
 use crate::skills::hooks::{HookAction, HookRule, HooksDefinition};
 use crate::testing::{FailingMockAgent, MockAgent, MockTool};

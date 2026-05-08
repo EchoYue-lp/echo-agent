@@ -30,18 +30,74 @@
 //! # }
 //! ```
 
-mod executor;
 mod planner;
 mod store;
-mod types;
 
-pub use executor::{Executor, ReactExecutor, SimpleExecutor};
-pub use planner::{LlmPlanner, Planner, PlannerOutputMode, StaticPlanner};
-pub use store::{PlanStore, PlanSummary, SqlitePlanStore, generate_plan_slug};
-pub use types::{
-    IssueSeverity, Plan, PlanOutput, PlanStep, PlanStepOutput, PlanValidationIssue, StepResult,
+pub use echo_core::agent::{
+    Executor, IssueSeverity, Plan, PlanOutput, PlanStep, PlanStepOutput, PlanStore, PlanSummary,
+    PlanValidationIssue, Planner, ReactExecutor, SimpleExecutor, StaticPlanner, StepResult,
     StepStatus, plan_output_schema,
 };
+pub use planner::{LlmPlanner, PlannerOutputMode};
+pub use store::{SqlitePlanStore, generate_plan_slug};
+
+// ── PlanExt: to_task_dag() extension trait ──────────────────────────────────
+
+/// Extension trait adding `to_task_dag()` to `Plan`.
+///
+/// This method depends on `crate::tasks::Task` (from echo-orchestration) and is
+/// therefore defined in the facade rather than in echo-core alongside `Plan`.
+trait PlanExt {
+    fn to_task_dag(&self) -> Vec<crate::tasks::Task>;
+}
+
+impl PlanExt for Plan {
+    fn to_task_dag(&self) -> Vec<crate::tasks::Task> {
+        use tracing::warn;
+        let now = echo_core::utils::time::now_secs();
+        self.steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                let deps: Vec<String> = step
+                    .dependencies
+                    .iter()
+                    .filter_map(|dep| {
+                        let (step_idx, was_fuzzy) = self.resolve_dependency_with_fuzzy(dep);
+                        if was_fuzzy {
+                            warn!(
+                                step = i,
+                                dependency = %dep,
+                                "Fuzzy dependency resolution used for step {}, dep '{}'. Prefer exact 'step_N' references.",
+                                i, dep
+                            );
+                        }
+                        step_idx.map(|idx| format!("plan_step_{}", idx))
+                    })
+                    .collect();
+
+                crate::tasks::Task {
+                    id: format!("plan_step_{}", i),
+                    description: step.description.clone(),
+                    subject: step.description.clone(),
+                    status: crate::tasks::TaskStatus::Pending,
+                    dependencies: deps,
+                    priority: 5,
+                    result: None,
+                    reasoning: step.expected_output.clone(),
+                    assigned_agent: None,
+                    tags: vec![],
+                    parent_id: self.id.clone(),
+                    created_at: now,
+                    updated_at: now,
+                    timeout_secs: 0,
+                    max_retries: 0,
+                    retry_count: 0,
+                }
+            })
+            .collect()
+    }
+}
 
 use crate::agent::{Agent, AgentEvent};
 use crate::error::Result;
@@ -52,9 +108,6 @@ use futures::stream::BoxStream;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-
-#[allow(unused_imports)]
-use futures::StreamExt;
 
 /// Execution mode for plan steps
 #[derive(Clone, Default)]
@@ -78,16 +131,16 @@ pub enum ExecutionMode {
 ///
 /// Planner generates plan → `to_task_dag()` converts to Task DAG → `TaskManager` schedules → Executor executes step by step.
 /// Supports incremental replanning (only replans the failed downstream subgraph).
-pub struct PlanExecuteAgent<P: Planner, E: Executor> {
+pub struct PlanExecuteAgent {
     name: String,
-    planner: RwLock<P>,
-    executor: RwLock<E>,
+    planner: RwLock<Box<dyn Planner>>,
+    executor: RwLock<Box<dyn Executor>>,
     max_replans: usize,
     enable_replan: bool,
     execution_mode: ExecutionMode,
 }
 
-impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
+impl PlanExecuteAgent {
     /// Create a Plan-and-Execute Agent instance
     ///
     /// # Parameters
@@ -104,30 +157,33 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
     /// - Execution mode: Sequential (`ExecutionMode::Sequential`)
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
     /// use echo_agent::agent::plan_execute::{PlanExecuteAgent, SimpleExecutor, StaticPlanner};
-    /// use echo_agent::agent::Agent;
-    /// use echo_agent::testing::MockAgent;
+    /// use echo_agent::agent::{Agent, ReactAgentBuilder};
+    /// use echo_agent::agent::plan_execute::Executor;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> echo_agent::error::Result<()> {
     /// let planner = StaticPlanner::new(vec!["Analyze the problem", "Provide conclusion"]);
-    /// let executor = SimpleExecutor::new(
-    ///     MockAgent::new("executor")
-    ///         .with_response("Completed step 1")
-    ///         .with_response("Completed step 2"),
-    /// );
+    /// let inner = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .name("executor")
+    ///     .system_prompt("Execute a single step")
+    ///     .build()?;
+    /// let executor = SimpleExecutor::new(inner);
     /// let mut agent = PlanExecuteAgent::new("plan_agent", planner, executor);
-    /// let result = agent.execute("Help me analyze this problem").await?;
-    /// assert!(!result.trim().is_empty());
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(name: impl Into<String>, planner: P, executor: E) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        planner: impl Planner + 'static,
+        executor: impl Executor + 'static,
+    ) -> Self {
         Self {
             name: name.into(),
-            planner: RwLock::new(planner),
-            executor: RwLock::new(executor),
+            planner: RwLock::new(Box::new(planner)),
+            executor: RwLock::new(Box::new(executor)),
             max_replans: 3,
             enable_replan: true,
             execution_mode: ExecutionMode::default(),
@@ -570,7 +626,7 @@ impl<P: Planner, E: Executor> PlanExecuteAgent<P, E> {
 
 // ── impl Agent ───────────────────────────────────────────────────────────────
 
-impl<P: Planner + Send + Sync, E: Executor + Send + Sync> Agent for PlanExecuteAgent<P, E> {
+impl Agent for PlanExecuteAgent {
     fn name(&self) -> &str {
         &self.name
     }
@@ -826,7 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_planner_to_dag() {
-        let planner = crate::agent::plan_execute::planner::StaticPlanner::new(vec!["A", "B", "C"]);
+        let planner = StaticPlanner::new(vec!["A", "B", "C"]);
         let plan = planner.plan("test").await.unwrap();
         let tasks = plan.to_task_dag();
         assert_eq!(tasks.len(), 3);

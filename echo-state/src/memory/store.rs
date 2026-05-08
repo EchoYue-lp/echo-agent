@@ -1,38 +1,12 @@
-//! Long-term memory Store
+//! Long-term memory Store — concrete implementations
 //!
-//! Data is organized as `namespace / key / value` triples, where namespace is a `&[&str]` slice
-//! (e.g. `&["alice", "memories"]`), naturally supporting multi-user/multi-agent isolation.
-//!
-//! ## Built-in implementations
-//!
-//! - [`InMemoryStore`]: In-process memory, suitable for testing
-//! - [`FileStore`]: JSON file persistence, zero extra dependencies
-//!
-//! ## Quick start
-//!
-//! ```rust,no_run
-//! use echo_core::error::Result;
-//! use echo_state::memory::store::{FileStore, Store};
-//! use std::sync::Arc;
-//!
-//! # async fn example() -> Result<()> {
-//! let store = Arc::new(FileStore::new("~/.echo-agent/store.json")?);
-//!
-//! store.put(&["alice", "memories"], "pref-001", serde_json::json!({
-//!     "content": "User prefers dark theme",
-//!     "importance": 8
-//! })).await?;
-//!
-//! let items = store.search(&["alice", "memories"], "theme", 5).await?;
-//! println!("{} relevant memories", items.len());
-//! # Ok(())
-//! # }
-//! ```
+//! Trait definition and data types live in [`echo_core::memory::store`].
+//! This module provides [`InMemoryStore`] and [`FileStore`].
 
 use crate::util::expand_tilde;
 use echo_core::error::{MemoryError, Result};
+pub use echo_core::memory::store::{Store, StoreItem};
 use futures::future::BoxFuture;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,168 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-// ── StoreItem ────────────────────────────────────────────────────────────────
-
-/// A single record in the Store
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreItem {
-    /// Namespace (e.g. `["user_123", "memories"]`)
-    pub namespace: Vec<String>,
-    /// Unique key for the item
-    pub key: String,
-    /// Arbitrary JSON value
-    pub value: Value,
-    /// Creation time (Unix seconds)
-    pub created_at: u64,
-    /// Last update time (Unix seconds)
-    pub updated_at: u64,
-    /// Relevance score from search (non-None only when returned by `search`)
-    pub score: Option<f32>,
-}
-
-impl StoreItem {
-    fn new(namespace: Vec<String>, key: String, value: Value) -> Self {
-        let now = now_secs();
-        Self {
-            namespace,
-            key,
-            value,
-            created_at: now,
-            updated_at: now,
-            score: None,
-        }
-    }
-}
-
-/// Search mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SearchMode {
-    /// Keyword search only
-    Keyword,
-    /// Semantic search only
-    Semantic,
-    /// Hybrid keyword + semantic search
-    Hybrid,
-}
-
-/// Unified search request
-#[derive(Debug, Clone, Copy)]
-pub struct SearchQuery<'a> {
-    pub text: &'a str,
-    pub limit: usize,
-    pub mode: SearchMode,
-}
-
-impl<'a> SearchQuery<'a> {
-    pub fn keyword(text: &'a str, limit: usize) -> Self {
-        Self {
-            text,
-            limit,
-            mode: SearchMode::Keyword,
-        }
-    }
-
-    pub fn semantic(text: &'a str, limit: usize) -> Self {
-        Self {
-            text,
-            limit,
-            mode: SearchMode::Semantic,
-        }
-    }
-
-    pub fn hybrid(text: &'a str, limit: usize) -> Self {
-        Self {
-            text,
-            limit,
-            mode: SearchMode::Hybrid,
-        }
-    }
-}
-
-// ── Store trait ───────────────────────────────────────────────────────────────
-
-/// Unified storage interface for long-term memory
-pub trait Store: Send + Sync {
-    /// Write or update a record (upsert)
-    fn put<'a>(
-        &'a self,
-        namespace: &'a [&'a str],
-        key: &'a str,
-        value: Value,
-    ) -> BoxFuture<'a, Result<()>>;
-
-    /// Exact fetch by key
-    fn get<'a>(
-        &'a self,
-        namespace: &'a [&'a str],
-        key: &'a str,
-    ) -> BoxFuture<'a, Result<Option<StoreItem>>>;
-
-    /// Keyword search, returns at most `limit` items (sorted by relevance)
-    fn search<'a>(
-        &'a self,
-        namespace: &'a [&'a str],
-        query: &'a str,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
-
-    /// Unified search entry point.
-    ///
-    /// By default only supports keyword search; semantic/hybrid search must be explicitly overridden by concrete implementations.
-    fn search_with<'a>(
-        &'a self,
-        namespace: &'a [&'a str],
-        query: SearchQuery<'a>,
-    ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
-        Box::pin(async move {
-            match query.mode {
-                SearchMode::Keyword => self.search(namespace, query.text, query.limit).await,
-                SearchMode::Semantic => Err(MemoryError::Unsupported(
-                    "semantic search is not supported by this Store".to_string(),
-                )
-                .into()),
-                SearchMode::Hybrid => Err(MemoryError::Unsupported(
-                    "hybrid search is not supported by this Store".to_string(),
-                )
-                .into()),
-            }
-        })
-    }
-
-    /// Delete the specified key, returns whether it existed and was deleted
-    fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>>;
-
-    /// List all namespaces matching the given `prefix`
-    fn list_namespaces<'a>(
-        &'a self,
-        prefix: Option<&'a [&'a str]>,
-    ) -> BoxFuture<'a, Result<Vec<Vec<String>>>>;
-
-    /// List all entries in the namespace (no keyword filter, no pagination limit).
-    ///
-    /// Used for scenarios that require full enumeration (e.g. `load_all()` in a task store),
-    /// avoiding infinite loops caused by empty queries matching all entries when using `search` for pagination.
-    fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
-}
-
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
 
 /// In-process memory Store, no persistence, suitable for testing and short-lived use
-///
-/// # 示例
-///
-/// ```rust,no_run
-/// use echo_core::error::Result;
-/// use echo_state::memory::store::{InMemoryStore, Store};
-/// use std::sync::Arc;
-///
-/// # async fn example() -> Result<()> {
-/// let store = Arc::new(InMemoryStore::new());
-/// store.put(&["ns"], "k1", serde_json::json!({"text": "hello"})).await?;
-/// let item = store.get(&["ns"], "k1").await?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct InMemoryStore {
     /// namespace_key -> items
     data: RwLock<HashMap<String, HashMap<String, StoreItem>>>,
@@ -343,15 +158,6 @@ impl Store for InMemoryStore {
 // ── FileStore ─────────────────────────────────────────────────────────────────
 
 /// JSON file-based persistent Store
-///
-/// Storage format:
-/// ```json
-/// {
-///   "user_123/memories": {
-///     "key1": { "namespace": [...], "key": "key1", "value": {...}, "created_at": 123, "updated_at": 456, "score": null }
-///   }
-/// }
-/// ```
 pub struct FileStore {
     path: PathBuf,
     data: RwLock<HashMap<String, HashMap<String, StoreItem>>>,
@@ -390,7 +196,6 @@ impl FileStore {
         let data = self.data.read().await;
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
-        // Atomic write: write to a temp file first then rename, avoiding data corruption from mid-write crashes
         let tmp = format!("{}.tmp", self.path.display());
         tokio::fs::write(&tmp, &json)
             .await
@@ -425,23 +230,7 @@ impl FileStore {
         self.flush().await
     }
 
-    /// Flush in-memory data to disk. Can be used in periodic flush scenarios together with `put()`
-    /// to avoid triggering disk IO on every write.
-    ///
-    /// # 示例
-    ///
-    /// ```rust,no_run
-    /// use echo_core::error::Result;
-    /// use echo_state::memory::store::{FileStore, Store};
-    ///
-    /// # async fn example() -> Result<()> {
-    /// let store = FileStore::new("~/.echo-agent/store.json")?;
-    /// store.put(&["ns"], "k1", serde_json::json!({"text": "hello"})).await?;
-    /// store.put(&["ns"], "k2", serde_json::json!({"text": "world"})).await?;
-    /// store.flush_public().await?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Flush in-memory data to disk.
     pub async fn flush_public(&self) -> Result<()> {
         self.flush().await
     }
@@ -629,6 +418,7 @@ fn value_to_searchable_text(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::memory::SearchQuery;
     use serde_json::json;
 
     #[tokio::test]

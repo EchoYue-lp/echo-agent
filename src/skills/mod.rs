@@ -1,4 +1,4 @@
-//! Skill System — agentskills.io aligned (core re-export from echo_execution::skills + builtin skills)
+//! Skill System — agentskills.io aligned (core re-export from echo_core + echo_execution)
 //!
 //! Two kinds of skills:
 //!
@@ -9,8 +9,11 @@
 //!
 //! File-based skills follow the [agentskills.io specification](https://agentskills.io/specification).
 
-/// Built-in skills provided by the Echo Agent framework.
-pub mod builtin;
+/// Built-in skills provided by the Echo Agent framework (re-export from echo_execution).
+pub mod builtin {
+    pub use echo_execution::skills::builtin::filesystem::FileSystemSkill;
+    pub use echo_execution::skills::builtin::shell::ShellSkill;
+}
 
 /// File-based external skill loading (re-export from echo_execution).
 pub mod external {
@@ -22,5 +25,13 @@ pub mod hooks {
     pub use echo_execution::skills::hooks::*;
 }
 
-// Re-export all types from echo_execution::skills
-pub use echo_execution::skills::*;
+/// Skill registry (re-export from echo_execution).
+pub mod registry {
+    pub use echo_execution::skills::registry::*;
+}
+
+// Core Skill trait + SkillInfo (defined in echo_core::tools::skill)
+pub use echo_core::tools::skill::{Skill, SkillInfo, is_path_safe, minimal_env, minimal_hook_env};
+
+// Execution-layer types (SkillRegistry, etc.)
+pub use echo_execution::skills::SkillRegistry;

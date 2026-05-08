@@ -9,56 +9,8 @@
 //! | Conversation history | [`ConversationStore`] / `SqliteConversationStore` | Transcript projection, history browsing, multi-user isolation |
 //! | Long-term memory | [`Store`] / [`FileStore`] / `SqliteStore` | Cross-session, cross-user sharing |
 //!
-//! ## Thread state persistence (Checkpointer)
-//!
-//! ```rust,no_run
-//! use echo_core::error::Result;
-//! use echo_state::memory::checkpointer::FileCheckpointer;
-//! use std::sync::Arc;
-//!
-//! # async fn example() -> Result<()> {
-//! let cp = Arc::new(FileCheckpointer::new("~/.echo-agent/checkpoints.json")?);
-//! // Wire `cp` into your own agent/runtime layer, or use it through the `echo_agent` façade.
-//! let _ = cp;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Conversation persistence (ConversationStore)
-//!
-//! ```rust,no_run
-//! use echo_core::error::Result;
-//! use echo_state::memory::conversation::{ConversationStore, NewConversation};
-//! # async fn example(store: &dyn ConversationStore) -> Result<()> {
-//! let conv = store.create_conversation(NewConversation {
-//!     conversation_id: "conv-001".to_string(),
-//!     user_id: "default".to_string(),
-//!     agent_type: None,
-//!     title: Some("Rust discussion".to_string()),
-//! }).await?;
-//! store.save_messages("conv-001", &[/* messages */]).await?;
-//! let msgs = store.get_messages("conv-001").await?;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Long-term KV storage (Store)
-//!
-//! ```rust,no_run
-//! use echo_core::error::Result;
-//! use echo_state::memory::store::{FileStore, Store};
-//! use std::sync::Arc;
-//!
-//! # async fn example() -> Result<()> {
-//! let store = Arc::new(FileStore::new("~/.echo-agent/store.json")?);
-//! store.put(&["alice", "memories"], "pref-001", serde_json::json!({
-//!     "content": "User prefers dark theme",
-//!     "importance": 8
-//! })).await?;
-//! let items = store.search(&["alice", "memories"], "theme", 3).await?;
-//! # Ok(())
-//! # }
-//! ```
+//! **Note**: Trait definitions and data types now live in `echo_core::memory`.
+//! They are re-exported here for backward compatibility.
 
 pub mod checkpointer;
 pub mod conversation;
@@ -71,30 +23,38 @@ pub mod sqlite_conversation;
 pub mod sqlite_store;
 pub mod store;
 
-pub use checkpointer::Checkpointer as ThreadStore;
-pub use checkpointer::{
-    Checkpoint, Checkpointer, FileCheckpointer, InMemoryCheckpointer, ThreadState,
-};
-pub use conversation::{
+// Re-export traits and data types from echo-core (backward compatibility)
+pub use echo_core::memory::checkpointer::{Checkpoint, Checkpointer, ThreadState};
+pub use echo_core::memory::conversation::{
     Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
-    StoredMessage, project_message, project_messages,
+    StoredMessage,
 };
-pub use embedder::{Embedder, HttpEmbedder};
+pub use echo_core::memory::embedder::Embedder;
+pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
+
+// Re-export concrete implementations from sub-modules
+pub use checkpointer::{FileCheckpointer, InMemoryCheckpointer};
+pub use conversation::{project_message, project_messages};
+pub use embedder::HttpEmbedder;
 pub use embedding_store::EmbeddingStore;
 pub use snapshot::{SnapshotManager, SnapshotPolicy, StateSnapshot};
 #[cfg(feature = "sqlite")]
 pub use sqlite_conversation::SqliteConversationStore;
 #[cfg(feature = "sqlite")]
 pub use sqlite_store::SqliteStore;
-pub use store::{FileStore, InMemoryStore, SearchMode, SearchQuery, Store, StoreItem};
+pub use store::{FileStore, InMemoryStore};
+
+// Legacy alias
+pub use Checkpointer as ThreadStore;
+
 #[cfg(test)]
 pub use test_utils::MockEmbedder;
 
 /// Test embedder (visible only in tests)
 #[cfg(test)]
 mod test_utils {
-    use crate::memory::embedder::Embedder;
     use echo_core::error::Result;
+    use echo_core::memory::embedder::Embedder;
     use futures::future::BoxFuture;
 
     pub struct MockEmbedder {

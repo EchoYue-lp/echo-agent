@@ -3,6 +3,7 @@
 //! Centralized management of tool registration/execution, Skill, Hook, MCP,
 //! SubAgent, Sandbox, and other components directly related to tool invocation.
 
+#[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentRegistry;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 /// environment.
 pub(crate) struct ToolExecutionSubsystem {
     pub(crate) tool_manager: ToolManager,
+    #[cfg(feature = "subagent")]
     pub(crate) subagent_registry: Arc<SubagentRegistry>,
     #[cfg(feature = "tasks")]
     pub(crate) task_manager: Arc<TaskManager>,

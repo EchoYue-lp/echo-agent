@@ -11,7 +11,7 @@
 use futures::future::BoxFuture;
 
 use crate::error::ToolError;
-use crate::memory::store::{SearchQuery, Store, StoreItem};
+use crate::memory::{SearchQuery, Store, StoreItem};
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use serde_json::{Value, json};
 use std::sync::Arc;

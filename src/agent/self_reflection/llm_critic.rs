@@ -1,11 +1,11 @@
 //! LLM-driven Critic implementation
 
-use crate::agent::self_reflection::critic::Critic;
-use crate::agent::self_reflection::types::{Critique, CritiqueOutput, critique_output_schema};
 use crate::error::{ReactError, Result};
 use crate::llm;
 use crate::llm::ResponseFormat;
 use crate::llm::types::Message;
+use echo_core::agent::Critic;
+use echo_core::agent::{Critique, CritiqueOutput, critique_output_schema};
 use futures::future::BoxFuture;
 use reqwest::Client;
 use std::sync::Arc;
