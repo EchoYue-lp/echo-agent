@@ -105,6 +105,8 @@ use crate::tasks::executor::{TaskExecuteFn, TaskExecutor, TaskExecutorConfig};
 use crate::tasks::{TaskManager, TaskStatus};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -806,7 +808,9 @@ impl Agent for PlanExecuteAgent {
         })
     }
 
-    fn reset(&self) {}
+    fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
 }
 
 #[cfg(test)]

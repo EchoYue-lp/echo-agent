@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult};
+pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult, ToolRiskLevel};
 
 impl ToolRegistrar for ToolManager {
     fn register(&mut self, tool: Box<dyn Tool>) {
@@ -199,7 +199,29 @@ impl ToolManager {
         Err(last_err.unwrap_or_else(|| ToolError::NotFound(tool_name.to_string()).into()))
     }
 
-    /// 验证工具参数
+    /// Validate tool parameters asynchronously.
+    ///
+    /// This is the preferred method — it works correctly inside a Tokio runtime.
+    pub async fn validate_tool_parameters_async(
+        &self,
+        tool_name: &str,
+        parameters: &ToolParameters,
+    ) -> Result<()> {
+        let tool = self
+            .get_tool(tool_name)
+            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+        tool.validate_parameters(parameters).await
+    }
+
+    /// Validate tool parameters synchronously.
+    ///
+    /// **Warning:** This uses `block_on()` internally and will **panic** if called
+    /// from within a Tokio runtime. Use [`Self::validate_tool_parameters_async`]
+    /// in async contexts.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `validate_tool_parameters_async` instead; this method panics inside Tokio"
+    )]
     pub fn validate_tool_parameters(
         &self,
         tool_name: &str,

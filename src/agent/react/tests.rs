@@ -1,11 +1,11 @@
 use super::ReactAgent;
 use crate::agent::Agent;
 use crate::agent::config::AgentConfig;
-use crate::llm::types::Message;
+use crate::llm::types::{Message, Role};
 use crate::sandbox::SandboxManager;
 use crate::skills::builtin::ShellSkill;
 use crate::skills::external::loader::DiscoveryScope;
-use crate::skills::hooks::{HookAction, HookRule, HooksDefinition};
+use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
 use crate::testing::{FailingMockAgent, MockAgent, MockTool};
 use serde_json::json;
 use std::sync::Arc;
@@ -46,7 +46,7 @@ async fn react_agent_reset_clears_to_system_only() {
         "After appending should have 4 messages"
     );
 
-    agent.reset();
+    agent.reset().await;
     let (count_after_reset, _) = agent.context_stats().await;
     assert_eq!(
         count_after_reset, 1,
@@ -60,9 +60,9 @@ async fn react_agent_reset_is_idempotent() {
     let config = AgentConfig::new("test-model", "test_agent", "System prompt");
     let agent = ReactAgent::new(config);
 
-    agent.reset();
-    agent.reset();
-    agent.reset();
+    agent.reset().await;
+    agent.reset().await;
+    agent.reset().await;
 
     let (count, _) = agent.context_stats().await;
     assert_eq!(
@@ -84,11 +84,11 @@ async fn react_agent_reset_preserves_system_prompt() {
         .lock()
         .await
         .push(Message::user("Some random message".to_string()));
-    agent.reset();
+    agent.reset().await;
 
     let messages = agent.memory.context.lock().await.messages().to_vec();
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].role, "system");
+    assert_eq!(messages[0].role, Role::System);
     assert_eq!(messages[0].content.as_text_ref().unwrap_or(""), system);
 }
 
@@ -216,7 +216,7 @@ async fn react_agent_get_messages() {
 
     let messages = agent.get_messages().await;
     assert_eq!(messages.len(), 1, "Initially only has system message");
-    assert_eq!(messages[0].role, "system");
+    assert_eq!(messages[0].role, Role::System);
 
     agent
         .memory
@@ -372,7 +372,7 @@ async fn trait_reset_callable_via_dyn_agent() {
     let r1 = agent.chat("msg1").await.unwrap();
     assert_eq!(r1, "r1");
 
-    agent.reset();
+    agent.reset().await;
 
     let r2 = agent.chat("msg2").await.unwrap();
     assert_eq!(r2, "r2");
@@ -439,7 +439,7 @@ async fn mock_agent_reset_clears_call_history() {
     agent.chat("Round1 Message2").await.unwrap();
     assert_eq!(agent.call_count(), 2, "before reset should have 2 records");
 
-    agent.reset();
+    agent.reset().await;
     assert_eq!(
         agent.call_count(),
         0,
@@ -491,7 +491,7 @@ async fn failing_mock_agent_reset_clears_calls() {
     agent.chat("Task2").await.unwrap_err();
     assert_eq!(agent.call_count(), 2);
 
-    agent.reset();
+    agent.reset().await;
     assert_eq!(
         agent.call_count(),
         0,
@@ -515,7 +515,7 @@ async fn mock_agent_full_chat_lifecycle() {
     agent.chat("Round 1: Question B").await.unwrap();
     assert_eq!(agent.call_count(), 2);
 
-    agent.reset();
+    agent.reset().await;
     assert_eq!(agent.call_count(), 0);
 
     agent.chat("Round 2: Question C").await.unwrap();
@@ -788,7 +788,7 @@ async fn subagent_reset_independence() {
         .push(Message::user("Child msg".to_string()));
 
     // Reset parent agent
-    parent.reset();
+    parent.reset().await;
 
     // Parent agent context is cleared
     let (parent_count, _) = parent.context_stats().await;
@@ -1038,24 +1038,26 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
     ));
 
     let mut hooks = agent.tools.hook_registry.write().await;
-    hooks.register(
-        "hook-skill",
-        "/tmp",
-        HooksDefinition {
-            pre_tool_use: vec![HookRule {
-                matcher: "test_tool".into(),
-                hooks: vec![HookAction::Prompt {
-                    prompt: "pre-hook guidance".into(),
-                }],
+    let mut hook_def = HooksDefinition::default();
+    hook_def.add_rules(
+        HookEvent::PreToolUse,
+        vec![HookRule {
+            matcher: "test_tool".into(),
+            hooks: vec![HookAction::Prompt {
+                prompt: "pre-hook guidance".into(),
             }],
-            post_tool_use: vec![HookRule {
-                matcher: "test_tool".into(),
-                hooks: vec![HookAction::Prompt {
-                    prompt: "post-hook guidance".into(),
-                }],
-            }],
-        },
+        }],
     );
+    hook_def.add_rules(
+        HookEvent::PostToolUse,
+        vec![HookRule {
+            matcher: "test_tool".into(),
+            hooks: vec![HookAction::Prompt {
+                prompt: "post-hook guidance".into(),
+            }],
+        }],
+    );
+    hooks.register("hook-skill", "/tmp", hook_def);
     drop(hooks);
 
     let result = agent.execute_tool("test_tool", &json!({})).await.unwrap();

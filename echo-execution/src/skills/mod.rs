@@ -17,7 +17,7 @@ pub mod registry;
 // -- Convenience re-exports --
 
 pub use echo_core::error::{ReactError, Result, ToolError};
-pub use echo_core::tools::skill::{Skill, SkillInfo, is_path_safe, minimal_env, minimal_hook_env};
+pub use echo_core::tools::skill::{Skill, SkillInfo, is_path_safe, minimal_env, minimal_hook_env, minimal_hook_env_with_context};
 
 // -- Re-exports --
 

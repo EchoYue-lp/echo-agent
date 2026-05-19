@@ -54,15 +54,23 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
 
-/// Shareable agent handle for safe access across async tasks
-pub type SharedAgent = Arc<AsyncMutex<Box<dyn Agent>>>;
+/// Shareable agent handle for safe access across async tasks.
+///
+/// Because the [`Agent`] trait takes `&self` for all methods and concrete
+/// implementations (e.g. `ReactAgent`) use interior mutability for shared
+/// state, the outer lock is unnecessary — `Arc<dyn Agent>` is sufficient.
+pub type SharedAgent = Arc<dyn Agent>;
 
 /// Wrap arbitrary `impl Agent` as a [`SharedAgent`]
 pub fn shared_agent(agent: impl Agent + 'static) -> SharedAgent {
-    Arc::new(AsyncMutex::new(Box::new(agent)))
+    Arc::new(agent)
 }
+
+/// Backward-compatible type alias for call sites that still reference the
+/// old `AsyncMutex` pattern. Marked deprecated to encourage migration.
+#[deprecated(note = "Use `SharedAgent` (now `Arc<dyn Agent>`) directly")]
+pub type SharedAgentMutex = Arc<tokio::sync::Mutex<Box<dyn Agent>>>;
 
 /// Step-by-step events emitted during workflow execution.
 ///

@@ -448,8 +448,8 @@ mod tests {
 
         assert_eq!(state.message_count(), 2);
         let msgs = state.messages();
-        assert_eq!(msgs[0].role, "user");
-        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[0].role, "user".into());
+        assert_eq!(msgs[1].role, "assistant".into());
     }
 
     #[test]

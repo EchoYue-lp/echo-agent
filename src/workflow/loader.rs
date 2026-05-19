@@ -140,9 +140,9 @@ impl WorkflowDefinition {
     /// Load from a YAML file
     pub fn from_yaml(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
-            ReactError::Agent(AgentError::InitializationFailed(format!(
+            ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                 "Failed to read workflow YAML file: {e}"
-            )))
+            ))))
         })?;
         Self::from_yaml_str(&content)
     }
@@ -150,18 +150,18 @@ impl WorkflowDefinition {
     /// Parse from a YAML string
     pub fn from_yaml_str(yaml: &str) -> Result<Self> {
         serde_yaml::from_str(yaml).map_err(|e| {
-            ReactError::Agent(AgentError::InitializationFailed(format!(
+            ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                 "Failed to parse workflow YAML: {e}"
-            )))
+            ))))
         })
     }
 
     /// Load from a JSON file
     pub fn from_json(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
-            ReactError::Agent(AgentError::InitializationFailed(format!(
+            ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                 "Failed to read workflow JSON file: {e}"
-            )))
+            ))))
         })?;
         Self::from_json_str(&content)
     }
@@ -169,9 +169,9 @@ impl WorkflowDefinition {
     /// Parse from a JSON string
     pub fn from_json_str(json: &str) -> Result<Self> {
         serde_json::from_str(json).map_err(|e| {
-            ReactError::Agent(AgentError::InitializationFailed(format!(
+            ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                 "Failed to parse workflow JSON: {e}"
-            )))
+            ))))
         })
     }
 
@@ -214,17 +214,20 @@ impl WorkflowDefinition {
                     builder = builder.add_router_node(&node_def.name);
                 }
                 "function" => {
-                    return Err(ReactError::Agent(AgentError::InitializationFailed(
-                        format!(
+                    return Err(ReactError::Agent(Box::new(
+                        AgentError::InitializationFailed(format!(
                             "Node type 'function' is not yet supported for node '{}'. \
                              Use 'agent' or 'router' instead, or register a function node manually.",
                             node_def.name
-                        ),
+                        )),
                     )));
                 }
                 other => {
-                    return Err(ReactError::Agent(AgentError::InitializationFailed(
-                        format!("Unknown node type '{}' for node '{}'", other, node_def.name),
+                    return Err(ReactError::Agent(Box::new(
+                        AgentError::InitializationFailed(format!(
+                            "Unknown node type '{}' for node '{}'",
+                            other, node_def.name
+                        )),
                     )));
                 }
             }

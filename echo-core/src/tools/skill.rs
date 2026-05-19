@@ -138,6 +138,22 @@ pub fn minimal_hook_env(skill_dir: &str, session_id: &str) -> HashMap<String, St
     env
 }
 
+/// Return minimal env for hook execution with additional lifecycle context.
+///
+/// Extends [`minimal_hook_env`] with `HOOK_EVENT` and `CWD` variables
+/// for lifecycle hooks that need to know what triggered them.
+pub fn minimal_hook_env_with_context(
+    skill_dir: &str,
+    session_id: &str,
+    hook_event: &str,
+    cwd: &str,
+) -> HashMap<String, String> {
+    let mut env = minimal_hook_env(skill_dir, session_id);
+    env.insert("HOOK_EVENT".to_string(), hook_event.to_string());
+    env.insert("CWD".to_string(), cwd.to_string());
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

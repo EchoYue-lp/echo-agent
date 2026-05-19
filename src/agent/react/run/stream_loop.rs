@@ -11,7 +11,7 @@ use futures::future::join_all;
 use futures::stream::BoxStream;
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{Instrument, debug, info, info_span};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 /// Streaming execution mode configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,12 +283,54 @@ impl ReactAgent {
 
             self.log_user_input_audit(&text).await;
 
+            // Fire UserPromptSubmit hook — allows blocking or injecting context
+            {
+                let hook_ctx = crate::skills::hooks::HookContext::for_user_prompt_submit(
+                    &text,
+                    None,
+                    self.config.session_id.as_deref().unwrap_or(""),
+                    &self.config.agent_name,
+                );
+                let registry = self.tools.hook_registry.read().await.clone();
+                let prompt_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                if prompt_result.block {
+                    yield AgentEvent::FinalAnswer(
+                        format!("Blocked by UserPromptSubmit hook: {}",
+                            prompt_result.block_reason.unwrap_or_default())
+                    );
+                    // Fire SessionEnd hook before exiting
+                    self.fire_lifecycle_hook(
+                        crate::skills::hooks::HookEvent::SessionEnd,
+                        Some("blocked"),
+                    ).await;
+                    return;
+                }
+                if let Some(ctx) = &prompt_result.injected_context {
+                    context.lock().await.push(
+                        crate::llm::types::Message::system(ctx.clone())
+                    );
+                }
+                for msg in &prompt_result.messages {
+                    context.lock().await.push(
+                        crate::llm::types::Message::system(msg.clone())
+                    );
+                }
+            }
+
+            let mut stop_hook_continued = false;
+
             for iteration in 0..self.config.max_iterations {
                 for cb in &callbacks {
                     cb.on_iteration(&agent, iteration).await;
                 }
 
                 debug!(agent = %agent, iteration = iteration + 1, "--- Streaming iteration{label} ---");
+
+                // Fire PreCompact hooks before compression
+                self.fire_lifecycle_hook(
+                    crate::skills::hooks::HookEvent::PreCompact,
+                    Some("auto"),
+                ).await;
 
                 let prepare_result = context.lock().await.prepare(None).await?;
 
@@ -299,6 +341,35 @@ impl ReactAgent {
                         before_tokens: stats.before_tokens,
                         after_tokens: stats.after_tokens,
                     };
+                    // Fire PostCompact hook after compression with actual stats
+                    {
+                        let hook_stats = crate::skills::hooks::CompressHookStats {
+                            before_count: stats.before_count,
+                            after_count: stats.after_count,
+                            before_tokens: stats.before_tokens,
+                            after_tokens: stats.after_tokens,
+                        };
+                        let hook_ctx = crate::skills::hooks::HookContext::for_post_compact(
+                            &hook_stats,
+                            "auto",
+                            self.config.session_id.as_deref().unwrap_or(""),
+                            &self.config.agent_name,
+                        );
+                        let registry = self.tools.hook_registry.read().await.clone();
+                        let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                        if let Some(ctx) = &post_result.injected_context {
+                            context.lock().await.push(
+                                crate::llm::types::Message::system(
+                                    format!("[Hook:PostCompact] {}", ctx)
+                                ),
+                            );
+                        }
+                        for msg in &post_result.messages {
+                            context.lock().await.push(
+                                crate::llm::types::Message::system(msg.clone())
+                            );
+                        }
+                    }
                 }
 
                 let messages = prepare_result.messages;
@@ -501,6 +572,44 @@ impl ReactAgent {
                                         self.save_checkpoint().await;
 
                                         yield AgentEvent::FinalAnswer(output);
+
+                                        // Fire Stop hook — if it returns continue_reason, keep iterating
+                                        {
+                                            let hook_ctx = crate::skills::hooks::HookContext::for_stop(
+                                                None,
+                                                self.config.session_id.as_deref().unwrap_or(""),
+                                                &self.config.agent_name,
+                                                stop_hook_continued,
+                                            );
+                                            let registry = self.tools.hook_registry.read().await.clone();
+                                            let stop_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                                            if stop_result.block {
+                                                warn!(agent = %agent, reason = ?stop_result.block_reason, "Stop hook blocked but answer already yielded in stream");
+                                            }
+                                            if let Some(reason) = &stop_result.continue_reason {
+                                                if !stop_hook_continued {
+                                                    info!(agent = %agent, reason = %reason, "Stop hook requested continuation");
+                                                    context.lock().await.push(
+                                                        crate::llm::types::Message::system(
+                                                            format!("[Hook:Stop] Continue: {}", reason)
+                                                        )
+                                                    );
+                                                    stop_hook_continued = true;
+                                                    continue; // continue iteration loop
+                                                }
+                                            }
+                                            for msg in &stop_result.messages {
+                                                context.lock().await.push(
+                                                    crate::llm::types::Message::system(msg.clone())
+                                                );
+                                            }
+                                        }
+
+                                        // Fire SessionEnd hook before exiting
+                                        self.fire_lifecycle_hook(
+                                            crate::skills::hooks::HookEvent::SessionEnd,
+                                            Some("complete"),
+                                        ).await;
                                         break;
                                     }
                                 }
@@ -559,6 +668,44 @@ impl ReactAgent {
                                     self.save_checkpoint().await;
 
                                     yield AgentEvent::FinalAnswer(output);
+
+                                    // Fire Stop hook — if it returns continue_reason, keep iterating
+                                    {
+                                        let hook_ctx = crate::skills::hooks::HookContext::for_stop(
+                                            None,
+                                            self.config.session_id.as_deref().unwrap_or(""),
+                                            &self.config.agent_name,
+                                            stop_hook_continued,
+                                        );
+                                        let registry = self.tools.hook_registry.read().await.clone();
+                                        let stop_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                                        if stop_result.block {
+                                            warn!(agent = %agent, reason = ?stop_result.block_reason, "Stop hook blocked but answer already yielded in stream");
+                                        }
+                                        if let Some(reason) = &stop_result.continue_reason {
+                                            if !stop_hook_continued {
+                                                info!(agent = %agent, reason = %reason, "Stop hook requested continuation");
+                                                context.lock().await.push(
+                                                    crate::llm::types::Message::system(
+                                                        format!("[Hook:Stop] Continue: {}", reason)
+                                                    )
+                                                );
+                                                stop_hook_continued = true;
+                                                continue; // continue iteration loop
+                                            }
+                                        }
+                                        for msg in &stop_result.messages {
+                                            context.lock().await.push(
+                                                crate::llm::types::Message::system(msg.clone())
+                                            );
+                                        }
+                                    }
+
+                                    // Fire SessionEnd hook before exiting
+                                    self.fire_lifecycle_hook(
+                                        crate::skills::hooks::HookEvent::SessionEnd,
+                                        Some("complete"),
+                                    ).await;
                                     return;
                                 }
                             }
@@ -594,18 +741,71 @@ impl ReactAgent {
                     self.save_checkpoint().await;
 
                     yield AgentEvent::FinalAnswer(content_buffer);
+
+                    // Fire Stop hook — if it returns continue_reason, keep iterating
+                    {
+                        let hook_ctx = crate::skills::hooks::HookContext::for_stop(
+                            None,
+                            self.config.session_id.as_deref().unwrap_or(""),
+                            &self.config.agent_name,
+                            stop_hook_continued,
+                        );
+                        let registry = self.tools.hook_registry.read().await.clone();
+                        let stop_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                        if stop_result.block {
+                            warn!(agent = %agent, reason = ?stop_result.block_reason, "Stop hook blocked but answer already yielded in stream");
+                        }
+                        if let Some(reason) = &stop_result.continue_reason {
+                            if !stop_hook_continued {
+                                info!(agent = %agent, reason = %reason, "Stop hook requested continuation");
+                                context.lock().await.push(
+                                    crate::llm::types::Message::system(
+                                        format!("[Hook:Stop] Continue: {}", reason)
+                                    )
+                                );
+                                stop_hook_continued = true;
+                                continue; // continue iteration loop
+                            }
+                        }
+                        for msg in &stop_result.messages {
+                            context.lock().await.push(
+                                crate::llm::types::Message::system(msg.clone())
+                            );
+                        }
+                    }
+
+                    // Fire SessionEnd hook before exiting
+                    self.fire_lifecycle_hook(
+                        crate::skills::hooks::HookEvent::SessionEnd,
+                        Some("complete"),
+                    ).await;
                     return;
                 } else {
-                    Err(ReactError::Agent(AgentError::NoResponse {
+                    Err(ReactError::Agent(Box::new(AgentError::NoResponse {
                         model: self.config.model_name.clone(),
                         agent: self.config.agent_name.clone(),
-                    }))?;
+                    })))?;
                 }
             }
 
-            Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+            // Fire SessionEnd hook for max iterations exceeded
+            self.fire_lifecycle_hook(
+                crate::skills::hooks::HookEvent::SessionEnd,
+                Some("max_iterations"),
+            ).await;
+
+            // Fire StopFailure hook for max iterations
+            let sf_result = self.fire_lifecycle_hook(
+                crate::skills::hooks::HookEvent::StopFailure,
+                Some("max_iterations"),
+            ).await;
+            if !sf_result.messages.is_empty() || sf_result.injected_context.is_some() {
+                warn!(agent = %agent, "StopFailure hook (max_iterations) produced output that cannot be injected (terminal path)");
+            }
+
+            Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
                 self.config.max_iterations,
-            )))?;
+            ))))?;
         };
 
         Ok(Box::pin(stream))

@@ -67,18 +67,18 @@ impl ImageFetchTool {
     #[allow(dead_code)]
     async fn download_image_as_base64(&self, url: &str) -> Result<(String, String)> {
         let response = self.client.get(url).send().await.map_err(|e| {
-            echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+            echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                 tool: "image_fetch".into(),
                 message: format!("Failed to download image: {}", e),
-            })
+            }))
         })?;
 
         if !response.status().is_success() {
             return Err(echo_core::error::ReactError::Tool(
-                ToolError::ExecutionFailed {
+                Box::new(ToolError::ExecutionFailed {
                     tool: "image_fetch".into(),
                     message: format!("HTTP error: {}", response.status()),
-                },
+                }),
             ));
         }
 
@@ -95,10 +95,10 @@ impl ImageFetchTool {
 
         // Download binary data
         let bytes = response.bytes().await.map_err(|e| {
-            echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+            echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                 tool: "image_fetch".into(),
                 message: format!("Failed to read image data: {}", e),
-            })
+            }))
         })?;
 
         // Encode to base64
@@ -195,10 +195,10 @@ impl Tool for ImageFetchTool {
 
             // Download image
             let response = self.client.get(url).send().await.map_err(|e| {
-                echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+                echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                     tool: "image_fetch".into(),
                     message: format!("Failed to download image: {}", e),
-                })
+                }))
             })?;
 
             if !response.status().is_success() {
@@ -231,10 +231,10 @@ impl Tool for ImageFetchTool {
 
             // Download binary data
             let bytes = response.bytes().await.map_err(|e| {
-                echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+                echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                     tool: "image_fetch".into(),
                     message: format!("Failed to read image data: {}", e),
-                })
+                }))
             })?;
 
             // Verify size again after download

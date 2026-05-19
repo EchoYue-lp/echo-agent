@@ -89,6 +89,54 @@ impl ReactAgent {
     ) -> Result<Option<Value>> {
         let agent = &self.config.agent_name;
 
+        // ── Phase -1: PermissionRequest hook ──
+        {
+            let hook_ctx = crate::skills::hooks::HookContext::for_permission_request(
+                tool_name,
+                input,
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
+            );
+            let registry = self.tools.hook_registry.read().await.clone();
+            let perm_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            // Check block first: a hook may signal block via exit code 2 or
+            // {"decision": "block"} without setting a PermissionDecision.
+            if perm_result.block {
+                let reason = perm_result
+                    .block_reason
+                    .unwrap_or_else(|| "blocked by hook".to_string());
+                let hook_result = self.log_permission_denied(tool_name, &[], &reason).await;
+                let retry_hint = if hook_result.retry {
+                    " (retry allowed by hook)"
+                } else {
+                    ""
+                };
+                return Err(ReactError::Other(format!(
+                    "Hook blocked permission for {tool_name}: {reason}{retry_hint}"
+                )));
+            }
+            if let Some(decision) = perm_result.permission_decision {
+                match decision {
+                    crate::tools::permission::PermissionDecision::Allow => {
+                        info!(agent = %agent, tool = %tool_name, "🔓 PermissionRequest hook auto-approved");
+                        return Ok(None);
+                    }
+                    crate::tools::permission::PermissionDecision::Deny { reason } => {
+                        let hook_result = self.log_permission_denied(tool_name, &[], &reason).await;
+                        let retry_hint = if hook_result.retry {
+                            " (retry allowed by hook)"
+                        } else {
+                            ""
+                        };
+                        return Err(ReactError::Other(format!(
+                            "Hook denied permission for {tool_name}: {reason}{retry_hint}"
+                        )));
+                    }
+                    _ => {} // Ask/RequireApproval: fall through to normal approval flow
+                }
+            }
+        }
+
         // ── Phase 0: PermissionService unified pipeline ──
         if let Some(service) = &self.approval.permission_service {
             self.flush_pending_permission_rules(service).await;
@@ -110,10 +158,16 @@ impl ReactAgent {
                     return Ok(modified);
                 }
                 crate::tools::permission::PermissionDecision::Deny { reason } => {
-                    self.log_permission_denied(tool_name, &tool_perms, &reason)
+                    let hook_result = self
+                        .log_permission_denied(tool_name, &tool_perms, &reason)
                         .await;
+                    let retry_hint = if hook_result.retry {
+                        " (retry allowed by hook)"
+                    } else {
+                        ""
+                    };
                     return Err(ReactError::Other(format!(
-                        "Tool {tool_name} has insufficient permissions: {reason}"
+                        "Tool {tool_name} has insufficient permissions: {reason}{retry_hint}"
                     )));
                 }
                 crate::tools::permission::PermissionDecision::RequireApproval => {
@@ -140,10 +194,16 @@ impl ReactAgent {
                 match decision {
                     crate::tools::permission::PermissionDecision::Allow => {}
                     crate::tools::permission::PermissionDecision::Deny { reason } => {
-                        self.log_permission_denied(tool_name, &tool_perms, &reason)
+                        let hook_result = self
+                            .log_permission_denied(tool_name, &tool_perms, &reason)
                             .await;
+                        let retry_hint = if hook_result.retry {
+                            " (retry allowed by hook)"
+                        } else {
+                            ""
+                        };
                         return Err(ReactError::Other(format!(
-                            "Tool {tool_name} has insufficient permissions: {reason}"
+                            "Tool {tool_name} has insufficient permissions: {reason}{retry_hint}"
                         )));
                     }
                     crate::tools::permission::PermissionDecision::RequireApproval => {
@@ -169,15 +229,16 @@ impl ReactAgent {
         Ok(None)
     }
 
-    /// Log permission denied audit event
+    /// Log permission denied audit event and fire PermissionDenied hook
     #[cfg(feature = "human-loop")]
     async fn log_permission_denied(
         &self,
         tool_name: &str,
         tool_perms: &[crate::tools::permission::ToolPermission],
         reason: &str,
-    ) {
+    ) -> crate::skills::hooks::HookResult {
         let agent = &self.config.agent_name;
+        let session_id = self.config.session_id.clone().unwrap_or_default();
         warn!(agent = %agent, tool = %tool_name, reason = %reason, "🔒 Permission denied");
         if let Some(al) = &self.guard.audit_logger {
             let event = crate::audit::AuditEvent::now(
@@ -191,6 +252,18 @@ impl ReactAgent {
             );
             let _ = al.log(event).await;
         }
+
+        // Fire PermissionDenied hook
+        let hook_ctx = crate::skills::hooks::HookContext::for_permission_denied(
+            tool_name,
+            &serde_json::json!({}),
+            reason,
+            true, // retry_allowed: model can retry with different params
+            &session_id,
+            agent,
+        );
+        let registry = self.tools.hook_registry.read().await.clone();
+        registry.run_lifecycle_hooks(&hook_ctx).await
     }
 
     /// Handle Ask decision — confirm tool execution with the user
@@ -252,6 +325,32 @@ impl ReactAgent {
     ) -> Result<Option<Value>> {
         let agent = &self.config.agent_name;
         let approval_start = std::time::Instant::now();
+
+        // Fire Notification hook (permission_prompt) before requesting human approval
+        {
+            let hook_ctx = crate::skills::hooks::HookContext::for_notification(
+                "permission_prompt",
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
+            );
+            let registry = self.tools.hook_registry.read().await.clone();
+            let notif_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            // If a hook provides a permission decision, short-circuit the approval flow
+            if let Some(decision) = notif_result.permission_decision {
+                match decision {
+                    crate::tools::permission::PermissionDecision::Allow => {
+                        info!(agent = %agent, tool = %tool_name, "🔓 Notification hook auto-approved");
+                        return Ok(None);
+                    }
+                    crate::tools::permission::PermissionDecision::Deny { reason } => {
+                        return Err(ReactError::Other(format!(
+                            "Hook auto-denied {tool_name}: {reason}"
+                        )));
+                    }
+                    _ => {} // Ask/RequireApproval: continue to human approval
+                }
+            }
+        }
 
         // Dynamically compute risk level based on tool permissions
         let tool_perms = self

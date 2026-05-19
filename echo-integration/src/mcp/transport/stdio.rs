@@ -42,22 +42,22 @@ impl StdioTransport {
         cmd.stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
-            ReactError::Mcp(McpError::ConnectionFailed(format!(
+            ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                 "无法启动 MCP 服务端 '{}': {}",
                 command, e
-            )))
+            ))))
         })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
-            ReactError::Mcp(McpError::ConnectionFailed(
+            ReactError::Mcp(Box::new(McpError::ConnectionFailed(
                 "无法获取子进程 stdin".to_string(),
-            ))
+            )))
         })?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
-            ReactError::Mcp(McpError::ConnectionFailed(
+            ReactError::Mcp(Box::new(McpError::ConnectionFailed(
                 "无法获取子进程 stdout".to_string(),
-            ))
+            )))
         })?;
 
         let stderr = child.stderr.take();
@@ -161,16 +161,16 @@ impl McpTransport for StdioTransport {
             }
 
             let line = serde_json::to_string(&request)
-                .map_err(|e| ReactError::Mcp(McpError::ProtocolError(e.to_string())))?
+                .map_err(|e| ReactError::Mcp(Box::new(McpError::ProtocolError(e.to_string()))))?
                 + "\n";
 
             {
                 let mut stdin = self.stdin.lock().await;
                 stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                    ReactError::Mcp(McpError::ProtocolError(format!("写入 stdin 失败: {}", e)))
+                    ReactError::Mcp(Box::new(McpError::ProtocolError(format!("写入 stdin 失败: {}", e))))
                 })?;
                 stdin.flush().await.map_err(|e| {
-                    ReactError::Mcp(McpError::ProtocolError(format!("flush stdin 失败: {}", e)))
+                    ReactError::Mcp(Box::new(McpError::ProtocolError(format!("flush stdin 失败: {}", e))))
                 })?;
             }
 
@@ -182,15 +182,15 @@ impl McpTransport for StdioTransport {
                 Ok(Err(_)) => {
                     // oneshot 发送端被丢弃（后台 task 崩溃）
                     self.pending.lock().await.remove(&id);
-                    Err(ReactError::Mcp(McpError::TransportClosed))
+                    Err(ReactError::Mcp(Box::new(McpError::TransportClosed)))
                 }
                 Err(_) => {
                     // 超时，清理 pending entry 防止泄漏
                     self.pending.lock().await.remove(&id);
-                    Err(ReactError::Mcp(McpError::ProtocolError(format!(
+                    Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                         "等待响应超时 (id={}, 超时 {:?})",
                         id, RESPONSE_TIMEOUT
-                    ))))
+                    )))))
                 }
             }
         })
@@ -199,15 +199,15 @@ impl McpTransport for StdioTransport {
     fn notify(&self, notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let line = serde_json::to_string(&notification)
-                .map_err(|e| ReactError::Mcp(McpError::ProtocolError(e.to_string())))?
+                .map_err(|e| ReactError::Mcp(Box::new(McpError::ProtocolError(e.to_string()))))?
                 + "\n";
 
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                ReactError::Mcp(McpError::ProtocolError(format!("写入通知失败: {}", e)))
+                ReactError::Mcp(Box::new(McpError::ProtocolError(format!("写入通知失败: {}", e))))
             })?;
             stdin.flush().await.map_err(|e| {
-                ReactError::Mcp(McpError::ProtocolError(format!("flush 通知失败: {}", e)))
+                ReactError::Mcp(Box::new(McpError::ProtocolError(format!("flush 通知失败: {}", e))))
             })?;
             Ok(())
         })

@@ -71,7 +71,7 @@ impl OllamaClient {
                 });
 
                 OllamaMessage {
-                    role: m.role.clone(),
+                    role: m.role.as_str().to_string(),
                     content: m.content.as_text().unwrap_or_default(),
                     tool_calls,
                 }
@@ -132,7 +132,7 @@ impl OllamaClient {
         };
 
         let message = Message {
-            role: msg.role.clone(),
+            role: msg.role.clone().into(),
             content: if msg.content.is_empty() {
                 echo_core::llm::types::MessageContent::Empty
             } else {
@@ -289,7 +289,7 @@ impl LlmClient for OllamaClient {
 
                                     yield Ok(ChatChunk {
                                         delta: DeltaMessage {
-                                            role: Some(resp.message.role),
+                                            role: Some(resp.message.role.as_str().to_string()),
                                             content,
                                             reasoning_content: None,
                                             tool_calls: None,

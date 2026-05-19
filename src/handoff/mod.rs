@@ -45,7 +45,6 @@ use crate::llm::types::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 pub use tool::HandoffTool;
@@ -143,7 +142,7 @@ pub struct HandoffResult {
 
 /// Handoff manager: responsible for Agent registration and handoff execution dispatch
 pub struct HandoffManager {
-    agents: HashMap<String, Arc<Mutex<Box<dyn Agent>>>>,
+    agents: HashMap<String, Arc<dyn Agent>>,
 }
 
 impl HandoffManager {
@@ -157,18 +156,17 @@ impl HandoffManager {
     /// Register an Agent (accepts any type implementing the Agent trait)
     pub fn register(&mut self, name: impl Into<String>, agent: impl Agent + 'static) {
         let name = name.into();
-        self.agents
-            .insert(name, Arc::new(Mutex::new(Box::new(agent))));
+        self.agents.insert(name, Arc::new(agent));
     }
 
     /// Register a boxed Agent
     pub fn register_boxed(&mut self, name: impl Into<String>, agent: Box<dyn Agent>) {
         let name = name.into();
-        self.agents.insert(name, Arc::new(Mutex::new(agent)));
+        self.agents.insert(name, Arc::new(agent));
     }
 
-    /// Register a pre-wrapped `Arc<Mutex<Box<dyn Agent>>>` agent
-    pub fn register_shared(&mut self, name: impl Into<String>, agent: Arc<Mutex<Box<dyn Agent>>>) {
+    /// Register a pre-wrapped `Arc<dyn Agent>` agent
+    pub fn register_shared(&mut self, name: impl Into<String>, agent: Arc<dyn Agent>) {
         self.agents.insert(name.into(), agent);
     }
 
@@ -195,11 +193,11 @@ impl HandoffManager {
         context: HandoffContext,
     ) -> Result<HandoffResult> {
         let agent_arc = self.agents.get(&target.agent_name).ok_or_else(|| {
-            ReactError::Agent(AgentError::InitializationFailed(format!(
+            ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                 "Handoff target agent '{}' is not registered. Available agents: {:?}",
                 target.agent_name,
                 self.registered_agents()
-            )))
+            ))))
         })?;
 
         info!(
@@ -237,7 +235,7 @@ impl HandoffManager {
                     .filter_map(|msg| {
                         msg.content
                             .as_text_ref()
-                            .map(|c| format!("{}: {}", msg.role, c))
+                            .map(|c| format!("{}: {}", msg.role.as_str(), c))
                     })
                     .collect();
                 prompt_parts.push(format!(
@@ -265,7 +263,7 @@ impl HandoffManager {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
-            let agent = agent_arc_clone.lock().await;
+            let agent = agent_arc_clone.as_ref();
             let result = agent.execute(&full_prompt).await;
             let _ = tx.send(result);
         });

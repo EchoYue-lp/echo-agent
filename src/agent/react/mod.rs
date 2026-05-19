@@ -48,8 +48,10 @@ use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, info, info_span};
 
 use crate::agent::react::subsystems::approval::ApprovalSubsystem;
 use crate::agent::react::subsystems::guard::GuardSubsystem;
@@ -187,11 +189,31 @@ impl ReactAgent {
         let task_manager = Arc::new(TaskManager::default());
         #[cfg(feature = "subagent")]
         let subagent_registry = Arc::new(SubagentRegistry::new());
+
+        // Create hook_registry early so the subagent executor can reference it
+        let hook_registry = Arc::new(tokio::sync::RwLock::new(HookRegistry::new()));
+
         #[cfg(feature = "subagent")]
-        let subagent_executor = Arc::new(SubagentExecutor::new(
-            subagent_registry.clone(),
-            SubagentExecutorConfig::default(),
-        ));
+        let subagent_executor = {
+            let hr_clone = hook_registry.clone();
+            let unified_executor: crate::skills::hooks::UnifiedHookExecutorFn =
+                Arc::new(move |ctx: crate::skills::hooks::HookContext| {
+                    let hr = hr_clone.clone();
+                    Box::pin(async move {
+                        let registry = hr.read().await.clone();
+                        registry.run_lifecycle_hooks(&ctx).await
+                    })
+                });
+            Arc::new(SubagentExecutor::new(
+                subagent_registry.clone(),
+                SubagentExecutorConfig {
+                    unified_hook_executor: Some(unified_executor),
+                    ..SubagentExecutorConfig::default()
+                },
+            ))
+        };
+        #[cfg(not(feature = "subagent"))]
+        let _ = &hook_registry; // suppress unused warning
         #[cfg(feature = "human-loop")]
         let approval_provider = crate::human_loop::default_provider();
 
@@ -240,7 +262,7 @@ impl ReactAgent {
                 task_manager,
                 skill_registry: SkillRegistry::new(),
                 progressive_skill_registry: None,
-                hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
+                hook_registry,
                 #[cfg(feature = "mcp")]
                 mcp_manager: McpManager::new(),
                 sandbox_manager: None,
@@ -575,6 +597,62 @@ impl ReactAgent {
         vec![]
     }
 
+    /// Wire up the MCP tool executor for [`HookAction::McpTool`] hook actions.
+    ///
+    /// Call this **after** connecting MCP servers via
+    /// [`connect_mcp_from_config`](Self::connect_mcp_from_config) or
+    /// [`load_mcp_from_file`](Self::load_mcp_from_file).
+    /// Call again after connecting additional servers to refresh the client snapshot.
+    #[cfg(feature = "mcp")]
+    pub fn setup_hook_mcp_executor(&mut self) {
+        use crate::skills::hooks::McpExecutorFn;
+        use std::sync::Arc;
+
+        let clients = self.tools.mcp_manager.get_clients();
+        let executor: McpExecutorFn = Arc::new(move |server, tool, args| {
+            let client = clients.get(&server).cloned();
+            Box::pin(async move {
+                match client {
+                    Some(c) => match c.call_tool(&tool, args.unwrap_or_default()).await {
+                        Ok(result) => {
+                            let mut hook_result = crate::skills::hooks::HookResult::default();
+                            let output = serde_json::to_string(&result).unwrap_or_default();
+                            hook_result
+                                .messages
+                                .push(format!("McpTool {}::{} => {}", server, tool, output));
+                            hook_result.metadata =
+                                Some(serde_json::to_value(&result).unwrap_or_default());
+                            hook_result
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                server = %server,
+                                tool = %tool,
+                                error = %e,
+                                "McpTool hook call failed"
+                            );
+                            crate::skills::hooks::HookResult::default()
+                        }
+                    },
+                    None => {
+                        tracing::warn!(
+                            server = %server,
+                            tool = %tool,
+                            "McpTool hook: server not found"
+                        );
+                        crate::skills::hooks::HookResult::default()
+                    }
+                }
+            })
+        });
+
+        if let Ok(mut hooks) = self.tools.hook_registry.try_write() {
+            hooks.set_mcp_executor(executor);
+        } else {
+            tracing::error!("Failed to acquire hook_registry lock for MCP executor setup");
+        }
+    }
+
     /// Enable the circuit breaker.
     ///
     /// Automatically trips after consecutive LLM failures reach the threshold,
@@ -783,13 +861,14 @@ impl ReactAgent {
     ///
     /// Closes MCP connections, cancels background tasks, and shuts down WebSocket servers.
     /// Call this when the agent is no longer needed, or rely on `Drop` for automatic cleanup.
+    ///
+    /// This is a convenience wrapper around [`Agent::close()`]. Prefer `close()` for
+    /// trait-object usage; `shutdown()` is retained for backward compatibility.
     pub async fn shutdown(&self) {
-        #[cfg(feature = "mcp")]
-        {
-            self.tools.mcp_manager.close_all().await;
-        }
-        // Close WebSocket servers if any (placeholder for future WS integration)
-        info!(agent = %self.config.agent_name, "Agent shut down complete");
+        // Fire SessionEnd hook before cleanup
+        self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("other"))
+            .await;
+        let _ = self.close().await;
     }
 
     /// Set the maximum number of ReAct loop iterations at runtime.
@@ -973,21 +1052,10 @@ impl Agent for ReactAgent {
         )
     }
 
-    fn reset(&self) {
-        match self.memory.context.try_lock() {
-            Ok(mut ctx) => {
-                ctx.clear();
-                ctx.push(crate::llm::types::Message::system(
-                    self.config.system_prompt.clone(),
-                ));
-            }
-            Err(_) => {
-                warn!(
-                    agent = %self.config.agent_name,
-                    "Cannot reset: context locked by active stream"
-                );
-            }
-        }
+    fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.reset_messages().await;
+        })
     }
 
     fn tool_names(&self) -> Vec<String> {
@@ -1043,10 +1111,12 @@ impl Agent for ReactAgent {
         }
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
+    fn close(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             #[cfg(feature = "mcp")]
             self.tools.mcp_manager.close_all().await;
+            info!(agent = %self.config.agent_name, "Agent shut down complete");
+            Ok(())
         })
     }
 }

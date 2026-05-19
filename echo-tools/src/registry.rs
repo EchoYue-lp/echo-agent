@@ -60,7 +60,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         use crate::git::{
             GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
         };
-        tool_manager.register(Box::new(GitStatusTool));
+        tool_manager.register(Box::new(GitStatusTool::default()));
         tool_manager.register(Box::new(GitDiffTool));
         tool_manager.register(Box::new(GitLogTool));
         tool_manager.register(Box::new(GitBlameTool));

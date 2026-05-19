@@ -102,9 +102,9 @@ impl McpTransport for HttpTransport {
                     Some(r) => r,
                     None => {
                         self.pending.lock().await.remove(&id);
-                        return Err(ReactError::Mcp(McpError::ConnectionFailed(
+                        return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
                             "无法复制 HTTP 请求".to_string(),
-                        )));
+                        ))));
                     }
                 };
                 match req.send().await {
@@ -138,10 +138,10 @@ impl McpTransport for HttpTransport {
                             tokio::time::sleep(delay).await;
                         } else {
                             self.pending.lock().await.remove(&id);
-                            return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+                            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                                 "HTTP 请求失败: {}",
                                 e
-                            ))));
+                            )))));
                         }
                     }
                 }
@@ -166,13 +166,13 @@ impl McpTransport for HttpTransport {
                 let result =
                     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
                         Ok(Ok(response)) => Ok(response),
-                        Ok(Err(_)) => Err(ReactError::Mcp(McpError::TransportClosed)),
+                        Ok(Err(_)) => Err(ReactError::Mcp(Box::new(McpError::TransportClosed))),
                         Err(_) => {
                             self.pending.lock().await.remove(&id);
-                            Err(ReactError::Mcp(McpError::ProtocolError(format!(
+                            Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                                 "等待 HTTP 异步响应超时 (id={})",
                                 id
-                            ))))
+                            )))))
                         }
                     }?;
 
@@ -185,18 +185,18 @@ impl McpTransport for HttpTransport {
             // 非 2xx 错误
             if !response.status().is_success() {
                 let body = response.text().await.unwrap_or_default();
-                return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+                return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                     "HTTP 错误 {}: {}",
                     status, body
-                ))));
+                )))));
             }
 
             // 直接同步响应
             let rpc_response: JsonRpcResponse = response.json().await.map_err(|e| {
-                ReactError::Mcp(McpError::ProtocolError(format!(
+                ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                     "解析 HTTP 响应失败: {}",
                     e
-                )))
+                ))))
             })?;
 
             Ok(rpc_response)

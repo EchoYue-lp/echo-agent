@@ -128,8 +128,8 @@ impl ReactAgent {
         }
 
         warn!(agent = %agent, max = self.config.max_iterations, "Reached maximum iteration count");
-        Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
-            self.config.max_iterations,
+        Err(ReactError::Agent(Box::new(
+            AgentError::MaxIterationsExceeded(self.config.max_iterations),
         )))
     }
 
@@ -340,8 +340,8 @@ impl ReactAgent {
             }
         }
 
-        Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
-            self.config.max_iterations,
+        Err(ReactError::Agent(Box::new(
+            AgentError::MaxIterationsExceeded(self.config.max_iterations),
         )))
     }
 }

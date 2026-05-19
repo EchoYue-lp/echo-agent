@@ -9,13 +9,13 @@ use echo_core::agent::Agent;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
+use tokio::sync::{Notify, RwLock};
 use tracing::{debug, info, warn};
 
 use super::events::SubagentEventBus;
 use super::types::{RegisteredSubagent, SubagentDefinition};
 
-type AgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
+type AgentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
 
 // ── Agent Factory ─────────────────────────────────────────────────────────────
 
@@ -140,7 +140,7 @@ impl SubagentRegistry {
         let name = def.name.clone();
         info!(subagent = %name, mode = %def.execution_mode, "Registering subagent");
 
-        let arc_agent = Arc::new(AsyncMutex::new(agent));
+        let arc_agent = Arc::new(agent);
         {
             let mut agents = self.agents.write().await;
             agents.insert(name.clone(), arc_agent);
@@ -160,7 +160,7 @@ impl SubagentRegistry {
     /// Falls back to logging a warning if locks are contended.
     pub fn register_sync(&self, def: SubagentDefinition, agent: Box<dyn Agent>) -> bool {
         let name = def.name.clone();
-        let arc_agent = Arc::new(AsyncMutex::new(agent));
+        let arc_agent = Arc::new(agent);
 
         let ok = match self.agents.try_write() {
             Ok(mut agents) => {
@@ -245,7 +245,7 @@ impl SubagentRegistry {
     ///
     /// Uses a loop with timeout to handle concurrent instantiation attempts
     /// rather than relying on a single `notified()` call.
-    pub async fn get_agent(&self, name: &str) -> Option<Arc<AsyncMutex<Box<dyn Agent>>>> {
+    pub async fn get_agent(&self, name: &str) -> Option<Arc<dyn Agent>> {
         use std::time::Duration;
 
         // Check if already instantiated
@@ -311,7 +311,7 @@ impl SubagentRegistry {
 
             match result {
                 Ok(agent) => {
-                    let arc_agent = Arc::new(AsyncMutex::new(agent));
+                    let arc_agent = Arc::new(agent);
                     let mut agents = self.agents.write().await;
                     agents.insert(name.to_string(), arc_agent.clone());
                     // Remove factory after successful instantiation
@@ -517,7 +517,7 @@ mod tests {
 
         // Verify the agent actually works
         let agent = handle.unwrap();
-        let agent = agent.lock().await;
+        let agent = agent.as_ref();
         let result = agent.execute("test").await.unwrap();
         assert_eq!(result, "lazy result");
     }
@@ -531,9 +531,7 @@ mod tests {
             let mut m = map.write().unwrap();
             m.insert(
                 "migrated".to_string(),
-                Arc::new(AsyncMutex::new(
-                    Box::new(MockAgent::new("migrated")) as Box<dyn Agent>
-                )),
+                Arc::new(MockAgent::new("migrated")) as Arc<dyn Agent>,
             );
         }
 

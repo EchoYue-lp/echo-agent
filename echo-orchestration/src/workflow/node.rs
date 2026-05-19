@@ -10,7 +10,6 @@ use echo_core::agent::Agent;
 use echo_core::error::Result;
 use futures::future::BoxFuture;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 // ── NodeAction ──────────────────────────────────────────────────────────────
 
@@ -18,12 +17,14 @@ use tokio::sync::Mutex;
 pub(crate) enum NodeAction {
     /// Agent execution: reads input_key from state as prompt, writes output to output_key
     Agent {
-        agent: Arc<Mutex<Box<dyn Agent>>>,
+        agent: Arc<dyn Agent>,
         input_key: String,
         output_key: String,
         /// Whether to use execute (multi-turn with tools) or chat (single turn)
         use_execute: bool,
     },
+    /// Nested subgraph execution — the node itself is a complete compiled Graph
+    Subgraph(super::graph::Graph),
     /// Custom async function
     Function(Box<dyn NodeFn>),
     /// No-op (used for router nodes)
@@ -69,7 +70,7 @@ impl Node {
         Self {
             name: name.into(),
             action: NodeAction::Agent {
-                agent: Arc::new(Mutex::new(Box::new(agent))),
+                agent: Arc::new(agent),
                 input_key: input_key.into(),
                 output_key: output_key.into(),
                 use_execute: true,
@@ -88,7 +89,7 @@ impl Node {
         Self {
             name: name.into(),
             action: NodeAction::Agent {
-                agent: Arc::new(Mutex::new(Box::new(agent))),
+                agent: Arc::new(agent),
                 input_key: input_key.into(),
                 output_key: output_key.into(),
                 use_execute,
@@ -96,10 +97,10 @@ impl Node {
         }
     }
 
-    /// Create an Agent node (pre-wrapped as Arc<Mutex<Box<dyn Agent>>>)
+    /// Create an Agent node (pre-wrapped as Arc<dyn Agent>)
     pub fn agent_shared(
         name: impl Into<String>,
-        agent: Arc<Mutex<Box<dyn Agent>>>,
+        agent: Arc<dyn Agent>,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
     ) -> Self {
@@ -117,7 +118,7 @@ impl Node {
     /// Create an Agent node (pre-wrapped + configurable execute/chat)
     pub fn agent_shared_with_mode(
         name: impl Into<String>,
-        agent: Arc<Mutex<Box<dyn Agent>>>,
+        agent: Arc<dyn Agent>,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
         use_execute: bool,
@@ -152,6 +153,17 @@ impl Node {
         }
     }
 
+    /// Create a subgraph node — embeds a compiled Graph as a node.
+    ///
+    /// The subgraph shares the parent's `SharedState` and executes within
+    /// the parent's step count limit.
+    pub fn subgraph(name: impl Into<String>, graph: super::graph::Graph) -> Self {
+        Self {
+            name: name.into(),
+            action: NodeAction::Subgraph(graph),
+        }
+    }
+
     /// Execute the node
     pub async fn execute(&self, state: &SharedState) -> Result<()> {
         match &self.action {
@@ -163,7 +175,7 @@ impl Node {
             } => {
                 let input = state.get::<String>(input_key).unwrap_or_default();
 
-                let agent = agent.lock().await;
+                let agent = agent.as_ref();
                 let output = if *use_execute {
                     agent.execute(&input).await?
                 } else {
@@ -182,6 +194,13 @@ impl Node {
                 ))?;
                 // Also append to message history
                 state.push_message(echo_core::llm::types::Message::assistant(output))?;
+                Ok(())
+            }
+            NodeAction::Subgraph(subgraph) => {
+                // Box::pin to break recursive async call chain
+                let state_clone = state.clone();
+                let result = Box::pin(subgraph.run(state_clone)).await?;
+                let _ = state.deep_merge(&result.state);
                 Ok(())
             }
             NodeAction::Function(f) => f.call(state).await,

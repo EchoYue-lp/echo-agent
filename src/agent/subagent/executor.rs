@@ -74,7 +74,6 @@ impl TeammateHandle {
 // ── Executor Config ───────────────────────────────────────────────────────────
 
 /// Configuration for the subagent executor.
-#[derive(Debug, Clone)]
 pub struct SubagentExecutorConfig {
     /// Maximum concurrent Fork dispatches.
     pub max_concurrent_forks: usize,
@@ -82,6 +81,10 @@ pub struct SubagentExecutorConfig {
     pub default_timeout_secs: u64,
     /// Enable hooks.
     pub enable_hooks: bool,
+    /// Optional bridge to the unified lifecycle hook system (echo-core).
+    /// When set, SubagentStart/SubagentStop events are fired into the
+    /// unified HookRegistry alongside the trait-based SubagentHooks.
+    pub unified_hook_executor: Option<crate::skills::hooks::UnifiedHookExecutorFn>,
 }
 
 impl Default for SubagentExecutorConfig {
@@ -90,6 +93,7 @@ impl Default for SubagentExecutorConfig {
             max_concurrent_forks: 5,
             default_timeout_secs: 300,
             enable_hooks: true,
+            unified_hook_executor: None,
         }
     }
 }
@@ -155,11 +159,11 @@ impl SubagentExecutor {
 
             // Guard against excessive retries
             if retry_count > max_retries {
-                return Err(ReactError::Agent(AgentError::ContextLimitExceeded(
-                    format!(
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::ContextLimitExceeded(format!(
                         "Max retry count exceeded ({}): agent '{}'",
                         max_retries, req.agent_name
-                    ),
+                    )),
                 )));
             }
 
@@ -202,6 +206,18 @@ impl SubagentExecutor {
             let req_parent_agent = req.parent_agent.clone();
             let delegate_depth = req.delegate_depth;
 
+            // Fire unified SubagentStart hook
+            if let Some(ref executor) = self.config.unified_hook_executor {
+                let ctx = crate::skills::hooks::HookContext::for_subagent_start(
+                    &req_agent_name,
+                    &format!("{:?}", mode),
+                    &req.task,
+                    "", // session_id not available at this layer
+                    &req_parent_agent,
+                );
+                executor(ctx).await;
+            }
+
             // Dispatch based on mode
             let start = Instant::now();
             let result = match mode {
@@ -226,13 +242,25 @@ impl SubagentExecutor {
                     self.registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchCompleted {
-                            parent: req_parent_agent,
-                            agent: req_agent_name,
+                            parent: req_parent_agent.clone(),
+                            agent: req_agent_name.clone(),
                             duration_ms: duration.as_millis() as u64,
                         });
 
                     if self.config.enable_hooks {
                         self.hooks.after_dispatch(&hook_ctx, &sub_result).await;
+                    }
+
+                    // Fire unified SubagentStop hook (success)
+                    if let Some(ref executor) = self.config.unified_hook_executor {
+                        let ctx = crate::skills::hooks::HookContext::for_subagent_stop(
+                            &req_agent_name,
+                            &format!("{:?}", mode),
+                            &format!("{:?}", sub_result.output),
+                            "",
+                            &req_parent_agent,
+                        );
+                        executor(ctx).await;
                     }
 
                     return Ok(sub_result);
@@ -243,8 +271,8 @@ impl SubagentExecutor {
                     self.registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchFailed {
-                            parent: req_parent_agent,
-                            agent: req_agent_name,
+                            parent: req_parent_agent.clone(),
+                            agent: req_agent_name.clone(),
                             error: error_str.clone(),
                         });
 
@@ -295,6 +323,18 @@ impl SubagentExecutor {
                         }
                     }
 
+                    // Fire unified SubagentStop hook (failure)
+                    if let Some(ref executor) = self.config.unified_hook_executor {
+                        let ctx = crate::skills::hooks::HookContext::for_subagent_stop(
+                            &req_agent_name,
+                            &format!("{:?}", mode),
+                            &format!("error: {}", error_str),
+                            "",
+                            &req_parent_agent,
+                        );
+                        executor(ctx).await;
+                    }
+
                     return Err(e);
                 }
             }
@@ -335,7 +375,7 @@ impl SubagentExecutor {
             let _permit = child_token.clone();
             let start = Instant::now();
 
-            let agent = agent_arc.lock().await;
+            let agent = agent_arc.as_ref();
 
             // Check cancellation before execution
             if child_token.is_cancelled() {
@@ -357,7 +397,7 @@ impl SubagentExecutor {
                 tokio::select! {
                     biased; // Check cancellation first
                     _ = child_token.cancelled() => {
-                        Err(ReactError::Agent(AgentError::Interrupted))
+                        Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
                     }
                     _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
                         Err(ReactError::Other(format!(
@@ -372,7 +412,7 @@ impl SubagentExecutor {
                 tokio::select! {
                     biased;
                     _ = child_token.cancelled() => {
-                        Err(ReactError::Agent(AgentError::Interrupted))
+                        Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
                     }
                     r = execute_future => r,
                 }
@@ -419,7 +459,11 @@ impl SubagentExecutor {
             let history: Vec<String> = ctx
                 .messages
                 .iter()
-                .filter_map(|m| m.content.as_text().map(|c| format!("[{}] {}", m.role, c)))
+                .filter_map(|m| {
+                    m.content
+                        .as_text()
+                        .map(|c| format!("[{}] {}", m.role.as_str(), c))
+                })
                 .collect();
             if !history.is_empty() {
                 parts.push(format!(
@@ -449,7 +493,7 @@ impl SubagentExecutor {
             })?;
 
         let start = Instant::now();
-        let agent = agent_arc.lock().await;
+        let agent = agent_arc.as_ref();
 
         // Check cancellation
         if req.cancel.is_cancelled() {
@@ -532,7 +576,7 @@ impl SubagentExecutor {
                 });
             }
 
-            let agent = agent_arc.lock().await;
+            let agent = agent_arc.as_ref();
 
             let result = if timeout_secs > 0 {
                 match tokio::time::timeout(

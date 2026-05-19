@@ -167,6 +167,56 @@ impl ReactAgent {
             .await
     }
 
+    /// Force compress with PreCompact/PostCompact hooks fired around the operation.
+    ///
+    /// The `matcher` parameter determines the hook matcher context:
+    /// - `"manual"` for user-initiated compression (e.g. `/compact` command)
+    /// - `"auto"` for automatic threshold-triggered compression
+    pub async fn force_compress_with_hooks(
+        &self,
+        compressor: &dyn ContextCompressor,
+        matcher: &str,
+    ) -> Result<ForceCompressStats> {
+        self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some(matcher))
+            .await;
+        let stats = self.force_compress_with(compressor).await?;
+        // Fire PostCompact with actual stats
+        {
+            let hook_stats = crate::skills::hooks::CompressHookStats {
+                before_count: stats.before_count,
+                after_count: stats.after_count,
+                before_tokens: stats.before_tokens,
+                after_tokens: stats.after_tokens,
+            };
+            let hook_ctx = crate::skills::hooks::HookContext::for_post_compact(
+                &hook_stats,
+                matcher,
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
+            );
+            let registry = self.tools.hook_registry.read().await.clone();
+            let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            if let Some(ctx) = &post_result.injected_context {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(crate::llm::types::Message::system(format!(
+                        "[Hook:PostCompact] {}",
+                        ctx
+                    )));
+            }
+            for msg in &post_result.messages {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(crate::llm::types::Message::system(msg.clone()));
+            }
+        }
+        Ok(stats)
+    }
+
     /// List all registered tool names
     ///
     /// # Returns
@@ -271,8 +321,10 @@ impl ReactAgent {
             self.memory
                 .context
                 .try_lock()
-                .unwrap()
-                .update_system(self.config.system_prompt.clone());
+                .map(|mut ctx| ctx.update_system(self.config.system_prompt.clone()))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to acquire context lock for skill injection: {}", e);
+                });
         }
 
         self.tools.skill_registry.record_code_skill(SkillInfo {
@@ -392,8 +444,48 @@ impl ReactAgent {
             self.memory
                 .context
                 .try_lock()
-                .unwrap()
-                .update_system(self.config.system_prompt.clone());
+                .map(|mut ctx| ctx.update_system(self.config.system_prompt.clone()))
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to acquire context lock for skill catalog injection: {}",
+                        e
+                    );
+                });
+        }
+
+        // Fire InstructionsLoaded hook
+        {
+            let hook_ctx = crate::skills::hooks::HookContext::for_instructions_loaded(
+                "startup",
+                &names,
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
+            );
+            let registry = self.tools.hook_registry.read().await.clone();
+            let result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            if result.block {
+                warn!(agent = %self.config.agent_name, reason = ?result.block_reason, "InstructionsLoaded hook blocked");
+            }
+            if let Some(ctx) = &result.injected_context {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(crate::llm::types::Message::system(format!(
+                        "[Hook:InstructionsLoaded] {}",
+                        ctx
+                    )));
+            }
+            for msg in &result.messages {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(crate::llm::types::Message::system(format!(
+                        "[Hook:InstructionsLoaded] {}",
+                        msg
+                    )));
+            }
         }
 
         // Register progressive disclosure tools with shared registry.
@@ -419,8 +511,10 @@ impl ReactAgent {
         self.memory
             .context
             .try_lock()
-            .unwrap()
-            .add_protected_marker("<skill_content".to_string());
+            .map(|mut ctx| ctx.add_protected_marker("<skill_content".to_string()))
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to acquire context lock for protected marker: {}", e);
+            });
 
         info!(
             agent = %self.config.agent_name,
@@ -504,8 +598,11 @@ impl ReactAgent {
         let client = {
             let mgr = &self.tools.mcp_manager;
             mgr.get_client(&name).ok_or_else(|| {
-                crate::error::ReactError::Agent(crate::error::AgentError::InitializationFailed(
-                    format!("MCP client '{}' not found after connection", name),
+                crate::error::ReactError::Agent(Box::new(
+                    crate::error::AgentError::InitializationFailed(format!(
+                        "MCP client '{}' not found after connection",
+                        name
+                    )),
                 ))
             })?
         };

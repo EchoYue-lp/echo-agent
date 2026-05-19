@@ -1,5 +1,6 @@
 //! Agent core trait, events, and callback interfaces
 
+pub mod builder;
 mod critic;
 mod executor;
 mod plan;
@@ -25,6 +26,8 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt as _;
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
 pub use tokio_util::sync::CancellationToken;
 
 /// Events produced during Agent execution
@@ -367,14 +370,25 @@ pub trait Agent: Send + Sync {
     }
 
     /// Release external resources before dropping the agent.
-    fn close<'a>(&'a self) -> BoxFuture<'a, ()> {
-        Box::pin(async {})
+    ///
+    /// Returns `Err` if cleanup fails (e.g., MCP server disconnect error,
+    /// flush failure), allowing callers to log or handle resource leaks.
+    fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 
     /// Execute a task and return the final answer.
+    ///
+    /// **Task-oriented**: resets/restores context, may run a planning phase
+    /// (if `tasks` feature is enabled), then enters the ReAct loop.
+    /// Use this for standalone, single-round tasks where the agent starts fresh
+    /// or resumes from a checkpoint.
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>>;
 
     /// Execute a task and stream lifecycle events.
+    ///
+    /// Same semantics as [`Self::execute`] but returns a stream of
+    /// [`AgentEvent`] for real-time observability.
     fn execute_stream<'a>(
         &'a self,
         task: &'a str,
@@ -391,34 +405,28 @@ pub trait Agent: Send + Sync {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
-            let mut stream = self.execute_stream(task).await?;
-            let wrapped = async_stream::try_stream! {
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            yield AgentEvent::Cancelled;
-                            break;
-                        }
-                        next = stream.next() => {
-                            match next {
-                                Some(event) => yield event?,
-                                None => break,
-                            }
-                        }
-                    }
-                }
-            };
-
-            Ok(Box::pin(wrapped) as BoxStream<'a, Result<AgentEvent>>)
+            let stream = self.execute_stream(task).await?;
+            Ok(cancel_aware_stream(stream, cancel))
         })
     }
 
-    /// Alias of [`Self::execute`] for chat-centric call sites.
+    /// Chat with the agent in a multi-turn conversation.
+    ///
+    /// **Conversation-oriented**: preserves existing context (no reset),
+    /// appends the user message, and runs the ReAct loop.
+    /// Use this for interactive, multi-turn dialogue where the agent
+    /// accumulates state across calls.
+    ///
+    /// By default this delegates to [`Self::execute`]; concrete implementations
+    /// (like `ReactAgent`) override it to avoid resetting context.
     fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         self.execute(message)
     }
 
-    /// Alias of [`Self::execute_stream`] for chat-centric call sites.
+    /// Chat with the agent and stream lifecycle events.
+    ///
+    /// Same semantics as [`Self::chat`] but returns a stream of
+    /// [`AgentEvent`] for real-time observability.
     fn chat_stream<'a>(
         &'a self,
         message: &'a str,
@@ -437,30 +445,100 @@ pub trait Agent: Send + Sync {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
-            let mut stream = self.chat_stream(message).await?;
-            let wrapped = async_stream::try_stream! {
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            yield AgentEvent::Cancelled;
-                            break;
-                        }
-                        next = stream.next() => {
-                            match next {
-                                Some(event) => yield event?,
-                                None => break,
-                            }
-                        }
-                    }
-                }
-            };
-
-            Ok(Box::pin(wrapped) as BoxStream<'a, Result<AgentEvent>>)
+            let stream = self.chat_stream(message).await?;
+            Ok(cancel_aware_stream(stream, cancel))
         })
     }
 
     /// Reset in-memory conversational state.
-    fn reset(&self) {}
+    ///
+    /// Implementations should clear context and fire `SessionStart("clear")` hooks
+    /// so that registered hooks can react to the reset event.
+    fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+}
+
+// ── Blanket impl for Box<dyn Agent> ──────────────────────────────────────
+
+/// Allow `Box<dyn Agent>` to be used as an `Agent` directly.
+///
+/// This enables `Arc<Box<dyn Agent>>` to coerce to `Arc<dyn Agent>`,
+/// which is essential for removing the outer `Mutex` from `SharedAgent`.
+impl Agent for Box<dyn Agent> {
+    fn name(&self) -> &str {
+        self.as_ref().name()
+    }
+    fn model_name(&self) -> &str {
+        self.as_ref().model_name()
+    }
+    fn system_prompt(&self) -> &str {
+        self.as_ref().system_prompt()
+    }
+    fn tool_names(&self) -> Vec<String> {
+        self.as_ref().tool_names()
+    }
+    fn tool_definitions(&self) -> Vec<crate::llm::ToolDefinition> {
+        self.as_ref().tool_definitions()
+    }
+    fn skill_names(&self) -> Vec<String> {
+        self.as_ref().skill_names()
+    }
+    fn mcp_server_names(&self) -> Vec<String> {
+        self.as_ref().mcp_server_names()
+    }
+    fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        self.as_ref().close()
+    }
+    fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        self.as_ref().execute(task)
+    }
+    fn execute_stream<'a>(
+        &'a self,
+        task: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref().execute_stream(task)
+    }
+    fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
+        self.as_ref().chat(message)
+    }
+    fn chat_stream<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref().chat_stream(message)
+    }
+    fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.as_ref().reset()
+    }
+}
+
+/// Wrap an agent event stream with cooperative cancellation support.
+///
+/// When `cancel` is triggered, the stream yields [`AgentEvent::Cancelled`]
+/// and terminates. Shared by both `execute_stream_with_cancel` and
+/// `chat_stream_with_cancel` default implementations.
+fn cancel_aware_stream<'a>(
+    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    cancel: CancellationToken,
+) -> BoxStream<'a, Result<AgentEvent>> {
+    let wrapped = async_stream::try_stream! {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    yield AgentEvent::Cancelled;
+                    break;
+                }
+                next = stream.next() => {
+                    match next {
+                        Some(event) => yield event?,
+                        None => break,
+                    }
+                }
+            }
+        }
+    };
+    Box::pin(wrapped)
 }
 
 /// Agent lifecycle callback interface

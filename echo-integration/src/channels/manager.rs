@@ -84,10 +84,10 @@ impl ChannelManager {
             Ok(())
         } else {
             Err(echo_core::error::ReactError::Channel(
-                echo_core::error::ChannelError::Other(format!(
+                Box::new(echo_core::error::ChannelError::Other(format!(
                     "Channel '{}' not found",
                     channel_id
-                )),
+                ))),
             ))
         }
     }

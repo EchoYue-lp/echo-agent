@@ -311,13 +311,24 @@ impl LlmClient for DefaultLlmClient {
     }
 
     fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
+        self.chat_simple_with_options(messages, echo_core::llm::SimpleChatOptions {
+            temperature: Some(0.3),
+            max_tokens: Some(2048),
+        })
+    }
+
+    fn chat_simple_with_options(
+        &self,
+        messages: Vec<Message>,
+        options: echo_core::llm::SimpleChatOptions,
+    ) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             let response = chat(
                 self.client.clone(),
                 &self.model_name,
                 &messages,
-                Some(0.3),
-                Some(2048),
+                options.temperature,
+                options.max_tokens,
                 Some(false),
                 None,
                 None,

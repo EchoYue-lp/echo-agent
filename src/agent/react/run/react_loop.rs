@@ -24,6 +24,11 @@ impl ReactAgent {
         debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM thinking...");
 
         // ContextManager::prepare handles compression internally — no need for duplicate pre-check here.
+        // Fire PreCompact hooks before compression
+        let pre_compact_result = self
+            .fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
+            .await;
+
         let prepare_result = self.memory.context.lock().await.prepare(None).await?;
 
         if let Some(ref stats) = prepare_result.compressed {
@@ -35,6 +40,56 @@ impl ReactAgent {
                 after_tokens = stats.after_tokens,
                 "📦 Context auto-compressed"
             );
+            // Fire PostCompact hooks with actual compression stats
+            {
+                let hook_stats = crate::skills::hooks::CompressHookStats {
+                    before_count: stats.before_count,
+                    after_count: stats.after_count,
+                    before_tokens: stats.before_tokens,
+                    after_tokens: stats.after_tokens,
+                };
+                let hook_ctx = crate::skills::hooks::HookContext::for_post_compact(
+                    &hook_stats,
+                    "auto",
+                    self.config.session_id.as_deref().unwrap_or(""),
+                    &self.config.agent_name,
+                );
+                let registry = self.tools.hook_registry.read().await.clone();
+                let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                if let Some(ctx) = &post_result.injected_context {
+                    self.memory
+                        .context
+                        .lock()
+                        .await
+                        .push(crate::llm::types::Message::system(format!(
+                            "[Hook:PostCompact] {}",
+                            ctx
+                        )));
+                }
+                for msg in &post_result.messages {
+                    self.memory
+                        .context
+                        .lock()
+                        .await
+                        .push(crate::llm::types::Message::system(msg.clone()));
+                }
+            }
+        }
+
+        // Inject any PreCompact hook messages into context
+        if let Some(ctx) = &pre_compact_result.injected_context {
+            self.memory
+                .context
+                .lock()
+                .await
+                .push(crate::llm::types::Message::system(ctx.clone()));
+        }
+        for msg in &pre_compact_result.messages {
+            self.memory
+                .context
+                .lock()
+                .await
+                .push(crate::llm::types::Message::system(msg.clone()));
         }
 
         let messages = prepare_result.messages;
@@ -58,8 +113,20 @@ impl ReactAgent {
             && cb.is_open()
         {
             warn!(agent = %agent, "🔴 Circuit breaker open, skip LLM request");
-            return Err(ReactError::Agent(AgentError::InitializationFailed(
-                "LLM service unavailable (circuit breaker open)".to_string(),
+            // Fire StopFailure hook for circuit breaker
+            let sf_result = self
+                .fire_lifecycle_hook(
+                    crate::skills::hooks::HookEvent::StopFailure,
+                    Some("circuit_breaker_open"),
+                )
+                .await;
+            if !sf_result.messages.is_empty() || sf_result.injected_context.is_some() {
+                warn!(agent = %agent, "StopFailure hook (circuit_breaker) produced output that cannot be injected (terminal path)");
+            }
+            return Err(ReactError::Agent(Box::new(
+                AgentError::InitializationFailed(
+                    "LLM service unavailable (circuit breaker open)".to_string(),
+                ),
             )));
         }
 
@@ -159,14 +226,12 @@ impl ReactAgent {
             )
             .await?;
             let usage = response.usage.clone();
-            let choice =
-                response
-                    .choices
-                    .first()
-                    .ok_or(ReactError::Agent(AgentError::NoResponse {
-                        model: self.config.model_name.clone(),
-                        agent: self.config.agent_name.clone(),
-                    }))?;
+            let choice = response.choices.first().ok_or(ReactError::Agent(Box::new(
+                AgentError::NoResponse {
+                    model: self.config.model_name.clone(),
+                    agent: self.config.agent_name.clone(),
+                },
+            )))?;
             let finish_reason = choice.finish_reason.clone();
             let message = choice.message.clone();
             warn!(
@@ -300,6 +365,13 @@ impl ReactAgent {
         let (approval_tools, concurrent_tools) =
             (Vec::<(String, String, Value)>::new(), tool_calls);
 
+        // Extract tool names before concurrent execution so they are available
+        // for PostToolBatch hook even on batch timeout.
+        let batch_tool_names: Vec<String> = concurrent_tools
+            .iter()
+            .map(|(_, name, _)| name.clone())
+            .collect();
+
         // Execute non-approval tools concurrently
         let concurrent_results: Vec<
             std::result::Result<ToolExecutionOutcome, ToolExecutionFailure>,
@@ -323,6 +395,24 @@ impl ReactAgent {
                 match tokio::time::timeout(timeout, join_all(futures)).await {
                     Ok(results) => results,
                     Err(_) => {
+                        // Fire PostToolBatch hook before returning timeout error
+                        let hook_ctx = crate::skills::hooks::HookContext::for_post_tool_batch(
+                            &batch_tool_names,
+                            0,
+                            batch_tool_names.len(),
+                            self.config.session_id.as_deref().unwrap_or(""),
+                            &self.config.agent_name,
+                        );
+                        let registry = self.tools.hook_registry.read().await.clone();
+                        let batch_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                        if let Some(ctx) = &batch_result.injected_context {
+                            self.memory.context.lock().await.push(
+                                crate::llm::types::Message::system(format!(
+                                    "[Hook:PostToolBatch] {}",
+                                    ctx
+                                )),
+                            );
+                        }
                         return Err(ToolError::Timeout(format!(
                             "parallel tool batch exceeded total timeout after {:?}",
                             timeout
@@ -337,30 +427,64 @@ impl ReactAgent {
 
         // Push concurrent results to context
         let mut final_answer: Option<String> = None;
+        let mut batch_success_count = 0usize;
+        let mut batch_failure_count = 0usize;
+        let mut first_failure: Option<ReactError> = None;
         for ((tool_call_id, function_name, _), result) in
             concurrent_tools.into_iter().zip(concurrent_results)
         {
-            let result = match result {
+            let output = match result {
                 Ok(outcome) => {
                     self.apply_hook_messages(&function_name, &outcome.hook_messages)
                         .await;
+                    batch_success_count += 1;
                     outcome.output
                 }
                 Err(failure) => {
                     self.apply_hook_messages(&function_name, &failure.hook_messages)
                         .await;
-                    return Err(failure.error);
+                    batch_failure_count += 1;
+                    let error_display = failure.error.to_string();
+                    if first_failure.is_none() {
+                        first_failure = Some(failure.error);
+                    }
+                    format!("[error: {}]", error_display)
                 }
             };
             self.memory.context.lock().await.push(Message::tool_result(
                 tool_call_id,
                 function_name.clone(),
-                result.clone(),
+                output.clone(),
             ));
             if function_name == TOOL_FINAL_ANSWER {
                 info!(agent = %agent, "🏁 Final answer generated");
-                final_answer = Some(result);
+                final_answer = Some(output);
             }
+        }
+
+        // Fire PostToolBatch hook for the concurrent tool batch
+        if !batch_tool_names.is_empty() {
+            let hook_ctx = crate::skills::hooks::HookContext::for_post_tool_batch(
+                &batch_tool_names,
+                batch_success_count,
+                batch_failure_count,
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
+            );
+            let registry = self.tools.hook_registry.read().await.clone();
+            let batch_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            if let Some(ctx) = &batch_result.injected_context {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(Message::system(format!("[Hook:PostToolBatch] {}", ctx)));
+            }
+        }
+
+        // Return first failure (after PostToolBatch has fired)
+        if let Some(err) = first_failure {
+            return Err(err);
         }
 
         // Execute approval tools sequentially
@@ -417,6 +541,38 @@ impl ReactAgent {
 
         self.log_user_input_audit(message).await;
 
+        // Fire UserPromptSubmit hook
+        {
+            let hook_ctx = crate::skills::hooks::HookContext::for_user_prompt_submit(
+                message,
+                None,
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
+            );
+            let registry = self.tools.hook_registry.read().await.clone();
+            let prompt_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            if prompt_result.block {
+                return Ok(format!(
+                    "Blocked by UserPromptSubmit hook: {}",
+                    prompt_result.block_reason.unwrap_or_default()
+                ));
+            }
+            if let Some(ctx) = &prompt_result.injected_context {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(crate::llm::types::Message::system(ctx.clone()));
+            }
+            for msg in &prompt_result.messages {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(crate::llm::types::Message::system(msg.clone()));
+            }
+        }
+
         match self.recall_long_term_memories(message).await {
             Ok(items) if !items.is_empty() => {
                 debug!(agent = %agent, count = items.len(), "📚 Injecting relevant long-term memories");
@@ -448,6 +604,8 @@ impl ReactAgent {
             .lock()
             .await
             .push(Message::user(message.to_string()));
+
+        let mut stop_hook_continued = false;
 
         for iteration in 0..self.config.max_iterations {
             info!(agent = %agent, iteration = iteration + 1, "🔄 ReAct iteration starting");
@@ -505,6 +663,49 @@ impl ReactAgent {
                 info!(agent = %agent, "🏁 Execution complete");
 
                 self.log_final_answer_audit(&answer).await;
+
+                // Fire Stop hook — if it returns a continue_reason, inject it and keep going
+                {
+                    let hook_ctx = crate::skills::hooks::HookContext::for_stop(
+                        None,
+                        self.config.session_id.as_deref().unwrap_or(""),
+                        &self.config.agent_name,
+                        stop_hook_continued,
+                    );
+                    let registry = self.tools.hook_registry.read().await.clone();
+                    let stop_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                    // Block takes priority: suppress the final answer
+                    if stop_result.block {
+                        warn!(agent = %agent, reason = ?stop_result.block_reason, "Stop hook blocked final answer");
+                        answer = stop_result
+                            .block_reason
+                            .unwrap_or_else(|| "Response blocked by Stop hook".to_string());
+                    }
+                    if let Some(reason) = &stop_result.continue_reason {
+                        info!(agent = %agent, reason = %reason, "Stop hook requested continuation");
+                        self.memory
+                            .context
+                            .lock()
+                            .await
+                            .push(crate::llm::types::Message::system(format!(
+                                "[Hook:Stop] Continue: {}",
+                                reason
+                            )));
+                        // Prevent infinite loops: mark that Stop hook already continued
+                        stop_hook_continued = true;
+                        self.auto_snapshot(iteration).await;
+                        continue;
+                    }
+                    // Inject any hook messages
+                    for msg in &stop_result.messages {
+                        self.memory
+                            .context
+                            .lock()
+                            .await
+                            .push(crate::llm::types::Message::system(msg.clone()));
+                    }
+                }
+
                 self.persist_runtime_state().await;
 
                 return Ok(answer);
@@ -515,6 +716,26 @@ impl ReactAgent {
         }
 
         warn!(agent = %agent, max = self.config.max_iterations, "Maximum iterations reached");
+
+        // Fire StopFailure hook before returning error
+        {
+            let hook_ctx = crate::skills::hooks::HookContext::for_stop_failure(
+                "MaxIterationsExceeded",
+                "max_iterations",
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
+            );
+            let registry = self.tools.hook_registry.read().await.clone();
+            let stop_failure_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+            // StopFailure result cannot change the terminal outcome, but log any
+            // messages or injected_context for audit visibility.
+            if !stop_failure_result.messages.is_empty()
+                || stop_failure_result.injected_context.is_some()
+            {
+                warn!(agent = %agent, "StopFailure hook produced output that cannot be injected (terminal path)");
+            }
+        }
+
         Err(ReactError::from(AgentError::MaxIterationsExceeded(
             self.config.max_iterations,
         )))

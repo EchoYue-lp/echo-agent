@@ -6,7 +6,7 @@
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::types::{
     ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message,
-    MessageContent, ToolCall,
+    MessageContent, Role, ToolCall,
 };
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use echo_core::retry::{RetryPolicy, with_retry_if};
@@ -68,12 +68,12 @@ impl AnthropicClient {
         let mut messages = Vec::new();
 
         for msg in &request.messages {
-            if msg.role == "system" {
+            if msg.role == Role::System {
                 system = msg.content.as_text();
                 continue;
             }
 
-            if msg.role == "tool" {
+            if msg.role == Role::Tool {
                 messages.push(AnthropicMessage {
                     role: "user".to_string(),
                     content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
@@ -84,7 +84,7 @@ impl AnthropicClient {
                 continue;
             }
 
-            if msg.role == "assistant"
+            if msg.role == Role::Assistant
                 && let Some(ref tool_calls) = msg.tool_calls
             {
                 let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -133,7 +133,7 @@ impl AnthropicClient {
             };
 
             messages.push(AnthropicMessage {
-                role: msg.role.clone(),
+                role: msg.role.as_str().to_string(),
                 content,
             });
         }
@@ -189,7 +189,7 @@ impl AnthropicClient {
         };
 
         let message = Message {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: if content_parts.is_empty() {
                 echo_core::llm::types::MessageContent::Empty
             } else {

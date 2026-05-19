@@ -19,7 +19,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 /// A2A server
@@ -34,7 +34,7 @@ use tracing::{info, warn};
 /// ```
 pub struct A2AServer {
     card: AgentCard,
-    agent: Arc<Mutex<Box<dyn Agent>>>,
+    agent: Arc<dyn Agent>,
     tasks: Arc<RwLock<HashMap<String, A2ATask>>>,
     cancel_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>,
 }
@@ -44,7 +44,7 @@ impl A2AServer {
     pub fn new(card: AgentCard, agent: impl Agent + 'static) -> Self {
         Self {
             card,
-            agent: Arc::new(Mutex::new(Box::new(agent))),
+            agent: Arc::new(agent),
             tasks: Arc::new(RwLock::new(HashMap::new())),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -54,7 +54,7 @@ impl A2AServer {
     pub fn from_boxed(card: AgentCard, agent: Box<dyn Agent>) -> Self {
         Self {
             card,
-            agent: Arc::new(Mutex::new(agent)),
+            agent: Arc::new(agent),
             tasks: Arc::new(RwLock::new(HashMap::new())),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -203,7 +203,7 @@ impl A2AServer {
             });
 
             // Execute agent with streaming
-            let agent_guard = agent.lock().await;
+            let agent_guard = agent.as_ref();
             let stream_result = agent_guard.execute_stream(&input_text).await;
 
             match stream_result {
@@ -401,7 +401,7 @@ impl A2AServer {
         Self::update_task_state(&self.tasks, &task_id, TaskState::Working, None).await;
 
         // working → completed / failed
-        let agent = self.agent.lock().await;
+        let agent = self.agent.as_ref();
         match agent.execute(&input_text).await {
             Ok(output) => {
                 info!(task_id = %task_id, "A2A: task execution completed");

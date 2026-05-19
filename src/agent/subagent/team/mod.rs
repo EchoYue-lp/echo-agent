@@ -7,7 +7,6 @@ pub mod coordinator;
 pub mod mailbox;
 
 use echo_core::agent::Agent;
-use futures::lock::Mutex as AsyncMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
@@ -67,7 +66,7 @@ pub struct TeamMember {
     /// Team role.
     pub role: TeamRole,
     /// Agent instance.
-    pub agent: Arc<AsyncMutex<Box<dyn Agent>>>,
+    pub agent: Arc<dyn Agent>,
     /// Member's mailbox.
     pub mailbox: Mailbox,
     /// Definition.
@@ -136,7 +135,7 @@ impl Team {
             TeamMember {
                 name: name.to_string(),
                 role,
-                agent: Arc::new(AsyncMutex::new(agent)),
+                agent: Arc::new(agent),
                 mailbox,
                 definition,
             },

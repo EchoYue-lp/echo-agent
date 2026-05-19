@@ -135,6 +135,11 @@ impl McpManager {
         self.clients.get(name)
     }
 
+    /// 获取所有已连接客户端的快照（用于 hook 执行器等场景）。
+    pub fn get_clients(&self) -> HashMap<String, Arc<McpClient>> {
+        self.clients.clone()
+    }
+
     /// 列出所有已连接的服务端名称
     pub fn server_names(&self) -> Vec<&str> {
         self.clients.keys().map(|s| s.as_str()).collect()

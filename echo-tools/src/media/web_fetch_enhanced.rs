@@ -122,18 +122,18 @@ impl WebFetchToolEnhanced {
     #[allow(dead_code)]
     async fn download_image_as_base64(&self, url: &str) -> Result<(String, String, usize)> {
         let response = self.client.get(url).send().await.map_err(|e| {
-            echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+            echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                 tool: "web_fetch_enhanced".into(),
                 message: format!("Failed to download image: {}", e),
-            })
+            }))
         })?;
 
         if !response.status().is_success() {
             return Err(echo_core::error::ReactError::Tool(
-                ToolError::ExecutionFailed {
+                Box::new(ToolError::ExecutionFailed {
                     tool: "web_fetch_enhanced".into(),
                     message: format!("HTTP error: {}", response.status()),
-                },
+                }),
             ));
         }
 
@@ -149,10 +149,10 @@ impl WebFetchToolEnhanced {
 
         // Download binary data
         let bytes = response.bytes().await.map_err(|e| {
-            echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+            echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                 tool: "web_fetch_enhanced".into(),
                 message: format!("Failed to read image data: {}", e),
-            })
+            }))
         })?;
 
         let size = bytes.len();
@@ -209,9 +209,9 @@ impl Tool for WebFetchToolEnhanced {
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    echo_core::error::ReactError::Tool(ToolError::MissingParameter(
+                    echo_core::error::ReactError::Tool(Box::new(ToolError::MissingParameter(
                         "url".to_string(),
-                    ))
+                    )))
                 })?;
 
             if url.trim().is_empty() {
@@ -255,10 +255,10 @@ impl Tool for WebFetchToolEnhanced {
             if mode == "image" || is_image_url {
                 // Verify it's actually an image
                 let response = client.head(url).send().await.map_err(|e| {
-                    echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+                    echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                         tool: "web_fetch_enhanced".into(),
                         message: format!("HEAD request failed: {}", e),
-                    })
+                    }))
                 })?;
 
                 if !response.status().is_success() {
@@ -327,7 +327,7 @@ impl Tool for WebFetchToolEnhanced {
                     }
                     .await;
 
-                let (data_uri, ct, size) = result.map_err(echo_core::error::ReactError::Tool)?;
+                let (data_uri, ct, size) = result.map_err(|e| echo_core::error::ReactError::Tool(Box::new(e)))?;
 
                 // Truncate base64 if too long
                 let data_uri_display = if data_uri.len() > 1000 {
@@ -346,10 +346,10 @@ impl Tool for WebFetchToolEnhanced {
 
             // Text mode (default) or JSON mode
             let response = client.get(url).send().await.map_err(|e| {
-                echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+                echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                     tool: "web_fetch_enhanced".into(),
                     message: format!("Request failed: {}", e),
-                })
+                }))
             })?;
 
             let status = response.status();
@@ -365,10 +365,10 @@ impl Tool for WebFetchToolEnhanced {
                 .to_string();
 
             let body = response.text().await.map_err(|e| {
-                echo_core::error::ReactError::Tool(ToolError::ExecutionFailed {
+                echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                     tool: "web_fetch_enhanced".into(),
                     message: format!("Failed to read response body: {}", e),
-                })
+                }))
             })?;
 
             let content = if mode == "json" {

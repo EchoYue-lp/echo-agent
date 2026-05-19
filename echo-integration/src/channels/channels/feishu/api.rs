@@ -110,10 +110,10 @@ pub async fn get_ws_endpoint(
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        return Err(ReactError::Channel(ChannelError::AuthError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::AuthError(format!(
             "Endpoint request failed (status {}): {}",
             status, text
-        ))));
+        )))));
     }
 
     let resp: EndpointResponse = res.json().await.map_err(|e| {
@@ -124,38 +124,38 @@ pub async fn get_ws_endpoint(
     match resp.code {
         0 => {}
         1 => {
-            return Err(ReactError::Channel(ChannelError::AuthError(
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
                 "System busy, please retry later".to_string(),
-            )));
+            ))));
         }
         514 => {
-            return Err(ReactError::Channel(ChannelError::AuthError(
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
                 "Authentication failed: invalid app_id or app_secret".to_string(),
-            )));
+            ))));
         }
         1000040350 => {
-            return Err(ReactError::Channel(ChannelError::AuthError(
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
                 "Exceeded connection limit (max 50 connections per app)".to_string(),
-            )));
+            ))));
         }
         code => {
-            return Err(ReactError::Channel(ChannelError::AuthError(format!(
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(format!(
                 "Endpoint error (code {}): {}",
                 code, resp.msg
-            ))));
+            )))));
         }
     }
 
     let data = resp.data.ok_or_else(|| {
-        ReactError::Channel(ChannelError::AuthError(
+        ReactError::Channel(Box::new(ChannelError::AuthError(
             "Endpoint response missing data".to_string(),
-        ))
+        )))
     })?;
 
     if data.url.is_empty() {
-        return Err(ReactError::Channel(ChannelError::AuthError(
+        return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
             "Endpoint URL is empty".to_string(),
-        )));
+        ))));
     }
 
     // Parse URL to get device_id and service_id
@@ -254,10 +254,10 @@ impl TokenManager {
             .map_err(|e| ChannelError::NetworkError(format!("Token request failed: {}", e)))?;
 
         if !res.status().is_success() {
-            return Err(ReactError::Channel(ChannelError::AuthError(format!(
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(format!(
                 "Token request failed with status {}",
                 res.status()
-            ))));
+            )))));
         }
 
         let json: serde_json::Value = res.json().await.map_err(|e| {
@@ -267,18 +267,18 @@ impl TokenManager {
         let code = json["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
-            return Err(ReactError::Channel(ChannelError::AuthError(format!(
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(format!(
                 "Token API error (code {}): {}",
                 code, msg
-            ))));
+            )))));
         }
 
         let token = json["tenant_access_token"]
             .as_str()
             .ok_or_else(|| {
-                ReactError::Channel(ChannelError::AuthError(
+                ReactError::Channel(Box::new(ChannelError::AuthError(
                     "Token response missing tenant_access_token".to_string(),
-                ))
+                )))
             })?
             .to_string();
 
@@ -335,10 +335,10 @@ pub async fn send_message(
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
         warn!("Feishu: send message failed (status {}): {}", status, text);
-        return Err(ReactError::Channel(ChannelError::SendError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
             "Send message failed (status {}): {}",
             status, text
-        ))));
+        )))));
     }
 
     let json: serde_json::Value = res
@@ -349,10 +349,10 @@ pub async fn send_message(
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
         let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
-        return Err(ReactError::Channel(ChannelError::SendError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
             "Send API error (code {}): {}",
             code, msg
-        ))));
+        )))));
     }
 
     // Return message ID
@@ -438,10 +438,10 @@ pub async fn reply_message(
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        return Err(ReactError::Channel(ChannelError::SendError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
             "Reply failed (status {}): {}",
             status, text
-        ))));
+        )))));
     }
 
     let json: serde_json::Value = res
@@ -452,10 +452,10 @@ pub async fn reply_message(
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
         let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
-        return Err(ReactError::Channel(ChannelError::SendError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
             "Reply API error (code {}): {}",
             code, msg
-        ))));
+        )))));
     }
 
     let reply_id = json["data"]["message_id"]
@@ -492,10 +492,10 @@ pub async fn patch_card_message(
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        return Err(ReactError::Channel(ChannelError::SendError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
             "Patch failed (status {}): {}",
             status, text
-        ))));
+        )))));
     }
 
     let json: serde_json::Value = res
@@ -506,10 +506,10 @@ pub async fn patch_card_message(
     let code = json["code"].as_i64().unwrap_or(-1);
     if code != 0 {
         let msg = json["msg"].as_str().unwrap_or("unknown error").to_string();
-        return Err(ReactError::Channel(ChannelError::SendError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
             "Patch API error (code {}): {}",
             code, msg
-        ))));
+        )))));
     }
 
     Ok(())

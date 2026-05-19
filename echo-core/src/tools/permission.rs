@@ -10,7 +10,7 @@
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 // ── Tool Permission Types ──────────────────────────────────────────────────────
 
@@ -82,7 +82,9 @@ impl PermissionMode {
         match self {
             PermissionMode::BypassPermissions => true,
             PermissionMode::AcceptEdits => true,
-            PermissionMode::DontAsk => true, // allows write operations in rules
+            // DontAsk defers to rule matching: writes are only allowed
+            // if an explicit allow rule matches; otherwise silently rejected.
+            PermissionMode::DontAsk => false,
             PermissionMode::Plan => false,
             _ => false,
         }
@@ -385,8 +387,6 @@ impl PermissionRule {
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
     rules: Vec<PermissionRule>,
-    /// Index for fast exact tool name lookups: tool_name -> list of rule indices
-    tool_index: HashMap<String, Vec<usize>>,
 }
 
 impl RuleRegistry {
@@ -405,9 +405,6 @@ impl RuleRegistry {
             .unwrap_or(self.rules.len());
 
         self.rules.insert(pos, rule);
-
-        // Rebuild tool_index after insertion so all indices are correct
-        self.rebuild_tool_index();
     }
 
     /// Batch add rules
@@ -426,31 +423,33 @@ impl RuleRegistry {
     ///
     /// This ensures that a low-priority deny rule can never be overridden by a
     /// high-priority allow rule.
+    ///
+    /// Implemented as a single pass: deny returns immediately, ask and allow
+    /// are tracked and the highest-priority match is returned after the loop.
     pub fn check(&self, tool_name: &str, permissions: &[ToolPermission]) -> Option<RuleBehavior> {
-        // Pass 1: Deny — any deny anywhere wins (full scan)
+        let mut first_ask: Option<RuleBehavior> = None;
+        let mut first_allow: Option<RuleBehavior> = None;
+
         for rule in &self.rules {
-            if matches!(rule.behavior, RuleBehavior::Deny { .. })
-                && rule.matches(tool_name, permissions)
-            {
-                return Some(rule.behavior.clone());
+            if !rule.matches(tool_name, permissions) {
+                continue;
+            }
+            match &rule.behavior {
+                RuleBehavior::Deny { .. } => return Some(rule.behavior.clone()),
+                RuleBehavior::Ask { .. } => {
+                    if first_ask.is_none() {
+                        first_ask = Some(rule.behavior.clone());
+                    }
+                }
+                RuleBehavior::Allow => {
+                    if first_allow.is_none() {
+                        first_allow = Some(rule.behavior.clone());
+                    }
+                }
             }
         }
-        // Pass 2: Ask — by source priority (rules are already sorted by source)
-        for rule in &self.rules {
-            if matches!(rule.behavior, RuleBehavior::Ask { .. })
-                && rule.matches(tool_name, permissions)
-            {
-                return Some(rule.behavior.clone());
-            }
-        }
-        // Pass 3: Allow — by source priority
-        for rule in &self.rules {
-            if matches!(rule.behavior, RuleBehavior::Allow) && rule.matches(tool_name, permissions)
-            {
-                return Some(rule.behavior.clone());
-            }
-        }
-        None
+
+        first_ask.or(first_allow)
     }
 
     /// Get all rules from the specified source
@@ -461,7 +460,6 @@ impl RuleRegistry {
     /// Remove all rules from the specified source
     pub fn remove_by_source(&mut self, source: RuleSource) {
         self.rules.retain(|r| r.source != source);
-        self.rebuild_tool_index();
     }
 
     /// Remove all rules matching the specified matcher string
@@ -472,27 +470,12 @@ impl RuleRegistry {
         let before = self.rules.len();
         self.rules
             .retain(|r| !r.matcher.matches_matcher_str(matcher_str));
-        let removed = before - self.rules.len();
-        if removed > 0 {
-            self.rebuild_tool_index();
-        }
-        removed
-    }
-
-    /// Rebuild tool_index (called after rule removal)
-    fn rebuild_tool_index(&mut self) {
-        self.tool_index.clear();
-        for (i, rule) in self.rules.iter().enumerate() {
-            if let RuleMatcher::Tool { name } = &rule.matcher {
-                self.tool_index.entry(name.clone()).or_default().push(i);
-            }
-        }
+        before - self.rules.len()
     }
 
     /// Clear all rules
     pub fn clear(&mut self) {
         self.rules.clear();
-        self.tool_index.clear();
     }
 
     /// Get the number of rules

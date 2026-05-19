@@ -49,6 +49,7 @@ pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -256,6 +257,8 @@ impl SqliteStore {
                     created_at: created_at as u64,
                     updated_at: updated_at as u64,
                     score: default_score.or(Some(1.0 / (i as f32 + 1.0))),
+                    importance: 5.0,
+                    last_accessed: None,
                 });
             }
         }
@@ -293,6 +296,8 @@ impl SqliteStore {
                     created_at: created_at as u64,
                     updated_at: updated_at as u64,
                     score: *score,
+                    importance: 5.0,
+                    last_accessed: None,
                 });
             }
         }
@@ -380,6 +385,8 @@ impl SqliteStore {
                     created_at: created_at as u64,
                     updated_at: updated_at as u64,
                     score: Some(score),
+                    importance: 5.0,
+                    last_accessed: None,
                 });
             }
         }
@@ -496,6 +503,8 @@ impl Store for SqliteStore {
                         created_at: created_at as u64,
                         updated_at: updated_at as u64,
                         score: None,
+                        importance: 5.0,
+                        last_accessed: None,
                     }))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -695,6 +704,8 @@ impl Store for SqliteStore {
                         created_at: row.get::<_, i64>(3)? as u64,
                         updated_at: row.get::<_, i64>(4)? as u64,
                         score: None,
+                        importance: 5.0,
+                        last_accessed: None,
                     })
                 })
                 .map_err(|e| memory_io_error("list items failed", e))?
@@ -716,39 +727,70 @@ impl Store for SqliteStore {
                     self.semantic_search_impl(namespace, query.text, query.limit)
                         .await
                 }
-                SearchMode::Hybrid => {
-                    let mut merged: std::collections::HashMap<String, StoreItem> =
-                        std::collections::HashMap::new();
-                    for item in self.search(namespace, query.text, query.limit).await? {
-                        merged.insert(item.key.clone(), item);
-                    }
-                    match self
+                SearchMode::Hybrid { vector_weight } => {
+                    let keyword_items = self.search(namespace, query.text, query.limit).await?;
+
+                    let semantic_items = match self
                         .semantic_search_impl(namespace, query.text, query.limit)
                         .await
                     {
-                        Ok(items) => {
-                            for item in items {
-                                merged
-                                    .entry(item.key.clone())
-                                    .and_modify(|existing| {
-                                        let incoming = item.score.unwrap_or_default();
-                                        if incoming > existing.score.unwrap_or_default() {
-                                            *existing = item.clone();
-                                        }
-                                    })
-                                    .or_insert(item);
-                            }
-                        }
+                        Ok(items) => items,
                         Err(err)
                             if format!("{err}").contains(
                                 "semantic search requires an embedder-backed SqliteStore",
-                            ) => {}
+                            ) =>
+                        {
+                            // Fallback to keyword-only: rank keyword items by RRF
+                            // (effectively vector_weight forced to 0.0)
+                            let mut items = keyword_items;
+                            items.sort_by(|a, b| {
+                                b.score.unwrap_or_default()
+                                    .partial_cmp(&a.score.unwrap_or_default())
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            items.truncate(query.limit);
+                            return Ok(items);
+                        }
                         Err(err) => return Err(err),
-                    }
-                    let mut items: Vec<StoreItem> = merged.into_values().collect();
+                    };
+
+                    // Build rank maps
+                    let keyword_ranks: HashMap<&str, usize> = keyword_items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, item)| (item.key.as_str(), i))
+                        .collect();
+                    let semantic_ranks: HashMap<&str, usize> = semantic_items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, item)| (item.key.as_str(), i))
+                        .collect();
+
+                    let all_keys: HashSet<&str> = keyword_ranks
+                        .keys()
+                        .chain(semantic_ranks.keys())
+                        .copied()
+                        .collect();
+
+                    let mut items: Vec<StoreItem> = all_keys
+                        .iter()
+                        .filter_map(|&key| {
+                            let kr = keyword_ranks.get(key).copied().unwrap_or(usize::MAX);
+                            let sr = semantic_ranks.get(key).copied().unwrap_or(usize::MAX);
+                            let rrf = echo_core::memory::store::rrf_score(sr, kr, vector_weight);
+
+                            let mut item = keyword_items
+                                .iter()
+                                .find(|i| i.key == key)
+                                .or_else(|| semantic_items.iter().find(|i| i.key == key))?
+                                .clone();
+                            item.score = Some(rrf);
+                            Some(item)
+                        })
+                        .collect();
+
                     items.sort_by(|a, b| {
-                        b.score
-                            .unwrap_or_default()
+                        b.score.unwrap_or_default()
                             .partial_cmp(&a.score.unwrap_or_default())
                             .unwrap_or(std::cmp::Ordering::Equal)
                     });

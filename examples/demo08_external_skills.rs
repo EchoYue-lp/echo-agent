@@ -633,18 +633,26 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
         let mut registry = HookRegistry::new();
 
         let def = HooksDefinition {
-            pre_tool_use: vec![HookRule {
-                matcher: "Bash".into(),
-                hooks: vec![HookAction::Prompt {
-                    prompt: "Verify command safety before execution".into(),
-                }],
-            }],
-            post_tool_use: vec![HookRule {
-                matcher: "*".into(),
-                hooks: vec![HookAction::Prompt {
-                    prompt: "Check output for sensitive data".into(),
-                }],
-            }],
+            rules: HashMap::from([
+                (
+                    HookEvent::PreToolUse,
+                    vec![HookRule {
+                        matcher: "Bash".into(),
+                        hooks: vec![HookAction::Prompt {
+                            prompt: "Verify command safety before execution".into(),
+                        }],
+                    }],
+                ),
+                (
+                    HookEvent::PostToolUse,
+                    vec![HookRule {
+                        matcher: "*".into(),
+                        hooks: vec![HookAction::Prompt {
+                            prompt: "Check output for sensitive data".into(),
+                        }],
+                    }],
+                ),
+            ]),
         };
 
         registry.register("security-guard", "/tmp/security", def);

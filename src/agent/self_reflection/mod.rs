@@ -54,6 +54,8 @@ use crate::agent::{Agent, AgentEvent};
 use crate::error::Result;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -523,9 +525,11 @@ impl Agent for SelfReflectionAgent {
         })
     }
 
-    fn reset(&self) {
-        self.generator.reset();
-        self.episodic_memory.write().unwrap().clear();
+    fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.generator.reset().await;
+            self.episodic_memory.write().unwrap().clear();
+        })
     }
 }
 
@@ -662,7 +666,7 @@ mod tests {
         agent.execute("Task1").await.unwrap();
 
         // Reset
-        agent.reset();
+        agent.reset().await;
         assert!(agent.episodic_memory.read().unwrap().is_empty());
     }
 

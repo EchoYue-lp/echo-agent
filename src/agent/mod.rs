@@ -29,14 +29,14 @@
 //! # }
 //! ```
 
+pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
 pub use echo_core::agent::{Agent, AgentCallback, AgentEvent, CancellationToken, StepType};
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tokio::sync::Mutex as AsyncMutex;
 
 /// SubAgent registry type alias
-pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<AsyncMutex<Box<dyn Agent>>>>>>;
+pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
 
 // ── Core sub-modules ───────────────────────────────────────────────────────
 

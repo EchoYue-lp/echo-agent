@@ -150,6 +150,17 @@ pub trait ToolRegistrar {
     fn register(&mut self, tool: Box<dyn Tool>);
 }
 
+/// Helper trait for `#[derive(Tool)]` — provides a typed `run` method that
+/// the derive macro's generated `execute()` delegates to.
+///
+/// Users override `run()` with their tool's business logic; the derive macro
+/// handles JSON Schema generation, parameter deserialization, and `Tool` trait
+/// boilerplate automatically.
+pub trait ToolRunner<P = ToolParameters>: Tool + Sized {
+    /// Execute the tool with typed, deserialized parameters.
+    fn run(&self, params: P) -> impl std::future::Future<Output = Result<ToolResult>> + Send;
+}
+
 /// Tool interface trait
 pub trait Tool: Send + Sync {
     /// Stable tool identifier exposed to the model.
@@ -159,10 +170,10 @@ pub trait Tool: Send + Sync {
     /// JSON Schema describing accepted parameters.
     fn parameters(&self) -> serde_json::Value;
     /// Execute the tool with untyped JSON parameters.
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>>;
+    fn execute<'a>(&'a self, parameters: ToolParameters) -> BoxFuture<'a, Result<ToolResult>>;
 
     /// Validate parameters before execution.
-    fn validate_parameters(&self, _params: &ToolParameters) -> BoxFuture<'_, Result<()>> {
+    fn validate_parameters<'a>(&'a self, _params: &'a ToolParameters) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 

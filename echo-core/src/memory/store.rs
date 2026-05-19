@@ -24,7 +24,18 @@ pub struct StoreItem {
     /// Last update time (Unix seconds)
     pub updated_at: u64,
     /// Relevance score from search (non-None only when returned by `search`)
+    #[serde(default)]
     pub score: Option<f32>,
+    /// Importance score (1.0–10.0, default 5.0). Higher = less likely to be pruned.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
+    /// Last access timestamp (Unix seconds). Used for decay/pruning decisions.
+    #[serde(default)]
+    pub last_accessed: Option<u64>,
+}
+
+fn default_importance() -> f32 {
+    5.0
 }
 
 impl StoreItem {
@@ -38,19 +49,67 @@ impl StoreItem {
             created_at: now,
             updated_at: now,
             score: None,
+            importance: 5.0,
+            last_accessed: None,
         }
+    }
+
+    /// Create a StoreItem with explicit importance.
+    pub fn with_importance(
+        namespace: Vec<String>,
+        key: String,
+        value: Value,
+        importance: f32,
+    ) -> Self {
+        let mut item = Self::new(namespace, key, value);
+        item.importance = importance.clamp(1.0, 10.0);
+        item
+    }
+
+    /// Mark this item as accessed (updates `last_accessed`).
+    pub fn touch(&mut self) {
+        self.last_accessed = Some(crate::utils::time::now_secs());
     }
 }
 
 /// Search mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum SearchMode {
     /// Keyword search only
     Keyword,
     /// Semantic search only
     Semantic,
-    /// Hybrid keyword + semantic search
-    Hybrid,
+    /// Hybrid keyword + semantic search with configurable vector weight.
+    /// `weight` is the vector-search contribution (0.0 = pure keyword, 1.0 = pure semantic, default 0.5).
+    Hybrid {
+        /// Weight of vector/semantic search in the final score (0.0–1.0).
+        /// Keyword weight is `1.0 - vector_weight`.
+        vector_weight: f32,
+    },
+}
+
+/// Default RRF constant k (standard value is 60)
+pub const RRF_K: f64 = 60.0;
+
+/// Compute Reciprocal Rank Fusion score from two ranked result sets.
+///
+/// `vector_rank` and `keyword_rank` are 0-based positions in their respective
+/// result lists (use `usize::MAX` for items not present in a list).
+/// `vector_weight` controls the relative contribution.
+pub fn rrf_score(vector_rank: usize, keyword_rank: usize, vector_weight: f32) -> f32 {
+    let vw = vector_weight as f64;
+    let kw = 1.0 - vw;
+    let vr = if vector_rank == usize::MAX {
+        0.0
+    } else {
+        vw / (RRF_K + vector_rank as f64)
+    };
+    let kr = if keyword_rank == usize::MAX {
+        0.0
+    } else {
+        kw / (RRF_K + keyword_rank as f64)
+    };
+    (vr + kr) as f32
 }
 
 /// Unified search request
@@ -82,7 +141,18 @@ impl<'a> SearchQuery<'a> {
         Self {
             text,
             limit,
-            mode: SearchMode::Hybrid,
+            mode: SearchMode::Hybrid {
+                vector_weight: 0.5,
+            },
+        }
+    }
+
+    /// Hybrid search with custom vector weight (0.0 = pure keyword, 1.0 = pure semantic).
+    pub fn hybrid_weighted(text: &'a str, limit: usize, vector_weight: f32) -> Self {
+        Self {
+            text,
+            limit,
+            mode: SearchMode::Hybrid { vector_weight },
         }
     }
 }
@@ -129,7 +199,7 @@ pub trait Store: Send + Sync {
                     "semantic search is not supported by this Store".to_string(),
                 )
                 .into()),
-                SearchMode::Hybrid => Err(MemoryError::Unsupported(
+                SearchMode::Hybrid { .. } => Err(MemoryError::Unsupported(
                     "hybrid search is not supported by this Store".to_string(),
                 )
                 .into()),

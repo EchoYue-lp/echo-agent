@@ -14,50 +14,27 @@ use std::path::Path;
 use std::process::Command;
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRunner};
 
 // ── Git status ──────────────────────────────────────────────────────────────
 
-pub struct GitStatusTool;
+#[derive(Default, echo_macros::Tool)]
+#[tool(name = "git_status", description = "View working directory status of the current repo: modified, staged, untracked files")]
+#[allow(dead_code)]
+pub struct GitStatusTool {
+    #[tool_param(description = "Repository path (defaults to current working directory)")]
+    repo_path: Option<String>,
+}
 
-impl Tool for GitStatusTool {
-    fn name(&self) -> &str {
-        "git_status"
-    }
-
-    fn description(&self) -> &str {
-        "View working directory status of the current repo: modified, staged, untracked files"
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "repo_path": {
-                    "type": "string",
-                    "description": "Repository path (defaults to current working directory)"
-                }
-            },
-            "required": []
-        })
-    }
-
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
-        Box::pin(async move {
-            let repo_path = parameters
-                .get("repo_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-
-            let output = run_git(repo_path, &["status", "--short"])?;
-            if output.is_empty() {
-                Ok(ToolResult::success(
-                    "Working directory clean, no changes".to_string(),
-                ))
-            } else {
-                Ok(ToolResult::success(format!("Git status:\n{}", output)))
-            }
-        })
+impl ToolRunner<GitStatusToolParams> for GitStatusTool {
+    async fn run(&self, params: GitStatusToolParams) -> Result<ToolResult> {
+        let repo_path = params.repo_path.as_deref().unwrap_or(".");
+        let output = run_git(repo_path, &["status", "--short"])?;
+        if output.is_empty() {
+            Ok(ToolResult::success("Working directory clean, no changes"))
+        } else {
+            Ok(ToolResult::success(format!("Git status:\n{}", output)))
+        }
     }
 }
 

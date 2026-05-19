@@ -1,5 +1,6 @@
 use crate::compression::{CompressionInput, CompressionOutput, ContextCompressor};
 use echo_core::error::Result;
+use echo_core::llm::types::Role;
 use futures::future::BoxFuture;
 
 /// 滑动窗口压缩：保留最近 `window_size` 条非 system 消息，裁掉更早的部分。
@@ -20,7 +21,7 @@ impl ContextCompressor for SlidingWindowCompressor {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) =
-                input.messages.into_iter().partition(|m| m.role == "system");
+                input.messages.into_iter().partition(|m| m.role == Role::System);
 
             if conv_msgs.len() <= self.window_size {
                 let mut messages = system_msgs;

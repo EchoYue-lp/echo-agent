@@ -59,7 +59,7 @@ pub struct SkillDescriptor {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
 
-    /// Hooks for intercepting tool calls.
+    /// Hooks for intercepting agent lifecycle events.
     #[serde(skip)]
     pub hooks: Option<crate::skills::hooks::HooksDefinition>,
 }
@@ -343,7 +343,7 @@ pub(crate) struct RawFrontmatter {
     #[serde(default)]
     pub paths: Option<Vec<String>>,
 
-    /// Hooks for intercepting tool calls (PreToolUse/PostToolUse)
+    /// Hooks for intercepting agent lifecycle events
     #[serde(default)]
     pub hooks: Option<crate::skills::hooks::HooksDefinition>,
 

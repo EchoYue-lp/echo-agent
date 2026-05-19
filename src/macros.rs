@@ -103,6 +103,7 @@ macro_rules! agent {
 /// ```rust
 /// use echo_agent::messages;
 /// use echo_agent::llm::types::Message;
+/// use echo_agent::llm::types::Role;
 ///
 /// let msgs = messages![
 ///     system("You are an assistant"),
@@ -112,7 +113,7 @@ macro_rules! agent {
 /// ];
 ///
 /// assert_eq!(msgs.len(), 4);
-/// assert_eq!(msgs[0].role, "system");
+/// assert_eq!(msgs[0].role, Role::System);
 /// ```
 #[macro_export]
 macro_rules! messages {
@@ -241,7 +242,7 @@ macro_rules! __chat_request_field {
 
 #[cfg(test)]
 mod tests {
-    use crate::llm::types::Message;
+    use crate::llm::types::{Message, Role};
 
     #[test]
     fn messages_macro_basic() {
@@ -252,17 +253,17 @@ mod tests {
         ];
 
         assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].role, Role::System);
         assert_eq!(msgs[0].content.as_text_ref(), Some("You are an assistant"));
-        assert_eq!(msgs[1].role, "user");
-        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[1].role, Role::User);
+        assert_eq!(msgs[2].role, Role::Assistant);
     }
 
     #[test]
     fn messages_macro_single() {
         let msgs = messages![user("hello")];
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].role, Role::User);
     }
 
     #[test]
@@ -322,7 +323,7 @@ mod tests {
         );
 
         assert_eq!(req.messages.len(), 2);
-        assert_eq!(req.messages[0].role, "system");
+        assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.temperature, Some(0.7));
         assert_eq!(req.max_tokens, Some(2048));
     }

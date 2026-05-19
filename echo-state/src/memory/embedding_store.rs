@@ -330,30 +330,56 @@ impl Store for EmbeddingStore {
                     self.semantic_search_impl(namespace, query.text, query.limit)
                         .await
                 }
-                SearchMode::Hybrid => {
-                    let mut merged: HashMap<String, StoreItem> = HashMap::new();
-                    for item in self
+                SearchMode::Hybrid { vector_weight } => {
+                    // Get both result lists independently
+                    let semantic_items = self
                         .semantic_search_impl(namespace, query.text, query.limit)
-                        .await?
-                    {
-                        merged.insert(item.key.clone(), item);
-                    }
-                    for item in self
+                        .await?;
+                    let keyword_items = self
                         .inner
                         .search(namespace, query.text, query.limit)
-                        .await?
-                    {
-                        merged
-                            .entry(item.key.clone())
-                            .and_modify(|existing| {
-                                let incoming = item.score.unwrap_or_default();
-                                if incoming > existing.score.unwrap_or_default() {
-                                    *existing = item.clone();
-                                }
-                            })
-                            .or_insert(item);
-                    }
-                    let mut items: Vec<StoreItem> = merged.into_values().collect();
+                        .await?;
+
+                    // Build rank maps: key -> 0-based position
+                    let semantic_ranks: HashMap<&str, usize> = semantic_items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, item)| (item.key.as_str(), i))
+                        .collect();
+                    let keyword_ranks: HashMap<&str, usize> = keyword_items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, item)| (item.key.as_str(), i))
+                        .collect();
+
+                    // Collect all unique keys
+                    let all_keys: Vec<&str> = semantic_ranks
+                        .keys()
+                        .chain(keyword_ranks.keys())
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+
+                    // Score each key via RRF, pick best item from either list
+                    let mut items: Vec<StoreItem> = all_keys
+                        .iter()
+                        .filter_map(|&key| {
+                            let sr = semantic_ranks.get(key).copied().unwrap_or(usize::MAX);
+                            let kr = keyword_ranks.get(key).copied().unwrap_or(usize::MAX);
+                            let rrf = echo_core::memory::store::rrf_score(sr, kr, vector_weight);
+
+                            // Prefer the semantic item if available, otherwise keyword
+                            let mut item = semantic_items
+                                .iter()
+                                .find(|i| i.key == key)
+                                .or_else(|| keyword_items.iter().find(|i| i.key == key))?
+                                .clone();
+                            item.score = Some(rrf);
+                            Some(item)
+                        })
+                        .collect();
+
                     items.sort_by(|a, b| {
                         b.score
                             .unwrap_or_default()

@@ -21,10 +21,10 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let mut result: Result<T> = Err(ReactError::Agent(AgentError::NoResponse {
+    let mut result: Result<T> = Err(ReactError::Agent(Box::new(AgentError::NoResponse {
         model: "unknown".to_string(),
         agent: agent_name.to_string(),
-    }));
+    })));
     for attempt in 0..=max_retries {
         if attempt > 0 {
             // Exponential backoff with jitter: base * 2^(attempt-1) + rand(0..base/2)

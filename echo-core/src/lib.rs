@@ -20,11 +20,13 @@
 
 pub mod agent;
 pub mod audit;
+pub mod budget;
 pub mod circuit_breaker;
 pub mod compression;
 pub mod error;
 pub mod guard;
 pub mod llm;
+pub mod hooks;
 pub mod memory;
 pub mod project_rules;
 pub mod retry;

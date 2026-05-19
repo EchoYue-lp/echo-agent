@@ -52,7 +52,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Configuration for task executor
-#[derive(Debug, Clone)]
 pub struct TaskExecutorConfig {
     /// Maximum concurrent task executions
     pub max_concurrent: usize,
@@ -70,6 +69,26 @@ pub struct TaskExecutorConfig {
     pub enable_hooks: bool,
     /// Checkpoint interval: seconds (0 = no checkpoint).
     pub checkpoint_interval_secs: u64,
+    /// Optional bridge to the unified lifecycle hook system (echo-core).
+    /// When set, TaskCreated/TaskCompleted events are fired into the
+    /// unified HookRegistry alongside the trait-based TaskHooks.
+    pub unified_hook_executor: Option<echo_core::hooks::UnifiedHookExecutorFn>,
+}
+
+impl Clone for TaskExecutorConfig {
+    fn clone(&self) -> Self {
+        Self {
+            max_concurrent: self.max_concurrent,
+            default_timeout_secs: self.default_timeout_secs,
+            retry_delay_secs: self.retry_delay_secs,
+            retry_backoff_factor: self.retry_backoff_factor,
+            retry_max_delay_secs: self.retry_max_delay_secs,
+            retry_jitter: self.retry_jitter,
+            enable_hooks: self.enable_hooks,
+            checkpoint_interval_secs: self.checkpoint_interval_secs,
+            unified_hook_executor: self.unified_hook_executor.clone(),
+        }
+    }
 }
 
 type TaskOutputPair = (String, String);
@@ -86,6 +105,7 @@ impl Default for TaskExecutorConfig {
             retry_jitter: true,
             enable_hooks: true,
             checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
         }
     }
 }
@@ -353,6 +373,17 @@ impl TaskExecutor {
         let mut handles = Vec::with_capacity(ready_tasks.len());
 
         for task in ready_tasks {
+            // Fire unified TaskCreated hook at scheduling time (before execution begins)
+            if let Some(ref executor) = self.config.unified_hook_executor {
+                let ctx = echo_core::hooks::HookContext::for_task_created(
+                    &task.id,
+                    &task.subject,
+                    "", // session_id not available at this layer
+                    "", // agent_name not available at this layer
+                );
+                executor(ctx).await;
+            }
+
             let permit = self
                 .semaphore
                 .clone()
@@ -558,6 +589,18 @@ impl TaskExecutor {
                         hooks.after_execute(&ctx, &output).await;
                     }
 
+                    // Fire unified TaskCompleted hook (success)
+                    if let Some(ref executor) = config.unified_hook_executor {
+                        let ctx = echo_core::hooks::HookContext::for_task_completed(
+                            &task_id,
+                            &task.subject,
+                            &output,
+                            "", // session_id not available at this layer
+                            "", // agent_name not available at this layer
+                        );
+                        executor(ctx).await;
+                    }
+
                     return TaskExecutionResult::success(
                         &task_id,
                         output,
@@ -658,6 +701,18 @@ impl TaskExecutor {
                     // Final failure
                     let _ =
                         manager.update_task_status(&task_id, TaskStatus::Failed(error_str.clone()));
+
+                    // Fire unified TaskCompleted hook (failure)
+                    if let Some(ref executor) = config.unified_hook_executor {
+                        let ctx = echo_core::hooks::HookContext::for_task_completed(
+                            &task_id,
+                            &task.subject,
+                            &format!("error: {}", error_str),
+                            "", // session_id not available at this layer
+                            "", // agent_name not available at this layer
+                        );
+                        executor(ctx).await;
+                    }
                     manager.record_task_execution(
                         &task_id,
                         current_attempt,
@@ -933,6 +988,7 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config);
@@ -960,6 +1016,7 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config);
@@ -996,6 +1053,7 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
         };
 
         let executor =
@@ -1047,6 +1105,7 @@ mod tests {
             retry_max_delay_secs: 60,
             retry_jitter: false,
             checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(

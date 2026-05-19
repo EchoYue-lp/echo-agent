@@ -13,6 +13,7 @@
 //! | [`#[compressor]`](attr.compressor.html) | `ContextCompressor` impl | Context compression strategy from an async fn |
 //! | [`#[permission_policy]`](attr.permission_policy.html) | `PermissionPolicy` impl | Tool permission policy from an async fn |
 //! | [`#[audit_logger]`](attr.audit_logger.html) | `AuditLogger` impl | Audit logging backend from an impl block |
+//! | [`#[derive(Tool)]`](derive.Tool.html) | `Tool` impl | Derive macro for structs — auto-generates params, JSON Schema, and `Tool` trait impl |
 //!
 //! ## Quick Example
 //!
@@ -29,11 +30,13 @@
 //! `use echo_agent::{tool, callback, guard, handler};` rather than depending
 //! on `echo_macros` directly.
 
+mod derive_tool;
+
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{FnArg, ImplItem, ItemFn, ItemImpl, LitStr, Pat, ReturnType, parse_macro_input};
+use syn::{DeriveInput, FnArg, ImplItem, ItemFn, ItemImpl, LitStr, Pat, ReturnType, parse_macro_input};
 
 fn echo_agent_crate_path() -> syn::Result<syn::Path> {
     match crate_name("echo_agent").map_err(|e| syn::Error::new(Span::call_site(), e.to_string()))? {
@@ -42,6 +45,54 @@ fn echo_agent_crate_path() -> syn::Result<syn::Path> {
             let ident = syn::Ident::new(&name, Span::call_site());
             Ok(syn::parse_quote!(::#ident))
         }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// #[derive(Tool)] — Generate Tool impl from struct definition
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Derive macro that generates a complete `Tool` trait implementation from a
+/// struct definition.
+///
+/// # Struct Attributes
+///
+/// - `#[tool(name = "...", description = "...")]` — required
+/// - `#[tool(risk_level = "ReadOnly|Standard|Dangerous")]` — optional
+/// - `#[tool(permissions = [Read, Write, ...])]` — optional
+///
+/// # Field Attributes
+///
+/// - `#[tool_param(skip)]` — internal state, not exposed to LLM
+/// - `#[tool_param(description = "...")]` — parameter description (also reads doc comments)
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use echo_agent::prelude::*;
+///
+/// #[derive(Tool)]
+/// #[tool(name = "read_file", description = "Read file contents")]
+/// struct ReadFileTool {
+///     #[tool_param(skip)]
+///     base_dir: PathBuf,
+///     #[tool_param(description = "File path")]
+///     path: String,
+/// }
+///
+/// impl ToolRunner<ReadFileToolParams> for ReadFileTool {
+///     async fn run(&self, params: ReadFileToolParams) -> Result<ToolResult> {
+///         let content = std::fs::read_to_string(&params.path)?;
+///         Ok(ToolResult::success(content))
+///     }
+/// }
+/// ```
+#[proc_macro_derive(Tool, attributes(tool, tool_param))]
+pub fn derive_tool(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match derive_tool::derive_tool_impl(input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
     }
 }
 
@@ -196,14 +247,18 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
                 ::serde_json::to_value(schema).unwrap_or_default()
             }
 
-            fn execute(&self, parameters: #echo_agent::tools::ToolParameters) -> ::futures::future::BoxFuture<'_, #echo_agent::error::Result<#echo_agent::tools::ToolResult>> {
+            #permissions_override
+
+            fn validate_parameters<'a>(&'a self, params: &'a #echo_agent::tools::ToolParameters) -> ::futures::future::BoxFuture<'a, #echo_agent::error::Result<()>> {
                 Box::pin(async move {
-                    let value = ::serde_json::Value::Object(parameters.into_iter().collect());
-                    let params: #params_name = ::serde_json::from_value(value)
-                        .map_err(|e| #echo_agent::error::ToolError::InvalidParameter {
-                            name: "(deserialization)".to_string(),
-                            message: e.to_string(),
-                        })?;
+                    #struct_name::deserialize_params(params)?;
+                    Ok(())
+                })
+            }
+
+            fn execute<'a>(&'a self, parameters: #echo_agent::tools::ToolParameters) -> ::futures::future::BoxFuture<'a, #echo_agent::error::Result<#echo_agent::tools::ToolResult>> {
+                Box::pin(async move {
+                    let params = #struct_name::deserialize_params(&parameters)?;
                     let #params_name { #(#param_names),* } = params;
                     #body
                 })
@@ -211,7 +266,28 @@ fn tool_impl(attrs: ToolAttrs, func: ItemFn) -> syn::Result<proc_macro2::TokenSt
         }
 
         impl #struct_name {
-            #permissions_override
+            /// Deserialize and validate tool parameters, returning a typed struct
+            /// or a [`ToolError::InvalidParameter`] with extracted field name.
+            fn deserialize_params(params: &#echo_agent::tools::ToolParameters) -> #echo_agent::error::Result<#params_name> {
+                let value = ::serde_json::Value::Object(params.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+                ::serde_json::from_value(value).map_err(|e| {
+                    let msg = e.to_string();
+                    // Extract field name from common serde error patterns:
+                    // "missing field `name`" -> "name"
+                    // "invalid type: ... at `field`" -> "field"
+                    let field = msg
+                        .strip_prefix("missing field `")
+                        .and_then(|s| s.strip_suffix('`'))
+                        .or_else(|| {
+                            msg.split("at `").nth(1).and_then(|s| s.strip_suffix('`'))
+                        })
+                        .unwrap_or("(deserialization)");
+                    #echo_agent::error::ToolError::InvalidParameter {
+                        name: field.to_string(),
+                        message: msg,
+                    }.into()
+                })
+            }
         }
     };
 
@@ -672,7 +748,7 @@ fn require_return_type(func: &ItemFn) -> syn::Result<()> {
     Ok(())
 }
 
-fn extract_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {
+pub(crate) fn extract_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {
     let docs: Vec<String> = attrs
         .iter()
         .filter_map(|attr| {

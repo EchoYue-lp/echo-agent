@@ -234,9 +234,9 @@ impl LocalSandbox {
         let start = Instant::now();
 
         let mut child = command.spawn().map_err(|e| {
-            echo_core::error::ReactError::Sandbox(SandboxError::StartFailed(format!(
+            echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
                 "Failed to spawn process: {e}"
-            )))
+            ))))
         })?;
 
         // 写入 stdin 并处理写入失败时的进程清理
@@ -247,7 +247,7 @@ impl LocalSandbox {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 return Err(echo_core::error::ReactError::Sandbox(
-                    SandboxError::IoError(format!("Failed to write stdin: {e}")),
+                    Box::new(SandboxError::IoError(format!("Failed to write stdin: {e}"))),
                 ));
             }
             // 关闭 stdin 发送 EOF
@@ -278,7 +278,7 @@ impl LocalSandbox {
                 // wait() 自身失败 — 清理进程
                 cleanup_child_process(&mut child).await;
                 Err(echo_core::error::ReactError::Sandbox(
-                    SandboxError::IoError(format!("Process wait error: {e}")),
+                    Box::new(SandboxError::IoError(format!("Process wait error: {e}"))),
                 ))
             }
             Err(_) => {
@@ -381,7 +381,7 @@ impl SandboxExecutor for LocalSandbox {
                 }
                 CommandKind::Code { language, code } => self
                     .build_code_command(language, code, &command)
-                    .map_err(echo_core::error::ReactError::Sandbox)?,
+                    .map_err(|e| echo_core::error::ReactError::Sandbox(Box::new(e)))?,
             };
             self.run_command(cmd, timeout, command.stdin.as_deref())
                 .await

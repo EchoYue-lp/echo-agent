@@ -101,7 +101,7 @@ impl Workflow for ConcurrentWorkflow {
                 let input = input.to_string();
                 handles.push(tokio::spawn(async move {
                     let step_start = Instant::now();
-                    let agent = agent_handle.lock().await;
+                    let agent = agent_handle.as_ref();
                     let agent_name = agent.name().to_string();
                     debug!(workflow = "concurrent", agent = %agent_name, "▶ Starting execution");
                     let result = agent.execute(&input).await;

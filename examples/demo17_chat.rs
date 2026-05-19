@@ -88,7 +88,7 @@ async fn demo_basic_chat() -> echo_agent::error::Result<()> {
     let r2 = agent.chat("你还记得我的名字和职业吗？").await?;
     println!("  🤖 Agent: {r2}\n");
 
-    agent.reset();
+    agent.reset().await;
     println!("  🔄 reset() 后上下文已清除");
 
     Ok(())
@@ -228,7 +228,7 @@ async fn demo_reset_lifecycle() -> echo_agent::error::Result<()> {
     let r2 = agent.chat("我最喜欢什么颜色？").await?;
     println!("  🤖 Agent: {r2}");
 
-    agent.reset();
+    agent.reset().await;
     println!("\n  🔄 agent.reset() ← 清除上下文\n");
 
     println!("  ── 会话 2（全新）──");

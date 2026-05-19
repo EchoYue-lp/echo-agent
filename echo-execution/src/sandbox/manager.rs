@@ -170,10 +170,10 @@ impl SandboxManager {
         if actual < required {
             if !self.allow_fallback {
                 return Err(echo_core::error::ReactError::Sandbox(
-                    SandboxError::PermissionDenied(format!(
+                    Box::new(SandboxError::PermissionDenied(format!(
                         "Cannot downgrade from {} to {}: no executor meets the required isolation level",
                         required, actual
-                    )),
+                    ))),
                 ));
             }
 
@@ -246,10 +246,10 @@ impl SandboxManager {
 
         // 不允许降级，直接拒绝
         Err(echo_core::error::ReactError::Sandbox(
-            SandboxError::Unavailable(format!(
+            Box::new(SandboxError::Unavailable(format!(
                 "Isolation level {} required but no executor meets the requirement",
                 required
-            )),
+            ))),
         ))
     }
 

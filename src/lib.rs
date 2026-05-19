@@ -67,7 +67,7 @@ mod macros;
 // ── Procedural macro re-exports ─────────────────────────────────────────────
 
 pub use echo_macros::{
-    audit_logger, callback, compressor, guard, handler, permission_policy, tool,
+    Tool, audit_logger, callback, compressor, guard, handler, permission_policy, tool,
 };
 
 /// Direct access to split workspace crates during migration.
@@ -102,11 +102,11 @@ pub mod prelude {
     pub type AgentBuilder = ReactAgentBuilder;
 
     // LLM
-    pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, ToolCall};
+    pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
     pub use crate::llm::{
         AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient,
         LlmConfig, LlmProvider, OllamaClient, OpenAiClient, ProviderFactory, ResponseFormat,
-        ToolDefinition,
+        SimpleChatOptions, ToolDefinition,
     };
 
     // Tools
@@ -114,7 +114,7 @@ pub mod prelude {
     pub use crate::tools::permission::{
         DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
     };
-    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult};
+    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, ToolRiskLevel};
 
     // Web Tools
     #[cfg(feature = "web")]
@@ -149,6 +149,8 @@ pub mod prelude {
     };
 
     // Skills
+    #[allow(deprecated)]
+    pub use crate::skills::hooks::LifecycleHookExecutorFn;
     pub use crate::skills::{
         Skill, SkillInfo, SkillRegistry,
         builtin::{FileSystemSkill, ShellSkill},
@@ -157,7 +159,11 @@ pub mod prelude {
             RunSkillScriptTool, SkillContent, SkillDescriptor, SkillLoader, SkillResourceEntry,
             SkillResourceKind, SkillSource,
         },
-        hooks::{HookAction, HookEvent, HookRegistry, HookResult, HookRule, HooksDefinition},
+        hooks::{
+            CompressHookStats, HookAction, HookContext, HookEvent, HookEventCategory, HookRegistry,
+            HookResult, HookRule, HookSource, HooksDefinition, McpExecutorFn,
+            UnifiedHookExecutorFn,
+        },
     };
 
     // Guard

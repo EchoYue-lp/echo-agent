@@ -33,6 +33,8 @@ use futures::future::BoxFuture;
 use futures::stream;
 use futures::stream::BoxStream;
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 // ── MockAgent ─────────────────────────────────────────────────────────────────
@@ -177,8 +179,10 @@ impl Agent for MockAgent {
     }
 
     /// Clear call history, simulating the reset semantics of a real Agent.
-    fn reset(&self) {
-        self.calls.lock().unwrap().clear();
+    fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().clear();
+        })
     }
 }
 
@@ -221,8 +225,8 @@ impl Agent for FailingMockAgent {
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(task.to_string());
-            Err(ReactError::Agent(AgentError::InitializationFailed(
-                self.error_message.clone(),
+            Err(ReactError::Agent(Box::new(
+                AgentError::InitializationFailed(self.error_message.clone()),
             )))
         })
     }
@@ -242,7 +246,9 @@ impl Agent for FailingMockAgent {
         Box::pin(async move { self.execute(message).await })
     }
 
-    fn reset(&self) {
-        self.calls.lock().unwrap().clear();
+    fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().clear();
+        })
     }
 }

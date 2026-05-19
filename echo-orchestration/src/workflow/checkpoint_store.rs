@@ -32,6 +32,9 @@ use echo_core::error::Result;
 /// - Execution path and step count
 /// - Shared state snapshot
 /// - Pending node information
+///
+/// Supports time-travel debugging via `parent_checkpoint_id` lineage,
+/// human-readable `label`/`tags`, and `branch` forking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// Unique identifier
@@ -52,6 +55,19 @@ pub struct Checkpoint {
     pub pending_action: Option<serde_json::Value>,
     /// Interrupt type
     pub interrupt_type: InterruptType,
+    /// Parent checkpoint ID for lineage tracking.
+    /// `None` for the first checkpoint in a session.
+    #[serde(default)]
+    pub parent_checkpoint_id: Option<String>,
+    /// Human-readable label (e.g., "before risky operation", "branch:feature-x")
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Tags for filtering and discovery
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Branch name if this checkpoint is a fork
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 impl Checkpoint {
@@ -77,7 +93,64 @@ impl Checkpoint {
             created_at: Utc::now(),
             pending_action: None,
             interrupt_type,
+            parent_checkpoint_id: None,
+            label: None,
+            tags: Vec::new(),
+            branch: None,
         }
+    }
+
+    /// Create a new Checkpoint with explicit parent for lineage tracking.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_parent(
+        parent_id: impl Into<String>,
+        graph_name: String,
+        current_node: String,
+        state: &SharedState,
+        path: Vec<String>,
+        step_count: usize,
+        interrupt_type: InterruptType,
+    ) -> Self {
+        let mut cp = Self::new(graph_name, current_node, state, path, step_count, interrupt_type);
+        cp.parent_checkpoint_id = Some(parent_id.into());
+        cp
+    }
+
+    /// Create a new branch checkpoint (fork off an existing checkpoint).
+    #[allow(clippy::too_many_arguments)]
+    pub fn branch(
+        parent_id: impl Into<String>,
+        branch_name: impl Into<String>,
+        graph_name: String,
+        current_node: String,
+        state: &SharedState,
+        path: Vec<String>,
+        step_count: usize,
+        interrupt_type: InterruptType,
+    ) -> Self {
+        let mut cp = Self::with_parent(
+            parent_id,
+            graph_name,
+            current_node,
+            state,
+            path,
+            step_count,
+            interrupt_type,
+        );
+        cp.branch = Some(branch_name.into());
+        cp
+    }
+
+    /// Set a human-readable label on this checkpoint.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Add tags to this checkpoint.
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Restore SharedState from a Checkpoint
@@ -111,6 +184,10 @@ pub struct CheckpointInfo {
     pub step_count: usize,
     pub created_at: DateTime<Utc>,
     pub interrupt_type: InterruptType,
+    pub parent_checkpoint_id: Option<String>,
+    pub label: Option<String>,
+    pub tags: Vec<String>,
+    pub branch: Option<String>,
 }
 
 impl From<&Checkpoint> for CheckpointInfo {
@@ -122,6 +199,33 @@ impl From<&Checkpoint> for CheckpointInfo {
             step_count: cp.step_count,
             created_at: cp.created_at,
             interrupt_type: cp.interrupt_type,
+            parent_checkpoint_id: cp.parent_checkpoint_id.clone(),
+            label: cp.label.clone(),
+            tags: cp.tags.clone(),
+            branch: cp.branch.clone(),
+        }
+    }
+}
+
+/// Filter parameters for listing checkpoints
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointFilter {
+    /// Filter by graph name
+    pub graph_name: Option<String>,
+    /// Filter by branch name
+    pub branch: Option<String>,
+    /// Filter by tag
+    pub tag: Option<String>,
+    /// Limit number of results
+    pub limit: Option<usize>,
+}
+
+impl CheckpointFilter {
+    /// Create a filter that matches a specific graph.
+    pub fn by_graph(graph_name: impl Into<String>) -> Self {
+        Self {
+            graph_name: Some(graph_name.into()),
+            ..Default::default()
         }
     }
 }
@@ -139,6 +243,36 @@ pub trait CheckpointStore: Send + Sync {
 
     /// List all Checkpoint info
     async fn list(&self) -> Result<Vec<CheckpointInfo>>;
+
+    /// List checkpoints for a specific graph
+    async fn list_by_graph(&self, graph_name: &str) -> Result<Vec<CheckpointInfo>> {
+        let all = self.list().await?;
+        Ok(all
+            .into_iter()
+            .filter(|info| info.graph_name == graph_name)
+            .collect())
+    }
+
+    /// List checkpoints matching a filter
+    async fn list_filtered(&self, filter: &CheckpointFilter) -> Result<Vec<CheckpointInfo>> {
+        let mut results = if let Some(ref graph_name) = filter.graph_name {
+            self.list_by_graph(graph_name).await?
+        } else {
+            self.list().await?
+        };
+
+        if let Some(ref branch) = filter.branch {
+            results.retain(|info| info.branch.as_deref() == Some(branch.as_str()));
+        }
+        if let Some(ref tag) = filter.tag {
+            results.retain(|info| info.tags.contains(tag));
+        }
+        if let Some(limit) = filter.limit {
+            results.truncate(limit);
+        }
+
+        Ok(results)
+    }
 
     /// Delete a Checkpoint
     async fn delete(&self, id: &str) -> Result<()>;

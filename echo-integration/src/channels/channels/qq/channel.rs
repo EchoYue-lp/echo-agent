@@ -46,9 +46,9 @@ pub struct QqChannel {
 impl QqChannel {
     pub fn new(config: QqConfig) -> Result<Self> {
         if config.app_id.is_empty() || config.client_secret.is_empty() {
-            return Err(ReactError::Channel(ChannelError::InvalidConfig(
+            return Err(ReactError::Channel(Box::new(ChannelError::InvalidConfig(
                 "QQ Bot requires app_id and client_secret".to_string(),
-            )));
+            ))));
         }
 
         Ok(Self {
@@ -210,15 +210,15 @@ impl ChannelPlugin for QqChannel {
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         if let Some(tx) = &self.send_tx {
             tx.send(msg).await.map_err(|e| {
-                ReactError::Channel(ChannelError::SendError(format!(
+                ReactError::Channel(Box::new(ChannelError::SendError(format!(
                     "Failed to queue message for sending: {}",
                     e
-                )))
+                ))))
             })
         } else {
-            Err(ReactError::Channel(ChannelError::SendError(
+            Err(ReactError::Channel(Box::new(ChannelError::SendError(
                 "QQ Bot channel not started".to_string(),
-            )))
+            ))))
         }
     }
 
@@ -228,9 +228,9 @@ impl ChannelPlugin for QqChannel {
             .as_ref()
             .is_some_and(|h| h.is_finished())
         {
-            return Err(ReactError::Channel(ChannelError::ConnectionError(
+            return Err(ReactError::Channel(Box::new(ChannelError::ConnectionError(
                 "QQ Bot gateway task has terminated".to_string(),
-            )));
+            ))));
         }
         if let Some(ref tm) = self.token_manager {
             tm.get_token().await?;
@@ -253,10 +253,10 @@ impl MessageHandler for QqMessageHandler {
 
     async fn reply(&self, msg: OutboundMessage) -> Result<()> {
         self.send_tx.send(msg).await.map_err(|e| {
-            ReactError::Channel(ChannelError::SendError(format!(
+            ReactError::Channel(Box::new(ChannelError::SendError(format!(
                 "Failed to send reply: {}",
                 e
-            )))
+            ))))
         })
     }
 }

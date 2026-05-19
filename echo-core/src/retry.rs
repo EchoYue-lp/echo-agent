@@ -91,9 +91,9 @@ impl RetryPolicy {
         let capped = delay.min(self.max_delay);
 
         if self.jitter && !capped.is_zero() {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             let jitter_range = capped.as_millis() as u64;
-            let jitter_ms = rng.gen_range(0..=jitter_range);
+            let jitter_ms = rng.random_range(0..=jitter_range);
             Duration::from_millis(jitter_ms)
         } else {
             capped

@@ -82,5 +82,5 @@ pub mod execution {
 }
 
 pub use echo_execution::tools::{
-    Tool, ToolExecutionConfig, ToolManager, ToolParameters, ToolResult,
+    Tool, ToolExecutionConfig, ToolManager, ToolParameters, ToolResult, ToolRiskLevel,
 };

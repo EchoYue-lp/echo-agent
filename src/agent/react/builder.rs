@@ -1,6 +1,6 @@
 //! Agent builder
 
-use crate::agent::{AgentCallback, AgentConfig, AgentRole};
+use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole};
 use crate::audit::AuditLogger;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
@@ -634,6 +634,67 @@ impl ReactAgentBuilder {
         }
 
         Ok(agent)
+    }
+
+    /// Build the agent and return it as a trait object.
+    ///
+    /// This is useful when you need polymorphic agent handling (e.g., passing
+    /// different agent types through a unified interface, or storing agents
+    /// in a collection).
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::agent::Agent;
+    /// use echo_agent::prelude::ReactAgentBuilder;
+    ///
+    /// # async fn run() -> echo_agent::error::Result<()> {
+    /// let agent: Box<dyn Agent> = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .system_prompt("You are an assistant")
+    ///     .build_boxed()?;
+    /// let answer = agent.execute("Hello").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn build_boxed(self) -> Result<Box<dyn Agent>> {
+        self.build().map(|a| Box::new(a) as Box<dyn Agent>)
+    }
+}
+
+// ── AgentBuilder Trait Implementation ─────────────────────────────────────────
+
+impl echo_core::agent::builder::AgentBuilder for ReactAgentBuilder {
+    type Agent = ReactAgent;
+
+    fn model(self, model: impl Into<String>) -> Self {
+        self.model(model)
+    }
+
+    fn system_prompt(self, prompt: impl Into<String>) -> Self {
+        self.system_prompt(prompt)
+    }
+
+    fn name(self, name: impl Into<String>) -> Self {
+        self.name(name)
+    }
+
+    fn max_iterations(self, max: usize) -> Self {
+        self.max_iterations(max)
+    }
+
+    fn token_limit(self, limit: usize) -> Self {
+        self.token_limit(limit)
+    }
+
+    fn tool(self, tool: Box<dyn crate::tools::Tool>) -> Self {
+        self.tool(tool)
+    }
+
+    fn tools(self, tools: Vec<Box<dyn crate::tools::Tool>>) -> Self {
+        self.tools(tools)
+    }
+
+    fn build(self) -> Result<ReactAgent> {
+        self.build()
     }
 }
 

@@ -5,12 +5,44 @@ pub mod types;
 use crate::error::Result;
 pub use types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, DeltaMessage, FunctionCall,
-    FunctionSpec, JsonSchemaSpec, Message, ResponseFormat, ToolCall, ToolDefinition,
+    FunctionSpec, JsonSchemaSpec, Message, ResponseFormat, Role, ToolCall, ToolDefinition,
 };
 
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
+
+/// Options for [`LlmClient::chat_simple_with_options`].
+#[derive(Debug, Clone)]
+pub struct SimpleChatOptions {
+    /// Sampling temperature (0.0–2.0). Defaults to `0.7`.
+    pub temperature: Option<f32>,
+    /// Maximum tokens to generate. Defaults to `2048`.
+    pub max_tokens: Option<u32>,
+}
+
+impl Default for SimpleChatOptions {
+    fn default() -> Self {
+        Self {
+            temperature: Some(0.7),
+            max_tokens: Some(2048),
+        }
+    }
+}
+
+impl SimpleChatOptions {
+    /// Create options with a specific temperature.
+    pub fn with_temperature(mut self, temp: f32) -> Self {
+        self.temperature = Some(temp);
+        self
+    }
+
+    /// Create options with a specific max_tokens.
+    pub fn with_max_tokens(mut self, max: u32) -> Self {
+        self.max_tokens = Some(max);
+        self
+    }
+}
 
 /// LLM client unified interface
 pub trait LlmClient: Send + Sync {
@@ -24,13 +56,25 @@ pub trait LlmClient: Send + Sync {
     ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>>;
 
     /// Convenience helper for simple text-only calls.
+    ///
+    /// Accepts optional overrides via [`SimpleChatOptions`]; defaults are
+    /// `temperature: 0.7` and `max_tokens: 2048`.
     fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
+        self.chat_simple_with_options(messages, SimpleChatOptions::default())
+    }
+
+    /// Convenience helper with configurable options.
+    fn chat_simple_with_options(
+        &self,
+        messages: Vec<Message>,
+        options: SimpleChatOptions,
+    ) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             let response = self
                 .chat(ChatRequest {
                     messages,
-                    temperature: Some(0.7),
-                    max_tokens: Some(2048),
+                    temperature: options.temperature,
+                    max_tokens: options.max_tokens,
                     ..Default::default()
                 })
                 .await?;

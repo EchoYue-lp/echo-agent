@@ -40,10 +40,10 @@ impl SseTransport {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| {
-                ReactError::Mcp(McpError::ConnectionFailed(format!(
+                ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                     "创建 HTTP 客户端失败: {}",
                     e
-                )))
+                ))))
             })?;
 
         let next_id = Arc::new(AtomicU64::new(1));
@@ -180,7 +180,7 @@ impl SseTransport {
 
         let response = tokio::select! {
             resp = builder.send() => resp.map_err(|e| {
-                ReactError::Mcp(McpError::ConnectionFailed(format!("SSE 连接失败: {}", e)))
+                ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!("SSE 连接失败: {}", e))))
             })?,
             _ = cancel.cancelled() => {
                 return Ok(());
@@ -189,10 +189,10 @@ impl SseTransport {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                 "SSE 连接返回 HTTP {}",
                 status
-            ))));
+            )))));
         }
 
         tracing::debug!("SSE: 连接已建立");
@@ -202,11 +202,11 @@ impl SseTransport {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                ReactError::Mcp(McpError::ConnectionFailed(format!("SSE 读取错误: {}", e)))
+                ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!("SSE 读取错误: {}", e))))
             })?;
 
             let text = std::str::from_utf8(&chunk).map_err(|e| {
-                ReactError::Mcp(McpError::ProtocolError(format!("SSE 编码错误: {}", e)))
+                ReactError::Mcp(Box::new(McpError::ProtocolError(format!("SSE 编码错误: {}", e))))
             })?;
 
             buffer.push_str(text);
@@ -323,9 +323,9 @@ impl McpTransport for SseTransport {
             let endpoint_uri = {
                 let guard = self.message_endpoint.lock().await;
                 guard.clone().ok_or_else(|| {
-                    ReactError::Mcp(McpError::ProtocolError(
+                    ReactError::Mcp(Box::new(McpError::ProtocolError(
                         "SSE: 尚未获取到 POST 端点 URI，请等待连接建立".to_string(),
-                    ))
+                    )))
                 })?
             };
 
@@ -346,20 +346,20 @@ impl McpTransport for SseTransport {
             builder = builder.json(&request);
 
             let post_resp = builder.send().await.map_err(|e| {
-                ReactError::Mcp(McpError::ConnectionFailed(format!(
+                ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                     "POST {} 失败: {}",
                     endpoint_uri, e
-                )))
+                ))))
             })?;
 
             if post_resp.status().is_server_error() {
                 let status = post_resp.status().as_u16();
                 let body = post_resp.text().await.unwrap_or_default();
                 self.pending.lock().await.remove(&id);
-                return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+                return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                     "POST {} 返回服务器错误 {}: {}",
                     endpoint_uri, status, body
-                ))));
+                )))));
             }
 
             tracing::debug!("SSE: POST 成功（id={}），等待 SSE 响应…", id);
@@ -367,13 +367,13 @@ impl McpTransport for SseTransport {
             let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
                 .await
                 .map_err(|_| {
-                    ReactError::Mcp(McpError::ProtocolError(format!(
+                    ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                         "等待 SSE 响应超时（id={}）",
                         id
-                    )))
+                    ))))
                 })?
                 .map_err(|_| {
-                    ReactError::Mcp(McpError::ProtocolError("响应 channel 已关闭".to_string()))
+                    ReactError::Mcp(Box::new(McpError::ProtocolError("响应 channel 已关闭".to_string())))
                 })?;
 
             Ok(response)

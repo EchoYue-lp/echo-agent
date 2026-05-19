@@ -93,7 +93,7 @@ impl Workflow for SequentialWorkflow {
                     current_input.clone()
                 };
 
-                let agent = step.agent.lock().await;
+                let agent = step.agent.as_ref();
                 let agent_name = agent.name().to_string();
 
                 info!(

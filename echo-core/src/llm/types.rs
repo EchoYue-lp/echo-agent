@@ -146,6 +146,89 @@ impl MessageContent {
     }
 }
 
+// ── Message Role ────────────────────────────────────────────────────────────
+
+/// Typed message role with backward-compatible serialization.
+///
+/// Standard roles (`system`, `user`, `assistant`, `tool`) are type-safe variants.
+/// Provider-specific or unknown roles fall into `Custom(String)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Role {
+    /// System instruction message
+    System,
+    /// User input message
+    #[default]
+    User,
+    /// Assistant response message
+    Assistant,
+    /// Tool result message
+    Tool,
+    /// Provider-specific or unknown role
+    Custom(String),
+}
+
+impl Role {
+    /// Returns the role string for API serialization.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+            Role::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+impl Serialize for Role {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Role {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "system" => Ok(Role::System),
+            "user" => Ok(Role::User),
+            "assistant" => Ok(Role::Assistant),
+            "tool" => Ok(Role::Tool),
+            _ => Ok(Role::Custom(s)),
+        }
+    }
+}
+
+impl From<Role> for String {
+    fn from(role: Role) -> String {
+        role.as_str().to_string()
+    }
+}
+
+impl From<String> for Role {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "system" => Role::System,
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "tool" => Role::Tool,
+            _ => Role::Custom(s),
+        }
+    }
+}
+
+impl From<&str> for Role {
+    fn from(s: &str) -> Self {
+        match s {
+            "system" => Role::System,
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "tool" => Role::Tool,
+            _ => Role::Custom(s.to_string()),
+        }
+    }
+}
+
 // ── Conversation Messages ─────────────────────────────────────────────────────
 
 /// Conversation message
@@ -154,8 +237,8 @@ impl MessageContent {
 /// plain text and multimodal content.
 #[derive(Debug, Clone, Default)]
 pub struct Message {
-    /// Message role such as `system`, `user`, `assistant`, or `tool`.
-    pub role: String,
+    /// Message role: `system`, `user`, `assistant`, `tool`, or `Custom`.
+    pub role: Role,
     /// Text or multimodal payload.
     pub content: MessageContent,
     /// Optional tool calls emitted by the assistant.
@@ -214,12 +297,14 @@ impl<'de> Deserialize<'de> for Message {
             reasoning_content: Option<String>,
         }
         let raw = RawMessage::deserialize(deserializer)?;
+        let role: Role = serde_json::from_value(serde_json::Value::String(raw.role))
+            .map_err(serde::de::Error::custom)?;
         let content = match raw.content {
             Some(value) => MessageContent::deserialize(value).map_err(serde::de::Error::custom)?,
             None => MessageContent::Empty,
         };
         Ok(Message {
-            role: raw.role,
+            role,
             content,
             tool_calls: raw.tool_calls,
             name: raw.name,
@@ -233,7 +318,7 @@ impl Message {
     /// Create a system message
     pub fn system(content: String) -> Self {
         Self {
-            role: "system".to_string(),
+            role: Role::System,
             content: MessageContent::Text(content),
             tool_calls: None,
             name: None,
@@ -245,7 +330,7 @@ impl Message {
     /// Create a user message
     pub fn user(content: String) -> Self {
         Self {
-            role: "user".to_string(),
+            role: Role::User,
             content: MessageContent::Text(content),
             tool_calls: None,
             name: None,
@@ -257,7 +342,7 @@ impl Message {
     /// Create a multimodal user message
     pub fn user_multimodal(parts: Vec<ContentPart>) -> Self {
         Self {
-            role: "user".to_string(),
+            role: Role::User,
             content: MessageContent::Parts(parts),
             tool_calls: None,
             name: None,
@@ -311,7 +396,7 @@ impl Message {
     /// Create an assistant message
     pub fn assistant(content: String) -> Self {
         Self {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: MessageContent::Text(content),
             tool_calls: None,
             name: None,
@@ -323,7 +408,7 @@ impl Message {
     /// Create an assistant message with tool calls
     pub fn assistant_with_tools(tool_calls: Vec<ToolCall>) -> Self {
         Self {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: MessageContent::Empty,
             tool_calls: Some(tool_calls),
             name: None,
@@ -335,7 +420,7 @@ impl Message {
     /// Create a tool result message
     pub fn tool_result(tool_call_id: String, name: String, content: String) -> Self {
         Self {
-            role: "tool".to_string(),
+            role: Role::Tool,
             content: MessageContent::Text(content),
             tool_calls: None,
             name: Some(name),
@@ -760,7 +845,7 @@ mod tests {
             ]
         });
         let msg: Message = serde_json::from_value(json).unwrap();
-        assert_eq!(msg.role, "user");
+        assert_eq!(msg.role, Role::User);
         assert!(
             matches!(msg.content, MessageContent::Parts(_)),
             "content should be Parts for multimodal"
@@ -801,7 +886,7 @@ mod tests {
     #[test]
     fn message_user_with_image_url_helper() {
         let msg = Message::user_with_image_url("look at this", "https://example.com/photo.jpg");
-        assert_eq!(msg.role, "user");
+        assert_eq!(msg.role, Role::User);
         assert!(msg.is_multimodal());
         let MessageContent::Parts(parts) = &msg.content else {
             panic!("expected Parts content");

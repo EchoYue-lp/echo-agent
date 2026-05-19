@@ -91,10 +91,10 @@ impl TokenManager {
             .map_err(|e| ChannelError::NetworkError(format!("QQ token request failed: {}", e)))?;
 
         if !res.status().is_success() {
-            return Err(ReactError::Channel(ChannelError::AuthError(format!(
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(format!(
                 "QQ token request failed with status {}",
                 res.status()
-            ))));
+            )))));
         }
 
         let json: serde_json::Value = res.json().await.map_err(|e| {
@@ -149,7 +149,7 @@ impl TokenManager {
                         json.clone()
                     }
                 });
-                ReactError::Channel(ChannelError::AuthError(err_msg))
+                ReactError::Channel(Box::new(ChannelError::AuthError(err_msg)))
             })?
             .to_string();
 
@@ -214,10 +214,10 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
                 .or_else(|| json.get("gateway_url"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    ReactError::Channel(ChannelError::NetworkError(format!(
+                    ReactError::Channel(Box::new(ChannelError::NetworkError(format!(
                         "QQ gateway response missing url, got: {:?}",
                         json
-                    )))
+                    ))))
                 })?
                 .to_string();
 
@@ -232,10 +232,10 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
         );
     }
 
-    Err(ReactError::Channel(ChannelError::ApiError {
+    Err(ReactError::Channel(Box::new(ChannelError::ApiError {
         status: 404,
         message: "QQ gateway: all endpoints failed".to_string(),
-    }))
+    })))
 }
 
 // ── Send Message ──────────────────────────────────────────────────────────────
@@ -286,10 +286,10 @@ pub async fn send_qq_message(
     if !status.is_success() {
         let error_text = res.text().await.unwrap_or_default();
         warn!("QQ message send failed (status {}): {}", status, error_text);
-        return Err(ReactError::Channel(ChannelError::SendError(format!(
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
             "QQ message send failed (status {}): {}",
             status, error_text
-        ))));
+        )))));
     }
 
     debug!("QQ message sent to {} ({:?})", to, chat_type);

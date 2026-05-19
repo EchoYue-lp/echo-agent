@@ -12,8 +12,11 @@
 
 pub mod checkpointer;
 pub mod conversation;
+pub mod core_memory;
+pub mod decay;
 pub mod embedder;
 pub mod store;
+pub mod tiered;
 
 pub use checkpointer::{Checkpoint, Checkpointer, ThreadState};
 pub use conversation::{

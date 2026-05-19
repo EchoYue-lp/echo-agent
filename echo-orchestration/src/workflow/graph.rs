@@ -59,7 +59,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 // ── Edge ────────────────────────────────────────────────────────────────────
@@ -265,11 +264,11 @@ impl GraphBuilder {
         self
     }
 
-    /// Add a shared Agent node (Arc<Mutex<Box<dyn Agent>>>)
+    /// Add a shared Agent node (Arc<dyn Agent>)
     pub fn add_shared_agent_node(
         mut self,
         name: impl Into<String>,
-        agent: Arc<Mutex<Box<dyn Agent>>>,
+        agent: Arc<dyn Agent>,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
     ) -> Self {
@@ -285,7 +284,7 @@ impl GraphBuilder {
     pub fn add_shared_agent_node_with_mode(
         mut self,
         name: impl Into<String>,
-        agent: Arc<Mutex<Box<dyn Agent>>>,
+        agent: Arc<dyn Agent>,
         input_key: impl Into<String>,
         output_key: impl Into<String>,
         use_execute: bool,
@@ -312,6 +311,16 @@ impl GraphBuilder {
     pub fn add_router_node(mut self, name: impl Into<String>) -> Self {
         let name = name.into();
         self.nodes.insert(name.clone(), Node::passthrough(&name));
+        self
+    }
+
+    /// Add a subgraph node — embeds a pre-built `Graph` as a node in this graph.
+    ///
+    /// The subgraph shares the parent's `SharedState`. Its execution is counted
+    /// toward the parent's step limit.
+    pub fn add_subgraph_node(mut self, name: impl Into<String>, subgraph: Graph) -> Self {
+        let name = name.into();
+        self.nodes.insert(name.clone(), Node::subgraph(&name, subgraph));
         self
     }
 
@@ -344,6 +353,13 @@ impl GraphBuilder {
     ///
     /// After `from` completes, all nodes in `targets` execute **in parallel**; when all complete, execution enters `then`.
     /// State modifications from parallel nodes are merged before the then node.
+    ///
+    /// **Note:** Currently, parallel branches execute **sequentially** within the
+    /// same async task (not via `tokio::spawn`), because `dyn Agent` nodes are
+    /// not `Send + 'static`. Each branch receives an isolated fork of the state
+    /// via `SharedState::fork()`, and results are merged back via `deep_merge()`.
+    /// True concurrent execution will be enabled once the `Node` type supports
+    /// `Send + 'static` bounds.
     pub fn add_parallel_edge(
         mut self,
         from: impl Into<String>,
@@ -410,43 +426,43 @@ impl GraphBuilder {
     /// Build an immutable Graph
     pub fn build(self) -> Result<Graph> {
         let entry = self.entry_node.ok_or_else(|| {
-            ReactError::Agent(AgentError::InitializationFailed(
+            ReactError::Agent(Box::new(AgentError::InitializationFailed(
                 "Graph must have an entry node (call set_entry())".to_string(),
-            ))
+            )))
         })?;
 
         if !self.nodes.contains_key(&entry) {
-            return Err(ReactError::Agent(AgentError::InitializationFailed(
+            return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
                 format!("Entry node '{}' not found in graph", entry),
-            )));
+            ))));
         }
 
         // Verify all nodes referenced by edges exist
         for edge in &self.edges {
             if !self.nodes.contains_key(&edge.from) {
-                return Err(ReactError::Agent(AgentError::InitializationFailed(
+                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
                     format!("Edge from unknown node '{}'", edge.from),
-                )));
+                ))));
             }
             match &edge.kind {
                 EdgeKind::Fixed(to) if to != Graph::END && !self.nodes.contains_key(to) => {
-                    return Err(ReactError::Agent(AgentError::InitializationFailed(
+                    return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
                         format!("Edge to unknown node '{}'", to),
-                    )));
+                    ))));
                 }
                 EdgeKind::Fixed(_) => {}
                 EdgeKind::Parallel { targets, then } => {
                     for t in targets {
                         if !self.nodes.contains_key(t) {
-                            return Err(ReactError::Agent(AgentError::InitializationFailed(
+                            return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
                                 format!("Parallel target node '{}' not found", t),
-                            )));
+                            ))));
                         }
                     }
                     if then != Graph::END && !self.nodes.contains_key(then) {
-                        return Err(ReactError::Agent(AgentError::InitializationFailed(
+                        return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
                             format!("Parallel 'then' node '{}' not found", then),
-                        )));
+                        ))));
                     }
                 }
                 _ => {}
@@ -461,13 +477,13 @@ impl GraphBuilder {
             // Disallow multiple ordinary outgoing edges (Fixed / Conditional) from the same node,
             // because resolve_next() only takes the first edge; the rest would be silently discarded.
             if !entry.is_empty() {
-                return Err(ReactError::Agent(AgentError::InitializationFailed(
+                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
                     format!(
                         "Node '{}' has multiple outgoing edges; only one edge per node is supported \
                          (use a Conditional edge for branching, or a Parallel edge for fan-out)",
                         from,
                     ),
-                )));
+                ))));
             }
             entry.push(edge);
         }
@@ -554,9 +570,9 @@ impl Graph {
                     steps = step_count,
                     "Graph execution exceeded max steps"
                 );
-                return Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+                return Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
                     self.max_steps,
-                )));
+                ))));
             }
 
             // Check termination condition
@@ -586,10 +602,10 @@ impl Graph {
 
             // Execute the current node
             let node = self.nodes.get(&current).ok_or_else(|| {
-                ReactError::Agent(AgentError::InitializationFailed(format!(
+                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                     "Node '{}' not found in graph '{}'",
                     current, self.name
-                )))
+                ))))
             })?;
 
             state.set_current_node(&current);
@@ -682,9 +698,9 @@ impl Graph {
                     steps = step_count,
                     "Graph execution exceeded max steps"
                 );
-                return Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+                return Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
                     self.max_steps,
-                )));
+                ))));
             }
 
             // Check interrupt_before
@@ -733,10 +749,10 @@ impl Graph {
 
             // Execute the current node
             let node = self.nodes.get(&current).ok_or_else(|| {
-                ReactError::Agent(AgentError::InitializationFailed(format!(
+                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                     "Node '{}' not found in graph '{}'",
                     current, self.name
-                )))
+                ))))
             })?;
 
             state.set_current_node(&current);
@@ -878,9 +894,9 @@ impl Graph {
         // Continue execution
         loop {
             if step_count >= self.max_steps {
-                return Err(ReactError::Agent(AgentError::MaxIterationsExceeded(
+                return Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
                     self.max_steps,
-                )));
+                ))));
             }
 
             // Check interrupt_before (skip, as it has already been handled)
@@ -906,10 +922,10 @@ impl Graph {
 
             // Execute the current node
             let node = self.nodes.get(&current).ok_or_else(|| {
-                ReactError::Agent(AgentError::InitializationFailed(format!(
+                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                     "Node '{}' not found",
                     current
-                )))
+                ))))
             })?;
 
             state.set_current_node(&current);
@@ -1019,6 +1035,94 @@ impl Graph {
             .await
     }
 
+    /// Restore a previous checkpoint's state WITHOUT executing further.
+    ///
+    /// Returns the restored state and the checkpoint metadata. Useful for
+    /// inspecting historical states or preparing to branch.
+    pub async fn restore_to_checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<(SharedState, Checkpoint)> {
+        let checkpoint = self
+            .checkpoint_store
+            .load(checkpoint_id)
+            .await?
+            .ok_or_else(|| {
+                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
+                    "Checkpoint '{}' not found",
+                    checkpoint_id
+                ))))
+            })?;
+        let state = checkpoint.restore_state()?;
+        Ok((state, checkpoint))
+    }
+
+    /// Fork a new execution from an existing checkpoint.
+    ///
+    /// Creates a new branch checkpoint with `state_updates` merged into the forked
+    /// state, preserving lineage via `parent_checkpoint_id`. The new branch is
+    /// stored and execution continues from the checkpointed node.
+    pub async fn branch_from(
+        &self,
+        checkpoint_id: &str,
+        state_updates: std::collections::HashMap<String, Value>,
+        branch_name: Option<String>,
+    ) -> Result<RunUntilInterruptResult> {
+        let (state, parent_cp) = self.restore_to_checkpoint(checkpoint_id).await?;
+
+        // Apply state updates
+        for (key, value) in &state_updates {
+            let _ = state.set(key, value.clone());
+        }
+
+        // Create a branch checkpoint
+        let branch_name = branch_name.unwrap_or_else(|| format!("branch-{}", uuid::Uuid::new_v4()));
+        let fork_cp = Checkpoint::branch(
+            &parent_cp.id,
+            &branch_name,
+            self.name.clone(),
+            parent_cp.current_node.clone(),
+            &state,
+            parent_cp.path.clone(),
+            parent_cp.step_count,
+            parent_cp.interrupt_type,
+        );
+
+        // Save fork checkpoint
+        self.checkpoint_store.save(&fork_cp).await?;
+
+        // Resume from the fork
+        self.resume(fork_cp, ApprovalDecision::Approved).await
+    }
+
+    /// Attach a human-readable label and/or tags to an existing checkpoint.
+    pub async fn tag_checkpoint(
+        &self,
+        checkpoint_id: &str,
+        label: Option<&str>,
+        tags: Vec<&str>,
+    ) -> Result<()> {
+        let mut checkpoint = self
+            .checkpoint_store
+            .load(checkpoint_id)
+            .await?
+            .ok_or_else(|| {
+                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
+                    "Checkpoint '{}' not found",
+                    checkpoint_id
+                ))))
+            })?;
+
+        if let Some(l) = label {
+            checkpoint.label = Some(l.to_string());
+        }
+        if !tags.is_empty() {
+            checkpoint.tags = tags.iter().map(|t| t.to_string()).collect();
+        }
+
+        self.checkpoint_store.save(&checkpoint).await
+    }
+
     /// Load a Checkpoint
     pub async fn load_checkpoint(&self, id: &str) -> Result<Option<Checkpoint>> {
         self.checkpoint_store.load(id).await
@@ -1027,6 +1131,11 @@ impl Graph {
     /// List all Checkpoints
     pub async fn list_checkpoints(&self) -> Result<Vec<super::checkpoint_store::CheckpointInfo>> {
         self.checkpoint_store.list().await
+    }
+
+    /// List checkpoints filtered by graph name (this graph).
+    pub async fn list_checkpoints_by_graph(&self) -> Result<Vec<super::checkpoint_store::CheckpointInfo>> {
+        self.checkpoint_store.list_by_graph(&self.name).await
     }
 
     /// Set a custom Checkpoint store
@@ -1051,7 +1160,7 @@ impl Graph {
 
             loop {
                 if step_count >= self.max_steps {
-                    Err(ReactError::Agent(AgentError::MaxIterationsExceeded(self.max_steps)))?;
+                    Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(self.max_steps))))?;
                 }
 
                 if current == Self::END || self.finish_nodes.contains(&current) {
@@ -1088,10 +1197,10 @@ impl Graph {
                 }
 
                 let node = self.nodes.get(&current).ok_or_else(|| {
-                    ReactError::Agent(AgentError::InitializationFailed(format!(
+                    ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                         "Node '{}' not found in graph '{}'",
                         current, self.name
-                    )))
+                    ))))
                 })?;
 
                 state_clone.set_current_node(&current);
@@ -1170,12 +1279,12 @@ impl Graph {
                 if self.finish_nodes.contains(&current.to_string()) {
                     return Ok(NextStep::End);
                 }
-                return Err(ReactError::Agent(AgentError::InitializationFailed(
+                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
                     format!(
                         "Node '{}' has no outgoing edges and is not a finish node",
                         current
                     ),
-                )));
+                ))));
             }
         };
 

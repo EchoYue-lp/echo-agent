@@ -118,6 +118,17 @@ impl ReactAgent {
                 }
                 self.log_tool_call_audit(tool_name, input, &error_msg, false, 0)
                     .await;
+
+                // ── PostToolUseFailure hook ──
+                self.run_post_failure_hook(
+                    &agent,
+                    tool_name,
+                    input,
+                    &error_msg,
+                    &mut hook_messages,
+                )
+                .await?;
+
                 if soften_errors && tool_name != TOOL_FINAL_ANSWER {
                     warn!(
                         agent = %agent,
@@ -161,6 +172,16 @@ impl ReactAgent {
                 )
                 .await;
             hook_messages.post = post_result.messages;
+            if post_result.block {
+                info!(agent = %agent, tool = %tool_name, reason = ?post_result.block_reason, "PostToolUse hook blocked tool output");
+                let blocked_output = post_result
+                    .block_reason
+                    .unwrap_or_else(|| format!("Tool {} output blocked by hook", tool_name));
+                return Ok(ToolExecutionOutcome {
+                    output: blocked_output,
+                    hook_messages,
+                });
+            }
         }
 
         if result.success {
@@ -205,6 +226,11 @@ impl ReactAgent {
             }
             self.log_tool_call_audit(tool_name, input, &error_msg, false, duration_ms)
                 .await;
+
+            // ── PostToolUseFailure hook ──
+            self.run_post_failure_hook(&agent, tool_name, input, &error_msg, &mut hook_messages)
+                .await?;
+
             if soften_errors && tool_name != TOOL_FINAL_ANSWER {
                 warn!(
                     agent = %agent,
@@ -225,6 +251,43 @@ impl ReactAgent {
                 })
             }
         }
+    }
+
+    /// Run the PostToolUseFailure hook and check for block.
+    ///
+    /// Returns `Err(ToolExecutionFailure)` if a hook blocks the error output.
+    async fn run_post_failure_hook(
+        &self,
+        agent: &str,
+        tool_name: &str,
+        input: &Value,
+        error_msg: &str,
+        hook_messages: &mut HookMessageBatches,
+    ) -> std::result::Result<(), ToolExecutionFailure> {
+        let hook_reg = {
+            let guard = self.tools.hook_registry.read().await;
+            guard.clone()
+        };
+        let failure_result = hook_reg
+            .run_post_tool_use_failure(
+                tool_name,
+                input,
+                error_msg,
+                self.config.get_session_id().unwrap_or(""),
+            )
+            .await;
+        hook_messages.post = failure_result.messages;
+        if failure_result.block {
+            info!(agent = %agent, tool = %tool_name, reason = ?failure_result.block_reason, "PostToolUseFailure hook blocked error output");
+            let blocked_msg = failure_result
+                .block_reason
+                .unwrap_or_else(|| format!("Tool {} error output blocked by hook", tool_name));
+            return Err(ToolExecutionFailure {
+                error: ReactError::Other(blocked_msg),
+                hook_messages: hook_messages.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Execute tool, preserving the real error information returned by the tool

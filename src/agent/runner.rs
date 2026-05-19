@@ -114,6 +114,23 @@ impl RunnerBuilder {
     pub fn build(self) -> Result<crate::agent::react::ReactAgent> {
         self.inner.build()
     }
+
+    /// Build the agent as a trait object for polymorphic usage.
+    ///
+    /// ```rust,no_run
+    /// # async fn run() -> echo_agent::error::Result<()> {
+    /// use echo_agent::agent::{Agent, runner::Runner};
+    ///
+    /// let agent: Box<dyn Agent> = Runner::builder("qwen3-max")
+    ///     .system_prompt("You are an assistant")
+    ///     .build_boxed()?;
+    /// let answer = agent.execute("Hello").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn build_boxed(self) -> Result<Box<dyn Agent>> {
+        self.inner.build_boxed()
+    }
 }
 
 #[cfg(test)]

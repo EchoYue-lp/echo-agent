@@ -5,7 +5,7 @@
 
 use chrono::Utc;
 use echo_core::error::Result;
-use echo_core::llm::types::Message;
+use echo_core::llm::types::{Message, Role};
 pub use echo_core::memory::conversation::StoredMessage;
 
 /// Project runtime Message list to persistable transcript records.
@@ -24,7 +24,7 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
         .map(serde_json::to_string)
         .transpose()?;
 
-    let tool_result_json = if message.role == "tool" {
+    let tool_result_json = if message.role == Role::Tool {
         Some(
             serde_json::json!({
                 "tool_call_id": message.tool_call_id,
@@ -39,7 +39,7 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
     Ok(StoredMessage {
         id: None,
         conversation_id: conversation_id.to_string(),
-        role: message.role.clone(),
+        role: message.role.as_str().to_string(),
         content: message.text_content(),
         attachments_json: None,
         tool_calls_json,

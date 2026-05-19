@@ -6,37 +6,45 @@
 use thiserror::Error;
 
 /// Top-level framework error, aggregating all subsystem errors
+///
+/// # Box wrapping convention
+///
+/// All sub-errors are `Box`-wrapped to keep the enum size small (Rust enums
+/// are sized by their largest variant). This avoids bloating the `Result<T>`
+/// return type on every call site. `From` impls are provided manually so
+/// callers can use `?` without explicit boxing.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ReactError {
     /// LLM-related error
     #[error("LLM Error: {0}")]
     Llm(Box<LlmError>),
     /// Tool execution error
     #[error("Tool Error: {0}")]
-    Tool(#[from] ToolError),
+    Tool(Box<ToolError>),
     /// Parse error
     #[error("Parse Error: {0}")]
-    Parse(#[from] ParseError),
+    Parse(Box<ParseError>),
     /// Agent execution error
     #[error("Agent Error: {0}")]
-    Agent(#[from] AgentError),
+    Agent(Box<AgentError>),
     /// Configuration error
     #[error("Config Error: {0}")]
     Config(Box<ConfigError>),
     /// MCP-related error
     #[cfg(feature = "mcp")]
     #[error("MCP Error: {0}")]
-    Mcp(#[from] McpError),
+    Mcp(Box<McpError>),
     /// Memory system error
     #[error("Memory Error: {0}")]
     Memory(Box<MemoryError>),
     /// Sandbox error
     #[error("Sandbox Error: {0}")]
-    Sandbox(#[from] SandboxError),
+    Sandbox(Box<SandboxError>),
     /// Channel / IM integration error
     #[cfg(feature = "channels")]
     #[error("Channel Error: {0}")]
-    Channel(#[from] ChannelError),
+    Channel(Box<ChannelError>),
     /// IO error
     #[error("IO Error: {0}")]
     Io(#[from] std::io::Error),
@@ -317,9 +325,34 @@ impl From<LlmError> for ReactError {
     }
 }
 
+impl From<ToolError> for ReactError {
+    fn from(err: ToolError) -> Self {
+        ReactError::Tool(Box::new(err))
+    }
+}
+
+impl From<ParseError> for ReactError {
+    fn from(err: ParseError) -> Self {
+        ReactError::Parse(Box::new(err))
+    }
+}
+
+impl From<AgentError> for ReactError {
+    fn from(err: AgentError) -> Self {
+        ReactError::Agent(Box::new(err))
+    }
+}
+
 impl From<ConfigError> for ReactError {
     fn from(err: ConfigError) -> Self {
         ReactError::Config(Box::new(err))
+    }
+}
+
+#[cfg(feature = "mcp")]
+impl From<McpError> for ReactError {
+    fn from(err: McpError) -> Self {
+        ReactError::Mcp(Box::new(err))
     }
 }
 
@@ -329,9 +362,22 @@ impl From<MemoryError> for ReactError {
     }
 }
 
+impl From<SandboxError> for ReactError {
+    fn from(err: SandboxError) -> Self {
+        ReactError::Sandbox(Box::new(err))
+    }
+}
+
+#[cfg(feature = "channels")]
+impl From<ChannelError> for ReactError {
+    fn from(err: ChannelError) -> Self {
+        ReactError::Channel(Box::new(err))
+    }
+}
+
 impl From<serde_json::Error> for ReactError {
     fn from(err: serde_json::Error) -> Self {
-        ReactError::Parse(ParseError::JsonError(err))
+        ReactError::Parse(Box::new(ParseError::JsonError(err)))
     }
 }
 

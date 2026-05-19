@@ -89,6 +89,11 @@ pub struct SubagentDefinition {
     pub can_delegate: bool,
     /// Tags for discovery / filtering.
     pub tags: Vec<String>,
+    /// Whether this sub-agent uses the lightweight (infrastructure-sharing) mode.
+    ///
+    /// When `true`, the sub-agent shares the parent's LLM client, ToolManager,
+    /// and GuardManager instead of creating new instances.
+    pub lightweight: bool,
 }
 
 impl SubagentDefinition {
@@ -113,6 +118,7 @@ impl SubagentDefinition {
             timeout_secs: 0,
             can_delegate: false,
             tags: Vec::new(),
+            lightweight: false,
         }
     }
 

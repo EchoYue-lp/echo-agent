@@ -139,9 +139,9 @@ pub struct FeishuChannel {
 impl FeishuChannel {
     pub fn new(config: FeishuConfig) -> Result<Self> {
         if config.app_id.is_empty() || config.app_secret.is_empty() {
-            return Err(ReactError::Channel(ChannelError::InvalidConfig(
+            return Err(ReactError::Channel(Box::new(ChannelError::InvalidConfig(
                 "Feishu requires app_id and app_secret".to_string(),
-            )));
+            ))));
         }
 
         Ok(Self {
@@ -314,23 +314,23 @@ impl ChannelPlugin for FeishuChannel {
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         if let Some(tx) = &self.send_tx {
             tx.send(msg).await.map_err(|e| {
-                ReactError::Channel(ChannelError::SendError(format!(
+                ReactError::Channel(Box::new(ChannelError::SendError(format!(
                     "Failed to queue message: {}",
                     e
-                )))
+                ))))
             })
         } else {
-            Err(ReactError::Channel(ChannelError::SendError(
+            Err(ReactError::Channel(Box::new(ChannelError::SendError(
                 "Feishu channel not started".to_string(),
-            )))
+            ))))
         }
     }
 
     async fn health_check(&self) -> Result<()> {
         if self.task_handle.as_ref().is_some_and(|h| h.is_finished()) {
-            return Err(ReactError::Channel(ChannelError::ConnectionError(
+            return Err(ReactError::Channel(Box::new(ChannelError::ConnectionError(
                 "Feishu channel task has terminated".to_string(),
-            )));
+            ))));
         }
         if let Some(ref tm) = self.token_manager {
             tm.get_token().await?;
@@ -425,10 +425,10 @@ impl MessageHandler for FeishuMessageHandler {
     async fn reply(&self, msg: OutboundMessage) -> Result<()> {
         // 通过 send_tx 发送（会被后台任务处理）
         self.send_tx.send(msg).await.map_err(|e| {
-            ReactError::Channel(ChannelError::SendError(format!(
+            ReactError::Channel(Box::new(ChannelError::SendError(format!(
                 "Failed to send reply: {}",
                 e
-            )))
+            ))))
         })
     }
 }

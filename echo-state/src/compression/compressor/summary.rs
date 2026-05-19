@@ -2,7 +2,7 @@ use crate::compression::compressor::SlidingWindowCompressor;
 use crate::compression::{CompressionInput, CompressionOutput, ContextCompressor};
 use echo_core::error::Result;
 use echo_core::llm::LlmClient;
-use echo_core::llm::types::Message;
+use echo_core::llm::types::{Message, Role};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use tracing::warn;
@@ -46,7 +46,7 @@ const COMPRESSION_PROMPT: &str =
 pub fn default_summary_prompt(messages: &[Message]) -> String {
     let history = messages
         .iter()
-        .filter_map(|m| m.content.as_text().map(|c| format!("[{}]: {}", m.role, c)))
+        .filter_map(|m| m.content.as_text().map(|c| format!("[{}]: {}", m.role.as_str(), c)))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -143,7 +143,7 @@ impl ContextCompressor for SummaryCompressor {
                 .messages
                 .iter()
                 .cloned()
-                .partition(|m| m.role == "system");
+                .partition(|m| m.role == Role::System);
 
             if conv_msgs.len() <= self.keep_recent {
                 let mut messages = system_msgs;

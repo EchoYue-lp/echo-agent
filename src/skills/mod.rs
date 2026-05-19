@@ -31,7 +31,9 @@ pub mod registry {
 }
 
 // Core Skill trait + SkillInfo (defined in echo_core::tools::skill)
-pub use echo_core::tools::skill::{Skill, SkillInfo, is_path_safe, minimal_env, minimal_hook_env};
+pub use echo_core::tools::skill::{
+    Skill, SkillInfo, is_path_safe, minimal_env, minimal_hook_env, minimal_hook_env_with_context,
+};
 
 // Execution-layer types (SkillRegistry, etc.)
 pub use echo_execution::skills::SkillRegistry;

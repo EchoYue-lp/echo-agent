@@ -3,6 +3,7 @@
 use crate::agent::AgentCallback;
 use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
+use echo_core::budget::TokenBudgetConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -92,6 +93,8 @@ pub struct AgentConfig {
     pub(crate) auto_project_rules: bool,
     /// Working directory (for searching project rules files), None means use current directory
     pub(crate) working_dir: Option<PathBuf>,
+    /// Token budget configuration for fine-grained context window management
+    pub(crate) token_budget_config: TokenBudgetConfig,
 }
 
 impl AgentConfig {
@@ -135,6 +138,7 @@ impl AgentConfig {
             max_tokens: None,
             auto_project_rules: true,
             working_dir: None,
+            token_budget_config: TokenBudgetConfig::default(),
         }
     }
 
@@ -660,6 +664,12 @@ impl AgentConfig {
     /// * `path` - Working directory path, None means use current directory
     pub fn working_dir(mut self, path: Option<PathBuf>) -> Self {
         self.working_dir = path;
+        self
+    }
+
+    /// Set token budget configuration for fine-grained context window management.
+    pub fn token_budget(mut self, config: TokenBudgetConfig) -> Self {
+        self.token_budget_config = config;
         self
     }
 

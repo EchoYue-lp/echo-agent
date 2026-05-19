@@ -14,7 +14,7 @@ pub use echo_core::compression::{CompressionInput, CompressionOutput, ContextCom
 
 use crate::compression::compressor::SlidingWindowCompressor;
 use echo_core::error::Result;
-use echo_core::llm::types::{Message, MessageContent};
+use echo_core::llm::types::{Message, MessageContent, Role};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
 
@@ -156,7 +156,7 @@ impl ContextManager {
         let first_non_system = self
             .messages
             .iter()
-            .position(|m| m.role != "system")
+            .position(|m| m.role != Role::System)
             .unwrap_or(0);
 
         // Calculate how many non-protected messages need to be deleted
@@ -405,7 +405,7 @@ impl ContextManager {
     /// finds the first message with role == "system" and replaces its content;
     /// if no system message exists, inserts one at the head of the queue.
     pub fn update_system(&mut self, new_system_prompt: String) {
-        if let Some(msg) = self.messages.iter_mut().find(|m| m.role == "system") {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.role == Role::System) {
             msg.content = MessageContent::Text(new_system_prompt);
         } else {
             self.messages.insert(0, Message::system(new_system_prompt));
@@ -558,7 +558,7 @@ mod tests {
         let messages = result.messages;
         println!("压缩后消息数：{}", messages.len());
         for m in &messages {
-            println!("  [{}] {}", m.role, m.content.as_text_ref().unwrap_or(""));
+            println!("  [{}] {}", m.role.as_str(), m.content.as_text_ref().unwrap_or(""));
         }
         Ok(())
     }
@@ -585,7 +585,7 @@ mod tests {
             .iter()
             .map(|m| {
                 (
-                    m.role.clone(),
+                    m.role.as_str().to_string(),
                     m.content.as_text_ref().unwrap_or("").to_string(),
                 )
             })

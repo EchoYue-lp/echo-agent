@@ -5,6 +5,7 @@ use super::stream_loop::StreamMode;
 use crate::llm::types::Message;
 use crate::memory::conversation::project_messages;
 use crate::memory::{NewConversation, SearchQuery, ThreadState};
+use crate::skills::hooks::{HookContext, HookEvent};
 use tracing::{debug, info, warn};
 
 #[derive(Clone, Default)]
@@ -116,10 +117,19 @@ impl ReactAgent {
         let mut ctx = self.memory.context.lock().await;
         ctx.clear();
         ctx.push(Message::system(self.config.system_prompt.clone()));
+        drop(ctx);
+        // Fire SessionStart hook with matcher "clear"
+        let start_result = self
+            .fire_lifecycle_hook(HookEvent::SessionStart, Some("clear"))
+            .await;
+        if start_result.block {
+            warn!(agent = %self.config.agent_name, reason = ?start_result.block_reason, "SessionStart hook blocked new session");
+        }
     }
 
     pub(crate) async fn restore_thread_context(&self) {
         let agent = self.config.agent_name.clone();
+        let session_matcher;
         if let (Some(cp), Some(tid)) = (&self.memory.checkpointer, &self.config.session_id) {
             match cp.get_state(tid).await {
                 Ok(Some(state)) => {
@@ -129,18 +139,29 @@ impl ReactAgent {
                         .lock()
                         .await
                         .set_messages(state.messages);
+                    session_matcher = "resume";
                 }
                 Ok(None) => {
                     debug!(agent = %agent, session_id = %tid, "New session, starting from empty context");
                     self.reset_messages().await;
+                    return; // reset_messages already fires SessionStart("clear")
                 }
                 Err(e) => {
                     warn!(agent = %agent, error = %e, "⚠️ Failed to load thread state, starting from empty context");
                     self.reset_messages().await;
+                    return;
                 }
             }
         } else {
             self.reset_messages().await;
+            return;
+        }
+        // Fire SessionStart hook with appropriate matcher
+        let start_result = self
+            .fire_lifecycle_hook(HookEvent::SessionStart, Some(session_matcher))
+            .await;
+        if start_result.block {
+            warn!(agent = %self.config.agent_name, reason = ?start_result.block_reason, "SessionStart hook blocked session restore");
         }
     }
 
@@ -224,14 +245,15 @@ impl ReactAgent {
 
     pub(crate) async fn inject_hook_messages(
         &self,
-        tool_name: &str,
+        source: &str,
         phase: &str,
+        identifier: &str,
         messages: &[String],
     ) {
         let mut ctx = self.memory.context.lock().await;
         for message in messages {
             ctx.push(Message::system(format!(
-                "[Skill Hook:{phase}:{tool_name}]\n{message}"
+                "[{source}:{phase}:{identifier}]\n{message}"
             )));
         }
     }
@@ -241,10 +263,130 @@ impl ReactAgent {
         tool_name: &str,
         hook_messages: &HookMessageBatches,
     ) {
-        self.inject_hook_messages(tool_name, "pre", &hook_messages.pre)
+        self.inject_hook_messages("Hook", "PreToolUse", tool_name, &hook_messages.pre)
             .await;
-        self.inject_hook_messages(tool_name, "post", &hook_messages.post)
+        self.inject_hook_messages("Hook", "PostToolUse", tool_name, &hook_messages.post)
             .await;
+    }
+
+    /// Fire a lifecycle hook and inject any results into the agent context.
+    pub async fn fire_lifecycle_hook(
+        &self,
+        event: HookEvent,
+        matcher: Option<&str>,
+    ) -> crate::skills::hooks::HookResult {
+        let session_id = self.config.session_id.clone().unwrap_or_default();
+        let agent_name = self.config.agent_name.clone();
+
+        let context = match event {
+            HookEvent::SessionStart => HookContext::for_session_start(
+                matcher.unwrap_or("startup"),
+                &session_id,
+                &agent_name,
+            ),
+            HookEvent::SessionEnd => {
+                HookContext::for_session_end(matcher.unwrap_or("other"), &session_id, &agent_name)
+            }
+            HookEvent::Stop => HookContext::for_stop(None, &session_id, &agent_name, false),
+            HookEvent::Notification => {
+                HookContext::for_notification(matcher.unwrap_or(""), &session_id, &agent_name)
+            }
+            HookEvent::UserPromptSubmit => {
+                // prompt is set by caller, use empty here
+                HookContext::for_user_prompt_submit("", None, &session_id, &agent_name)
+            }
+            HookEvent::PreCompact | HookEvent::PostCompact => {
+                // Compress stats are set by caller, use default here
+                let stats = Default::default();
+                if event == HookEvent::PreCompact {
+                    HookContext::for_pre_compact(
+                        &stats,
+                        matcher.unwrap_or("auto"),
+                        &session_id,
+                        &agent_name,
+                    )
+                } else {
+                    HookContext::for_post_compact(
+                        &stats,
+                        matcher.unwrap_or("auto"),
+                        &session_id,
+                        &agent_name,
+                    )
+                }
+            }
+            HookEvent::ConfigChange => HookContext::for_config_change(
+                matcher.unwrap_or(""),
+                matcher,
+                &session_id,
+                &agent_name,
+            ),
+            HookEvent::InstructionsLoaded => HookContext::for_instructions_loaded(
+                matcher.unwrap_or("startup"),
+                &[],
+                &session_id,
+                &agent_name,
+            ),
+            HookEvent::PostToolBatch => {
+                // Batch details are set by caller; use defaults here
+                HookContext::for_post_tool_batch(&[], 0, 0, &session_id, &agent_name)
+            }
+            HookEvent::StopFailure => {
+                HookContext::for_stop_failure("", matcher.unwrap_or(""), &session_id, &agent_name)
+            }
+            HookEvent::SubagentStart => HookContext::for_subagent_start(
+                "",
+                "",
+                matcher.unwrap_or(""),
+                &session_id,
+                &agent_name,
+            ),
+            HookEvent::SubagentStop => HookContext::for_subagent_stop(
+                "",
+                "",
+                matcher.unwrap_or(""),
+                &session_id,
+                &agent_name,
+            ),
+            HookEvent::TaskCreated => {
+                HookContext::for_task_created("", matcher.unwrap_or(""), &session_id, &agent_name)
+            }
+            HookEvent::TaskCompleted => HookContext::for_task_completed(
+                "",
+                matcher.unwrap_or(""),
+                "",
+                &session_id,
+                &agent_name,
+            ),
+            // Tool events should use run_pre_tool_use / run_post_tool_use / run_post_tool_use_failure directly
+            HookEvent::PreToolUse
+            | HookEvent::PostToolUse
+            | HookEvent::PostToolUseFailure
+            | HookEvent::PermissionRequest
+            | HookEvent::PermissionDenied => {
+                warn!(event = ?event, "Tool event dispatched via fire_lifecycle_hook; use dedicated tool hook methods instead");
+                return crate::skills::hooks::HookResult::default();
+            }
+        };
+
+        let registry = self.tools.hook_registry.read().await.clone();
+        let result = registry.run_lifecycle_hooks(&context).await;
+
+        // Inject context from hook results (single lock acquisition for batching)
+        let event_name = event.as_str();
+        if result.injected_context.is_some() || !result.messages.is_empty() {
+            let mut ctx = self.memory.context.lock().await;
+            if let Some(ctx_text) = &result.injected_context {
+                ctx.push(Message::system(format!(
+                    "[Hook:{}] {}",
+                    event_name, ctx_text
+                )));
+            }
+            for msg in &result.messages {
+                ctx.push(Message::system(format!("[Hook:{}] {}", event_name, msg)));
+            }
+        }
+
+        result
     }
 
     /// Common initialization logic for streaming execution

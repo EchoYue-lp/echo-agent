@@ -68,7 +68,6 @@ use crate::agent::react::ReactAgent;
 use crate::prelude::AgentConfig;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// IM message handler backed by a `ReactAgent`.
 ///
@@ -78,7 +77,7 @@ use tokio::sync::Mutex;
 /// Each user session (managed by `SessionHandler`) owns an independent
 /// `AgentChannelHandler` to ensure conversation isolation.
 pub struct AgentChannelHandler {
-    agent: Arc<Mutex<ReactAgent>>,
+    agent: Arc<ReactAgent>,
 }
 
 impl AgentChannelHandler {
@@ -88,7 +87,7 @@ impl AgentChannelHandler {
     /// `LlmConfig`, `MemoryStore`, etc.).
     pub fn new(agent: ReactAgent) -> Self {
         Self {
-            agent: Arc::new(Mutex::new(agent)),
+            agent: Arc::new(agent),
         }
     }
 
@@ -115,7 +114,7 @@ impl AgentChannelHandler {
 #[async_trait]
 impl MessageHandler for AgentChannelHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
-        let agent = self.agent.lock().await;
+        let agent = self.agent.as_ref();
         let reply = agent.chat(&msg.text).await?;
 
         Ok(OutboundMessage::new(

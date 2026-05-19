@@ -36,6 +36,7 @@
 //! | [`AgentYamlConfig`] | System prompt, iterations, feature toggles |
 
 use crate::agent::AgentConfig;
+use crate::skills::hooks::HooksDefinition;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -56,6 +57,8 @@ pub struct AppConfig {
     pub channels: ChannelsConfig,
     /// Webhook event callback configuration.
     pub webhooks: WebhooksConfig,
+    /// User-defined lifecycle hooks configuration.
+    pub hooks: HooksDefinition,
     /// Server configuration (host, port).
     pub server: ServerConfig,
     /// Logging level configuration.
@@ -352,7 +355,7 @@ pub struct WebhookEntryConfig {
 // ── Config loading ───────────────────────────────────────────────────
 
 /// Config file search paths.
-fn config_search_paths() -> Vec<PathBuf> {
+pub fn config_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(explicit) = std::env::var("ECHO_AGENT_CONFIG")
         && !explicit.trim().is_empty()

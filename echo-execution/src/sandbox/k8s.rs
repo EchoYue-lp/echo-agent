@@ -276,18 +276,18 @@ impl K8sSandbox {
         let start = Instant::now();
 
         let mut child = cmd.spawn().map_err(|e| {
-            echo_core::error::ReactError::Sandbox(SandboxError::StartFailed(format!(
+            echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
                 "Failed to run kubectl: {e}"
-            )))
+            ))))
         })?;
 
         if let Some(input) = command.stdin.as_deref()
             && let Some(mut stdin) = child.stdin.take()
         {
             stdin.write_all(input.as_bytes()).await.map_err(|e| {
-                echo_core::error::ReactError::Sandbox(SandboxError::IoError(format!(
+                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
                     "Failed to write kubectl stdin: {e}"
-                )))
+                ))))
             })?;
         }
 
@@ -306,7 +306,7 @@ impl K8sSandbox {
             Ok(Err(e)) => {
                 self.delete_pod(&pod_name).await;
                 Err(echo_core::error::ReactError::Sandbox(
-                    SandboxError::IoError(format!("kubectl IO error: {e}")),
+                    Box::new(SandboxError::IoError(format!("kubectl IO error: {e}"))),
                 ))
             }
             Err(_) => {
@@ -341,9 +341,9 @@ impl K8sSandbox {
             .output()
             .await
             .map_err(|e| {
-                echo_core::error::ReactError::Sandbox(SandboxError::IoError(format!(
+                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
                     "Failed to list sandbox pods: {e}"
-                )))
+                ))))
             })?;
 
         let pods = String::from_utf8_lossy(&output.stdout);

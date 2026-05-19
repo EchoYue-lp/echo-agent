@@ -48,6 +48,7 @@ impl SubagentBuilder {
                 timeout_secs: 0,
                 can_delegate: false,
                 tags: Vec::new(),
+                lightweight: false,
             },
         }
     }

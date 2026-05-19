@@ -109,10 +109,10 @@ impl McpServerEntry {
     pub fn to_server_config(&self, name: &str) -> Result<McpServerConfig> {
         // 检查是否被禁用
         if self.disabled {
-            return Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                 "服务端 '{}' 已禁用（disabled: true）",
                 name
-            ))));
+            )))));
         }
 
         if let Some(command) = &self.command {
@@ -148,10 +148,10 @@ impl McpServerEntry {
                 transport,
             })
         } else {
-            Err(ReactError::Mcp(McpError::ConnectionFailed(format!(
+            Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                 "服务端 '{}' 配置无效：stdio 模式需提供 'command'，HTTP 模式需提供 'url'",
                 name
-            ))))
+            )))))
         }
     }
 }
@@ -160,10 +160,10 @@ impl McpConfigFile {
     /// 从 JSON 字符串解析配置
     pub fn parse(s: &str) -> Result<Self> {
         serde_json::from_str(s).map_err(|e| {
-            ReactError::Mcp(McpError::ProtocolError(format!(
+            ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                 "mcp.json 格式解析失败: {}",
                 e
-            )))
+            ))))
         })
     }
 
@@ -180,11 +180,11 @@ impl McpConfigFile {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).map_err(|e| {
-            ReactError::Mcp(McpError::ConnectionFailed(format!(
+            ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                 "读取配置文件失败 ({}): {}",
                 path.display(),
                 e
-            )))
+            ))))
         })?;
         Self::parse(&content)
     }
@@ -228,10 +228,10 @@ const BLOCKED_COMMANDS: &[&str] = &[
 pub fn validate_stdio_command(command: &str) -> Result<()> {
     // 1. Shell 元字符检查
     if command.contains(DANGEROUS_SHELL_CHARS) {
-        return Err(ReactError::Mcp(McpError::ProtocolError(format!(
+        return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
             "MCP stdio command 包含 shell 元字符，可能为注入攻击: '{}'",
             command
-        ))));
+        )))));
     }
 
     // 2. 危险命令前缀检查
@@ -242,18 +242,18 @@ pub fn validate_stdio_command(command: &str) -> Result<()> {
         .unwrap_or(base_cmd);
 
     if BLOCKED_COMMANDS.contains(&base_name) {
-        return Err(ReactError::Mcp(McpError::ProtocolError(format!(
+        return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
             "MCP stdio command 使用了危险命令 '{}'",
             base_name
-        ))));
+        )))));
     }
 
     // 3. 路径遍历检查
     if command.contains("..") {
-        return Err(ReactError::Mcp(McpError::ProtocolError(format!(
+        return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
             "MCP stdio command 包含路径遍历 '..': '{}'",
             command
-        ))));
+        )))));
     }
 
     Ok(())
