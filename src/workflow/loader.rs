@@ -149,7 +149,7 @@ impl WorkflowDefinition {
 
     /// Parse from a YAML string
     pub fn from_yaml_str(yaml: &str) -> Result<Self> {
-        serde_yaml::from_str(yaml).map_err(|e| {
+        serde_yaml_ng::from_str(yaml).map_err(|e| {
             ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                 "Failed to parse workflow YAML: {e}"
             ))))

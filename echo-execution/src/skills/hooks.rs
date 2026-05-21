@@ -1470,7 +1470,7 @@ SessionStart:
       - type: prompt
         prompt: "Welcome!"
 "#;
-        let def: HooksDefinition = serde_yaml::from_str(yaml).unwrap();
+        let def: HooksDefinition = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(!def.is_empty());
         assert_eq!(def.rules_for(HookEvent::PreToolUse).len(), 1);
         assert_eq!(def.rules_for(HookEvent::PreToolUse)[0].hooks.len(), 2);
@@ -1488,7 +1488,7 @@ PostToolUse:
         url: "https://audit.example.com/tool-usage"
         timeout: 3
 "#;
-        let def: HooksDefinition = serde_yaml::from_str(yaml).unwrap();
+        let def: HooksDefinition = serde_yaml_ng::from_str(yaml).unwrap();
         let rules = def.rules_for(HookEvent::PostToolUse);
         assert_eq!(rules.len(), 1);
         assert!(matches!(&rules[0].hooks[0], HookAction::Http { url, .. } if url == "https://audit.example.com/tool-usage"));
@@ -1506,7 +1506,7 @@ Notification:
         arguments:
           channel: "agent-approvals"
 "#;
-        let def: HooksDefinition = serde_yaml::from_str(yaml).unwrap();
+        let def: HooksDefinition = serde_yaml_ng::from_str(yaml).unwrap();
         let rules = def.rules_for(HookEvent::Notification);
         assert_eq!(rules.len(), 1);
         assert!(matches!(&rules[0].hooks[0], HookAction::McpTool { server, .. } if server == "slack"));

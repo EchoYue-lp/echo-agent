@@ -372,7 +372,7 @@ pub fn config_search_paths() -> Vec<PathBuf> {
 fn load_from_file(path: &PathBuf) -> Result<AppConfig, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("Failed to read config file: {}", e))?;
-    serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
+    serde_yaml_ng::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
 }
 
 /// Load configuration (searches default paths).
@@ -483,8 +483,8 @@ mod tests {
     #[test]
     fn test_yaml_roundtrip() {
         let config = AppConfig::default();
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: AppConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml_ng::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(parsed.model.name, config.model.name);
         assert_eq!(parsed.agent.system_prompt, config.agent.system_prompt);
     }

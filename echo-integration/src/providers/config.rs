@@ -592,7 +592,7 @@ impl Config {
             ConfigError::ConfigFileError(format!("无法读取配置文件 {}: {}", path.display(), e))
         })?;
 
-        let file: ConfigFile = serde_yaml::from_str(&content).map_err(|e| {
+        let file: ConfigFile = serde_yaml_ng::from_str(&content).map_err(|e| {
             ConfigError::ConfigFileError(format!("配置文件解析失败 {}: {}", path.display(), e))
         })?;
 
@@ -1079,7 +1079,7 @@ models:
     api_key: sk-alias
     model: gpt-4o-mini
 "#;
-        let file: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let file: ConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(file.models.len(), 2);
         assert!(file.models.contains_key("test-model"));
         assert!(file.models.contains_key("alias-model"));
@@ -1103,7 +1103,7 @@ embedding:
   timeout_secs: 45
 "#;
         unsafe { std::env::set_var("TEST_EMBED_KEY", "embed-key") };
-        let file: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let file: ConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
         let entry = file.embedding.expect("embedding should exist");
         assert_eq!(entry.base_url.as_deref(), Some("https://api.openai.com"));
         assert_eq!(resolve_env_ref(&entry.api_key), "embed-key");
@@ -1186,7 +1186,7 @@ models:
     provider: openai
     api_key: sk-test
 "#;
-        let file: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let file: ConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(file.models.len(), 3);
     }
 }

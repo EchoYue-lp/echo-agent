@@ -34,7 +34,7 @@ tokio = { version = "1", features = ["process", "time", "macros", "rt", "io-util
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 # From echo-skills
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 regex = "1"
 dirs = "6"
 shlex = "1"

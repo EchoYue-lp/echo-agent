@@ -336,7 +336,7 @@ fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
         ));
     }
 
-    serde_yaml::from_str(yaml_str)
+    serde_yaml_ng::from_str(yaml_str)
         .map_err(|e| ReactError::Other(format!("SKILL.md YAML parse error: {}", e)))
 }
 
