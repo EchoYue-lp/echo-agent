@@ -15,7 +15,5 @@ pub use types::{
 };
 
 // Backward compatibility re-exports
-#[allow(deprecated)]
 pub use resource_tool::LoadSkillResourceTool;
-#[allow(deprecated)]
 pub use types::{LoadedSkill, ResourceRef, SkillMeta};

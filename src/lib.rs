@@ -97,8 +97,7 @@ pub mod prelude {
     // Config
     pub use crate::config::AppConfig;
 
-    /// Alias for backward compatibility.
-    #[allow(deprecated)]
+    /// Convenience alias for [`ReactAgentBuilder`], the canonical builder type.
     pub type AgentBuilder = ReactAgentBuilder;
 
     // LLM
@@ -149,7 +148,6 @@ pub mod prelude {
     };
 
     // Skills
-    #[allow(deprecated)]
     pub use crate::skills::hooks::LifecycleHookExecutorFn;
     pub use crate::skills::{
         Skill, SkillInfo, SkillRegistry,

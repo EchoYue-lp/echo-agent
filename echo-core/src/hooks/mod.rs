@@ -10,5 +10,4 @@ pub use types::{
     CompressHookStats, HookContext, HookEvent, HookEventCategory, HookResult, HookSource,
     UnifiedHookExecutorFn,
 };
-#[allow(deprecated)]
 pub use types::LifecycleHookExecutorFn;

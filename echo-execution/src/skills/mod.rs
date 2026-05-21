@@ -24,5 +24,4 @@ pub use echo_core::tools::skill::{Skill, SkillInfo, is_path_safe, minimal_env, m
 pub use registry::SkillRegistry;
 
 // Backward compatibility
-#[allow(deprecated)]
 pub use registry::SkillManager;

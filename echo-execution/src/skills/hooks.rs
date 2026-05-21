@@ -75,7 +75,6 @@ pub use echo_core::hooks::{
     CompressHookStats, HookContext, HookEvent, HookEventCategory, HookResult, HookSource,
     UnifiedHookExecutorFn,
 };
-#[allow(deprecated)]
 pub use echo_core::hooks::LifecycleHookExecutorFn;
 
 use std::collections::HashMap;
