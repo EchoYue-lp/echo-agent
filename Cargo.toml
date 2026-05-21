@@ -79,6 +79,7 @@ echo_orchestration = { version = "0.1.4", path = "echo-orchestration" }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
+tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 serde_json = "1.0.143"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -131,8 +132,63 @@ name = "comprehensive_data_analyst"
 required-features = ["sqlite"]
 
 [[example]]
-name = "comprehensive_research_agent"
+name = "comprehensive_code_laboratory"
+required-features = ["sandbox"]
+
+[[example]]
+name = "demo06_mcp"
+required-features = ["mcp"]
+
+[[example]]
+name = "demo15_structured_output"
+
+[[example]]
+name = "demo18_semantic_memory"
+required-features = ["semantic-memory"]
+
+[[example]]
+name = "demo22_plan_execute"
+required-features = ["plan-execute"]
+
+[[example]]
+name = "demo23_a2a"
+required-features = ["a2a"]
+
+[[example]]
+name = "demo25_macros"
+required-features = ["macros"]
+
+[[example]]
+name = "demo26_provider_factory"
+required-features = ["provider-factory"]
+
+[[example]]
+name = "demo28_workflow"
+required-features = ["workflow"]
+
+[[example]]
+name = "demo29_sandbox"
+required-features = ["sandbox"]
+
+[[example]]
+name = "demo30_mcp_server"
+required-features = ["mcp"]
+
+[[example]]
+name = "demo31_memory_tools"
 required-features = ["sqlite"]
+
+[[example]]
+name = "demo34_workflow_stream"
+required-features = ["workflow"]
+
+[[example]]
+name = "demo36_multimodal"
+required-features = ["multimodal"]
+
+[[example]]
+name = "demo37_declarative_workflow"
+required-features = ["workflow"]
 
 [[example]]
 name = "demo38_im_channels"

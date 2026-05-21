@@ -21,7 +21,7 @@ exclude = ["**/.DS_Store"]
 [features]
 default = []
 mcp = ["dep:tokio-tungstenite", "echo_core/mcp"]
-channels = ["echo_core/channels"]
+channels = ["echo_core/channels", "dep:axum"]
 
 [dependencies]
 echo_core = { version = "0.1.4", path = "../echo-core" }
@@ -42,7 +42,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
 dashmap = "6"
 chrono = { version = "0.4", features = ["serde"] }
-axum = "0.7"
+axum = { version = "0.7", optional = true }
 prost = "0.13"
 url = "2"
 rand = "0.9"

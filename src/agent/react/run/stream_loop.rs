@@ -378,9 +378,8 @@ impl ReactAgent {
                     cb.on_think_start(&agent, &messages).await;
                 }
 
-                // Create LLM stream
-                let llm_stream = self.create_llm_stream(messages.clone()).await?;
-                let mut llm_stream = Box::pin(llm_stream);
+                // Create LLM stream (already returned as BoxStream / Pin<Box<dyn Stream>>)
+                let mut llm_stream = self.create_llm_stream(messages.clone()).await?;
 
                 // Collect streaming response
                 let mut content_buffer = String::new();

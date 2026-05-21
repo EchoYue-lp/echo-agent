@@ -597,7 +597,8 @@ impl ReactAgent {
         vec![]
     }
 
-    /// Wire up the MCP tool executor for [`HookAction::McpTool`] hook actions.
+    /// Wire up the MCP tool executor for `HookAction::McpTool` hook actions
+    /// (see `echo_execution::skills::hooks::HookAction`).
     ///
     /// Call this **after** connecting MCP servers via
     /// [`connect_mcp_from_config`](Self::connect_mcp_from_config) or
