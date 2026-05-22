@@ -444,6 +444,30 @@ pub fn apply_env_overrides(config: &mut AppConfig) {
 mod tests {
     use super::*;
 
+    /// RAII guard that sets an env var and restores (or removes) it on drop.
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: test code, single-threaded via cargo test harness
+            unsafe { std::env::set_var(key, val) };
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
@@ -502,9 +526,9 @@ model:
         )
         .unwrap();
 
-        unsafe { std::env::set_var("ECHO_AGENT_CONFIG", &temp_path) };
+        let _guard = EnvGuard::set("ECHO_AGENT_CONFIG", &temp_path);
         let config = load_config(None);
-        unsafe { std::env::remove_var("ECHO_AGENT_CONFIG") };
+        drop(_guard);
         std::fs::remove_file(&temp_path).unwrap();
 
         assert_eq!(config.model.name, "qwen-vl-max");

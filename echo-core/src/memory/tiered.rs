@@ -27,6 +27,8 @@ pub struct TieredMemory {
     pub max_short_term: usize,
     /// Long-term store (optional — None means no persistence)
     pub long_term: Option<Arc<dyn Store>>,
+    /// Overflow queue: items evicted from short-term, awaiting async flush to long-term store
+    pub overflow_queue: Vec<String>,
 }
 
 impl TieredMemory {
@@ -37,6 +39,7 @@ impl TieredMemory {
             short_term: Vec::new(),
             max_short_term,
             long_term: None,
+            overflow_queue: Vec::new(),
         }
     }
 
@@ -47,15 +50,48 @@ impl TieredMemory {
     }
 
     /// Add a short-term memory entry (summarized conversation turn).
-    /// Oldest entries are evicted when max_short_term is exceeded.
+    /// Oldest entries are evicted to the overflow_queue when max_short_term is exceeded.
+    /// Call [`flush_overflow`] to persist them to the long-term store.
     pub fn add_short_term(&mut self, summary: String) {
         self.short_term.push(summary);
         if self.short_term.len() > self.max_short_term {
-            // Move oldest short-term to long-term if store is available
             let oldest = self.short_term.remove(0);
-            // Note: actual persistence to store happens via async, this is sync-only
-            let _ = oldest; // In production, trigger async persistence
+            self.overflow_queue.push(oldest);
         }
+    }
+
+    /// Persist overflowed short-term memories to the long-term store.
+    ///
+    /// Drains the overflow queue and writes each entry as a [`StoreItem`]
+    /// with key `short_term_{uuid}` in the `memories/short_term` namespace.
+    /// Returns the number of entries successfully flushed.
+    pub async fn flush_overflow(&mut self) -> usize {
+        let store = match &self.long_term {
+            Some(s) => s,
+            None => {
+                // No store attached — clear queue to avoid unbounded growth
+                let drained = self.overflow_queue.len();
+                self.overflow_queue.clear();
+                return drained;
+            }
+        };
+
+        let mut flushed = 0;
+        for entry in self.overflow_queue.drain(..) {
+            let key = format!("short_term_{}", uuid::Uuid::new_v4());
+            let value = serde_json::json!({
+                "content": entry,
+                "source": "short_term_overflow",
+            });
+            if store
+                .put(&["memories", "short_term"], &key, value)
+                .await
+                .is_ok()
+            {
+                flushed += 1;
+            }
+        }
+        flushed
     }
 
     /// Build the full context injection string from Core + ShortTerm memory.
@@ -118,7 +154,19 @@ mod tests {
         assert_eq!(tm.short_term.len(), 2);
         tm.add_short_term("summary 3".into());
         assert_eq!(tm.short_term.len(), 2);
-        assert_eq!(tm.short_term[0], "summary 2"); // oldest evicted
+        assert_eq!(tm.short_term[0], "summary 2");
+        // Overflow queue should contain the evicted oldest entry
+        assert_eq!(tm.overflow_queue.len(), 1);
+        assert_eq!(tm.overflow_queue[0], "summary 1");
+    }
+
+    #[test]
+    fn test_overflow_queue_clears_without_store() {
+        let mut tm = TieredMemory::new(1, 2000);
+        tm.add_short_term("entry 1".into());
+        tm.add_short_term("entry 2".into()); // triggers overflow
+        assert_eq!(tm.short_term, vec!["entry 2"]);
+        assert_eq!(tm.overflow_queue, vec!["entry 1"]);
     }
 
     #[test]

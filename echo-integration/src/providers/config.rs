@@ -952,6 +952,31 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
+    /// RAII guard that sets an env var and restores (or removes) it on drop.
+    /// Must be used together with [`env_test_lock`] for cross-test isolation.
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: guarded by env_test_lock mutex; no concurrent access
+            unsafe { std::env::set_var(key, val) };
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
     #[test]
     fn test_llm_config_new() {
         let config = LlmConfig::new("https://example.com", "sk-test", "gpt-4o");
@@ -1006,10 +1031,9 @@ mod tests {
 
     #[test]
     fn test_resolve_env_ref_with_var() {
-        let _guard = env_test_lock();
-        unsafe { std::env::set_var("TEST_ECHO_KEY", "resolved-value") };
+        let _lock = env_test_lock();
+        let _guard = EnvGuard::set("TEST_ECHO_KEY", "resolved-value");
         assert_eq!(resolve_env_ref("${TEST_ECHO_KEY}"), "resolved-value");
-        unsafe { std::env::remove_var("TEST_ECHO_KEY") };
     }
 
     #[test]
@@ -1021,32 +1045,25 @@ mod tests {
 
     #[test]
     fn test_resolve_env_ref_supports_dashscope_qwen_alias() {
-        let _guard = env_test_lock();
-        unsafe {
-            std::env::remove_var("DASHSCOPE_API_KEY");
-            std::env::set_var("QWEN_API_KEY", "qwen-alias-value");
-        }
+        let _lock = env_test_lock();
+        // Remove DASHSCOPE key, set QWEN alias — DASHSCOPE should resolve to QWEN fallback
+        let _qwen_guard = {
+            unsafe { std::env::remove_var("DASHSCOPE_API_KEY") };
+            EnvGuard::set("QWEN_API_KEY", "qwen-alias-value")
+        };
         assert_eq!(resolve_env_ref("${DASHSCOPE_API_KEY}"), "qwen-alias-value");
-        unsafe {
-            std::env::remove_var("QWEN_API_KEY");
-        }
     }
 
     #[test]
     fn test_env_api_key_supports_qwen_alias() {
-        let _guard = env_test_lock();
-        unsafe {
-            std::env::remove_var("DASHSCOPE_API_KEY");
-            std::env::set_var("QWEN_API_KEY", "qwen-provider-key");
-        }
+        let _lock = env_test_lock();
+        unsafe { std::env::remove_var("DASHSCOPE_API_KEY") };
+        let _guard = EnvGuard::set("QWEN_API_KEY", "qwen-provider-key");
         assert_eq!(
             ProviderFactory::env_api_key("dashscope"),
             "qwen-provider-key"
         );
         assert_eq!(ProviderFactory::env_api_key("qwen"), "qwen-provider-key");
-        unsafe {
-            std::env::remove_var("QWEN_API_KEY");
-        }
     }
 
     #[test]
@@ -1102,12 +1119,11 @@ embedding:
   model: text-embedding-3-small
   timeout_secs: 45
 "#;
-        unsafe { std::env::set_var("TEST_EMBED_KEY", "embed-key") };
+        let _guard = EnvGuard::set("TEST_EMBED_KEY", "embed-key");
         let file: ConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
         let entry = file.embedding.expect("embedding should exist");
         assert_eq!(entry.base_url.as_deref(), Some("https://api.openai.com"));
         assert_eq!(resolve_env_ref(&entry.api_key), "embed-key");
-        unsafe { std::env::remove_var("TEST_EMBED_KEY") };
     }
 
     #[test]
