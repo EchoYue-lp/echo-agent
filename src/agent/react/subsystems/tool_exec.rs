@@ -22,7 +22,8 @@ use std::sync::Arc;
 /// Skill/Hook system, MCP connection management, SubAgent scheduling, and sandbox
 /// environment.
 pub(crate) struct ToolExecutionSubsystem {
-    pub(crate) tool_manager: ToolManager,
+    /// Tool registry (Arc for sharing with StreamRunner).
+    pub(crate) tool_manager: Arc<ToolManager>,
     #[cfg(feature = "subagent")]
     pub(crate) subagent_registry: Arc<SubagentRegistry>,
     #[cfg(feature = "tasks")]
@@ -33,4 +34,30 @@ pub(crate) struct ToolExecutionSubsystem {
     #[cfg(feature = "mcp")]
     pub(crate) mcp_manager: McpManager,
     pub(crate) sandbox_manager: Option<Arc<SandboxManager>>,
+}
+
+impl ToolExecutionSubsystem {
+    /// Return a clone of the tool manager Arc (for StreamRunner construction).
+    pub(crate) fn tool_manager_arc(&self) -> Arc<ToolManager> {
+        Arc::clone(&self.tool_manager)
+    }
+
+    #[cfg(feature = "mcp")]
+    pub(crate) fn mcp_manager_arc(&self) -> Option<Arc<McpManager>> {
+        None // McpManager is not Arc-wrapped; use shared registry instead
+    }
+
+    #[cfg(feature = "subagent")]
+    pub(crate) fn subagent_registry(&self) -> Option<Arc<SubagentRegistry>> {
+        Some(Arc::clone(&self.subagent_registry))
+    }
+
+    #[cfg(feature = "tasks")]
+    pub(crate) fn task_manager(&self) -> Option<Arc<TaskManager>> {
+        Some(Arc::clone(&self.task_manager))
+    }
+
+    pub(crate) fn progressive_skill_registry(&self) -> Option<SharedRegistry> {
+        self.progressive_skill_registry.clone()
+    }
 }

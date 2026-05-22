@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
 "#;
 
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("deepseek-v4-flash")
         .name("my_math_agent")
         .system_prompt(system_prompt)
         .enable_tools()

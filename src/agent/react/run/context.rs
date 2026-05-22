@@ -1,7 +1,7 @@
 //! Context management + long-term memory + persistence + audit
 
 use super::super::ReactAgent;
-use super::stream_loop::StreamMode;
+use super::types::StreamMode;
 use crate::llm::types::Message;
 use crate::memory::conversation::project_messages;
 use crate::memory::{NewConversation, SearchQuery, ThreadState};

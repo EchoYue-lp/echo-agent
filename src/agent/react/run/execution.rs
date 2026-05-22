@@ -312,7 +312,10 @@ impl ReactAgent {
     /// Truncate tool output based on token budget.
     ///
     /// When `max_tool_output_tokens` is configured and the estimated output tokens
-    /// exceed the limit, truncate the text and append a `[Output truncated, total N tokens]` notice.
+    /// exceed the limit, the output is truncated to a **head + tail** view:
+    /// the first ~70% of the budget is taken from the beginning, the remaining
+    /// ~30% from the end.  Cut points are aligned to newline boundaries so that
+    /// code blocks, JSON structures, and log lines stay intact.
     pub(crate) async fn truncate_tool_output(&self, output: String) -> String {
         let Some(max_tokens) = self.config.max_tool_output_tokens else {
             return output;
@@ -320,20 +323,67 @@ impl ReactAgent {
         let ctx = self.memory.context.lock().await;
         let tokenizer = ctx.tokenizer();
         let token_count = tokenizer.count_tokens(&output);
-        drop(ctx);
         if token_count <= max_tokens {
+            drop(ctx);
             return output;
         }
 
-        // Estimate truncation position by character ratio
-        let ratio = max_tokens as f64 / token_count as f64;
-        let char_limit = (output.len() as f64 * ratio * 0.95) as usize;
-        let truncated: String = output.chars().take(char_limit).collect();
-        let suffix = format!(
-            "\n[Output truncated, total {} tokens, keeping first {} tokens]",
-            token_count, max_tokens
+        let notice = format!(
+            "\n\n[... output truncated: {} tokens total → {} tokens shown ...]\n\n",
+            token_count, max_tokens,
         );
-        format!("{truncated}{suffix}")
+        let notice_tokens = tokenizer.count_tokens(&notice);
+        let available = max_tokens.saturating_sub(notice_tokens);
+
+        // If the budget is too tight for a meaningful split, fall back to
+        // prefix-only with a short suffix.
+        if available < 4 {
+            drop(ctx);
+            let truncated: String = output.chars().take(max_tokens * 4).collect();
+            return format!("{truncated}\n[Output truncated, total {token_count} tokens]");
+        }
+
+        let head_budget = (available as f64 * 0.7) as usize;
+        let tail_budget = available.saturating_sub(head_budget);
+
+        let chars: Vec<char> = output.chars().collect();
+        let char_per_token = chars.len() as f64 / token_count as f64;
+
+        // ── head ──────────────────────────────────────────────────
+        let head_char_end = {
+            let est = (head_budget as f64 * char_per_token * 1.05) as usize;
+            newline_boundary_fwd(&chars, est.min(chars.len()))
+        };
+        let head: String = chars[..head_char_end].iter().collect();
+        let actual_head = tokenizer.count_tokens(&head);
+        let head = if actual_head > head_budget {
+            let scale = head_budget as f64 / actual_head as f64;
+            let adj = newline_boundary_fwd(&chars, (head_char_end as f64 * scale) as usize);
+            chars[..adj].iter().collect::<String>()
+        } else {
+            head
+        };
+
+        // ── tail ──────────────────────────────────────────────────
+        let tail_char_start = {
+            let est = chars.len().saturating_sub(
+                (tail_budget as f64 * char_per_token * 1.05) as usize,
+            );
+            newline_boundary_rev(&chars, est)
+        };
+        let tail: String = chars[tail_char_start..].iter().collect();
+        let actual_tail = tokenizer.count_tokens(&tail);
+        let tail = if actual_tail > tail_budget {
+            let scale = tail_budget as f64 / actual_tail as f64;
+            let keep = (tail.len() as f64 * scale) as usize;
+            let adj = newline_boundary_rev(&chars, tail_char_start + tail.len().saturating_sub(keep));
+            chars[adj..].iter().collect::<String>()
+        } else {
+            tail
+        };
+
+        drop(ctx);
+        format!("{head}{notice}{tail}")
     }
 
     /// Perform guard check on tool output to prevent malicious content injection
@@ -391,4 +441,30 @@ impl ReactAgent {
             }
         }
     }
+}
+
+// ── truncation helpers ──────────────────────────────────────────────
+
+/// Find the nearest newline at or before `target`, so truncation lands on
+/// a natural boundary (line / code-block / JSON key end).
+fn newline_boundary_fwd(chars: &[char], target: usize) -> usize {
+    let t = target.min(chars.len());
+    for i in (0..t).rev() {
+        if chars[i] == '\n' {
+            return i + 1; // include the newline in the kept portion
+        }
+    }
+    t
+}
+
+/// Find the nearest newline at or after `target`, so the tail starts at a
+/// clean line boundary.
+fn newline_boundary_rev(chars: &[char], target: usize) -> usize {
+    let t = target.min(chars.len());
+    for i in t..chars.len() {
+        if chars[i] == '\n' {
+            return i + 1; // start after the newline
+        }
+    }
+    t
 }

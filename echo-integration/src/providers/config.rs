@@ -4,7 +4,9 @@
 //!
 //! ## 1. YAML 配置文件（推荐）
 //!
-//! 查找顺序：`$ECHO_AGENT_CONFIG` → `./echo-agent.yaml` → `~/.echo-agent/config.yaml`
+//! 查找顺序：`$ECHO_AGENT_MODELS_CONFIG` → `./echo-agent-models.yaml` → `~/.echo-agent/models.yaml`，
+//! 并兼容旧路径 `$ECHO_AGENT_CONFIG` / `./echo-agent.yaml` / `~/.echo-agent/config.yaml`。
+//! 旧路径如果是应用配置（没有顶层 `models`）会被跳过，避免与应用配置冲突。
 //!
 //! ```yaml
 //! models:
@@ -229,7 +231,7 @@ impl LlmConfig {
 ///
 /// 支持三种配置方式：
 ///
-/// 1. **模型名称**：从配置文件/环境变量加载（如 `"qwen3-max"`）
+/// 1. **模型名称**：从内置 provider/env 规则或配置文件加载（如 `"qwen-plus"`）
 /// 2. **Provider:Model 格式**：自动匹配内置 Provider（如 `"anthropic:claude-sonnet-4-6"`、`"ollama:llama3"`）
 /// 3. **完整 LlmConfig**：手动构造配置后调用 `from_config()`
 ///
@@ -240,8 +242,8 @@ impl LlmConfig {
 /// use echo_core::error::Result;
 ///
 /// # fn example() -> Result<()> {
-/// // 方式一：从配置文件加载
-/// let client = ProviderFactory::create("qwen3-max")?;
+/// // 方式一：使用内置 provider/env 规则或模型配置文件
+/// let client = ProviderFactory::create("qwen-plus")?;
 ///
 /// // 方式二：Provider:Model 简写
 /// let client = ProviderFactory::create("anthropic:claude-sonnet-4-6")?;
@@ -262,7 +264,7 @@ impl ProviderFactory {
     ///
     /// 解析规则：
     /// - 含 `:` 分隔符 → 解析为 `provider:model`，自动填充 base_url，API key 从环境变量获取
-    /// - 不含 `:` → 视为模型名称，从配置文件/环境变量加载完整配置
+    /// - 不含 `:` → 视为模型名称，先使用内置 provider/env 规则，再从配置文件加载完整配置
     pub fn create(config_str: &str) -> Result<Box<dyn echo_core::llm::LlmClient>> {
         if let Some((provider_name, model_name)) = config_str.split_once(':') {
             Self::from_provider_model(provider_name.trim(), model_name.trim())
@@ -542,7 +544,7 @@ impl Config {
         }
 
         Err(ConfigError::ConfigFileError(
-            "未找到模型配置文件，请提供 echo-agent.yaml；环境变量仅支持通过 `${VAR}` 在 YAML 中注入值".to_string(),
+            "未找到模型配置文件，请提供 echo-agent-models.yaml；环境变量仅支持通过 `${VAR}` 在 YAML 中注入值".to_string(),
         )
         .into())
     }
@@ -550,52 +552,101 @@ impl Config {
     /// 查找配置文件路径
     ///
     /// 查找顺序：
-    /// 1. `$ECHO_AGENT_CONFIG` 环境变量指定的路径
-    /// 2. `./echo-agent.yaml`（当前目录）
-    /// 3. `~/.echo-agent/config.yaml`（用户目录）
-    fn config_file_path() -> Option<PathBuf> {
-        // 1. 环境变量指定
+    /// 1. `$ECHO_AGENT_MODELS_CONFIG` 环境变量指定的模型配置路径
+    /// 2. `./echo-agent-models.yaml`（当前目录）
+    /// 3. `~/.echo-agent/models.yaml`（用户目录）
+    /// 4. 兼容旧路径：`$ECHO_AGENT_CONFIG`、`./echo-agent.yaml`、`~/.echo-agent/config.yaml`
+    fn config_file_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        if let Ok(path) = std::env::var("ECHO_AGENT_MODELS_CONFIG") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                paths.push(p);
+            }
+        }
+
+        let local = PathBuf::from("./echo-agent-models.yaml");
+        if local.exists() {
+            paths.push(local);
+        }
+
+        if let Ok(home) = std::env::var("HOME") {
+            let global = PathBuf::from(&home).join(".echo-agent").join("models.yaml");
+            if global.exists() {
+                paths.push(global);
+            }
+        }
+
         if let Ok(path) = std::env::var("ECHO_AGENT_CONFIG") {
             let p = PathBuf::from(&path);
             if p.exists() {
-                return Some(p);
+                paths.push(p);
             }
         }
 
-        // 2. 当前目录
-        let local = PathBuf::from("./echo-agent.yaml");
-        if local.exists() {
-            return Some(local);
+        let legacy_local = PathBuf::from("./echo-agent.yaml");
+        if legacy_local.exists() {
+            paths.push(legacy_local);
         }
 
-        // 3. 用户主目录
         if let Ok(home) = std::env::var("HOME") {
-            let global = PathBuf::from(home).join(".echo-agent").join("config.yaml");
-            if global.exists() {
-                return Some(global);
+            let legacy_global = PathBuf::from(home).join(".echo-agent").join("config.yaml");
+            if legacy_global.exists() {
+                paths.push(legacy_global);
             }
         }
 
-        None
+        paths
     }
 
     /// 从 YAML 配置文件加载
     fn from_config_file() -> Result<Option<Self>> {
-        let path = match Self::config_file_path() {
-            Some(p) => p,
-            None => return Ok(None),
-        };
+        let paths = Self::config_file_paths();
+        if paths.is_empty() {
+            return Ok(None);
+        }
 
-        tracing::debug!("正在加载配置文件: {}", path.display());
+        let mut parse_errors = Vec::new();
 
-        let content = std::fs::read_to_string(&path).map_err(|e| {
-            ConfigError::ConfigFileError(format!("无法读取配置文件 {}: {}", path.display(), e))
-        })?;
+        for path in paths {
+            tracing::debug!("正在加载模型配置文件: {}", path.display());
 
-        let file: ConfigFile = serde_yaml_ng::from_str(&content).map_err(|e| {
-            ConfigError::ConfigFileError(format!("配置文件解析失败 {}: {}", path.display(), e))
-        })?;
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                ConfigError::ConfigFileError(format!("无法读取配置文件 {}: {}", path.display(), e))
+            })?;
 
+            if !has_models_section(&content) {
+                tracing::debug!(
+                    path = %path.display(),
+                    "跳过非模型配置文件：缺少顶层 models 段"
+                );
+                continue;
+            }
+
+            let file: ConfigFile = match serde_yaml_ng::from_str(&content) {
+                Ok(file) => file,
+                Err(e) => {
+                    parse_errors.push(format!("{}: {}", path.display(), e));
+                    continue;
+                }
+            };
+
+            return Self::from_config_file_data(file).map(Some);
+        }
+
+        if parse_errors.is_empty() {
+            Ok(None)
+        } else {
+            Err(ConfigError::ConfigFileError(format!(
+                "模型配置文件解析失败: {}",
+                parse_errors.join("; ")
+            ))
+            .into())
+        }
+    }
+
+    fn from_config_file_data(file: ConfigFile) -> Result<Self> {
         let mut models = HashMap::new();
         let mut invalid_models = HashMap::new();
 
@@ -712,12 +763,12 @@ impl Config {
             None => (None, None),
         };
 
-        Ok(Some(Config {
+        Ok(Config {
             models,
             invalid_models,
             embedding,
             invalid_embedding,
-        }))
+        })
     }
 
     // ── 公共查询 API ─────────────────────────────────────────────────────────
@@ -736,6 +787,10 @@ impl Config {
 
     /// 获取指定模型的配置
     pub fn get_model(model: &str) -> Result<ModelConfig> {
+        if let Some(config) = builtin_model_config(model) {
+            return Ok(config);
+        }
+
         let config = Self::load_cached()?;
         if let Some(err) = config.invalid_models.get(model) {
             return Err(ConfigError::ConfigFileError(err.clone()).into());
@@ -749,7 +804,7 @@ impl Config {
                     "{}（可用模型: {}）",
                     model,
                     if available.is_empty() {
-                        "无，请创建 echo-agent.yaml 并在其中声明 models.*".to_string()
+                        "无，请创建 echo-agent-models.yaml 并在其中声明 models.*".to_string()
                     } else {
                         available.join(", ")
                     }
@@ -762,6 +817,10 @@ impl Config {
     ///
     /// 配置加载失败时返回 `false`（不 panic）。
     pub fn has_model(model: &str) -> bool {
+        if builtin_model_config(model).is_some() {
+            return true;
+        }
+
         Self::load_cached()
             .map(|config| config.models.contains_key(model))
             .unwrap_or(false)
@@ -772,8 +831,14 @@ impl Config {
     /// 配置加载失败时返回空列表（不 panic）。
     pub fn list_models() -> Vec<String> {
         Self::load_cached()
-            .map(|config| config.models.keys().cloned().collect())
-            .unwrap_or_default()
+            .map(|config| {
+                let mut models: Vec<String> = config.models.keys().cloned().collect();
+                models.extend(builtin_available_models());
+                models.sort();
+                models.dedup();
+                models
+            })
+            .unwrap_or_else(|_| builtin_available_models())
     }
 
     /// 获取 embedding 配置
@@ -785,7 +850,7 @@ impl Config {
         config.embedding.clone().ok_or_else(|| {
             ConfigError::MissingConfig(
                 "embedding".to_string(),
-                "请在 echo-agent.yaml 中配置 embedding 段".to_string(),
+                "请在 echo-agent-models.yaml 中配置 embedding 段".to_string(),
             )
             .into()
         })
@@ -805,6 +870,82 @@ impl Config {
 }
 
 // ── 工具函数 ─────────────────────────────────────────────────────────────────
+
+fn builtin_model_config(model: &str) -> Option<ModelConfig> {
+    let (provider, model_name) = infer_builtin_provider(model)?;
+    let baseurl = provider_base_url(provider)?.to_string();
+    let apikey = ProviderFactory::env_api_key(provider);
+
+    if apikey.trim().is_empty() && !matches!(provider, "ollama") {
+        return None;
+    }
+
+    Some(ModelConfig {
+        model: model_name,
+        baseurl,
+        apikey,
+        provider: parse_provider(provider),
+    })
+}
+
+fn infer_builtin_provider(model: &str) -> Option<(&'static str, String)> {
+    if let Some((provider, raw_model)) = model.split_once(':') {
+        let provider = match provider.trim().to_ascii_lowercase().as_str() {
+            "openai" => "openai",
+            "anthropic" => "anthropic",
+            "deepseek" => "deepseek",
+            "dashscope" | "qwen" | "aliyun" => "qwen",
+            "moonshot" | "kimi" => "moonshot",
+            "zhipu" | "glm" => "zhipu",
+            "ollama" => "ollama",
+            _ => return None,
+        };
+        let raw_model = raw_model.trim();
+        if raw_model.is_empty() {
+            None
+        } else {
+            Some((provider, raw_model.to_string()))
+        }
+    } else {
+        let lower = model.to_ascii_lowercase();
+        let provider = if lower.starts_with("qwen-") || lower.starts_with("qwen3") {
+            "qwen"
+        } else if lower.starts_with("gpt-")
+            || lower.starts_with("o1")
+            || lower.starts_with("o3")
+            || lower.starts_with("o4")
+        {
+            "openai"
+        } else if lower.starts_with("claude-") {
+            "anthropic"
+        } else if lower.starts_with("deepseek-") {
+            "deepseek"
+        } else if lower.starts_with("moonshot-") || lower.starts_with("kimi-") {
+            "moonshot"
+        } else if lower.starts_with("glm-") {
+            "zhipu"
+        } else {
+            return None;
+        };
+        Some((provider, model.to_string()))
+    }
+}
+
+fn builtin_available_models() -> Vec<String> {
+    let mut models = Vec::new();
+    if ProviderFactory::env_api_key("qwen").trim().is_empty() {
+        return models;
+    }
+    models.push("qwen-plus".to_string());
+    models
+}
+
+fn has_models_section(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#') && line == trimmed && trimmed.starts_with("models:")
+    })
+}
 
 /// 解析字符串中的 `${VAR_NAME}` 环境变量引用
 ///
@@ -1082,6 +1223,57 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err}").contains("DASHSCOPE_API_KEY"));
         assert!(format!("{err}").contains("QWEN_API_KEY"));
+    }
+
+    fn test_builtin_model_config_uses_qwen_alias() {
+        let _lock = env_test_lock();
+        unsafe {
+            std::env::remove_var("DASHSCOPE_API_KEY");
+            std::env::remove_var("ECHO_AGENT_MODELS_CONFIG");
+            std::env::remove_var("ECHO_AGENT_CONFIG");
+        }
+        let _guard = EnvGuard::set("QWEN_API_KEY", "qwen-builtin-key");
+        let config = Config::get_model("qwen-plus").unwrap();
+        assert_eq!(config.model, "qwen-plus");
+        assert_eq!(config.apikey, "qwen-builtin-key");
+        assert!(config.baseurl.contains("dashscope.aliyuncs.com"));
+    }
+
+    #[test]
+    fn test_provider_prefixed_builtin_model_config() {
+        let _lock = env_test_lock();
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("ECHO_AGENT_MODELS_CONFIG");
+            std::env::remove_var("ECHO_AGENT_CONFIG");
+        }
+        let _guard = EnvGuard::set("OPENAI_API_KEY", "openai-builtin-key");
+        let config = Config::get_model("openai:gpt-4o-mini").unwrap();
+        assert_eq!(config.model, "gpt-4o-mini");
+        assert_eq!(config.apikey, "openai-builtin-key");
+        assert!(config.baseurl.contains("api.openai.com"));
+    }
+
+    #[test]
+    fn test_has_models_section_skips_app_config() {
+        let app_yaml = r#"
+model:
+  name: qwen-plus
+agent:
+  name: echo-assistant
+"#;
+        assert!(!has_models_section(app_yaml));
+    }
+
+    #[test]
+    fn test_has_models_section_accepts_model_config() {
+        let model_yaml = r#"
+models:
+  qwen-plus:
+    provider: qwen
+    api_key: ${DASHSCOPE_API_KEY}
+"#;
+        assert!(has_models_section(model_yaml));
     }
 
     #[test]

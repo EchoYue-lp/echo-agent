@@ -221,7 +221,7 @@ impl ReactAgent {
     ///
     /// # Returns
     /// List of registered tool names
-    pub fn list_tools(&self) -> Vec<&str> {
+    pub fn list_tools(&self) -> Vec<String> {
         self.tools.tool_manager.list_tools()
     }
 

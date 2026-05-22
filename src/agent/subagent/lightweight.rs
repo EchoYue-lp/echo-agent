@@ -302,12 +302,12 @@ impl LightweightSubagent {
     /// Get the tool definitions for this sub-agent (respecting tool_filter).
     fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
         let tool_names = self.tool_manager.list_tools();
-        let names_iter: Box<dyn Iterator<Item = &str>> =
+        let names_iter: Box<dyn Iterator<Item = String>> =
             if let Some(ref filter) = self.config.tool_filter {
                 Box::new(
                     tool_names
                         .into_iter()
-                        .filter(|name| filter.contains(&name.to_string())),
+                        .filter(move |name| filter.contains(name)),
                 )
             } else {
                 Box::new(tool_names.into_iter())
@@ -315,8 +315,8 @@ impl LightweightSubagent {
         names_iter
             .filter_map(|name| {
                 self.tool_manager
-                    .get_tool(name)
-                    .map(ToolDefinition::from_tool)
+                    .get_tool(&name)
+                    .map(|t| ToolDefinition::from_tool(&**t))
             })
             .collect()
     }

@@ -165,7 +165,7 @@ cargo run --example demo38_im_channels --features channels  # IM channels
 
 ## Feature Matrix
 
-echo-agent ships with **28+ capabilities** across 6 crates, all accessible through a single `use echo_agent::prelude::*`.
+echo-agent ships with **30+ capabilities** across 6 crates, all accessible through a single `use echo_agent::prelude::*`.
 
 ### Core
 
@@ -247,6 +247,19 @@ echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "
 | `a2a` | Agent-to-Agent protocol | — |
 | `topology` | Agent topology visualization | — |
 | `telemetry` | OpenTelemetry tracing | `opentelemetry` |
+| `sandbox` | Code execution sandbox (Local/Docker/K8s) | — |
+| `semantic-memory` | Semantic memory | — |
+| `macros` | Procedural macros (#\[tool\] etc.) | `echo-macros` |
+| `provider-factory` | LLM provider factory | — |
+| `multimodal` | Multimodal input (images/files) | — |
+| `git` | Git operation tools | — |
+| `database` | Database query tools | `sqlx` |
+| `rag` | RAG retrieval tools | — |
+| `chart` | Chart generation tools | — |
+| `content-guard` | Content safety guard | — |
+| `project-rules` | Project rule loading | — |
+| `shell` | Shell command execution | — |
+| `files` | File read/write tools | — |
 
 ---
 
@@ -261,7 +274,7 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── src/                 Agent engine, re-exports, and facade layer
-├── examples/            40+ runnable demos
+├── examples/            33 runnable demos
 ├── docs/                Bilingual documentation (en + zh)
 ├── skills/              External skill packs (Markdown-based)
 └── echo-agent.yaml      Example configuration
@@ -355,9 +368,9 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 
 ## Highlights
 
-- **40+ capabilities** — ReAct loop, tools, memory, streaming, multi-agent, skills, MCP, IM channels, guards, audit, and more
-- **40 runnable examples** — every feature has a demo you can `cargo run` immediately
-- **629+ unit tests** — comprehensive coverage across all modules
+- **30+ capabilities** — ReAct loop, tools, memory, streaming, multi-agent, skills, MCP, IM channels, guards, audit, and more
+- **33 runnable examples** — every feature has a demo you can `cargo run` immediately
+- **Comprehensive unit tests** — full coverage across all modules
 - **6 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box

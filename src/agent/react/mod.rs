@@ -127,6 +127,11 @@ pub struct ReactAgent {
     /// to support request-level stream cancellation.
     /// Uses `tokio::sync::Mutex` to support `&self` streaming methods.
     cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
+
+    /// Optional run store for persisting execution traces.
+    /// When set, each streaming execution records a [`Run`](crate::trace::Run)
+    /// with events, token usage, and timings.
+    pub run_store: Option<Arc<dyn crate::trace::RunStore>>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -258,7 +263,7 @@ impl ReactAgent {
         Self {
             config,
             tools: ToolExecutionSubsystem {
-                tool_manager,
+                tool_manager: Arc::new(tool_manager),
                 #[cfg(feature = "subagent")]
                 subagent_registry,
                 #[cfg(feature = "tasks")]
@@ -295,6 +300,7 @@ impl ReactAgent {
             llm_client: None,
             llm_config: None,
             cancel_token: tokio::sync::Mutex::new(None),
+            run_store: None,
         }
     }
 
@@ -575,7 +581,7 @@ impl ReactAgent {
     }
 
     /// Get the list of registered tool names.
-    pub fn tool_names(&self) -> Vec<&str> {
+    pub fn tool_names(&self) -> Vec<String> {
         self.tools.tool_manager.list_tools()
     }
 
@@ -957,6 +963,15 @@ impl Drop for ReactAgent {
 
 pub use echo_core::agent::StepType;
 
+// ── Internal accessors ───────────────────────────────────────────────────────
+
+impl ReactAgent {
+    /// Access the shared HTTP client (for StreamRunner construction).
+    pub(crate) fn client(&self) -> &Arc<Client> {
+        &self.client
+    }
+}
+
 // ── impl Agent for ReactAgent ────────────────────────────────────────────────
 
 impl Agent for ReactAgent {
@@ -1031,10 +1046,8 @@ impl Agent for ReactAgent {
         let model = self.config.model_name.clone();
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel.clone());
-                // Delegate to the Agent trait's default implementation
-                // which wraps chat_stream with cancellation
-                <Self as Agent>::chat_stream_with_cancel(self, _message, cancel).await
+                *self.cancel_token.lock().await = Some(cancel);
+                self.run_stream(_message, run::StreamMode::Chat).await
             }
             .instrument(info_span!("agent_chat_stream_with_cancel", agent.name = %agent, agent.model = %model)),
         )
@@ -1049,8 +1062,8 @@ impl Agent for ReactAgent {
         let model = self.config.model_name.clone();
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel.clone());
-                <Self as Agent>::execute_stream_with_cancel(self, _task, cancel).await
+                *self.cancel_token.lock().await = Some(cancel);
+                self.run_stream(_task, run::StreamMode::Execute).await
             }
             .instrument(info_span!("agent_execute_stream_with_cancel", agent.name = %agent, agent.model = %model)),
         )

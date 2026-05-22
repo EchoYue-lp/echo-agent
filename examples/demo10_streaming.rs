@@ -88,7 +88,7 @@ async fn demo_raw_stream() -> echo_agent::error::Result<()> {
     let mut stream = Box::pin(
         stream_chat(
             client,
-            "qwen3-max",
+            "deepseek-v4-flash",
             messages,
             Some(0.7),
             Some(512),

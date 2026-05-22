@@ -29,5 +29,17 @@ jobs:
       - name: Cargo clippy workspace
         run: cargo clippy --workspace --all-targets
 
+      - name: Cargo test workspace
+        run: cargo test --workspace
+
+      - name: Cargo check workspace all features
+        run: cargo check --workspace --all-features --all-targets
+
+      - name: Cargo check examples all features
+        run: cargo check --examples --all-features
+
+      - name: Cargo check workspace minimal features
+        run: cargo check --workspace --no-default-features --all-targets
+
       - name: Cargo check workspace all targets
         run: cargo check --workspace --all-targets

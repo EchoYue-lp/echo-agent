@@ -135,7 +135,7 @@ cargo run --example demo38_im_channels --features channels  # IM 通道
 
 ## 功能矩阵
 
-echo-agent 提供 **28+ 项能力**，跨越 6 个 crate，通过一行 `use echo_agent::prelude::*` 即可全部使用。
+echo-agent 提供 **30+ 项能力**，跨越 6 个 crate，通过一行 `use echo_agent::prelude::*` 即可全部使用。
 
 ### 核心
 
@@ -189,11 +189,14 @@ echo-agent 提供 **28+ 项能力**，跨越 6 个 crate，通过一行 `use ech
 ## Feature Flags
 
 ```toml
-# 最小化 —— 仅 ReAct 引擎
+# 最小化 —— 仅 ReAct 引擎（默认）
+echo-agent = "0.1.4"
+
+# 显式禁用默认 feature（等价于默认安装）
 echo-agent = { version = "0.1.4", default-features = false }
 
-# 完整功能（默认）
-echo-agent = "0.1.4"
+# 完整功能
+echo-agent = { version = "0.1.4", features = ["full"] }
 
 # 按需选择
 echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "web"] }
@@ -217,6 +220,20 @@ echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "
 | `a2a` | Agent-to-Agent 协议 | — |
 | `topology` | Agent 拓扑可视化 | — |
 | `telemetry` | OpenTelemetry 追踪 | `opentelemetry` |
+| `sandbox` | 代码执行沙箱（Local/Docker/K8s） | — |
+| `semantic-memory` | 语义记忆 | — |
+| `macros` | 过程宏（#[tool] 等） | `echo-macros` |
+| `provider-factory` | LLM 提供方工厂 | — |
+| `workflow` | 图工作流引擎 | — |
+| `multimodal` | 多模态输入（图片/文件） | — |
+| `git` | Git 操作工具 | — |
+| `database` | 数据库查询工具 | `sqlx` |
+| `rag` | RAG 检索工具 | — |
+| `chart` | 图表生成工具 | — |
+| `content-guard` | 内容安全护栏 | — |
+| `project-rules` | 项目规则加载 | — |
+| `shell` | Shell 命令执行工具 | — |
+| `files` | 文件读写工具 | — |
 
 ---
 
@@ -231,7 +248,7 @@ echo-agent/
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
 ├── src/                 Agent 引擎、重导出和门面层
-├── examples/            40+ 可运行示例
+├── examples/            33 个可运行示例
 ├── docs/                双语文档（en + zh）
 ├── skills/              外部技能包（Markdown 格式）
 └── echo-agent.yaml      示例配置
@@ -243,29 +260,11 @@ echo-agent/
 
 ## 配置
 
-在项目根目录创建 `echo-agent.yaml`：
+在项目根目录创建应用配置 `echo-agent.yaml`：
 
 ```yaml
-# Provider / 模型注册表（供 ProviderFactory 和基于配置的 LLM 客户端使用）
-models:
-  qwen3-max:
-    provider: dashscope
-    api_key: ${DASHSCOPE_API_KEY}
-
-  deepseek-chat:
-    provider: deepseek
-    api_key: ${DEEPSEEK_API_KEY}
-
-# Embedding 配置（供语义记忆 / 向量检索示例使用）
-embedding:
-  base_url: https://api.openai.com
-  api_key: ${OPENAI_API_KEY}
-  model: text-embedding-3-small
-  timeout_secs: 30
-
-# 运行时框架配置（供 IM channels 等示例使用）
 model:
-  name: qwen3-max
+  name: qwen-plus
   max_tokens: 4096
   temperature: 0.7
 
@@ -302,11 +301,31 @@ logging:
   level: info
 ```
 
+如需注册模型别名或自定义 provider endpoint，创建模型配置 `echo-agent-models.yaml`：
+
+```yaml
+models:
+  qwen3-max:
+    provider: dashscope
+    api_key: ${DASHSCOPE_API_KEY}
+
+  deepseek-chat:
+    provider: deepseek
+    api_key: ${DEEPSEEK_API_KEY}
+
+embedding:
+  base_url: https://api.openai.com
+  api_key: ${OPENAI_API_KEY}
+  model: text-embedding-3-small
+  timeout_secs: 30
+```
+
 说明：
 
-- `models:` 用于 `ProviderFactory`、`LlmConfig::from_model()` 以及基于配置的 LLM 客户端。
+- `echo-agent.yaml` 中的 `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` 是 `echo_agent::config` 加载的应用运行时配置。
+- `echo-agent-models.yaml` 中的 `models:` 用于 `ProviderFactory`、`LlmConfig::from_model()` 以及基于配置的 LLM 客户端。
 - `embedding:` 用于语义记忆 / 向量检索相关示例。
-- `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` 是 `echo_agent::config` 加载的运行时配置。
+- 内置 provider/model 规则可直接使用 `qwen-plus`、`openai:gpt-4o-mini` 等，不一定需要 `models:` 文件。
 
 通过环境变量设置密钥：
 
@@ -325,9 +344,9 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 
 ## 亮点
 
-- **40+ 项能力** — ReAct 循环、工具、记忆、流式、多 Agent、技能、MCP、IM 通道、护栏、审计等
-- **40 个可运行示例** — 每个功能都有 `cargo run` 即可运行的 Demo
-- **629+ 单元测试** — 覆盖所有模块的全面测试
+- **30+ 项能力** — ReAct 循环、工具、记忆、流式、多 Agent、技能、MCP、IM 通道、护栏、审计等
+- **33 个可运行示例** — 每个功能都有 `cargo run` 即可运行的 Demo
+- **全模块单元测试** — 覆盖核心路径的测试
 - **6 个 crate，1 行导入** — 模块化 Workspace，但只需 `use echo_agent::prelude::*`
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用

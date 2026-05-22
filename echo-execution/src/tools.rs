@@ -2,10 +2,11 @@
 //!
 //! The [`ToolManager`] handles registration, execution, concurrency control,
 //! and timeout/retry for all tools in an agent session.
+//! Uses `DashMap` internally so it can be shared via `Arc`.
 
+use dashmap::DashMap;
 use echo_core::error::{Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -14,43 +15,32 @@ pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolRegist
 
 impl ToolRegistrar for ToolManager {
     fn register(&mut self, tool: Box<dyn Tool>) {
-        self.register(tool);
+        (&*self).register(tool);
     }
 }
 
-/// 工具管理器
-///
-/// 负责工具的注册、执行、并发控制和超时重试。
+/// 工具管理器 — thread-safe tool registry and executor.
 pub struct ToolManager {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: DashMap<String, Box<dyn Tool>>,
     config: ToolExecutionConfig,
-    /// 并发限流器
     semaphore: Option<Arc<Semaphore>>,
-    /// 缓存的工具定义
     cached_definitions: RwLock<Option<Vec<ToolDefinition>>>,
 }
 
 impl ToolManager {
-    /// 获取 OpenAI 格式的工具定义列表（带缓存）
-    ///
-    /// 首次调用时构建并缓存，后续直接返回缓存值。
-    /// 注册新工具后缓存会自动失效。
     pub fn get_openai_tools(&self) -> Vec<ToolDefinition> {
-        // Fast path: read cached
         if let Some(ref cached) = *self.cached_definitions.read().unwrap() {
             return cached.clone();
         }
-        // Build + cache
         let definitions: Vec<ToolDefinition> = self
             .tools
-            .values()
-            .map(|tool| ToolDefinition::from_tool(&**tool))
+            .iter()
+            .map(|entry| ToolDefinition::from_tool(&**entry.value()))
             .collect();
         *self.cached_definitions.write().unwrap() = Some(definitions.clone());
         definitions
     }
 
-    /// 使缓存失效（注册/注销工具时调用）
     fn invalidate_cache(&self) {
         *self.cached_definitions.write().unwrap() = None;
     }
@@ -65,7 +55,7 @@ impl Default for ToolManager {
 impl ToolManager {
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: DashMap::new(),
             semaphore: None,
             config: ToolExecutionConfig::default(),
             cached_definitions: RwLock::new(None),
@@ -73,61 +63,43 @@ impl ToolManager {
     }
 
     pub fn new_with_config(config: ToolExecutionConfig) -> Self {
-        let semaphore = config
-            .max_concurrency
+        let semaphore = config.max_concurrency
             .map(|n| Arc::new(Semaphore::new(n.max(1))));
-        Self {
-            tools: HashMap::new(),
-            semaphore,
-            config,
-            cached_definitions: RwLock::new(None),
-        }
+        Self { tools: DashMap::new(), semaphore, config, cached_definitions: RwLock::new(None) }
     }
 
-    /// 返回并发度限制（`None` = 不限制）
-    pub fn max_concurrency(&self) -> Option<usize> {
-        self.config.max_concurrency
-    }
+    pub fn max_concurrency(&self) -> Option<usize> { self.config.max_concurrency }
 
-    /// 注册单个工具
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
+    /// Register a tool (takes `&self` via DashMap interior mutability).
+    pub fn register(&self, tool: Box<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
         self.invalidate_cache();
     }
 
-    /// 批量注册工具
-    pub fn register_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+    pub fn register_tools(&self, tools: Vec<Box<dyn Tool>>) {
         for tool in tools {
             self.tools.insert(tool.name().to_string(), tool);
         }
         self.invalidate_cache();
     }
 
-    /// 注销工具
-    pub fn unregister(&mut self, tool_name: &str) -> Option<Box<dyn Tool>> {
-        let tool = self.tools.remove(tool_name);
-        if tool.is_some() {
-            self.invalidate_cache();
-        }
+    pub fn unregister(&self, tool_name: &str) -> Option<Box<dyn Tool>> {
+        let tool = self.tools.remove(tool_name).map(|(_, v)| v);
+        if tool.is_some() { self.invalidate_cache(); }
         tool
     }
 
-    /// 列出所有已注册的工具名称
-    pub fn list_tools(&self) -> Vec<&str> {
-        self.tools.keys().map(|name| name.as_str()).collect()
+    pub fn list_tools(&self) -> Vec<String> {
+        self.tools.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// 获取工具引用
-    pub fn get_tool(&self, tool_name: &str) -> Option<&dyn Tool> {
-        self.tools.get(tool_name).map(|tool| &**tool)
+    /// Get a reference to a tool (via DashMap's Ref).
+    pub fn get_tool(&self, tool_name: &str) -> Option<dashmap::mapref::one::Ref<'_, String, Box<dyn Tool>>> {
+        self.tools.get(tool_name)
     }
 
-    /// 获取工具定义列表（用于展示或调试）
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|tool| ToolDefinition::from_tool(&**tool))
-            .collect()
+        self.tools.iter().map(|entry| ToolDefinition::from_tool(&**entry.value())).collect()
     }
 
     /// 执行工具

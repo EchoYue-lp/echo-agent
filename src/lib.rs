@@ -20,6 +20,7 @@ pub mod skills;
 pub mod testing;
 pub mod tokenizer;
 pub mod tools;
+pub mod trace;
 pub mod utils;
 pub mod workflow;
 
@@ -104,8 +105,8 @@ pub mod prelude {
     pub use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
     pub use crate::llm::{
         AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmClient,
-        LlmConfig, LlmProvider, OllamaClient, OpenAiClient, ProviderFactory, ResponseFormat,
-        SimpleChatOptions, ToolDefinition,
+        LlmConfig, LlmProvider, ModelProfile, OllamaClient, OpenAiClient, ProviderCapabilities,
+        ProviderFactory, ResponseFormat, SimpleChatOptions, ToolDefinition,
     };
 
     // Tools
@@ -199,6 +200,9 @@ pub mod prelude {
 
     // Error
     pub use crate::error::Result;
+
+    // Trace
+    pub use crate::trace::{InMemoryRunStore, Run, RunEvent, RunStatus, RunStore, RunSummary};
 
     // Testing
     #[cfg(any(test, feature = "testing"))]

@@ -1,5 +1,6 @@
 //! LLM client core trait and request/response types
 
+pub mod capabilities;
 pub mod types;
 
 use crate::error::Result;
@@ -84,6 +85,14 @@ pub trait LlmClient: Send + Sync {
 
     /// Model identifier used by this client.
     fn model_name(&self) -> &str;
+
+    /// Provider capabilities for this client.
+    ///
+    /// Default returns OpenAI-compatible capabilities. Override for
+    /// Anthropic, Ollama, or custom providers.
+    fn capabilities(&self) -> capabilities::ProviderCapabilities {
+        capabilities::ProviderCapabilities::openai_compatible()
+    }
 }
 
 /// Controls how the model uses tools during inference.

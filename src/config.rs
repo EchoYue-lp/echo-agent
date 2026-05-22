@@ -132,6 +132,10 @@ impl AppConfig {
 }
 
 /// Model configuration.
+///
+/// The default model is `qwen-plus`, which requires `DASHSCOPE_API_KEY` or
+/// `QWEN_API_KEY` at runtime. Use `provider:model` (for example
+/// `openai:gpt-4o-mini`) to select another provider explicitly.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -375,6 +379,24 @@ fn load_from_file(path: &PathBuf) -> Result<AppConfig, String> {
     serde_yaml_ng::from_str(&content).map_err(|e| format!("Failed to parse config file: {}", e))
 }
 
+/// Persist an [`AppConfig`] back to the first writable config file.
+///
+/// Search order: `$ECHO_AGENT_CONFIG` → `./echo-agent.yaml` → `~/.echo-agent/config.yaml`.
+/// The first existing file (or first path if none exist) is overwritten.
+pub fn save_config(config: &AppConfig) -> std::result::Result<(), String> {
+    let search = config_search_paths();
+    // Prefer an already-existing file; otherwise use the first path (./echo-agent.yaml)
+    let target = search.iter().find(|p| p.exists()).unwrap_or(&search[1]);
+    let yaml = serde_yaml_ng::to_string(config).map_err(|e| format!("序列化失败: {e}"))?;
+    // Preserve the header comment
+    let header = "# Echo Agent 配置文件\n# 通过 Web API 或 CLI 修改后自动保存\n\n";
+    let content = format!("{header}{yaml}");
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    std::fs::write(target, content).map_err(|e| format!("写入失败: {e}"))
+}
+
 /// Load configuration (searches default paths).
 pub fn load_config(explicit_path: Option<&str>) -> AppConfig {
     if let Some(path_str) = explicit_path {
@@ -526,7 +548,7 @@ model:
         )
         .unwrap();
 
-        let _guard = EnvGuard::set("ECHO_AGENT_CONFIG", &temp_path);
+        let _guard = EnvGuard::set("ECHO_AGENT_CONFIG", temp_path.to_str().unwrap());
         let config = load_config(None);
         drop(_guard);
         std::fs::remove_file(&temp_path).unwrap();
