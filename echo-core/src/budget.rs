@@ -301,6 +301,34 @@ pub fn context_window_for_model(model: &str) -> usize {
     }
 }
 
+/// Dynamic model context-window registry.
+///
+/// Entries registered here take priority over the built-in
+/// [`context_window_for_model`] heuristic.  Call
+/// [`register_model_window`] at startup to override or extend the
+/// defaults for custom or newly-released models.
+static MODEL_WINDOW_REGISTRY: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Register a model name → context window size mapping.
+/// Takes priority over the heuristics in [`context_window_for_model`].
+pub fn register_model_window(model: &str, window_size: usize) {
+    if let Ok(mut reg) = MODEL_WINDOW_REGISTRY.lock() {
+        reg.insert(model.to_lowercase(), window_size);
+    }
+}
+
+/// Resolve the context-window size for a model, checking the dynamic
+/// registry before falling back to the built-in heuristic.
+pub fn resolve_model_window(model: &str) -> usize {
+    if let Ok(reg) = MODEL_WINDOW_REGISTRY.lock() {
+        if let Some(&size) = reg.get(&model.to_lowercase()) {
+            return size;
+        }
+    }
+    context_window_for_model(model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

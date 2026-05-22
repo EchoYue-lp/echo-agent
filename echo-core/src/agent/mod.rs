@@ -338,9 +338,14 @@ pub enum StepType {
 
 /// Unified Agent execution interface
 ///
-/// Establishes an execution model that is driven by a mutable borrow, allowing the Agent
-/// to internally maintain dialogue state, tool caches, or connection handles, while the
-/// workflow layer can safely serialize access through `Mutex`.
+/// All methods accept `&self` so that an `Agent` may be shared via `Arc`.
+/// **However**, the underlying mutable state (dialogue history, context,
+/// tool caches) is *not* safe for concurrent `execute` / `chat_stream` calls
+/// on the same instance.  Callers **must** serialize access — typically
+/// through `Arc<RwLock<Agent>>` or `Arc<tokio::sync::Mutex<Agent>>`.
+///
+/// The workflow layer already enforces this serialization when driving
+/// agents through plan-execute and multi-agent topologies.
 pub trait Agent: Send + Sync {
     /// Human-readable agent name used in logs, events, and orchestration.
     fn name(&self) -> &str;
