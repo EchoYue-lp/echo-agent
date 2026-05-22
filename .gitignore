@@ -10,4 +10,11 @@ mcp.json
 /echo-agent.yaml
 .DS_Store
 .ISSUES.md
-/.playwright-mcp/
+/.playwright-mcp/echo-core/target/
+echo-execution/target/
+echo-state/target/
+echo-orchestration/target/
+echo-macros/target/
+echo-integration/target/
+echo-tools/target/
+*/Cargo.lock

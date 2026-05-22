@@ -86,6 +86,50 @@ pub trait LlmClient: Send + Sync {
     fn model_name(&self) -> &str;
 }
 
+/// Controls how the model uses tools during inference.
+///
+/// Maps to provider-specific APIs:
+/// - OpenAI: `"auto"`, `"none"`, `"required"`, `{"type": "function", "function": {"name": "..."}}`
+/// - Anthropic: `{"type": "auto"}`, `{"type": "any"}`, `{"type": "tool", "name": "..."}`
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolChoice {
+    /// Let the model decide whether to call tools (default).
+    Auto,
+    /// Force the model NOT to call any tools.
+    None,
+    /// Require the model to call at least one tool.
+    Required,
+    /// Force the model to call a specific tool by name.
+    Function { name: String },
+}
+
+impl Default for ToolChoice {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl ToolChoice {
+    /// Create a ToolChoice that forces a specific function call.
+    pub fn function(name: impl Into<String>) -> Self {
+        Self::Function { name: name.into() }
+    }
+
+    /// Convert to the OpenAI wire format (`"auto"`, `"none"`, `"required"`,
+    /// or `{"type":"function","function":{"name":"..."}}`).
+    pub fn to_openai_value(&self) -> serde_json::Value {
+        match self {
+            Self::Auto => serde_json::Value::String("auto".into()),
+            Self::None => serde_json::Value::String("none".into()),
+            Self::Required => serde_json::Value::String("required".into()),
+            Self::Function { name } => serde_json::json!({
+                "type": "function",
+                "function": {"name": name}
+            }),
+        }
+    }
+}
+
 /// Chat request parameters
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
@@ -97,7 +141,9 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// Optional tool definitions exposed to the model.
     pub tools: Option<Vec<ToolDefinition>>,
-    /// Optional provider-specific tool choice mode.
+    /// Controls how the model uses tools (OpenAI wire format).
+    /// Prefer [`ToolChoice`] for type-safe construction; convert via
+    /// [`ToolChoice::to_openai_value`] when building a [`ChatCompletionRequest`].
     pub tool_choice: Option<String>,
     /// Optional structured output format hint.
     pub response_format: Option<ResponseFormat>,

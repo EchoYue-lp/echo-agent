@@ -166,6 +166,9 @@ impl ReactAgent {
     /// - Memory system (long-term memory enabled per config)
     /// - Skill registry
     /// - Hook system
+    /// Prefer [`ReactAgentBuilder`] for construction — it handles subsystem
+    /// initialization and provides sensible defaults.  Direct construction with
+    /// [`new`](Self::new) initialises every subsystem eagerly.
     pub fn new(config: AgentConfig) -> Self {
         let system_prompt = Self::build_system_prompt(&config);
 

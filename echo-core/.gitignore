@@ -1,0 +1,4 @@
+echo-core/target/
+echo-execution/target/
+echo-core/Cargo.lock
+echo-execution/Cargo.lock

@@ -84,7 +84,10 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(
 impl Default for SandboxPolicy {
     fn default() -> Self {
         Self {
-            default_level: SecurityLevel::Standard,
+            // Default to Strict (Docker) for safe-by-default operation.
+            // Falls back to Local sandbox when Docker is unavailable (auto_escalate=true).
+            // Use SandboxPolicy::trusted() for development environments.
+            default_level: SecurityLevel::Strict,
             auto_escalate: true,
             container_required_languages: CONTAINER_LANGUAGES
                 .iter()
