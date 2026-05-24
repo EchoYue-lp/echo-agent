@@ -79,7 +79,10 @@ fn parse_sse_chunk(data: &str) -> Option<Result<ChatCompletionChunk>> {
         return None;
     }
     if trimmed == "[DONE]" {
-        return Some(Err(LlmError::NetworkError(STREAM_DONE_SENTINEL.to_string()).into()));
+        return Some(Err(LlmError::NetworkError(
+            STREAM_DONE_SENTINEL.to_string(),
+        )
+        .into()));
     }
     match serde_json::from_str::<ChatCompletionChunk>(trimmed) {
         Ok(chunk) => Some(Ok(chunk)),
@@ -355,7 +358,10 @@ mod tests {
 
     #[test]
     fn parse_data_with_crlf_and_keepalive() {
-        let mut buffer = format!(": ping\r\nevent: message\r\ndata: {}\r\n\r\n", chunk_json("hi"));
+        let mut buffer = format!(
+            ": ping\r\nevent: message\r\ndata: {}\r\n\r\n",
+            chunk_json("hi")
+        );
         let event = split_sse_event(&mut buffer).unwrap();
         let data = parse_sse_data(&event).unwrap();
         let chunk = parse_sse_chunk(&data).unwrap().unwrap();

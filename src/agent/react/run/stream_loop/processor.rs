@@ -94,7 +94,30 @@ pub(crate) fn build_tool_calls_from_map(
 
     for idx in &sorted_indices {
         let (id, name, args_str) = &tool_call_map[idx];
-        let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Object(Default::default()));
+        let args: Value = match serde_json::from_str(args_str) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    tool_name = %name,
+                    tool_call_id = %id,
+                    raw_args = %args_str,
+                    error = %e,
+                    "Failed to parse streaming tool-call arguments as JSON; skipping this tool call"
+                );
+                // Skip this tool call — do NOT execute with broken/empty args.
+                // The raw args are preserved in msg_tool_calls for the model to
+                // see in the response, but no execution step is created.
+                msg_tool_calls.push(LlmToolCall {
+                    id: id.clone(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: name.clone(),
+                        arguments: args_str.clone(),
+                    },
+                });
+                continue;
+            }
+        };
 
         msg_tool_calls.push(LlmToolCall {
             id: id.clone(),

@@ -63,15 +63,7 @@ impl Tool for BrokenTool {
         &self,
         _params: ToolParameters,
     ) -> futures::future::BoxFuture<'_, echo_agent::error::Result<ToolResult>> {
-        Box::pin(async move {
-            Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("BrokenTool: 服务不可用".to_string()),
-                bytes: None,
-                data: None,
-            })
-        })
+        Box::pin(async move { Ok(ToolResult::error("BrokenTool: 服务不可用")) })
     }
 }
 
@@ -113,21 +105,11 @@ impl Tool for FlakyTool {
 
             if remaining > 0 {
                 self.fail_remaining.fetch_sub(1, Ordering::Relaxed);
-                Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("服务暂时不可用（第 {call_idx} 次尝试）")),
-                    bytes: None,
-                    data: None,
-                })
+                Ok(ToolResult::error(format!(
+                    "服务暂时不可用（第 {call_idx} 次尝试）"
+                )))
             } else {
-                Ok(ToolResult {
-                    success: true,
-                    output: format!("{city}：晴，26°C"),
-                    error: None,
-                    bytes: None,
-                    data: None,
-                })
+                Ok(ToolResult::success(format!("{city}：晴，26°C")))
             }
         })
     }

@@ -42,6 +42,7 @@
 //! ```
 
 use async_trait::async_trait;
+use echo_core::tools::ToolRiskLevel;
 use echo_core::tools::permission::{PermissionMode, ToolPermission};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -117,6 +118,30 @@ impl std::fmt::Display for RiskLevel {
             RiskLevel::Medium => write!(f, "中等风险"),
             RiskLevel::High => write!(f, "高风险"),
             RiskLevel::Critical => write!(f, "危险"),
+        }
+    }
+}
+
+/// Bridge the compile-time [`ToolRiskLevel`] into the runtime [`RiskLevel`].
+///
+/// | `ToolRiskLevel`   | → `RiskLevel` |
+/// |-------------------|---------------|
+/// | `ReadOnly`        | `Low`         |
+/// | `Standard` (default) | `Medium`   |
+/// | `Dangerous`       | `High`        |
+///
+/// Note: `ToolRiskLevel` is a hint declared at tool definition time via
+/// `#[tool]` or `Tool::risk_level()`. At runtime, the framework typically
+/// recomputes risk from the tool's `ToolPermission` set via
+/// [`RiskLevel::from_permissions`], which can yield `Critical` for tools
+/// with the `Sensitive` permission — a level that `ToolRiskLevel` has no
+/// direct equivalent for.
+impl From<ToolRiskLevel> for RiskLevel {
+    fn from(level: ToolRiskLevel) -> Self {
+        match level {
+            ToolRiskLevel::ReadOnly => RiskLevel::Low,
+            ToolRiskLevel::Standard => RiskLevel::Medium,
+            ToolRiskLevel::Dangerous => RiskLevel::High,
         }
     }
 }

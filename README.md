@@ -101,30 +101,42 @@ cargo run --example demo38_im_channels --features channels  # IM channels
 
 ### Feature Flags
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `full` | on | All features enabled |
-| `web` | on | Web search + page fetch (DuckDuckGo/Brave/Tavily) |
-| `mcp` | on | Model Context Protocol client |
-| `media` | on | PDF/Excel/Word/image extraction |
-| `channels` | on | QQ Bot + Feishu IM integrations |
-| `human-loop` | on | Human-in-the-loop approval (Console/Webhook/WebSocket) |
-| `plan-execute` | on | Plan-then-execute agent pattern |
-| `self-reflection` | on | LLM self-critique and refinement |
-| `subagent` | on | Multi-agent orchestration |
-| `sqlite` | on | SQLite-backed persistent memory |
-| `telemetry` | on | OpenTelemetry tracing + metrics |
-| `a2a` | on | Agent-to-Agent protocol (server + client) |
-| `handoff` | on | Agent handoff/collaboration |
-| `topology` | on | Multi-agent topology tracking |
-| `tasks` | on | DAG task scheduling |
-| `data` | on | Polars-powered data tools |
-| `rag` | on | Retrieval-Augmented Generation |
-| `chart` | on | Chart generation tools |
-| `git` | on | Git operations tools |
-| `database` | — | SQL database tools (requires `sqlx`) |
-| `content-guard` | — | Content filtering guardrails |
-| `project-rules` | — | `.claude/rules` project rule parsing |
+The crate ships with **zero default features** (`default = []`) for minimal compile time and dependency footprint. Enable features individually or use `features = ["full"]` to get everything.
+
+```toml
+[dependencies]
+echo-agent = { version = "0.1", features = ["full"] }
+# or cherry-pick:
+echo-agent = { version = "0.1", features = ["mcp", "sqlite", "web"] }
+```
+
+| Feature | In `full`? | Description |
+|---------|-----------|-------------|
+| `full` | — | Meta-feature: enables all flags listed below |
+| `web` | yes | Web search + page fetch (DuckDuckGo/Brave/Tavily) |
+| `mcp` | yes | Model Context Protocol client |
+| `media` | yes | PDF/Excel/Word/image extraction |
+| `channels` | yes | QQ Bot + Feishu IM integrations |
+| `human-loop` | yes | Human-in-the-loop approval (Console/Webhook/WebSocket) |
+| `plan-execute` | yes | Plan-then-execute agent pattern |
+| `self-reflection` | yes | LLM self-critique and refinement |
+| `subagent` | yes | Multi-agent orchestration |
+| `sqlite` | yes | SQLite-backed persistent memory |
+| `telemetry` | yes | OpenTelemetry tracing + metrics |
+| `a2a` | yes | Agent-to-Agent protocol (server + client) |
+| `handoff` | yes | Agent handoff/collaboration |
+| `topology` | yes | Multi-agent topology tracking |
+| `tasks` | yes | DAG task scheduling |
+| `data` | yes | Polars-powered data tools |
+| `rag` | yes | Retrieval-Augmented Generation |
+| `chart` | yes | Chart generation tools |
+| `git` | yes | Git operations tools |
+| `shell` | yes | Restricted shell command execution |
+| `files` | yes | File system read/write tools |
+| `sandbox` | yes | Container/local sandbox execution |
+| `database` | no | SQL database tools (requires `sqlx`) |
+| `content-guard` | no | Content filtering guardrails |
+| `project-rules` | no | `.claude/rules` project rule parsing |
 
 ---
 

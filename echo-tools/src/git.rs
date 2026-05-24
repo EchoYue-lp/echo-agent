@@ -14,12 +14,17 @@ use std::path::Path;
 use std::process::Command;
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRunner};
+use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel, ToolRunner};
 
 // ── Git status ──────────────────────────────────────────────────────────────
 
 #[derive(Default, echo_macros::Tool)]
-#[tool(name = "git_status", description = "View working directory status of the current repo: modified, staged, untracked files")]
+#[tool(
+    name = "git_status",
+    description = "View working directory status of the current repo: modified, staged, untracked files",
+    risk_level = "ReadOnly"
+)]
 #[allow(dead_code)]
 pub struct GitStatusTool {
     #[tool_param(description = "Repository path (defaults to current working directory)")]
@@ -49,6 +54,13 @@ impl Tool for GitDiffTool {
 
     fn description(&self) -> &str {
         "View code diffs: unstaged changes, staged changes, or diffs between specified branches/commits"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn parameters(&self) -> Value {
@@ -124,6 +136,13 @@ impl Tool for GitLogTool {
 
     fn description(&self) -> &str {
         "View Git commit history, with options for count limit and format"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn parameters(&self) -> Value {
@@ -215,6 +234,13 @@ impl Tool for GitBlameTool {
         "View line-by-line annotations for a file, showing the last author and commit for each line"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
+    }
+
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -279,6 +305,13 @@ impl Tool for GitBranchTool {
 
     fn description(&self) -> &str {
         "View, create, or switch Git branches. No args lists all branches; with name creates a new branch"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn parameters(&self) -> Value {
@@ -348,6 +381,13 @@ impl Tool for GitCommitTool {
 
     fn description(&self) -> &str {
         "Create a Git commit. Files must be staged via git add first. Only call this tool when explicitly requested by the user."
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write, ToolPermission::Execute]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::Dangerous
     }
 
     fn parameters(&self) -> Value {

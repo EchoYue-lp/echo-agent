@@ -246,9 +246,9 @@ impl LocalSandbox {
             if let Err(e) = child_stdin.write_all(input.as_bytes()).await {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                return Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::IoError(format!("Failed to write stdin: {e}"))),
-                ));
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(format!("Failed to write stdin: {e}")),
+                )));
             }
             // 关闭 stdin 发送 EOF
             drop(child_stdin);
@@ -277,9 +277,9 @@ impl LocalSandbox {
             Ok(Err(e)) => {
                 // wait() 自身失败 — 清理进程
                 cleanup_child_process(&mut child).await;
-                Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::IoError(format!("Process wait error: {e}"))),
-                ))
+                Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(format!("Process wait error: {e}")),
+                )))
             }
             Err(_) => {
                 // 超时 — 显式 kill + wait 确保进程完全终止并被收割

@@ -111,7 +111,14 @@ impl Checkpoint {
         step_count: usize,
         interrupt_type: InterruptType,
     ) -> Self {
-        let mut cp = Self::new(graph_name, current_node, state, path, step_count, interrupt_type);
+        let mut cp = Self::new(
+            graph_name,
+            current_node,
+            state,
+            path,
+            step_count,
+            interrupt_type,
+        );
         cp.parent_checkpoint_id = Some(parent_id.into());
         cp
     }

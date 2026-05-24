@@ -76,7 +76,9 @@ impl McpClient {
         let init_resp = transport.send(init_req).await?;
 
         if let Some(err) = init_resp.error {
-            return Err(ReactError::Mcp(Box::new(McpError::InitializationFailed(err.message))));
+            return Err(ReactError::Mcp(Box::new(McpError::InitializationFailed(
+                err.message,
+            ))));
         }
 
         let init_result: InitializeResult =
@@ -185,7 +187,9 @@ impl McpClient {
                 tokio::time::timeout(std::time::Duration::from_secs(30), transport.send(req))
                     .await
                     .map_err(|_| {
-                        ReactError::Mcp(Box::new(McpError::ProtocolError("获取工具列表超时".to_string())))
+                        ReactError::Mcp(Box::new(McpError::ProtocolError(
+                            "获取工具列表超时".to_string(),
+                        )))
                     })??;
 
             if let Some(err) = resp.error {
@@ -233,10 +237,9 @@ impl McpClient {
         let resp = self.transport.send(req).await?;
 
         if let Some(err) = resp.error {
-            return Err(ReactError::Mcp(Box::new(McpError::ToolCallFailed(format!(
-                "工具 '{}' 调用失败: {}",
-                name, err.message
-            )))));
+            return Err(ReactError::Mcp(Box::new(McpError::ToolCallFailed(
+                format!("工具 '{}' 调用失败: {}", name, err.message),
+            ))));
         }
 
         let result: McpToolCallResult = serde_json::from_value(resp.result.unwrap_or(Value::Null))?;
@@ -278,7 +281,9 @@ impl McpClient {
                 tokio::time::timeout(std::time::Duration::from_secs(30), transport.send(req))
                     .await
                     .map_err(|_| {
-                        ReactError::Mcp(Box::new(McpError::ProtocolError("获取资源列表超时".to_string())))
+                        ReactError::Mcp(Box::new(McpError::ProtocolError(
+                            "获取资源列表超时".to_string(),
+                        )))
                     })??;
 
             if let Some(err) = resp.error {
@@ -376,7 +381,9 @@ impl McpClient {
                 tokio::time::timeout(std::time::Duration::from_secs(30), transport.send(req))
                     .await
                     .map_err(|_| {
-                        ReactError::Mcp(Box::new(McpError::ProtocolError("获取提示词列表超时".to_string())))
+                        ReactError::Mcp(Box::new(McpError::ProtocolError(
+                            "获取提示词列表超时".to_string(),
+                        )))
                     })??;
 
             if let Some(err) = resp.error {

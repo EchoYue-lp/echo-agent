@@ -13,7 +13,3 @@ pub use run_script_tool::RunSkillScriptTool;
 pub use types::{
     LegacyResourceRef, SkillContent, SkillDescriptor, SkillResourceEntry, SkillResourceKind,
 };
-
-// Backward compatibility re-exports
-pub use resource_tool::LoadSkillResourceTool;
-pub use types::{LoadedSkill, ResourceRef, SkillMeta};

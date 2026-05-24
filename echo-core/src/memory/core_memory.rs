@@ -189,7 +189,9 @@ mod tests {
         assert_eq!(cm.len(), 2);
 
         // Add a third that pushes over budget
-        cm.upsert(CoreMemoryBlock::new("3", "highest", "this_is_sixteen_chars!").with_importance(10.0));
+        cm.upsert(
+            CoreMemoryBlock::new("3", "highest", "this_is_sixteen_chars!").with_importance(10.0),
+        );
         // Total: 5 + 5 + 22 = 32 > 30. Lowest importance (key_b, imp 1.0) evicted.
         assert_eq!(cm.len(), 2);
         let labels: Vec<&str> = cm.blocks().iter().map(|b| b.label.as_str()).collect();
@@ -211,10 +213,7 @@ mod tests {
     #[test]
     fn test_truncation() {
         let mut cm = CoreMemory::new(200);
-        cm.upsert(
-            CoreMemoryBlock::new("1", "key", "a very long string")
-                .with_limit(3),
-        );
+        cm.upsert(CoreMemoryBlock::new("1", "key", "a very long string").with_limit(3));
         assert_eq!(cm.blocks()[0].value, "a v…"); // truncated to 3 chars + ellipsis
     }
 }

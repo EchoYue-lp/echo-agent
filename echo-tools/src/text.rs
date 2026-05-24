@@ -26,6 +26,13 @@ impl Tool for TextReadTool {
         "Read text file content, supports various text formats. Auto-detects encoding."
     }
 
+    fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+        vec![echo_core::tools::permission::ToolPermission::Read]
+    }
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
+    }
+
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -137,6 +144,13 @@ impl Tool for TextSearchTool {
 
     fn description(&self) -> &str {
         "Search content in text files, supports regular expressions."
+    }
+
+    fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+        vec![echo_core::tools::permission::ToolPermission::Read]
+    }
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
     }
 
     fn parameters(&self) -> Value {
@@ -469,6 +483,10 @@ impl Tool for TextExportTool {
 
     fn description(&self) -> &str {
         "Export processed text to a new file."
+    }
+
+    fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+        vec![echo_core::tools::permission::ToolPermission::Write]
     }
 
     fn parameters(&self) -> Value {

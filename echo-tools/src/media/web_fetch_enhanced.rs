@@ -129,12 +129,12 @@ impl WebFetchToolEnhanced {
         })?;
 
         if !response.status().is_success() {
-            return Err(echo_core::error::ReactError::Tool(
-                Box::new(ToolError::ExecutionFailed {
+            return Err(echo_core::error::ReactError::Tool(Box::new(
+                ToolError::ExecutionFailed {
                     tool: "web_fetch_enhanced".into(),
                     message: format!("HTTP error: {}", response.status()),
-                }),
-            ));
+                },
+            )));
         }
 
         // Get content type (before consuming response)
@@ -327,7 +327,8 @@ impl Tool for WebFetchToolEnhanced {
                     }
                     .await;
 
-                let (data_uri, ct, size) = result.map_err(|e| echo_core::error::ReactError::Tool(Box::new(e)))?;
+                let (data_uri, ct, size) =
+                    result.map_err(|e| echo_core::error::ReactError::Tool(Box::new(e)))?;
 
                 // Truncate base64 if too long
                 let data_uri_display = if data_uri.len() > 1000 {

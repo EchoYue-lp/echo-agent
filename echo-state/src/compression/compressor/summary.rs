@@ -46,7 +46,11 @@ const COMPRESSION_PROMPT: &str =
 pub fn default_summary_prompt(messages: &[Message]) -> String {
     let history = messages
         .iter()
-        .filter_map(|m| m.content.as_text().map(|c| format!("[{}]: {}", m.role.as_str(), c)))
+        .filter_map(|m| {
+            m.content
+                .as_text()
+                .map(|c| format!("[{}]: {}", m.role.as_str(), c))
+        })
         .collect::<Vec<_>>()
         .join("\n");
 

@@ -5,7 +5,9 @@
 
 use crate::security::{ssrf_safe_redirect_policy, validate_url};
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::Value;
@@ -15,6 +17,11 @@ use std::time::Duration;
 const DEFAULT_MAX_LENGTH: usize = 50_000;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_TEXT_WIDTH: usize = 120;
+
+/// Hard byte limit on the raw HTTP response body (10 MB).
+/// Responses larger than this are rejected before reading to prevent
+/// memory exhaustion from large or malicious payloads.
+const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
@@ -78,12 +85,17 @@ impl WebFetchTool {
             Ok(text) => text,
             Err(e) => {
                 tracing::warn!(
-                    "HTML to text conversion failed ({}), falling back to raw HTML tag stripping: {}",
+                    "HTML to text conversion failed ({}), falling back to simple tag stripping: {}",
                     self.text_width,
                     e
                 );
-                // Fallback: simple HTML tag removal
-                html2text::from_read(html.as_bytes(), self.text_width).unwrap_or_default()
+                // Fallback: strip HTML tags with a simple regex, then collapse whitespace
+                let re = regex::Regex::new(r"<[^>]*>").unwrap();
+                let stripped = re.replace_all(html, " ");
+                let collapsed = regex::Regex::new(r"[ \t\r\n]+")
+                    .unwrap()
+                    .replace_all(&stripped, "\n");
+                collapsed.trim().to_string()
             }
         }
     }
@@ -113,6 +125,10 @@ impl Tool for WebFetchTool {
     fn description(&self) -> &str {
         "Fetches web page content from a specified URL and converts HTML to readable text. \
          Parameters: url - web page address (required), max_length - maximum content length (optional, default 50000 chars)"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]
     }
 
     fn parameters(&self) -> Value {
@@ -180,13 +196,46 @@ impl Tool for WebFetchTool {
                 .unwrap_or("text/html")
                 .to_string();
 
-            let body = match response.text().await {
-                Ok(t) => t,
-                Err(e) => {
+            // Reject oversized responses early via Content-Length header
+            if let Some(content_length) = response.content_length()
+                && content_length > MAX_BODY_BYTES
+            {
+                return Ok(ToolResult::error(format!(
+                    "Response body too large: Content-Length {} exceeds limit {} ({} MB)",
+                    content_length,
+                    MAX_BODY_BYTES,
+                    MAX_BODY_BYTES / (1024 * 1024),
+                )));
+            }
+
+            // Stream the response body with a hard byte cap to prevent memory exhaustion
+            let mut body_bytes = Vec::new();
+            let mut byte_stream = response.bytes_stream();
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Ok(ToolResult::error(format!(
+                            "Failed to read response body: {}",
+                            e
+                        )));
+                    }
+                };
+                if body_bytes.len() + chunk.len() > MAX_BODY_BYTES as usize {
                     return Ok(ToolResult::error(format!(
-                        "Failed to read response body: {}",
-                        e
+                        "Response body exceeds limit of {} bytes ({} MB)",
+                        MAX_BODY_BYTES,
+                        MAX_BODY_BYTES / (1024 * 1024),
                     )));
+                }
+                body_bytes.extend_from_slice(&chunk);
+            }
+
+            let body = match String::from_utf8(body_bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    // Non-UTF-8: fall back to lossy conversion
+                    String::from_utf8_lossy(&body_bytes).into_owned()
                 }
             };
 
@@ -198,6 +247,7 @@ impl Tool for WebFetchTool {
                 body
             };
 
+            let was_truncated = content.chars().count() > max_length;
             let content = Self::truncate_content(&content, max_length);
 
             let output = format!(
@@ -205,7 +255,10 @@ impl Tool for WebFetchTool {
                 url, status, content_type, content
             );
 
-            Ok(ToolResult::success(output))
+            Ok(ToolResult::success(output)
+                .with_truncated(was_truncated)
+                .with_mime_type(content_type)
+                .with_meta("url", url))
         })
     }
 }

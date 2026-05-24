@@ -48,6 +48,13 @@ impl Tool for GrepTool {
         "Search file contents by regex pattern. Walks directories and returns matching lines with file paths and line numbers. Use glob parameter to filter file types (e.g. '*.rs', '*.py')."
     }
 
+    fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+        vec![echo_core::tools::permission::ToolPermission::Read]
+    }
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",

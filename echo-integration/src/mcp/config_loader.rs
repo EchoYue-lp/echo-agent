@@ -109,10 +109,9 @@ impl McpServerEntry {
     pub fn to_server_config(&self, name: &str) -> Result<McpServerConfig> {
         // 检查是否被禁用
         if self.disabled {
-            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
-                "服务端 '{}' 已禁用（disabled: true）",
-                name
-            )))));
+            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
+                format!("服务端 '{}' 已禁用（disabled: true）", name),
+            ))));
         }
 
         if let Some(command) = &self.command {
@@ -148,10 +147,12 @@ impl McpServerEntry {
                 transport,
             })
         } else {
-            Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
-                "服务端 '{}' 配置无效：stdio 模式需提供 'command'，HTTP 模式需提供 'url'",
-                name
-            )))))
+            Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
+                format!(
+                    "服务端 '{}' 配置无效：stdio 模式需提供 'command'，HTTP 模式需提供 'url'",
+                    name
+                ),
+            ))))
         }
     }
 }

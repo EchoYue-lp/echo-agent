@@ -149,7 +149,6 @@ pub mod prelude {
     };
 
     // Skills
-    pub use crate::skills::hooks::LifecycleHookExecutorFn;
     pub use crate::skills::{
         Skill, SkillInfo, SkillRegistry,
         builtin::{FileSystemSkill, ShellSkill},

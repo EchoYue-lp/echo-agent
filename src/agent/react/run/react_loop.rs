@@ -517,6 +517,9 @@ impl ReactAgent {
         let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
 
+        // Clear read-before-edit tracking for the new conversation turn
+        self.clear_read_files();
+
         // Input guard check
         if let Some(gm) = &self.guard.guard_manager {
             info!(agent = %agent, direction = "input", "🛡️ Guard check started");

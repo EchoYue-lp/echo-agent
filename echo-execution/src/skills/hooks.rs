@@ -75,7 +75,6 @@ pub use echo_core::hooks::{
     CompressHookStats, HookContext, HookEvent, HookEventCategory, HookResult, HookSource,
     UnifiedHookExecutorFn,
 };
-pub use echo_core::hooks::LifecycleHookExecutorFn;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -160,7 +159,9 @@ impl HookAction {
     /// Called during hook registration to catch misconfigurations early.
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            HookAction::Command { command, timeout, .. } => {
+            HookAction::Command {
+                command, timeout, ..
+            } => {
                 if command.is_empty() {
                     return Err("Command hook has empty command string".into());
                 }
@@ -202,7 +203,12 @@ impl HookAction {
                     ));
                 }
             }
-            HookAction::McpTool { server, tool, timeout, .. } => {
+            HookAction::McpTool {
+                server,
+                tool,
+                timeout,
+                ..
+            } => {
                 if server.is_empty() {
                     return Err("McpTool hook has empty server name".into());
                 }
@@ -423,8 +429,7 @@ impl HookRegistry {
         tool_input: &Value,
         session_id: &str,
     ) -> HookResult {
-        let context =
-            HookContext::for_pre_tool_use(tool_name, tool_input, session_id, "");
+        let context = HookContext::for_pre_tool_use(tool_name, tool_input, session_id, "");
         self.run_hooks(&context).await
     }
 
@@ -436,13 +441,8 @@ impl HookRegistry {
         tool_output: &str,
         session_id: &str,
     ) -> HookResult {
-        let context = HookContext::for_post_tool_use(
-            tool_name,
-            tool_input,
-            tool_output,
-            session_id,
-            "",
-        );
+        let context =
+            HookContext::for_post_tool_use(tool_name, tool_input, tool_output, session_id, "");
         self.run_hooks(&context).await
     }
 
@@ -455,11 +455,7 @@ impl HookRegistry {
         session_id: &str,
     ) -> HookResult {
         let context = HookContext::for_post_tool_use_failure(
-            tool_name,
-            tool_input,
-            tool_error,
-            session_id,
-            "",
+            tool_name, tool_input, tool_error, session_id, "",
         );
         self.run_hooks(&context).await
     }
@@ -616,8 +612,15 @@ async fn execute_action(
             shell,
             timeout,
         } => {
-            execute_command_hook(command, shell.as_deref(), *timeout, source_dir, context, sandbox)
-                .await
+            execute_command_hook(
+                command,
+                shell.as_deref(),
+                *timeout,
+                source_dir,
+                context,
+                sandbox,
+            )
+            .await
         }
         HookAction::Prompt { prompt } => {
             let mut result = HookResult::default();
@@ -635,8 +638,7 @@ async fn execute_action(
                     result.permission_decision = Some(PermissionDecision::Allow);
                 }
                 "deny" => {
-                    let reason_text =
-                        reason.clone().unwrap_or_else(|| "Hook denied".to_string());
+                    let reason_text = reason.clone().unwrap_or_else(|| "Hook denied".to_string());
                     result.block = true;
                     result.block_reason = Some(reason_text.clone());
                     result.permission_decision = Some(PermissionDecision::Deny {
@@ -661,54 +663,50 @@ async fn execute_action(
             headers,
             timeout,
         } => {
-            execute_http_hook(url, method.as_deref(), headers.as_ref(), *timeout, context, http_client)
-                .await
+            execute_http_hook(
+                url,
+                method.as_deref(),
+                headers.as_ref(),
+                *timeout,
+                context,
+                http_client,
+            )
+            .await
         }
         HookAction::McpTool {
             server,
             tool,
             arguments,
             timeout,
-        } => {
-            match mcp_executor {
-                Some(executor) => {
-                    let fut = executor(
-                        server.clone(),
-                        tool.clone(),
-                        arguments.clone(),
-                    );
-                    if *timeout > 0 {
-                        match tokio::time::timeout(
-                            Duration::from_secs(*timeout),
-                            fut,
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => {
-                                warn!(
-                                    server = %server,
-                                    tool = %tool,
-                                    timeout_secs = *timeout,
-                                    "McpTool hook timed out"
-                                );
-                                HookResult::default()
-                            }
+        } => match mcp_executor {
+            Some(executor) => {
+                let fut = executor(server.clone(), tool.clone(), arguments.clone());
+                if *timeout > 0 {
+                    match tokio::time::timeout(Duration::from_secs(*timeout), fut).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                server = %server,
+                                tool = %tool,
+                                timeout_secs = *timeout,
+                                "McpTool hook timed out"
+                            );
+                            HookResult::default()
                         }
-                    } else {
-                        fut.await
                     }
-                }
-                None => {
-                    warn!(
-                        server = %server,
-                        tool = %tool,
-                        "McpTool hook action configured but no mcp_executor registered"
-                    );
-                    HookResult::default()
+                } else {
+                    fut.await
                 }
             }
-        }
+            None => {
+                warn!(
+                    server = %server,
+                    tool = %tool,
+                    "McpTool hook action configured but no mcp_executor registered"
+                );
+                HookResult::default()
+            }
+        },
     }
 }
 
@@ -866,10 +864,8 @@ async fn execute_http_hook(
             .unwrap_or_default(),
     };
 
-    let method = reqwest::Method::from_bytes(
-        method.unwrap_or("POST").as_bytes(),
-    )
-    .unwrap_or(reqwest::Method::POST);
+    let method = reqwest::Method::from_bytes(method.unwrap_or("POST").as_bytes())
+        .unwrap_or(reqwest::Method::POST);
 
     let mut req = client.request(method, url).json(context);
 
@@ -942,7 +938,10 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
         }
         _ => {
             // Other non-zero: log warning, don't block
-            warn!(exit_code = exit_code, "Hook exited with unexpected code, treating as warning (not block)");
+            warn!(
+                exit_code = exit_code,
+                "Hook exited with unexpected code, treating as warning (not block)"
+            );
         }
     }
 
@@ -1244,7 +1243,8 @@ mod tests {
 
     #[test]
     fn test_hook_context_for_pre_tool_use() {
-        let ctx = HookContext::for_pre_tool_use("Bash", &json!({"command": "ls"}), "sess-1", "agent");
+        let ctx =
+            HookContext::for_pre_tool_use("Bash", &json!({"command": "ls"}), "sess-1", "agent");
         assert_eq!(ctx.event, HookEvent::PreToolUse);
         assert_eq!(ctx.tool_name.as_deref(), Some("Bash"));
         assert_eq!(ctx.session_id, "sess-1");
@@ -1277,7 +1277,8 @@ mod tests {
 
     #[test]
     fn test_hook_context_serialization() {
-        let ctx = HookContext::for_pre_tool_use("Bash", &json!({"command": "ls"}), "sess-1", "agent");
+        let ctx =
+            HookContext::for_pre_tool_use("Bash", &json!({"command": "ls"}), "sess-1", "agent");
         let json_str = serde_json::to_string(&ctx).unwrap();
         assert!(json_str.contains("\"event\":\"PreToolUse\""));
         assert!(json_str.contains("\"tool_name\":\"Bash\""));
@@ -1490,7 +1491,9 @@ PostToolUse:
         let def: HooksDefinition = serde_yaml_ng::from_str(yaml).unwrap();
         let rules = def.rules_for(HookEvent::PostToolUse);
         assert_eq!(rules.len(), 1);
-        assert!(matches!(&rules[0].hooks[0], HookAction::Http { url, .. } if url == "https://audit.example.com/tool-usage"));
+        assert!(
+            matches!(&rules[0].hooks[0], HookAction::Http { url, .. } if url == "https://audit.example.com/tool-usage")
+        );
     }
 
     #[test]
@@ -1508,7 +1511,9 @@ Notification:
         let def: HooksDefinition = serde_yaml_ng::from_str(yaml).unwrap();
         let rules = def.rules_for(HookEvent::Notification);
         assert_eq!(rules.len(), 1);
-        assert!(matches!(&rules[0].hooks[0], HookAction::McpTool { server, .. } if server == "slack"));
+        assert!(
+            matches!(&rules[0].hooks[0], HookAction::McpTool { server, .. } if server == "slack")
+        );
     }
 
     // -- HookResult tests --
@@ -1553,10 +1558,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_block() {
-        let result = parse_hook_output(
-            r#"{"decision": "block", "reason": "unsafe"}"#,
-            0,
-        );
+        let result = parse_hook_output(r#"{"decision": "block", "reason": "unsafe"}"#, 0);
         assert!(result.block);
         assert_eq!(result.block_reason, Some("unsafe".into()));
     }
@@ -1579,7 +1581,10 @@ Notification:
         // exit 2 = explicit block signal
         let result = parse_hook_output("", 2);
         assert!(result.block);
-        assert_eq!(result.block_reason, Some("Hook exited with code 2 (explicit block)".to_string()));
+        assert_eq!(
+            result.block_reason,
+            Some("Hook exited with code 2 (explicit block)".to_string())
+        );
     }
 
     #[test]
@@ -1593,10 +1598,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_retry_field() {
-        let result = parse_hook_output(
-            r#"{"retry": true}"#,
-            0,
-        );
+        let result = parse_hook_output(r#"{"retry": true}"#, 0);
         assert!(result.retry);
     }
 
@@ -1608,10 +1610,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_updated_input() {
-        let result = parse_hook_output(
-            r#"{"updatedInput": {"command": "safe-command"}}"#,
-            0,
-        );
+        let result = parse_hook_output(r#"{"updatedInput": {"command": "safe-command"}}"#, 0);
         assert!(!result.block);
         assert_eq!(
             result.updated_input,
@@ -1621,10 +1620,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_continue_reason() {
-        let result = parse_hook_output(
-            r#"{"continue_reason": "Run tests before stopping"}"#,
-            0,
-        );
+        let result = parse_hook_output(r#"{"continue_reason": "Run tests before stopping"}"#, 0);
         assert_eq!(
             result.continue_reason,
             Some("Run tests before stopping".to_string())
@@ -1633,10 +1629,7 @@ Notification:
 
     #[test]
     fn test_parse_hook_output_injected_context() {
-        let result = parse_hook_output(
-            r#"{"injected_context": "Remember to use bun"}"#,
-            0,
-        );
+        let result = parse_hook_output(r#"{"injected_context": "Remember to use bun"}"#, 0);
         assert_eq!(
             result.injected_context,
             Some("Remember to use bun".to_string())
@@ -1739,7 +1732,10 @@ Notification:
                 ..HookResult::default()
             },
         );
-        assert_eq!(combined.continue_reason, Some("Different reason".to_string()));
+        assert_eq!(
+            combined.continue_reason,
+            Some("Different reason".to_string())
+        );
     }
 
     #[test]
@@ -1796,7 +1792,10 @@ Notification:
                 ..HookResult::default()
             },
         );
-        assert_eq!(combined.permission_mode_override, Some(PermissionMode::Plan));
+        assert_eq!(
+            combined.permission_mode_override,
+            Some(PermissionMode::Plan)
+        );
 
         merge_result(
             &mut combined,
@@ -1805,7 +1804,10 @@ Notification:
                 ..HookResult::default()
             },
         );
-        assert_eq!(combined.permission_mode_override, Some(PermissionMode::Plan));
+        assert_eq!(
+            combined.permission_mode_override,
+            Some(PermissionMode::Plan)
+        );
     }
 
     #[test]
@@ -1913,9 +1915,7 @@ Notification:
         );
         registry.register("test", "/tmp", def);
 
-        let result = registry
-            .run_pre_tool_use("Read", &json!({}), "")
-            .await;
+        let result = registry.run_pre_tool_use("Read", &json!({}), "").await;
         assert!(result.messages.is_empty());
     }
 
@@ -2012,10 +2012,7 @@ Notification:
 
         let ctx = HookContext::for_stop(None, "sess-1", "agent", false);
         let result = registry.run_lifecycle_hooks(&ctx).await;
-        assert_eq!(
-            result.continue_reason,
-            Some("Run tests first".to_string())
-        );
+        assert_eq!(result.continue_reason, Some("Run tests first".to_string()));
     }
 
     #[tokio::test]
@@ -2048,9 +2045,7 @@ Notification:
         );
         registry.register_user_hooks(user_def);
 
-        let result = registry
-            .run_pre_tool_use("Bash", &json!({}), "")
-            .await;
+        let result = registry.run_pre_tool_use("Bash", &json!({}), "").await;
         // User config runs first, then skill
         assert_eq!(result.messages, vec!["from-user", "from-skill"]);
     }
@@ -2133,33 +2128,49 @@ Notification:
     fn test_hook_action_http_deserialize() {
         let json = r#"{"type":"http","url":"https://example.com","timeout":5}"#;
         let action: HookAction = serde_json::from_str(json).unwrap();
-        assert!(matches!(action, HookAction::Http { url, timeout: 5, .. } if url == "https://example.com"));
+        assert!(
+            matches!(action, HookAction::Http { url, timeout: 5, .. } if url == "https://example.com")
+        );
     }
 
     #[test]
     fn test_hook_action_mcp_tool_deserialize() {
         let json = r#"{"type":"mcp_tool","server":"slack","tool":"send_message","arguments":{"channel":"test"}}"#;
         let action: HookAction = serde_json::from_str(json).unwrap();
-        assert!(matches!(action, HookAction::McpTool { server, tool, .. } if server == "slack" && tool == "send_message"));
+        assert!(
+            matches!(action, HookAction::McpTool { server, tool, .. } if server == "slack" && tool == "send_message")
+        );
     }
 
     // -- HookAction validation tests --
 
     #[test]
     fn test_hook_action_validate_command_ok() {
-        let action = HookAction::Command { command: "echo hello".into(), shell: None, timeout: 10 };
+        let action = HookAction::Command {
+            command: "echo hello".into(),
+            shell: None,
+            timeout: 10,
+        };
         assert!(action.validate().is_ok());
     }
 
     #[test]
     fn test_hook_action_validate_command_empty() {
-        let action = HookAction::Command { command: "".into(), shell: None, timeout: 10 };
+        let action = HookAction::Command {
+            command: "".into(),
+            shell: None,
+            timeout: 10,
+        };
         assert!(action.validate().is_err());
     }
 
     #[test]
     fn test_hook_action_validate_command_timeout_exceeds_max() {
-        let action = HookAction::Command { command: "echo hi".into(), shell: None, timeout: 99999 };
+        let action = HookAction::Command {
+            command: "echo hi".into(),
+            shell: None,
+            timeout: 99999,
+        };
         assert!(action.validate().is_err());
     }
 
@@ -2171,39 +2182,71 @@ Notification:
 
     #[test]
     fn test_hook_action_validate_permission_invalid() {
-        let action = HookAction::Permission { decision: "maybe".into(), reason: None, suggestions: vec![] };
+        let action = HookAction::Permission {
+            decision: "maybe".into(),
+            reason: None,
+            suggestions: vec![],
+        };
         assert!(action.validate().is_err());
     }
 
     #[test]
     fn test_hook_action_validate_permission_valid() {
         for dec in &["allow", "deny", "ask"] {
-            let action = HookAction::Permission { decision: (*dec).into(), reason: None, suggestions: vec![] };
-            assert!(action.validate().is_ok(), "decision '{}' should be valid", dec);
+            let action = HookAction::Permission {
+                decision: (*dec).into(),
+                reason: None,
+                suggestions: vec![],
+            };
+            assert!(
+                action.validate().is_ok(),
+                "decision '{}' should be valid",
+                dec
+            );
         }
     }
 
     #[test]
     fn test_hook_action_validate_http_empty_url() {
-        let action = HookAction::Http { url: "".into(), method: None, headers: None, timeout: 10 };
+        let action = HookAction::Http {
+            url: "".into(),
+            method: None,
+            headers: None,
+            timeout: 10,
+        };
         assert!(action.validate().is_err());
     }
 
     #[test]
     fn test_hook_action_validate_http_timeout_exceeds_max() {
-        let action = HookAction::Http { url: "https://example.com".into(), method: None, headers: None, timeout: 99999 };
+        let action = HookAction::Http {
+            url: "https://example.com".into(),
+            method: None,
+            headers: None,
+            timeout: 99999,
+        };
         assert!(action.validate().is_err());
     }
 
     #[test]
     fn test_hook_action_validate_mcp_empty_server() {
-        let action = HookAction::McpTool { server: "".into(), tool: "send".into(), arguments: None, timeout: 10 };
+        let action = HookAction::McpTool {
+            server: "".into(),
+            tool: "send".into(),
+            arguments: None,
+            timeout: 10,
+        };
         assert!(action.validate().is_err());
     }
 
     #[test]
     fn test_hook_action_validate_mcp_timeout_exceeds_max() {
-        let action = HookAction::McpTool { server: "s".into(), tool: "t".into(), arguments: None, timeout: 99999 };
+        let action = HookAction::McpTool {
+            server: "s".into(),
+            tool: "t".into(),
+            arguments: None,
+            timeout: 99999,
+        };
         assert!(action.validate().is_err());
     }
 }

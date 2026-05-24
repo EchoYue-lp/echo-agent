@@ -744,7 +744,8 @@ impl Store for SqliteStore {
                             // (effectively vector_weight forced to 0.0)
                             let mut items = keyword_items;
                             items.sort_by(|a, b| {
-                                b.score.unwrap_or_default()
+                                b.score
+                                    .unwrap_or_default()
                                     .partial_cmp(&a.score.unwrap_or_default())
                                     .unwrap_or(std::cmp::Ordering::Equal)
                             });
@@ -790,7 +791,8 @@ impl Store for SqliteStore {
                         .collect();
 
                     items.sort_by(|a, b| {
-                        b.score.unwrap_or_default()
+                        b.score
+                            .unwrap_or_default()
                             .partial_cmp(&a.score.unwrap_or_default())
                             .unwrap_or(std::cmp::Ordering::Equal)
                     });

@@ -48,6 +48,7 @@ use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -132,6 +133,11 @@ pub struct ReactAgent {
     /// When set, each streaming execution records a [`Run`](crate::trace::Run)
     /// with events, token usage, and timings.
     pub run_store: Option<Arc<dyn crate::trace::RunStore>>,
+
+    /// Tracks absolute file paths that have been successfully read during the
+    /// current conversation turn. Used by the read-before-edit enforcement
+    /// when `config.force_read_before_edit` is true.
+    recently_read_files: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -301,6 +307,7 @@ impl ReactAgent {
             llm_config: None,
             cancel_token: tokio::sync::Mutex::new(None),
             run_store: None,
+            recently_read_files: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -320,7 +327,7 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
-        let mut prompt = if config.enable_tool && config.enable_cot {
+        let prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -865,6 +872,31 @@ impl ReactAgent {
     /// prompt as the first entry if needed.
     pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) {
         self.memory.context.lock().await.set_messages(messages);
+    }
+
+    /// Record that a file was successfully read (for read-before-edit enforcement).
+    pub(crate) fn record_file_read(&self, path: &str) {
+        if self.config.force_read_before_edit {
+            self.recently_read_files
+                .lock()
+                .unwrap()
+                .insert(path.to_string());
+        }
+    }
+
+    /// Check whether a file was read in the current conversation turn.
+    /// Returns `true` if read-before-edit is disabled, or if the path was
+    /// previously recorded via [`record_file_read`].
+    pub(crate) fn was_file_read(&self, path: &str) -> bool {
+        if !self.config.force_read_before_edit {
+            return true; // enforcement disabled — allow all
+        }
+        self.recently_read_files.lock().unwrap().contains(path)
+    }
+
+    /// Clear the read-files set at the start of a new conversation turn.
+    pub(crate) fn clear_read_files(&self) {
+        self.recently_read_files.lock().unwrap().clear();
     }
 
     /// Shut down the agent and release all resources.

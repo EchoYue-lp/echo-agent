@@ -12,7 +12,8 @@ use super::providers::brave::BraveSearchProvider;
 use super::providers::duckduckgo::DuckDuckGoProvider;
 use super::providers::tavily::TavilyProvider;
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
@@ -88,6 +89,10 @@ impl WebSearchTool {
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
         "web_search"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]
     }
 
     fn description(&self) -> &str {

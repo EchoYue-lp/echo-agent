@@ -1,6 +1,7 @@
 use super::resolve_path;
 use echo_core::error::ToolError;
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -35,6 +36,10 @@ impl Tool for CreateFileTool {
 
     fn description(&self) -> &str {
         "Create a specified file."
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write]
     }
 
     fn parameters(&self) -> Value {
@@ -126,6 +131,13 @@ impl Tool for DeleteFileTool {
         "Delete a specified file."
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::Dangerous
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -212,6 +224,13 @@ impl Tool for ReadFileTool {
         "Read file content from the specified path, returns text content"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -295,6 +314,10 @@ impl Tool for WriteFileTool {
 
     fn description(&self) -> &str {
         "Write content to a file at the specified path (overwrite), auto-creating parent directories"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write]
     }
 
     fn parameters(&self) -> Value {
@@ -390,6 +413,10 @@ impl Tool for AppendFileTool {
 
     fn description(&self) -> &str {
         "Append content to end of file (auto-create if file does not exist)"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write]
     }
 
     fn parameters(&self) -> Value {
@@ -495,6 +522,10 @@ impl Tool for UpdateFileTool {
 
     fn description(&self) -> &str {
         "Update file content by replacing old content with new content."
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write]
     }
 
     fn parameters(&self) -> Value {
@@ -608,6 +639,10 @@ impl Tool for MoveFileTool {
 
     fn description(&self) -> &str {
         "Move file to a new path"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write]
     }
 
     fn parameters(&self) -> Value {
@@ -724,6 +759,13 @@ impl Tool for ListDirTool {
 
     fn description(&self) -> &str {
         "List all files and subdirectories in a directory, returning a name list"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn parameters(&self) -> Value {

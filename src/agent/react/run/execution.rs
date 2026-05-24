@@ -100,11 +100,32 @@ impl ReactAgent {
             effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         }
 
+        // ── Read-before-edit enforcement ──
+        if self.config.force_read_before_edit && is_write_tool(tool_name) {
+            if let Some(path) = extract_path_param(tool_name, &effective_params) {
+                let canonical = std::fs::canonicalize(&path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.clone());
+                if !self.was_file_read(&canonical) {
+                    let msg = format!(
+                        "Read-before-edit is enabled. File '{}' has not been read in this conversation turn. \
+                         Use read_file to read it first, then retry this operation.",
+                        path
+                    );
+                    warn!(agent = %agent, tool = %tool_name, path = %path, "Read-before-edit rejected");
+                    return Ok(ToolExecutionOutcome {
+                        output: msg,
+                        hook_messages,
+                    });
+                }
+            }
+        }
+
         let execution_start = std::time::Instant::now();
         let result = match self
             .tools
             .tool_manager
-            .execute_tool(tool_name, effective_params)
+            .execute_tool(tool_name, effective_params.clone())
             .await
         {
             Ok(result) => result,
@@ -151,6 +172,17 @@ impl ReactAgent {
             }
         };
         let duration_ms = execution_start.elapsed().as_millis() as u64;
+
+        // ── Record file reads for read-before-edit enforcement ──
+        if result.success && is_read_tool(tool_name) {
+            if let Some(path) = extract_path_param(tool_name, &effective_params) {
+                // Canonicalize to normalize ./foo, ../bar, symlinks
+                let canonical = std::fs::canonicalize(&path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path);
+                self.record_file_read(&canonical);
+            }
+        }
 
         // ── PostToolUse hooks ──
         let is_hook_post = {
@@ -366,9 +398,9 @@ impl ReactAgent {
 
         // ── tail ──────────────────────────────────────────────────
         let tail_char_start = {
-            let est = chars.len().saturating_sub(
-                (tail_budget as f64 * char_per_token * 1.05) as usize,
-            );
+            let est = chars
+                .len()
+                .saturating_sub((tail_budget as f64 * char_per_token * 1.05) as usize);
             newline_boundary_rev(&chars, est)
         };
         let tail: String = chars[tail_char_start..].iter().collect();
@@ -376,7 +408,8 @@ impl ReactAgent {
         let tail = if actual_tail > tail_budget {
             let scale = tail_budget as f64 / actual_tail as f64;
             let keep = (tail.len() as f64 * scale) as usize;
-            let adj = newline_boundary_rev(&chars, tail_char_start + tail.len().saturating_sub(keep));
+            let adj =
+                newline_boundary_rev(&chars, tail_char_start + tail.len().saturating_sub(keep));
             chars[adj..].iter().collect::<String>()
         } else {
             tail
@@ -467,4 +500,40 @@ fn newline_boundary_rev(chars: &[char], target: usize) -> usize {
         }
     }
     t
+}
+
+// ── Read-before-edit helpers ─────────────────────────────────────────────────
+
+/// Tools that modify files and should require a prior read.
+const WRITE_TOOLS: &[&str] = &[
+    "edit_file",
+    "write_file",
+    "append_file",
+    "create_file",
+    "delete_file",
+    "update_file",
+    "move_file",
+];
+
+/// Tools that read file content.
+const READ_TOOLS: &[&str] = &["read_file", "read_text"];
+
+/// Check whether a tool name is a file-modifying tool.
+fn is_write_tool(name: &str) -> bool {
+    WRITE_TOOLS.contains(&name)
+}
+
+/// Check whether a tool name is a file-reading tool.
+fn is_read_tool(name: &str) -> bool {
+    READ_TOOLS.contains(&name)
+}
+
+/// Extract the target file path from the tool parameters.
+/// Looks for `path` or `file_path` keys common across file tools.
+fn extract_path_param(_tool_name: &str, params: &ToolParameters) -> Option<String> {
+    params
+        .get("path")
+        .or_else(|| params.get("file_path"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }

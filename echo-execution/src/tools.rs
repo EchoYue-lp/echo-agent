@@ -11,7 +11,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-pub use echo_core::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult, ToolRiskLevel};
+pub use echo_core::tools::{
+    Tool, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult, ToolRiskLevel,
+};
 
 impl ToolRegistrar for ToolManager {
     fn register(&mut self, tool: Box<dyn Tool>) {
@@ -63,12 +65,20 @@ impl ToolManager {
     }
 
     pub fn new_with_config(config: ToolExecutionConfig) -> Self {
-        let semaphore = config.max_concurrency
+        let semaphore = config
+            .max_concurrency
             .map(|n| Arc::new(Semaphore::new(n.max(1))));
-        Self { tools: DashMap::new(), semaphore, config, cached_definitions: RwLock::new(None) }
+        Self {
+            tools: DashMap::new(),
+            semaphore,
+            config,
+            cached_definitions: RwLock::new(None),
+        }
     }
 
-    pub fn max_concurrency(&self) -> Option<usize> { self.config.max_concurrency }
+    pub fn max_concurrency(&self) -> Option<usize> {
+        self.config.max_concurrency
+    }
 
     /// Register a tool (takes `&self` via DashMap interior mutability).
     pub fn register(&self, tool: Box<dyn Tool>) {
@@ -85,7 +95,9 @@ impl ToolManager {
 
     pub fn unregister(&self, tool_name: &str) -> Option<Box<dyn Tool>> {
         let tool = self.tools.remove(tool_name).map(|(_, v)| v);
-        if tool.is_some() { self.invalidate_cache(); }
+        if tool.is_some() {
+            self.invalidate_cache();
+        }
         tool
     }
 
@@ -94,12 +106,18 @@ impl ToolManager {
     }
 
     /// Get a reference to a tool (via DashMap's Ref).
-    pub fn get_tool(&self, tool_name: &str) -> Option<dashmap::mapref::one::Ref<'_, String, Box<dyn Tool>>> {
+    pub fn get_tool(
+        &self,
+        tool_name: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, Box<dyn Tool>>> {
         self.tools.get(tool_name)
     }
 
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|entry| ToolDefinition::from_tool(&**entry.value())).collect()
+        self.tools
+            .iter()
+            .map(|entry| ToolDefinition::from_tool(&**entry.value()))
+            .collect()
     }
 
     /// 执行工具

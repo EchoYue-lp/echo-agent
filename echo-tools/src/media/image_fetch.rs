@@ -74,12 +74,12 @@ impl ImageFetchTool {
         })?;
 
         if !response.status().is_success() {
-            return Err(echo_core::error::ReactError::Tool(
-                Box::new(ToolError::ExecutionFailed {
+            return Err(echo_core::error::ReactError::Tool(Box::new(
+                ToolError::ExecutionFailed {
                     tool: "image_fetch".into(),
                     message: format!("HTTP error: {}", response.status()),
-                }),
-            ));
+                },
+            )));
         }
 
         // Get content type to determine image format (before consuming response)

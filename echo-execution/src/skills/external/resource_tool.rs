@@ -215,10 +215,6 @@ fn is_path_traversal_safe(path: &std::path::Path) -> bool {
         .all(|c| !matches!(c, Component::ParentDir))
 }
 
-// Backward compatibility alias
-#[deprecated(note = "Use ReadSkillResourceTool instead")]
-pub type LoadSkillResourceTool = ReadSkillResourceTool;
-
 #[cfg(test)]
 mod tests {
     use super::*;

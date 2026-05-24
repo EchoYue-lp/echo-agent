@@ -138,10 +138,9 @@ impl McpTransport for HttpTransport {
                             tokio::time::sleep(delay).await;
                         } else {
                             self.pending.lock().await.remove(&id);
-                            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
-                                "HTTP 请求失败: {}",
-                                e
-                            )))));
+                            return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
+                                format!("HTTP 请求失败: {}", e),
+                            ))));
                         }
                     }
                 }
@@ -185,10 +184,9 @@ impl McpTransport for HttpTransport {
             // 非 2xx 错误
             if !response.status().is_success() {
                 let body = response.text().await.unwrap_or_default();
-                return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
-                    "HTTP 错误 {}: {}",
-                    status, body
-                )))));
+                return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
+                    format!("HTTP 错误 {}: {}", status, body),
+                ))));
             }
 
             // 直接同步响应

@@ -50,6 +50,21 @@ pub struct ProviderCapabilities {
 
     /// Requires a provider-specific version header (Anthropic `anthropic-version`).
     pub requires_version_header: bool,
+
+    /// Supports parallel tool calls (multiple tools requested in a single
+    /// response). OpenAI, Anthropic, and most cloud providers support this;
+    /// Ollama and local models typically do not.
+    pub supports_parallel_tool_calls: bool,
+
+    /// Known maximum context window in tokens for this provider's default model.
+    /// `None` means unknown.
+    pub max_context_tokens: Option<u32>,
+
+    /// Tokenizer name or identifier for accurate token counting (e.g.
+    /// `"cl100k_base"` for GPT-4, `"o200k_base"` for GPT-4o).
+    /// `None` means the tokenizer is unknown; callers should fall back to
+    /// heuristic counting.
+    pub tokenizer_name: Option<&'static str>,
 }
 
 impl ProviderCapabilities {
@@ -66,6 +81,9 @@ impl ProviderCapabilities {
             tool_support: true,
             structured_output: true,
             requires_version_header: false,
+            supports_parallel_tool_calls: true,
+            max_context_tokens: None, // varies by model; see ModelProfile
+            tokenizer_name: None,
         }
     }
 
@@ -81,6 +99,9 @@ impl ProviderCapabilities {
             tool_support: true,
             structured_output: false, // no JSON mode in Messages API
             requires_version_header: true,
+            supports_parallel_tool_calls: true,
+            max_context_tokens: Some(200_000), // Claude 3.x+
+            tokenizer_name: Some("claude"),
         }
     }
 
@@ -96,6 +117,9 @@ impl ProviderCapabilities {
             tool_support: true,
             structured_output: false,
             requires_version_header: false,
+            supports_parallel_tool_calls: false,
+            max_context_tokens: None, // varies by model
+            tokenizer_name: None,
         }
     }
 
@@ -138,6 +162,16 @@ pub struct ModelProfile {
 
     /// Whether this model supports streaming.
     pub supports_streaming: bool,
+
+    /// Whether this model supports parallel tool calls (derived from provider
+    /// capabilities; may be overridden for specific models).
+    pub supports_parallel_tool_calls: bool,
+
+    /// Known maximum context window in tokens (None if unknown).
+    pub max_context_tokens: Option<u32>,
+
+    /// Tokenizer name for accurate token counting (None if unknown).
+    pub tokenizer_name: Option<&'static str>,
 }
 
 impl ModelProfile {
@@ -160,15 +194,45 @@ impl ModelProfile {
             && !lower.starts_with("o1") // o1 doesn't support images
             && !lower.starts_with("o3"); // o3-mini doesn't support images
 
-        // Known context window sizes
-        let max_output_tokens = if lower.contains("qwen3-235b") {
-            Some(131072)
-        } else if lower.starts_with("gpt-4o") {
-            Some(16384)
+        // Known max context window (tokens)
+        let max_context_tokens = if lower.contains("qwen3-235b") {
+            Some(131_072)
+        } else if lower.starts_with("gpt-4o") || lower.starts_with("gpt-4.5") {
+            Some(128_000)
+        } else if lower.starts_with("gpt-4") && !lower.starts_with("gpt-4o") {
+            Some(8_192)
+        } else if lower.starts_with("claude-3-opus") {
+            Some(200_000)
+        } else if lower.starts_with("claude-3.5") || lower.starts_with("claude-4") {
+            Some(200_000)
         } else if lower.starts_with("claude-") {
-            Some(8192)
+            Some(200_000)
+        } else if lower.starts_with("deepseek-") {
+            Some(128_000)
+        } else if lower.starts_with("qwen-") {
+            Some(131_072)
+        } else {
+            capabilities.max_context_tokens
+        };
+
+        // Known max output tokens
+        let max_output_tokens = if lower.contains("qwen3-235b") {
+            Some(131_072)
+        } else if lower.starts_with("gpt-4o") {
+            Some(16_384)
+        } else if lower.starts_with("claude-") {
+            Some(8_192)
         } else {
             None
+        };
+
+        // Tokenizer name mapping
+        let tokenizer_name = if lower.starts_with("gpt-4o") || lower.starts_with("gpt-4.5") {
+            Some("o200k_base")
+        } else if lower.starts_with("gpt-4") || lower.starts_with("gpt-3") {
+            Some("cl100k_base")
+        } else {
+            capabilities.tokenizer_name
         };
 
         Self {
@@ -180,6 +244,9 @@ impl ModelProfile {
             supports_tools: capabilities.tool_support,
             max_output_tokens,
             supports_streaming: true, // All supported providers stream
+            supports_parallel_tool_calls: capabilities.supports_parallel_tool_calls,
+            max_context_tokens,
+            tokenizer_name,
         }
     }
 

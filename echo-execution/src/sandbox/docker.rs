@@ -207,14 +207,18 @@ impl DockerSandbox {
         if let Some(limits) = limits {
             for path in &limits.read_only_paths {
                 Self::validate_mount_paths(std::slice::from_ref(path)).map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::PermissionDenied(e)))
+                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::PermissionDenied(
+                        e,
+                    )))
                 })?;
                 args.push("-v".to_string());
                 args.push(format!("{}:{}:ro", path.display(), path.display()));
             }
             for path in &limits.writable_paths {
                 Self::validate_mount_paths(std::slice::from_ref(path)).map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::PermissionDenied(e)))
+                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::PermissionDenied(
+                        e,
+                    )))
                 })?;
                 args.push("-v".to_string());
                 args.push(format!("{}:{}", path.display(), path.display()));
@@ -332,9 +336,9 @@ impl SandboxExecutor for DockerSandbox {
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move {
             if !Self::check_docker().await {
-                return Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::Unavailable("Docker is not available".to_string())),
-                ));
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::Unavailable("Docker is not available".to_string()),
+                )));
             }
 
             let timeout = command.timeout;
@@ -347,17 +351,17 @@ impl SandboxExecutor for DockerSandbox {
                 .output()
                 .await
                 .map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
-                        "Failed to create docker container: {e}"
-                    ))))
+                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(
+                        format!("Failed to create docker container: {e}"),
+                    )))
                 })?;
 
             let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if container_id.is_empty() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::StartFailed(format!("Failed to get container ID: {stderr}"))),
-                ));
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::StartFailed(format!("Failed to get container ID: {stderr}")),
+                )));
             }
 
             // 启动并等待结果
@@ -405,9 +409,9 @@ impl SandboxExecutor for DockerSandbox {
                 }
                 Ok(Err(e)) => {
                     Self::remove_container(&container_id).await;
-                    Err(echo_core::error::ReactError::Sandbox(
-                        Box::new(SandboxError::IoError(format!("Docker IO error: {e}"))),
-                    ))
+                    Err(echo_core::error::ReactError::Sandbox(Box::new(
+                        SandboxError::IoError(format!("Docker IO error: {e}")),
+                    )))
                 }
                 Err(_) => {
                     // 超时：强制 kill 容器
@@ -437,9 +441,9 @@ impl SandboxExecutor for DockerSandbox {
     ) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move {
             if !Self::check_docker().await {
-                return Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::Unavailable("Docker is not available".to_string())),
-                ));
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::Unavailable("Docker is not available".to_string()),
+                )));
             }
 
             let timeout = limits
@@ -456,17 +460,17 @@ impl SandboxExecutor for DockerSandbox {
                 .output()
                 .await
                 .map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
-                        "Failed to create docker container: {e}"
-                    ))))
+                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(
+                        format!("Failed to create docker container: {e}"),
+                    )))
                 })?;
 
             let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if container_id.is_empty() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::StartFailed(format!("Failed to get container ID: {stderr}"))),
-                ));
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::StartFailed(format!("Failed to get container ID: {stderr}")),
+                )));
             }
 
             let mut start_cmd = Command::new("docker");
@@ -527,9 +531,9 @@ impl SandboxExecutor for DockerSandbox {
                 }
                 Ok(Err(e)) => {
                     Self::remove_container(&container_id).await;
-                    Err(echo_core::error::ReactError::Sandbox(
-                        Box::new(SandboxError::IoError(format!("Docker IO error: {e}"))),
-                    ))
+                    Err(echo_core::error::ReactError::Sandbox(Box::new(
+                        SandboxError::IoError(format!("Docker IO error: {e}")),
+                    )))
                 }
                 Err(_) => {
                     let _ = Command::new("docker")

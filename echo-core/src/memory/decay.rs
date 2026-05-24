@@ -61,11 +61,7 @@ mod tests {
 
     #[test]
     fn test_no_access_no_decay() {
-        let item = StoreItem::new(
-            vec!["test".into()],
-            "k1".into(),
-            json!({"content": "test"}),
-        );
+        let item = StoreItem::new(vec!["test".into()], "k1".into(), json!({"content": "test"}));
         assert_eq!(decay_score(&item), 5.0); // default importance
     }
 

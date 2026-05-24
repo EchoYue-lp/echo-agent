@@ -63,8 +63,13 @@ pub struct AgentConfig {
     pub(crate) llm_retry_delay_ms: u64,
     /// On tool execution failure, feed the error back to the LLM instead of failing the Agent directly (default true)
     pub(crate) tool_error_feedback: bool,
-    /// Enable chain-of-thought (CoT) system prompt injection (default true).
+    /// Enable chain-of-thought (CoT) system prompt injection (default false).
     pub(crate) enable_cot: bool,
+    /// Require that a file be explicitly read (via `read_file`) before any
+    /// write/edit/delete operation on it. When enabled, tools like
+    /// `edit_file`, `write_file`, and `delete_file` will reject paths
+    /// that haven't been read in the current conversation turn. (default false)
+    pub(crate) force_read_before_edit: bool,
     /// Tool execution config: timeout, retry strategy, parallel concurrency
     pub(crate) tool_execution: ToolExecutionConfig,
     /// Whether to enable long-term memory Store (remember/recall/forget tools + automatic context injection)
@@ -124,7 +129,8 @@ impl AgentConfig {
             llm_max_retries: 3,
             llm_retry_delay_ms: 500,
             tool_error_feedback: true,
-            enable_cot: true,
+            enable_cot: false,
+            force_read_before_edit: false,
             tool_execution: ToolExecutionConfig::default(),
             enable_memory: false,
             memory_path: "~/.echo-agent/store.json".to_string(),

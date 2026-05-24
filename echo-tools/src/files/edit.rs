@@ -8,6 +8,7 @@
 
 use super::resolve_path;
 use echo_core::error::{Result, ToolError};
+use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -52,6 +53,10 @@ impl Tool for EditFileTool {
 
     fn description(&self) -> &str {
         "Edit a file by replacing old content with new content. Returns a unified diff showing what changed. Use replace_all=true to replace every occurrence. Use dry_run=true to preview changes without writing."
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read, ToolPermission::Write]
     }
 
     fn parameters(&self) -> Value {
@@ -195,6 +200,15 @@ impl Tool for EditFileTool {
                 )));
             }
 
+            // Create a backup before overwriting ({filename}.bak)
+            let bak_path = PathBuf::from(format!("{}.bak", path.display()));
+            fs::copy(&path, &bak_path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "edit_file".to_string(),
+                    message: format!("Failed to create backup: {}", e),
+                })?;
+
             // Write updated content
             fs::write(&path, &updated)
                 .await
@@ -210,7 +224,10 @@ impl Tool for EditFileTool {
                 replaced_count,
                 if replaced_count > 1 { "s" } else { "" },
                 diff
-            )))
+            ))
+            .with_meta("backup_path", bak_path.to_string_lossy().to_string())
+            .with_meta("original_size", original.len().to_string())
+            .with_meta("updated_size", updated.len().to_string()))
         })
     }
 }

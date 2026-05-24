@@ -46,6 +46,13 @@ impl Tool for GlobTool {
         "Find files by name pattern. Returns file paths matching a glob pattern (e.g. '**/*.rs', 'src/**/*.ts', '*.md'). Supports ** for recursive directory matching."
     }
 
+    fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+        vec![echo_core::tools::permission::ToolPermission::Read]
+    }
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",

@@ -24,6 +24,15 @@ pub struct ToolResult {
     /// directly instead of parsing the `output` string.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub data: Option<serde_json::Value>,
+    /// Whether the output was truncated to fit within a length limit.
+    #[serde(default)]
+    pub truncated: bool,
+    /// MIME type of the output content, when known (e.g. `text/html`, `image/png`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mime_type: Option<String>,
+    /// Arbitrary key-value metadata (e.g. source URL, file path, duration, token count).
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 impl ToolResult {
@@ -35,6 +44,9 @@ impl ToolResult {
             error: None,
             bytes: None,
             data: None,
+            truncated: false,
+            mime_type: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -50,6 +62,9 @@ impl ToolResult {
             error: None,
             bytes: None,
             data: Some(data),
+            truncated: false,
+            mime_type: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -61,6 +76,9 @@ impl ToolResult {
             error: Some(error.into()),
             bytes: None,
             data: None,
+            truncated: false,
+            mime_type: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -72,6 +90,9 @@ impl ToolResult {
             error: None,
             bytes: Some(bytes),
             data: None,
+            truncated: false,
+            mime_type: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -97,6 +118,30 @@ impl ToolResult {
     /// Attach structured data to an existing result.
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = Some(data);
+        self
+    }
+
+    /// Mark the output as truncated.
+    pub fn with_truncated(mut self, truncated: bool) -> Self {
+        self.truncated = truncated;
+        self
+    }
+
+    /// Set the MIME type for the output content.
+    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
+        self.mime_type = Some(mime_type.into());
+        self
+    }
+
+    /// Insert a key-value metadata entry.
+    pub fn with_meta(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Bulk-insert metadata entries.
+    pub fn with_metadata(mut self, meta: HashMap<String, String>) -> Self {
+        self.metadata = meta;
         self
     }
 }

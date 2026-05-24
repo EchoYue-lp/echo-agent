@@ -50,7 +50,8 @@ use crate::sandbox::{SandboxCommand, SandboxManager};
 use crate::skills::minimal_env;
 use crate::skills::registry::SkillRegistry;
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
@@ -94,6 +95,13 @@ impl Tool for RunSkillScriptTool {
          Supports Python (.py), Node.js (.js/.ts), Bash (.sh), PowerShell (.ps1), \
          Ruby (.rb), Perl (.pl). \
          The skill must be activated first via activate_skill."
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Execute]
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::Dangerous
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -491,16 +499,11 @@ fn format_execution_result(
     if exit_code == 0 {
         Ok(ToolResult::success(output))
     } else {
-        Ok(ToolResult {
-            success: false,
-            output,
-            error: Some(format!(
-                "Script '{}' exited with code {}",
-                script_path, exit_code
-            )),
-            bytes: None,
-            data: None,
-        })
+        Ok(ToolResult::error(format!(
+            "Script '{}' exited with code {}",
+            script_path, exit_code
+        ))
+        .with_output(output))
     }
 }
 

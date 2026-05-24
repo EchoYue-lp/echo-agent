@@ -83,12 +83,12 @@ impl ChannelManager {
             info!("Channel '{}' stopped", channel_id);
             Ok(())
         } else {
-            Err(echo_core::error::ReactError::Channel(
-                Box::new(echo_core::error::ChannelError::Other(format!(
+            Err(echo_core::error::ReactError::Channel(Box::new(
+                echo_core::error::ChannelError::Other(format!(
                     "Channel '{}' not found",
                     channel_id
-                ))),
-            ))
+                )),
+            )))
         }
     }
 

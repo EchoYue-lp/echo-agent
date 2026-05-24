@@ -10,22 +10,33 @@ use super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
 use crate::error::{AgentError, ReactError, Result};
 use crate::llm::types::Message;
+use crate::tools::ToolParameters;
 use echo_core::circuit_breaker::CircuitBreaker;
 use echo_core::tools::permission::PermissionPolicy;
-use futures::future::join_all;
 use futures::StreamExt;
+use futures::future::join_all;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{Instrument, debug, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span};
 
 macro_rules! yield_event {
-    ($tx:expr, $event:expr) => { if $tx.send(Ok($event)).is_err() { return Ok(()); } };
+    ($tx:expr, $event:expr) => {
+        if $tx.send(Ok($event)).is_err() {
+            return Ok(());
+        }
+    };
 }
 macro_rules! try_send {
     ($tx:expr, $fallible:expr) => {
-        match $fallible { Ok(v) => v, Err(e) => { let _ = $tx.send(Err(e.into())); return Ok(()); } }
+        match $fallible {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = $tx.send(Err(e.into()));
+                return Ok(());
+            }
+        }
     };
 }
 
@@ -34,7 +45,9 @@ macro_rules! try_send {
 impl ReactAgent {
     /// Channel-based streaming entry point. Returns `BoxStream<'static>`.
     pub(crate) async fn run_stream_channel(
-        &self, init: StreamInit, mode: StreamMode,
+        &self,
+        init: StreamInit,
+        mode: StreamMode,
     ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<AgentEvent>>();
         let context = self.memory.context.clone();
@@ -44,22 +57,30 @@ impl ReactAgent {
 
         let recalled = if let Some(ref msg) = init.message {
             self.prepare_stream_context_with_message(mode, msg).await
-        } else { self.prepare_stream_context(mode, &init.text).await };
+        } else {
+            self.prepare_stream_context(mode, &init.text).await
+        };
 
         let snap = AgentSnapshot::from_agent(self);
 
         tokio::spawn(async move {
-            if let Err(e) = snap.run_loop(context, text, message, label, mode, recalled, tx.clone()).await {
+            if let Err(e) = snap
+                .run_loop(context, text, message, label, mode, recalled, tx.clone())
+                .await
+            {
                 let _ = tx.send(Err(e));
             }
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)))
+        Ok(Box::pin(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+        ))
     }
 }
 
 // ── AgentSnapshot ────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct AgentSnapshot {
     agent_name: String,
     callbacks: Vec<Arc<dyn crate::agent::AgentCallback>>,
@@ -69,6 +90,7 @@ struct AgentSnapshot {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     tool_error_feedback: bool,
+    force_read_before_edit: bool,
     enable_tool: bool,
     llm_max_retries: usize,
     llm_retry_delay_ms: u64,
@@ -83,6 +105,7 @@ struct AgentSnapshot {
     snapshot_manager: Arc<std::sync::RwLock<Option<crate::memory::snapshot::SnapshotManager>>>,
     client: Arc<reqwest::Client>,
     cancel_token: Option<crate::agent::CancellationToken>,
+    recently_read_files: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     #[cfg(feature = "human-loop")]
     permission_service: Option<Arc<crate::human_loop::PermissionService>>,
 }
@@ -98,6 +121,7 @@ impl AgentSnapshot {
             temperature: agent.config.temperature,
             max_tokens: agent.config.max_tokens,
             tool_error_feedback: agent.config.tool_error_feedback,
+            force_read_before_edit: agent.config.force_read_before_edit,
             enable_tool: agent.config.enable_tool,
             llm_max_retries: agent.config.llm_max_retries,
             llm_retry_delay_ms: agent.config.llm_retry_delay_ms,
@@ -112,6 +136,7 @@ impl AgentSnapshot {
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             client: agent.client().clone(),
             cancel_token: None,
+            recently_read_files: Arc::clone(&agent.recently_read_files),
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
         }
@@ -120,9 +145,14 @@ impl AgentSnapshot {
     // ── Main loop ────────────────────────────────────────────────────
 
     async fn run_loop(
-        self, context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
-        text: String, _message: Option<Message>, label: String,
-        mode: StreamMode, recalled: usize, tx: mpsc::UnboundedSender<Result<AgentEvent>>,
+        self,
+        context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        text: String,
+        _message: Option<Message>,
+        label: String,
+        mode: StreamMode,
+        recalled: usize,
+        tx: mpsc::UnboundedSender<Result<AgentEvent>>,
     ) -> Result<()> {
         let agent = self.agent_name.clone();
         let callbacks = self.callbacks.clone();
@@ -131,61 +161,108 @@ impl AgentSnapshot {
             StreamMode::Execute => info!(agent = %agent, "Agent streaming task execution{label}"),
             StreamMode::Chat => info!(agent = %agent, "Agent streaming conversation{label}"),
         }
-        if recalled > 0 { yield_event!(tx, AgentEvent::MemoryRecalled { count: recalled }); }
+        if recalled > 0 {
+            yield_event!(tx, AgentEvent::MemoryRecalled { count: recalled });
+        }
 
         // Audit: user input
         if let Some(al) = &self.audit_logger {
-            let event = crate::audit::AuditEvent::now(self.session_id.clone(), self.agent_name.clone(),
-                crate::audit::AuditEventType::UserInput { content: text.clone() });
+            let event = crate::audit::AuditEvent::now(
+                self.session_id.clone(),
+                self.agent_name.clone(),
+                crate::audit::AuditEventType::UserInput {
+                    content: text.clone(),
+                },
+            );
             let _ = al.log(event).await;
         }
 
         // UserPromptSubmit hook
         {
             let hook_ctx = crate::skills::hooks::HookContext::for_user_prompt_submit(
-                &text, None, self.session_id.as_deref().unwrap_or(""), &self.agent_name);
+                &text,
+                None,
+                self.session_id.as_deref().unwrap_or(""),
+                &self.agent_name,
+            );
             let registry = self.hook_registry.read().await.clone();
             let result = registry.run_lifecycle_hooks(&hook_ctx).await;
             if result.block {
-                yield_event!(tx, AgentEvent::FinalAnswer(format!("Blocked by UserPromptSubmit hook: {}",
-                    result.block_reason.unwrap_or_default())));
-                self.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked")).await;
+                yield_event!(
+                    tx,
+                    AgentEvent::FinalAnswer(format!(
+                        "Blocked by UserPromptSubmit hook: {}",
+                        result.block_reason.unwrap_or_default()
+                    ))
+                );
+                self.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
+                    .await;
                 return Ok(());
             }
-            if let Some(ctx) = &result.injected_context { context.lock().await.push(Message::system(ctx.clone())); }
-            for msg in &result.messages { context.lock().await.push(Message::system(msg.clone())); }
+            if let Some(ctx) = &result.injected_context {
+                context.lock().await.push(Message::system(ctx.clone()));
+            }
+            for msg in &result.messages {
+                context.lock().await.push(Message::system(msg.clone()));
+            }
         }
 
         let mut stop_hook_continued = false;
 
         for iteration in 0..self.max_iterations {
-            for cb in &callbacks { cb.on_iteration(&agent, iteration).await; }
+            for cb in &callbacks {
+                cb.on_iteration(&agent, iteration).await;
+            }
             debug!(agent = %agent, iteration = iteration + 1, "--- Streaming iteration{label} ---");
 
-            self.fire_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto")).await;
+            self.fire_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
+                .await;
             let prepare_result = try_send!(tx, context.lock().await.prepare(None).await);
 
             if let Some(ref stats) = prepare_result.compressed {
-                yield_event!(tx, AgentEvent::ContextCompressed {
-                    before_count: stats.before_count, after_count: stats.after_count,
-                    before_tokens: stats.before_tokens, after_tokens: stats.after_tokens,
-                });
+                yield_event!(
+                    tx,
+                    AgentEvent::ContextCompressed {
+                        before_count: stats.before_count,
+                        after_count: stats.after_count,
+                        before_tokens: stats.before_tokens,
+                        after_tokens: stats.after_tokens,
+                    }
+                );
                 let hs = crate::skills::hooks::CompressHookStats {
-                    before_count: stats.before_count, after_count: stats.after_count,
-                    before_tokens: stats.before_tokens, after_tokens: stats.after_tokens,
+                    before_count: stats.before_count,
+                    after_count: stats.after_count,
+                    before_tokens: stats.before_tokens,
+                    after_tokens: stats.after_tokens,
                 };
                 let hc = crate::skills::hooks::HookContext::for_post_compact(
-                    &hs, "auto", self.session_id.as_deref().unwrap_or(""), &self.agent_name);
+                    &hs,
+                    "auto",
+                    self.session_id.as_deref().unwrap_or(""),
+                    &self.agent_name,
+                );
                 let reg = self.hook_registry.read().await.clone();
                 let r = reg.run_lifecycle_hooks(&hc).await;
-                if let Some(c) = &r.injected_context { context.lock().await.push(Message::system(format!("[Hook:PostCompact] {}", c))); }
-                for m in &r.messages { context.lock().await.push(Message::system(m.clone())); }
+                if let Some(c) = &r.injected_context {
+                    context
+                        .lock()
+                        .await
+                        .push(Message::system(format!("[Hook:PostCompact] {}", c)));
+                }
+                for m in &r.messages {
+                    context.lock().await.push(Message::system(m.clone()));
+                }
             }
 
             let messages = prepare_result.messages;
-            for cb in &callbacks { cb.on_think_start(&agent, &messages).await; }
+            for cb in &callbacks {
+                cb.on_think_start(&agent, &messages).await;
+            }
 
-            let mut llm_stream = Box::pin(try_send!(tx, self.create_llm_stream(messages.clone()).await));
+            let mut llm_stream = Box::pin(try_send!(
+                tx,
+                self.create_llm_stream(messages.clone()).await
+            ));
             let mut content_buffer = String::new();
             let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
             let mut last_usage = None;
@@ -193,163 +270,395 @@ impl AgentSnapshot {
 
             while let Some(cr) = llm_stream.next().await {
                 let chunk = try_send!(tx, cr);
-                if chunk.usage.is_some() { last_usage = chunk.usage.clone(); }
-                for event in process_stream_chunk(&chunk, &mut content_buffer, &mut tool_call_map, &mut in_reasoning) {
+                if chunk.usage.is_some() {
+                    last_usage = chunk.usage.clone();
+                }
+                for event in process_stream_chunk(
+                    &chunk,
+                    &mut content_buffer,
+                    &mut tool_call_map,
+                    &mut in_reasoning,
+                ) {
                     yield_event!(tx, event);
                 }
             }
 
-            let pt = last_usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0) as usize;
-            let ct = last_usage.as_ref().and_then(|u| u.completion_tokens).unwrap_or(0) as usize;
-            if in_reasoning { yield_event!(tx, AgentEvent::ThinkEnd { prompt_tokens: pt, completion_tokens: ct }); }
+            let pt = last_usage
+                .as_ref()
+                .and_then(|u| u.prompt_tokens)
+                .unwrap_or(0) as usize;
+            let ct = last_usage
+                .as_ref()
+                .and_then(|u| u.completion_tokens)
+                .unwrap_or(0) as usize;
+            if in_reasoning {
+                yield_event!(
+                    tx,
+                    AgentEvent::ThinkEnd {
+                        prompt_tokens: pt,
+                        completion_tokens: ct
+                    }
+                );
+            }
 
             if !tool_call_map.is_empty() {
                 let (msg_tc, steps) = build_tool_calls_from_map(&tool_call_map);
-                for (_, name, args) in &steps { yield_event!(tx, AgentEvent::ToolCall { name: name.clone(), args: args.clone() }); }
-                {
-                    let ts: Vec<StepType> = steps.iter().map(|(id, n, a)| StepType::Call {
-                        tool_call_id: id.clone(), function_name: n.clone(), arguments: a.clone() }).collect();
-                    for cb in &callbacks { cb.on_think_end(&agent, &ts, pt, ct).await; }
+                for (_, name, args) in &steps {
+                    yield_event!(
+                        tx,
+                        AgentEvent::ToolCall {
+                            name: name.clone(),
+                            args: args.clone()
+                        }
+                    );
                 }
-                context.lock().await.push(Message::assistant_with_tools(msg_tc));
+                {
+                    let ts: Vec<StepType> = steps
+                        .iter()
+                        .map(|(id, n, a)| StepType::Call {
+                            tool_call_id: id.clone(),
+                            function_name: n.clone(),
+                            arguments: a.clone(),
+                        })
+                        .collect();
+                    for cb in &callbacks {
+                        cb.on_think_end(&agent, &ts, pt, ct).await;
+                    }
+                }
+                context
+                    .lock()
+                    .await
+                    .push(Message::assistant_with_tools(msg_tc));
 
                 #[cfg(feature = "human-loop")]
                 let (appr, conc) = {
-                    let mut a = vec![]; let mut c = vec![];
-                    for s in steps { if self.tool_needs_approval(&s.1).await { a.push(s); } else { c.push(s); } }
+                    let mut a = vec![];
+                    let mut c = vec![];
+                    for s in steps {
+                        if self.tool_needs_approval(&s.1).await {
+                            a.push(s);
+                        } else {
+                            c.push(s);
+                        }
+                    }
                     (a, c)
                 };
                 #[cfg(not(feature = "human-loop"))]
-                let (appr, conc): (Vec<_>, Vec<_>) = (vec![], steps);
+                let (appr, conc): (
+                    Vec<(String, String, Value)>,
+                    Vec<(String, String, Value)>,
+                ) = (vec![], steps);
 
                 if !conc.is_empty() {
                     let mc = self.tool_manager.max_concurrency();
-                    let futs: Vec<_> = conc.iter().map(|(_, n, a)| {
-                        let tm = Arc::clone(&self.tool_manager);
-                        let name = n.clone(); let args = a.clone(); let soften = self.tool_error_feedback;
-                        async move {
-                            let params = if let Value::Object(m) = &args { m.clone().into_iter().collect() } else { HashMap::new() };
-                            match tm.execute_tool(&name, params).await {
-                                Ok(o) => Ok(o.output),
-                                Err(e) if soften && name != TOOL_FINAL_ANSWER => Ok(format!("[Tool error] {e}\nTry adjusting parameters or using another tool.")),
-                                Err(e) => Err(ReactError::from(e)),
+                    let snapshot = self.clone();
+                    let futs: Vec<_> = conc
+                        .iter()
+                        .map(|(_, n, a)| {
+                            let snapshot = snapshot.clone();
+                            let name = n.clone();
+                            let args = a.clone();
+                            async move {
+                                let params = if let Value::Object(m) = &args {
+                                    m.clone().into_iter().collect()
+                                } else {
+                                    HashMap::new()
+                                };
+                                snapshot
+                                    .execute_tool_with_policy(&name, &params, &args)
+                                    .await
                             }
-                        }.instrument(info_span!("tool", tool.name = %n))
-                    }).collect();
-                    let bt = super::retry::compute_concurrent_tool_batch_timeout(&self.tool_execution, futs.len(), mc);
+                            .instrument(info_span!("tool", tool.name = %n))
+                        })
+                        .collect();
+                    let bt = super::retry::compute_concurrent_tool_batch_timeout(
+                        &self.tool_execution,
+                        futs.len(),
+                        mc,
+                    );
                     let results: Vec<std::result::Result<String, ReactError>>;
                     if let Some(to) = bt {
-                        results = try_send!(tx, tokio::time::timeout(to, join_all(futs)).await
-                            .map_err(|_| ReactError::from(crate::error::ToolError::Timeout("batch timeout".into()))));
-                    } else { results = join_all(futs).await; }
+                        results = try_send!(
+                            tx,
+                            tokio::time::timeout(to, join_all(futs)).await.map_err(|_| {
+                                ReactError::from(crate::error::ToolError::Timeout(
+                                    "batch timeout".into(),
+                                ))
+                            })
+                        );
+                    } else {
+                        results = join_all(futs).await;
+                    }
 
                     for ((id, fname, _), result) in conc.into_iter().zip(results) {
                         match result {
                             Ok(output) => {
-                                let truncated = self.truncate_output(output).await;
-                                yield_event!(tx, AgentEvent::ToolResult { name: fname.clone(), output: truncated.clone() });
-                                context.lock().await.push(Message::tool_result(id, fname.clone(), truncated.clone()));
+                                yield_event!(
+                                    tx,
+                                    AgentEvent::ToolResult {
+                                        name: fname.clone(),
+                                        output: output.clone()
+                                    }
+                                );
+                                context.lock().await.push(Message::tool_result(
+                                    id,
+                                    fname.clone(),
+                                    output.clone(),
+                                ));
                                 if fname == TOOL_FINAL_ANSWER {
-                                    return self.finish(context, agent, callbacks, label, &truncated, iteration, stop_hook_continued, tx).await;
+                                    return self
+                                        .finish(
+                                            context,
+                                            agent,
+                                            callbacks,
+                                            label,
+                                            &output,
+                                            iteration,
+                                            stop_hook_continued,
+                                            tx,
+                                        )
+                                        .await;
                                 }
                             }
                             Err(error) => {
-                                yield_event!(tx, AgentEvent::ToolError { name: fname.clone(), error: error.to_string() });
-                                context.lock().await.push(Message::tool_result(id, fname.clone(), format!("[Error] {error}")));
+                                yield_event!(
+                                    tx,
+                                    AgentEvent::ToolError {
+                                        name: fname.clone(),
+                                        error: error.to_string()
+                                    }
+                                );
+                                context.lock().await.push(Message::tool_result(
+                                    id,
+                                    fname.clone(),
+                                    format!("[Error] {error}"),
+                                ));
                             }
                         }
                     }
                 }
 
                 for (id, fname, args) in appr {
-                    let params = if let Value::Object(m) = &args { m.clone().into_iter().collect() } else { HashMap::new() };
-                    match self.tool_manager.execute_tool(&fname, params).await {
-                        Ok(result) => {
-                            let truncated = self.truncate_output(result.output).await;
-                            yield_event!(tx, AgentEvent::ToolResult { name: fname.clone(), output: truncated.clone() });
-                            context.lock().await.push(Message::tool_result(id, fname.clone(), truncated.clone()));
+                    let params = if let Value::Object(m) = &args {
+                        m.clone().into_iter().collect()
+                    } else {
+                        HashMap::new()
+                    };
+                    match self.execute_tool_with_policy(&fname, &params, &args).await {
+                        Ok(truncated) => {
+                            yield_event!(
+                                tx,
+                                AgentEvent::ToolResult {
+                                    name: fname.clone(),
+                                    output: truncated.clone()
+                                }
+                            );
+                            context.lock().await.push(Message::tool_result(
+                                id,
+                                fname.clone(),
+                                truncated.clone(),
+                            ));
                             if fname == TOOL_FINAL_ANSWER {
-                                return self.finish(context, agent, callbacks, label, &truncated, iteration, stop_hook_continued, tx).await;
+                                return self
+                                    .finish(
+                                        context,
+                                        agent,
+                                        callbacks,
+                                        label,
+                                        &truncated,
+                                        iteration,
+                                        stop_hook_continued,
+                                        tx,
+                                    )
+                                    .await;
                             }
                         }
                         Err(error) => {
-                            yield_event!(tx, AgentEvent::ToolError { name: fname.clone(), error: error.to_string() });
-                            context.lock().await.push(Message::tool_result(id, fname.clone(), format!("[Error] {error}")));
+                            yield_event!(
+                                tx,
+                                AgentEvent::ToolError {
+                                    name: fname.clone(),
+                                    error: error.to_string()
+                                }
+                            );
+                            context.lock().await.push(Message::tool_result(
+                                id,
+                                fname.clone(),
+                                format!("[Error] {error}"),
+                            ));
                         }
                     }
                 }
                 self.auto_snapshot(&context, iteration).await;
             } else if !content_buffer.is_empty() {
                 let ts = vec![StepType::Thought(content_buffer.clone())];
-                for cb in &callbacks { cb.on_think_end(&agent, &ts, pt, ct).await; cb.on_final_answer(&agent, &content_buffer).await; }
-                context.lock().await.push(Message::assistant(content_buffer.clone()));
+                for cb in &callbacks {
+                    cb.on_think_end(&agent, &ts, pt, ct).await;
+                    cb.on_final_answer(&agent, &content_buffer).await;
+                }
+                context
+                    .lock()
+                    .await
+                    .push(Message::assistant(content_buffer.clone()));
                 self.auto_snapshot(&context, iteration).await;
                 if let Some(al) = &self.audit_logger {
-                    let ev = crate::audit::AuditEvent::now(self.session_id.clone(), self.agent_name.clone(),
-                        crate::audit::AuditEventType::FinalAnswer { content: content_buffer.clone() });
+                    let ev = crate::audit::AuditEvent::now(
+                        self.session_id.clone(),
+                        self.agent_name.clone(),
+                        crate::audit::AuditEventType::FinalAnswer {
+                            content: content_buffer.clone(),
+                        },
+                    );
                     let _ = al.log(ev).await;
                 }
                 self.save_checkpoint(&context).await;
                 yield_event!(tx, AgentEvent::FinalAnswer(content_buffer));
-                let hc = crate::skills::hooks::HookContext::for_stop(None, self.session_id.as_deref().unwrap_or(""), &self.agent_name, stop_hook_continued);
+                let hc = crate::skills::hooks::HookContext::for_stop(
+                    None,
+                    self.session_id.as_deref().unwrap_or(""),
+                    &self.agent_name,
+                    stop_hook_continued,
+                );
                 let reg = self.hook_registry.read().await.clone();
                 let sr = reg.run_lifecycle_hooks(&hc).await;
-                if let Some(reason) = &sr.continue_reason { if !stop_hook_continued {
-                    context.lock().await.push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
-                    stop_hook_continued = true; continue;
-                }}
-                self.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("complete")).await;
+                if let Some(reason) = &sr.continue_reason {
+                    if !stop_hook_continued {
+                        context
+                            .lock()
+                            .await
+                            .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
+                        stop_hook_continued = true;
+                        continue;
+                    }
+                }
+                self.fire_hook(
+                    crate::skills::hooks::HookEvent::SessionEnd,
+                    Some("complete"),
+                )
+                .await;
                 return Ok(());
             } else {
-                let _ = tx.send(Err(ReactError::Agent(Box::new(AgentError::NoResponse { model: self.model_name.clone(), agent: self.agent_name.clone() }))));
+                let _ = tx.send(Err(ReactError::Agent(Box::new(AgentError::NoResponse {
+                    model: self.model_name.clone(),
+                    agent: self.agent_name.clone(),
+                }))));
                 return Ok(());
             }
         }
 
-        self.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("max_iterations")).await;
-        self.fire_hook(crate::skills::hooks::HookEvent::StopFailure, Some("max_iterations")).await;
-        let _ = tx.send(Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(self.max_iterations)))));
+        self.fire_hook(
+            crate::skills::hooks::HookEvent::SessionEnd,
+            Some("max_iterations"),
+        )
+        .await;
+        self.fire_hook(
+            crate::skills::hooks::HookEvent::StopFailure,
+            Some("max_iterations"),
+        )
+        .await;
+        let _ = tx.send(Err(ReactError::Agent(Box::new(
+            AgentError::MaxIterationsExceeded(self.max_iterations),
+        ))));
         Ok(())
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
 
-    async fn create_llm_stream(&self, messages: Vec<Message>) -> Result<impl futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>>> {
+    async fn create_llm_stream(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<impl futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>>> {
         let tools = if self.enable_tool {
             let t = self.tool_manager.get_openai_tools();
             if t.is_empty() { None } else { Some(t) }
-        } else { None };
+        } else {
+            None
+        };
         let cancel = self.cancel_token.clone();
-        super::retry::retry_llm_call(&self.agent_name, self.llm_max_retries, self.llm_retry_delay_ms, &self.circuit_breaker, || {
-            let c = self.client.clone(); let m = self.model_name.clone(); let ms = messages.clone();
-            let t = tools.clone(); let ct = cancel.clone();
-            async move { crate::llm::stream_chat(c, &m, ms, self.temperature, self.max_tokens, t, None, None, ct).await }
-        }).await
+        super::retry::retry_llm_call(
+            &self.agent_name,
+            self.llm_max_retries,
+            self.llm_retry_delay_ms,
+            &self.circuit_breaker,
+            || {
+                let c = self.client.clone();
+                let m = self.model_name.clone();
+                let ms = messages.clone();
+                let t = tools.clone();
+                let ct = cancel.clone();
+                async move {
+                    crate::llm::stream_chat(
+                        c,
+                        &m,
+                        ms,
+                        self.temperature,
+                        self.max_tokens,
+                        t,
+                        None,
+                        None,
+                        ct,
+                    )
+                    .await
+                }
+            },
+        )
+        .await
     }
 
     async fn truncate_output(&self, output: String) -> String {
-        let Some(mt) = self.max_tool_output_tokens else { return output; };
-        if output.chars().count() / 3 <= mt { return output; }
+        let Some(mt) = self.max_tool_output_tokens else {
+            return output;
+        };
+        if output.chars().count() / 3 <= mt {
+            return output;
+        }
         let ratio = mt as f64 / (output.chars().count() as f64 / 3.0);
-        format!("{}\n[Output truncated]", output.chars().take((output.len() as f64 * ratio * 0.95) as usize).collect::<String>())
+        format!(
+            "{}\n[Output truncated]",
+            output
+                .chars()
+                .take((output.len() as f64 * ratio * 0.95) as usize)
+                .collect::<String>()
+        )
     }
 
     async fn fire_hook(&self, event: crate::skills::hooks::HookEvent, matcher: Option<&str>) {
         let sid = self.session_id.clone().unwrap_or_default();
         let hc = match event {
-            crate::skills::hooks::HookEvent::SessionEnd =>
-                crate::skills::hooks::HookContext::for_session_end(matcher.unwrap_or("other"), &sid, &self.agent_name),
-            crate::skills::hooks::HookEvent::PreCompact =>
-                crate::skills::hooks::HookContext::for_pre_compact(&Default::default(), matcher.unwrap_or("auto"), &sid, &self.agent_name),
-            crate::skills::hooks::HookEvent::StopFailure =>
-                crate::skills::hooks::HookContext::for_stop_failure("", matcher.unwrap_or(""), &sid, &self.agent_name),
+            crate::skills::hooks::HookEvent::SessionEnd => {
+                crate::skills::hooks::HookContext::for_session_end(
+                    matcher.unwrap_or("other"),
+                    &sid,
+                    &self.agent_name,
+                )
+            }
+            crate::skills::hooks::HookEvent::PreCompact => {
+                crate::skills::hooks::HookContext::for_pre_compact(
+                    &Default::default(),
+                    matcher.unwrap_or("auto"),
+                    &sid,
+                    &self.agent_name,
+                )
+            }
+            crate::skills::hooks::HookEvent::StopFailure => {
+                crate::skills::hooks::HookContext::for_stop_failure(
+                    "",
+                    matcher.unwrap_or(""),
+                    &sid,
+                    &self.agent_name,
+                )
+            }
             _ => return,
         };
         let reg = self.hook_registry.read().await.clone();
         let _ = reg.run_lifecycle_hooks(&hc).await;
     }
 
-    async fn auto_snapshot(&self, context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>, iteration: usize) {
+    async fn auto_snapshot(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        iteration: usize,
+    ) {
         let should_capture = {
             let mgr = self.snapshot_manager.read().unwrap();
             mgr.as_ref().is_some_and(|m| m.should_capture(iteration))
@@ -359,14 +668,23 @@ impl AgentSnapshot {
             let ctx = context.lock().await;
             let ms = ctx.messages().to_vec();
             drop(ctx);
-            if let Some(ref mut m) = *self.snapshot_manager.write().unwrap() { m.capture(iteration, &ms); }
+            if let Some(ref mut m) = *self.snapshot_manager.write().unwrap() {
+                m.capture(iteration, &ms);
+            }
         }
     }
 
-    async fn save_checkpoint(&self, context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>) {
+    async fn save_checkpoint(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+    ) {
         if let (Some(cp), Some(sid)) = (&self.checkpointer, &self.session_id) {
             let ctx = context.lock().await;
-            let state = crate::memory::ThreadState { messages: ctx.messages().to_vec(), summary: None, metadata: None };
+            let state = crate::memory::ThreadState {
+                messages: ctx.messages().to_vec(),
+                summary: None,
+                metadata: None,
+            };
             drop(ctx);
             let _ = cp.put_state(sid, state).await;
         }
@@ -377,46 +695,274 @@ impl AgentSnapshot {
         use crate::tools::permission::{PermissionDecision, PermissionMode};
         if let Some(svc) = &self.permission_service {
             let mode = svc.mode().await;
-            if matches!(mode, PermissionMode::BypassPermissions | PermissionMode::DontAsk | PermissionMode::Plan) { return false; }
-            let perms = self.tool_manager.get_tool(tool_name).map(|t| t.permissions()).unwrap_or_default();
-            return svc.check_with_permissions(tool_name, &serde_json::json!({}), &perms).await
-                .unwrap_or(PermissionDecision::RequireApproval).requires_approval();
+            if matches!(
+                mode,
+                PermissionMode::BypassPermissions | PermissionMode::DontAsk | PermissionMode::Plan
+            ) {
+                return false;
+            }
+            let perms = self
+                .tool_manager
+                .get_tool(tool_name)
+                .map(|t| t.permissions())
+                .unwrap_or_default();
+            return svc
+                .check_with_permissions(tool_name, &serde_json::json!({}), &perms)
+                .await
+                .unwrap_or(PermissionDecision::RequireApproval)
+                .requires_approval();
         }
         if let Some(pol) = &self.permission_policy {
-            let perms = self.tool_manager.get_tool(tool_name).map(|t| t.permissions()).unwrap_or_default();
+            let perms = self
+                .tool_manager
+                .get_tool(tool_name)
+                .map(|t| t.permissions())
+                .unwrap_or_default();
             if !perms.is_empty() {
                 let d = pol.check(tool_name, &perms).await;
-                return matches!(d, PermissionDecision::RequireApproval | PermissionDecision::Ask { .. });
+                return matches!(
+                    d,
+                    PermissionDecision::RequireApproval | PermissionDecision::Ask { .. }
+                );
             }
         }
         false
     }
     #[cfg(not(feature = "human-loop"))]
-    async fn tool_needs_approval(&self, _: &str) -> bool { false }
+    async fn tool_needs_approval(&self, _: &str) -> bool {
+        false
+    }
 
     #[allow(clippy::too_many_arguments)]
     async fn finish(
-        &self, context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
-        agent: String, callbacks: Vec<Arc<dyn crate::agent::AgentCallback>>,
-        label: String, output: &str, iteration: usize,
-        stop_hook_continued: bool, tx: mpsc::UnboundedSender<Result<AgentEvent>>,
+        &self,
+        context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        agent: String,
+        callbacks: Vec<Arc<dyn crate::agent::AgentCallback>>,
+        label: String,
+        output: &str,
+        _iteration: usize,
+        stop_hook_continued: bool,
+        tx: mpsc::UnboundedSender<Result<AgentEvent>>,
     ) -> Result<()> {
-        for cb in &callbacks { cb.on_final_answer(&agent, output).await; }
+        for cb in &callbacks {
+            cb.on_final_answer(&agent, output).await;
+        }
         info!(agent = %agent, "Streaming execution completed{label}");
         if let Some(al) = &self.audit_logger {
-            let ev = crate::audit::AuditEvent::now(self.session_id.clone(), self.agent_name.clone(),
-                crate::audit::AuditEventType::FinalAnswer { content: output.to_string() });
+            let ev = crate::audit::AuditEvent::now(
+                self.session_id.clone(),
+                self.agent_name.clone(),
+                crate::audit::AuditEventType::FinalAnswer {
+                    content: output.to_string(),
+                },
+            );
             let _ = al.log(ev).await;
         }
         self.save_checkpoint(&context).await;
         yield_event!(tx, AgentEvent::FinalAnswer(output.to_string()));
-        let hc = crate::skills::hooks::HookContext::for_stop(None, self.session_id.as_deref().unwrap_or(""), &self.agent_name, stop_hook_continued);
+        let hc = crate::skills::hooks::HookContext::for_stop(
+            None,
+            self.session_id.as_deref().unwrap_or(""),
+            &self.agent_name,
+            stop_hook_continued,
+        );
         let reg = self.hook_registry.read().await.clone();
         let sr = reg.run_lifecycle_hooks(&hc).await;
-        if let Some(reason) = &sr.continue_reason { if !stop_hook_continued {
-            context.lock().await.push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
-        }}
-        self.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("complete")).await;
+        if let Some(reason) = &sr.continue_reason {
+            if !stop_hook_continued {
+                context
+                    .lock()
+                    .await
+                    .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
+            }
+        }
+        self.fire_hook(
+            crate::skills::hooks::HookEvent::SessionEnd,
+            Some("complete"),
+        )
+        .await;
         Ok(())
     }
+
+    /// Execute a single tool call with the full policy pipeline:
+    /// PreToolUse hooks → read-before-edit guard → execute → PostToolUse hooks → audit.
+    ///
+    /// Mirrors `ReactAgent::execute_tool_feedback_raw` but uses the
+    /// snapshot's owned state so it can run inside a `'static` future.
+    async fn execute_tool_with_policy(
+        &self,
+        tool_name: &str,
+        params: &ToolParameters,
+        input: &Value,
+    ) -> std::result::Result<String, crate::error::ReactError> {
+        // ── PreToolUse hooks ──
+        let hook_reg = self.hook_registry.read().await.clone();
+        let pre_result = hook_reg
+            .run_pre_tool_use(tool_name, input, self.session_id.as_deref().unwrap_or(""))
+            .await;
+        if pre_result.block {
+            let reason = pre_result
+                .block_reason
+                .unwrap_or_else(|| "blocked by skill hook".into());
+            return Ok(format!("Tool {} blocked by hook: {}", tool_name, reason));
+        }
+
+        let mut effective_params = params.clone();
+        let mut effective_input = input.clone();
+        if let Some(updated) = pre_result.updated_input
+            && let Value::Object(map) = &updated
+        {
+            effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            effective_input = updated;
+        }
+
+        self.validate_read_before_edit(tool_name, &effective_params)?;
+        // ── Business audit: tool start ──
+        if let Some(al) = &self.audit_logger {
+            let ev = crate::audit::AuditEvent::now(
+                self.session_id.clone(),
+                self.agent_name.clone(),
+                crate::audit::AuditEventType::ToolCall {
+                    tool: tool_name.to_string(),
+                    input: effective_input.clone(),
+                    output: String::new(),
+                    success: true,
+                    duration_ms: 0,
+                },
+            );
+            let _ = al.log(ev).await;
+        }
+
+        // ── Execute ──
+        let result = match self
+            .tool_manager
+            .execute_tool(tool_name, effective_params.clone())
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let err_msg = e.to_string();
+                // Audit failure
+                if let Some(al) = &self.audit_logger {
+                    let ev = crate::audit::AuditEvent::now(
+                        self.session_id.clone(),
+                        self.agent_name.clone(),
+                        crate::audit::AuditEventType::ToolCall {
+                            tool: tool_name.to_string(),
+                            input: effective_input.clone(),
+                            output: err_msg.clone(),
+                            success: false,
+                            duration_ms: 0,
+                        },
+                    );
+                    let _ = al.log(ev).await;
+                }
+                // Error softening
+                if self.tool_error_feedback && tool_name != TOOL_FINAL_ANSWER {
+                    return Ok(format!(
+                        "[Tool error] {e}\nTry adjusting parameters or using another tool."
+                    ));
+                }
+                return Err(crate::error::ReactError::from(e));
+            }
+        };
+        if result.success {
+            self.record_file_read_if_needed(tool_name, &effective_params);
+        }
+
+        // ── PostToolUse hooks ──
+        let post_result = hook_reg
+            .run_post_tool_use(
+                tool_name,
+                &effective_input,
+                &result.output,
+                self.session_id.as_deref().unwrap_or(""),
+            )
+            .await;
+        if post_result.block {
+            let reason = post_result
+                .block_reason
+                .unwrap_or_else(|| format!("Tool {} output blocked by hook", tool_name));
+            return Ok(reason);
+        }
+
+        // ── Truncate ──
+        let truncated = self.truncate_output(result.output).await;
+        Ok(truncated)
+    }
+
+    fn validate_read_before_edit(
+        &self,
+        tool_name: &str,
+        params: &ToolParameters,
+    ) -> std::result::Result<(), crate::error::ReactError> {
+        if !self.force_read_before_edit || !is_write_tool(tool_name) {
+            return Ok(());
+        }
+
+        if let Some(path) = extract_path_param(params) {
+            let canonical = canonicalize_for_read_tracking(&path);
+            if !self
+                .recently_read_files
+                .lock()
+                .unwrap()
+                .contains(&canonical)
+            {
+                return Err(crate::error::ReactError::Other(format!(
+                    "Read-before-edit is enabled. File '{}' has not been read in this conversation turn. Use read_file to read it first, then retry this operation.",
+                    path
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn record_file_read_if_needed(&self, tool_name: &str, params: &ToolParameters) {
+        if !self.force_read_before_edit || !is_read_tool(tool_name) {
+            return;
+        }
+
+        if let Some(path) = extract_path_param(params) {
+            let canonical = canonicalize_for_read_tracking(&path);
+            self.recently_read_files.lock().unwrap().insert(canonical);
+        }
+    }
+}
+
+// ── Read-before-edit helpers ─────────────────────────────────────────────────
+
+const WRITE_TOOLS: &[&str] = &[
+    "edit_file",
+    "write_file",
+    "append_file",
+    "create_file",
+    "delete_file",
+    "update_file",
+    "move_file",
+];
+
+const READ_TOOLS: &[&str] = &["read_file", "read_text"];
+
+fn is_write_tool(name: &str) -> bool {
+    WRITE_TOOLS.contains(&name)
+}
+
+fn is_read_tool(name: &str) -> bool {
+    READ_TOOLS.contains(&name)
+}
+
+fn extract_path_param(params: &ToolParameters) -> Option<String> {
+    params
+        .get("path")
+        .or_else(|| params.get("file_path"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn canonicalize_for_read_tracking(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string())
 }

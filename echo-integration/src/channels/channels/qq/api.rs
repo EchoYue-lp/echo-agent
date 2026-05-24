@@ -91,10 +91,9 @@ impl TokenManager {
             .map_err(|e| ChannelError::NetworkError(format!("QQ token request failed: {}", e)))?;
 
         if !res.status().is_success() {
-            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(format!(
-                "QQ token request failed with status {}",
-                res.status()
-            )))));
+            return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
+                format!("QQ token request failed with status {}", res.status()),
+            ))));
         }
 
         let json: serde_json::Value = res.json().await.map_err(|e| {
@@ -286,10 +285,9 @@ pub async fn send_qq_message(
     if !status.is_success() {
         let error_text = res.text().await.unwrap_or_default();
         warn!("QQ message send failed (status {}): {}", status, error_text);
-        return Err(ReactError::Channel(Box::new(ChannelError::SendError(format!(
-            "QQ message send failed (status {}): {}",
-            status, error_text
-        )))));
+        return Err(ReactError::Channel(Box::new(ChannelError::SendError(
+            format!("QQ message send failed (status {}): {}", status, error_text),
+        ))));
     }
 
     debug!("QQ message sent to {} ({:?})", to, chat_type);

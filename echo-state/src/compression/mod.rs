@@ -558,7 +558,11 @@ mod tests {
         let messages = result.messages;
         println!("压缩后消息数：{}", messages.len());
         for m in &messages {
-            println!("  [{}] {}", m.role.as_str(), m.content.as_text_ref().unwrap_or(""));
+            println!(
+                "  [{}] {}",
+                m.role.as_str(),
+                m.content.as_text_ref().unwrap_or("")
+            );
         }
         Ok(())
     }

@@ -79,10 +79,8 @@ impl TokenBudget {
     /// Maximum tokens available for conversation history.
     /// This is what remains after all allocations and the safety margin.
     pub fn conversation_budget(&self) -> usize {
-        let allocated = self.system_prompt_pct
-            + self.tool_defs_pct
-            + self.output_pct
-            + self.safety_pct;
+        let allocated =
+            self.system_prompt_pct + self.tool_defs_pct + self.output_pct + self.safety_pct;
         let remaining = (1.0 - allocated).max(0.0);
         (self.total_window as f64 * remaining) as usize
     }
@@ -307,8 +305,9 @@ pub fn context_window_for_model(model: &str) -> usize {
 /// [`context_window_for_model`] heuristic.  Call
 /// [`register_model_window`] at startup to override or extend the
 /// defaults for custom or newly-released models.
-static MODEL_WINDOW_REGISTRY: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static MODEL_WINDOW_REGISTRY: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, usize>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Register a model name → context window size mapping.
 /// Takes priority over the heuristics in [`context_window_for_model`].

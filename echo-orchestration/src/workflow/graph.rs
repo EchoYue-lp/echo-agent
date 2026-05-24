@@ -320,7 +320,8 @@ impl GraphBuilder {
     /// toward the parent's step limit.
     pub fn add_subgraph_node(mut self, name: impl Into<String>, subgraph: Graph) -> Self {
         let name = name.into();
-        self.nodes.insert(name.clone(), Node::subgraph(&name, subgraph));
+        self.nodes
+            .insert(name.clone(), Node::subgraph(&name, subgraph));
         self
     }
 
@@ -432,37 +433,49 @@ impl GraphBuilder {
         })?;
 
         if !self.nodes.contains_key(&entry) {
-            return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                format!("Entry node '{}' not found in graph", entry),
-            ))));
+            return Err(ReactError::Agent(Box::new(
+                AgentError::InitializationFailed(format!(
+                    "Entry node '{}' not found in graph",
+                    entry
+                )),
+            )));
         }
 
         // Verify all nodes referenced by edges exist
         for edge in &self.edges {
             if !self.nodes.contains_key(&edge.from) {
-                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                    format!("Edge from unknown node '{}'", edge.from),
-                ))));
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::InitializationFailed(format!(
+                        "Edge from unknown node '{}'",
+                        edge.from
+                    )),
+                )));
             }
             match &edge.kind {
                 EdgeKind::Fixed(to) if to != Graph::END && !self.nodes.contains_key(to) => {
-                    return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                        format!("Edge to unknown node '{}'", to),
-                    ))));
+                    return Err(ReactError::Agent(Box::new(
+                        AgentError::InitializationFailed(format!("Edge to unknown node '{}'", to)),
+                    )));
                 }
                 EdgeKind::Fixed(_) => {}
                 EdgeKind::Parallel { targets, then } => {
                     for t in targets {
                         if !self.nodes.contains_key(t) {
-                            return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                                format!("Parallel target node '{}' not found", t),
-                            ))));
+                            return Err(ReactError::Agent(Box::new(
+                                AgentError::InitializationFailed(format!(
+                                    "Parallel target node '{}' not found",
+                                    t
+                                )),
+                            )));
                         }
                     }
                     if then != Graph::END && !self.nodes.contains_key(then) {
-                        return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                            format!("Parallel 'then' node '{}' not found", then),
-                        ))));
+                        return Err(ReactError::Agent(Box::new(
+                            AgentError::InitializationFailed(format!(
+                                "Parallel 'then' node '{}' not found",
+                                then
+                            )),
+                        )));
                     }
                 }
                 _ => {}
@@ -477,13 +490,13 @@ impl GraphBuilder {
             // Disallow multiple ordinary outgoing edges (Fixed / Conditional) from the same node,
             // because resolve_next() only takes the first edge; the rest would be silently discarded.
             if !entry.is_empty() {
-                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                    format!(
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::InitializationFailed(format!(
                         "Node '{}' has multiple outgoing edges; only one edge per node is supported \
                          (use a Conditional edge for branching, or a Parallel edge for fan-out)",
                         from,
-                    ),
-                ))));
+                    )),
+                )));
             }
             entry.push(edge);
         }
@@ -570,9 +583,9 @@ impl Graph {
                     steps = step_count,
                     "Graph execution exceeded max steps"
                 );
-                return Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
-                    self.max_steps,
-                ))));
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::MaxIterationsExceeded(self.max_steps),
+                )));
             }
 
             // Check termination condition
@@ -698,9 +711,9 @@ impl Graph {
                     steps = step_count,
                     "Graph execution exceeded max steps"
                 );
-                return Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
-                    self.max_steps,
-                ))));
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::MaxIterationsExceeded(self.max_steps),
+                )));
             }
 
             // Check interrupt_before
@@ -894,9 +907,9 @@ impl Graph {
         // Continue execution
         loop {
             if step_count >= self.max_steps {
-                return Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
-                    self.max_steps,
-                ))));
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::MaxIterationsExceeded(self.max_steps),
+                )));
             }
 
             // Check interrupt_before (skip, as it has already been handled)
@@ -1134,7 +1147,9 @@ impl Graph {
     }
 
     /// List checkpoints filtered by graph name (this graph).
-    pub async fn list_checkpoints_by_graph(&self) -> Result<Vec<super::checkpoint_store::CheckpointInfo>> {
+    pub async fn list_checkpoints_by_graph(
+        &self,
+    ) -> Result<Vec<super::checkpoint_store::CheckpointInfo>> {
         self.checkpoint_store.list_by_graph(&self.name).await
     }
 
@@ -1279,12 +1294,12 @@ impl Graph {
                 if self.finish_nodes.contains(&current.to_string()) {
                     return Ok(NextStep::End);
                 }
-                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                    format!(
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::InitializationFailed(format!(
                         "Node '{}' has no outgoing edges and is not a finish node",
                         current
-                    ),
-                ))));
+                    )),
+                )));
             }
         };
 

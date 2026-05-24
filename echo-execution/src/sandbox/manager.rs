@@ -169,12 +169,12 @@ impl SandboxManager {
         let actual = executor.isolation_level();
         if actual < required {
             if !self.allow_fallback {
-                return Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::PermissionDenied(format!(
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::PermissionDenied(format!(
                         "Cannot downgrade from {} to {}: no executor meets the required isolation level",
                         required, actual
-                    ))),
-                ));
+                    )),
+                )));
             }
 
             warn!(
@@ -245,12 +245,12 @@ impl SandboxManager {
         }
 
         // 不允许降级，直接拒绝
-        Err(echo_core::error::ReactError::Sandbox(
-            Box::new(SandboxError::Unavailable(format!(
+        Err(echo_core::error::ReactError::Sandbox(Box::new(
+            SandboxError::Unavailable(format!(
                 "Isolation level {} required but no executor meets the requirement",
                 required
-            ))),
-        ))
+            )),
+        )))
     }
 
     /// 列出可用的沙箱层

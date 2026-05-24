@@ -305,9 +305,9 @@ impl K8sSandbox {
             }
             Ok(Err(e)) => {
                 self.delete_pod(&pod_name).await;
-                Err(echo_core::error::ReactError::Sandbox(
-                    Box::new(SandboxError::IoError(format!("kubectl IO error: {e}"))),
-                ))
+                Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(format!("kubectl IO error: {e}")),
+                )))
             }
             Err(_) => {
                 // 超时时删除 Pod 并等待确认

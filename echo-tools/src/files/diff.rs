@@ -47,6 +47,13 @@ impl Tool for DiffTool {
         "Compare two files or a file against a string, returning a unified diff. Use path_a + path_b to compare two files, or path_a + content_b to compare a file against given content."
     }
 
+    fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+        vec![echo_core::tools::permission::ToolPermission::Read]
+    }
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",

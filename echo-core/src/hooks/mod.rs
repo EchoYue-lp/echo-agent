@@ -10,4 +10,3 @@ pub use types::{
     CompressHookStats, HookContext, HookEvent, HookEventCategory, HookResult, HookSource,
     UnifiedHookExecutorFn,
 };
-pub use types::LifecycleHookExecutorFn;

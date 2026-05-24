@@ -311,10 +311,13 @@ impl LlmClient for DefaultLlmClient {
     }
 
     fn chat_simple(&self, messages: Vec<Message>) -> BoxFuture<'_, Result<String>> {
-        self.chat_simple_with_options(messages, echo_core::llm::SimpleChatOptions {
-            temperature: Some(0.3),
-            max_tokens: Some(2048),
-        })
+        self.chat_simple_with_options(
+            messages,
+            echo_core::llm::SimpleChatOptions {
+                temperature: Some(0.3),
+                max_tokens: Some(2048),
+            },
+        )
     }
 
     fn chat_simple_with_options(

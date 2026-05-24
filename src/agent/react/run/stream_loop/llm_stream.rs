@@ -5,7 +5,7 @@ use crate::error::{ReactError, Result};
 use crate::llm::stream_chat;
 use crate::llm::types::Message;
 use futures::stream::BoxStream;
-use tracing::{info, Instrument};
+use tracing::{Instrument, info};
 
 impl ReactAgent {
     /// Create streaming LLM request (with retries and circuit breaker).
@@ -21,11 +21,7 @@ impl ReactAgent {
         let agent = &self.config.agent_name;
         let tools_for_stream: Option<Vec<_>> = if self.config.enable_tool {
             let tools = self.tools.tool_manager.get_openai_tools();
-            if tools.is_empty() {
-                None
-            } else {
-                Some(tools)
-            }
+            if tools.is_empty() { None } else { Some(tools) }
         } else {
             None
         };
@@ -41,8 +37,12 @@ impl ReactAgent {
         info!(agent = %agent, model = %model_name, "Creating LLM streaming request");
 
         let circuit_breaker = self.guard.circuit_breaker.clone();
-        let stream_result =
-            super::super::retry::retry_llm_call(agent, max_retries, retry_delay, &circuit_breaker, || {
+        let stream_result = super::super::retry::retry_llm_call(
+            agent,
+            max_retries,
+            retry_delay,
+            &circuit_breaker,
+            || {
                 let client = client.clone();
                 let model_name = model_name.clone();
                 let messages = messages.clone();
@@ -63,8 +63,9 @@ impl ReactAgent {
                     )
                     .await
                 }
-            })
-            .await;
+            },
+        )
+        .await;
 
         let stream = stream_result?;
         Ok(Box::pin(stream))

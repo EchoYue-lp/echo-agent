@@ -141,9 +141,7 @@ impl<'a> SearchQuery<'a> {
         Self {
             text,
             limit,
-            mode: SearchMode::Hybrid {
-                vector_weight: 0.5,
-            },
+            mode: SearchMode::Hybrid { vector_weight: 0.5 },
         }
     }
 

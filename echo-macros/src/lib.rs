@@ -36,7 +36,9 @@ use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{DeriveInput, FnArg, ImplItem, ItemFn, ItemImpl, LitStr, Pat, ReturnType, parse_macro_input};
+use syn::{
+    DeriveInput, FnArg, ImplItem, ItemFn, ItemImpl, LitStr, Pat, ReturnType, parse_macro_input,
+};
 
 fn echo_agent_crate_path() -> syn::Result<syn::Path> {
     match crate_name("echo_agent").map_err(|e| syn::Error::new(Span::call_site(), e.to_string()))? {

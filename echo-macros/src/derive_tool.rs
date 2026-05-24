@@ -27,21 +27,17 @@
 //! - `ReadFileToolParams` struct with `Deserialize + JsonSchema`
 //! - Full `impl Tool for ReadFileTool` (name, description, parameters, execute, etc.)
 
-use proc_macro2::TokenStream;
 use proc_macro_crate;
+use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{
-    Attribute, Data, DeriveInput, Fields, Ident, LitStr, Token,
-};
+use syn::{Attribute, Data, DeriveInput, Fields, Ident, LitStr, Token};
 
 /// Resolve the echo-agent (or echo-core) crate path for code generation.
 /// Tries `echo_core` first (for crates that only depend on echo-core),
 /// then falls back to `echo_agent` (the facade crate).
 fn resolve_echo_crate_path() -> syn::Result<syn::Path> {
     match proc_macro_crate::crate_name("echo_core") {
-        Ok(proc_macro_crate::FoundCrate::Itself) => {
-            Ok(syn::parse_quote!(::echo_core))
-        }
+        Ok(proc_macro_crate::FoundCrate::Itself) => Ok(syn::parse_quote!(::echo_core)),
         Ok(proc_macro_crate::FoundCrate::Name(name)) => {
             let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
             Ok(syn::parse_quote!(::#ident))
@@ -49,9 +45,7 @@ fn resolve_echo_crate_path() -> syn::Result<syn::Path> {
         Err(_) => {
             // Fallback to echo_agent (facade)
             match proc_macro_crate::crate_name("echo_agent") {
-                Ok(proc_macro_crate::FoundCrate::Itself) => {
-                    Ok(syn::parse_quote!(::echo_agent))
-                }
+                Ok(proc_macro_crate::FoundCrate::Itself) => Ok(syn::parse_quote!(::echo_agent)),
                 Ok(proc_macro_crate::FoundCrate::Name(name)) => {
                     let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
                     Ok(syn::parse_quote!(::#ident))
@@ -500,4 +494,3 @@ fn generate_unit_tool(
         }
     })
 }
-

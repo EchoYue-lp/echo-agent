@@ -167,10 +167,16 @@ impl McpTransport for StdioTransport {
             {
                 let mut stdin = self.stdin.lock().await;
                 stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                    ReactError::Mcp(Box::new(McpError::ProtocolError(format!("写入 stdin 失败: {}", e))))
+                    ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+                        "写入 stdin 失败: {}",
+                        e
+                    ))))
                 })?;
                 stdin.flush().await.map_err(|e| {
-                    ReactError::Mcp(Box::new(McpError::ProtocolError(format!("flush stdin 失败: {}", e))))
+                    ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+                        "flush stdin 失败: {}",
+                        e
+                    ))))
                 })?;
             }
 
@@ -204,10 +210,16 @@ impl McpTransport for StdioTransport {
 
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                ReactError::Mcp(Box::new(McpError::ProtocolError(format!("写入通知失败: {}", e))))
+                ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+                    "写入通知失败: {}",
+                    e
+                ))))
             })?;
             stdin.flush().await.map_err(|e| {
-                ReactError::Mcp(Box::new(McpError::ProtocolError(format!("flush 通知失败: {}", e))))
+                ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+                    "flush 通知失败: {}",
+                    e
+                ))))
             })?;
             Ok(())
         })

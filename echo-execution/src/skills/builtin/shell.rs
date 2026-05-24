@@ -90,7 +90,7 @@ impl Skill for ShellSkill {
              - `rm`, `mv`, `cp`, `curl`, `wget`, `npm`, `pip`, etc.\n\n\
              **Permanently forbidden (hard security policy):**\n\
              - `sudo`, `dd`, `chmod`, `reboot`, `shutdown`, etc.\n\n\
-             **Note**: Only execute one command at a time; use `&&` to chain combined operations."
+             **Note**: Only execute one command at a time. Shell metacharacters (pipe, semicolon, ampersand, dollar sign, backtick, redirects) are not allowed; use separate tool calls for multiple operations."
                 .to_string(),
         )
     }

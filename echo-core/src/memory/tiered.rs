@@ -120,7 +120,11 @@ impl TieredMemory {
     ///
     /// This is a best-effort sync operation; actual deletion requires async.
     pub fn prune_candidates(&self, items: &[StoreItem]) -> Vec<String> {
-        items.iter().filter(|i| should_prune(i)).map(|i| i.key.clone()).collect()
+        items
+            .iter()
+            .filter(|i| should_prune(i))
+            .map(|i| i.key.clone())
+            .collect()
     }
 
     /// Sort and truncate a list of items using decayed importance scoring.

@@ -257,22 +257,31 @@ impl DagWorkflowBuilder {
 
         for edge in &self.edges {
             if !node_ids.contains(edge.from.as_str()) {
-                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                    format!("DAG edge references unknown node: '{}'", edge.from),
-                ))));
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::InitializationFailed(format!(
+                        "DAG edge references unknown node: '{}'",
+                        edge.from
+                    )),
+                )));
             }
             if !node_ids.contains(edge.to.as_str()) {
-                return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                    format!("DAG edge references unknown node: '{}'", edge.to),
-                ))));
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::InitializationFailed(format!(
+                        "DAG edge references unknown node: '{}'",
+                        edge.to
+                    )),
+                )));
             }
         }
 
         let node_list: Vec<String> = self.nodes.iter().map(|(id, _)| id.clone()).collect();
         if let Some(cycle) = detect_cycle(&node_list, &self.edges) {
-            return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-                format!("DAG contains cycle: {}", cycle.join(" → ")),
-            ))));
+            return Err(ReactError::Agent(Box::new(
+                AgentError::InitializationFailed(format!(
+                    "DAG contains cycle: {}",
+                    cycle.join(" → ")
+                )),
+            )));
         }
 
         let topo_order = topological_sort(&node_list, &self.edges)?;
@@ -349,9 +358,11 @@ fn topological_sort(nodes: &[String], edges: &[DagEdge]) -> Result<Vec<String>> 
     }
 
     if order.len() != nodes.len() {
-        return Err(ReactError::Agent(Box::new(AgentError::InitializationFailed(
-            "DAG contains a cycle (topological sort incomplete)".to_string(),
-        ))));
+        return Err(ReactError::Agent(Box::new(
+            AgentError::InitializationFailed(
+                "DAG contains a cycle (topological sort incomplete)".to_string(),
+            ),
+        )));
     }
 
     Ok(order)

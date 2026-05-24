@@ -4,7 +4,8 @@
 
 use echo_core::error::{Result, ToolError};
 use echo_core::sandbox::{SandboxCommand, SandboxExecutor};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use shlex::split as shlex_split;
@@ -301,6 +302,14 @@ impl Tool for ShellTool {
 
     fn description(&self) -> &str {
         "Execute restricted shell commands (only safe read-only operations and code-related commands are allowed). Parameter: command - the command to execute. Note: only simple commands (program + args) are supported; pipes, redirects, command substitution, and other shell syntax are not allowed."
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Execute]
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::Dangerous
     }
 
     fn parameters(&self) -> Value {

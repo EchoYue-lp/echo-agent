@@ -150,7 +150,9 @@ impl TokenUsage {
     pub fn add(&mut self, prompt: u32, completion: u32) {
         self.prompt_tokens = self.prompt_tokens.saturating_add(prompt);
         self.completion_tokens = self.completion_tokens.saturating_add(completion);
-        self.total_tokens = self.total_tokens.saturating_add(prompt.saturating_add(completion));
+        self.total_tokens = self
+            .total_tokens
+            .saturating_add(prompt.saturating_add(completion));
     }
 }
 

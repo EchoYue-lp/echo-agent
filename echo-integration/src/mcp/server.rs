@@ -694,19 +694,23 @@ async fn write_response(
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
     response: &JsonRpcResponse,
 ) -> Result<()> {
-    let line = serde_json::to_string(response)
-        .map_err(|e| ReactError::Mcp(Box::new(McpError::ProtocolError(format!("序列化响应失败: {e}")))))?
-        + "\n";
+    let line = serde_json::to_string(response).map_err(|e| {
+        ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+            "序列化响应失败: {e}"
+        ))))
+    })? + "\n";
 
     let mut stdout = stdout.lock().await;
-    stdout
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| ReactError::Mcp(Box::new(McpError::ProtocolError(format!("写入 stdout 失败: {e}")))))?;
-    stdout
-        .flush()
-        .await
-        .map_err(|e| ReactError::Mcp(Box::new(McpError::ProtocolError(format!("flush stdout 失败: {e}")))))?;
+    stdout.write_all(line.as_bytes()).await.map_err(|e| {
+        ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+            "写入 stdout 失败: {e}"
+        ))))
+    })?;
+    stdout.flush().await.map_err(|e| {
+        ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
+            "flush stdout 失败: {e}"
+        ))))
+    })?;
 
     Ok(())
 }

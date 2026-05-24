@@ -228,9 +228,9 @@ impl ChannelPlugin for QqChannel {
             .as_ref()
             .is_some_and(|h| h.is_finished())
         {
-            return Err(ReactError::Channel(Box::new(ChannelError::ConnectionError(
-                "QQ Bot gateway task has terminated".to_string(),
-            ))));
+            return Err(ReactError::Channel(Box::new(
+                ChannelError::ConnectionError("QQ Bot gateway task has terminated".to_string()),
+            )));
         }
         if let Some(ref tm) = self.token_manager {
             tm.get_token().await?;

@@ -328,9 +328,9 @@ impl ChannelPlugin for FeishuChannel {
 
     async fn health_check(&self) -> Result<()> {
         if self.task_handle.as_ref().is_some_and(|h| h.is_finished()) {
-            return Err(ReactError::Channel(Box::new(ChannelError::ConnectionError(
-                "Feishu channel task has terminated".to_string(),
-            ))));
+            return Err(ReactError::Channel(Box::new(
+                ChannelError::ConnectionError("Feishu channel task has terminated".to_string()),
+            )));
         }
         if let Some(ref tm) = self.token_manager {
             tm.get_token().await?;

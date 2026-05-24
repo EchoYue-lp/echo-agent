@@ -330,94 +330,337 @@ impl HookContext {
 
     // ── Factory methods for tool events ──
 
-    pub fn for_pre_tool_use(tool_name: &str, tool_input: &Value, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PreToolUse, session_id: session_id.to_string(), agent_name: agent_name.to_string(), tool_name: Some(tool_name.to_string()), tool_input: Some(tool_input.clone()), ..Self::default() }
+    pub fn for_pre_tool_use(
+        tool_name: &str,
+        tool_input: &Value,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PreToolUse,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            tool_name: Some(tool_name.to_string()),
+            tool_input: Some(tool_input.clone()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_post_tool_use(tool_name: &str, tool_input: &Value, tool_output: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PostToolUse, session_id: session_id.to_string(), agent_name: agent_name.to_string(), tool_name: Some(tool_name.to_string()), tool_input: Some(tool_input.clone()), tool_output: Some(tool_output.to_string()), ..Self::default() }
+    pub fn for_post_tool_use(
+        tool_name: &str,
+        tool_input: &Value,
+        tool_output: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PostToolUse,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            tool_name: Some(tool_name.to_string()),
+            tool_input: Some(tool_input.clone()),
+            tool_output: Some(tool_output.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_post_tool_use_failure(tool_name: &str, tool_input: &Value, tool_error: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PostToolUseFailure, session_id: session_id.to_string(), agent_name: agent_name.to_string(), tool_name: Some(tool_name.to_string()), tool_input: Some(tool_input.clone()), tool_error: Some(tool_error.to_string()), ..Self::default() }
+    pub fn for_post_tool_use_failure(
+        tool_name: &str,
+        tool_input: &Value,
+        tool_error: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PostToolUseFailure,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            tool_name: Some(tool_name.to_string()),
+            tool_input: Some(tool_input.clone()),
+            tool_error: Some(tool_error.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_permission_request(tool_name: &str, tool_input: &Value, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PermissionRequest, session_id: session_id.to_string(), agent_name: agent_name.to_string(), tool_name: Some(tool_name.to_string()), tool_input: Some(tool_input.clone()), ..Self::default() }
+    pub fn for_permission_request(
+        tool_name: &str,
+        tool_input: &Value,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PermissionRequest,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            tool_name: Some(tool_name.to_string()),
+            tool_input: Some(tool_input.clone()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_permission_denied(tool_name: &str, tool_input: &Value, denial_reason: &str, retry_allowed: bool, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PermissionDenied, session_id: session_id.to_string(), agent_name: agent_name.to_string(), tool_name: Some(tool_name.to_string()), tool_input: Some(tool_input.clone()), denial_reason: Some(denial_reason.to_string()), retry_allowed: Some(retry_allowed), ..Self::default() }
+    pub fn for_permission_denied(
+        tool_name: &str,
+        tool_input: &Value,
+        denial_reason: &str,
+        retry_allowed: bool,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PermissionDenied,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            tool_name: Some(tool_name.to_string()),
+            tool_input: Some(tool_input.clone()),
+            denial_reason: Some(denial_reason.to_string()),
+            retry_allowed: Some(retry_allowed),
+            ..Self::default()
+        }
     }
 
     // ── Factory methods for lifecycle events ──
 
     pub fn for_session_start(matcher: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::SessionStart, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(matcher.to_string()), ..Self::default() }
+        Self {
+            event: HookEvent::SessionStart,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(matcher.to_string()),
+            ..Self::default()
+        }
     }
 
     pub fn for_session_end(matcher: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::SessionEnd, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(matcher.to_string()), ..Self::default() }
+        Self {
+            event: HookEvent::SessionEnd,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(matcher.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_stop(matcher: Option<&str>, session_id: &str, agent_name: &str, stop_hook_active: bool) -> Self {
-        Self { event: HookEvent::Stop, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: matcher.map(|s| s.to_string()), stop_hook_active: Some(stop_hook_active), ..Self::default() }
+    pub fn for_stop(
+        matcher: Option<&str>,
+        session_id: &str,
+        agent_name: &str,
+        stop_hook_active: bool,
+    ) -> Self {
+        Self {
+            event: HookEvent::Stop,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: matcher.map(|s| s.to_string()),
+            stop_hook_active: Some(stop_hook_active),
+            ..Self::default()
+        }
     }
 
     pub fn for_notification(matcher: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::Notification, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(matcher.to_string()), ..Self::default() }
+        Self {
+            event: HookEvent::Notification,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(matcher.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_user_prompt_submit(prompt: &str, matcher: Option<&str>, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::UserPromptSubmit, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: matcher.map(|s| s.to_string()), prompt: Some(prompt.to_string()), ..Self::default() }
+    pub fn for_user_prompt_submit(
+        prompt: &str,
+        matcher: Option<&str>,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::UserPromptSubmit,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: matcher.map(|s| s.to_string()),
+            prompt: Some(prompt.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_pre_compact(stats: &CompressHookStats, matcher: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PreCompact, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(matcher.to_string()), compress_stats: Some(stats.clone()), ..Self::default() }
+    pub fn for_pre_compact(
+        stats: &CompressHookStats,
+        matcher: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PreCompact,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(matcher.to_string()),
+            compress_stats: Some(stats.clone()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_post_compact(stats: &CompressHookStats, matcher: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PostCompact, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(matcher.to_string()), compress_stats: Some(stats.clone()), ..Self::default() }
+    pub fn for_post_compact(
+        stats: &CompressHookStats,
+        matcher: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PostCompact,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(matcher.to_string()),
+            compress_stats: Some(stats.clone()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_config_change(config_path: &str, matcher: Option<&str>, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::ConfigChange, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: matcher.map(|s| s.to_string()), config_path: Some(config_path.to_string()), ..Self::default() }
+    pub fn for_config_change(
+        config_path: &str,
+        matcher: Option<&str>,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::ConfigChange,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: matcher.map(|s| s.to_string()),
+            config_path: Some(config_path.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_instructions_loaded(matcher: &str, skill_names: &[String], session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::InstructionsLoaded, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(matcher.to_string()), skill_names: Some(skill_names.to_vec()), ..Self::default() }
+    pub fn for_instructions_loaded(
+        matcher: &str,
+        skill_names: &[String],
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::InstructionsLoaded,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(matcher.to_string()),
+            skill_names: Some(skill_names.to_vec()),
+            ..Self::default()
+        }
     }
 
     // ── Factory methods for aggregation events ──
 
-    pub fn for_post_tool_batch(batch_tool_names: &[String], success_count: usize, failure_count: usize, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::PostToolBatch, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(batch_tool_names.join("|")), batch_tool_names: Some(batch_tool_names.to_vec()), batch_success_count: Some(success_count), batch_failure_count: Some(failure_count), ..Self::default() }
+    pub fn for_post_tool_batch(
+        batch_tool_names: &[String],
+        success_count: usize,
+        failure_count: usize,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PostToolBatch,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(batch_tool_names.join("|")),
+            batch_tool_names: Some(batch_tool_names.to_vec()),
+            batch_success_count: Some(success_count),
+            batch_failure_count: Some(failure_count),
+            ..Self::default()
+        }
     }
 
     // ── Factory methods for subagent events ──
 
-    pub fn for_subagent_start(subagent_name: &str, subagent_mode: &str, task: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::SubagentStart, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(subagent_name.to_string()), subagent_name: Some(subagent_name.to_string()), subagent_mode: Some(subagent_mode.to_string()), subagent_task: Some(task.to_string()), ..Self::default() }
+    pub fn for_subagent_start(
+        subagent_name: &str,
+        subagent_mode: &str,
+        task: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::SubagentStart,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(subagent_name.to_string()),
+            subagent_name: Some(subagent_name.to_string()),
+            subagent_mode: Some(subagent_mode.to_string()),
+            subagent_task: Some(task.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_subagent_stop(subagent_name: &str, subagent_mode: &str, result: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::SubagentStop, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(subagent_name.to_string()), subagent_name: Some(subagent_name.to_string()), subagent_mode: Some(subagent_mode.to_string()), subagent_result: Some(result.to_string()), ..Self::default() }
+    pub fn for_subagent_stop(
+        subagent_name: &str,
+        subagent_mode: &str,
+        result: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::SubagentStop,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(subagent_name.to_string()),
+            subagent_name: Some(subagent_name.to_string()),
+            subagent_mode: Some(subagent_mode.to_string()),
+            subagent_result: Some(result.to_string()),
+            ..Self::default()
+        }
     }
 
     // ── Factory methods for task events ──
 
-    pub fn for_task_created(task_id: &str, task_subject: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::TaskCreated, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(task_subject.to_string()), task_id: Some(task_id.to_string()), task_subject: Some(task_subject.to_string()), ..Self::default() }
+    pub fn for_task_created(
+        task_id: &str,
+        task_subject: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::TaskCreated,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(task_subject.to_string()),
+            task_id: Some(task_id.to_string()),
+            task_subject: Some(task_subject.to_string()),
+            ..Self::default()
+        }
     }
 
-    pub fn for_task_completed(task_id: &str, task_subject: &str, result: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::TaskCompleted, session_id: session_id.to_string(), agent_name: agent_name.to_string(), matcher: Some(task_subject.to_string()), task_id: Some(task_id.to_string()), task_subject: Some(task_subject.to_string()), task_result: Some(result.to_string()), ..Self::default() }
+    pub fn for_task_completed(
+        task_id: &str,
+        task_subject: &str,
+        result: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::TaskCompleted,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(task_subject.to_string()),
+            task_id: Some(task_id.to_string()),
+            task_subject: Some(task_subject.to_string()),
+            task_result: Some(result.to_string()),
+            ..Self::default()
+        }
     }
 
     // ── Factory methods for error events ──
 
-    pub fn for_stop_failure(failure_error: &str, failure_category: &str, session_id: &str, agent_name: &str) -> Self {
-        Self { event: HookEvent::StopFailure, session_id: session_id.to_string(), agent_name: agent_name.to_string(), failure_error: Some(failure_error.to_string()), failure_category: Some(failure_category.to_string()), ..Self::default() }
+    pub fn for_stop_failure(
+        failure_error: &str,
+        failure_category: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::StopFailure,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            failure_error: Some(failure_error.to_string()),
+            failure_category: Some(failure_category.to_string()),
+            ..Self::default()
+        }
     }
 }
 
@@ -519,12 +762,8 @@ impl std::fmt::Display for HookSource {
 /// `SubagentStart`/`SubagentStop` events into the unified system.
 ///
 /// Handles Lifecycle, Subagent, and Task events (not just Lifecycle).
-pub type UnifiedHookExecutorFn = Arc<
-    dyn Fn(HookContext) -> Pin<Box<dyn Future<Output = HookResult> + Send>> + Send + Sync,
->;
-
-#[deprecated(since = "1.1.0", note = "Use `UnifiedHookExecutorFn` instead")]
-pub type LifecycleHookExecutorFn = UnifiedHookExecutorFn;
+pub type UnifiedHookExecutorFn =
+    Arc<dyn Fn(HookContext) -> Pin<Box<dyn Future<Output = HookResult> + Send>> + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
@@ -533,12 +772,30 @@ mod tests {
     #[test]
     fn test_hook_event_category() {
         assert_eq!(HookEvent::PreToolUse.category(), HookEventCategory::Tool);
-        assert_eq!(HookEvent::PermissionDenied.category(), HookEventCategory::Tool);
-        assert_eq!(HookEvent::SessionStart.category(), HookEventCategory::Lifecycle);
-        assert_eq!(HookEvent::PostToolBatch.category(), HookEventCategory::Lifecycle);
-        assert_eq!(HookEvent::InstructionsLoaded.category(), HookEventCategory::Lifecycle);
-        assert_eq!(HookEvent::SubagentStart.category(), HookEventCategory::Subagent);
-        assert_eq!(HookEvent::SubagentStop.category(), HookEventCategory::Subagent);
+        assert_eq!(
+            HookEvent::PermissionDenied.category(),
+            HookEventCategory::Tool
+        );
+        assert_eq!(
+            HookEvent::SessionStart.category(),
+            HookEventCategory::Lifecycle
+        );
+        assert_eq!(
+            HookEvent::PostToolBatch.category(),
+            HookEventCategory::Lifecycle
+        );
+        assert_eq!(
+            HookEvent::InstructionsLoaded.category(),
+            HookEventCategory::Lifecycle
+        );
+        assert_eq!(
+            HookEvent::SubagentStart.category(),
+            HookEventCategory::Subagent
+        );
+        assert_eq!(
+            HookEvent::SubagentStop.category(),
+            HookEventCategory::Subagent
+        );
         assert_eq!(HookEvent::TaskCreated.category(), HookEventCategory::Task);
         assert_eq!(HookEvent::TaskCompleted.category(), HookEventCategory::Task);
         assert_eq!(HookEvent::StopFailure.category(), HookEventCategory::Error);
@@ -603,7 +860,12 @@ mod tests {
     #[test]
     fn test_hook_context_for_permission_denied() {
         let ctx = HookContext::for_permission_denied(
-            "Bash", &serde_json::json!({"command": "rm -rf /"}), "unsafe command", true, "sess-1", "agent",
+            "Bash",
+            &serde_json::json!({"command": "rm -rf /"}),
+            "unsafe command",
+            true,
+            "sess-1",
+            "agent",
         );
         assert_eq!(ctx.event, HookEvent::PermissionDenied);
         assert_eq!(ctx.tool_name.as_deref(), Some("Bash"));
@@ -614,7 +876,10 @@ mod tests {
     #[test]
     fn test_hook_context_for_stop_failure() {
         let ctx = HookContext::for_stop_failure(
-            "MaxIterationsExceeded", "max_iterations", "sess-1", "agent",
+            "MaxIterationsExceeded",
+            "max_iterations",
+            "sess-1",
+            "agent",
         );
         assert_eq!(ctx.event, HookEvent::StopFailure);
         assert_eq!(ctx.failure_error.as_deref(), Some("MaxIterationsExceeded"));
@@ -634,7 +899,11 @@ mod tests {
     #[test]
     fn test_hook_context_for_subagent() {
         let ctx = HookContext::for_subagent_start(
-            "coder", "sync", "implement feature X", "sess-1", "agent",
+            "coder",
+            "sync",
+            "implement feature X",
+            "sess-1",
+            "agent",
         );
         assert_eq!(ctx.event, HookEvent::SubagentStart);
         assert_eq!(ctx.subagent_name.as_deref(), Some("coder"));
@@ -687,6 +956,9 @@ mod tests {
         let ctx = HookContext::for_subagent_start("test", "sync", "task", "", "");
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(executor(ctx));
-        assert_eq!(result.injected_context, Some("subagent context".to_string()));
+        assert_eq!(
+            result.injected_context,
+            Some("subagent context".to_string())
+        );
     }
 }

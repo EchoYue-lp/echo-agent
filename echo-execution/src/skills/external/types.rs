@@ -431,20 +431,6 @@ pub struct LegacyResourceRef {
 
 // -- Backward compatibility aliases --
 
-#[deprecated(note = "Use SkillDescriptor instead")]
-pub type SkillMeta = SkillDescriptor;
-
-#[deprecated(note = "Use LegacyResourceRef instead")]
-pub type ResourceRef = LegacyResourceRef;
-
-/// Legacy loaded skill struct (kept for API compatibility).
-#[deprecated(note = "Use SkillContent instead")]
-#[derive(Debug, Clone)]
-pub struct LoadedSkill {
-    pub meta: SkillDescriptor,
-    pub skill_dir: PathBuf,
-}
-
 // -- Tests --
 
 #[cfg(test)]

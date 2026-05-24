@@ -395,9 +395,6 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
 
 // -- Backward compatibility --
 
-#[deprecated(note = "Use SkillRegistry instead")]
-pub type SkillManager = SkillRegistry;
-
 // -- Tests --
 
 #[cfg(test)]
