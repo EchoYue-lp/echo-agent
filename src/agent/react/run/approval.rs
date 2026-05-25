@@ -223,9 +223,16 @@ impl ReactAgent {
     #[cfg(not(feature = "human-loop"))]
     pub(crate) async fn check_tool_approval(
         &self,
-        _tool_name: &str,
+        tool_name: &str,
         _input: &Value,
     ) -> Result<Option<Value>> {
+        // Record PermissionDecision trace event (allowed — no human-loop)
+        self.record_trace_event(crate::trace::RunEvent::PermissionDecision {
+            tool: tool_name.to_string(),
+            decision: "allow".into(),
+            reason: "Permission check passed (no human-loop)".into(),
+        })
+        .await;
         Ok(None)
     }
 

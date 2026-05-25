@@ -11,8 +11,6 @@ use crate::agent::AgentEvent;
 use crate::error::{AgentError, ReactError, Result};
 use crate::llm::types::Message;
 use crate::tools::ToolParameters;
-use echo_core::circuit_breaker::CircuitBreaker;
-use echo_core::tools::permission::PermissionPolicy;
 use futures::StreamExt;
 use futures::future::join_all;
 use serde_json::Value;
@@ -21,10 +19,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span};
 
+// Default stream buffer capacity
+const DEFAULT_STREAM_BUFFER: usize = 256;
+
 macro_rules! yield_event {
     ($tx:expr, $event:expr) => {
-        if $tx.send(Ok($event)).is_err() {
-            return Ok(());
+        match $tx.try_send(Ok($event)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Channel full — drop event and log
+                tracing::warn!("Stream buffer full ({}), dropping event", DEFAULT_STREAM_BUFFER);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Ok(());
+            }
         }
     };
 }
@@ -33,7 +41,7 @@ macro_rules! try_send {
         match $fallible {
             Ok(v) => v,
             Err(e) => {
-                let _ = $tx.send(Err(e.into()));
+                let _ = $tx.try_send(Err(e.into()));
                 return Ok(());
             }
         }
@@ -49,7 +57,7 @@ impl ReactAgent {
         init: StreamInit,
         mode: StreamMode,
     ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
-        let (tx, rx) = mpsc::unbounded_channel::<Result<AgentEvent>>();
+        let (tx, rx) = mpsc::channel::<Result<AgentEvent>>(self.config.stream_buffer_size);
         let context = self.memory.context.clone();
         let text = init.text.clone();
         let message = init.message.clone();
@@ -61,87 +69,39 @@ impl ReactAgent {
             self.prepare_stream_context(mode, &init.text).await
         };
 
-        let snap = AgentSnapshot::from_agent(self);
+        // Start trace run for streaming path
+        self.start_trace_run(&text).await;
+
+        let mut snap = make_snapshot(self);
+        // Pass current run_id from the agent to the snapshot
+        snap.current_run_id = self.current_run_id.lock().unwrap().clone();
 
         tokio::spawn(async move {
             if let Err(e) = snap
                 .run_loop(context, text, message, label, mode, recalled, tx.clone())
                 .await
             {
-                let _ = tx.send(Err(e));
+                let _ = tx.try_send(Err(e));
             }
         });
 
         Ok(Box::pin(
-            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+            tokio_stream::wrappers::ReceiverStream::new(rx),
         ))
     }
 }
 
 // ── AgentSnapshot ────────────────────────────────────────────────────
 
-#[derive(Clone)]
-struct AgentSnapshot {
-    agent_name: String,
-    callbacks: Vec<Arc<dyn crate::agent::AgentCallback>>,
-    max_iterations: usize,
-    session_id: Option<String>,
-    model_name: String,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-    tool_error_feedback: bool,
-    force_read_before_edit: bool,
-    enable_tool: bool,
-    llm_max_retries: usize,
-    llm_retry_delay_ms: u64,
-    max_tool_output_tokens: Option<usize>,
-    tool_execution: crate::tools::ToolExecutionConfig,
-    hook_registry: Arc<tokio::sync::RwLock<crate::skills::hooks::HookRegistry>>,
-    tool_manager: Arc<crate::tools::ToolManager>,
-    permission_policy: Option<Arc<dyn PermissionPolicy>>,
-    audit_logger: Option<Arc<dyn crate::audit::AuditLogger>>,
-    circuit_breaker: Option<Arc<CircuitBreaker>>,
-    checkpointer: Option<Arc<dyn crate::memory::checkpointer::Checkpointer>>,
-    snapshot_manager: Arc<std::sync::RwLock<Option<crate::memory::snapshot::SnapshotManager>>>,
-    client: Arc<reqwest::Client>,
-    cancel_token: Option<crate::agent::CancellationToken>,
-    recently_read_files: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    #[cfg(feature = "human-loop")]
-    permission_service: Option<Arc<crate::human_loop::PermissionService>>,
+// AgentSnapshot is now AgentRunSnapshot from crate::agent::snapshot
+use crate::agent::snapshot::AgentRunSnapshot as AgentSnapshot;
+
+// Helper to create snapshot from agent (keeps the same API for rest of file)
+fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
+    AgentSnapshot::from_agent(agent)
 }
 
 impl AgentSnapshot {
-    fn from_agent(agent: &ReactAgent) -> Self {
-        Self {
-            agent_name: agent.config.agent_name.clone(),
-            callbacks: agent.config.callbacks.to_vec(),
-            max_iterations: agent.config.max_iterations,
-            session_id: agent.config.session_id.clone(),
-            model_name: agent.config.model_name.clone(),
-            temperature: agent.config.temperature,
-            max_tokens: agent.config.max_tokens,
-            tool_error_feedback: agent.config.tool_error_feedback,
-            force_read_before_edit: agent.config.force_read_before_edit,
-            enable_tool: agent.config.enable_tool,
-            llm_max_retries: agent.config.llm_max_retries,
-            llm_retry_delay_ms: agent.config.llm_retry_delay_ms,
-            max_tool_output_tokens: agent.config.max_tool_output_tokens,
-            tool_execution: agent.config.tool_execution.clone(),
-            hook_registry: agent.tools.hook_registry.clone(),
-            tool_manager: Arc::clone(&agent.tools.tool_manager),
-            permission_policy: agent.guard.permission_policy.clone(),
-            audit_logger: agent.guard.audit_logger.clone(),
-            circuit_breaker: agent.guard.circuit_breaker.clone(),
-            checkpointer: agent.memory.checkpointer.clone(),
-            snapshot_manager: agent.memory.snapshot_manager.clone(),
-            client: agent.client().clone(),
-            cancel_token: None,
-            recently_read_files: Arc::clone(&agent.recently_read_files),
-            #[cfg(feature = "human-loop")]
-            permission_service: agent.approval.permission_service.clone(),
-        }
-    }
-
     // ── Main loop ────────────────────────────────────────────────────
 
     async fn run_loop(
@@ -152,10 +112,10 @@ impl AgentSnapshot {
         label: String,
         mode: StreamMode,
         recalled: usize,
-        tx: mpsc::UnboundedSender<Result<AgentEvent>>,
+        tx: mpsc::Sender<Result<AgentEvent>>,
     ) -> Result<()> {
-        let agent = self.agent_name.clone();
-        let callbacks = self.callbacks.clone();
+        let agent = self.config.agent_name.clone();
+        let callbacks = self.config.callbacks.clone();
 
         match mode {
             StreamMode::Execute => info!(agent = %agent, "Agent streaming task execution{label}"),
@@ -166,10 +126,10 @@ impl AgentSnapshot {
         }
 
         // Audit: user input
-        if let Some(al) = &self.audit_logger {
+        if let Some(al) = &self.guard.audit_logger {
             let event = crate::audit::AuditEvent::now(
-                self.session_id.clone(),
-                self.agent_name.clone(),
+                self.config.session_id.clone(),
+                self.config.agent_name.clone(),
                 crate::audit::AuditEventType::UserInput {
                     content: text.clone(),
                 },
@@ -182,10 +142,10 @@ impl AgentSnapshot {
             let hook_ctx = crate::skills::hooks::HookContext::for_user_prompt_submit(
                 &text,
                 None,
-                self.session_id.as_deref().unwrap_or(""),
-                &self.agent_name,
+                self.config.session_id.as_deref().unwrap_or(""),
+                &self.config.agent_name,
             );
-            let registry = self.hook_registry.read().await.clone();
+            let registry = self.tools.hook_registry.read().await.clone();
             let result = registry.run_lifecycle_hooks(&hook_ctx).await;
             if result.block {
                 yield_event!(
@@ -209,7 +169,7 @@ impl AgentSnapshot {
 
         let mut stop_hook_continued = false;
 
-        for iteration in 0..self.max_iterations {
+        for iteration in 0..self.config.max_iterations {
             for cb in &callbacks {
                 cb.on_iteration(&agent, iteration).await;
             }
@@ -238,10 +198,10 @@ impl AgentSnapshot {
                 let hc = crate::skills::hooks::HookContext::for_post_compact(
                     &hs,
                     "auto",
-                    self.session_id.as_deref().unwrap_or(""),
-                    &self.agent_name,
+                    self.config.session_id.as_deref().unwrap_or(""),
+                    &self.config.agent_name,
                 );
-                let reg = self.hook_registry.read().await.clone();
+                let reg = self.tools.hook_registry.read().await.clone();
                 let r = reg.run_lifecycle_hooks(&hc).await;
                 if let Some(c) = &r.injected_context {
                     context
@@ -350,7 +310,7 @@ impl AgentSnapshot {
                 ) = (vec![], steps);
 
                 if !conc.is_empty() {
-                    let mc = self.tool_manager.max_concurrency();
+                    let mc = self.tools.tool_manager.max_concurrency();
                     let snapshot = self.clone();
                     let futs: Vec<_> = conc
                         .iter()
@@ -372,7 +332,7 @@ impl AgentSnapshot {
                         })
                         .collect();
                     let bt = super::retry::compute_concurrent_tool_batch_timeout(
-                        &self.tool_execution,
+                        &self.config.tool_execution,
                         futs.len(),
                         mc,
                     );
@@ -501,10 +461,10 @@ impl AgentSnapshot {
                     .await
                     .push(Message::assistant(content_buffer.clone()));
                 self.auto_snapshot(&context, iteration).await;
-                if let Some(al) = &self.audit_logger {
+                if let Some(al) = &self.guard.audit_logger {
                     let ev = crate::audit::AuditEvent::now(
-                        self.session_id.clone(),
-                        self.agent_name.clone(),
+                        self.config.session_id.clone(),
+                        self.config.agent_name.clone(),
                         crate::audit::AuditEventType::FinalAnswer {
                             content: content_buffer.clone(),
                         },
@@ -512,14 +472,21 @@ impl AgentSnapshot {
                     let _ = al.log(ev).await;
                 }
                 self.save_checkpoint(&context).await;
+                // Finalize trace before moving content_buffer into the event
+                self.finalize_run(
+                    crate::trace::RunStatus::Completed,
+                    Some(&content_buffer),
+                    None,
+                )
+                .await;
                 yield_event!(tx, AgentEvent::FinalAnswer(content_buffer));
                 let hc = crate::skills::hooks::HookContext::for_stop(
                     None,
-                    self.session_id.as_deref().unwrap_or(""),
-                    &self.agent_name,
+                    self.config.session_id.as_deref().unwrap_or(""),
+                    &self.config.agent_name,
                     stop_hook_continued,
                 );
-                let reg = self.hook_registry.read().await.clone();
+                let reg = self.tools.hook_registry.read().await.clone();
                 let sr = reg.run_lifecycle_hooks(&hc).await;
                 if let Some(reason) = &sr.continue_reason {
                     if !stop_hook_continued {
@@ -538,9 +505,15 @@ impl AgentSnapshot {
                 .await;
                 return Ok(());
             } else {
-                let _ = tx.send(Err(ReactError::Agent(Box::new(AgentError::NoResponse {
-                    model: self.model_name.clone(),
-                    agent: self.agent_name.clone(),
+                self.finalize_run(
+                    crate::trace::RunStatus::Failed,
+                    None,
+                    Some("No response from LLM"),
+                )
+                .await;
+                let _ = tx.try_send(Err(ReactError::Agent(Box::new(AgentError::NoResponse {
+                    model: self.config.model_name.clone(),
+                    agent: self.config.agent_name.clone(),
                 }))));
                 return Ok(());
             }
@@ -556,8 +529,14 @@ impl AgentSnapshot {
             Some("max_iterations"),
         )
         .await;
-        let _ = tx.send(Err(ReactError::Agent(Box::new(
-            AgentError::MaxIterationsExceeded(self.max_iterations),
+        self.finalize_run(
+            crate::trace::RunStatus::Failed,
+            None,
+            Some("Max iterations exceeded"),
+        )
+        .await;
+        let _ = tx.try_send(Err(ReactError::Agent(Box::new(
+            AgentError::MaxIterationsExceeded(self.config.max_iterations),
         ))));
         Ok(())
     }
@@ -568,21 +547,21 @@ impl AgentSnapshot {
         &self,
         messages: Vec<Message>,
     ) -> Result<impl futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>>> {
-        let tools = if self.enable_tool {
-            let t = self.tool_manager.get_openai_tools();
+        let tools = if self.config.enable_tool {
+            let t = self.tools.tool_manager.get_openai_tools();
             if t.is_empty() { None } else { Some(t) }
         } else {
             None
         };
         let cancel = self.cancel_token.clone();
         super::retry::retry_llm_call(
-            &self.agent_name,
-            self.llm_max_retries,
-            self.llm_retry_delay_ms,
-            &self.circuit_breaker,
+            &self.config.agent_name,
+            self.config.llm_max_retries,
+            self.config.llm_retry_delay_ms,
+            &self.guard.circuit_breaker,
             || {
                 let c = self.client.clone();
-                let m = self.model_name.clone();
+                let m = self.config.model_name.clone();
                 let ms = messages.clone();
                 let t = tools.clone();
                 let ct = cancel.clone();
@@ -591,8 +570,8 @@ impl AgentSnapshot {
                         c,
                         &m,
                         ms,
-                        self.temperature,
-                        self.max_tokens,
+                        self.config.temperature,
+                        self.config.max_tokens,
                         t,
                         None,
                         None,
@@ -606,7 +585,7 @@ impl AgentSnapshot {
     }
 
     async fn truncate_output(&self, output: String) -> String {
-        let Some(mt) = self.max_tool_output_tokens else {
+        let Some(mt) = self.config.max_tool_output_tokens else {
             return output;
         };
         if output.chars().count() / 3 <= mt {
@@ -623,13 +602,13 @@ impl AgentSnapshot {
     }
 
     async fn fire_hook(&self, event: crate::skills::hooks::HookEvent, matcher: Option<&str>) {
-        let sid = self.session_id.clone().unwrap_or_default();
+        let sid = self.config.session_id.clone().unwrap_or_default();
         let hc = match event {
             crate::skills::hooks::HookEvent::SessionEnd => {
                 crate::skills::hooks::HookContext::for_session_end(
                     matcher.unwrap_or("other"),
                     &sid,
-                    &self.agent_name,
+                    &self.config.agent_name,
                 )
             }
             crate::skills::hooks::HookEvent::PreCompact => {
@@ -637,7 +616,7 @@ impl AgentSnapshot {
                     &Default::default(),
                     matcher.unwrap_or("auto"),
                     &sid,
-                    &self.agent_name,
+                    &self.config.agent_name,
                 )
             }
             crate::skills::hooks::HookEvent::StopFailure => {
@@ -645,12 +624,12 @@ impl AgentSnapshot {
                     "",
                     matcher.unwrap_or(""),
                     &sid,
-                    &self.agent_name,
+                    &self.config.agent_name,
                 )
             }
             _ => return,
         };
-        let reg = self.hook_registry.read().await.clone();
+        let reg = self.tools.hook_registry.read().await.clone();
         let _ = reg.run_lifecycle_hooks(&hc).await;
     }
 
@@ -678,7 +657,7 @@ impl AgentSnapshot {
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
     ) {
-        if let (Some(cp), Some(sid)) = (&self.checkpointer, &self.session_id) {
+        if let (Some(cp), Some(sid)) = (&self.checkpointer, &self.config.session_id) {
             let ctx = context.lock().await;
             let state = crate::memory::ThreadState {
                 messages: ctx.messages().to_vec(),
@@ -702,6 +681,7 @@ impl AgentSnapshot {
                 return false;
             }
             let perms = self
+                .tools
                 .tool_manager
                 .get_tool(tool_name)
                 .map(|t| t.permissions())
@@ -712,8 +692,9 @@ impl AgentSnapshot {
                 .unwrap_or(PermissionDecision::RequireApproval)
                 .requires_approval();
         }
-        if let Some(pol) = &self.permission_policy {
+        if let Some(pol) = &self.guard.permission_policy {
             let perms = self
+                .tools
                 .tool_manager
                 .get_tool(tool_name)
                 .map(|t| t.permissions())
@@ -743,16 +724,16 @@ impl AgentSnapshot {
         output: &str,
         _iteration: usize,
         stop_hook_continued: bool,
-        tx: mpsc::UnboundedSender<Result<AgentEvent>>,
+        tx: mpsc::Sender<Result<AgentEvent>>,
     ) -> Result<()> {
         for cb in &callbacks {
             cb.on_final_answer(&agent, output).await;
         }
         info!(agent = %agent, "Streaming execution completed{label}");
-        if let Some(al) = &self.audit_logger {
+        if let Some(al) = &self.guard.audit_logger {
             let ev = crate::audit::AuditEvent::now(
-                self.session_id.clone(),
-                self.agent_name.clone(),
+                self.config.session_id.clone(),
+                self.config.agent_name.clone(),
                 crate::audit::AuditEventType::FinalAnswer {
                     content: output.to_string(),
                 },
@@ -763,11 +744,11 @@ impl AgentSnapshot {
         yield_event!(tx, AgentEvent::FinalAnswer(output.to_string()));
         let hc = crate::skills::hooks::HookContext::for_stop(
             None,
-            self.session_id.as_deref().unwrap_or(""),
-            &self.agent_name,
+            self.config.session_id.as_deref().unwrap_or(""),
+            &self.config.agent_name,
             stop_hook_continued,
         );
-        let reg = self.hook_registry.read().await.clone();
+        let reg = self.tools.hook_registry.read().await.clone();
         let sr = reg.run_lifecycle_hooks(&hc).await;
         if let Some(reason) = &sr.continue_reason {
             if !stop_hook_continued {
@@ -797,9 +778,9 @@ impl AgentSnapshot {
         input: &Value,
     ) -> std::result::Result<String, crate::error::ReactError> {
         // ── PreToolUse hooks ──
-        let hook_reg = self.hook_registry.read().await.clone();
+        let hook_reg = self.tools.hook_registry.read().await.clone();
         let pre_result = hook_reg
-            .run_pre_tool_use(tool_name, input, self.session_id.as_deref().unwrap_or(""))
+            .run_pre_tool_use(tool_name, input, self.config.session_id.as_deref().unwrap_or(""))
             .await;
         if pre_result.block {
             let reason = pre_result
@@ -819,10 +800,10 @@ impl AgentSnapshot {
 
         self.validate_read_before_edit(tool_name, &effective_params)?;
         // ── Business audit: tool start ──
-        if let Some(al) = &self.audit_logger {
+        if let Some(al) = &self.guard.audit_logger {
             let ev = crate::audit::AuditEvent::now(
-                self.session_id.clone(),
-                self.agent_name.clone(),
+                self.config.session_id.clone(),
+                self.config.agent_name.clone(),
                 crate::audit::AuditEventType::ToolCall {
                     tool: tool_name.to_string(),
                     input: effective_input.clone(),
@@ -835,7 +816,23 @@ impl AgentSnapshot {
         }
 
         // ── Execute ──
+        let call_id = format!("call_{}", uuid::Uuid::new_v4());
+        // Redact secrets from args before recording
+        let safe_args = Some(serde_json::from_str(
+            &crate::security::redact_secrets(&serde_json::to_string(&effective_input).unwrap_or_default())
+        ).unwrap_or(effective_input.clone()));
+        // Record ToolCall trace event
+        self.record_event(crate::trace::RunEvent::ToolCall {
+            call_id: call_id.clone(),
+            name: tool_name.to_string(),
+            args: safe_args,
+            risk: None,
+            duration_ms: 0,
+        })
+        .await;
+
         let result = match self
+            .tools
             .tool_manager
             .execute_tool(tool_name, effective_params.clone())
             .await
@@ -843,11 +840,18 @@ impl AgentSnapshot {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = e.to_string();
+                // Record ToolError trace event
+                self.record_event(crate::trace::RunEvent::ToolError {
+                    call_id: call_id.clone(),
+                    name: tool_name.to_string(),
+                    message: err_msg.clone(),
+                })
+                .await;
                 // Audit failure
-                if let Some(al) = &self.audit_logger {
+                if let Some(al) = &self.guard.audit_logger {
                     let ev = crate::audit::AuditEvent::now(
-                        self.session_id.clone(),
-                        self.agent_name.clone(),
+                        self.config.session_id.clone(),
+                        self.config.agent_name.clone(),
                         crate::audit::AuditEventType::ToolCall {
                             tool: tool_name.to_string(),
                             input: effective_input.clone(),
@@ -859,7 +863,7 @@ impl AgentSnapshot {
                     let _ = al.log(ev).await;
                 }
                 // Error softening
-                if self.tool_error_feedback && tool_name != TOOL_FINAL_ANSWER {
+                if self.config.tool_error_feedback && tool_name != TOOL_FINAL_ANSWER {
                     return Ok(format!(
                         "[Tool error] {e}\nTry adjusting parameters or using another tool."
                     ));
@@ -867,6 +871,18 @@ impl AgentSnapshot {
                 return Err(crate::error::ReactError::from(e));
             }
         };
+
+        // Record ToolResult trace event
+        self.record_event(crate::trace::RunEvent::ToolResult {
+            call_id: call_id.clone(),
+            name: tool_name.to_string(),
+            success: result.success,
+            output_preview: Some(result.output.chars().take(200).collect()),
+            output_truncated: false,
+            duration_ms: 0,
+        })
+        .await;
+
         if result.success {
             self.record_file_read_if_needed(tool_name, &effective_params);
         }
@@ -877,7 +893,7 @@ impl AgentSnapshot {
                 tool_name,
                 &effective_input,
                 &result.output,
-                self.session_id.as_deref().unwrap_or(""),
+                self.config.session_id.as_deref().unwrap_or(""),
             )
             .await;
         if post_result.block {
@@ -897,18 +913,21 @@ impl AgentSnapshot {
         tool_name: &str,
         params: &ToolParameters,
     ) -> std::result::Result<(), crate::error::ReactError> {
-        if !self.force_read_before_edit || !is_write_tool(tool_name) {
+        if !self.config.force_read_before_edit || !is_write_tool(tool_name) {
             return Ok(());
         }
 
         if let Some(path) = extract_path_param(params) {
             let canonical = canonicalize_for_read_tracking(&path);
-            if !self
-                .recently_read_files
-                .lock()
-                .unwrap()
-                .contains(&canonical)
-            {
+            let ttl = std::time::Duration::from_secs(30 * 60);
+            let mut files = self.recently_read_files.lock().unwrap();
+            let read = match files.get(&canonical) {
+                Some(instant) if instant.elapsed() < ttl => true,
+                Some(_) => { files.remove(&canonical); false }
+                None => false,
+            };
+            drop(files);
+            if !read {
                 return Err(crate::error::ReactError::Other(format!(
                     "Read-before-edit is enabled. File '{}' has not been read in this conversation turn. Use read_file to read it first, then retry this operation.",
                     path
@@ -920,13 +939,13 @@ impl AgentSnapshot {
     }
 
     fn record_file_read_if_needed(&self, tool_name: &str, params: &ToolParameters) {
-        if !self.force_read_before_edit || !is_read_tool(tool_name) {
+        if !self.config.force_read_before_edit || !is_read_tool(tool_name) {
             return;
         }
 
         if let Some(path) = extract_path_param(params) {
             let canonical = canonicalize_for_read_tracking(&path);
-            self.recently_read_files.lock().unwrap().insert(canonical);
+            self.recently_read_files.lock().unwrap().insert(canonical, std::time::Instant::now());
         }
     }
 }

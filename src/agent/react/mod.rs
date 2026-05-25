@@ -48,7 +48,7 @@ use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -134,10 +134,31 @@ pub struct ReactAgent {
     /// with events, token usage, and timings.
     pub run_store: Option<Arc<dyn crate::trace::RunStore>>,
 
+    /// The currently active run ID. Set at the start of `run_react_loop` or
+    /// streaming execution; cleared when the run completes. Used to associate
+    /// trace events with the correct run.
+    pub current_run_id: std::sync::Mutex<Option<String>>,
+
+    /// Optional tool execution pipeline. When set, `execute_tool_feedback_raw`
+    /// delegates to this pipeline instead of the inline implementation.
+    pub(crate) tool_execution_pipeline: Option<Arc<run::pipeline::ToolExecutionPipeline>>,
+
+    /// Optional context assembler for centralized message list construction.
+    pub(crate) context_assembler: Option<crate::context::ContextAssembler>,
+
+    /// Current agent turn (if one is in progress).
+    pub(crate) current_turn: std::sync::Mutex<Option<crate::agent::turn::AgentTurn>>,
+
     /// Tracks absolute file paths that have been successfully read during the
-    /// current conversation turn. Used by the read-before-edit enforcement
-    /// when `config.force_read_before_edit` is true.
-    recently_read_files: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// current conversation turn, along with the instant of the read.
+    /// Used by the read-before-edit enforcement when `config.force_read_before_edit`
+    /// is true. Entries are evicted when they exceed the TTL (30 min) or when
+    /// the set exceeds `MAX_READ_FILES`.
+    pub(crate) recently_read_files: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
+
+    /// File content cache for avoiding repeated disk reads.
+    #[allow(dead_code)]
+    pub(crate) file_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -183,11 +204,16 @@ impl ReactAgent {
     pub fn new(config: AgentConfig) -> Self {
         let system_prompt = Self::build_system_prompt(&config);
 
-        let context = Arc::new(tokio::sync::Mutex::new(
-            ContextManager::builder(config.token_limit)
-                .with_system(system_prompt)
-                .build(),
-        ));
+        let mut ctx_builder = ContextManager::builder(config.token_limit)
+            .with_system(system_prompt.clone());
+
+        // Wire TokenBudget if configured
+        if config.token_budget_config.enabled {
+            let budget = config.token_budget_config.build(config.token_limit);
+            ctx_builder = ctx_builder.budget(budget);
+        }
+
+        let context = Arc::new(tokio::sync::Mutex::new(ctx_builder.build()));
 
         let mut tool_manager = ToolManager::new_with_config(config.tool_execution.clone());
         let client = reqwest::Client::builder()
@@ -197,6 +223,8 @@ impl ReactAgent {
 
         // ── Core tools ─────────────────────────────────────────────
         tool_manager.register(Box::new(FinalAnswerTool));
+        tool_manager.register(Box::new(crate::tools::builtin::todo::TodoWriteTool));
+        tool_manager.register(Box::new(crate::tools::builtin::memory_write::MemoryWriteTool));
 
         // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
@@ -307,7 +335,12 @@ impl ReactAgent {
             llm_config: None,
             cancel_token: tokio::sync::Mutex::new(None),
             run_store: None,
-            recently_read_files: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            current_run_id: std::sync::Mutex::new(None),
+            tool_execution_pipeline: None,
+            context_assembler: None,
+            current_turn: std::sync::Mutex::new(None),
+            recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            file_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -874,29 +907,101 @@ impl ReactAgent {
         self.memory.context.lock().await.set_messages(messages);
     }
 
+    const MAX_READ_FILES: usize = 1024;
+    /// TTL for recently-read-file entries (30 minutes).
+    const READ_FILES_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
     /// Record that a file was successfully read (for read-before-edit enforcement).
+    /// Caps at MAX_READ_FILES entries to prevent unbounded growth in long sessions.
+    /// Entries exceeding the TTL are lazily evicted.
     pub(crate) fn record_file_read(&self, path: &str) {
         if self.config.force_read_before_edit {
-            self.recently_read_files
-                .lock()
-                .unwrap()
-                .insert(path.to_string());
+            let mut files = self.recently_read_files.lock().unwrap();
+            files.insert(path.to_string(), std::time::Instant::now());
+            // Evict expired entries first
+            let ttl = Self::READ_FILES_TTL;
+            files.retain(|_, instant| instant.elapsed() < ttl);
+            // Cap: if still over limit, remove oldest entries
+            if files.len() > Self::MAX_READ_FILES {
+                let mut entries: Vec<(String, std::time::Instant)> = files.drain().collect();
+                entries.sort_by_key(|(_, t)| *t);
+                let keep = entries.into_iter().rev().take(Self::MAX_READ_FILES);
+                files.extend(keep);
+            }
         }
     }
 
-    /// Check whether a file was read in the current conversation turn.
+    /// Check whether a file was read in the current conversation turn and is
+    /// still within the TTL window.
     /// Returns `true` if read-before-edit is disabled, or if the path was
-    /// previously recorded via [`record_file_read`].
+    /// previously recorded via [`record_file_read`] and hasn't expired.
     pub(crate) fn was_file_read(&self, path: &str) -> bool {
         if !self.config.force_read_before_edit {
             return true; // enforcement disabled — allow all
         }
-        self.recently_read_files.lock().unwrap().contains(path)
+        let mut files = self.recently_read_files.lock().unwrap();
+        match files.get(path) {
+            Some(instant) if instant.elapsed() < Self::READ_FILES_TTL => true,
+            Some(_) => {
+                // Expired — remove it
+                files.remove(path);
+                false
+            }
+            None => false,
+        }
     }
 
     /// Clear the read-files set at the start of a new conversation turn.
     pub(crate) fn clear_read_files(&self) {
         self.recently_read_files.lock().unwrap().clear();
+    }
+
+    // ── Trace / run recording ─────────────────────────────────────────────────
+
+    /// Record a trace event to the current run (if a run store is attached).
+    /// Also publishes trace lifecycle to global event bus for audit subscribers.
+    pub(crate) async fn record_trace_event(&self, event: crate::trace::RunEvent) {
+        let run_id = self.current_run_id.lock().unwrap().clone();
+        if let (Some(store), Some(run_id)) = (&self.run_store, &run_id) {
+            let _ = store.append_event(run_id, event).await;
+        }
+    }
+
+    /// Start a new trace run and set it as the current run.
+    pub(crate) async fn start_trace_run(&self, input: &str) {
+        if let Some(ref store) = self.run_store {
+            let run_id = format!("run_{}", uuid::Uuid::new_v4());
+            let run = crate::trace::Run {
+                run_id: run_id.clone(),
+                parent_run_id: None,
+                session_id: self.config.session_id.clone().unwrap_or_default(),
+                status: crate::trace::RunStatus::Running,
+                input: input.to_string(),
+                events: vec![],
+                final_output: None,
+                error: None,
+                token_usage: crate::trace::TokenUsage::default(),
+                timings: crate::trace::RunTimings::default(),
+                started_at: chrono::Utc::now(),
+                finished_at: None,
+            };
+            *self.current_run_id.lock().unwrap() = Some(run_id);
+            let _ = store.save(run).await;
+        }
+    }
+
+    /// Finalize the current trace run (completed or failed).
+    pub(crate) async fn finalize_trace_run(&self, status: crate::trace::RunStatus, output: Option<&str>, error: Option<&str>) {
+        let run_id = self.current_run_id.lock().unwrap().take();
+        if let (Some(store), Some(run_id)) = (&self.run_store, run_id) {
+            if let Ok(Some(mut run)) = store.load(&run_id).await {
+                run.status = status;
+                run.final_output = output.map(|s| s.to_string());
+                run.error = error.map(|s| s.to_string());
+                run.finished_at = Some(chrono::Utc::now());
+                let _ = store.save(run).await;
+            }
+        }
     }
 
     /// Shut down the agent and release all resources.
@@ -921,6 +1026,27 @@ impl ReactAgent {
     ///
     /// # Panics
     /// Panics if `max` is 0 (the loop would never execute).
+    /// Get a reference to the shared context manager (for stats/display).
+    pub fn context(&self) -> &Arc<tokio::sync::Mutex<crate::compression::ContextManager>> {
+        &self.memory.context
+    }
+
+    /// Get the maximum number of iterations.
+    pub fn max_iterations(&self) -> usize {
+        self.config.max_iterations
+    }
+
+    /// Enable or disable plan mode (read-only tools).
+    pub fn set_plan_mode(&mut self, enabled: bool) {
+        self.config.plan_mode = enabled;
+    }
+
+
+    /// Check if plan mode is active.
+    pub fn is_plan_mode(&self) -> bool {
+        self.config.plan_mode
+    }
+
     pub fn set_max_iterations(&mut self, max: usize) {
         assert!(max > 0, "max_iterations must be > 0");
         self.config.max_iterations = max;
@@ -1013,6 +1139,10 @@ impl Agent for ReactAgent {
 
     fn model_name(&self) -> &str {
         &self.config.model_name
+    }
+
+    fn current_run_id(&self) -> Option<String> {
+        self.current_run_id.lock().unwrap().clone()
     }
 
     fn system_prompt(&self) -> &str {

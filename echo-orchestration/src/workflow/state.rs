@@ -40,8 +40,20 @@ pub type StateResult<T> = std::result::Result<T, StateError>;
 
 #[derive(Debug)]
 pub enum StateError {
+    /// Serialization or deserialization failure.
     Serialize(String),
+    /// A lock was poisoned (another thread panicked while holding it).
     LockPoisoned(String),
+    /// A type mismatch occurred when deserializing a stored value.
+    TypeMismatch {
+        key: String,
+        expected: String,
+        found: String,
+    },
+    /// A required key is missing from the state.
+    MissingKey(String),
+    /// An invalid operation was attempted (e.g., fork on empty state).
+    InvalidOperation(String),
 }
 
 impl std::fmt::Display for StateError {
@@ -49,6 +61,16 @@ impl std::fmt::Display for StateError {
         match self {
             StateError::Serialize(e) => write!(f, "Serialization failed: {e}"),
             StateError::LockPoisoned(e) => write!(f, "Lock poisoned: {e}"),
+            StateError::TypeMismatch {
+                key,
+                expected,
+                found,
+            } => write!(
+                f,
+                "Type mismatch for key '{key}': expected {expected}, found {found}"
+            ),
+            StateError::MissingKey(key) => write!(f, "Missing key: '{key}'"),
+            StateError::InvalidOperation(msg) => write!(f, "Invalid operation: {msg}"),
         }
     }
 }
@@ -57,7 +79,15 @@ impl std::error::Error for StateError {}
 
 impl From<StateError> for ReactError {
     fn from(e: StateError) -> Self {
-        ReactError::Other(e.to_string())
+        match e {
+            StateError::Serialize(msg) => ReactError::Other(format!("State serialization error: {msg}")),
+            StateError::LockPoisoned(msg) => ReactError::Other(format!("State lock poisoned: {msg}")),
+            StateError::TypeMismatch { key, expected, found } => ReactError::Other(format!(
+                "State type mismatch for '{key}': expected {expected}, found {found}"
+            )),
+            StateError::MissingKey(key) => ReactError::Other(format!("State missing key: '{key}'")),
+            StateError::InvalidOperation(msg) => ReactError::Other(format!("State invalid operation: {msg}")),
+        }
     }
 }
 

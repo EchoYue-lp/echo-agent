@@ -15,8 +15,11 @@ pub mod conversation;
 pub mod core_memory;
 pub mod decay;
 pub mod embedder;
+pub mod scope;
 pub mod store;
 pub mod tiered;
+
+pub use scope::MemoryScope;
 
 pub use checkpointer::{Checkpoint, Checkpointer, ThreadState};
 pub use conversation::{

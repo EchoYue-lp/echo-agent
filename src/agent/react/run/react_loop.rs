@@ -292,13 +292,23 @@ impl ReactAgent {
             debug!(agent = %agent, "🧠 LLM returned only reasoning content or empty response, continue iterating");
         }
 
-        let prompt_tokens = usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0) as usize;
+        let prompt_tokens = usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0);
         let completion_tokens = usage
             .as_ref()
             .and_then(|u| u.completion_tokens)
-            .unwrap_or(0) as usize;
+            .unwrap_or(0);
+
+        // Record trace event
+        self.record_trace_event(crate::trace::RunEvent::LlmCall {
+            messages: messages.len(),
+            prompt_tokens,
+            completion_tokens,
+            duration_ms: 0, // duration tracked by caller
+        })
+        .await;
+
         for cb in &callbacks {
-            cb.on_think_end(&agent, &res, prompt_tokens, completion_tokens)
+            cb.on_think_end(&agent, &res, prompt_tokens as usize, completion_tokens as usize)
                 .await;
         }
 
@@ -517,6 +527,10 @@ impl ReactAgent {
         let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
 
+        // Begin a new agent turn (phase: ReceiveInput)
+        let mut turn = crate::agent::turn::AgentTurn::new(message);
+        *self.current_turn.lock().unwrap() = Some(turn.clone());
+
         // Clear read-before-edit tracking for the new conversation turn
         self.clear_read_files();
 
@@ -543,6 +557,14 @@ impl ReactAgent {
         }
 
         self.log_user_input_audit(message).await;
+
+        // Phase: Recall
+        turn.advance(crate::agent::turn::TurnPhase::Recall);
+        self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
+            phase: "recall".into(),
+            iteration: 0,
+        }).await;
+        *self.current_turn.lock().unwrap() = Some(turn.clone());
 
         // Fire UserPromptSubmit hook
         {
@@ -608,9 +630,25 @@ impl ReactAgent {
             .await
             .push(Message::user(message.to_string()));
 
+        // Start trace run recording
+        self.start_trace_run(message).await;
+
         let mut stop_hook_continued = false;
 
         for iteration in 0..self.config.max_iterations {
+            // Cancel check: if a cancellation token is set and triggered, stop the loop
+            if let Some(ref cancel) = *self.cancel_token.lock().await {
+                if cancel.is_cancelled() {
+                    info!(agent = %agent, "Cancellation requested, stopping ReAct loop");
+                    self.finalize_trace_run(
+                        crate::trace::RunStatus::Cancelled,
+                        None,
+                        Some("Cancelled"),
+                    ).await;
+                    return Ok("Cancelled.".to_string());
+                }
+            }
+
             info!(agent = %agent, iteration = iteration + 1, "🔄 ReAct iteration starting");
 
             for cb in &callbacks {
@@ -618,6 +656,14 @@ impl ReactAgent {
             }
 
             debug!(agent = %agent, iteration = iteration + 1, "--- Iteration ---");
+
+            // Phase: Think
+            turn.advance(crate::agent::turn::TurnPhase::Think);
+            self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
+                phase: "think".into(),
+                iteration: iteration + 1,
+            }).await;
+            *self.current_turn.lock().unwrap() = Some(turn.clone());
 
             let think_model = self.config.model_name.clone();
             let steps = self
@@ -634,6 +680,15 @@ impl ReactAgent {
                 );
                 continue;
             }
+
+            // Phase: Act
+            turn.advance(crate::agent::turn::TurnPhase::Act);
+            turn.record_iteration();
+            self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
+                phase: "act".into(),
+                iteration: iteration + 1,
+            }).await;
+            *self.current_turn.lock().unwrap() = Some(turn.clone());
 
             if let Some(mut answer) = self.process_steps(steps).await? {
                 // Output guard check
@@ -711,6 +766,22 @@ impl ReactAgent {
 
                 self.persist_runtime_state().await;
 
+                // Phase: Finalize
+                turn.advance(crate::agent::turn::TurnPhase::Finalize);
+                self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
+                    phase: "finalize".into(),
+                    iteration: iteration + 1,
+                }).await;
+                *self.current_turn.lock().unwrap() = Some(turn.clone());
+
+                // Finalize trace run as completed
+                self.finalize_trace_run(
+                    crate::trace::RunStatus::Completed,
+                    Some(&answer),
+                    None,
+                )
+                .await;
+
                 return Ok(answer);
             }
 
@@ -738,6 +809,14 @@ impl ReactAgent {
                 warn!(agent = %agent, "StopFailure hook produced output that cannot be injected (terminal path)");
             }
         }
+
+        // Finalize trace run as failed
+        self.finalize_trace_run(
+            crate::trace::RunStatus::Failed,
+            None,
+            Some("Max iterations exceeded"),
+        )
+        .await;
 
         Err(ReactError::from(AgentError::MaxIterationsExceeded(
             self.config.max_iterations,

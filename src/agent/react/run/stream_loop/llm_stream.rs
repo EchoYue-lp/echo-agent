@@ -1,17 +1,18 @@
 //! LLM stream creation — build the HTTP streaming request with retry + circuit breaker.
 
 use super::super::super::ReactAgent;
-use crate::error::{ReactError, Result};
+use crate::error::Result;
 use crate::llm::stream_chat;
 use crate::llm::types::Message;
 use futures::stream::BoxStream;
-use tracing::{Instrument, info};
+use tracing::info;
 
 impl ReactAgent {
     /// Create streaming LLM request (with retries and circuit breaker).
     ///
     /// Returns a `'static` stream because all captured state is cloned
     /// before entering the retry closure.
+    #[allow(dead_code)]
     #[tracing::instrument(skip(self, messages), fields(agent = %self.config.agent_name, model = %self.config.model_name, msg_count = messages.len()))]
     pub(crate) async fn create_llm_stream(
         &self,

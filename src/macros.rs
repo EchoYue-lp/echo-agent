@@ -362,6 +362,6 @@ mod tests {
         assert!(result.is_ok());
 
         let agent = result.unwrap();
-        assert!(agent.tool_names().contains(&"final_answer"));
+        assert!(agent.tool_names().contains(&String::from("final_answer")));
     }
 }

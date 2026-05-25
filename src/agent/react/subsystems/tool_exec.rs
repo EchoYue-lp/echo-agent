@@ -38,16 +38,19 @@ pub(crate) struct ToolExecutionSubsystem {
 
 impl ToolExecutionSubsystem {
     /// Return a clone of the tool manager Arc (for StreamRunner construction).
+    #[allow(dead_code)]
     pub(crate) fn tool_manager_arc(&self) -> Arc<ToolManager> {
         Arc::clone(&self.tool_manager)
     }
 
     #[cfg(feature = "mcp")]
+    #[allow(dead_code)]
     pub(crate) fn mcp_manager_arc(&self) -> Option<Arc<McpManager>> {
         None // McpManager is not Arc-wrapped; use shared registry instead
     }
 
     #[cfg(feature = "subagent")]
+    #[allow(dead_code)]
     pub(crate) fn subagent_registry(&self) -> Option<Arc<SubagentRegistry>> {
         Some(Arc::clone(&self.subagent_registry))
     }
@@ -57,6 +60,7 @@ impl ToolExecutionSubsystem {
         Some(Arc::clone(&self.task_manager))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn progressive_skill_registry(&self) -> Option<SharedRegistry> {
         self.progressive_skill_registry.clone()
     }

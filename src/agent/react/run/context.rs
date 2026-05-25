@@ -484,6 +484,7 @@ impl ReactAgent {
     }
 
     /// Save checkpoint (for chat mode)
+    #[allow(dead_code)]
     pub(crate) async fn save_checkpoint(&self) {
         self.persist_runtime_state().await;
     }

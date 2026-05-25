@@ -2,7 +2,7 @@
 name = "echo_core"
 version = "0.1.4"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT"
 description = "Core traits and types for the echo-agent framework"
 repository = "https://github.com/EchoYue-lp/echo-agent"

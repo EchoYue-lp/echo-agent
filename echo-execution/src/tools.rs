@@ -7,7 +7,10 @@
 use dashmap::DashMap;
 use echo_core::error::{Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
@@ -25,26 +28,44 @@ impl ToolRegistrar for ToolManager {
 pub struct ToolManager {
     tools: DashMap<String, Box<dyn Tool>>,
     config: ToolExecutionConfig,
+    /// Write/execute semaphore (limits concurrent write/execute tools).
     semaphore: Option<Arc<Semaphore>>,
-    cached_definitions: RwLock<Option<Vec<ToolDefinition>>>,
+    /// Read semaphore (higher limit for concurrent read-only tools).
+    read_semaphore: Option<Arc<Semaphore>>,
+    /// Cached tool definitions: `(version, definitions)`.
+    /// Invalidated by bumping `definitions_version`; rebuilt lazily on next access.
+    /// Uses `parking_lot::RwLock` which does not poison on panic.
+    cached_definitions: RwLock<Option<(u64, Vec<ToolDefinition>)>>,
+    /// Monotonically increasing version counter. On register/unregister the
+    /// version is bumped so that the next read rebuilds from the live tool set.
+    definitions_version: AtomicU64,
+    /// Tool result cache: (tool_name, params_json) -> ToolResult.
+    /// Only caches read-only tool results. Cleared on write operations.
+    result_cache: RwLock<HashMap<(String, String), (ToolResult, std::time::Instant)>>,
 }
 
 impl ToolManager {
     pub fn get_openai_tools(&self) -> Vec<ToolDefinition> {
-        if let Some(ref cached) = *self.cached_definitions.read().unwrap() {
-            return cached.clone();
+        let current_version = self.definitions_version.load(Ordering::Acquire);
+        if let Some(ref cached) = *self.cached_definitions.read() {
+            if cached.0 == current_version {
+                return cached.1.clone();
+            }
         }
+        // Version mismatch or cache empty — rebuild.
         let definitions: Vec<ToolDefinition> = self
             .tools
             .iter()
             .map(|entry| ToolDefinition::from_tool(&**entry.value()))
             .collect();
-        *self.cached_definitions.write().unwrap() = Some(definitions.clone());
+        *self.cached_definitions.write() = Some((current_version, definitions.clone()));
         definitions
     }
 
     fn invalidate_cache(&self) {
-        *self.cached_definitions.write().unwrap() = None;
+        self.definitions_version.fetch_add(1, Ordering::Release);
+        // No need to clear cached_definitions — version mismatch will trigger
+        // a lazy rebuild on the next access.
     }
 }
 
@@ -59,8 +80,11 @@ impl ToolManager {
         Self {
             tools: DashMap::new(),
             semaphore: None,
+            read_semaphore: None,
             config: ToolExecutionConfig::default(),
             cached_definitions: RwLock::new(None),
+            definitions_version: AtomicU64::new(0),
+            result_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -68,11 +92,17 @@ impl ToolManager {
         let semaphore = config
             .max_concurrency
             .map(|n| Arc::new(Semaphore::new(n.max(1))));
+        let read_semaphore = config
+            .max_read_concurrency
+            .map(|n| Arc::new(Semaphore::new(n.max(1))));
         Self {
             tools: DashMap::new(),
             semaphore,
+            read_semaphore,
             config,
             cached_definitions: RwLock::new(None),
+            definitions_version: AtomicU64::new(0),
+            result_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -132,21 +162,47 @@ impl ToolManager {
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
 
-        // 并发控制：获取信号量许可
-        let _permit = if let Some(sem) = &self.semaphore {
-            match sem.acquire().await {
-                Ok(permit) => Some(permit),
-                Err(e) => {
-                    tracing::warn!("Failed to acquire semaphore permit: {}", e);
-                    return Err(ToolError::ExecutionFailed {
-                        tool: tool_name.to_string(),
-                        message: format!("Concurrency limit error: {}", e),
-                    }
-                    .into());
+        // 并发控制：获取信号量许可（读/写分离）
+        let is_read = crate::risk::ToolRiskClassifier::classify(tool_name)
+            == crate::risk::ToolRiskCategory::ReadOnly;
+
+        // Check result cache for read-only tools
+        if is_read {
+            let params_json = serde_json::to_string(&parameters).unwrap_or_default();
+            let cache_key = (tool_name.to_string(), params_json);
+            if let Some((result, ts)) = self.result_cache.read().get(&cache_key) {
+                if ts.elapsed() < std::time::Duration::from_secs(60) {
+                    tracing::debug!("Tool result cache hit: {tool_name}");
+                    return Ok(result.clone());
                 }
             }
+        }
+
+        let _permit = if is_read {
+            if let Some(sem) = &self.read_semaphore {
+                match sem.acquire().await {
+                    Ok(permit) => Some(permit),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
         } else {
-            None
+            if let Some(sem) = &self.semaphore {
+                match sem.acquire().await {
+                    Ok(permit) => Some(permit),
+                    Err(e) => {
+                        tracing::warn!("Failed to acquire semaphore permit: {}", e);
+                        return Err(ToolError::ExecutionFailed {
+                            tool: tool_name.to_string(),
+                            message: format!("Concurrency limit error: {}", e),
+                        }
+                        .into());
+                    }
+                }
+            } else {
+                None
+            }
         };
 
         let max_retries = if self.config.retry_on_fail {
@@ -203,23 +259,4 @@ impl ToolManager {
         tool.validate_parameters(parameters).await
     }
 
-    /// Validate tool parameters synchronously.
-    ///
-    /// **Warning:** This uses `block_on()` internally and will **panic** if called
-    /// from within a Tokio runtime. Use [`Self::validate_tool_parameters_async`]
-    /// in async contexts.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use `validate_tool_parameters_async` instead; this method panics inside Tokio"
-    )]
-    pub fn validate_tool_parameters(
-        &self,
-        tool_name: &str,
-        parameters: &ToolParameters,
-    ) -> Result<()> {
-        let tool = self
-            .get_tool(tool_name)
-            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
-        futures::executor::block_on(tool.validate_parameters(parameters))
-    }
 }

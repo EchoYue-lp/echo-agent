@@ -2,7 +2,7 @@
 name = "echo_agent"
 version = "0.1.4"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT"
 description = "Production-grade AI Agent framework for Rust — ReAct engine, multi-agent, memory, streaming, MCP, IM channels, workflows"
 repository = "https://github.com/EchoYue-lp/echo-agent"
@@ -232,6 +232,42 @@ required-features = ["testing"]
 [[example]]
 name = "comprehensive_enterprise"
 required-features = ["testing"]
+
+[[example]]
+name = "demo05_compressor"
+required-features = ["human-loop"]
+
+[[example]]
+name = "demo20_audit"
+required-features = ["human-loop"]
+
+[[example]]
+name = "demo21_handoff"
+required-features = ["handoff"]
+
+[[example]]
+name = "demo24_topology"
+required-features = ["topology"]
+
+[[example]]
+name = "demo03_approval"
+required-features = ["human-loop"]
+
+[[example]]
+name = "comprehensive_research_agent"
+required-features = ["sqlite", "web"]
+
+[[example]]
+name = "demo08_external_skills"
+required-features = ["sqlite"]
+
+[[example]]
+name = "demo14_memory_isolation"
+required-features = ["sqlite"]
+
+[[example]]
+name = "demo35_dynamic_tools"
+required-features = ["macros"]
 
 [dev-dependencies]
 proptest = "1"

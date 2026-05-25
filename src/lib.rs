@@ -9,12 +9,19 @@ pub mod agent;
 pub mod audit;
 pub mod compression;
 pub mod config;
+pub mod context;
 pub mod error;
+pub mod eval;
+pub mod event_bus;
 pub mod guard;
+pub mod improve;
+pub mod layered_compress;
 pub mod llm;
+pub mod plugin;
 pub mod memory;
 pub mod retry;
 pub mod sandbox;
+pub mod security;
 pub mod skills;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -201,7 +208,9 @@ pub mod prelude {
     pub use crate::error::Result;
 
     // Trace
-    pub use crate::trace::{InMemoryRunStore, Run, RunEvent, RunStatus, RunStore, RunSummary};
+    pub use crate::trace::{
+        InMemoryRunStore, JsonlRunStore, Run, RunEvent, RunStatus, RunStore, RunSummary,
+    };
 
     // Testing
     #[cfg(any(test, feature = "testing"))]

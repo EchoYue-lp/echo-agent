@@ -15,6 +15,7 @@ pub use echo_core::compression::{CompressionInput, CompressionOutput, ContextCom
 use crate::compression::compressor::SlidingWindowCompressor;
 use echo_core::error::Result;
 use echo_core::llm::types::{Message, MessageContent, Role};
+use echo_core::budget::TokenBudget;
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
 
@@ -110,6 +111,9 @@ pub struct ContextManager {
     /// Hard message count cap. When exceeded, triggers sliding window degradation to prevent OOM.
     /// Default 200 messages.
     max_messages: usize,
+    /// Optional token budget for percentage-based allocation.
+    /// When set, `prepare()` uses budget.allocate() instead of simple token_limit comparison.
+    budget: Option<TokenBudget>,
 }
 
 impl ContextManager {
@@ -120,6 +124,7 @@ impl ContextManager {
             initial_messages: Vec::new(),
             tokenizer: None,
             max_messages: None,
+            budget: None,
         }
     }
 
@@ -425,18 +430,36 @@ impl ContextManager {
     /// Returns a [`PrepareResult`] containing the prepared messages and optional
     /// compression stats (populated only when auto-compression was triggered).
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<PrepareResult> {
-        let compressed = if let Some(compressor) = &self.compressor
-            && Self::estimate_tokens(&self.messages, &*self.tokenizer) > self.token_limit
-        {
+        let estimated_tokens = Self::estimate_tokens(&self.messages, &*self.tokenizer);
+
+        let needs_compression = if let Some(ref budget) = self.budget {
+            // Budget-aware check: use percentage-based allocation
+            let system_tokens = 0; // system prompt tokens already counted in messages
+            let tool_tokens = 0;   // tool defs not in messages
+            let allocation = budget.allocate(system_tokens, tool_tokens, estimated_tokens);
+            allocation.needs_compression()
+        } else {
+            estimated_tokens > self.token_limit
+        };
+
+        let compressed = if let Some(compressor) = &self.compressor && needs_compression {
             let before_count = self.messages.len();
             let before_tokens = self.token_estimate();
+
+            // Compute effective token limit for compression
+            let effective_limit = if let Some(ref budget) = self.budget {
+                let allocation = budget.allocate(0, 0, estimated_tokens);
+                (estimated_tokens.saturating_sub(allocation.conversation_excess)).max(self.token_limit / 2)
+            } else {
+                self.token_limit
+            };
 
             let (compressible, protected) = self.split_protected(self.messages.clone());
 
             let output = compressor
                 .compress(CompressionInput {
                     messages: compressible,
-                    token_limit: self.token_limit,
+                    token_limit: effective_limit,
                     current_query: current_query.map(String::from),
                 })
                 .await?;
@@ -477,6 +500,7 @@ pub struct ContextManagerBuilder {
     initial_messages: Vec<Message>,
     tokenizer: Option<Arc<dyn Tokenizer>>,
     max_messages: Option<usize>,
+    budget: Option<TokenBudget>,
 }
 
 impl ContextManagerBuilder {
@@ -519,6 +543,17 @@ impl ContextManagerBuilder {
         self
     }
 
+    /// Set a token budget for percentage-based allocation.
+    ///
+    /// When set, `prepare()` uses budget-aware compression instead of
+    /// the simple `token_limit` comparison. The budget divides the context
+    /// window into system/tool/output/safety percentages and allocates
+    /// the remainder for conversation.
+    pub fn budget(mut self, budget: TokenBudget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
     pub fn build(self) -> ContextManager {
         ContextManager {
             messages: self.initial_messages,
@@ -529,6 +564,7 @@ impl ContextManagerBuilder {
                 .unwrap_or_else(|| Arc::new(HeuristicTokenizer)),
             protected_markers: Vec::new(),
             max_messages: self.max_messages.unwrap_or(200),
+            budget: self.budget,
         }
     }
 }

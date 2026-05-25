@@ -2,7 +2,7 @@
 name = "echo_orchestration"
 version = "0.1.4"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT"
 description = "Orchestration layer for echo-agent framework (workflow, human-loop, tasks)"
 repository = "https://github.com/EchoYue-lp/echo-agent"

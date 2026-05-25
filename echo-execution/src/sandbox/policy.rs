@@ -226,9 +226,9 @@ mod tests {
     fn test_default_policy_safe_command() {
         let policy = SandboxPolicy::default();
         let cmd = SandboxCommand::shell("ls -la");
-        // default_level = Standard -> base = Process, safe command -> None
-        // evaluate() takes max(Process, None) = Process
-        assert_eq!(policy.evaluate(&cmd), IsolationLevel::Process);
+        // default_level = Strict -> base = Container, safe command -> None
+        // evaluate() takes max(Container, None) = Container
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::Container);
     }
 
     #[test]
@@ -273,7 +273,9 @@ mod tests {
     fn test_script_interpreter_escalation() {
         let policy = SandboxPolicy::default();
         let cmd = SandboxCommand::shell("python3 script.py");
-        assert_eq!(policy.evaluate(&cmd), IsolationLevel::OsSandbox);
+        // default_level = Strict -> base = Container, python3 -> OsSandbox
+        // evaluate() takes max(Container, OsSandbox) = Container
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::Container);
     }
 
     #[test]
@@ -281,5 +283,23 @@ mod tests {
         let policy = SandboxPolicy::default();
         let cmd = SandboxCommand::shell("echo $(whoami)");
         assert_eq!(policy.evaluate(&cmd), IsolationLevel::Container);
+    }
+
+    #[test]
+    fn test_standard_level_safe_command() {
+        let mut policy = SandboxPolicy::default();
+        policy.default_level = SecurityLevel::Standard;
+        let cmd = SandboxCommand::shell("ls -la");
+        // Standard -> base = Process, safe command -> None -> max(Process, None) = Process
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::Process);
+    }
+
+    #[test]
+    fn test_standard_level_script_interpreter() {
+        let mut policy = SandboxPolicy::default();
+        policy.default_level = SecurityLevel::Standard;
+        let cmd = SandboxCommand::shell("python3 script.py");
+        // Standard -> base = Process, python3 -> OsSandbox -> max(Process, OsSandbox) = OsSandbox
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::OsSandbox);
     }
 }

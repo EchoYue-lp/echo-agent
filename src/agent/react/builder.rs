@@ -14,6 +14,9 @@ use crate::prelude::ReactAgent;
 use crate::sandbox::SandboxManager;
 use crate::tools::permission::PermissionPolicy;
 use crate::tools::{Tool, ToolExecutionConfig};
+use crate::agent::react::run::pipeline::ToolExecutionPipeline;
+use crate::context::ContextAssembler;
+use crate::trace::RunStore;
 use echo_core::circuit_breaker::CircuitBreakerConfig;
 use std::sync::Arc;
 
@@ -57,6 +60,9 @@ pub struct ReactAgentBuilder {
     max_tool_output_tokens: Option<usize>,
     circuit_breaker_config: Option<CircuitBreakerConfig>,
     sandbox_manager: Option<Arc<SandboxManager>>,
+    run_store: Option<Arc<dyn RunStore>>,
+    tool_execution_pipeline: Option<Arc<ToolExecutionPipeline>>,
+    context_assembler: Option<ContextAssembler>,
 }
 
 impl Default for ReactAgentBuilder {
@@ -104,6 +110,9 @@ impl ReactAgentBuilder {
             max_tool_output_tokens: None,
             circuit_breaker_config: None,
             sandbox_manager: None,
+            run_store: None,
+            tool_execution_pipeline: None,
+            context_assembler: None,
         }
     }
 
@@ -496,6 +505,35 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Attach a [`RunStore`] for persisting execution traces.
+    ///
+    /// When set, every agent invocation records a full [`Run`](crate::trace::Run)
+    /// with events, token usage, and timings.
+    pub fn with_run_store(mut self, store: Arc<dyn RunStore>) -> Self {
+        self.run_store = Some(store);
+        self
+    }
+
+    /// Set a custom [`ToolExecutionPipeline`] for fine-grained control over
+    /// the tool execution lifecycle (hooks, permissions, guards, etc.).
+    ///
+    /// When set, `execute_tool_feedback_raw` delegates to this pipeline.
+    /// When `None` (default), the built-in inline implementation is used.
+    pub fn tool_execution_pipeline(mut self, pipeline: ToolExecutionPipeline) -> Self {
+        self.tool_execution_pipeline = Some(Arc::new(pipeline));
+        self
+    }
+
+    /// Attach a [`ContextAssembler`] for centralized message list construction.
+    ///
+    /// When set, `run_react_loop` delegates context assembly to the assembler
+    /// instead of pushing messages individually. When `None` (default), the
+    /// built-in scattered push logic is used.
+    pub fn with_context_assembler(mut self, assembler: ContextAssembler) -> Self {
+        self.context_assembler = Some(assembler);
+        self
+    }
+
     /// Set sandbox manager, providing secure isolation for skill script execution
     pub fn sandbox_manager(mut self, manager: Arc<SandboxManager>) -> Self {
         self.sandbox_manager = Some(manager);
@@ -631,6 +669,21 @@ impl ReactAgentBuilder {
         // Set sandbox manager
         if let Some(manager) = self.sandbox_manager {
             agent.set_sandbox_manager(manager);
+        }
+
+        // Set run store
+        if let Some(store) = self.run_store {
+            agent.run_store = Some(store);
+        }
+
+        // Set tool execution pipeline
+        if let Some(pipeline) = self.tool_execution_pipeline {
+            agent.tool_execution_pipeline = Some(pipeline);
+        }
+
+        // Set context assembler
+        if let Some(assembler) = self.context_assembler {
+            agent.context_assembler = Some(assembler);
         }
 
         Ok(agent)

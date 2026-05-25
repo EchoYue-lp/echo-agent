@@ -122,6 +122,7 @@ mod tests {
             max_retries: 2,
             retry_delay_ms: 200,
             max_concurrency: Some(2),
+            max_read_concurrency: Some(32),
         };
 
         let timeout = compute_concurrent_tool_batch_timeout(&config, 5, config.max_concurrency);
@@ -139,6 +140,7 @@ mod tests {
             max_retries: 3,
             retry_delay_ms: 200,
             max_concurrency: Some(4),
+            max_read_concurrency: Some(32),
         };
 
         assert_eq!(

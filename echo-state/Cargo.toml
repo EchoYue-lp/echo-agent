@@ -2,7 +2,7 @@
 name = "echo_state"
 version = "0.1.4"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT"
 description = "State management for echo-agent framework (memory, compression, audit)"
 repository = "https://github.com/EchoYue-lp/echo-agent"

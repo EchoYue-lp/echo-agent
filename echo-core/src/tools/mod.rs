@@ -8,9 +8,55 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Classifies the kind of result a tool produced.
+///
+/// This enriches [`ToolResult`] so downstream consumers (CLI rendering,
+/// trace analysis, eval scoring) can handle results appropriately without
+/// parsing the raw output string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind_type", rename_all = "snake_case")]
+pub enum ToolResultKind {
+    /// Plain text output.
+    Text,
+    /// Structured JSON data (also available in `ToolResult.data`).
+    Json,
+    /// An image (MIME type in `ToolResult.mime_type`).
+    Image { mime_type: String },
+    /// Tabular data with column headers and row data.
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    /// A unified diff (e.g., from `edit_file`).
+    Diff {
+        unified_diff: String,
+    },
+    /// A reference to a file (path in metadata).
+    FileReference {
+        path: String,
+    },
+    /// Command execution output with exit code.
+    CommandOutput {
+        exit_code: Option<i32>,
+    },
+    /// A structured error with an error code.
+    StructuredError {
+        error_code: String,
+    },
+}
+
+impl Default for ToolResultKind {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
 /// 工具执行结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// The kind of result (enables type-aware downstream handling).
+    #[serde(default)]
+    pub kind: ToolResultKind,
     /// Whether the tool completed successfully.
     pub success: bool,
     /// Text output returned to the caller.
@@ -39,6 +85,7 @@ impl ToolResult {
     /// Construct a successful text result.
     pub fn success(output: impl Into<String>) -> Self {
         Self {
+            kind: ToolResultKind::Text,
             success: true,
             output: output.into(),
             error: None,
@@ -57,6 +104,7 @@ impl ToolResult {
     pub fn success_json(data: serde_json::Value) -> Self {
         let output = serde_json::to_string(&data).unwrap_or_default();
         Self {
+            kind: ToolResultKind::Json,
             success: true,
             output,
             error: None,
@@ -71,6 +119,7 @@ impl ToolResult {
     /// Construct a failed result with an error message.
     pub fn error(error: impl Into<String>) -> Self {
         Self {
+            kind: ToolResultKind::StructuredError { error_code: "tool_error".into() },
             success: false,
             output: String::new(),
             error: Some(error.into()),
@@ -85,6 +134,7 @@ impl ToolResult {
     /// Construct a successful result that carries binary payload.
     pub fn binary(bytes: Vec<u8>) -> Self {
         Self {
+            kind: ToolResultKind::Text,
             success: true,
             output: String::new(),
             error: None,
@@ -157,8 +207,10 @@ pub struct ToolExecutionConfig {
     pub max_retries: u32,
     /// Delay between retry attempts.
     pub retry_delay_ms: u64,
-    /// Optional concurrency cap shared by the tool manager.
+    /// Optional concurrency cap shared by the tool manager (write/execute tools).
     pub max_concurrency: Option<usize>,
+    /// Optional concurrency cap for read-only tools (higher limit, default 32).
+    pub max_read_concurrency: Option<usize>,
 }
 
 impl Default for ToolExecutionConfig {
@@ -169,12 +221,163 @@ impl Default for ToolExecutionConfig {
             max_retries: 2,
             retry_delay_ms: 200,
             max_concurrency: None,
+            max_read_concurrency: Some(32),
         }
     }
 }
 
-/// Tool parameter type
+/// Tool parameter type (simple key-value from LLM).
 pub type ToolParameters = HashMap<String, serde_json::Value>;
+
+/// A type-safe parameter value extracted from raw JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamValue {
+    String(String),
+    Number(f64),
+    Bool(bool),
+    Array(Vec<ParamValue>),
+    Object(HashMap<String, ParamValue>),
+    Null,
+}
+
+impl ParamValue {
+    /// Extract from a JSON value.
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::String(s) => Self::String(s.clone()),
+            serde_json::Value::Number(n) => {
+                Self::Number(n.as_f64().unwrap_or(0.0))
+            }
+            serde_json::Value::Bool(b) => Self::Bool(*b),
+            serde_json::Value::Array(arr) => {
+                Self::Array(arr.iter().map(|v| Self::from_json(v)).collect())
+            }
+            serde_json::Value::Object(obj) => {
+                Self::Object(obj.iter().map(|(k, v)| (k.clone(), Self::from_json(v))).collect())
+            }
+            serde_json::Value::Null => Self::Null,
+        }
+    }
+
+    /// Get as string, if this is a String variant.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Get as number, if this is a Number variant.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Get as bool, if this is a Bool variant.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Type name for error messages.
+    pub fn type_name(&self) -> &str {
+        match self {
+            Self::String(_) => "string",
+            Self::Number(_) => "number",
+            Self::Bool(_) => "bool",
+            Self::Array(_) => "array",
+            Self::Object(_) => "object",
+            Self::Null => "null",
+        }
+    }
+}
+
+/// Type-safe tool call parameters with validation support.
+#[derive(Debug, Clone)]
+pub struct ToolCallParams {
+    /// Original raw JSON from the LLM.
+    pub raw: serde_json::Value,
+    /// Parsed type-safe values.
+    parsed: HashMap<String, ParamValue>,
+}
+
+impl ToolCallParams {
+    /// Create from a raw JSON value.
+    pub fn from_value(value: &serde_json::Value) -> Self {
+        let parsed = if let serde_json::Value::Object(map) = value {
+            map.iter().map(|(k, v)| (k.clone(), ParamValue::from_json(v))).collect()
+        } else {
+            HashMap::new()
+        };
+        Self {
+            raw: value.clone(),
+            parsed,
+        }
+    }
+
+    /// Create from a ToolParameters map.
+    pub fn from_params(params: &ToolParameters) -> Self {
+        let mut map = serde_json::Map::new();
+        for (k, v) in params {
+            map.insert(k.clone(), v.clone());
+        }
+        Self::from_value(&serde_json::Value::Object(map))
+    }
+
+    /// Get a string parameter.
+    pub fn get_str(&self, key: &str) -> Option<&str> {
+        self.parsed.get(key).and_then(|v| v.as_str())
+    }
+
+    /// Get a numeric parameter.
+    pub fn get_number(&self, key: &str) -> Option<f64> {
+        self.parsed.get(key).and_then(|v| v.as_f64())
+    }
+
+    /// Get a boolean parameter.
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.parsed.get(key).and_then(|v| v.as_bool())
+    }
+
+    /// Get a parameter value by key.
+    pub fn get(&self, key: &str) -> Option<&ParamValue> {
+        self.parsed.get(key)
+    }
+
+    /// Validate that a required parameter exists and has the expected type.
+    /// Returns `Ok(())` or `Err(error_message)`.
+    pub fn validate_required(&self, key: &str, expected_type: &str) -> std::result::Result<(), String> {
+        match self.parsed.get(key) {
+            None => Err(format!("Missing required parameter: {key}")),
+            Some(v) if v.type_name() != expected_type => {
+                Err(format!(
+                    "Parameter '{key}': expected {expected_type}, got {}",
+                    v.type_name()
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Check if a parameter exists.
+    pub fn has(&self, key: &str) -> bool {
+        self.parsed.contains_key(key)
+    }
+
+    /// Number of parameters.
+    pub fn len(&self) -> usize {
+        self.parsed.len()
+    }
+
+    /// Whether there are no parameters.
+    pub fn is_empty(&self) -> bool {
+        self.parsed.is_empty()
+    }
+}
 
 /// Tool risk level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -230,5 +433,14 @@ pub trait Tool: Send + Sync {
     /// Risk level of this tool. Dangerous tools require explicit approval.
     fn risk_level(&self) -> ToolRiskLevel {
         ToolRiskLevel::Standard
+    }
+
+    /// Human-readable capability declaration (e.g. "Reads files", "Executes shell commands").
+    fn capability_description(&self) -> &str {
+        match self.risk_level() {
+            ToolRiskLevel::ReadOnly => "Read-only: no side effects",
+            ToolRiskLevel::Standard => "Standard: limited side effects",
+            ToolRiskLevel::Dangerous => "Dangerous: irreversible side effects",
+        }
     }
 }

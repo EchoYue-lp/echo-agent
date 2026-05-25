@@ -112,8 +112,8 @@ fn react_agent_add_tool_enables_tool_flag() {
     );
     // FinalAnswerTool + test_tool
     let tool_names = agent.tool_names();
-    assert!(tool_names.contains(&"test_tool"));
-    assert!(tool_names.contains(&"final_answer"));
+    assert!(tool_names.contains(&String::from("test_tool")));
+    assert!(tool_names.contains(&String::from("final_answer")));
 }
 
 #[test]
@@ -132,9 +132,9 @@ fn react_agent_add_tools_batch() {
     let tool_names = agent.tool_names();
     // built-in tools + 3 custom tools
     assert!(tool_names.len() >= 4);
-    assert!(tool_names.contains(&"tool1"));
-    assert!(tool_names.contains(&"tool2"));
-    assert!(tool_names.contains(&"tool3"));
+    assert!(tool_names.contains(&String::from("tool1")));
+    assert!(tool_names.contains(&String::from("tool2")));
+    assert!(tool_names.contains(&String::from("tool3")));
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn react_agent_add_tools_with_allowed_list() {
     let tool_names = agent.tool_names();
     // built-in tools + allowed_tool (whitelist only filters user-added tools)
     assert!(tool_names.len() >= 2);
-    assert!(tool_names.contains(&"allowed_tool"));
+    assert!(tool_names.contains(&String::from("allowed_tool")));
 }
 
 // ── ReactAgent getter method tests ─────────────────────────────────────────────
@@ -556,10 +556,10 @@ fn react_agent_builder_with_tools() {
     assert!(agent.config().is_tool_enabled());
     // FinalAnswerTool + built-in tools (count depends on enabled features) + tool1 + tool2
     let names = agent.tool_names();
-    assert!(names.contains(&"tool1"), "Should contain tool1");
-    assert!(names.contains(&"tool2"), "Should contain tool2");
+    assert!(names.contains(&String::from("tool1")), "Should contain tool1");
+    assert!(names.contains(&String::from("tool2")), "Should contain tool2");
     assert!(
-        names.contains(&"final_answer"),
+        names.contains(&String::from("final_answer")),
         "Should contain final_answer"
     );
     assert!(names.len() >= 3, "Should have at least 3 tools");
@@ -682,6 +682,7 @@ fn react_agent_builder_full_featured() {
 
 // ── SubAgent Tests ───────────────────────────────────────────────────────────────
 
+#[cfg(feature = "subagent")]
 #[test]
 fn react_agent_register_subagent_requires_enable_flag() {
     // Do not enable subagent feature
@@ -695,6 +696,7 @@ fn react_agent_register_subagent_requires_enable_flag() {
     // There is no public method to directly check subagent list, but can verify through behavior
 }
 
+#[cfg(feature = "subagent")]
 #[test]
 fn react_agent_register_subagent_when_enabled() {
     let config = AgentConfig::minimal("test-model", "main_agent").enable_subagent(true);
@@ -707,6 +709,7 @@ fn react_agent_register_subagent_when_enabled() {
     // Can indirectly verify by checking if agent_dispatch tool is available
 }
 
+#[cfg(feature = "subagent")]
 #[test]
 fn react_agent_register_multiple_subagents() {
     let config = AgentConfig::minimal("test-model", "main_agent").enable_subagent(true);
@@ -799,6 +802,7 @@ async fn subagent_reset_independence() {
     assert_eq!(child_count, 2);
 }
 
+#[cfg(feature = "subagent")]
 #[test]
 fn react_agent_register_agent_dispatch_tool() {
     let config = AgentConfig::minimal("test-model", "main_agent").enable_subagent(true);
@@ -806,9 +810,10 @@ fn react_agent_register_agent_dispatch_tool() {
 
     // When subagent is enabled, agent_tool should be registered
     let tool_names = agent.tool_names();
-    assert!(tool_names.contains(&"agent_tool"));
+    assert!(tool_names.contains(&String::from("agent_tool")));
 }
 
+#[cfg(feature = "subagent")]
 #[test]
 fn react_agent_no_agent_dispatch_without_subagent() {
     let config = AgentConfig::minimal("test-model", "main_agent").enable_subagent(false);
@@ -816,7 +821,7 @@ fn react_agent_no_agent_dispatch_without_subagent() {
 
     // When subagent is not enabled, agent_tool should not be registered
     let tool_names = agent.tool_names();
-    assert!(!tool_names.contains(&"agent_tool"));
+    assert!(!tool_names.contains(&String::from("agent_tool")));
 }
 
 // ── Agent Config Isolation Tests ───────────────────────────────────────────────────────
@@ -889,6 +894,7 @@ fn agent_callbacks_isolation() {
 
 // ── Agent Human-in-Loop Tool Tests ───────────────────────────────────────────────
 
+#[cfg(feature = "human-loop")]
 #[test]
 fn react_agent_human_in_loop_tool_registration() {
     let config = AgentConfig::minimal("model", "agent").enable_human_in_loop(true);
@@ -896,9 +902,10 @@ fn react_agent_human_in_loop_tool_registration() {
 
     // After enabling human_in_loop, the human_in_loop tool should be registered
     let tool_names = agent.tool_names();
-    assert!(tool_names.contains(&"human_in_loop"));
+    assert!(tool_names.contains(&String::from("human_in_loop")));
 }
 
+#[cfg(feature = "human-loop")]
 #[test]
 fn react_agent_no_human_in_loop_without_flag() {
     let config = AgentConfig::minimal("model", "agent").enable_human_in_loop(false);
@@ -906,10 +913,11 @@ fn react_agent_no_human_in_loop_without_flag() {
 
     // When human_in_loop is not enabled, the tool should not be registered
     let tool_names = agent.tool_names();
-    assert!(!tool_names.contains(&"human_in_loop"));
+    assert!(!tool_names.contains(&String::from("human_in_loop")));
 }
 
 #[tokio::test]
+#[cfg(feature = "human-loop")]
 async fn add_need_appeal_tool_does_not_nest_runtime_with_permission_service() {
     let provider = Arc::new(crate::human_loop::HumanLoopManager::new());
     let service = Arc::new(crate::human_loop::PermissionService::from_provider(
@@ -972,8 +980,8 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .expect("activate_skill should be registered")
         .parameters()
         .to_string();
-    assert!(first_params.contains("skill-one"));
-    assert!(!first_params.contains("skill-two"));
+    assert!(first_params.contains(&String::from("skill-one")));
+    assert!(!first_params.contains(&String::from("skill-two")));
 
     let first_activation = agent
         .tools
@@ -985,7 +993,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .await
         .unwrap();
     assert!(first_activation.success);
-    assert!(first_activation.output.contains("Use skill one."));
+    assert!(first_activation.output.contains(&String::from("Use skill one.")));
 
     agent
         .discover_skills(&[DiscoveryScope::Custom(base.join("skills-b"))])
@@ -999,8 +1007,8 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .expect("activate_skill should stay registered")
         .parameters()
         .to_string();
-    assert!(second_params.contains("skill-one"));
-    assert!(second_params.contains("skill-two"));
+    assert!(second_params.contains(&String::from("skill-one")));
+    assert!(second_params.contains(&String::from("skill-two")));
 
     let repeat_activation = agent
         .tools
@@ -1012,7 +1020,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .await
         .unwrap();
     assert!(repeat_activation.success);
-    assert!(repeat_activation.output.contains("already activated"));
+    assert!(repeat_activation.output.contains(&String::from("already activated")));
 
     let second_activation = agent
         .tools
@@ -1024,7 +1032,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .await
         .unwrap();
     assert!(second_activation.success);
-    assert!(second_activation.output.contains("Use skill two."));
+    assert!(second_activation.output.contains(&String::from("Use skill two.")));
 
     let _ = tokio::fs::remove_dir_all(base).await;
 }
@@ -1069,8 +1077,8 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
         .iter()
         .filter_map(|m| m.content.as_text_ref().map(str::to_string))
         .collect();
-    assert!(messages.iter().any(|m| m.contains("pre-hook guidance")));
-    assert!(messages.iter().any(|m| m.contains("post-hook guidance")));
+    assert!(messages.iter().any(|m| m.contains(&String::from("pre-hook guidance"))));
+    assert!(messages.iter().any(|m| m.contains(&String::from("post-hook guidance"))));
 }
 
 #[tokio::test]
@@ -1084,7 +1092,7 @@ async fn shell_skill_uses_agent_sandbox_manager_when_present() {
         .execute_tool("shell", &json!({"command": "echo sandboxed"}))
         .await;
     assert!(result.is_ok());
-    assert!(result.unwrap().contains("sandboxed"));
+    assert!(result.unwrap().contains(&String::from("sandboxed")));
 }
 
 #[tokio::test]
@@ -1119,7 +1127,7 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         .await
         .unwrap();
     assert!(!missing.success);
-    assert!(missing.error.unwrap_or_default().contains("context_path"));
+    assert!(missing.error.unwrap_or_default().contains(&String::from("context_path")));
 
     let mismatch = agent
         .tools
@@ -1139,7 +1147,7 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         mismatch
             .error
             .unwrap_or_default()
-            .contains("cannot be activated")
+            .contains(&String::from("cannot be activated"))
     );
 
     let matched = agent
@@ -1156,7 +1164,7 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         .await
         .unwrap();
     assert!(matched.success);
-    assert!(matched.output.contains("Lint the current Python file."));
+    assert!(matched.output.contains(&String::from("Lint the current Python file.")));
 
     let _ = tokio::fs::remove_dir_all(base).await;
 }
@@ -1164,16 +1172,15 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
 // ── Agent Task Planning Tool Tests ───────────────────────────────────────────────────────
 
 #[test]
+#[cfg(feature = "tasks")]
 fn react_agent_planning_tools_registration() {
     let config = AgentConfig::minimal("model", "agent").enable_task(true);
     let agent = ReactAgent::new(config);
 
     let tool_names = agent.tool_names();
-    // After enabling task planning, related tools should be available
-    assert!(tool_names.contains(&"plan"));
-    assert!(tool_names.contains(&"create_task"));
-    assert!(tool_names.contains(&"update_task"));
-    assert!(tool_names.contains(&"list_tasks"));
+    assert!(tool_names.contains(&String::from("create_task")));
+    assert!(tool_names.contains(&String::from("update_task")));
+    assert!(tool_names.contains(&String::from("list_tasks")));
 }
 
 #[test]
@@ -1183,7 +1190,7 @@ fn react_agent_no_planning_tools_without_flag() {
 
     let tool_names = agent.tool_names();
     // When task planning is not enabled, related tools should not be available
-    assert!(!tool_names.contains(&"create_task"));
+    assert!(!tool_names.contains(&String::from("create_task")));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1200,13 +1207,13 @@ fn builder_with_memory_tools_registers_all_memory_tools() {
         .unwrap();
 
     let tools = agent.tool_names();
-    assert!(tools.contains(&"remember"), "Should register remember");
-    assert!(tools.contains(&"recall"), "Should register recall");
+    assert!(tools.contains(&String::from("remember")), "Should register remember");
+    assert!(tools.contains(&String::from("recall")), "Should register recall");
     assert!(
-        tools.contains(&"search_memory"),
+        tools.contains(&String::from("search_memory")),
         "Should register search_memory"
     );
-    assert!(tools.contains(&"forget"), "Should register forget");
+    assert!(tools.contains(&String::from("forget")), "Should register forget");
 }
 
 #[test]
@@ -1227,7 +1234,7 @@ fn set_memory_store_registers_search_memory_tool() {
     let mut agent = ReactAgent::new(config);
 
     assert!(
-        !agent.tool_names().contains(&"search_memory"),
+        !agent.tool_names().contains(&String::from("search_memory")),
         "Should not have search_memory initially"
     );
 
@@ -1235,7 +1242,7 @@ fn set_memory_store_registers_search_memory_tool() {
     agent.set_memory_store(store);
 
     assert!(
-        agent.tool_names().contains(&"search_memory"),
+        agent.tool_names().contains(&String::from("search_memory")),
         "Should have search_memory after set_memory_store"
     );
 }
@@ -1255,7 +1262,7 @@ async fn search_memory_tool_returns_empty_for_no_matches() {
     );
     let result = tool.execute(params).await.unwrap();
     assert!(result.success);
-    assert!(result.output.contains("No memories found"));
+    assert!(result.output.contains(&String::from("No memories found")));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1314,7 +1321,7 @@ async fn truncate_tool_output_exceeds_limit() {
     let long_text = "a ".repeat(500);
     let result = agent.truncate_tool_output(long_text).await;
     assert!(
-        result.contains("[Output truncated"),
+        result.contains(&String::from("[Output truncated")),
         "Should show truncation notice when over limit"
     );
     assert!(
@@ -1346,16 +1353,16 @@ fn remove_tool_basic() {
     agent.add_tool(Box::new(MockTool::new("tool_a")));
     agent.add_tool(Box::new(MockTool::new("tool_b")));
 
-    assert!(agent.tool_names().contains(&"tool_a"));
+    assert!(agent.tool_names().contains(&String::from("tool_a")));
 
     let removed = agent.remove_tool("tool_a");
     assert!(removed.is_some(), "Should return the removed tool");
     assert!(
-        !agent.tool_names().contains(&"tool_a"),
+        !agent.tool_names().contains(&String::from("tool_a")),
         "Should not exist after removal"
     );
     assert!(
-        agent.tool_names().contains(&"tool_b"),
+        agent.tool_names().contains(&String::from("tool_b")),
         "Other tools should be unaffected"
     );
 }
@@ -1377,7 +1384,7 @@ fn replace_tool_basic() {
     let old = agent.replace_tool(Box::new(MockTool::new("tool_x")));
     assert!(old.is_some(), "Should return the old tool");
     assert!(
-        agent.tool_names().contains(&"tool_x"),
+        agent.tool_names().contains(&String::from("tool_x")),
         "New tool should exist"
     );
 }
@@ -1393,7 +1400,7 @@ fn replace_tool_when_not_exists() {
         "Should return None when old tool doesn't exist"
     );
     assert!(
-        agent.tool_names().contains(&"new_tool"),
+        agent.tool_names().contains(&String::from("new_tool")),
         "New tool should be registered"
     );
 }

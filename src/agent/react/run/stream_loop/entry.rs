@@ -6,7 +6,6 @@ use super::super::super::ReactAgent;
 use super::super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
 use crate::error::Result;
-use tracing::Instrument;
 
 impl ReactAgent {
     #[tracing::instrument(skip(self), fields(agent = %self.config.agent_name, model = %self.config.model_name, mode = %mode))]

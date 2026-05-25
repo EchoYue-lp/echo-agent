@@ -3,12 +3,17 @@
 //! 演示如何使用 RuleGuard 对用户输入和 LLM 输出进行安全过滤。
 //!
 //! ```bash
-//! RUST_LOG=info cargo run --example demo19_guard
+//! RUST_LOG=info cargo run --features content-guard --example demo19_guard
 //! ```
+
+// This example requires the `content-guard` feature. When the feature is
+// not enabled, provide a stub main so the file still compiles as an example.
+#![cfg_attr(not(feature = "content-guard"), allow(dead_code))]
 
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
+#[cfg(feature = "content-guard")]
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     tracing_subscriber::fmt()
@@ -75,4 +80,10 @@ async fn main() -> echo_agent::error::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(not(feature = "content-guard"))]
+fn main() {
+    eprintln!("This example requires the 'content-guard' feature.");
+    eprintln!("Run with: cargo run --features content-guard --example demo19_guard");
 }

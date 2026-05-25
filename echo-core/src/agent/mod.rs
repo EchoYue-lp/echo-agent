@@ -175,6 +175,30 @@ pub enum AgentEvent {
         message: String,
     },
 
+    /// Safety notice: the agent is about to perform an action that needs user awareness.
+    /// Includes what action, why, risk level, and required permission.
+    SafetyNotice {
+        /// What the agent is about to do.
+        action: String,
+        /// Why this action is needed.
+        reason: String,
+        /// Risk description.
+        risk: String,
+        /// Permission level required.
+        permission: String,
+    },
+    /// A tool parameter validation error occurred.
+    ParameterError {
+        /// Tool name.
+        tool: String,
+        /// Parameter name.
+        parameter: String,
+        /// Expected type.
+        expected: String,
+        /// Actual type received.
+        got: String,
+    },
+
     // ── Terminal States ──────────────────────────────────────────────────────────────
     /// Final answer
     FinalAnswer(String),
@@ -267,7 +291,9 @@ impl AgentEvent {
             AgentEvent::ToolCall { .. }
             | AgentEvent::ToolResult { .. }
             | AgentEvent::ToolError { .. }
-            | AgentEvent::GuardTriggered { .. } => AgentPhase::Acting,
+            | AgentEvent::GuardTriggered { .. }
+            | AgentEvent::SafetyNotice { .. }
+            | AgentEvent::ParameterError { .. } => AgentPhase::Acting,
 
             AgentEvent::PlanGenerated { .. }
             | AgentEvent::StepStart { .. }
@@ -308,6 +334,7 @@ impl AgentEvent {
             AgentEvent::ThinkEnd { .. }
                 | AgentEvent::ToolResult { .. }
                 | AgentEvent::ToolError { .. }
+                | AgentEvent::ParameterError { .. }
                 | AgentEvent::PlanGenerated { .. }
                 | AgentEvent::StepEnd { .. }
                 | AgentEvent::ReflectionEnd { .. }
@@ -462,6 +489,10 @@ pub trait Agent: Send + Sync {
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
+
+    /// Get the current run ID, if the agent is tracking one.
+    /// Default: None. ReactAgent overrides this.
+    fn current_run_id(&self) -> Option<String> { None }
 }
 
 // ── Blanket impl for Box<dyn Agent> ──────────────────────────────────────
@@ -512,6 +543,9 @@ impl Agent for Box<dyn Agent> {
         message: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         self.as_ref().chat_stream(message)
+    }
+    fn current_run_id(&self) -> Option<String> {
+        self.as_ref().current_run_id()
     }
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         self.as_ref().reset()

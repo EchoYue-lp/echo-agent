@@ -40,9 +40,12 @@ pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
 
 // ── Core sub-modules ───────────────────────────────────────────────────────
 
+pub mod approval_stack;
 pub mod config;
 pub mod react;
 pub mod runner;
+pub mod snapshot;
+pub mod turn;
 
 #[cfg(feature = "plan-execute")]
 pub mod plan_execute;

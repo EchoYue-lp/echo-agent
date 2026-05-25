@@ -13,6 +13,7 @@
 //! Most users should depend on `echo_agent` (the facade crate) instead of
 //! depending on `echo_execution` directly.
 
+pub mod risk;
 pub mod sandbox;
 pub mod skills;
 pub mod tools;

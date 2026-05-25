@@ -56,6 +56,8 @@ pub struct AgentConfig {
     pub(crate) enable_subagent: bool,
     /// Context token limit; auto-triggers compression when exceeded (`usize::MAX` means no limit)
     pub(crate) token_limit: usize,
+    /// Streaming channel buffer size (default 256). When full, events are dropped with a warning.
+    pub(crate) stream_buffer_size: usize,
     pub(crate) callbacks: Vec<Arc<dyn AgentCallback>>,
     /// Maximum retry count after LLM call failure (0 = no retry, default 3)
     pub(crate) llm_max_retries: usize,
@@ -70,6 +72,10 @@ pub struct AgentConfig {
     /// `edit_file`, `write_file`, and `delete_file` will reject paths
     /// that haven't been read in the current conversation turn. (default false)
     pub(crate) force_read_before_edit: bool,
+    /// Whether the agent is in plan mode (read-only tools only).
+    pub(crate) plan_mode: bool,
+    /// Reasoning effort: low(quick)/medium(standard)/high(thorough).
+    pub(crate) _reasoning_effort: String,
     /// Tool execution config: timeout, retry strategy, parallel concurrency
     pub(crate) tool_execution: ToolExecutionConfig,
     /// Whether to enable long-term memory Store (remember/recall/forget tools + automatic context injection)
@@ -125,12 +131,15 @@ impl AgentConfig {
             enable_human_in_loop: false,
             enable_subagent: false,
             token_limit: usize::MAX,
+            stream_buffer_size: 256,
             callbacks: Vec::new(),
             llm_max_retries: 3,
             llm_retry_delay_ms: 500,
             tool_error_feedback: true,
             enable_cot: false,
             force_read_before_edit: false,
+            plan_mode: false,
+            _reasoning_effort: "medium".to_string(),
             tool_execution: ToolExecutionConfig::default(),
             enable_memory: false,
             memory_path: "~/.echo-agent/store.json".to_string(),

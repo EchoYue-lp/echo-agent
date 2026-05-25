@@ -9,8 +9,10 @@ pub(crate) mod answer;
 #[cfg(feature = "human-loop")]
 pub(crate) mod human_in_loop;
 pub(crate) mod memory;
+pub(crate) mod memory_write;
 #[cfg(feature = "tasks")]
 pub(crate) mod plan;
+pub(crate) mod todo;
 #[cfg(feature = "tasks")]
 pub(crate) mod task;
 /// Think tool for reasoning and reflection.

@@ -247,7 +247,15 @@ impl Plan {
     }
 
     /// Resolve a dependency string to a step index
+    ///
+    /// Resolution strategy (in order of priority):
+    /// 1. **Exact index reference** — `step_N` where N is a valid index
+    /// 2. **Exact description match** — dep string exactly equals a step description
+    /// 3. **Word-boundary substring** — dep is a word-bounded substring of a step description
+    /// 4. **Reverse containment** — step description is a substring of dep
+    /// 5. **Fuzzy text similarity** — Jaccard character-set similarity (threshold 0.6)
     pub fn resolve_dependency(&self, dep: &str) -> Option<usize> {
+        // Strategy 1: Exact index reference (step_N)
         if let Some(idx_str) = dep.strip_prefix("step_")
             && let Ok(idx) = idx_str.parse::<usize>()
             && idx < self.steps.len()
@@ -255,12 +263,20 @@ impl Plan {
             return Some(idx);
         }
 
+        // Strategy 2: Exact description match (case-insensitive)
+        let dep_lower = dep.to_lowercase();
+        for (idx, step) in self.steps.iter().enumerate() {
+            if step.description.to_lowercase() == dep_lower {
+                return Some(idx);
+            }
+        }
+
+        // Strategies 3-5: fuzzy matching (with reduced confidence)
         let mut candidates = Vec::new();
 
         for (idx, step) in self.steps.iter().enumerate() {
             if dep.len() >= 3 && step.description.contains(dep) {
                 let desc_lower = step.description.to_lowercase();
-                let dep_lower = dep.to_lowercase();
 
                 let mut positions = Vec::new();
                 let mut start = 0;
@@ -452,7 +468,7 @@ pub struct PlanOutput {
 pub struct PlanStepOutput {
     /// Step description
     pub description: String,
-    /// Dependent step descriptions (converted to indices after fuzzy matching)
+    /// Dependent step references (prefer 'step_N' IDs; description keywords accepted as fallback)
     #[serde(default)]
     pub dependencies: Vec<String>,
     /// Expected output
@@ -477,7 +493,7 @@ pub fn plan_output_schema() -> serde_json::Value {
                         "dependencies": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Dependency step description keywords (can be empty)"
+                            "description": "Dependency references — prefer exact step IDs like 'step_0', 'step_1'. Only use description keywords when a step ID is unavailable."
                         },
                         "expected_output": {
                             "type": "string",
