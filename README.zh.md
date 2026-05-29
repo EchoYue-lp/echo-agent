@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["full"] }
 
 定义工具、运行 Agent——不到 20 行代码：
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
 use echo_agent::{agent, tool};
 

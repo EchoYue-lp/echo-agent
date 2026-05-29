@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["full"] }
 
 Define a tool and run an agent — in under 20 lines:
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
 use echo_agent::{agent, tool};
 
