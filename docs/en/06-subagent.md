@@ -169,4 +169,4 @@ let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
 3. **Don't enable `enable_subagent(true)` on SubAgents** — avoid recursive nesting that's hard to debug
 4. **Use Planner role + DAG task system for complex tasks** rather than relying on ad-hoc Orchestrator decisions
 
-See: `examples/demo04_suagent.rs`, `examples/demo14_memory_isolation.rs`
+See: `examples/demo04_subagent.rs`, `examples/demo14_memory_isolation.rs`

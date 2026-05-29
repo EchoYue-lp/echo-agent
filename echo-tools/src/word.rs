@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::security::{ResourceLimits, SecurityConfig};
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 
 const TOOL_NAME: &str = "word_tools";
 
@@ -20,6 +21,10 @@ pub struct WordReadTool;
 impl Tool for WordReadTool {
     fn name(&self) -> &str {
         "read_word"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -84,6 +89,10 @@ pub struct WordInfoTool;
 impl Tool for WordInfoTool {
     fn name(&self) -> &str {
         "word_info"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -165,6 +174,10 @@ pub struct WordStructureTool;
 impl Tool for WordStructureTool {
     fn name(&self) -> &str {
         "word_structure"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {

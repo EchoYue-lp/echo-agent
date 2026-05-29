@@ -4,6 +4,7 @@ pub mod edit;
 pub mod files;
 pub mod glob;
 pub mod grep;
+pub mod repo_map;
 
 use std::path::{Component, Path, PathBuf};
 

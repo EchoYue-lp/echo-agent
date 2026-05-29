@@ -35,15 +35,29 @@ impl EventBus {
 
     /// Send an event with run context.
     pub fn send_with(&self, event: AgentEvent, run_id: Option<String>, agent_id: Option<String>) {
-        let _ = self.sender.send(Arc::new(BusEvent { event: Arc::new(event), run_id, agent_id }));
+        let _ = self.sender.send(Arc::new(BusEvent {
+            event: Arc::new(event),
+            run_id,
+            agent_id,
+        }));
     }
-    pub fn send(&self, event: AgentEvent) { self.send_with(event, None, None); }
-    pub fn send_for_run(&self, event: AgentEvent, run_id: &str) { self.send_with(event, Some(run_id.to_string()), None); }
+    pub fn send(&self, event: AgentEvent) {
+        self.send_with(event, None, None);
+    }
+    pub fn send_for_run(&self, event: AgentEvent, run_id: &str) {
+        self.send_with(event, Some(run_id.to_string()), None);
+    }
 
-    pub fn subscriber_count(&self) -> usize { self.sender.receiver_count() }
+    pub fn subscriber_count(&self) -> usize {
+        self.sender.receiver_count()
+    }
 }
 
-impl Default for EventBus { fn default() -> Self { Self::new(1024) } }
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new(1024)
+    }
+}
 
 /// Global event bus — capacity 1024 to handle batch eval without dropping events.
 /// Subscribers that fall behind get `RecvError::Lagged` — consumers should handle this.

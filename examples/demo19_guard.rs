@@ -10,12 +10,14 @@
 // not enabled, provide a stub main so the file still compiles as an example.
 #![cfg_attr(not(feature = "content-guard"), allow(dead_code))]
 
-use echo_agent::prelude::*;
-use std::sync::Arc;
-
 #[cfg(feature = "content-guard")]
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
+    use echo_agent::audit::InMemoryAuditLogger;
+    use echo_agent::guard::GuardDirection;
+    use echo_agent::guard::rule::RuleGuardBuilder;
+    use echo_agent::prelude::*;
+    use std::sync::Arc;
     tracing_subscriber::fmt()
         .without_time()
         .with_target(false)

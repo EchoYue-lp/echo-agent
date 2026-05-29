@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 
 // ── generate_chart tool ──────────────────────────────────────────────────────
 
@@ -16,6 +17,10 @@ pub struct GenerateChartTool;
 impl Tool for GenerateChartTool {
     fn name(&self) -> &str {
         "generate_chart"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read, ToolPermission::Write]
     }
 
     fn description(&self) -> &str {

@@ -2,6 +2,7 @@
 
 use crate::eval::EvalCase;
 use crate::improve::{CritiqueIssue, ImprovementSuggestion, RunCritique};
+use crate::tools::{is_read_tool, is_write_tool};
 use crate::trace::{Run, RunEvent, RunStatus};
 use std::collections::HashMap;
 
@@ -17,7 +18,9 @@ impl Analyzer {
         // Detect issues
         critique.issues.extend(Self::detect_write_without_read(run));
         critique.issues.extend(Self::detect_excessive_retries(run));
-        critique.issues.extend(Self::detect_excessive_tool_calls(run));
+        critique
+            .issues
+            .extend(Self::detect_excessive_tool_calls(run));
 
         // Generate suggestions from issues
         critique.suggestions = Self::generate_suggestions(&critique.issues, run);
@@ -32,7 +35,7 @@ impl Analyzer {
 
     /// Analyze multiple runs and detect cross-run patterns.
     pub fn analyze_batch(runs: &[Run]) -> Vec<RunCritique> {
-        runs.iter().map(|r| Self::analyze(r)).collect()
+        runs.iter().map(Self::analyze).collect()
     }
 
     // ── Issue detectors ────────────────────────────────────────────
@@ -48,10 +51,8 @@ impl Analyzer {
                 RunEvent::ToolCall { name, .. } if is_read_tool(name) => {
                     read_tools_seen += 1;
                 }
-                RunEvent::ToolCall { name, .. } if is_write_tool(name) => {
-                    if read_tools_seen == 0 {
-                        writes_without_read += 1;
-                    }
+                RunEvent::ToolCall { name, .. } if is_write_tool(name) && read_tools_seen == 0 => {
+                    writes_without_read += 1;
                 }
                 RunEvent::ToolResult { name, .. } if is_read_tool(name) => {
                     // read completed successfully
@@ -104,10 +105,7 @@ impl Analyzer {
     // ── Suggestion generators ──────────────────────────────────────
 
     /// Generate improvement suggestions from detected issues.
-    fn generate_suggestions(
-        issues: &[CritiqueIssue],
-        _run: &Run,
-    ) -> Vec<ImprovementSuggestion> {
+    fn generate_suggestions(issues: &[CritiqueIssue], _run: &Run) -> Vec<ImprovementSuggestion> {
         let mut suggestions = Vec::new();
 
         for issue in issues {
@@ -168,25 +166,10 @@ impl Analyzer {
     }
 }
 
-const WRITE_TOOLS: &[&str] = &[
-    "edit_file", "write_file", "append_file", "create_file",
-    "delete_file", "update_file", "move_file",
-];
-
-const READ_TOOLS: &[&str] = &["read_file", "read_text"];
-
-fn is_write_tool(name: &str) -> bool {
-    WRITE_TOOLS.contains(&name)
-}
-
-fn is_read_tool(name: &str) -> bool {
-    READ_TOOLS.contains(&name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{RunStatus, TokenUsage, RunTimings};
+    use crate::trace::{RunStatus, RunTimings, TokenUsage};
     use chrono::Utc;
 
     fn make_run(events: Vec<RunEvent>, status: RunStatus) -> Run {
@@ -210,40 +193,111 @@ mod tests {
     fn test_detect_write_without_read() {
         let run = make_run(
             vec![
-                RunEvent::ToolCall { call_id: "test_call".into(), name: "write_file".into(), args: None, risk: None, duration_ms: 10 },
-                RunEvent::ToolResult { call_id: "test_call".into(), name: "write_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
+                RunEvent::ToolCall {
+                    call_id: "test_call".into(),
+                    name: "write_file".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 10,
+                },
+                RunEvent::ToolResult {
+                    call_id: "test_call".into(),
+                    name: "write_file".into(),
+                    success: true,
+                    output_preview: None,
+                    output_truncated: false,
+                    duration_ms: 0,
+                },
             ],
             RunStatus::Completed,
         );
         let critique = Analyzer::analyze(&run);
         assert!(!critique.issues.is_empty());
-        assert!(critique.suggestions.iter().any(|s| matches!(s, ImprovementSuggestion::PromptChange { .. })));
-        assert!(critique.suggestions.iter().any(|s| matches!(s, ImprovementSuggestion::PolicyChange { .. })));
+        assert!(
+            critique
+                .suggestions
+                .iter()
+                .any(|s| matches!(s, ImprovementSuggestion::PromptChange { .. }))
+        );
+        assert!(
+            critique
+                .suggestions
+                .iter()
+                .any(|s| matches!(s, ImprovementSuggestion::PolicyChange { .. }))
+        );
     }
 
     #[test]
     fn test_detect_excessive_retries() {
         let run = make_run(
             vec![
-                RunEvent::ToolCall { call_id: "test_call".into(), name: "shell".into(), args: None, risk: None, duration_ms: 10 },
-                RunEvent::ToolError { call_id: "test_call".into(), name: "shell".into(), message: "fail1".into() },
-                RunEvent::ToolCall { call_id: "test_call".into(), name: "shell".into(), args: None, risk: None, duration_ms: 10 },
-                RunEvent::ToolError { call_id: "test_call".into(), name: "shell".into(), message: "fail2".into() },
-                RunEvent::ToolCall { call_id: "test_call".into(), name: "shell".into(), args: None, risk: None, duration_ms: 10 },
-                RunEvent::ToolError { call_id: "test_call".into(), name: "shell".into(), message: "fail3".into() },
+                RunEvent::ToolCall {
+                    call_id: "test_call".into(),
+                    name: "shell".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 10,
+                },
+                RunEvent::ToolError {
+                    call_id: "test_call".into(),
+                    name: "shell".into(),
+                    message: "fail1".into(),
+                },
+                RunEvent::ToolCall {
+                    call_id: "test_call".into(),
+                    name: "shell".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 10,
+                },
+                RunEvent::ToolError {
+                    call_id: "test_call".into(),
+                    name: "shell".into(),
+                    message: "fail2".into(),
+                },
+                RunEvent::ToolCall {
+                    call_id: "test_call".into(),
+                    name: "shell".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 10,
+                },
+                RunEvent::ToolError {
+                    call_id: "test_call".into(),
+                    name: "shell".into(),
+                    message: "fail3".into(),
+                },
             ],
             RunStatus::Failed,
         );
         let critique = Analyzer::analyze(&run);
-        assert!(critique.issues.iter().any(|i| matches!(i, CritiqueIssue::ExcessiveRetries { .. })));
+        assert!(
+            critique
+                .issues
+                .iter()
+                .any(|i| matches!(i, CritiqueIssue::ExcessiveRetries { .. }))
+        );
     }
 
     #[test]
     fn test_clean_run() {
         let run = make_run(
             vec![
-                RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 10 },
-                RunEvent::ToolResult { call_id: "test_call".into(), name: "read_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
+                RunEvent::ToolCall {
+                    call_id: "test_call".into(),
+                    name: "read_file".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 10,
+                },
+                RunEvent::ToolResult {
+                    call_id: "test_call".into(),
+                    name: "read_file".into(),
+                    success: true,
+                    output_preview: None,
+                    output_truncated: false,
+                    duration_ms: 0,
+                },
             ],
             RunStatus::Completed,
         );

@@ -1,6 +1,6 @@
 [package]
 name = "echo_integration"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -24,7 +24,7 @@ mcp = ["dep:tokio-tungstenite", "echo_core/mcp"]
 channels = ["echo_core/channels", "dep:axum"]
 
 [dependencies]
-echo_core = { version = "0.1.4", path = "../echo-core" }
+echo_core = { version = "0.2.0", path = "../echo-core" }
 # From echo-providers
 reqwest = { version = "0.12", features = ["json", "stream"] }
 async-stream = "0.3"

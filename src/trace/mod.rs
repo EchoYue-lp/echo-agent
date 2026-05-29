@@ -17,8 +17,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 pub use crate::error::Result;
@@ -193,6 +193,30 @@ pub enum RunEvent {
         /// Outcome: "completed", "failed", "cancelled".
         outcome: String,
     },
+}
+
+impl RunEvent {
+    /// Create a [`RunEvent::ToolCall`] with secret redaction applied to args.
+    pub fn new_tool_call(
+        call_id: String,
+        name: String,
+        args: Option<serde_json::Value>,
+        risk: Option<String>,
+        duration_ms: u64,
+    ) -> Self {
+        let safe_args = args.map(|v| {
+            let s = serde_json::to_string(&v).unwrap_or_default();
+            let redacted = crate::security::redact_secrets(&s);
+            serde_json::from_str(&redacted).unwrap_or(v)
+        });
+        Self::ToolCall {
+            call_id,
+            name,
+            args: safe_args,
+            risk,
+            duration_ms,
+        }
+    }
 }
 
 // ── TokenUsage ───────────────────────────────────────────────────────
@@ -399,10 +423,10 @@ impl JsonlRunStore {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "jsonl") {
-                    if let Some(run) = Self::load_last_line(&path) {
-                        cache.insert(run.run_id.clone(), run);
-                    }
+                if path.extension().is_some_and(|ext| ext == "jsonl")
+                    && let Some(run) = Self::load_last_line(&path)
+                {
+                    cache.insert(run.run_id.clone(), run);
                 }
             }
         }
@@ -422,10 +446,14 @@ impl JsonlRunStore {
     fn load_last_line(path: &Path) -> Option<Run> {
         let data = std::fs::read_to_string(path).ok()?;
         // Find the last non-empty line
-        let last_line = data
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .next_back()?;
+        let last_line = data.lines().rfind(|l| !l.trim().is_empty())?;
+        serde_json::from_str::<Run>(last_line).ok()
+    }
+
+    /// Async version of `load_last_line` for use in async contexts.
+    async fn load_last_line_async(path: &Path) -> Option<Run> {
+        let data = tokio::fs::read_to_string(path).await.ok()?;
+        let last_line = data.lines().rfind(|l| !l.trim().is_empty())?;
         serde_json::from_str::<Run>(last_line).ok()
     }
 }
@@ -437,12 +465,14 @@ impl RunStore for JsonlRunStore {
         let path = self.run_path(&run_id);
         let line = serde_json::to_string(&run)?;
 
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .write(true)
-            .open(&path)?;
-        writeln!(file, "{line}")?;
+            .open(&path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
+        file.write_all(b"\n").await?;
 
         // Update in-memory cache
         self.cache.write().await.insert(run_id, run);
@@ -454,16 +484,16 @@ impl RunStore for JsonlRunStore {
         if let Some(run) = self.cache.read().await.get(run_id) {
             return Ok(Some(run.clone()));
         }
-        // Fall back to disk
+        // Fall back to disk (async)
         let path = self.run_path(run_id);
-        if path.exists() {
-            if let Some(run) = Self::load_last_line(&path) {
-                self.cache
-                    .write()
-                    .await
-                    .insert(run_id.to_string(), run.clone());
-                return Ok(Some(run));
-            }
+        if tokio::fs::try_exists(&path).await.unwrap_or(false)
+            && let Some(run) = Self::load_last_line_async(&path).await
+        {
+            self.cache
+                .write()
+                .await
+                .insert(run_id.to_string(), run.clone());
+            return Ok(Some(run));
         }
         Ok(None)
     }

@@ -20,10 +20,10 @@
 //!
 //! ```bash
 //! # 基础运行（需要 LLM API Key 和 web feature + sqlite）
-//! QWEN_API_KEY=your_key cargo run --example comprehensive_research_agent --features "web sqlite"
+//! QWEN_API_KEY=your_key cargo run --example demo49_research_agent --features "web sqlite"
 //!
 //!# 带详细日志
-//! RUST_LOG=info QWEN_API_KEY=your_key cargo run --example comprehensive_research_agent --features "web sqlite"
+//! RUST_LOG=info QWEN_API_KEY=your_key cargo run --example demo49_research_agent --features "web sqlite"
 //! ```
 
 use echo_agent::memory::SqliteStore;

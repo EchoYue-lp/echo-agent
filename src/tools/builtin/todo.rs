@@ -24,7 +24,9 @@ pub struct TodoWriteTool;
 
 #[async_trait]
 impl Tool for TodoWriteTool {
-    fn name(&self) -> &str { "todo_write" }
+    fn name(&self) -> &str {
+        "todo_write"
+    }
     fn description(&self) -> &str {
         "Create and manage a task list for your current coding session. \
          Use this to plan and track multi-step work. \
@@ -46,40 +48,61 @@ impl Tool for TodoWriteTool {
     }
     fn execute<'a>(&'a self, params: ToolParameters) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
-            let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+            let action = params
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list");
             let mut tasks = TASKS.lock().unwrap();
             match action {
                 "create" => {
                     let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     let id = format!("task_{}", tasks.len() + 1);
-                    tasks.push(TodoEntry { id: id.clone(), content: content.to_string(), status: "pending".into() });
-                    Ok(ToolResult::success(format!("Created task {}: {}", id, content)))
+                    tasks.push(TodoEntry {
+                        id: id.clone(),
+                        content: content.to_string(),
+                        status: "pending".into(),
+                    });
+                    Ok(ToolResult::success(format!(
+                        "Created task {}: {}",
+                        id, content
+                    )))
                 }
                 "update" => {
                     let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    let status = params.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                    let status = params
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pending");
                     if let Some(t) = tasks.iter_mut().find(|t| t.id == id) {
                         t.status = status.to_string();
                         if let Some(content) = params.get("content").and_then(|v| v.as_str()) {
                             t.content = content.to_string();
                         }
-                        Ok(ToolResult::success(format!("Updated task {}: status={}", id, status)))
+                        Ok(ToolResult::success(format!(
+                            "Updated task {}: status={}",
+                            id, status
+                        )))
                     } else {
                         Ok(ToolResult::error(format!("Task {} not found", id)))
                     }
                 }
                 _ => {
                     if tasks.is_empty() {
-                        Ok(ToolResult::success("No tasks. Use todo_write with action='create' to add tasks."))
+                        Ok(ToolResult::success(
+                            "No tasks. Use todo_write with action='create' to add tasks.",
+                        ))
                     } else {
-                        let list: Vec<String> = tasks.iter().map(|t|
-                            format!("[{}] {} — {}", t.status, t.id, t.content)
-                        ).collect();
+                        let list: Vec<String> = tasks
+                            .iter()
+                            .map(|t| format!("[{}] {} — {}", t.status, t.id, t.content))
+                            .collect();
                         Ok(ToolResult::success(list.join("\n")))
                     }
                 }
             }
         })
     }
-    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel { echo_core::tools::ToolRiskLevel::ReadOnly }
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
+    }
 }

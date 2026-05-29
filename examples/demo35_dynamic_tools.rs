@@ -193,7 +193,7 @@ fn demo_edge_cases() {
     println!("  [2.2] replace_tool 不存在时自动注册");
     let old = agent.replace_tool(Box::new(SearchWebTool));
     assert!(old.is_none());
-    assert!(agent.tool_names().contains(&"search_web"));
+    assert!(agent.tool_names().contains(&"search_web".to_string()));
     println!("    replace_tool('new_tool') 当工具不存在时自动注册 ✓\n");
 
     // 2.3 多次添加同名工具

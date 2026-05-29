@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 
 // ── Shared vector store ───────────────────────────────────────────────────
 
@@ -210,6 +211,10 @@ impl Tool for RagIndexTool {
         "rag_index"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read, ToolPermission::Write]
+    }
+
     fn description(&self) -> &str {
         "Chunk documents and build a vector index for semantic retrieval. \
          Requires EMBEDDING_API_KEY env var (or compatible OPENAI_API_KEY / EMBEDDING_APIKEY). \
@@ -322,6 +327,10 @@ impl Tool for RagSearchTool {
         "rag_search"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
     fn description(&self) -> &str {
         "Semantic search over indexed documents, returning top_k most relevant chunks with similarity scores. \
          Requires prior rag_index to build the index."
@@ -415,6 +424,10 @@ pub struct RagChunkDocumentTool;
 impl Tool for RagChunkDocumentTool {
     fn name(&self) -> &str {
         "rag_chunk_document"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {

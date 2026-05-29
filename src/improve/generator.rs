@@ -19,7 +19,9 @@ impl Default for PromptGenerator {
 }
 
 impl PromptGenerator {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Generate an improved system prompt based on failure analysis.
     ///
@@ -32,18 +34,17 @@ impl PromptGenerator {
         critiques: &[RunCritique],
         task_domain: &str,
     ) -> String {
-        // Collect failure patterns
+        // Use structured report format instead of Debug format
         let failure_summary: String = critiques
             .iter()
-            .flat_map(|c| &c.issues)
-            .map(|issue| format!("- {:?}", issue))
+            .map(|c| c.format_report())
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n---\n");
 
         let previous_suggestions: String = critiques
             .iter()
             .flat_map(|c| &c.suggestions)
-            .map(|s| format!("- {:?}", s))
+            .map(|s| format!("- {}", Self::format_suggestion(s)))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -51,13 +52,14 @@ impl PromptGenerator {
             "You are improving a system prompt for an AI coding agent.\n\n\
              CURRENT PROMPT:\n{current_prompt}\n\n\
              DOMAIN: {task_domain}\n\n\
-             FAILURE PATTERNS (issues found in previous runs):\n{failure_summary}\n\n\
+             FAILURE ANALYSIS (from previous runs):\n{failure_summary}\n\n\
              PREVIOUS SUGGESTIONS:\n{previous_suggestions}\n\n\
              TASK: Write an improved system prompt that addresses these failures.\n\
              Rules:\n\
              - Keep it under {max_chars} characters\n\
              - Be specific about tools and behaviors\n\
              - Include guardrails that prevent the observed failures\n\
+             - Do NOT repeat previous attempts — each iteration must make DIFFERENT changes\n\
              - Output ONLY the new prompt text, no explanations\n\
              - Wrap in <new_prompt>...</new_prompt> tags",
             max_chars = self.max_chars,
@@ -75,6 +77,25 @@ impl PromptGenerator {
             .chars()
             .take(self.max_chars)
             .collect()
+    }
+
+    /// Format an improvement suggestion as human-readable text.
+    fn format_suggestion(suggestion: &crate::improve::ImprovementSuggestion) -> String {
+        use crate::improve::ImprovementSuggestion;
+        match suggestion {
+            ImprovementSuggestion::PromptChange {
+                section,
+                suggestion,
+            } => {
+                format!("Modify '{section}': {suggestion}")
+            }
+            ImprovementSuggestion::PolicyChange { rule, reason } => {
+                format!("Policy: {rule} (reason: {reason})")
+            }
+            ImprovementSuggestion::EvalGeneration { case_id, .. } => {
+                format!("Generate eval case: {case_id}")
+            }
+        }
     }
 
     /// Extract content between XML-style tags.

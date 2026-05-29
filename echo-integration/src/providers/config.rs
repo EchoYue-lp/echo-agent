@@ -41,6 +41,10 @@ pub enum LlmProvider {
     Anthropic,
     /// Ollama 本地推理
     Ollama,
+    /// Google Gemini (OpenAI-compatible endpoint)
+    Gemini,
+    /// Azure OpenAI
+    Azure,
 }
 
 /// LLM 运行时配置（依赖注入模式）
@@ -182,6 +186,32 @@ impl LlmConfig {
         }
     }
 
+    /// 创建 Google Gemini 配置
+    pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: LlmProvider::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai/".to_string(),
+            api_key: api_key.into(),
+            model: model.into(),
+        }
+    }
+
+    /// 创建 Azure OpenAI 配置
+    ///
+    /// `base_url` 格式: `https://{resource}.openai.azure.com`
+    pub fn azure(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        deployment: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: LlmProvider::Azure,
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            model: deployment.into(),
+        }
+    }
+
     /// 创建自定义端点的配置（`new` 的别名）
     pub fn custom(
         base_url: impl Into<String>,
@@ -209,6 +239,14 @@ impl LlmConfig {
             LlmProvider::Ollama => {
                 let client =
                     super::ollama::OllamaClient::with_base_url(&self.base_url, &self.model);
+                Ok(Box::new(client))
+            }
+            LlmProvider::Gemini => {
+                let client = super::gemini::GeminiClient::new(self.clone())?;
+                Ok(Box::new(client))
+            }
+            LlmProvider::Azure => {
+                let client = super::azure::AzureOpenAiClient::new(self.clone())?;
                 Ok(Box::new(client))
             }
         }
@@ -350,6 +388,10 @@ impl ProviderFactory {
             "zhipu",
             "glm",
             "ollama",
+            "gemini",
+            "google",
+            "azure",
+            "azure_openai",
         ]
     }
 }
@@ -368,6 +410,7 @@ fn provider_base_url(provider: &str) -> Option<&'static str> {
         "moonshot" | "kimi" => Some("https://api.moonshot.cn/v1/chat/completions"),
         "zhipu" | "glm" => Some("https://open.bigmodel.cn/api/paas/v4/chat/completions"),
         "ollama" => Some("http://localhost:11434/v1/chat/completions"),
+        "gemini" | "google" => Some("https://generativelanguage.googleapis.com/v1beta/openai/"),
         _ => None,
     }
 }
@@ -377,6 +420,8 @@ fn parse_provider(provider: &str) -> LlmProvider {
     match provider.to_lowercase().as_str() {
         "anthropic" => LlmProvider::Anthropic,
         "ollama" => LlmProvider::Ollama,
+        "gemini" | "google" => LlmProvider::Gemini,
+        "azure" | "azure_openai" => LlmProvider::Azure,
         // OpenAI 兼容类（openai、deepseek、dashscope 等）统一走 OpenAI 实现
         _ => LlmProvider::OpenAi,
     }
@@ -389,6 +434,10 @@ fn detect_provider_from_url(url: &str) -> LlmProvider {
         LlmProvider::Anthropic
     } else if lower.contains("localhost:11434") || lower.contains("ollama") {
         LlmProvider::Ollama
+    } else if lower.contains("generativelanguage.googleapis.com") {
+        LlmProvider::Gemini
+    } else if lower.contains(".openai.azure.com") {
+        LlmProvider::Azure
     } else {
         LlmProvider::OpenAi
     }

@@ -12,8 +12,8 @@ pub(crate) mod memory;
 pub(crate) mod memory_write;
 #[cfg(feature = "tasks")]
 pub(crate) mod plan;
-pub(crate) mod todo;
 #[cfg(feature = "tasks")]
 pub(crate) mod task;
 /// Think tool for reasoning and reflection.
 pub mod think;
+pub(crate) mod todo;

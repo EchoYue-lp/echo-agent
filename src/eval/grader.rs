@@ -70,7 +70,8 @@ impl LlmGrader {
                 "  \"overall_assessment\": \"brief summary\"\n",
                 "}\n\n",
                 "Be strict but fair. If evidence is ambiguous, mark as not passed."
-            ).to_string(),
+            )
+            .to_string(),
         }
     }
 
@@ -82,17 +83,44 @@ impl LlmGrader {
         output: &str,
         assertions: &[Assertion],
     ) -> GradingReport {
+        self.grade_with_trajectory(agent, task, output, assertions, None)
+            .await
+    }
+
+    /// Grade an agent's output with optional trajectory summary.
+    ///
+    /// The `trajectory_summary` can include tool calls made, files edited, etc.
+    /// to give the grader more context about the agent's execution path.
+    pub async fn grade_with_trajectory(
+        &self,
+        agent: &dyn Agent,
+        task: &str,
+        output: &str,
+        assertions: &[Assertion],
+        trajectory_summary: Option<&str>,
+    ) -> GradingReport {
         let assertions_text: String = assertions
             .iter()
-            .map(|a| format!("- [{}] Check: {}\n  Expected: {}", a.id, a.check, a.expected))
+            .map(|a| {
+                format!(
+                    "- [{}] Check: {}\n  Expected: {}",
+                    a.id, a.check, a.expected
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
-        let prompt = format!(
-            "{}\n\n--- TASK ---\n{task}\n\n--- OUTPUT ---\n{}\n\n--- ASSERTIONS ---\n{assertions_text}\n\nProvide your grading in the JSON format specified.",
-            self.grader_prompt,
-            truncate(output, 4000)
-        );
+        let mut sections = vec![self.grader_prompt.clone(), format!("--- TASK ---\n{task}")];
+
+        if let Some(traj) = trajectory_summary {
+            sections.push(format!("--- TRAJECTORY ---\n{traj}"));
+        }
+
+        sections.push(format!("--- OUTPUT ---\n{}", truncate(output, 8000)));
+        sections.push(format!("--- ASSERTIONS ---\n{assertions_text}"));
+        sections.push("Provide your grading in the JSON format specified.".to_string());
+
+        let prompt = sections.join("\n\n");
 
         let response = agent.execute(&prompt).await;
         let raw = response.unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
@@ -120,7 +148,11 @@ impl LlmGrader {
                 .unwrap_or_default();
 
             let pass_count = results.iter().filter(|r| r.passed).count();
-            let pass_rate = if assertions.is_empty() { 1.0 } else { pass_count as f64 / assertions.len() as f64 };
+            let pass_rate = if assertions.is_empty() {
+                1.0
+            } else {
+                pass_count as f64 / assertions.len() as f64
+            };
 
             GradingReport {
                 case_id: String::new(),
@@ -133,8 +165,7 @@ impl LlmGrader {
             let results: Vec<GradeResult> = assertions
                 .iter()
                 .map(|a| {
-                    let passed = raw.to_lowercase().contains("passed")
-                        && raw.contains(&a.id);
+                    let passed = raw.to_lowercase().contains("passed") && raw.contains(&a.id);
                     GradeResult {
                         assertion_id: a.id.clone(),
                         passed,
@@ -146,7 +177,11 @@ impl LlmGrader {
                 .collect();
 
             let pass_count = results.iter().filter(|r| r.passed).count();
-            let pass_rate = if assertions.is_empty() { 1.0 } else { pass_count as f64 / assertions.len() as f64 };
+            let pass_rate = if assertions.is_empty() {
+                1.0
+            } else {
+                pass_count as f64 / assertions.len() as f64
+            };
 
             GradingReport {
                 case_id: String::new(),
@@ -169,7 +204,11 @@ mod tests {
     #[test]
     fn test_parse_valid_response() {
         let raw = r#"{"results":[{"assertion_id":"a1","passed":true,"confidence":0.9,"evidence":"found","reasoning":"clear"}],"overall_assessment":"good"}"#;
-        let assertions = vec![Assertion { id: "a1".into(), check: "check".into(), expected: "yes".into() }];
+        let assertions = vec![Assertion {
+            id: "a1".into(),
+            check: "check".into(),
+            expected: "yes".into(),
+        }];
         let report = LlmGrader::parse_grading_response(raw, &assertions);
         assert_eq!(report.pass_rate, 1.0);
         assert_eq!(report.results.len(), 1);

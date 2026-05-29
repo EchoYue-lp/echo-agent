@@ -14,6 +14,13 @@ pub struct TriggerTestCase {
     pub expected_agent: String,
     /// Whether this query should trigger ANY sub-agent (false = should not trigger).
     pub should_trigger: bool,
+    /// Number of runs per query for computing trigger rate. Default: 1.
+    #[serde(default = "default_runs")]
+    pub runs_per_query: usize,
+}
+
+fn default_runs() -> usize {
+    1
 }
 
 /// Result of a trigger accuracy evaluation.
@@ -35,11 +42,17 @@ pub struct TriggerAccuracy {
     pub recall: f64,
     /// F1 score.
     pub f1: f64,
+    /// Per-case trigger rates when runs_per_query > 1 (rate = triggered_count / total_runs).
+    #[serde(default)]
+    pub trigger_rates: Vec<f64>,
 }
 
 impl TriggerAccuracy {
     /// Evaluate trigger accuracy from test cases and actual triggers.
-    pub fn evaluate(cases: &[TriggerTestCase], actual_triggers: &[(String, Option<String>)]) -> Self {
+    pub fn evaluate(
+        cases: &[TriggerTestCase],
+        actual_triggers: &[(String, Option<String>)],
+    ) -> Self {
         let mut tp = 0usize; // triggered correctly
         let mut fp = 0usize; // triggered but shouldn't
         let mut tn = 0usize; // correctly skipped
@@ -53,7 +66,10 @@ impl TriggerAccuracy {
                 // Should trigger, did trigger, correct agent → TP
                 (true, true, true) => tp += 1,
                 // Should trigger, did trigger, wrong agent → partial TP, also FP
-                (true, true, false) => { tp += 1; fp += 1; }
+                (true, true, false) => {
+                    tp += 1;
+                    fp += 1;
+                }
                 // Should trigger, didn't trigger → FN
                 (true, false, _) => fn_count += 1,
                 // Shouldn't trigger, triggered anyway → FP
@@ -64,11 +80,68 @@ impl TriggerAccuracy {
         }
 
         let total = cases.len();
-        let precision = if tp + fp > 0 { tp as f64 / (tp + fp) as f64 } else { 0.0 };
-        let recall = if tp + fn_count > 0 { tp as f64 / (tp + fn_count) as f64 } else { 0.0 };
-        let f1 = if precision + recall > 0.0 { 2.0 * precision * recall / (precision + recall) } else { 0.0 };
+        let precision = if tp + fp > 0 {
+            tp as f64 / (tp + fp) as f64
+        } else {
+            0.0
+        };
+        let recall = if tp + fn_count > 0 {
+            tp as f64 / (tp + fn_count) as f64
+        } else {
+            0.0
+        };
+        let f1 = if precision + recall > 0.0 {
+            2.0 * precision * recall / (precision + recall)
+        } else {
+            0.0
+        };
 
-        Self { total, true_positives: tp, false_positives: fp, true_negatives: tn, false_negatives: fn_count, precision, recall, f1 }
+        Self {
+            total,
+            true_positives: tp,
+            false_positives: fp,
+            true_negatives: tn,
+            false_negatives: fn_count,
+            precision,
+            recall,
+            f1,
+            trigger_rates: Vec::new(),
+        }
+    }
+
+    /// Evaluate trigger accuracy from multi-run results.
+    ///
+    /// `multi_results` is a list where each entry corresponds to a test case and
+    /// contains the actual triggers from multiple runs (runs_per_query > 1).
+    pub fn evaluate_multi_run(
+        cases: &[TriggerTestCase],
+        multi_results: &[Vec<(String, Option<String>)>],
+    ) -> Self {
+        // Flatten to single-run results for standard metrics
+        let flat_actuals: Vec<(String, Option<String>)> = multi_results
+            .iter()
+            .map(|runs| runs.first().cloned().unwrap_or_default())
+            .collect();
+        let mut result = Self::evaluate(cases, &flat_actuals);
+
+        // Compute per-case trigger rates
+        result.trigger_rates = cases
+            .iter()
+            .zip(multi_results.iter())
+            .map(|(case, runs)| {
+                if case.runs_per_query <= 1 {
+                    return if runs.first().is_some_and(|(_, a)| a.is_some()) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                }
+                let triggered = runs.iter().filter(|(_, a)| a.is_some()).count();
+                triggered as f64 / runs.len() as f64
+            })
+            .collect();
+
+        result
     }
 }
 
@@ -79,8 +152,18 @@ mod tests {
     #[test]
     fn test_trigger_accuracy_perfect() {
         let cases = vec![
-            TriggerTestCase { query: "read src/main.rs".into(), expected_agent: "code-explorer".into(), should_trigger: true },
-            TriggerTestCase { query: "what is 2+2".into(), expected_agent: "".into(), should_trigger: false },
+            TriggerTestCase {
+                query: "read src/main.rs".into(),
+                expected_agent: "code-explorer".into(),
+                should_trigger: true,
+                runs_per_query: 1,
+            },
+            TriggerTestCase {
+                query: "what is 2+2".into(),
+                expected_agent: "".into(),
+                should_trigger: false,
+                runs_per_query: 1,
+            },
         ];
         let actuals = vec![
             ("read src/main.rs".into(), Some("code-explorer".into())),
@@ -94,12 +177,13 @@ mod tests {
 
     #[test]
     fn test_trigger_accuracy_false_positive() {
-        let cases = vec![
-            TriggerTestCase { query: "what is 2+2".into(), expected_agent: "".into(), should_trigger: false },
-        ];
-        let actuals = vec![
-            ("what is 2+2".into(), Some("code-explorer".into())),
-        ];
+        let cases = vec![TriggerTestCase {
+            query: "what is 2+2".into(),
+            expected_agent: "".into(),
+            should_trigger: false,
+            runs_per_query: 1,
+        }];
+        let actuals = vec![("what is 2+2".into(), Some("code-explorer".into()))];
         let acc = TriggerAccuracy::evaluate(&cases, &actuals);
         assert_eq!(acc.precision, 0.0); // triggered but shouldn't
     }

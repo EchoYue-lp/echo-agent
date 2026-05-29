@@ -12,6 +12,7 @@ use sqlx::{Column, Row};
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 
 // ── SQL Query (read-only) ─────────────────────────────────────────────────────────
 
@@ -20,6 +21,10 @@ pub struct SqlQueryTool;
 impl Tool for SqlQueryTool {
     fn name(&self) -> &str {
         "sql_query"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]
     }
 
     fn description(&self) -> &str {
@@ -51,6 +56,17 @@ impl Tool for SqlQueryTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("connection_url".to_string()))?;
 
+            // Validate connection URL scheme
+            if !conn_url.starts_with("sqlite")
+                && !conn_url.starts_with("mysql")
+                && !conn_url.starts_with("postgresql")
+                && !conn_url.starts_with("postgres")
+            {
+                return Ok(ToolResult::error(
+                    "Unsupported database scheme. Use sqlite://, mysql://, or postgresql://",
+                ));
+            }
+
             let query = parameters
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -76,7 +92,7 @@ impl Tool for SqlQueryTool {
             // Additional dangerous keyword scan
             let dangerous = [
                 "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT",
-                "REVOKE", "REPLACE",
+                "REVOKE", "REPLACE", "EXECUTE", "EXEC", "INTO OUTFILE", "LOAD_FILE",
             ];
             for keyword in &dangerous {
                 if trimmed.contains(keyword) {
@@ -104,6 +120,10 @@ impl Tool for ListTablesTool {
         "list_tables"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]
+    }
+
     fn description(&self) -> &str {
         "List all tables in the database. Supports SQLite, MySQL, PostgreSQL."
     }
@@ -127,6 +147,17 @@ impl Tool for ListTablesTool {
                 .get("connection_url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("connection_url".to_string()))?;
+
+            // Validate connection URL scheme
+            if !conn_url.starts_with("sqlite")
+                && !conn_url.starts_with("mysql")
+                && !conn_url.starts_with("postgresql")
+                && !conn_url.starts_with("postgres")
+            {
+                return Ok(ToolResult::error(
+                    "Unsupported database scheme. Use sqlite://, mysql://, or postgresql://",
+                ));
+            }
 
             // Choose appropriate query based on database type
             let query = if conn_url.starts_with("sqlite") {
@@ -153,6 +184,10 @@ pub struct DescribeTableTool;
 impl Tool for DescribeTableTool {
     fn name(&self) -> &str {
         "describe_table"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]
     }
 
     fn description(&self) -> &str {
@@ -183,10 +218,29 @@ impl Tool for DescribeTableTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("connection_url".to_string()))?;
 
+            // Validate connection URL scheme
+            if !conn_url.starts_with("sqlite")
+                && !conn_url.starts_with("mysql")
+                && !conn_url.starts_with("postgresql")
+                && !conn_url.starts_with("postgres")
+            {
+                return Ok(ToolResult::error(
+                    "Unsupported database scheme. Use sqlite://, mysql://, or postgresql://",
+                ));
+            }
+
             let table_name = parameters
                 .get("table_name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("table_name".to_string()))?;
+
+            // Validate table name: only allow alphanumeric, underscore, dot (for schema.table)
+            if !table_name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+                return Ok(ToolResult::error(format!(
+                    "Invalid table name '{}': only alphanumeric, underscore, and dot characters allowed",
+                    table_name
+                )));
+            }
 
             // Choose appropriate query based on database type
             let query = if conn_url.starts_with("sqlite") {
@@ -197,7 +251,7 @@ impl Tool for DescribeTableTool {
                      FROM information_schema.COLUMNS \
                      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}' \
                      ORDER BY ORDINAL_POSITION",
-                    table_name.replace('\'', "\\'")
+                    table_name.replace('\'', "''")
                 )
             } else {
                 // PostgreSQL

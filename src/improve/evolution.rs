@@ -42,31 +42,61 @@ pub struct SelfEvolution {
 }
 
 impl Default for SelfEvolution {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SelfEvolution {
     pub fn new() -> Self {
-        Self { cases: Vec::new(), run_store: None, max_iterations: 5, report_dir: None, enabled: false }
+        Self {
+            cases: Vec::new(),
+            run_store: None,
+            max_iterations: 5,
+            report_dir: None,
+            enabled: false,
+        }
     }
 
-    pub fn with_eval_cases(mut self, cases: Vec<EvalCase>) -> Self { self.cases = cases; self }
-    pub fn with_run_store(mut self, store: Arc<dyn RunStore>) -> Self { self.run_store = Some(store); self }
-    pub fn max_iterations(mut self, max: usize) -> Self { self.max_iterations = max; self }
-    pub fn with_report_dir(mut self, dir: &str) -> Self { self.report_dir = Some(dir.to_string()); self }
+    pub fn with_eval_cases(mut self, cases: Vec<EvalCase>) -> Self {
+        self.cases = cases;
+        self
+    }
+    pub fn with_run_store(mut self, store: Arc<dyn RunStore>) -> Self {
+        self.run_store = Some(store);
+        self
+    }
+    pub fn max_iterations(mut self, max: usize) -> Self {
+        self.max_iterations = max;
+        self
+    }
+    pub fn with_report_dir(mut self, dir: &str) -> Self {
+        self.report_dir = Some(dir.to_string());
+        self
+    }
 
     /// Enable self-evolution.
-    pub fn enable(mut self) -> Self { self.enabled = true; self }
-    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn enable(mut self) -> Self {
+        self.enabled = true;
+        self
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
 
     /// Run the full self-evolution pipeline.
     pub async fn run<F>(&self, agent_factory: F) -> Option<LoopResult>
-    where F: Fn() -> Box<dyn crate::agent::Agent>,
+    where
+        F: Fn() -> Box<dyn crate::agent::Agent>,
     {
-        if !self.enabled || self.cases.is_empty() { return None; }
+        if !self.enabled || self.cases.is_empty() {
+            return None;
+        }
 
         let runner = ImprovementLoop::new();
-        let result = runner.run(&self.cases, agent_factory, &self.run_store).await;
+        let result = runner
+            .run(&self.cases, agent_factory, &self.run_store)
+            .await;
 
         if let Some(ref dir) = self.report_dir {
             let _ = std::fs::create_dir_all(dir);

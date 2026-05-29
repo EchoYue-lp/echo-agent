@@ -11,6 +11,140 @@ use serde_json::Value;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 impl ReactAgent {
+    /// Unified LLM call with retry, diagnostics logging, and circuit breaker.
+    ///
+    /// Handles both custom `llm_client` and raw HTTP paths, returning a
+    /// normalized `(message, usage, finish_reason)` tuple.
+    async fn call_llm_with_retry(
+        &self,
+        messages: &[Message],
+        tools: Vec<crate::llm::types::ToolDefinition>,
+    ) -> Result<(Message, Option<crate::llm::types::Usage>, String)> {
+        let agent = &self.config.agent_name;
+        let max_retries = self.config.llm_max_retries;
+        let retry_delay = self.config.llm_retry_delay_ms;
+        let circuit_breaker = self.guard.circuit_breaker.clone();
+        let temperature = self.config.temperature;
+        let max_tokens = self.config.max_tokens;
+        let response_format = self.config.response_format.clone();
+
+        if let Some(llm_client) = self.llm_client.clone() {
+            let request = ChatRequest {
+                messages: messages.to_vec(),
+                temperature,
+                max_tokens,
+                tools: Some(tools.clone()),
+                tool_choice: None,
+                response_format: response_format.clone(),
+                cancel_token: None,
+            };
+            let msg_count = request.messages.len();
+            let tool_count = request.tools.as_ref().map_or(0, |t| t.len());
+            let last_msg_preview = request.messages.last().map(|m| {
+                let role = m.role.as_str();
+                let content = m.content.as_text().unwrap_or_default();
+                let preview: String = content.chars().take(200).collect();
+                format!("[{role}] {preview}")
+            });
+            warn!(
+                agent = %agent,
+                msg_count,
+                tool_count,
+                temperature = request.temperature,
+                max_tokens = request.max_tokens,
+                last_msg = ?last_msg_preview,
+                "📤 LLM request"
+            );
+            let response = super::retry::retry_llm_call(
+                agent,
+                max_retries,
+                retry_delay,
+                &circuit_breaker,
+                || {
+                    let llm_client = llm_client.clone();
+                    let request = request.clone();
+                    async move { llm_client.chat(request).await }
+                },
+            )
+            .await?;
+            warn!(
+                agent = %agent,
+                finish_reason = ?response.finish_reason,
+                has_tool_calls = response.has_tool_calls(),
+                content_preview = ?response.content().map(|c| c.chars().take(200).collect::<String>()),
+                "📥 LLM response"
+            );
+            let usage = response.raw.usage.clone();
+            let finish_reason = response.finish_reason.unwrap_or_default();
+            Ok((response.message, usage, finish_reason))
+        } else {
+            let client = self.client.clone();
+            let model_name = self.config.model_name.clone();
+            let msg_count = messages.len();
+            let tool_count = tools.len();
+            let last_msg_preview = messages.last().map(|m| {
+                let role = m.role.as_str();
+                let content = m.content.as_text().unwrap_or_default();
+                let preview: String = content.chars().take(200).collect();
+                format!("[{role}] {preview}")
+            });
+            warn!(
+                agent = %agent,
+                msg_count,
+                tool_count,
+                temperature,
+                max_tokens,
+                last_msg = ?last_msg_preview,
+                "📤 LLM request"
+            );
+            let response = super::retry::retry_llm_call(
+                agent,
+                max_retries,
+                retry_delay,
+                &circuit_breaker,
+                || {
+                    let client = client.clone();
+                    let model_name = model_name.as_str();
+                    let messages = messages.to_vec();
+                    let tools = tools.clone();
+                    let response_format = response_format.clone();
+                    async move {
+                        chat(
+                            client,
+                            model_name,
+                            &messages,
+                            temperature,
+                            max_tokens,
+                            Some(false),
+                            Some(tools),
+                            None,
+                            response_format,
+                        )
+                        .await
+                    }
+                },
+            )
+            .await?;
+            let usage = response.usage.clone();
+            let choice = response.choices.first().ok_or(ReactError::Agent(Box::new(
+                AgentError::NoResponse {
+                    model: self.config.model_name.clone(),
+                    agent: self.config.agent_name.clone(),
+                },
+            )))?;
+            let finish_reason = choice.finish_reason.clone().unwrap_or_default();
+            let message = choice.message.clone();
+            warn!(
+                agent = %agent,
+                finish_reason = ?finish_reason,
+                has_tool_calls = message.tool_calls.as_ref().is_some_and(|t| !t.is_empty()),
+                content_preview = ?message.content.as_text().map(|c| c.chars().take(200).collect::<String>()),
+                "📥 LLM response"
+            );
+            Ok((message, usage, finish_reason))
+        }
+    }
+
     /// Call LLM for reasoning, returning the list of steps for this round.
     ///
     /// Before each call, `ContextManager::prepare` auto-compresses overflow history messages,
@@ -99,13 +233,6 @@ impl ReactAgent {
         }
 
         let tools = self.tools.tool_manager.get_openai_tools();
-        let max_retries = self.config.llm_max_retries;
-        let retry_delay = self.config.llm_retry_delay_ms;
-        let client = self.client.clone();
-        let model_name = self.config.model_name.clone();
-        let response_format = self.config.response_format.clone();
-        let temperature = self.config.temperature;
-        let max_tokens = self.config.max_tokens;
 
         // Circuit breaker check
         let circuit_breaker = self.guard.circuit_breaker.clone();
@@ -130,119 +257,7 @@ impl ReactAgent {
             )));
         }
 
-        let (message, usage, finish_reason) = if let Some(llm_client) = self.llm_client.clone() {
-            let request = ChatRequest {
-                messages: messages.clone(),
-                temperature: self.config.temperature,
-                max_tokens: self.config.max_tokens,
-                tools: Some(tools.clone()),
-                tool_choice: None,
-                response_format: response_format.clone(),
-                cancel_token: None,
-            };
-            let msg_count = request.messages.len();
-            let tool_count = request.tools.as_ref().map_or(0, |t| t.len());
-            let last_msg_preview = request.messages.last().map(|m| {
-                let role = m.role.as_str();
-                let content = m.content.as_text().unwrap_or_default();
-                let preview: String = content.chars().take(200).collect();
-                format!("[{role}] {preview}")
-            });
-            warn!(
-                agent = %agent,
-                msg_count,
-                tool_count,
-                temperature = request.temperature,
-                max_tokens = request.max_tokens,
-                last_msg = ?last_msg_preview,
-                "📤 LLM request"
-            );
-            let response = super::retry::retry_llm_call(
-                &agent,
-                max_retries,
-                retry_delay,
-                &circuit_breaker,
-                || {
-                    let llm_client = llm_client.clone();
-                    let request = request.clone();
-                    async move { llm_client.chat(request).await }
-                },
-            )
-            .await?;
-            warn!(
-                agent = %agent,
-                finish_reason = ?response.finish_reason,
-                has_tool_calls = response.has_tool_calls(),
-                content_preview = ?response.content().map(|c| c.chars().take(200).collect::<String>()),
-                "📥 LLM response"
-            );
-            let usage = response.raw.usage.clone();
-            let finish_reason = response.finish_reason.clone();
-            (response.message, usage, finish_reason)
-        } else {
-            let msg_count = messages.len();
-            let tool_count = tools.len();
-            let last_msg_preview = messages.last().map(|m| {
-                let role = m.role.as_str();
-                let content = m.content.as_text().unwrap_or_default();
-                let preview: String = content.chars().take(200).collect();
-                format!("[{role}] {preview}")
-            });
-            warn!(
-                agent = %agent,
-                msg_count,
-                tool_count,
-                temperature,
-                max_tokens,
-                last_msg = ?last_msg_preview,
-                "📤 LLM request"
-            );
-            let response = super::retry::retry_llm_call(
-                &agent,
-                max_retries,
-                retry_delay,
-                &circuit_breaker,
-                || {
-                    let client = client.clone();
-                    let model_name = model_name.as_str();
-                    let messages = &messages;
-                    let tools = tools.clone();
-                    let response_format = response_format.clone();
-                    async move {
-                        chat(
-                            client,
-                            model_name,
-                            messages,
-                            temperature,
-                            max_tokens,
-                            Some(false),
-                            Some(tools),
-                            None,
-                            response_format,
-                        )
-                        .await
-                    }
-                },
-            )
-            .await?;
-            let usage = response.usage.clone();
-            let choice = response.choices.first().ok_or(ReactError::Agent(Box::new(
-                AgentError::NoResponse {
-                    model: self.config.model_name.clone(),
-                    agent: self.config.agent_name.clone(),
-                },
-            )))?;
-            let finish_reason = choice.finish_reason.clone();
-            let message = choice.message.clone();
-            warn!(
-                agent = %agent,
-                finish_reason = ?finish_reason,
-                has_tool_calls = message.tool_calls.as_ref().is_some_and(|t| !t.is_empty()),
-                content_preview = ?message.content.as_text().map(|c| c.chars().take(200).collect::<String>()),
-                "📥 LLM response"
-            );
-            (message, usage, finish_reason)
-        };
+        let (message, usage, finish_reason) = self.call_llm_with_retry(&messages, tools).await?;
 
         let has_tool_calls = message.tool_calls.is_some();
         let tool_calls_count = message.tool_calls.as_ref().map_or(0, |tc| tc.len());
@@ -308,8 +323,13 @@ impl ReactAgent {
         .await;
 
         for cb in &callbacks {
-            cb.on_think_end(&agent, &res, prompt_tokens as usize, completion_tokens as usize)
-                .await;
+            cb.on_think_end(
+                &agent,
+                &res,
+                prompt_tokens as usize,
+                completion_tokens as usize,
+            )
+            .await;
         }
 
         Ok(res)
@@ -563,7 +583,8 @@ impl ReactAgent {
         self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
             phase: "recall".into(),
             iteration: 0,
-        }).await;
+        })
+        .await;
         *self.current_turn.lock().unwrap() = Some(turn.clone());
 
         // Fire UserPromptSubmit hook
@@ -633,20 +654,23 @@ impl ReactAgent {
         // Start trace run recording
         self.start_trace_run(message).await;
 
-        let mut stop_hook_continued = false;
+        /// Maximum times a Stop hook can request continuation before being ignored.
+        const MAX_STOP_CONTINUE: usize = 3;
+        let mut stop_continue_count = 0usize;
 
         for iteration in 0..self.config.max_iterations {
             // Cancel check: if a cancellation token is set and triggered, stop the loop
-            if let Some(ref cancel) = *self.cancel_token.lock().await {
-                if cancel.is_cancelled() {
-                    info!(agent = %agent, "Cancellation requested, stopping ReAct loop");
-                    self.finalize_trace_run(
-                        crate::trace::RunStatus::Cancelled,
-                        None,
-                        Some("Cancelled"),
-                    ).await;
-                    return Ok("Cancelled.".to_string());
-                }
+            if let Some(ref cancel) = *self.cancel_token.lock().await
+                && cancel.is_cancelled()
+            {
+                info!(agent = %agent, "Cancellation requested, stopping ReAct loop");
+                self.finalize_trace_run(
+                    crate::trace::RunStatus::Cancelled,
+                    None,
+                    Some("Cancelled"),
+                )
+                .await;
+                return Ok("Cancelled.".to_string());
             }
 
             info!(agent = %agent, iteration = iteration + 1, "🔄 ReAct iteration starting");
@@ -662,7 +686,8 @@ impl ReactAgent {
             self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
                 phase: "think".into(),
                 iteration: iteration + 1,
-            }).await;
+            })
+            .await;
             *self.current_turn.lock().unwrap() = Some(turn.clone());
 
             let think_model = self.config.model_name.clone();
@@ -687,7 +712,8 @@ impl ReactAgent {
             self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
                 phase: "act".into(),
                 iteration: iteration + 1,
-            }).await;
+            })
+            .await;
             *self.current_turn.lock().unwrap() = Some(turn.clone());
 
             if let Some(mut answer) = self.process_steps(steps).await? {
@@ -728,7 +754,7 @@ impl ReactAgent {
                         None,
                         self.config.session_id.as_deref().unwrap_or(""),
                         &self.config.agent_name,
-                        stop_hook_continued,
+                        stop_continue_count > 0,
                     );
                     let registry = self.tools.hook_registry.read().await.clone();
                     let stop_result = registry.run_lifecycle_hooks(&hook_ctx).await;
@@ -740,19 +766,25 @@ impl ReactAgent {
                             .unwrap_or_else(|| "Response blocked by Stop hook".to_string());
                     }
                     if let Some(reason) = &stop_result.continue_reason {
-                        info!(agent = %agent, reason = %reason, "Stop hook requested continuation");
-                        self.memory
-                            .context
-                            .lock()
-                            .await
-                            .push(crate::llm::types::Message::system(format!(
-                                "[Hook:Stop] Continue: {}",
-                                reason
-                            )));
-                        // Prevent infinite loops: mark that Stop hook already continued
-                        stop_hook_continued = true;
-                        self.auto_snapshot(iteration).await;
-                        continue;
+                        if stop_continue_count >= MAX_STOP_CONTINUE {
+                            warn!(
+                                agent = %agent,
+                                count = stop_continue_count,
+                                max = MAX_STOP_CONTINUE,
+                                "Stop hook continue limit reached, ignoring continuation request"
+                            );
+                        } else {
+                            info!(agent = %agent, reason = %reason, "Stop hook requested continuation");
+                            self.memory.context.lock().await.push(
+                                crate::llm::types::Message::system(format!(
+                                    "[Hook:Stop] Continue: {}",
+                                    reason
+                                )),
+                            );
+                            stop_continue_count += 1;
+                            self.auto_snapshot(iteration).await;
+                            continue;
+                        }
                     }
                     // Inject any hook messages
                     for msg in &stop_result.messages {
@@ -771,16 +803,13 @@ impl ReactAgent {
                 self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
                     phase: "finalize".into(),
                     iteration: iteration + 1,
-                }).await;
+                })
+                .await;
                 *self.current_turn.lock().unwrap() = Some(turn.clone());
 
                 // Finalize trace run as completed
-                self.finalize_trace_run(
-                    crate::trace::RunStatus::Completed,
-                    Some(&answer),
-                    None,
-                )
-                .await;
+                self.finalize_trace_run(crate::trace::RunStatus::Completed, Some(&answer), None)
+                    .await;
 
                 return Ok(answer);
             }
@@ -790,6 +819,17 @@ impl ReactAgent {
         }
 
         warn!(agent = %agent, max = self.config.max_iterations, "Maximum iterations reached");
+
+        // Auto-save checkpoint so the conversation can be resumed
+        if let Some(checkpointer) = self.checkpointer()
+            && let Some(ref session_id) = self.config.session_id
+        {
+            // Best-effort checkpoint save — don't fail the run if this errors
+            if let Ok(Some(state)) = checkpointer.get_state(session_id).await {
+                let _ = checkpointer.put_state(session_id, state).await;
+            }
+            info!(agent = %agent, session = %session_id, "Saved checkpoint on max_iterations exceeded");
+        }
 
         // Fire StopFailure hook before returning error
         {

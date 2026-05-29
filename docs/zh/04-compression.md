@@ -190,7 +190,7 @@ println!("压缩后消息数: {}", messages.len());
 | 长文档分析 | `HybridCompressor`（先滑动窗口，再摘要） |
 | 测试环境 | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-对应示例：`examples/demo05.rs`
+对应示例：`examples/demo05_compressor.rs`
 
 ---
 

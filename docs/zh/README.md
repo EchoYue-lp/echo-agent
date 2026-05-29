@@ -36,6 +36,8 @@
 | [18 - Guard 系统](18-guard-system.md) | 护栏系统 | RuleGuard、LlmGuard、输入/输出过滤 |
 | [20 - Web 工具](20-web-tools.md) | Web 搜索 / 网页获取 | DuckDuckGo / Brave / Tavily 搜索、HTML→文本 |
 | [21 - 常用工具速查](21-common-tools.md) | Tool Guide | Web 搜索、网页抓取、浏览器自动化、数据工具 |
+| [22 - 论文检索工具](22-research-tools.md) | Research | ArXiv 搜索、Semantic Scholar、PDF 下载、BibTeX 生成 |
+| [23 - Hooks 系统](23-hooks.md) | Hooks | Skills hooks（20 个事件）、Task hooks、Subagent hooks |
 
 ### 知识库
 
@@ -151,7 +153,7 @@ async fn main() -> Result<()> {
 | `examples/demo01_tools.rs` | 基础工具注册与调用 |
 | `examples/demo02_tasks.rs` | DAG 任务规划 |
 | `examples/demo03_approval.rs` | 人工审批 |
-| `examples/demo04_suagent.rs` | SubAgent 编排 |
+| `examples/demo04_subagent.rs` | SubAgent 编排 |
 | `examples/demo05_compressor.rs` | 上下文压缩 |
 | `examples/demo06_mcp.rs` | MCP 协议集成 |
 | `examples/demo07_skills.rs` | Skill 系统 |

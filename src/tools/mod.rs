@@ -84,3 +84,29 @@ pub mod execution {
 pub use echo_execution::tools::{
     Tool, ToolExecutionConfig, ToolManager, ToolParameters, ToolResult, ToolRiskLevel,
 };
+
+// ── Common file tool classification ──────────────────────────────────────────
+
+/// Tools that modify files and should require a prior read.
+pub const WRITE_TOOLS: &[&str] = &[
+    "edit_file",
+    "write_file",
+    "append_file",
+    "create_file",
+    "delete_file",
+    "update_file",
+    "move_file",
+];
+
+/// Tools that read file content.
+pub const READ_TOOLS: &[&str] = &["read_file", "read_text"];
+
+/// Check if a tool name is a write tool.
+pub fn is_write_tool(name: &str) -> bool {
+    WRITE_TOOLS.contains(&name)
+}
+
+/// Check if a tool name is a read tool.
+pub fn is_read_tool(name: &str) -> bool {
+    READ_TOOLS.contains(&name)
+}

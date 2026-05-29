@@ -38,6 +38,8 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [18 - Guard System](./18-guard-system.md) | Guards | RuleGuard, LlmGuard, input/output filtering |
 | [20 - Web Tools](./20-web-tools.md) | Web Search / Fetch | DuckDuckGo / Brave / Tavily search, HTML→text |
 | [21 - Common Tools](./21-common-tools.md) | Tool Guide | Web search, web fetch, browser automation, data tools |
+| [22 - Research Tools](./22-research-tools.md) | Research | ArXiv search, Semantic Scholar, PDF fetch, BibTeX generation |
+| [23 - Hooks System](./23-hooks.md) | Hooks | Skills hooks (20 events), Task hooks, Subagent hooks |
 
 ### Knowledge Base
 
@@ -156,7 +158,7 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo01_tools.rs` | Basic tool registration and invocation |
 | `examples/demo02_tasks.rs` | DAG task planning |
 | `examples/demo03_approval.rs` | Human-in-the-loop approval |
-| `examples/demo04_suagent.rs` | SubAgent orchestration |
+| `examples/demo04_subagent.rs` | SubAgent orchestration |
 | `examples/demo05_compressor.rs` | Context compression |
 | `examples/demo06_mcp.rs` | MCP protocol integration |
 | `examples/demo07_skills.rs` | Skill system |

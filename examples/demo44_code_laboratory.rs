@@ -17,7 +17,7 @@
 //!
 //! ```bash
 //! # 基础运行（需要 LLM API Key）
-//! QWEN_API_KEY=your_key cargo run --example comprehensive_code_laboratory
+//! QWEN_API_KEY=your_key cargo run --example demo44_code_laboratory
 //! ```
 
 use echo_agent::audit::AuditEvent;

@@ -37,11 +37,23 @@ pub struct TeamMessage {
 
 impl TeamMessage {
     pub fn new(from: &str, to: &str, kind: MessageKind, seq: u64) -> Self {
-        Self { from: from.into(), to: to.into(), kind, seq, in_reply_to: None }
+        Self {
+            from: from.into(),
+            to: to.into(),
+            kind,
+            seq,
+            in_reply_to: None,
+        }
     }
 
     pub fn reply_to(&self, kind: MessageKind, seq: u64) -> Self {
-        Self { from: self.to.clone(), to: self.from.clone(), kind, seq, in_reply_to: Some(self.seq) }
+        Self {
+            from: self.to.clone(),
+            to: self.from.clone(),
+            kind,
+            seq,
+            in_reply_to: Some(self.seq),
+        }
     }
 
     /// Serialize for storage/replay.

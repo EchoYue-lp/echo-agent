@@ -18,8 +18,21 @@ Echo Agent 提供了多层安全机制来保护你的系统和数据。本指南
 | `edit_file` | `Read, Write` | `Standard` | 编辑文件（自动创建 .bak 备份） |
 | `shell` | `Execute` | `Dangerous` | 执行 shell 命令（白名单限制） |
 | `web_fetch` | `Network` | `Standard` | 网络请求（SSRF 防护） |
+| `web_search` | `Network` | `Standard` | Web 搜索（DuckDuckGo/Brave/Tavily） |
 | `git_commit` | `Write, Execute` | `Dangerous` | 创建 Git 提交 |
 | `run_skill_script` | `Execute` | `Dangerous` | 执行技能脚本 |
+| `arxiv_search` | `Network` | `Standard` | ArXiv API（HTTPS，SSRF 重定向策略） |
+| `semantic_scholar_search` | `Network` | `Standard` | Semantic Scholar API（HTTPS，SSRF 重定向） |
+| `pdf_fetch` | `Network` | `Standard` | PDF 下载（SSRF 防护，%PDF 验证） |
+| `bibtex_generate` | `Write` | `ReadOnly` | BibTeX 文本生成 |
+| `rag_index` | `Read, Write` | `Standard` | 文档分块 + 向量索引 |
+| `rag_search` | `Read` | `ReadOnly` | 索引文档的语义搜索 |
+| `excel_read` / `excel_info` | `Read` | `ReadOnly` | 读取 Excel 文件 |
+| `excel_write` | `Write` | `Standard` | 写入 Excel 文件 |
+| `data_read` / `data_filter` / ... | `Read` | `ReadOnly` | 数据分析工具 |
+| `data_transform` | `Read, Write` | `Standard` | 数据转换 |
+| `generate_chart` | `Read, Write` | `Standard` | 图表图片生成 |
+| `db_query` | `Network` | `Standard` | SQL 数据库查询（黑名单防护） |
 
 ### 权限类型
 
@@ -243,7 +256,30 @@ export ECHO_AUDIT_MAX_ENTRIES=20000  # 默认 10000
 
 ---
 
-## 7. 安全检查清单
+## 7. SSRF 防护
+
+所有支持网络访问的工具共享统一的 SSRF（服务端请求伪造）防护层：
+
+- **私有 IP 阻止**：127.0.0.0/8、10.0.0.0/8、172.16.0.0/12、192.168.0.0/16
+- **Localhost 阻止**：`localhost`、`*.local` 域名
+- **协议限制**：仅允许 `http://` 和 `https://`（阻止 `file://`、`gopher://` 等）
+- **安全重定向策略**：重定向目标重新验证相同规则
+- **共享 HTTP 客户端**：`OnceLock<reqwest::Client>`，可配置超时（30-60 秒）
+
+此防护适用于：`web_fetch`、`web_search`、`arxiv_search`、`semantic_scholar_search`、`pdf_fetch`。
+
+### SQL 注入防护
+
+数据库工具（`db_query`）包含额外防护：
+
+- **SQL 黑名单**：阻止 `DROP`、`DELETE`、`TRUNCATE`、`ALTER`、`CREATE`、`GRANT`、`EXECUTE`、`INTO OUTFILE`、`LOAD_FILE`
+- **表名验证**：仅允许字母数字、`_` 和 `.` 字符
+- **URL scheme 验证**：仅接受 `sqlite`、`mysql`、`postgresql`、`postgres`
+- **MySQL 转义**：单引号转义为 `''`（非 `\'`）
+
+---
+
+## 8. 安全检查清单
 
 部署前检查：
 

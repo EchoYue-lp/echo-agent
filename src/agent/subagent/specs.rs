@@ -84,7 +84,9 @@ impl ContextPolicy {
     /// Human-readable description of this policy.
     pub fn description(&self) -> &str {
         match self {
-            Self::FullContext => "Inherits all parent context (system prompt, tools, history, memory)",
+            Self::FullContext => {
+                "Inherits all parent context (system prompt, tools, history, memory)"
+            }
             Self::TaskOnly => "Receives only the task description, no parent history",
             Self::SelectedFiles(_) => "Receives only specified files, no parent history",
             Self::DiffOnly => "Receives only git diff context",
@@ -221,10 +223,9 @@ impl SubAgentSpec {
                 "Read the error messages carefully and find the root cause.\n",
                 "Make minimal changes to fix the issue — do not refactor or add features.\n",
                 "After fixing, verify the build succeeds."
-            ).into(),
-            recommended_tools: vec![
-                "read_file".into(), "edit_file".into(), "shell".into(),
-            ],
+            )
+            .into(),
+            recommended_tools: vec!["read_file".into(), "edit_file".into(), "shell".into()],
             context_policy: ContextPolicy::ErrorOnly,
             default_timeout_secs: 300,
             execution_mode: ExecutionMode::Fork,
@@ -262,10 +263,9 @@ impl SubAgentSpec {
                 "missing abstractions, overly complex functions.\n",
                 "Produce a step-by-step refactoring plan with risk assessment for each step.\n",
                 "Do NOT make changes. Only plan."
-            ).into(),
-            recommended_tools: vec![
-                "read_file".into(), "shell".into(),
-            ],
+            )
+            .into(),
+            recommended_tools: vec!["read_file".into(), "shell".into()],
             context_policy: ContextPolicy::FullContext,
             default_timeout_secs: 180,
             execution_mode: ExecutionMode::Fork,
@@ -276,17 +276,17 @@ impl SubAgentSpec {
     pub fn performance_profiler() -> Self {
         Self {
             name: "performance-profiler".into(),
-            role_description: "Profiles code performance, identifies bottlenecks and hot paths".into(),
+            role_description: "Profiles code performance, identifies bottlenecks and hot paths"
+                .into(),
             system_prompt_template: concat!(
                 "You are a Performance Profiler agent. Your job is to find performance issues.\n",
                 "Look for: N+1 queries, unnecessary allocations, blocking I/O, ",
                 "hot loops, excessive cloning, large memory footprints.\n",
                 "For each finding, explain: the bottleneck, impact, and suggested fix.\n",
                 "Do NOT make changes. Only profile and recommend."
-            ).into(),
-            recommended_tools: vec![
-                "read_file".into(), "shell".into(),
-            ],
+            )
+            .into(),
+            recommended_tools: vec!["read_file".into(), "shell".into()],
             context_policy: ContextPolicy::FullContext,
             default_timeout_secs: 300,
             execution_mode: ExecutionMode::Fork,
@@ -304,9 +304,13 @@ impl SubAgentSpec {
                 "Check: are all tests passing? Is the changelog complete? ",
                 "Are breaking changes documented?\n",
                 "Produce a release checklist and suggested version number."
-            ).into(),
+            )
+            .into(),
             recommended_tools: vec![
-                "read_file".into(), "edit_file".into(), "shell".into(), "git".into(),
+                "read_file".into(),
+                "edit_file".into(),
+                "shell".into(),
+                "git".into(),
             ],
             context_policy: ContextPolicy::FullContext,
             default_timeout_secs: 180,

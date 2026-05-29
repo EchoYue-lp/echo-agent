@@ -4,9 +4,10 @@
 //! patterns using the Analyzer, generates improvement suggestions, applies
 //! them, and re-tests to measure improvement.
 
-use crate::eval::{EvalCase, EvalReport, EvalRunner};
+use crate::eval::{EvalCase, EvalReport, EvalRunner, SuccessCriteria};
 use crate::improve::{Analyzer, ImprovementSuggestion, RunCritique};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +16,7 @@ use std::time::Instant;
 pub struct LoopIteration {
     pub iteration: usize,
     pub eval_report: EvalReport,
+    pub train_score: f64,
     pub critiques: Vec<RunCritique>,
     pub suggestions: Vec<ImprovementSuggestion>,
     pub duration_ms: u64,
@@ -43,12 +45,56 @@ pub struct ImprovementLoop {
 
 impl Default for ImprovementLoop {
     fn default() -> Self {
-        Self { max_iterations: 5, improvement_threshold: 0.95, holdout_ratio: 0.4 }
+        Self {
+            max_iterations: 5,
+            improvement_threshold: 0.95,
+            holdout_ratio: 0.4,
+        }
     }
 }
 
 impl ImprovementLoop {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the variant name of a SuccessCriteria for stratification.
+    fn criteria_variant(criteria: &SuccessCriteria) -> &str {
+        match criteria {
+            SuccessCriteria::TestPass { .. } => "test_pass",
+            SuccessCriteria::OutputContains { .. } => "output_contains",
+            SuccessCriteria::ToolUsed { .. } => "tool_used",
+            SuccessCriteria::ToolNotUsed { .. } => "tool_not_used",
+            SuccessCriteria::AllOf(_) => "all_of",
+            SuccessCriteria::AnyOf(_) => "any_of",
+            SuccessCriteria::LlmGraded { .. } => "llm_graded",
+            SuccessCriteria::SweBench { .. } => "swe_bench",
+        }
+    }
+
+    /// Stratified split: group cases by criteria type, split each group proportionally.
+    fn stratified_split(
+        cases: &[EvalCase],
+        holdout_ratio: f64,
+    ) -> (Vec<&EvalCase>, Vec<&EvalCase>) {
+        let mut groups: HashMap<String, Vec<&EvalCase>> = HashMap::new();
+        for case in cases {
+            let key = Self::criteria_variant(&case.success_criteria).to_string();
+            groups.entry(key).or_default().push(case);
+        }
+
+        let mut train = Vec::new();
+        let mut test = Vec::new();
+
+        for (_, group) in groups {
+            let split_idx = ((1.0 - holdout_ratio) * group.len() as f64) as usize;
+            let split_idx = split_idx.clamp(1, group.len().saturating_sub(1));
+            train.extend_from_slice(&group[..split_idx]);
+            test.extend_from_slice(&group[split_idx..]);
+        }
+
+        (train, test)
+    }
 
     /// Run the analysis loop: eval → critique → suggest → re-eval.
     /// Returns analysis results. Suggestions must be applied externally.
@@ -59,35 +105,38 @@ impl ImprovementLoop {
         run_store: &Option<Arc<dyn crate::trace::RunStore>>,
     ) -> LoopResult {
         let started = Instant::now();
-        if cases.is_empty() { return LoopResult { iterations: vec![], best_score: 0.0, best_iteration: 0, total_duration_ms: 0 }; }
+        if cases.is_empty() {
+            return LoopResult {
+                iterations: vec![],
+                best_score: 0.0,
+                best_iteration: 0,
+                total_duration_ms: 0,
+            };
+        }
         let mut iterations = Vec::new();
         let mut best_score = 0.0;
         let mut best_iteration = 0;
 
-        // Split cases
-        let split_idx = ((1.0 - self.holdout_ratio) * cases.len() as f64) as usize;
-        let train_cases = &cases[..split_idx.max(1)];
-        let test_cases = &cases[split_idx.min(cases.len())..];
+        // Stratified split by criteria type to prevent overfitting
+        let (train_cases, test_cases) = Self::stratified_split(cases, self.holdout_ratio);
 
         for i in 0..self.max_iterations {
             let iter_start = Instant::now();
 
             // a. Evaluate on train set
             let runner = EvalRunner::new(std::env::temp_dir().join(format!("improve_{i}")));
-            let train_report = runner
-                .run_all(train_cases, || agent_factory())
-                .await;
+            let train_cases_vec: Vec<EvalCase> = train_cases.iter().map(|c| (*c).clone()).collect();
+            let train_report = runner.run_all(&train_cases_vec, || agent_factory()).await;
 
             // b. Analyze failures — load runs and critique
             let mut critiques = Vec::new();
             if let Some(store) = run_store {
                 for result in &train_report.results {
-                    if !result.success {
-                        if let Some(ref run_id) = result.run_id {
-                            if let Ok(Some(run)) = store.load(run_id).await {
-                                critiques.push(Analyzer::analyze(&run));
-                            }
-                        }
+                    if !result.success
+                        && let Some(ref run_id) = result.run_id
+                        && let Ok(Some(run)) = store.load(run_id).await
+                    {
+                        critiques.push(Analyzer::analyze(&run));
                     }
                 }
             }
@@ -101,12 +150,11 @@ impl ImprovementLoop {
             suggestions.sort_by_key(|s| format!("{:?}", s));
             suggestions.dedup_by_key(|s| format!("{:?}", s));
 
-            // d. Re-evaluate on test set
-            let test_report = runner
-                .run_all(test_cases, || agent_factory())
-                .await;
+            // d. Re-evaluate on test set (blinded — test scores not visible to generator)
+            let test_cases_vec: Vec<EvalCase> = test_cases.iter().map(|c| (*c).clone()).collect();
+            let test_report = runner.run_all(&test_cases_vec, || agent_factory()).await;
 
-            // e. Track best
+            // e. Track best by test score
             if test_report.avg_score > best_score {
                 best_score = test_report.avg_score;
                 best_iteration = i;
@@ -115,6 +163,7 @@ impl ImprovementLoop {
             let iter = LoopIteration {
                 iteration: i,
                 eval_report: test_report,
+                train_score: train_report.avg_score,
                 critiques,
                 suggestions: suggestions.clone(),
                 duration_ms: iter_start.elapsed().as_millis() as u64,

@@ -556,8 +556,14 @@ fn react_agent_builder_with_tools() {
     assert!(agent.config().is_tool_enabled());
     // FinalAnswerTool + built-in tools (count depends on enabled features) + tool1 + tool2
     let names = agent.tool_names();
-    assert!(names.contains(&String::from("tool1")), "Should contain tool1");
-    assert!(names.contains(&String::from("tool2")), "Should contain tool2");
+    assert!(
+        names.contains(&String::from("tool1")),
+        "Should contain tool1"
+    );
+    assert!(
+        names.contains(&String::from("tool2")),
+        "Should contain tool2"
+    );
     assert!(
         names.contains(&String::from("final_answer")),
         "Should contain final_answer"
@@ -865,7 +871,7 @@ fn agent_tool_registration_isolation() {
         "agent1 should have at least 2 tools (built-in + tool1)"
     );
     assert!(
-        tools2.len() >= 1,
+        !tools2.is_empty(),
         "agent2 should have at least 1 built-in tool"
     );
     assert_eq!(
@@ -993,7 +999,11 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .await
         .unwrap();
     assert!(first_activation.success);
-    assert!(first_activation.output.contains(&String::from("Use skill one.")));
+    assert!(
+        first_activation
+            .output
+            .contains(&String::from("Use skill one."))
+    );
 
     agent
         .discover_skills(&[DiscoveryScope::Custom(base.join("skills-b"))])
@@ -1020,7 +1030,11 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .await
         .unwrap();
     assert!(repeat_activation.success);
-    assert!(repeat_activation.output.contains(&String::from("already activated")));
+    assert!(
+        repeat_activation
+            .output
+            .contains(&String::from("already activated"))
+    );
 
     let second_activation = agent
         .tools
@@ -1032,7 +1046,11 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .await
         .unwrap();
     assert!(second_activation.success);
-    assert!(second_activation.output.contains(&String::from("Use skill two.")));
+    assert!(
+        second_activation
+            .output
+            .contains(&String::from("Use skill two."))
+    );
 
     let _ = tokio::fs::remove_dir_all(base).await;
 }
@@ -1077,8 +1095,16 @@ async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
         .iter()
         .filter_map(|m| m.content.as_text_ref().map(str::to_string))
         .collect();
-    assert!(messages.iter().any(|m| m.contains(&String::from("pre-hook guidance"))));
-    assert!(messages.iter().any(|m| m.contains(&String::from("post-hook guidance"))));
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains(&String::from("pre-hook guidance")))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains(&String::from("post-hook guidance")))
+    );
 }
 
 #[tokio::test]
@@ -1127,7 +1153,12 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         .await
         .unwrap();
     assert!(!missing.success);
-    assert!(missing.error.unwrap_or_default().contains(&String::from("context_path")));
+    assert!(
+        missing
+            .error
+            .unwrap_or_default()
+            .contains(&String::from("context_path"))
+    );
 
     let mismatch = agent
         .tools
@@ -1164,7 +1195,11 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         .await
         .unwrap();
     assert!(matched.success);
-    assert!(matched.output.contains(&String::from("Lint the current Python file.")));
+    assert!(
+        matched
+            .output
+            .contains(&String::from("Lint the current Python file."))
+    );
 
     let _ = tokio::fs::remove_dir_all(base).await;
 }
@@ -1207,13 +1242,22 @@ fn builder_with_memory_tools_registers_all_memory_tools() {
         .unwrap();
 
     let tools = agent.tool_names();
-    assert!(tools.contains(&String::from("remember")), "Should register remember");
-    assert!(tools.contains(&String::from("recall")), "Should register recall");
+    assert!(
+        tools.contains(&String::from("remember")),
+        "Should register remember"
+    );
+    assert!(
+        tools.contains(&String::from("recall")),
+        "Should register recall"
+    );
     assert!(
         tools.contains(&String::from("search_memory")),
         "Should register search_memory"
     );
-    assert!(tools.contains(&String::from("forget")), "Should register forget");
+    assert!(
+        tools.contains(&String::from("forget")),
+        "Should register forget"
+    );
 }
 
 #[test]

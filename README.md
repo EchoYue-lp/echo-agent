@@ -26,7 +26,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-echo-agent = "0.1.4"
+echo-agent = "0.2.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -105,9 +105,9 @@ The crate ships with **zero default features** (`default = []`) for minimal comp
 
 ```toml
 [dependencies]
-echo-agent = { version = "0.1", features = ["full"] }
+echo-agent = { version = "0.2", features = ["full"] }
 # or cherry-pick:
-echo-agent = { version = "0.1", features = ["mcp", "sqlite", "web"] }
+echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 ```
 
 | Feature | In `full`? | Description |
@@ -129,6 +129,7 @@ echo-agent = { version = "0.1", features = ["mcp", "sqlite", "web"] }
 | `tasks` | yes | DAG task scheduling |
 | `data` | yes | Polars-powered data tools |
 | `rag` | yes | Retrieval-Augmented Generation |
+| `research` | no | ArXiv, Semantic Scholar, PDF fetch, BibTeX tools |
 | `chart` | yes | Chart generation tools |
 | `git` | yes | Git operations tools |
 | `shell` | yes | Restricted shell command execution |
@@ -177,7 +178,7 @@ echo-agent = { version = "0.1", features = ["mcp", "sqlite", "web"] }
 
 ## Feature Matrix
 
-echo-agent ships with **30+ capabilities** across 6 crates, all accessible through a single `use echo_agent::prelude::*`.
+echo-agent ships with **67 registered tools** across 6 crates, all accessible through a single `use echo_agent::prelude::*`.
 
 ### Core
 
@@ -219,6 +220,7 @@ echo-agent ships with **30+ capabilities** across 6 crates, all accessible throu
 | **Skill System** | Progressive disclosure: discover → activate → use | `agent.load_skill("web_research")` |
 | **IM Channels** | QQ Bot (WebSocket) & Feishu (Webhook) built-in | `ChannelManager::new()` |
 | **Web Tools** | Search (DuckDuckGo/Brave/Tavily) + Page Fetch | `WebSearchTool::auto()` |
+| **Research Tools** | ArXiv, Semantic Scholar, PDF fetch, BibTeX generation | `ArxivSearchTool` |
 | **Media Tools** | PDF, Excel, Word, Image analysis built-in | `ImageAnalysisTool` |
 | **Data Tools** | Polars-powered filter, aggregate, transform, stats | `DataReadTool` |
 | **Sandbox** | Local / Docker / K8s code execution with limits | `LocalSandbox::new()` |
@@ -235,7 +237,7 @@ echo-agent ships with **30+ capabilities** across 6 crates, all accessible throu
 echo-agent = { version = "0.1.4", default-features = false }
 
 # Full (default) — all features enabled
-echo-agent = "0.1.4"
+echo-agent = "0.2.0"
 
 # Pick only what you need
 echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "web"] }
@@ -267,6 +269,7 @@ echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "
 | `git` | Git operation tools | — |
 | `database` | Database query tools | `sqlx` |
 | `rag` | RAG retrieval tools | — |
+| `research` | ArXiv, Semantic Scholar, PDF fetch, BibTeX | `quick-xml` |
 | `chart` | Chart generation tools | — |
 | `content-guard` | Content safety guard | — |
 | `project-rules` | Project rule loading | — |
@@ -380,7 +383,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 
 ## Highlights
 
-- **30+ capabilities** — ReAct loop, tools, memory, streaming, multi-agent, skills, MCP, IM channels, guards, audit, and more
+- **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
 - **33 runnable examples** — every feature has a demo you can `cargo run` immediately
 - **Comprehensive unit tests** — full coverage across all modules
 - **6 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
@@ -1044,7 +1047,7 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 01 | [`demo01_tools`](examples/demo01_tools.rs) | Custom tools with `#[tool]` |
 | 02 | [`demo02_tasks`](examples/demo02_tasks.rs) | DAG task planning |
 | 03 | [`demo03_approval`](examples/demo03_approval.rs) | Human-in-the-loop |
-| 04 | [`demo04_suagent`](examples/demo04_suagent.rs) | Multi-agent orchestration |
+| 04 | [`demo04_subagent`](examples/demo04_subagent.rs) | Multi-agent orchestration |
 | 05 | [`demo05_compressor`](examples/demo05_compressor.rs) | Context compression |
 | 06 | [`demo06_mcp`](examples/demo06_mcp.rs) | MCP tool server |
 | 07 | [`demo07_skills`](examples/demo07_skills.rs) | Built-in skills |
@@ -1089,12 +1092,12 @@ Plus **6 comprehensive examples** demonstrating real-world use cases:
 
 | Example | Scenario |
 |---------|----------|
-| [`comprehensive_code_laboratory`](examples/comprehensive_code_laboratory.rs) | Code execution assistant |
-| [`comprehensive_customer_service`](examples/comprehensive_customer_service.rs) | Intelligent customer service |
-| [`comprehensive_data_analyst`](examples/comprehensive_data_analyst.rs) | Data analysis assistant |
-| [`comprehensive_enterprise`](examples/comprehensive_enterprise.rs) | Enterprise workflow automation |
-| [`comprehensive_personal_assistant`](examples/comprehensive_personal_assistant.rs) | Personal smart assistant |
-| [`comprehensive_research_agent`](examples/comprehensive_research_agent.rs) | Research & report assistant |
+| [`demo44_code_laboratory`](examples/demo44_code_laboratory.rs) | Code execution assistant |
+| [`demo45_customer_service`](examples/demo45_customer_service.rs) | Intelligent customer service |
+| [`demo46_data_analyst`](examples/demo46_data_analyst.rs) | Data analysis assistant |
+| [`demo47_enterprise`](examples/demo47_enterprise.rs) | Enterprise workflow automation |
+| [`demo48_personal_assistant`](examples/demo48_personal_assistant.rs) | Personal smart assistant |
+| [`demo49_research_agent`](examples/demo49_research_agent.rs) | Research & report assistant |
 
 ---
 

@@ -1,6 +1,6 @@
 [package]
 name = "echo_tools"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -14,11 +14,12 @@ readme = "README.md"
 
 [features]
 default = []
-full = ["web", "chart", "data", "database", "media", "git", "rag", "shell", "files"]
+full = ["web", "chart", "data", "database", "media", "git", "rag", "shell", "files", "research"]
+research = ["dep:quick-xml", "dep:lopdf"]
 shell = []
 files = []
 web = ["dep:scraper", "dep:html2text", "dep:url", "dep:async-trait"]
-media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs"]
+media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "dep:rust_xlsxwriter"]
 chart = []
 data = ["dep:polars"]
 database = ["dep:sqlx"]
@@ -26,8 +27,8 @@ git = []
 rag = ["dep:uuid"]
 
 [dependencies]
-echo_core = { version = "0.1.4", path = "../echo-core" }
-echo_macros = { version = "0.1.4", path = "../echo-macros" }
+echo_core = { version = "0.2.0", path = "../echo-core" }
+echo_macros = { version = "0.2.0", path = "../echo-macros" }
 uuid = { version = "1", features = ["v4"], optional = true }
 shlex = "1"
 similar = "2"
@@ -49,7 +50,10 @@ url = { version = "2", optional = true }
 pdf-extract = { version = "0.7", optional = true }
 lopdf = { version = "0.34", optional = true }
 calamine = { version = "0.26", optional = true }
+rust_xlsxwriter = { version = "0.82", optional = true }
 docx-rs = { version = "0.4", optional = true }
 encoding_rs = { version = "0.8", optional = true }
 polars = { version = "0.53", features = ["lazy", "csv", "json", "parquet", "dtype-full", "strings", "is_in", "regex"], optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "any"], optional = true }
+quick-xml = { version = "0.37", features = ["serialize"], optional = true }
+urlencoding = "2"

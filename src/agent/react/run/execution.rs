@@ -4,7 +4,7 @@ use super::super::{ReactAgent, TOOL_FINAL_ANSWER};
 use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result, ToolError};
 use crate::guard::GuardDirection;
-use crate::tools::ToolParameters;
+use crate::tools::{ToolParameters, is_read_tool, is_write_tool};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +32,9 @@ impl ReactAgent {
     ) -> std::result::Result<ToolExecutionOutcome, ToolExecutionFailure> {
         // If a custom pipeline is configured, delegate to it
         if let Some(ref pipeline) = self.tool_execution_pipeline {
-            return self.execute_with_pipeline(tool_name, input, soften_errors, pipeline).await;
+            return self
+                .execute_with_pipeline(tool_name, input, soften_errors, pipeline)
+                .await;
         }
 
         // ── Inline implementation (fallback when no pipeline configured) ──
@@ -135,42 +137,39 @@ impl ReactAgent {
         }
 
         // ── Read-before-edit enforcement ──
-        if self.config.force_read_before_edit && is_write_tool(tool_name) {
-            if let Some(path) = extract_path_param(tool_name, &effective_params) {
-                let canonical = std::fs::canonicalize(&path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.clone());
-                if !self.was_file_read(&canonical) {
-                    let msg = format!(
-                        "Read-before-edit is enabled. File '{}' has not been read in this conversation turn. \
+        if self.config.force_read_before_edit
+            && is_write_tool(tool_name)
+            && let Some(path) = extract_path_param(tool_name, &effective_params)
+        {
+            let canonical = std::fs::canonicalize(&path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.clone());
+            if !self.was_file_read(&canonical) {
+                let msg = format!(
+                    "Read-before-edit is enabled. File '{}' has not been read in this conversation turn. \
                          Use read_file to read it first, then retry this operation.",
-                        path
-                    );
-                    warn!(agent = %agent, tool = %tool_name, path = %path, "Read-before-edit rejected");
-                    return Ok(ToolExecutionOutcome {
+                    path
+                );
+                warn!(agent = %agent, tool = %tool_name, path = %path, "Read-before-edit rejected");
+                return Ok(ToolExecutionOutcome {
                     tool_result: None,
-                        output: msg,
-                        hook_messages,
-                    });
-                }
+                    output: msg,
+                    hook_messages,
+                });
             }
         }
 
         let execution_start = std::time::Instant::now();
 
         let call_id = format!("call_{}", uuid::Uuid::new_v4());
-        // Redact secrets from args before recording
-        let safe_args = Some(serde_json::from_str(
-            &crate::security::redact_secrets(&serde_json::to_string(input).unwrap_or_default())
-        ).unwrap_or(input.clone()));
-        // Record ToolCall trace event (before execution)
-        self.record_trace_event(crate::trace::RunEvent::ToolCall {
-            call_id: call_id.clone(),
-            name: tool_name.to_string(),
-            args: safe_args,
-            risk: None,
-            duration_ms: 0,
-        })
+        // Record ToolCall trace event (redaction handled by new_tool_call)
+        self.record_trace_event(crate::trace::RunEvent::new_tool_call(
+            call_id.clone(),
+            tool_name.to_string(),
+            Some(input.clone()),
+            None,
+            0,
+        ))
         .await;
 
         let result = match self
@@ -218,7 +217,7 @@ impl ReactAgent {
                         "⚠️ Tool error converted to observation and sent back to LLM"
                     );
                     return Ok(ToolExecutionOutcome {
-                    tool_result: None,
+                        tool_result: None,
                         output: format!(
                             "[Tool execution failed] {error}\nTip: adjust parameters based on the error and retry, or try other tools."
                         ),
@@ -246,24 +245,26 @@ impl ReactAgent {
         .await;
 
         // ── Record file reads for read-before-edit enforcement ──
-        if result.success && is_read_tool(tool_name) {
-            if let Some(path) = extract_path_param(tool_name, &effective_params) {
-                let canonical = std::fs::canonicalize(&path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.clone());
-                self.record_file_read(&canonical);
-            }
+        if result.success
+            && is_read_tool(tool_name)
+            && let Some(path) = extract_path_param(tool_name, &effective_params)
+        {
+            let canonical = std::fs::canonicalize(&path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.clone());
+            self.record_file_read(&canonical);
         }
 
         // Record FileEdit trace event for write tools
-        if result.success && is_write_tool(tool_name) {
-            if let Some(path) = extract_path_param(tool_name, &effective_params) {
-                self.record_trace_event(crate::trace::RunEvent::FileEdit {
-                    tool: tool_name.to_string(),
-                    path,
-                })
-                .await;
-            }
+        if result.success
+            && is_write_tool(tool_name)
+            && let Some(path) = extract_path_param(tool_name, &effective_params)
+        {
+            self.record_trace_event(crate::trace::RunEvent::FileEdit {
+                tool: tool_name.to_string(),
+                path,
+            })
+            .await;
         }
 
         // ── PostToolUse hooks ──
@@ -324,7 +325,7 @@ impl ReactAgent {
             self.log_tool_call_audit(tool_name, input, &result.output, true, duration_ms)
                 .await;
             Ok(ToolExecutionOutcome {
-                    tool_result: None,
+                tool_result: None,
                 output: result.output,
                 hook_messages,
             })
@@ -460,7 +461,14 @@ impl ReactAgent {
                 "[Summary: {char_count} chars, ~{line_count} lines. First line: {first_line}]\n\n"
             );
             let head: String = output.chars().skip(first_line.len()).take(1400).collect();
-            let tail: String = output.chars().rev().take(400).collect::<String>().chars().rev().collect();
+            let tail: String = output
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
             return format!("{summary}{head}\n...\n{tail}");
         }
 
@@ -469,15 +477,25 @@ impl ReactAgent {
         if output.len() > SPILL_THRESHOLD {
             let tmp_dir = std::env::temp_dir().join("echo_agent_spill");
             let _ = std::fs::create_dir_all(&tmp_dir);
-            let file_name = format!("tool_output_{}.txt", uuid::Uuid::new_v4());
-            let spill_path = tmp_dir.join(&file_name);
-            if std::fs::write(&spill_path, &output).is_ok() {
-                let preview: String = output.chars().take(500).collect();
-                return format!(
-                    "{preview}\n\n[Output spilled to disk: {} ({:.1}MB). Use read_file to read the full output.]",
-                    spill_path.display(),
-                    output.len() as f64 / 1_048_576.0
-                );
+            match tempfile::NamedTempFile::new_in(&tmp_dir) {
+                Ok(mut tmp) => {
+                    use std::io::Write;
+                    if tmp.write_all(output.as_bytes()).is_ok() {
+                        // Persist the temp file so it can be read later
+                        match tmp.keep() {
+                            Ok((_, path)) => {
+                                let preview: String = output.chars().take(500).collect();
+                                return format!(
+                                    "{preview}\n\n[Output spilled to disk: {} ({:.1}MB). Use read_file to read the full output.]",
+                                    path.display(),
+                                    output.len() as f64 / 1_048_576.0
+                                );
+                            }
+                            Err(_) => { /* keep failed, fall through to truncation */ }
+                        }
+                    }
+                }
+                Err(_) => { /* temp file creation failed, fall through to truncation */ }
             }
         }
 
@@ -619,7 +637,9 @@ impl ReactAgent {
                 if ctx.blocked {
                     return Ok(ToolExecutionOutcome {
                         tool_result: None,
-                        output: ctx.block_reason.unwrap_or_else(|| format!("Tool {} blocked", tool_name)),
+                        output: ctx
+                            .block_reason
+                            .unwrap_or_else(|| format!("Tool {} blocked", tool_name)),
                         hook_messages: ctx.hook_messages,
                     });
                 }
@@ -726,30 +746,6 @@ fn newline_boundary_rev(chars: &[char], target: usize) -> usize {
 }
 
 // ── Read-before-edit helpers ─────────────────────────────────────────────────
-
-/// Tools that modify files and should require a prior read.
-const WRITE_TOOLS: &[&str] = &[
-    "edit_file",
-    "write_file",
-    "append_file",
-    "create_file",
-    "delete_file",
-    "update_file",
-    "move_file",
-];
-
-/// Tools that read file content.
-const READ_TOOLS: &[&str] = &["read_file", "read_text"];
-
-/// Check whether a tool name is a file-modifying tool.
-fn is_write_tool(name: &str) -> bool {
-    WRITE_TOOLS.contains(&name)
-}
-
-/// Check whether a tool name is a file-reading tool.
-fn is_read_tool(name: &str) -> bool {
-    READ_TOOLS.contains(&name)
-}
 
 /// Extract the target file path from the tool parameters.
 /// Looks for `path` or `file_path` keys common across file tools.

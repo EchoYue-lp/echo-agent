@@ -1,6 +1,6 @@
 [package]
 name = "echo_agent"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -42,7 +42,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "sandbox", "semantic-memory", "macros", "provider-factory", "workflow", "multimodal"]
+full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "sandbox", "semantic-memory", "macros", "provider-factory", "workflow", "multimodal", "research"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
 sqlite = ["echo_state/sqlite", "dep:rusqlite"]
@@ -72,16 +72,17 @@ macros = []
 provider-factory = []
 workflow = []
 multimodal = []
+research = ["echo_tools/research"]
 testing = []
 
 [dependencies]
-echo_core = { version = "0.1.4", path = "echo-core", features = ["reqwest"] }
-echo_macros = { version = "0.1.4", path = "echo-macros" }
-echo_execution = { version = "0.1.4", path = "echo-execution" }
-echo_integration = { version = "0.1.4", path = "echo-integration" }
-echo_tools = { version = "0.1.4", path = "echo-tools" }
-echo_state = { version = "0.1.4", path = "echo-state" }
-echo_orchestration = { version = "0.1.4", path = "echo-orchestration" }
+echo_core = { version = "0.2.0", path = "echo-core", features = ["reqwest"] }
+echo_macros = { version = "0.2.0", path = "echo-macros" }
+echo_execution = { version = "0.2.0", path = "echo-execution" }
+echo_integration = { version = "0.2.0", path = "echo-integration" }
+echo_tools = { version = "0.2.0", path = "echo-tools" }
+echo_state = { version = "0.2.0", path = "echo-state" }
+echo_orchestration = { version = "0.2.0", path = "echo-orchestration" }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
 tokio = { version = "1.47.1", features = ["full"] }
@@ -101,6 +102,7 @@ similar = "2"
 chrono = { version = "0.4", features = ["serde"] }
 shlex = "1"
 async-trait = "0.1"
+tempfile = "3"
 fastrand = "2"
 base64 = "0.22"
 opentelemetry = { version = "0.27", features = ["trace", "metrics"], optional = true }
@@ -126,19 +128,19 @@ name = "demo27_sqlite_memory"
 required-features = ["sqlite"]
 
 [[example]]
-name = "comprehensive_customer_service"
+name = "demo45_customer_service"
 required-features = ["sqlite"]
 
 [[example]]
-name = "comprehensive_personal_assistant"
+name = "demo48_personal_assistant"
 required-features = ["sqlite"]
 
 [[example]]
-name = "comprehensive_data_analyst"
+name = "demo46_data_analyst"
 required-features = ["sqlite"]
 
 [[example]]
-name = "comprehensive_code_laboratory"
+name = "demo44_code_laboratory"
 required-features = ["sandbox"]
 
 [[example]]
@@ -210,7 +212,7 @@ path = "examples/demo42_playwright_mcp.rs"
 required-features = ["mcp"]
 
 [[example]]
-name = "demo04_suagent"
+name = "demo04_subagent"
 required-features = ["testing"]
 
 [[example]]
@@ -230,7 +232,7 @@ name = "demo43_data_tools"
 required-features = ["testing"]
 
 [[example]]
-name = "comprehensive_enterprise"
+name = "demo47_enterprise"
 required-features = ["testing"]
 
 [[example]]
@@ -254,7 +256,7 @@ name = "demo03_approval"
 required-features = ["human-loop"]
 
 [[example]]
-name = "comprehensive_research_agent"
+name = "demo49_research_agent"
 required-features = ["sqlite", "web"]
 
 [[example]]

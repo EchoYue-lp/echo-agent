@@ -80,21 +80,13 @@ pub struct EvalCase {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SuccessCriteria {
     /// A test command exits successfully (e.g., `cargo test`).
-    TestPass {
-        command: String,
-    },
+    TestPass { command: String },
     /// The agent's final output contains a specific substring.
-    OutputContains {
-        substring: String,
-    },
+    OutputContains { substring: String },
     /// The agent used a specific tool at least once.
-    ToolUsed {
-        tool_name: String,
-    },
+    ToolUsed { tool_name: String },
     /// The agent did NOT use a specific tool.
-    ToolNotUsed {
-        tool_name: String,
-    },
+    ToolNotUsed { tool_name: String },
     /// All of the given criteria must pass.
     AllOf(Vec<SuccessCriteria>),
     /// At least one of the given criteria must pass.
@@ -232,8 +224,8 @@ impl EvalResult {
         if self.metrics.is_empty() {
             self.score = if self.success { 1.0 } else { 0.0 };
         } else {
-            self.score = self.metrics.iter().map(|m| m.score).sum::<f64>()
-                / self.metrics.len() as f64;
+            self.score =
+                self.metrics.iter().map(|m| m.score).sum::<f64>() / self.metrics.len() as f64;
         }
     }
 }
@@ -297,7 +289,9 @@ impl EvalReport {
         let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
         let variance = if total > 1 {
             scores.iter().map(|s| (s - avg_score).powi(2)).sum::<f64>() / (total - 1) as f64
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let std_dev = variance.sqrt();
         let min_score = scores.iter().cloned().fold(f64::MAX, f64::min);
         let max_score = scores.iter().cloned().fold(f64::MIN, f64::max);

@@ -116,6 +116,21 @@ impl ToolResult {
         }
     }
 
+    /// Construct a successful result with a specific [`ToolResultKind`].
+    pub fn success_with_kind(kind: ToolResultKind, output: impl Into<String>) -> Self {
+        Self {
+            kind,
+            success: true,
+            output: output.into(),
+            error: None,
+            bytes: None,
+            data: None,
+            truncated: false,
+            mime_type: None,
+            metadata: HashMap::new(),
+        }
+    }
+
     /// Construct a failed result with an error message.
     pub fn error(error: impl Into<String>) -> Self {
         Self {

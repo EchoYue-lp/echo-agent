@@ -395,6 +395,26 @@ impl HookRegistry {
         self.sources.remove(source).is_some()
     }
 
+    /// Clear all user-configured hooks (keeps skill hooks intact).
+    pub fn clear_user_hooks(&mut self) -> bool {
+        self.sources.remove(&HookSource::UserConfig).is_some()
+    }
+
+    /// List all registered hook sources with their rule counts.
+    pub fn list_sources(&self) -> Vec<(String, usize)> {
+        self.sources
+            .iter()
+            .map(|(source, registered)| {
+                let name = match source {
+                    HookSource::UserConfig => "user_config".to_string(),
+                    HookSource::Skill(name) => format!("skill:{}", name),
+                };
+                let count = registered.definition.rules.values().map(|v| v.len()).sum();
+                (name, count)
+            })
+            .collect()
+    }
+
     /// Check if any hooks are registered.
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()

@@ -3,6 +3,7 @@
 use crate::security::{ssrf_safe_redirect_policy, validate_url};
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::Value;
@@ -175,6 +176,10 @@ impl Tool for WebFetchToolEnhanced {
         "web_fetch_enhanced"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]
+    }
+
     fn description(&self) -> &str {
         "Enhanced web fetch tool, supports: HTML-to-text, JSON formatting, image download to base64. \
          Parameters: url - web address (required), mode - processing mode (text/json/image, default text), \
@@ -238,15 +243,7 @@ impl Tool for WebFetchToolEnhanced {
 
             tracing::info!("WebFetchEnhanced: url='{}', mode='{}'", url, mode);
 
-            let client = Client::builder()
-                .user_agent("Mozilla/5.0 (compatible; EchoAgent/1.0)")
-                .timeout(Duration::from_secs(30))
-                .redirect(ssrf_safe_redirect_policy())
-                .build()
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to build HTTP client: {}, using default", e);
-                    Client::new()
-                });
+            let client = &self.client;
 
             // Check if URL points to an image (regardless of mode)
             let is_image_url = Self::is_image_url(url);

@@ -26,7 +26,7 @@
 
 ```toml
 [dependencies]
-echo-agent = "0.1.4"
+echo-agent = "0.2.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -135,7 +135,7 @@ cargo run --example demo38_im_channels --features channels  # IM 通道
 
 ## 功能矩阵
 
-echo-agent 提供 **30+ 项能力**，跨越 6 个 crate，通过一行 `use echo_agent::prelude::*` 即可全部使用。
+echo-agent 提供 **67 个注册工具**，跨越 6 个 crate，通过一行 `use echo_agent::prelude::*` 即可全部使用。
 
 ### 核心
 
@@ -177,6 +177,7 @@ echo-agent 提供 **30+ 项能力**，跨越 6 个 crate，通过一行 `use ech
 | **Skill 系统** | 渐进式披露：发现 → 激活 → 使用 | `agent.load_skill("web_research")` |
 | **IM 通道** | QQ Bot（WebSocket）+ 飞书（Webhook） | `ChannelManager::new()` |
 | **Web 工具** | 搜索 + 网页获取 | `WebSearchTool::auto()` |
+| **论文检索工具** | ArXiv、Semantic Scholar、PDF 下载、BibTeX 生成 | `ArxivSearchTool` |
 | **媒体工具** | PDF、Excel、Word、图片分析 | `ImageAnalysisTool` |
 | **数据工具** | Polars 驱动的过滤、聚合、统计 | `DataReadTool` |
 | **沙箱** | Local / Docker / K8s 代码执行 | `LocalSandbox::new()` |
@@ -190,7 +191,7 @@ echo-agent 提供 **30+ 项能力**，跨越 6 个 crate，通过一行 `use ech
 
 ```toml
 # 最小化 —— 仅 ReAct 引擎（默认）
-echo-agent = "0.1.4"
+echo-agent = "0.2.0"
 
 # 显式禁用默认 feature（等价于默认安装）
 echo-agent = { version = "0.1.4", default-features = false }
@@ -229,6 +230,7 @@ echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "
 | `git` | Git 操作工具 | — |
 | `database` | 数据库查询工具 | `sqlx` |
 | `rag` | RAG 检索工具 | — |
+| `research` | ArXiv、Semantic Scholar、PDF 下载、BibTeX 工具 | `quick-xml` |
 | `chart` | 图表生成工具 | — |
 | `content-guard` | 内容安全护栏 | — |
 | `project-rules` | 项目规则加载 | — |
@@ -344,7 +346,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 
 ## 亮点
 
-- **30+ 项能力** — ReAct 循环、工具、记忆、流式、多 Agent、技能、MCP、IM 通道、护栏、审计等
+- **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
 - **33 个可运行示例** — 每个功能都有 `cargo run` 即可运行的 Demo
 - **全模块单元测试** — 覆盖核心路径的测试
 - **6 个 crate，1 行导入** — 模块化 Workspace，但只需 `use echo_agent::prelude::*`
@@ -748,7 +750,7 @@ agent.set_circuit_breaker(cb_config);
 | 01 | [`demo01_tools`](examples/demo01_tools.rs) | `#[tool]` 宏自定义工具 |
 | 02 | [`demo02_tasks`](examples/demo02_tasks.rs) | DAG 任务规划 |
 | 03 | [`demo03_approval`](examples/demo03_approval.rs) | 人工审批 |
-| 04 | [`demo04_suagent`](examples/demo04_suagent.rs) | 多 Agent 编排 |
+| 04 | [`demo04_subagent`](examples/demo04_subagent.rs) | 多 Agent 编排 |
 | 05 | [`demo05_compressor`](examples/demo05_compressor.rs) | 上下文压缩 |
 | 06 | [`demo06_mcp`](examples/demo06_mcp.rs) | MCP 工具服务器 |
 | 07 | [`demo07_skills`](examples/demo07_skills.rs) | 内置技能 |
@@ -793,12 +795,12 @@ agent.set_circuit_breaker(cb_config);
 
 | 示例 | 场景 |
 |------|------|
-| [`comprehensive_code_laboratory`](examples/comprehensive_code_laboratory.rs) | 代码执行助手 |
-| [`comprehensive_customer_service`](examples/comprehensive_customer_service.rs) | 智能客服 |
-| [`comprehensive_data_analyst`](examples/comprehensive_data_analyst.rs) | 数据分析助手 |
-| [`comprehensive_enterprise`](examples/comprehensive_enterprise.rs) | 企业工作流自动化 |
-| [`comprehensive_personal_assistant`](examples/comprehensive_personal_assistant.rs) | 个人智能助手 |
-| [`comprehensive_research_agent`](examples/comprehensive_research_agent.rs) | 研究报告助手 |
+| [`demo44_code_laboratory`](examples/demo44_code_laboratory.rs) | 代码执行助手 |
+| [`demo45_customer_service`](examples/demo45_customer_service.rs) | 智能客服 |
+| [`demo46_data_analyst`](examples/demo46_data_analyst.rs) | 数据分析助手 |
+| [`demo47_enterprise`](examples/demo47_enterprise.rs) | 企业工作流自动化 |
+| [`demo48_personal_assistant`](examples/demo48_personal_assistant.rs) | 个人智能助手 |
+| [`demo49_research_agent`](examples/demo49_research_agent.rs) | 研究报告助手 |
 
 ---
 

@@ -27,7 +27,9 @@ pub struct ApprovalStack {
 
 impl ApprovalStack {
     pub fn new() -> Self {
-        Self { decisions: Mutex::new(HashMap::new()) }
+        Self {
+            decisions: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Check if a decision has already been made for this tool+path.
@@ -61,7 +63,9 @@ impl ApprovalStack {
 }
 
 impl Default for ApprovalStack {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -73,7 +77,10 @@ mod tests {
         let stack = ApprovalStack::new();
         assert!(stack.check("write_file", "src/main.rs").is_none());
         stack.record("write_file", "src/main.rs", ApprovalDecision::Once);
-        assert_eq!(stack.check("write_file", "src/main.rs"), Some(ApprovalDecision::Once));
+        assert_eq!(
+            stack.check("write_file", "src/main.rs"),
+            Some(ApprovalDecision::Once)
+        );
         // Different path not affected
         assert!(stack.check("write_file", "src/lib.rs").is_none());
     }
@@ -82,6 +89,9 @@ mod tests {
     fn test_always_catch_all() {
         let stack = ApprovalStack::new();
         stack.record("read_file", "*", ApprovalDecision::Always);
-        assert_eq!(stack.check("read_file", "any/path.rs"), Some(ApprovalDecision::Always));
+        assert_eq!(
+            stack.check("read_file", "any/path.rs"),
+            Some(ApprovalDecision::Always)
+        );
     }
 }

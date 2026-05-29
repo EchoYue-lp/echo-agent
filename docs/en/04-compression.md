@@ -189,7 +189,7 @@ ctx.prepare() is called:
 | Long document analysis | `HybridCompressor` (slide then summarize) |
 | Test environment | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-See: `examples/demo05.rs`
+See: `examples/demo05_compressor.rs`
 
 ---
 

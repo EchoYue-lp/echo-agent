@@ -51,7 +51,10 @@ impl ManagerWorkerOrchestrator {
 
         // Phase 1: Manager plans
         let sub_tasks = self.plan_sub_tasks(team, manager_name, task).await?;
-        debug!(sub_task_count = sub_tasks.len(), "Manager created sub-tasks");
+        debug!(
+            sub_task_count = sub_tasks.len(),
+            "Manager created sub-tasks"
+        );
 
         // Phase 2: Fan out to workers
         let results = self.execute_sub_tasks(&sub_tasks, workers).await;
@@ -155,10 +158,8 @@ impl ManagerWorkerOrchestrator {
             results_text.push_str(&format!("Sub-task {}: {}\n", i + 1, sub_task));
             match result {
                 Ok(output) => {
-                    results_text.push_str(&format!(
-                        "Result: {}\n\n",
-                        &output[..output.len().min(500)]
-                    ));
+                    results_text
+                        .push_str(&format!("Result: {}\n\n", &output[..output.len().min(500)]));
                 }
                 Err(e) => {
                     results_text.push_str(&format!("Error: {e}\n\n"));
@@ -196,7 +197,10 @@ mod tests {
     #[test]
     fn test_team_strategy_default() {
         let strategy = crate::agent::subagent::team::strategy::TeamStrategy::default();
-        assert_eq!(strategy, crate::agent::subagent::team::strategy::TeamStrategy::ManagerWorker);
+        assert_eq!(
+            strategy,
+            crate::agent::subagent::team::strategy::TeamStrategy::ManagerWorker
+        );
         assert_eq!(strategy.name(), "manager-worker");
     }
 }

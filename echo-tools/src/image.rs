@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::security::{ResourceLimits, SecurityConfig, create_safe_http_client, validate_url};
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 
 /// Image analysis tool
 ///
@@ -22,6 +23,10 @@ pub struct ImageAnalysisTool;
 impl Tool for ImageAnalysisTool {
     fn name(&self) -> &str {
         "analyze_image"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read, ToolPermission::Network]
     }
 
     fn description(&self) -> &str {

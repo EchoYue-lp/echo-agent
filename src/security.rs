@@ -29,17 +29,48 @@ pub struct SecretMatch {
 static SECRET_PATTERNS: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
     vec![
         ("AWS Access Key", Regex::new(r"AKIA[0-9A-Z]{16}").unwrap()),
-        ("AWS Secret Key", Regex::new(r"(?i)aws.?secret.?key[\s:=]+[A-Za-z0-9/+=]{40}").unwrap()),
-        ("GitHub Token", Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").unwrap()),
-        ("GitHub PAT", Regex::new(r"github_pat_[A-Za-z0-9_]{22,}").unwrap()),
-        ("Anthropic API Key", Regex::new(r"sk-ant-[A-Za-z0-9_-]{20,}").unwrap()),
-        ("OpenAI API Key", Regex::new(r"sk-[A-Za-z0-9_-]{20,}").unwrap()),
-        ("Generic API Key", Regex::new(r"(?i)(api[_-]?key|apikey)[\s:=]+[A-Za-z0-9_\-]{20,}").unwrap()),
-        ("Private Key", Regex::new(r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----").unwrap()),
-        ("JWT Token", Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}").unwrap()),
+        (
+            "AWS Secret Key",
+            Regex::new(r"(?i)aws.?secret.?key[\s:=]+[A-Za-z0-9/+=]{40}").unwrap(),
+        ),
+        (
+            "GitHub Token",
+            Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").unwrap(),
+        ),
+        (
+            "GitHub PAT",
+            Regex::new(r"github_pat_[A-Za-z0-9_]{22,}").unwrap(),
+        ),
+        (
+            "Anthropic API Key",
+            Regex::new(r"sk-ant-[A-Za-z0-9_-]{20,}").unwrap(),
+        ),
+        (
+            "OpenAI API Key",
+            Regex::new(r"sk-[A-Za-z0-9_-]{20,}").unwrap(),
+        ),
+        (
+            "Generic API Key",
+            Regex::new(r"(?i)(api[_-]?key|apikey)[\s:=]+[A-Za-z0-9_\-]{20,}").unwrap(),
+        ),
+        (
+            "Private Key",
+            Regex::new(r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----").unwrap(),
+        ),
+        (
+            "JWT Token",
+            Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}").unwrap(),
+        ),
         ("Password in URL", Regex::new(r"://[^:]+:[^@]+@").unwrap()),
-        ("Slack Token", Regex::new(r"xox[baprs]-[A-Za-z0-9-]{10,}").unwrap()),
-        ("Generic Token", Regex::new(r"(?i)(token|secret|password|passwd)[\s:=]+[A-Za-z0-9_\-!@#$%^&*]{8,}").unwrap()),
+        (
+            "Slack Token",
+            Regex::new(r"xox[baprs]-[A-Za-z0-9-]{10,}").unwrap(),
+        ),
+        (
+            "Generic Token",
+            Regex::new(r"(?i)(token|secret|password|passwd)[\s:=]+[A-Za-z0-9_\-!@#$%^&*]{8,}")
+                .unwrap(),
+        ),
     ]
 });
 
@@ -87,7 +118,9 @@ pub fn redact_secrets(text: &str) -> String {
 /// Check if text contains any secrets. Faster than `scan_secrets` —
 /// stops at the first match.
 pub fn contains_secrets(text: &str) -> bool {
-    SECRET_PATTERNS.iter().any(|(_, regex)| regex.is_match(text))
+    SECRET_PATTERNS
+        .iter()
+        .any(|(_, regex)| regex.is_match(text))
 }
 
 /// Scan and return a summary suitable for CLI display.
@@ -143,7 +176,8 @@ mod tests {
 
     #[test]
     fn test_private_key() {
-        let text = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0B\n-----END PRIVATE KEY-----";
+        let text =
+            "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0B\n-----END PRIVATE KEY-----";
         assert!(contains_secrets(text));
     }
 }

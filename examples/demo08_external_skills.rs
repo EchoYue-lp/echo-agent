@@ -518,7 +518,7 @@ async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
     ];
     println!("\n  Progressive disclosure tools:");
     for (name, purpose) in &tool_checks {
-        let registered = tools.contains(name);
+        let registered = tools.contains(&name.to_string());
         if !registered {
             return Err(echo_agent::error::ReactError::Other(format!(
                 "demo08 验收失败：Agent 未自动注册技能工具 `{name}`"
@@ -787,6 +787,7 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
             allowed_tools: vec!["read_skill_resource".into()],
             shell: None,
             paths: vec![],
+            triggers: vec![],
             hooks: None,
         });
         locked_registry.mark_activated("locked-skill");
@@ -1026,7 +1027,7 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
             ));
         }
         let tools = agent.list_tools();
-        if !tools.contains(&"activate_skill") {
+        if !tools.contains(&"activate_skill".to_string()) {
             return Err(echo_agent::error::ReactError::Other(
                 "demo08 验收失败：Agent 集成后缺少 activate_skill 工具".to_string(),
             ));

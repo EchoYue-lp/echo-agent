@@ -231,13 +231,10 @@ impl Tool for WebFetchTool {
                 body_bytes.extend_from_slice(&chunk);
             }
 
-            let body = match String::from_utf8(body_bytes) {
-                Ok(s) => s,
-                Err(_) => {
-                    // Non-UTF-8: fall back to lossy conversion
-                    String::from_utf8_lossy(&body_bytes).into_owned()
-                }
-            };
+            let body = String::from_utf8(body_bytes).unwrap_or_else(|e| {
+                // Non-UTF-8: fall back to lossy conversion
+                String::from_utf8_lossy(e.as_bytes()).into_owned()
+            });
 
             // Process based on content type: only convert HTML/XHTML
             let content = if Self::needs_html_conversion(&content_type) {

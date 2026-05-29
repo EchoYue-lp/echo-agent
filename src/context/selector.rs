@@ -122,12 +122,7 @@ mod tests {
             vec!["format".into(), "parse".into()],
         );
 
-        let scored = selector.score_files(
-            "fix the login bug",
-            &symbols,
-            &[],
-            &[],
-        );
+        let scored = selector.score_files("fix the login bug", &symbols, &[], &[]);
         assert!(!scored.is_empty());
         // auth.rs should score higher than utils.rs for "login bug"
         assert_eq!(scored[0].0, PathBuf::from("src/auth.rs"));

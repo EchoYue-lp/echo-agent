@@ -17,7 +17,9 @@ pub fn l1_fold_tools(messages: &mut Vec<Message>, keep_latest: usize) -> usize {
         if messages[i].role.as_str() == "tool" {
             let start = i;
             i += 1;
-            while i < messages.len() && messages[i].role.as_str() == "tool" { i += 1; }
+            while i < messages.len() && messages[i].role.as_str() == "tool" {
+                i += 1;
+            }
             let count = i - start;
             if count > keep_latest {
                 let to_remove = count - keep_latest;
@@ -29,15 +31,20 @@ pub fn l1_fold_tools(messages: &mut Vec<Message>, keep_latest: usize) -> usize {
                 folded += to_remove; // count of original messages replaced
                 i = start + 1 + keep_latest;
             }
-        } else { i += 1; }
+        } else {
+            i += 1;
+        }
     }
     folded
 }
 
 /// L3: Extract important facts and write to memory (best-effort).
 pub fn l3_promote_memory(messages: &[Message]) -> Vec<String> {
-    messages.iter()
-        .filter(|m| m.role.as_str() == "system" || m.content.as_text().unwrap_or_default().len() > 500)
+    messages
+        .iter()
+        .filter(|m| {
+            m.role.as_str() == "system" || m.content.as_text().unwrap_or_default().len() > 500
+        })
         .filter_map(|m| m.content.as_text())
         .map(|t| t.chars().take(200).collect())
         .collect()

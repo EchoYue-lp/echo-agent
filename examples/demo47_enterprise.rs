@@ -18,7 +18,7 @@
 //!
 //! ```bash
 //! # 基础运行
-//! QWEN_API_KEY=your_key cargo run --example comprehensive_enterprise
+//! QWEN_API_KEY=your_key cargo run --example demo47_enterprise
 //! ```
 
 use echo_agent::advanced::*;
@@ -397,12 +397,12 @@ async fn demo_dynamic_tools() -> Result<()> {
     agent.add_tool(Box::new(ci_tool));
 
     println!("  可用工具: {:?}\n", agent.tool_names());
-    if agent.tool_names().contains(&"code_quality") {
+    if agent.tool_names().contains(&"code_quality".to_string()) {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：切换工具后 code_quality 仍然存在".to_string(),
         ));
     }
-    if !agent.tool_names().contains(&"ci_check") {
+    if !agent.tool_names().contains(&"ci_check".to_string()) {
         return Err(echo_agent::error::ReactError::Other(
             "综合验收失败：切换工具后 ci_check 未注册".to_string(),
         ));

@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-29
+
+### Added
+
+- **Research tools** — 4 new tools for academic paper workflows (feature flag: `research`)
+  - `arxiv_search`: Search ArXiv API for preprints (Atom/XML parsing, category filtering)
+  - `semantic_scholar_search`: Search Semantic Scholar for published papers (citation counts, fields of study)
+  - `pdf_fetch`: Download and parse PDF documents from URL (page range, metadata extraction)
+  - `bibtex_generate`: Generate BibTeX entries from paper metadata (arXiv ID → primaryClass extraction, cite key disambiguation)
+- **Tool permission system** — all 67 tools now declare `ToolPermission` (Read/Write/Network/Execute/Sensitive)
+- **SSRF protection for research tools** — `arxiv_search`, `semantic_scholar_search`, `pdf_fetch` all use safe redirect policy and private IP blocking
+
+### Fixed
+
+- **Security: ArXiv API URL** — changed from `http://` to `https://export.arxiv.org/api/query`
+- **Security: URL encoding** — arxiv query/category and semantic_scholar query/fields_of_study are now URL-encoded to prevent parameter injection
+- **Security: MySQL escaping** — fixed single-quote escaping from `"\\'"` to `"''"` (standard SQL)
+- **Security: Table name validation** — added regex check for alphanumeric/underscore/dot only
+- **Security: Database URL validation** — only sqlite/mysql/postgresql/postgres schemes accepted
+- **Security: SQL blacklist expanded** — added `EXECUTE`, `EXEC`, `INTO OUTFILE`, `LOAD_FILE`
+- **Security: Image tools permissions** — `ImageAnalysisTool` and `ImageFetchTool` now declare `ToolPermission::Network`
+- **Security: All data/excel/chart/word/pdf/rag tools** — permissions added to all 30+ tools
+- **PDF double-parse eliminated** — `pdf_fetch` now parses PDF once for both text extraction and metadata
+- **BibTeX primaryClass extraction** — fixed old-format arxiv IDs (`cs.AI/1234567`) and added new-format fallback via `fields_of_study`
+- **BibTeX cite key disambiguation** — duplicate author-year combos now get `a`, `b`, `c` suffixes
+
+### Changed
+
+- **Shared HTTP client pattern** — research tools use `OnceLock<reqwest::Client>` instead of creating fresh clients per request
+- **`/compact` vs `/compress` separation** — `/compact` now uses lightweight `force_compress(12)` (keeps more recent messages), `/compress` uses full `force_compress(6)`
+
 ## [0.1.4] - 2026-05-09
 
 ### Changed
@@ -75,3 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OpenTelemetry integration
 - 40+ examples and 6 comprehensive demos
 - Bilingual documentation (EN + ZH)
+
+[0.2.0]: https://github.com/EchoYue-lp/echo-agent/compare/v0.1.4...v0.2.0
+[0.1.4]: https://github.com/EchoYue-lp/echo-agent/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/EchoYue-lp/echo-agent/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/EchoYue-lp/echo-agent/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/EchoYue-lp/echo-agent/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/EchoYue-lp/echo-agent/releases/tag/v0.1.0

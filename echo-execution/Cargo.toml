@@ -1,6 +1,6 @@
 [package]
 name = "echo_execution"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -24,8 +24,8 @@ files = ["echo_tools/files"]
 shell = ["echo_tools/shell"]
 
 [dependencies]
-echo_core = { version = "0.1.4", path = "../echo-core" }
-echo_tools = { version = "0.1.4", path = "../echo-tools", default-features = false }
+echo_core = { version = "0.2.0", path = "../echo-core" }
+echo_tools = { version = "0.2.0", path = "../echo-tools", default-features = false }
 # From echo-sandbox
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }

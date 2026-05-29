@@ -40,6 +40,8 @@ pub mod media;
 pub mod pdf;
 #[cfg(feature = "rag")]
 pub mod rag;
+#[cfg(feature = "research")]
+pub mod research;
 #[cfg(feature = "media")]
 pub mod text;
 #[cfg(feature = "web")]

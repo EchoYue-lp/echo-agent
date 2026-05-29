@@ -38,12 +38,12 @@ These examples are expected to fail loudly when their prerequisites are missing.
 - `demo41_web_tools.rs`
 - `demo42_playwright_mcp.rs`
 - `demo43_data_tools.rs`
-- `comprehensive_code_laboratory.rs`
-- `comprehensive_customer_service.rs`
-- `comprehensive_data_analyst.rs`
-- `comprehensive_enterprise.rs`
-- `comprehensive_personal_assistant.rs`
-- `comprehensive_research_agent.rs`
+- `demo44_code_laboratory.rs`
+- `demo45_customer_service.rs`
+- `demo46_data_analyst.rs`
+- `demo47_enterprise.rs`
+- `demo48_personal_assistant.rs`
+- `demo49_research_agent.rs`
 
 Typical prerequisites:
 
@@ -57,9 +57,10 @@ Typical prerequisites:
 
 These examples stay focused on API understanding, interaction style, or walkthrough value.
 
+- `demo00_quickstart.rs`
 - `demo01_tools.rs`
 - `demo02_tasks.rs`
-- `demo04_suagent.rs`
+- `demo04_subagent.rs`
 - `demo05_compressor.rs`
 - `demo10_streaming.rs`
 - `demo11_callbacks.rs`
@@ -91,3 +92,11 @@ These examples stay focused on API understanding, interaction style, or walkthro
 
 - `demo03_approval.rs`: use this when you want to validate both proactive `human_in_loop` input requests and sensitive-tool approval.
 - `demo05_compressor.rs`: use this when you want to validate the real `add_need_appeal_tool()` path inside a broader workflow example.
+
+## Naming Convention
+
+All examples follow the `demo{NN}_{feature}.rs` pattern:
+- `NN` — two-digit sequential number (00-99)
+- `feature` — snake_case description of the demonstrated feature
+
+Comprehensive scenario examples (demo44-demo49) combine multiple features into real-world use cases.

@@ -38,11 +38,46 @@ ToolManager                      ← 注册表 + 执行器
     └─ think                     ← CoT 显式思维工具（已被 CoT 文本方案替代）
 
 扩展工具（开箱即用）：
-    ├─ tools/files     ← 文件读写
-    ├─ tools/shell     ← Shell 命令执行
-    ├─ tools/web      ← Web 搜索 + 网页获取（feature: web）
-    └─ tools/others    ← 数学计算、天气查询等示例工具
+    ├─ tools/files       ← 文件读写（2 个工具）
+    ├─ tools/shell       ← Shell 命令执行
+    ├─ tools/web         ← Web 搜索 + 网页获取（feature: web）
+    ├─ tools/media       ← PDF、Excel、Word、图片（feature: media）
+    ├─ tools/data        ← Polars 数据分析（13 个工具，feature: data）
+    ├─ tools/chart       ← 图表生成（feature: chart）
+    ├─ tools/rag         ← RAG 索引/搜索/分块（feature: rag）
+    ├─ tools/research    ← ArXiv、Semantic Scholar、PDF 下载、BibTeX（feature: research）
+    ├─ tools/database    ← SQL 数据库工具（feature: database）
+    └─ tools/others      ← 数学计算、天气查询等示例工具
+
+总计：26 个功能分类，67 个已注册工具。
 ```
+
+---
+
+## 工具权限
+
+每个工具通过 `ToolPermission` 声明所需权限，框架在执行时通过审批链强制执行。
+
+| 权限 | 说明 | 示例工具 |
+|------|------|----------|
+| `Read` | 读取文件/目录 | `read_file`、`excel_read`、`pdf_extract` |
+| `Write` | 写入/修改文件 | `write_file`、`data_export`、`generate_chart` |
+| `Network` | 网络访问 | `web_fetch`、`web_search`、`arxiv_search`、`pdf_fetch` |
+| `Execute` | 执行命令/代码 | `shell`、`run_skill_script` |
+| `Sensitive` | 敏感操作 | `human_in_loop` |
+
+工具通过实现 `fn permissions() -> Vec<ToolPermission>` 声明权限：
+
+```rust
+impl Tool for MyTool {
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read, ToolPermission::Network]
+    }
+    // ...
+}
+```
+
+详见 [安全指南](./security.md) 了解完整的权限模型和审批链。
 
 ---
 
@@ -172,5 +207,15 @@ agent.add_tools(vec![
 | `get_weather` | others | 天气查询（示例） |
 | `web_search` | web | Web 搜索（需 `web` feature） |
 | `web_fetch` | web | 获取网页内容并转文本（需 `web` feature） |
+| `arxiv_search` | research | 搜索 ArXiv 学术论文（需 `research` feature） |
+| `semantic_scholar_search` | research | 搜索 Semantic Scholar（需 `research` feature） |
+| `pdf_fetch` | research | 从 URL 下载并解析 PDF（需 `research` feature） |
+| `bibtex_generate` | research | 从论文元数据生成 BibTeX（需 `research` feature） |
+| `rag_index` | rag | 文档分块和向量索引（需 `rag` feature） |
+| `rag_search` | rag | 索引文档的语义搜索（需 `rag` feature） |
+| `excel_read` / `excel_write` / ... | media | Excel 读写/分析（6 个工具，需 `media` feature） |
+| `data_read` / `data_filter` / ... | data | Polars 数据分析（13 个工具，需 `data` feature） |
+| `generate_chart` | chart | 图表生成（需 `chart` feature） |
+| `db_query` / `db_schema` | database | SQL 数据库工具（需 `database` feature） |
 
 对应示例：`examples/demo01_tools.rs`、`examples/demo09_file_shell.rs`、`examples/demo13_tool_execution.rs`

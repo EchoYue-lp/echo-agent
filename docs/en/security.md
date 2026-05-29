@@ -18,8 +18,21 @@ Each built-in tool declares its required permissions and risk level:
 | `edit_file` | `Read, Write` | `Standard` | Edit file (auto .bak backup) |
 | `shell` | `Execute` | `Dangerous` | Execute shell commands (whitelist-restricted) |
 | `web_fetch` | `Network` | `Standard` | HTTP requests (SSRF protected) |
+| `web_search` | `Network` | `Standard` | Web search (DuckDuckGo/Brave/Tavily) |
 | `git_commit` | `Write, Execute` | `Dangerous` | Create Git commits |
 | `run_skill_script` | `Execute` | `Dangerous` | Execute skill scripts |
+| `arxiv_search` | `Network` | `Standard` | ArXiv API (HTTPS, SSRF redirect policy) |
+| `semantic_scholar_search` | `Network` | `Standard` | Semantic Scholar API (HTTPS, SSRF redirect) |
+| `pdf_fetch` | `Network` | `Standard` | PDF download (SSRF protected, %PDF validation) |
+| `bibtex_generate` | `Write` | `ReadOnly` | BibTeX text generation |
+| `rag_index` | `Read, Write` | `Standard` | Document chunking + vector index |
+| `rag_search` | `Read` | `ReadOnly` | Semantic search over indexed docs |
+| `excel_read` / `excel_info` | `Read` | `ReadOnly` | Read Excel files |
+| `excel_write` | `Write` | `Standard` | Write Excel files |
+| `data_read` / `data_filter` / ... | `Read` | `ReadOnly` | Data analysis tools |
+| `data_transform` | `Read, Write` | `Standard` | Data transformation |
+| `generate_chart` | `Read, Write` | `Standard` | Chart image generation |
+| `db_query` | `Network` | `Standard` | SQL database queries (blacklist protected) |
 
 ### Permission Types
 
@@ -98,7 +111,30 @@ let sandbox = DockerSandbox::new()
 
 ---
 
-## 5. Security Checklist
+## 5. SSRF Protection
+
+All network-capable tools share a unified SSRF (Server-Side Request Forgery) protection layer:
+
+- **Private IP blocking**: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+- **Localhost blocking**: `localhost`, `*.local` domains
+- **Protocol restriction**: Only `http://` and `https://` allowed (blocks `file://`, `gopher://`, etc.)
+- **Safe redirect policy**: Redirects are re-validated against the same rules
+- **Shared HTTP client**: `OnceLock<reqwest::Client>` with configurable timeout (30-60s)
+
+This protection applies to: `web_fetch`, `web_search`, `arxiv_search`, `semantic_scholar_search`, `pdf_fetch`.
+
+### SQL Injection Protection
+
+Database tools (`db_query`) include additional protections:
+
+- **SQL blacklist**: Blocks `DROP`, `DELETE`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `EXECUTE`, `INTO OUTFILE`, `LOAD_FILE`
+- **Table name validation**: Only alphanumeric, `_`, and `.` characters allowed
+- **URL scheme validation**: Only `sqlite`, `mysql`, `postgresql`, `postgres` schemes accepted
+- **MySQL escaping**: Single quotes escaped as `''` (not `\'`)
+
+---
+
+## 6. Security Checklist
 
 - [ ] JWT authentication enabled (`AUTH_ENABLED=true`)
 - [ ] Strong JWT secret (≥32 characters)

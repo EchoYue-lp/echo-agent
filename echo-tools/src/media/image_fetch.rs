@@ -2,6 +2,7 @@
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::Value;
@@ -22,6 +23,7 @@ impl ImageFetchTool {
     pub fn new() -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(crate::security::ssrf_safe_redirect_policy())
             .build()
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "image_fetch".into(),
@@ -123,6 +125,10 @@ impl Tool for ImageFetchTool {
         "image_fetch"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]
+    }
+
     fn description(&self) -> &str {
         "Downloads an image from a URL and converts it to base64 encoding, suitable for LLM multimodal input. \
          Parameters: url - image URL (required), max_size_mb - maximum file size in MB (optional, default 10MB)"
@@ -159,6 +165,9 @@ impl Tool for ImageFetchTool {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Ok(ToolResult::error("URL must start with http:// or https://"));
             }
+
+            // SSRF protection
+            crate::security::validate_url(url)?;
 
             let max_size_mb = parameters
                 .get("max_size_mb")

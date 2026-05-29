@@ -26,6 +26,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         };
         use crate::files::glob::GlobTool;
         use crate::files::grep::GrepTool;
+        use crate::files::repo_map::RepoMapTool;
 
         tool_manager.register(Box::new(ReadFileTool::new()));
         tool_manager.register(Box::new(WriteFileTool::new()));
@@ -39,6 +40,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(GlobTool::new()));
         tool_manager.register(Box::new(EditFileTool::new()));
         tool_manager.register(Box::new(DiffTool::new()));
+        tool_manager.register(Box::new(RepoMapTool::new()));
     }
 
     #[cfg(not(any(
@@ -50,7 +52,8 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         feature = "database",
         feature = "web",
         feature = "media",
-        feature = "data"
+        feature = "data",
+        feature = "research"
     )))]
     {
         let _ = tool_manager; // Suppress unused warning when no feature-gated tools
@@ -100,7 +103,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
 
     #[cfg(feature = "media")]
     {
-        use crate::excel::{ExcelInfoTool, ExcelReadTool, ExcelToCsvTool};
+        use crate::excel::{ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool, ExcelWriteTool};
         use crate::image::ImageAnalysisTool;
         use crate::media::image_fetch::ImageFetchTool;
         use crate::media::web_fetch_enhanced::WebFetchToolEnhanced;
@@ -120,6 +123,13 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(ExcelReadTool));
         tool_manager.register(Box::new(ExcelInfoTool));
         tool_manager.register(Box::new(ExcelToCsvTool));
+        tool_manager.register(Box::new(ExcelProfileTool));
+        tool_manager.register(Box::new(ExcelWriteTool));
+        #[cfg(feature = "data")]
+        {
+            use crate::excel::ExcelLoadTool;
+            tool_manager.register(Box::new(ExcelLoadTool));
+        }
         tool_manager.register(Box::new(WordReadTool));
         tool_manager.register(Box::new(WordInfoTool));
         tool_manager.register(Box::new(WordStructureTool));
@@ -134,8 +144,8 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
     {
         use crate::data::{
             DataAggregateTool, DataBinTool, DataContributionTool, DataExportTool, DataFilterTool,
-            DataProfileTool, DataRatioTool, DataReadTool, DataStatsTool, DataTopNTool,
-            DataTransformTool,
+            DataJoinTool, DataMultiReadTool, DataProfileTool, DataRatioTool, DataReadTool,
+            DataStatsTool, DataTopNTool, DataTransformTool,
         };
 
         tool_manager.register(Box::new(DataReadTool));
@@ -149,5 +159,17 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(DataContributionTool));
         tool_manager.register(Box::new(DataBinTool));
         tool_manager.register(Box::new(DataRatioTool));
+        tool_manager.register(Box::new(DataMultiReadTool));
+        tool_manager.register(Box::new(DataJoinTool));
+    }
+
+    // ── research ──────────────────────────────────────────────────────────
+    #[cfg(feature = "research")]
+    {
+        use crate::research::{ArxivSearchTool, BibtexGenerateTool, PdfFetchTool, SemanticScholarSearchTool};
+        tool_manager.register(Box::new(ArxivSearchTool));
+        tool_manager.register(Box::new(SemanticScholarSearchTool));
+        tool_manager.register(Box::new(PdfFetchTool));
+        tool_manager.register(Box::new(BibtexGenerateTool));
     }
 }

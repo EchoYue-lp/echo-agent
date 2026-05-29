@@ -39,9 +39,13 @@ pub trait Plugin: Send + Sync {
     fn version(&self) -> &str;
 
     /// Initialize the plugin. Called once at startup.
-    fn init(&mut self) -> Result<(), String> { Ok(()) }
+    fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     /// Shutdown the plugin. Called at agent shutdown.
-    fn shutdown(&mut self) -> Result<(), String> { Ok(()) }
+    fn shutdown(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Registry of loaded plugins.
@@ -52,7 +56,12 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
-    pub fn new() -> Self { Self { plugins: Vec::new(), by_name: std::collections::HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            plugins: Vec::new(),
+            by_name: std::collections::HashMap::new(),
+        }
+    }
 
     /// Register a plugin.
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
@@ -65,16 +74,22 @@ impl PluginRegistry {
     /// NOTE: entry_point loading is not yet implemented — only manifest metadata is registered.
     /// Returns count of discovered plugins.
     pub fn scan_dir(&mut self, dir: &PathBuf) -> std::io::Result<usize> {
-        if !dir.exists() { return Ok(0); }
+        if !dir.exists() {
+            return Ok(0);
+        }
         let mut count = 0;
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
-            if !path.is_dir() { continue; }
+            if !path.is_dir() {
+                continue;
+            }
             // Read manifest.json (manifest.toml support pending toml dependency)
             let manifest = if path.join("manifest.json").exists() {
                 let content = std::fs::read_to_string(path.join("manifest.json"))?;
                 serde_json::from_str::<PluginManifest>(&content).ok()
-            } else { continue; };
+            } else {
+                continue;
+            };
 
             if let Some(manifest) = manifest {
                 self.register(Box::new(RegisteredPlugin::new(manifest)));
@@ -101,7 +116,9 @@ impl PluginRegistry {
 }
 
 impl Default for PluginRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A plugin loaded from a manifest file (minimal implementation).
@@ -110,21 +127,33 @@ struct RegisteredPlugin {
 }
 
 impl RegisteredPlugin {
-    fn new(manifest: PluginManifest) -> Self { Self { manifest } }
+    fn new(manifest: PluginManifest) -> Self {
+        Self { manifest }
+    }
 }
 
 impl Plugin for RegisteredPlugin {
-    fn id(&self) -> &str { &self.manifest.name }
-    fn name(&self) -> &str { &self.manifest.name }
-    fn capabilities(&self) -> Vec<PluginCapability> {
-        self.manifest.capabilities.iter().map(|c| match c.as_str() {
-            "skill" => PluginCapability::Skill,
-            "hook" => PluginCapability::Hook,
-            "mcp" => PluginCapability::McpServer,
-            "channel" => PluginCapability::Channel,
-            "tool" => PluginCapability::Tool,
-            _ => PluginCapability::Custom,
-        }).collect()
+    fn id(&self) -> &str {
+        &self.manifest.name
     }
-    fn version(&self) -> &str { &self.manifest.version }
+    fn name(&self) -> &str {
+        &self.manifest.name
+    }
+    fn capabilities(&self) -> Vec<PluginCapability> {
+        self.manifest
+            .capabilities
+            .iter()
+            .map(|c| match c.as_str() {
+                "skill" => PluginCapability::Skill,
+                "hook" => PluginCapability::Hook,
+                "mcp" => PluginCapability::McpServer,
+                "channel" => PluginCapability::Channel,
+                "tool" => PluginCapability::Tool,
+                _ => PluginCapability::Custom,
+            })
+            .collect()
+    }
+    fn version(&self) -> &str {
+        &self.manifest.version
+    }
 }

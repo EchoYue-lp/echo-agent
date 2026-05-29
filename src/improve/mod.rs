@@ -14,15 +14,21 @@
 //! - Publish or deploy anything
 
 pub mod analyzer;
+pub mod background_review;
+pub mod curator;
 pub mod evolution;
 pub mod generator;
 pub mod r#loop;
 pub mod store;
+pub mod trajectory;
 pub use analyzer::Analyzer;
+pub use background_review::{BackgroundReviewConfig, BackgroundReviewer, ReviewOutcome};
+pub use curator::{Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle};
 pub use evolution::SelfEvolution;
 pub use generator::PromptGenerator;
 pub use r#loop::{ImprovementLoop, LoopResult};
 pub use store::CritiqueStore;
+pub use trajectory::{TrajectoryEntry, TrajectorySaver, TrajectoryStats};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,33 +38,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CritiqueIssue {
     /// Agent wrote to a file without reading it first.
-    WriteWithoutRead {
-        tool: String,
-        count: usize,
-    },
+    WriteWithoutRead { tool: String, count: usize },
     /// Tool was retried excessively.
-    ExcessiveRetries {
-        tool: String,
-        count: usize,
-    },
+    ExcessiveRetries { tool: String, count: usize },
     /// A tool error pattern (repeated failures of the same tool).
-    ToolErrorPattern {
-        tool: String,
-        message: String,
-    },
+    ToolErrorPattern { tool: String, message: String },
     /// Context overflow — compression was triggered.
     ContextOverflow {
         tokens_before: usize,
         tokens_after: usize,
     },
     /// The agent didn't use a tool that seemed necessary.
-    MissingTool {
-        needed: String,
-    },
+    MissingTool { needed: String },
     /// Too many tool calls for a simple task.
-    ExcessiveToolCalls {
-        total: usize,
-    },
+    ExcessiveToolCalls { total: usize },
 }
 
 // ── ImprovementSuggestion ────────────────────────────────────────────
@@ -170,7 +163,10 @@ impl RunCritique {
             lines.push("Suggestions:".into());
             for suggestion in &self.suggestions {
                 match suggestion {
-                    ImprovementSuggestion::PromptChange { section, suggestion } => {
+                    ImprovementSuggestion::PromptChange {
+                        section,
+                        suggestion,
+                    } => {
                         lines.push(format!("  [Prompt] {section}: {suggestion}"));
                     }
                     ImprovementSuggestion::PolicyChange { rule, reason } => {

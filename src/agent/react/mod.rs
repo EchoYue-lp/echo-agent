@@ -204,8 +204,8 @@ impl ReactAgent {
     pub fn new(config: AgentConfig) -> Self {
         let system_prompt = Self::build_system_prompt(&config);
 
-        let mut ctx_builder = ContextManager::builder(config.token_limit)
-            .with_system(system_prompt.clone());
+        let mut ctx_builder =
+            ContextManager::builder(config.token_limit).with_system(system_prompt.clone());
 
         // Wire TokenBudget if configured
         if config.token_budget_config.enabled {
@@ -224,7 +224,9 @@ impl ReactAgent {
         // ── Core tools ─────────────────────────────────────────────
         tool_manager.register(Box::new(FinalAnswerTool));
         tool_manager.register(Box::new(crate::tools::builtin::todo::TodoWriteTool));
-        tool_manager.register(Box::new(crate::tools::builtin::memory_write::MemoryWriteTool));
+        tool_manager.register(Box::new(
+            crate::tools::builtin::memory_write::MemoryWriteTool,
+        ));
 
         // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
@@ -360,7 +362,7 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
-        let prompt = if config.enable_tool && config.enable_cot {
+        let mut prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -528,6 +530,11 @@ impl ReactAgent {
     /// Get the current LLM configuration.
     pub fn llm_config(&self) -> Option<&LlmConfig> {
         self.llm_config.as_ref()
+    }
+
+    /// Get a reference to the LLM client (if set).
+    pub fn llm_client(&self) -> Option<&Arc<dyn crate::llm::LlmClient>> {
+        self.llm_client.as_ref()
     }
 
     // ── Accessors & setters ──────────────────────────────────────────────────────
@@ -991,16 +998,21 @@ impl ReactAgent {
     }
 
     /// Finalize the current trace run (completed or failed).
-    pub(crate) async fn finalize_trace_run(&self, status: crate::trace::RunStatus, output: Option<&str>, error: Option<&str>) {
+    pub(crate) async fn finalize_trace_run(
+        &self,
+        status: crate::trace::RunStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) {
         let run_id = self.current_run_id.lock().unwrap().take();
-        if let (Some(store), Some(run_id)) = (&self.run_store, run_id) {
-            if let Ok(Some(mut run)) = store.load(&run_id).await {
-                run.status = status;
-                run.final_output = output.map(|s| s.to_string());
-                run.error = error.map(|s| s.to_string());
-                run.finished_at = Some(chrono::Utc::now());
-                let _ = store.save(run).await;
-            }
+        if let (Some(store), Some(run_id)) = (&self.run_store, run_id)
+            && let Ok(Some(mut run)) = store.load(&run_id).await
+        {
+            run.status = status;
+            run.final_output = output.map(|s| s.to_string());
+            run.error = error.map(|s| s.to_string());
+            run.finished_at = Some(chrono::Utc::now());
+            let _ = store.save(run).await;
         }
     }
 
@@ -1040,7 +1052,6 @@ impl ReactAgent {
     pub fn set_plan_mode(&mut self, enabled: bool) {
         self.config.plan_mode = enabled;
     }
-
 
     /// Check if plan mode is active.
     pub fn is_plan_mode(&self) -> bool {

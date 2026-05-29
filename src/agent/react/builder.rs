@@ -1,7 +1,9 @@
 //! Agent builder
 
+use crate::agent::react::run::pipeline::ToolExecutionPipeline;
 use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole};
 use crate::audit::AuditLogger;
+use crate::context::ContextAssembler;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
@@ -14,8 +16,6 @@ use crate::prelude::ReactAgent;
 use crate::sandbox::SandboxManager;
 use crate::tools::permission::PermissionPolicy;
 use crate::tools::{Tool, ToolExecutionConfig};
-use crate::agent::react::run::pipeline::ToolExecutionPipeline;
-use crate::context::ContextAssembler;
 use crate::trace::RunStore;
 use echo_core::circuit_breaker::CircuitBreakerConfig;
 use std::sync::Arc;

@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::security::{ResourceLimits, SecurityConfig};
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 
 const TOOL_NAME: &str = "pdf_tools";
 
@@ -20,6 +21,10 @@ pub struct PdfExtractTool;
 impl Tool for PdfExtractTool {
     fn name(&self) -> &str {
         "extract_pdf"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -113,6 +118,10 @@ pub struct PdfInfoTool;
 impl Tool for PdfInfoTool {
     fn name(&self) -> &str {
         "pdf_info"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {

@@ -7,7 +7,7 @@
 use super::super::ReactAgent;
 use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result};
-use crate::tools::{ToolParameters, ToolResult};
+use crate::tools::{ToolParameters, ToolResult, is_write_tool};
 use async_trait::async_trait;
 use serde_json::Value;
 use tracing::debug;
@@ -219,15 +219,15 @@ impl PipelineStage for ExecuteStage {
         if ctx.call_id.is_empty() {
             ctx.call_id = format!("call_{}", uuid::Uuid::new_v4());
         }
-        // Record ToolCall trace event
+        // Record ToolCall trace event (redaction handled by new_tool_call)
         agent
-            .record_trace_event(crate::trace::RunEvent::ToolCall {
-                call_id: ctx.call_id.clone(),
-                name: ctx.tool_name.clone(),
-                args: Some(redact_trace_args(&ctx.input)),
-                risk: None,
-                duration_ms: 0,
-            })
+            .record_trace_event(crate::trace::RunEvent::new_tool_call(
+                ctx.call_id.clone(),
+                ctx.tool_name.clone(),
+                Some(ctx.input.clone()),
+                None,
+                0,
+            ))
             .await;
 
         // Execute tool; on infrastructure error, convert to ToolResult{success:false}
@@ -281,8 +281,11 @@ impl PipelineStage for PostToolUseHookStage {
             .result
             .as_ref()
             .map(|r| {
-                if r.output.is_empty() { r.error.as_deref().unwrap_or("") }
-                else { r.output.as_str() }
+                if r.output.is_empty() {
+                    r.error.as_deref().unwrap_or("")
+                } else {
+                    r.output.as_str()
+                }
             })
             .unwrap_or("");
         let post_result = hook_reg
@@ -314,10 +317,9 @@ impl PipelineStage for OutputGuardStage {
     async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
         if let Some(ref result) = ctx.result
             && result.success
+            && let Some(guarded) = agent.check_tool_output_guard(&result.output).await
         {
-            if let Some(guarded) = agent.check_tool_output_guard(&result.output).await {
-                ctx.output = Some(guarded);
-            }
+            ctx.output = Some(guarded);
         }
         Ok(())
     }
@@ -376,7 +378,8 @@ impl PipelineStage for CallbackStage {
         for cb in &agent.config.callbacks {
             match self.phase {
                 CallbackPhase::Start => {
-                    cb.on_tool_start(agent_name, &ctx.tool_name, &ctx.input).await;
+                    cb.on_tool_start(agent_name, &ctx.tool_name, &ctx.input)
+                        .await;
                 }
                 CallbackPhase::End => {
                     let output = ctx
@@ -413,7 +416,13 @@ impl PipelineStage for TraceRecordingStage {
                     output_preview: Some(if result.success {
                         result.output.chars().take(200).collect()
                     } else {
-                        result.error.clone().unwrap_or_default().chars().take(200).collect()
+                        result
+                            .error
+                            .clone()
+                            .unwrap_or_default()
+                            .chars()
+                            .take(200)
+                            .collect()
                     }),
                     output_truncated: ctx.output.is_some(),
                     duration_ms: ctx.duration_ms,
@@ -525,7 +534,10 @@ impl PipelineStage for PlanModeStage {
         if !ctx.plan_mode {
             return Ok(());
         }
-        if is_write_tool(&ctx.tool_name) || ctx.tool_name == "shell" || ctx.tool_name == "delete_file" {
+        if is_write_tool(&ctx.tool_name)
+            || ctx.tool_name == "shell"
+            || ctx.tool_name == "delete_file"
+        {
             ctx.blocked = true;
             ctx.block_reason = Some(format!(
                 "Plan mode: '{}' is blocked. Read and analyze only. Use /plan off to enable writes.",
@@ -543,27 +555,6 @@ impl Default for ToolExecutionPipeline {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
-
-const WRITE_TOOLS: &[&str] = &[
-    "edit_file",
-    "write_file",
-    "append_file",
-    "create_file",
-    "delete_file",
-    "update_file",
-    "move_file",
-];
-
-fn is_write_tool(name: &str) -> bool {
-    WRITE_TOOLS.contains(&name)
-}
-
-/// Redact secrets from trace args before persisting.
-fn redact_trace_args(input: &Value) -> serde_json::Value {
-    let s = serde_json::to_string(input).unwrap_or_default();
-    let redacted = crate::security::redact_secrets(&s);
-    serde_json::from_str(&redacted).unwrap_or(input.clone())
-}
 
 fn extract_path_param(_tool_name: &str, params: &ToolParameters) -> Option<String> {
     params

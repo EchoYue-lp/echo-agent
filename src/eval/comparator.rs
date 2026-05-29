@@ -56,9 +56,13 @@ impl AbComparator {
             let is_improved = delta > 0.001;
             let is_regressed = delta < -0.001;
 
-            if is_improved { improved += 1; }
-            else if is_regressed { regressed += 1; }
-            else { unchanged += 1; }
+            if is_improved {
+                improved += 1;
+            } else if is_regressed {
+                regressed += 1;
+            } else {
+                unchanged += 1;
+            }
 
             per_case_deltas.push(CaseDelta {
                 case_id: base.case_id.clone(),
@@ -71,9 +75,7 @@ impl AbComparator {
 
         // Attach delta to experiment report
         let mut experiment = experiment;
-        experiment.delta_vs_baseline = Some(
-            experiment.avg_score - baseline.avg_score
-        );
+        experiment.delta_vs_baseline = Some(experiment.avg_score - baseline.avg_score);
 
         AbComparison {
             baseline,
@@ -88,21 +90,43 @@ impl AbComparator {
     /// Format comparison as a readable summary.
     pub fn format_summary(comparison: &AbComparison) -> String {
         let delta = comparison.experiment.avg_score - comparison.baseline.avg_score;
-        let direction = if delta > 0.0 { "improved" } else if delta < 0.0 { "regressed" } else { "unchanged" };
+        let direction = if delta > 0.0 {
+            "improved"
+        } else if delta < 0.0 {
+            "regressed"
+        } else {
+            "unchanged"
+        };
         let mut lines = vec![
             format!("A/B Comparison Results:"),
-            format!("  Baseline:  {:.4} avg (n={})", comparison.baseline.avg_score, comparison.baseline.total),
-            format!("  Experiment: {:.4} avg (n={})", comparison.experiment.avg_score, comparison.experiment.total),
+            format!(
+                "  Baseline:  {:.4} avg (n={})",
+                comparison.baseline.avg_score, comparison.baseline.total
+            ),
+            format!(
+                "  Experiment: {:.4} avg (n={})",
+                comparison.experiment.avg_score, comparison.experiment.total
+            ),
             format!("  Delta: {delta:+.4} → {direction}"),
-            format!("  Improved: {}  Regressed: {}  Unchanged: {}",
-                comparison.improved, comparison.regressed, comparison.unchanged),
+            format!(
+                "  Improved: {}  Regressed: {}  Unchanged: {}",
+                comparison.improved, comparison.regressed, comparison.unchanged
+            ),
             String::new(),
             "Per-case deltas:".into(),
         ];
         for cd in &comparison.per_case_deltas {
-            let icon = if cd.improved { "↑" } else if cd.delta < -0.001 { "↓" } else { "=" };
-            lines.push(format!("  {icon} {}: {:+.4} ({:.4} → {:.4})",
-                cd.case_id, cd.delta, cd.baseline_score, cd.experiment_score));
+            let icon = if cd.improved {
+                "↑"
+            } else if cd.delta < -0.001 {
+                "↓"
+            } else {
+                "="
+            };
+            lines.push(format!(
+                "  {icon} {}: {:+.4} ({:.4} → {:.4})",
+                cd.case_id, cd.delta, cd.baseline_score, cd.experiment_score
+            ));
         }
         lines.join("\n")
     }

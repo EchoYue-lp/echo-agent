@@ -13,7 +13,10 @@ pub struct CritiqueStore {
 
 impl CritiqueStore {
     pub fn new() -> Self {
-        Self { critiques: Mutex::new(Vec::new()), pattern_counts: Mutex::new(HashMap::new()) }
+        Self {
+            critiques: Mutex::new(Vec::new()),
+            pattern_counts: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Store a critique and update pattern counts.
@@ -36,15 +39,24 @@ impl CritiqueStore {
 
     /// Retrieve critiques for a specific run.
     pub fn get_by_run(&self, run_id: &str) -> Vec<RunCritique> {
-        self.critiques.lock().unwrap().iter()
-            .filter(|c| c.run_id == run_id).cloned().collect()
+        self.critiques
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.run_id == run_id)
+            .cloned()
+            .collect()
     }
 
     /// Total stored critiques.
-    pub fn len(&self) -> usize { self.critiques.lock().unwrap().len() }
+    pub fn len(&self) -> usize {
+        self.critiques.lock().unwrap().len()
+    }
 
     /// Whether empty.
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Clear all stored data.
     pub fn clear(&self) {
@@ -54,5 +66,7 @@ impl CritiqueStore {
 }
 
 impl Default for CritiqueStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

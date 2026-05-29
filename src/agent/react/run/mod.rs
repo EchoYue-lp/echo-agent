@@ -18,6 +18,8 @@ pub(crate) mod pipeline;
 pub(crate) mod react_loop;
 pub(crate) mod retry;
 pub(crate) mod stream_channel;
+#[deprecated(since = "0.2.0", note = "Use stream_channel implementation instead")]
+#[allow(deprecated)]
 pub(crate) mod stream_loop;
 pub(crate) mod types;
 pub(crate) use types::StreamMode;

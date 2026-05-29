@@ -221,7 +221,8 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read file content from the specified path, returns text content"
+        "Read file content from the specified path, returns text content with line numbers. \
+         Supports offset/limit for reading specific sections of large files."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -238,6 +239,14 @@ impl Tool for ReadFileTool {
                 "path": {
                     "type": "string",
                     "description": "File path to read (relative or absolute path)"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Line number to start reading from (1-based, default: 1)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to read (default: all lines)"
                 }
             },
             "required": ["path"]
@@ -254,6 +263,12 @@ impl Tool for ReadFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
+            let offset = parameters
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as usize;
+            let limit = parameters.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize);
+
             let path = resolve_path("read_file", path_str, &self.base_dir)?;
 
             if !path.exists() {
@@ -269,15 +284,75 @@ impl Tool for ReadFileTool {
                 )));
             }
 
-            let content =
-                tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
+            // Size guard: warn for files > 100KB
+            let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
+                ToolError::ExecutionFailed {
+                    tool: "read_file".to_string(),
+                    message: format!("Failed to read metadata: {}", e),
+                }
+            })?;
+            let file_size = metadata.len();
+            if file_size > 100 * 1024 && limit.is_none() && offset == 1 {
+                // For large files without offset/limit, read only first 2000 lines
+                let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+                    ToolError::ExecutionFailed {
                         tool: "read_file".to_string(),
                         message: format!("Failed to read: {}", e),
-                    })?;
+                    }
+                })?;
+                let lines: Vec<&str> = content.lines().collect();
+                let total_lines = lines.len();
+                let end = 2000.min(total_lines);
+                let mut output = String::new();
+                for (i, line) in lines.iter().take(end).enumerate() {
+                    output.push_str(&format!("{:>6}\t{}\n", i + 1, line));
+                }
+                if total_lines > end {
+                    output.push_str(&format!(
+                        "\n... (showing first {end} of {total_lines} lines, file size: {} bytes. Use offset/limit to read more.)",
+                        file_size
+                    ));
+                }
+                return Ok(ToolResult::success(output));
+            }
 
-            Ok(ToolResult::success(content))
+            let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+                ToolError::ExecutionFailed {
+                    tool: "read_file".to_string(),
+                    message: format!("Failed to read: {}", e),
+                }
+            })?;
+
+            let all_lines: Vec<&str> = content.lines().collect();
+            let total_lines = all_lines.len();
+
+            // offset is 1-based
+            let start = if offset > 0 { offset - 1 } else { 0 };
+            let end = match limit {
+                Some(l) => (start + l).min(total_lines),
+                None => total_lines,
+            };
+
+            if start >= total_lines {
+                return Ok(ToolResult::success(format!(
+                    "Offset {offset} exceeds total lines ({total_lines})"
+                )));
+            }
+
+            let mut output = String::new();
+            for (i, line) in all_lines[start..end].iter().enumerate() {
+                output.push_str(&format!("{:>6}\t{}\n", start + i + 1, line));
+            }
+
+            if start > 0 || end < total_lines {
+                output.push_str(&format!(
+                    "\n(lines {start_offset}-{end_offset} of {total_lines})",
+                    start_offset = start + 1,
+                    end_offset = end,
+                ));
+            }
+
+            Ok(ToolResult::success(output))
         })
     }
 }

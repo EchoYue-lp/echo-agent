@@ -7,6 +7,7 @@
 use crate::human_loop::{HumanLoopProvider, PermissionService};
 #[cfg(feature = "human-loop")]
 use echo_core::tools::permission::PermissionRule;
+#[cfg(feature = "human-loop")]
 use std::sync::Arc;
 
 /// Human-in-the-loop approval subsystem

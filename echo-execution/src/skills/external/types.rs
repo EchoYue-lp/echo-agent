@@ -59,6 +59,12 @@ pub struct SkillDescriptor {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
 
+    /// Explicit trigger keywords/phrases for skill routing.
+    /// When the user query matches any trigger, the skill is activated.
+    /// Complements the `description` field for precise routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<String>,
+
     /// Hooks for intercepting agent lifecycle events.
     #[serde(skip)]
     pub hooks: Option<crate::skills::hooks::HooksDefinition>,
@@ -67,18 +73,23 @@ pub struct SkillDescriptor {
 impl SkillDescriptor {
     /// Generate a single catalog line for system-prompt injection.
     ///
-    /// Format: `- <name>: <description>` (with optional path constraints)
+    /// Format: `- <name>: <description>` (with optional path constraints and triggers)
     pub fn catalog_line(&self) -> String {
-        if self.paths.is_empty() {
-            format!("- {}: {}", self.name, self.description)
-        } else {
-            format!(
-                "- {}: {} [activates for: {}]",
-                self.name,
-                self.description,
-                self.paths.join(", ")
-            )
+        let mut line = format!("- {}: {}", self.name, self.description);
+
+        let mut annotations = Vec::new();
+        if !self.paths.is_empty() {
+            annotations.push(format!("activates for: {}", self.paths.join(", ")));
         }
+        if !self.triggers.is_empty() {
+            annotations.push(format!("triggers: {}", self.triggers.join(", ")));
+        }
+
+        if !annotations.is_empty() {
+            line.push_str(&format!(" [{}]", annotations.join("; ")));
+        }
+
+        line
     }
 
     /// Validate the name according to the agentskills.io spec.
@@ -343,6 +354,10 @@ pub(crate) struct RawFrontmatter {
     #[serde(default)]
     pub paths: Option<Vec<String>>,
 
+    /// Explicit trigger keywords/phrases for skill routing
+    #[serde(default)]
+    pub triggers: Option<Vec<String>>,
+
     /// Hooks for intercepting agent lifecycle events
     #[serde(default)]
     pub hooks: Option<crate::skills::hooks::HooksDefinition>,
@@ -408,6 +423,7 @@ impl RawFrontmatter {
             allowed_tools: self.allowed_tools.map(|v| v.into_vec()).unwrap_or_default(),
             shell: self.shell,
             paths: self.paths.unwrap_or_default(),
+            triggers: self.triggers.unwrap_or_default(),
             hooks: self.hooks,
         }
     }
@@ -449,6 +465,7 @@ mod tests {
             allowed_tools: vec![],
             shell: None,
             paths: vec![],
+            triggers: vec![],
             hooks: None,
         };
         assert!(d.validate_name().is_empty());
@@ -474,6 +491,7 @@ mod tests {
                 allowed_tools: vec![],
                 shell: None,
                 paths: vec![],
+                triggers: vec![],
                 hooks: None,
             };
             assert!(
@@ -497,6 +515,7 @@ mod tests {
             allowed_tools: vec![],
             shell: None,
             paths: vec![],
+            triggers: vec![],
             hooks: None,
         };
         assert_eq!(
@@ -518,6 +537,7 @@ mod tests {
                 allowed_tools: vec![],
                 shell: None,
                 paths: vec![],
+                triggers: vec![],
                 hooks: None,
             },
             instructions: "# Instructions\n\nDo the thing.".into(),
@@ -628,6 +648,7 @@ mod tests {
             allowed_tools: vec![],
             shell: None,
             paths: paths.into_iter().map(String::from).collect(),
+            triggers: vec![],
             hooks: None,
         }
     }

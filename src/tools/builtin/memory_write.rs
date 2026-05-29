@@ -16,7 +16,9 @@ pub struct MemoryWriteTool;
 
 #[async_trait]
 impl Tool for MemoryWriteTool {
-    fn name(&self) -> &str { "memory_write" }
+    fn name(&self) -> &str {
+        "memory_write"
+    }
     fn description(&self) -> &str {
         "Write a key-value memory that persists across the session. \
          Use this to remember important information the user shares, \
@@ -38,12 +40,22 @@ impl Tool for MemoryWriteTool {
         Box::pin(async move {
             let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
             let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
-            let scope = params.get("scope").and_then(|v| v.as_str()).unwrap_or("session");
-            if key.is_empty() { return Ok(ToolResult::error("key is required")); }
+            let scope = params
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("session");
+            if key.is_empty() {
+                return Ok(ToolResult::error("key is required"));
+            }
             let full_key = format!("{scope}:{key}");
-            MEMORY.lock().unwrap().insert(full_key.clone(), value.to_string());
+            MEMORY
+                .lock()
+                .unwrap()
+                .insert(full_key.clone(), value.to_string());
             Ok(ToolResult::success(format!("Stored: {full_key}")))
         })
     }
-    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel { echo_core::tools::ToolRiskLevel::ReadOnly }
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
+    }
 }

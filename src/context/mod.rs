@@ -144,9 +144,7 @@ impl ContextAssembler {
 
         // 2. Developer instructions
         for inst in &sources.developer_instructions {
-            messages.push(Message::system(format!(
-                "[Developer Instructions]\n{inst}"
-            )));
+            messages.push(Message::system(format!("[Developer Instructions]\n{inst}")));
         }
 
         // 3. Project rules
@@ -168,7 +166,8 @@ impl ContextAssembler {
         if let Some(mem) = &sources.memory_recall {
             let mem_text = if let Some(ref budget) = self.budget {
                 if mem.len() > budget.memory_max {
-                    let cut = (0..=budget.memory_max).rev()
+                    let cut = (0..=budget.memory_max)
+                        .rev()
                         .find(|i| mem.is_char_boundary(*i))
                         .unwrap_or(budget.memory_max);
                     format!("{}...", &mem[..cut])
@@ -184,14 +183,20 @@ impl ContextAssembler {
         // 7. Conversation history (budget-aware: estimate tokens ≈ chars/4)
         let history = if let Some(ref budget) = self.budget {
             let mut token_est = 0usize;
-            let keep_count = sources.conversation_history.iter().rev()
+            let keep_count = sources
+                .conversation_history
+                .iter()
+                .rev()
                 .take_while(|m| {
                     let t = m.content.as_text().map(|c| c.len() / 4).unwrap_or(0);
                     token_est += t;
                     token_est <= budget.history_max
                 })
                 .count();
-            let start = sources.conversation_history.len().saturating_sub(keep_count);
+            let start = sources
+                .conversation_history
+                .len()
+                .saturating_sub(keep_count);
             sources.conversation_history[start..].to_vec()
         } else {
             sources.conversation_history.clone()
@@ -204,7 +209,10 @@ impl ContextAssembler {
         // 9. Tool results (budget-aware: keep most recent by estimated tokens)
         let tool_results = if let Some(ref budget) = self.budget {
             let mut token_est = 0usize;
-            let keep_count = sources.tool_results.iter().rev()
+            let keep_count = sources
+                .tool_results
+                .iter()
+                .rev()
                 .take_while(|m| {
                     let t = m.content.as_text().map(|c| c.len() / 4).unwrap_or(0);
                     token_est += t;

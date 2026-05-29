@@ -169,4 +169,4 @@ let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
 3. **SubAgent 不要 `enable_subagent(true)`**（避免递归嵌套导致难以调试）
 4. **复杂任务用 Planner 角色配合 DAG 任务系统**，而不是依赖 Orchestrator 临时决策
 
-对应示例：`examples/demo04_suagent.rs`、`examples/demo14_memory_isolation.rs`
+对应示例：`examples/demo04_subagent.rs`、`examples/demo14_memory_isolation.rs`

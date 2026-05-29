@@ -10,7 +10,7 @@ use super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
 use crate::error::{AgentError, ReactError, Result};
 use crate::llm::types::Message;
-use crate::tools::ToolParameters;
+use crate::tools::{ToolParameters, is_read_tool, is_write_tool};
 use futures::StreamExt;
 use futures::future::join_all;
 use serde_json::Value;
@@ -28,7 +28,10 @@ macro_rules! yield_event {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 // Channel full — drop event and log
-                tracing::warn!("Stream buffer full ({}), dropping event", DEFAULT_STREAM_BUFFER);
+                tracing::warn!(
+                    "Stream buffer full ({}), dropping event",
+                    DEFAULT_STREAM_BUFFER
+                );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 return Ok(());
@@ -85,9 +88,7 @@ impl ReactAgent {
             }
         });
 
-        Ok(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(rx),
-        ))
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }
 
@@ -488,15 +489,15 @@ impl AgentSnapshot {
                 );
                 let reg = self.tools.hook_registry.read().await.clone();
                 let sr = reg.run_lifecycle_hooks(&hc).await;
-                if let Some(reason) = &sr.continue_reason {
-                    if !stop_hook_continued {
-                        context
-                            .lock()
-                            .await
-                            .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
-                        stop_hook_continued = true;
-                        continue;
-                    }
+                if let Some(reason) = &sr.continue_reason
+                    && !stop_hook_continued
+                {
+                    context
+                        .lock()
+                        .await
+                        .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
+                    stop_hook_continued = true;
+                    continue;
                 }
                 self.fire_hook(
                     crate::skills::hooks::HookEvent::SessionEnd,
@@ -750,13 +751,13 @@ impl AgentSnapshot {
         );
         let reg = self.tools.hook_registry.read().await.clone();
         let sr = reg.run_lifecycle_hooks(&hc).await;
-        if let Some(reason) = &sr.continue_reason {
-            if !stop_hook_continued {
-                context
-                    .lock()
-                    .await
-                    .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
-            }
+        if let Some(reason) = &sr.continue_reason
+            && !stop_hook_continued
+        {
+            context
+                .lock()
+                .await
+                .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
         }
         self.fire_hook(
             crate::skills::hooks::HookEvent::SessionEnd,
@@ -780,7 +781,11 @@ impl AgentSnapshot {
         // ── PreToolUse hooks ──
         let hook_reg = self.tools.hook_registry.read().await.clone();
         let pre_result = hook_reg
-            .run_pre_tool_use(tool_name, input, self.config.session_id.as_deref().unwrap_or(""))
+            .run_pre_tool_use(
+                tool_name,
+                input,
+                self.config.session_id.as_deref().unwrap_or(""),
+            )
             .await;
         if pre_result.block {
             let reason = pre_result
@@ -817,18 +822,14 @@ impl AgentSnapshot {
 
         // ── Execute ──
         let call_id = format!("call_{}", uuid::Uuid::new_v4());
-        // Redact secrets from args before recording
-        let safe_args = Some(serde_json::from_str(
-            &crate::security::redact_secrets(&serde_json::to_string(&effective_input).unwrap_or_default())
-        ).unwrap_or(effective_input.clone()));
-        // Record ToolCall trace event
-        self.record_event(crate::trace::RunEvent::ToolCall {
-            call_id: call_id.clone(),
-            name: tool_name.to_string(),
-            args: safe_args,
-            risk: None,
-            duration_ms: 0,
-        })
+        // Record ToolCall trace event (redaction handled by new_tool_call)
+        self.record_event(crate::trace::RunEvent::new_tool_call(
+            call_id.clone(),
+            tool_name.to_string(),
+            Some(effective_input.clone()),
+            None,
+            0,
+        ))
         .await;
 
         let result = match self
@@ -868,7 +869,7 @@ impl AgentSnapshot {
                         "[Tool error] {e}\nTry adjusting parameters or using another tool."
                     ));
                 }
-                return Err(crate::error::ReactError::from(e));
+                return Err(e);
             }
         };
 
@@ -923,7 +924,10 @@ impl AgentSnapshot {
             let mut files = self.recently_read_files.lock().unwrap();
             let read = match files.get(&canonical) {
                 Some(instant) if instant.elapsed() < ttl => true,
-                Some(_) => { files.remove(&canonical); false }
+                Some(_) => {
+                    files.remove(&canonical);
+                    false
+                }
                 None => false,
             };
             drop(files);
@@ -945,32 +949,15 @@ impl AgentSnapshot {
 
         if let Some(path) = extract_path_param(params) {
             let canonical = canonicalize_for_read_tracking(&path);
-            self.recently_read_files.lock().unwrap().insert(canonical, std::time::Instant::now());
+            self.recently_read_files
+                .lock()
+                .unwrap()
+                .insert(canonical, std::time::Instant::now());
         }
     }
 }
 
 // ── Read-before-edit helpers ─────────────────────────────────────────────────
-
-const WRITE_TOOLS: &[&str] = &[
-    "edit_file",
-    "write_file",
-    "append_file",
-    "create_file",
-    "delete_file",
-    "update_file",
-    "move_file",
-];
-
-const READ_TOOLS: &[&str] = &["read_file", "read_text"];
-
-fn is_write_tool(name: &str) -> bool {
-    WRITE_TOOLS.contains(&name)
-}
-
-fn is_read_tool(name: &str) -> bool {
-    READ_TOOLS.contains(&name)
-}
 
 fn extract_path_param(params: &ToolParameters) -> Option<String> {
     params

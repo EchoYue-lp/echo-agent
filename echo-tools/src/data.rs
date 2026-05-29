@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::security::SecurityConfig;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::permission::ToolPermission;
 
 const TOOL_NAME: &str = "data_tools";
 
@@ -193,6 +194,10 @@ impl Tool for DataReadTool {
         "read_data"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
     fn description(&self) -> &str {
         "Read data files (CSV, JSON, Parquet), returning basic info and a preview of the first rows."
     }
@@ -281,6 +286,10 @@ impl Tool for DataFilterTool {
         "filter_data"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
     fn description(&self) -> &str {
         "Filter a data file, supporting conditional expressions (comparisons, AND/OR combinations, contains matching, etc.). Returns a preview of the filtered data."
     }
@@ -363,6 +372,10 @@ impl Tool for DataAggregateTool {
         "aggregate_data"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
     fn description(&self) -> &str {
         "Group aggregation operations on data: group stats, sum, mean, count, distinct count, variance, stddev, median, p25/p75/p90/p95/arbitrary percentile, etc. Supported operations: sum, mean/avg, min, max, count, count_distinct/n_unique, variance/var, stddev/std, median, p25/p75/p90/p95, percentile:N/pct:N, first, last. Example: aggregate_data(file_path='sales.csv', group_by='region', aggregations='sales:sum,profit:mean,users:count_distinct,revenue:p95')"
     }
@@ -442,6 +455,10 @@ pub struct DataStatsTool;
 impl Tool for DataStatsTool {
     fn name(&self) -> &str {
         "data_stats"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -689,6 +706,10 @@ impl Tool for DataTransformTool {
         "transform_data"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read, ToolPermission::Write]
+    }
+
     fn description(&self) -> &str {
         "Transform data: sort, select columns, rename columns, drop columns, etc."
     }
@@ -828,6 +849,10 @@ pub struct DataExportTool;
 impl Tool for DataExportTool {
     fn name(&self) -> &str {
         "export_data"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Write]
     }
 
     fn description(&self) -> &str {
@@ -983,6 +1008,10 @@ pub struct DataProfileTool;
 impl Tool for DataProfileTool {
     fn name(&self) -> &str {
         "profile_data"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -1191,6 +1220,10 @@ impl Tool for DataTopNTool {
         "topn_data"
     }
 
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
     fn description(&self) -> &str {
         "Sort by a metric column and take Top N. Without dimension columns, returns global top N; with dimension_columns specified, returns top N within each group. Suitable for questions like 'top 10 products by sales', 'top 3 categories by revenue in each region'. Example: topn_data(file_path='sales.csv', metric_column='revenue', dimension_columns='region', top_n=3)"
     }
@@ -1357,6 +1390,10 @@ pub struct DataContributionTool;
 impl Tool for DataContributionTool {
     fn name(&self) -> &str {
         "contribution_data"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -1533,6 +1570,10 @@ pub struct DataBinTool;
 impl Tool for DataBinTool {
     fn name(&self) -> &str {
         "bin_data"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -1730,6 +1771,10 @@ pub struct DataRatioTool;
 impl Tool for DataRatioTool {
     fn name(&self) -> &str {
         "ratio_data"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
     }
 
     fn description(&self) -> &str {
@@ -2207,6 +2252,412 @@ fn format_value(value: &AnyValue) -> String {
         AnyValue::String(s) => s.to_string(),
         AnyValue::StringOwned(s) => s.to_string(),
         _ => value.to_string(),
+    }
+}
+
+// ── Multi-file read tool ─────────────────────────────────────────────
+
+const MAX_MULTI_FILES: usize = 50;
+
+/// Load multiple DataFrames and vertically concatenate them
+fn load_multi_dataframes(paths: &[&Path], format: Option<&str>) -> Result<DataFrame> {
+    if paths.is_empty() {
+        return Err(ToolError::MissingParameter("file_paths".to_string()).into());
+    }
+    if paths.len() > MAX_MULTI_FILES {
+        return Err(ToolError::InvalidParameter {
+            name: "file_paths".to_string(),
+            message: format!("Too many files ({}). Maximum is {}.", paths.len(), MAX_MULTI_FILES),
+        }
+        .into());
+    }
+
+    let mut result = load_dataframe(paths[0], format)?;
+    let schema = result.schema();
+
+    for path in &paths[1..] {
+        let df = load_dataframe(path, format)?;
+        // Validate schema compatibility (column names must match)
+        if df.schema() != schema {
+            return Err(ToolError::InvalidParameter {
+                name: "file_paths".to_string(),
+                message: format!(
+                    "Schema mismatch: {} has different columns than {}",
+                    path.display(),
+                    paths[0].display()
+                ),
+            }
+            .into());
+        }
+        result.vstack(&df).map_err(|e| ToolError::ExecutionFailed {
+            tool: TOOL_NAME.to_string(),
+            message: format!("Failed to concatenate DataFrames: {}", e),
+        })?;
+    }
+
+    Ok(result)
+}
+
+pub struct DataMultiReadTool;
+
+impl Tool for DataMultiReadTool {
+    fn name(&self) -> &str {
+        "multi_read_data"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
+    fn description(&self) -> &str {
+        "Read and concatenate multiple same-schema data files into a single DataFrame. Supports CSV, JSON, and Parquet. Maximum 50 files. Useful for merging monthly reports, log files, or sharded data. Example: multi_read_data(file_paths=['data/jan.csv','data/feb.csv','data/mar.csv'])"
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of absolute file paths to read (max 50). All files must have the same column schema."
+                },
+                "format": {
+                    "type": "string",
+                    "description": "File format: 'csv', 'json', or 'parquet' (optional, auto-detected per file)"
+                },
+                "preview_rows": {
+                    "type": "integer",
+                    "description": "Number of preview rows from the merged result (default 10)"
+                }
+            },
+            "required": ["file_paths"]
+        })
+    }
+
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let paths_val = parameters
+                .get("file_paths")
+                .ok_or_else(|| ToolError::MissingParameter("file_paths".to_string()))?;
+
+            let path_strs: Vec<&str> = paths_val
+                .as_array()
+                .ok_or_else(|| ToolError::InvalidParameter {
+                    name: "file_paths".to_string(),
+                    message: "Must be an array of strings".to_string(),
+                })?
+                .iter()
+                .map(|v| v.as_str().ok_or_else(|| ToolError::InvalidParameter {
+                    name: "file_paths".to_string(),
+                    message: "All entries must be strings".to_string(),
+                }.into()))
+                .collect::<Result<Vec<_>>>()?;
+
+            if path_strs.is_empty() {
+                return Err(ToolError::MissingParameter("file_paths".to_string()).into());
+            }
+
+            let format = parameters.get("format").and_then(|v| v.as_str());
+            let preview_rows = parameters
+                .get("preview_rows")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as usize;
+
+            let security = SecurityConfig::global();
+
+            // Validate all paths
+            let paths: Vec<std::path::PathBuf> = path_strs
+                .iter()
+                .map(|p| security.validate_file(p))
+                .collect::<Result<Vec<_>>>()?;
+            let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
+
+            // Load and concatenate
+            let df = load_multi_dataframes(&path_refs, format)?;
+
+            let effective_preview = preview_rows.min(security.limits.max_preview_rows);
+            let shape = df.shape();
+            let columns: Vec<String> = df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+
+            let preview = df.head(Some(effective_preview));
+            let preview_json = df_to_json(&preview)?;
+
+            // Per-file row counts (reload individually for stats)
+            let file_details: Vec<Value> = path_strs
+                .iter()
+                .map(|p| {
+                    let path = Path::new(p);
+                    let fmt = detect_format(path, format);
+                    match load_dataframe(path, Some(fmt)) {
+                        Ok(f) => serde_json::json!({
+                            "file": p,
+                            "rows": f.height(),
+                            "format": fmt,
+                        }),
+                        Err(e) => serde_json::json!({
+                            "file": p,
+                            "error": e.to_string(),
+                        }),
+                    }
+                })
+                .collect();
+
+            let result = serde_json::json!({
+                "files_count": path_strs.len(),
+                "total_rows": shape.0,
+                "columns": shape.1,
+                "column_info": columns.iter().map(|col| {
+                    if let Ok(c) = df.column(col.as_str()) {
+                        serde_json::json!({"name": col, "dtype": c.dtype().to_string()})
+                    } else {
+                        serde_json::json!({"name": col, "dtype": "unknown"})
+                    }
+                }).collect::<Vec<_>>(),
+                "file_details": file_details,
+                "preview_rows": effective_preview,
+                "preview": preview_json,
+            });
+
+            Ok(ToolResult::success_json(result))
+        })
+    }
+}
+
+// ── Join tool ────────────────────────────────────────────────────────
+
+pub struct DataJoinTool;
+
+impl Tool for DataJoinTool {
+    fn name(&self) -> &str {
+        "join_data"
+    }
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+
+    fn description(&self) -> &str {
+        "Join two data files on common key columns. Supports inner, left, and outer joins. Useful for combining orders with customers, facts with dimensions, etc. Example: join_data(left_file='orders.csv', right_file='customers.csv', join_keys=['customer_id'], join_type='left')"
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "left_file": {
+                    "type": "string",
+                    "description": "Absolute path to the left (primary) data file"
+                },
+                "right_file": {
+                    "type": "string",
+                    "description": "Absolute path to the right (lookup) data file"
+                },
+                "join_keys": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Column names to join on (must exist in both files). At least 1 key required."
+                },
+                "join_type": {
+                    "type": "string",
+                    "description": "Join type: 'inner' (default), 'left', 'outer', or 'cross'"
+                },
+                "left_suffix": {
+                    "type": "string",
+                    "description": "Suffix for duplicate column names from left file (default: '_left')"
+                },
+                "right_suffix": {
+                    "type": "string",
+                    "description": "Suffix for duplicate column names from right file (default: '_right')"
+                },
+                "format": {
+                    "type": "string",
+                    "description": "File format override for both files: 'csv', 'json', or 'parquet'"
+                },
+                "preview_rows": {
+                    "type": "integer",
+                    "description": "Number of preview rows (default 10)"
+                }
+            },
+            "required": ["left_file", "right_file", "join_keys"]
+        })
+    }
+
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let left_path = parameters
+                .get("left_file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("left_file".to_string()))?;
+
+            let right_path = parameters
+                .get("right_file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("right_file".to_string()))?;
+
+            let keys_val = parameters
+                .get("join_keys")
+                .ok_or_else(|| ToolError::MissingParameter("join_keys".to_string()))?;
+
+            let key_strs: Vec<String> = keys_val
+                .as_array()
+                .ok_or_else(|| ToolError::InvalidParameter {
+                    name: "join_keys".to_string(),
+                    message: "Must be an array of strings".to_string(),
+                })?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| ToolError::InvalidParameter {
+                            name: "join_keys".to_string(),
+                            message: "All entries must be strings".to_string(),
+                        }.into())
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            if key_strs.is_empty() {
+                return Err(ToolError::InvalidParameter {
+                    name: "join_keys".to_string(),
+                    message: "At least one join key is required".to_string(),
+                }
+                .into());
+            }
+
+            let join_type_str = parameters
+                .get("join_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("inner");
+
+            let format = parameters.get("format").and_then(|v| v.as_str());
+            let preview_rows = parameters
+                .get("preview_rows")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as usize;
+
+            let left_suffix = parameters
+                .get("left_suffix")
+                .and_then(|v| v.as_str())
+                .unwrap_or("_left");
+            let right_suffix = parameters
+                .get("right_suffix")
+                .and_then(|v| v.as_str())
+                .unwrap_or("_right");
+
+            let security = SecurityConfig::global();
+            let l_path = security.validate_file(left_path)?;
+            let r_path = security.validate_file(right_path)?;
+
+            let left_df = load_dataframe(&l_path, format)?;
+            let right_df = load_dataframe(&r_path, format)?;
+
+            // Validate join keys exist in both DataFrames
+            let left_names: std::collections::HashSet<String> =
+                left_df.get_column_names().iter().map(|s| s.to_string()).collect();
+            let right_names: std::collections::HashSet<String> =
+                right_df.get_column_names().iter().map(|s| s.to_string()).collect();
+
+            for key in &key_strs {
+                if !left_names.contains(key.as_str()) {
+                    return Err(ToolError::InvalidParameter {
+                        name: "join_keys".to_string(),
+                        message: format!("Column '{}' not found in left file", key),
+                    }
+                    .into());
+                }
+                if !right_names.contains(key.as_str()) {
+                    return Err(ToolError::InvalidParameter {
+                        name: "join_keys".to_string(),
+                        message: format!("Column '{}' not found in right file", key),
+                    }
+                    .into());
+                }
+            }
+
+            // Resolve duplicate non-key column names by adding suffixes
+            let key_set: std::collections::HashSet<&str> =
+                key_strs.iter().map(|s| s.as_str()).collect();
+            let mut right_rename_map = std::collections::HashMap::new();
+            for col_name in &right_names {
+                if !key_set.contains(col_name.as_str()) && left_names.contains(col_name.as_str()) {
+                    right_rename_map.insert(col_name.clone(), format!("{}{}", col_name, right_suffix));
+                }
+            }
+
+            let mut right_df = right_df;
+            for (old, new) in &right_rename_map {
+                right_df.rename(old, PlSmallStr::from_str(new));
+            }
+
+            // Determine join type
+            let how = match join_type_str {
+                "inner" => JoinType::Inner,
+                "left" => JoinType::Left,
+                "outer" => JoinType::Full,
+                "cross" => JoinType::Cross,
+                _ => {
+                    return Err(ToolError::InvalidParameter {
+                        name: "join_type".to_string(),
+                        message: format!(
+                            "Unsupported join type: '{}'. Use: inner, left, outer, cross",
+                            join_type_str
+                        ),
+                    }
+                    .into());
+                }
+            };
+
+            let key_refs: Vec<&str> = key_strs.iter().map(|s| s.as_str()).collect();
+
+            let joined = left_df
+                .join(
+                    &right_df,
+                    key_refs.clone(),
+                    key_refs,
+                    JoinArgs::new(how),
+                    None,
+                )
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: TOOL_NAME.to_string(),
+                    message: format!("Join failed: {}", e),
+                })?;
+
+            let effective_preview = preview_rows.min(security.limits.max_preview_rows);
+            let shape = joined.shape();
+            let columns: Vec<String> = joined
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+
+            let preview = joined.head(Some(effective_preview));
+            let preview_json = df_to_json(&preview)?;
+
+            let result = serde_json::json!({
+                "left_file": left_path,
+                "right_file": right_path,
+                "join_keys": key_strs,
+                "join_type": join_type_str,
+                "total_rows": shape.0,
+                "columns": shape.1,
+                "column_info": columns.iter().map(|col| {
+                    if let Ok(c) = joined.column(col.as_str()) {
+                        serde_json::json!({"name": col, "dtype": c.dtype().to_string()})
+                    } else {
+                        serde_json::json!({"name": col, "dtype": "unknown"})
+                    }
+                }).collect::<Vec<_>>(),
+                "renamed_columns": right_rename_map,
+                "preview_rows": effective_preview,
+                "preview": preview_json,
+            });
+
+            Ok(ToolResult::success_json(result))
+        })
     }
 }
 

@@ -126,7 +126,8 @@ pub struct AgentRunSnapshot {
     /// Cancellation token (set after construction).
     pub cancel_token: Option<crate::agent::CancellationToken>,
     /// Recently read files for read-before-edit enforcement (path → read instant).
-    pub recently_read_files: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    pub recently_read_files:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Run store for trace persistence.
     pub run_store: Option<Arc<dyn RunStore>>,
     /// Current run ID.
@@ -159,30 +160,24 @@ impl AgentRunSnapshot {
 
     /// Record a trace event if a run store is attached.
     pub async fn record_event(&self, event: RunEvent) {
-        if let Some(ref store) = self.run_store {
-            if let Some(ref run_id) = self.current_run_id {
-                let _ = store.append_event(run_id, event).await;
-            }
+        if let Some(ref store) = self.run_store
+            && let Some(ref run_id) = self.current_run_id
+        {
+            let _ = store.append_event(run_id, event).await;
         }
     }
 
     /// Finalize the current trace run (completed or failed).
-    pub async fn finalize_run(
-        &self,
-        status: RunStatus,
-        output: Option<&str>,
-        error: Option<&str>,
-    ) {
-        if let Some(ref store) = self.run_store {
-            if let Some(ref run_id) = self.current_run_id {
-                if let Ok(Some(mut run)) = store.load(run_id).await {
-                    run.status = status;
-                    run.final_output = output.map(|s| s.to_string());
-                    run.error = error.map(|s| s.to_string());
-                    run.finished_at = Some(chrono::Utc::now());
-                    let _ = store.save(run).await;
-                }
-            }
+    pub async fn finalize_run(&self, status: RunStatus, output: Option<&str>, error: Option<&str>) {
+        if let Some(ref store) = self.run_store
+            && let Some(ref run_id) = self.current_run_id
+            && let Ok(Some(mut run)) = store.load(run_id).await
+        {
+            run.status = status;
+            run.final_output = output.map(|s| s.to_string());
+            run.error = error.map(|s| s.to_string());
+            run.finished_at = Some(chrono::Utc::now());
+            let _ = store.save(run).await;
         }
     }
 }

@@ -32,7 +32,7 @@ async fn main() -> echo_agent::error::Result<()> {
     let tools = agent.tool_names();
     println!("[1] with_memory_tools() 自动注册的工具：");
     for name in &tools {
-        let tag = match *name {
+        let tag = match name.as_str() {
             "remember" | "recall" | "search_memory" | "forget" => "memory",
             "final_answer" => "builtin",
             _ => "other",
@@ -40,10 +40,10 @@ async fn main() -> echo_agent::error::Result<()> {
         println!("    [{tag:7}] {name}");
     }
 
-    assert!(tools.contains(&"remember"));
-    assert!(tools.contains(&"recall"));
-    assert!(tools.contains(&"search_memory"));
-    assert!(tools.contains(&"forget"));
+    assert!(tools.contains(&"remember".to_string()));
+    assert!(tools.contains(&"recall".to_string()));
+    assert!(tools.contains(&"search_memory".to_string()));
+    assert!(tools.contains(&"forget".to_string()));
     println!("    → 全部 4 个记忆工具 ✓\n");
 
     // ── 2. 手动写入 Store 模拟已有记忆 ────────────────────────────────────
@@ -83,10 +83,18 @@ async fn main() -> echo_agent::error::Result<()> {
     // ── 4. set_memory_store 也同样注册所有记忆工具 ─────────────────────────
     let config = AgentConfig::minimal("qwen3-max", "bare_agent");
     let mut bare_agent = echo_agent::agent::react::ReactAgent::new(config);
-    assert!(!bare_agent.tool_names().contains(&"search_memory"));
+    assert!(
+        !bare_agent
+            .tool_names()
+            .contains(&"search_memory".to_string())
+    );
 
     bare_agent.set_memory_store(Arc::new(InMemoryStore::new()));
-    assert!(bare_agent.tool_names().contains(&"search_memory"));
+    assert!(
+        bare_agent
+            .tool_names()
+            .contains(&"search_memory".to_string())
+    );
     println!("\n[4] set_memory_store() 也能注入记忆工具 ✓");
 
     println!("\n═══ Demo Complete ═══");

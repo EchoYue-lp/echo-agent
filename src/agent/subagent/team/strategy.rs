@@ -58,12 +58,8 @@ impl TeamStrategy {
             Self::Pipeline(_) => {
                 "Agents run in sequence: each output becomes the next agent's input"
             }
-            Self::Debate { .. } => {
-                "Multiple agents propose solutions, judge selects the best one"
-            }
-            Self::Swarm { .. } => {
-                "Work is split across agents, reducer merges findings"
-            }
+            Self::Debate { .. } => "Multiple agents propose solutions, judge selects the best one",
+            Self::Swarm { .. } => "Work is split across agents, reducer merges findings",
         }
     }
 }

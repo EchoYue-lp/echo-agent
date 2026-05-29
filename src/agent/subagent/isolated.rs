@@ -25,7 +25,8 @@ pub struct IsolatedSubAgentConfig {
 impl Default for IsolatedSubAgentConfig {
     fn default() -> Self {
         Self {
-            system_prompt: "You are a helpful sub-agent. Complete the task and report only the result.".into(),
+            system_prompt:
+                "You are a helpful sub-agent. Complete the task and report only the result.".into(),
             max_iterations: 5,
             token_budget: 16_000,
             tool_call_limit: 20,
@@ -60,10 +61,14 @@ pub async fn run_isolated(
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(config.timeout_secs),
         sub.execute(task),
-    ).await;
+    )
+    .await;
 
     match result {
-        Ok(Ok(output)) => Ok(IsolatedSubAgentResult { output, success: true }),
+        Ok(Ok(output)) => Ok(IsolatedSubAgentResult {
+            output,
+            success: true,
+        }),
         Ok(Err(e)) => Ok(IsolatedSubAgentResult {
             output: format!("Sub-agent error: {e}"),
             success: false,

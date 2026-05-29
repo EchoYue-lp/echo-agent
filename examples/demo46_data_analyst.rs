@@ -17,7 +17,7 @@
 //!
 //! ```bash
 //! # 基础运行（需要 LLM API Key + Embedding API）
-//! QWEN_API_KEY=your_key EMBEDDING_APIKEY=your_key cargo run --example comprehensive_data_analyst --features sqlite
+//! QWEN_API_KEY=your_key EMBEDDING_APIKEY=your_key cargo run --example demo46_data_analyst --features sqlite
 //! ```
 
 use echo_agent::memory::store::Store;

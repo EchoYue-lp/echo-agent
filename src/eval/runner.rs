@@ -55,7 +55,9 @@ impl EvalRunner {
         let mut result = EvalResult::new(&case.id, true);
 
         // Execute the task — pass workspace dir explicitly, never change global cwd
-        let cwd = work_dir.clone().unwrap_or_else(|| self.workspace_root.clone());
+        let cwd = work_dir
+            .clone()
+            .unwrap_or_else(|| self.workspace_root.clone());
 
         let agent_result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
@@ -69,8 +71,12 @@ impl EvalRunner {
         match agent_result {
             Ok(Ok(output)) => {
                 result.duration_ms = started.elapsed().as_millis() as u64;
-                let criteria_result = self.check_criteria(&case.success_criteria, &output, &case.task, &cwd).await;
-                if !criteria_result.success { result.success = false; }
+                let criteria_result = self
+                    .check_criteria(&case.success_criteria, &output, &case.task, &cwd)
+                    .await;
+                if !criteria_result.success {
+                    result.success = false;
+                }
                 result.metrics.extend(criteria_result.metrics);
             }
             Ok(Err(e)) => {
@@ -86,21 +92,27 @@ impl EvalRunner {
         }
 
         // Populate metrics from trace (all branches — errors/timeouts also have diagnostic trace value)
-        if let Some(ref store) = self.run_store {
-            if let Some(ref run_id) = result.run_id {
-                if let Ok(Some(run)) = store.load(run_id).await {
-                    // Only check constraints on success; on error, just collect metrics
-                    if result.success {
-                        let violations = self.evaluate_run_constraints(&case.constraints, &run);
-                        if !violations.is_empty() { result.violations = violations; result.success = false; }
-                    }
-                    result.tool_calls = run.events.iter().filter(|e| matches!(e, crate::trace::RunEvent::ToolCall{..})).count();
-                    result.tokens_in = run.token_usage.prompt_tokens;
-                    result.tokens_out = run.token_usage.completion_tokens;
-                    let replay = TrajectoryReplay::new(run);
-                    result.file_changes = replay.written_files().len();
+        if let Some(ref store) = self.run_store
+            && let Some(ref run_id) = result.run_id
+            && let Ok(Some(run)) = store.load(run_id).await
+        {
+            // Only check constraints on success; on error, just collect metrics
+            if result.success {
+                let violations = self.evaluate_run_constraints(&case.constraints, &run);
+                if !violations.is_empty() {
+                    result.violations = violations;
+                    result.success = false;
                 }
             }
+            result.tool_calls = run
+                .events
+                .iter()
+                .filter(|e| matches!(e, crate::trace::RunEvent::ToolCall { .. }))
+                .count();
+            result.tokens_in = run.token_usage.prompt_tokens;
+            result.tokens_out = run.token_usage.completion_tokens;
+            let replay = TrajectoryReplay::new(run);
+            result.file_changes = replay.written_files().len();
         }
 
         result.recompute_score();
@@ -152,17 +164,24 @@ impl EvalRunner {
         match criteria {
             SuccessCriteria::LlmGraded { assertions } => {
                 if let (Some(grader), Some(grading_agent)) = (&self.grader, &self.grading_agent) {
-                    let report = grader.grade(grading_agent.as_ref(), task, output, assertions).await;
+                    let report = grader
+                        .grade(grading_agent.as_ref(), task, output, assertions)
+                        .await;
                     let mut result = EvalResult::new("criteria", report.pass_rate >= 0.5);
                     result.metrics.push(crate::eval::EvalMetric {
                         name: "llm_graded".into(),
                         score: report.pass_rate,
-                        detail: format!("{} assertions, {:.0}% pass rate", assertions.len(), report.pass_rate * 100.0),
+                        detail: format!(
+                            "{} assertions, {:.0}% pass rate",
+                            assertions.len(),
+                            report.pass_rate * 100.0
+                        ),
                     });
                     result
                 } else {
                     let mut r = EvalResult::new("criteria", true);
-                    r.violations.push("LlmGraded criteria set but no grader configured".into());
+                    r.violations
+                        .push("LlmGraded criteria set but no grader configured".into());
                     r
                 }
             }
@@ -197,9 +216,7 @@ impl EvalRunner {
                 // Mark as pass here; constraint checker handles violations.
                 EvalResult::new("criteria", true)
             }
-            SuccessCriteria::ToolNotUsed { tool_name: _ } => {
-                EvalResult::new("criteria", true)
-            }
+            SuccessCriteria::ToolNotUsed { tool_name: _ } => EvalResult::new("criteria", true),
             SuccessCriteria::AllOf(items) => {
                 let mut all_pass = true;
                 let mut metrics = Vec::new();
@@ -247,8 +264,11 @@ impl EvalRunner {
                         .current_dir(cwd)
                         .output();
                     if let Err(e) = clone_result {
-                        return EvalResult::new("criteria", false)
-                            .with_metric("swe_bench", 0.0, &format!("Clone failed: {e}"));
+                        return EvalResult::new("criteria", false).with_metric(
+                            "swe_bench",
+                            0.0,
+                            &format!("Clone failed: {e}"),
+                        );
                     }
                 }
 
@@ -279,7 +299,11 @@ impl EvalRunner {
     }
 
     /// Evaluate constraints using a completed run trace.
-    pub fn evaluate_run_constraints(&self, constraints: &EvalConstraints, run: &Run) -> Vec<String> {
+    pub fn evaluate_run_constraints(
+        &self,
+        constraints: &EvalConstraints,
+        run: &Run,
+    ) -> Vec<String> {
         let replay = TrajectoryReplay::new(run.clone());
         let mut violations = replay.evaluate_constraints(constraints);
 
@@ -300,7 +324,8 @@ impl EvalRunner {
             if written.len() > max {
                 violations.push(format!(
                     "Too many files changed: {} (max {})",
-                    written.len(), max
+                    written.len(),
+                    max
                 ));
             }
         }
@@ -345,8 +370,8 @@ mod tests {
     #[tokio::test]
     async fn test_runner_output_contains() {
         let dir = std::env::temp_dir().join(format!("eval_test_{}", uuid::Uuid::new_v4()));
-        let runner = EvalRunner::new(dir);
-        let case = EvalCase {
+        let _runner = EvalRunner::new(dir);
+        let _case = EvalCase {
             id: "test".into(),
             name: "test".into(),
             description: "".into(),

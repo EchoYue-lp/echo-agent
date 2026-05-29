@@ -224,7 +224,8 @@ impl Team {
 
     /// Get all workers.
     pub fn workers(&self) -> impl Iterator<Item = &TeamMember> {
-        self.members().filter(|m| matches!(m.role, TeamRole::Worker))
+        self.members()
+            .filter(|m| matches!(m.role, TeamRole::Worker))
     }
 
     /// Human-readable list of workers and their descriptions.
@@ -315,7 +316,10 @@ impl TeamAgent {
                     Err("Judge not found in team".into())
                 }
             }
-            strategy::TeamStrategy::Swarm { reducer, batch_size: _ } => {
+            strategy::TeamStrategy::Swarm {
+                reducer,
+                batch_size: _,
+            } => {
                 // Swarm: each worker processes the task independently, reducer merges
                 // Use a semaphore to respect max_concurrent from TeamConfig
                 let workers: Vec<&TeamMember> = self.team.workers().collect();
@@ -407,7 +411,8 @@ impl TeamAgentBuilder {
         agent: Box<dyn Agent>,
         definition: SubagentDefinition,
     ) -> Self {
-        self.members.push((name.into(), TeamRole::Leader, agent, definition));
+        self.members
+            .push((name.into(), TeamRole::Leader, agent, definition));
         self
     }
 
@@ -418,7 +423,8 @@ impl TeamAgentBuilder {
         agent: Box<dyn Agent>,
         definition: SubagentDefinition,
     ) -> Self {
-        self.members.push((name.into(), TeamRole::Worker, agent, definition));
+        self.members
+            .push((name.into(), TeamRole::Worker, agent, definition));
         self
     }
 
@@ -429,7 +435,8 @@ impl TeamAgentBuilder {
         agent: Box<dyn Agent>,
         definition: SubagentDefinition,
     ) -> Self {
-        self.members.push((name.into(), TeamRole::Reviewer, agent, definition));
+        self.members
+            .push((name.into(), TeamRole::Reviewer, agent, definition));
         self
     }
 

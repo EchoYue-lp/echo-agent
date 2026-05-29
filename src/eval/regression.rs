@@ -66,7 +66,13 @@ impl RegressionSuite {
             }
         } else {
             SuccessCriteria::OutputContains {
-                substring: run.final_output.clone().unwrap_or_default().chars().take(50).collect(),
+                substring: run
+                    .final_output
+                    .clone()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(50)
+                    .collect(),
             }
         };
 
@@ -118,7 +124,7 @@ impl RegressionSuite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{TokenUsage, RunTimings};
+    use crate::trace::{RunTimings, TokenUsage};
     use chrono::Utc;
 
     fn make_run(id: &str, input: &str, events: Vec<RunEvent>, status: RunStatus) -> Run {
@@ -140,17 +146,28 @@ mod tests {
 
     #[test]
     fn test_from_traces() {
-        let runs = vec![
-            make_run(
-                "run1",
-                "read src/main.rs",
-                vec![
-                    RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 10 },
-                    RunEvent::ToolResult { call_id: "test_call".into(), name: "read_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
-                ],
-                RunStatus::Completed,
-            ),
-        ];
+        let runs = vec![make_run(
+            "run1",
+            "read src/main.rs",
+            vec![
+                RunEvent::ToolCall {
+                    call_id: "test_call".into(),
+                    name: "read_file".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 10,
+                },
+                RunEvent::ToolResult {
+                    call_id: "test_call".into(),
+                    name: "read_file".into(),
+                    success: true,
+                    output_preview: None,
+                    output_truncated: false,
+                    duration_ms: 0,
+                },
+            ],
+            RunStatus::Completed,
+        )];
         let suite = RegressionSuite::from_traces(&runs);
         assert_eq!(suite.len(), 1);
         assert!(suite.cases[0].id.contains("run1"));
@@ -158,9 +175,7 @@ mod tests {
 
     #[test]
     fn test_from_traces_skips_failed() {
-        let runs = vec![
-            make_run("run2", "fail task", vec![], RunStatus::Failed),
-        ];
+        let runs = vec![make_run("run2", "fail task", vec![], RunStatus::Failed)];
         let suite = RegressionSuite::from_traces(&runs);
         assert!(suite.is_empty());
     }
@@ -168,14 +183,50 @@ mod tests {
     #[test]
     fn test_from_traces_dedup() {
         let runs = vec![
-            make_run("r1", "read file", vec![
-                RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 10 },
-                RunEvent::ToolResult { call_id: "test_call".into(), name: "read_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
-            ], RunStatus::Completed),
-            make_run("r2", "read file", vec![
-                RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 10 },
-                RunEvent::ToolResult { call_id: "test_call".into(), name: "read_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
-            ], RunStatus::Completed),
+            make_run(
+                "r1",
+                "read file",
+                vec![
+                    RunEvent::ToolCall {
+                        call_id: "test_call".into(),
+                        name: "read_file".into(),
+                        args: None,
+                        risk: None,
+                        duration_ms: 10,
+                    },
+                    RunEvent::ToolResult {
+                        call_id: "test_call".into(),
+                        name: "read_file".into(),
+                        success: true,
+                        output_preview: None,
+                        output_truncated: false,
+                        duration_ms: 0,
+                    },
+                ],
+                RunStatus::Completed,
+            ),
+            make_run(
+                "r2",
+                "read file",
+                vec![
+                    RunEvent::ToolCall {
+                        call_id: "test_call".into(),
+                        name: "read_file".into(),
+                        args: None,
+                        risk: None,
+                        duration_ms: 10,
+                    },
+                    RunEvent::ToolResult {
+                        call_id: "test_call".into(),
+                        name: "read_file".into(),
+                        success: true,
+                        output_preview: None,
+                        output_truncated: false,
+                        duration_ms: 0,
+                    },
+                ],
+                RunStatus::Completed,
+            ),
         ];
         let suite = RegressionSuite::from_traces(&runs);
         assert_eq!(suite.len(), 1); // deduped

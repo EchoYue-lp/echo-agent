@@ -5,6 +5,7 @@
 //! generates eval metrics without re-running the agent.
 
 use crate::eval::{EvalConstraints, EvalMetric, EvalResult};
+use crate::tools::{is_read_tool, is_write_tool};
 use crate::trace::{Run, RunEvent};
 
 /// Replay analyzer for a completed run.
@@ -45,12 +46,7 @@ impl TrajectoryReplay {
         self.run
             .events
             .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    RunEvent::ToolError { .. } | RunEvent::Error { .. }
-                )
-            })
+            .filter(|e| matches!(e, RunEvent::ToolError { .. } | RunEvent::Error { .. }))
             .count()
     }
 
@@ -62,7 +58,9 @@ impl TrajectoryReplay {
         for part in parts {
             match part {
                 "." | "" => {}
-                ".." => { out.pop(); }
+                ".." => {
+                    out.pop();
+                }
                 _ => out.push(part),
             }
         }
@@ -73,16 +71,13 @@ impl TrajectoryReplay {
     pub fn written_files(&self) -> Vec<String> {
         let mut files = Vec::new();
         for event in &self.run.events {
-            if let RunEvent::ToolCall { name, args, .. } = event {
-                if is_write_tool(name) || is_read_tool(name) {
-                    if let Some(args) = args {
-                        if let Some(path) = args.get("path").or_else(|| args.get("file_path")) {
-                            if let Some(s) = path.as_str() {
-                                files.push(Self::normalize_path(s));
-                            }
-                        }
-                    }
-                }
+            if let RunEvent::ToolCall { name, args, .. } = event
+                && (is_write_tool(name) || is_read_tool(name))
+                && let Some(args) = args
+                && let Some(path) = args.get("path").or_else(|| args.get("file_path"))
+                && let Some(s) = path.as_str()
+            {
+                files.push(Self::normalize_path(s));
             }
         }
         files
@@ -97,28 +92,24 @@ impl TrajectoryReplay {
         for event in &self.run.events {
             match event {
                 RunEvent::ToolCall { name, args, .. } if is_read_tool(name) => {
-                    if let Some(args) = args {
-                        if let Some(path) = args.get("path").or_else(|| args.get("file_path")) {
-                            if let Some(s) = path.as_str() {
-                                read_files.insert(Self::normalize_path(s));
-                            }
-                        }
+                    if let Some(args) = args
+                        && let Some(path) = args.get("path").or_else(|| args.get("file_path"))
+                        && let Some(s) = path.as_str()
+                    {
+                        read_files.insert(Self::normalize_path(s));
                     }
                 }
                 RunEvent::ToolResult { name, success, .. } if is_read_tool(name) && *success => {
                     // Read confirmed successful — path already tracked from ToolCall
                 }
                 RunEvent::ToolCall { name, args, .. } if is_write_tool(name) => {
-                    if let Some(args) = args {
-                        if let Some(path) = args.get("path").or_else(|| args.get("file_path")) {
-                            if let Some(s) = path.as_str() {
-                                let normalized = Self::normalize_path(s);
-                                if !read_files.contains(&normalized) {
-                                    violations.push(format!(
-                                        "Write without read: {name} on {normalized}"
-                                    ));
-                                }
-                            }
+                    if let Some(args) = args
+                        && let Some(path) = args.get("path").or_else(|| args.get("file_path"))
+                        && let Some(s) = path.as_str()
+                    {
+                        let normalized = Self::normalize_path(s);
+                        if !read_files.contains(&normalized) {
+                            violations.push(format!("Write without read: {name} on {normalized}"));
                         }
                     }
                 }
@@ -136,9 +127,7 @@ impl TrajectoryReplay {
         if let Some(max) = constraints.max_tool_calls {
             let total = self.total_tool_calls();
             if total > max {
-                violations.push(format!(
-                    "Too many tool calls: {total} (max {max})"
-                ));
+                violations.push(format!("Too many tool calls: {total} (max {max})"));
             }
         }
 
@@ -216,25 +205,10 @@ impl TrajectoryReplay {
     }
 }
 
-const WRITE_TOOLS: &[&str] = &[
-    "edit_file", "write_file", "append_file", "create_file",
-    "delete_file", "update_file", "move_file",
-];
-
-const READ_TOOLS: &[&str] = &["read_file", "read_text"];
-
-fn is_write_tool(name: &str) -> bool {
-    WRITE_TOOLS.contains(&name)
-}
-
-fn is_read_tool(name: &str) -> bool {
-    READ_TOOLS.contains(&name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{RunStatus, TokenUsage, RunTimings};
+    use crate::trace::{RunStatus, RunTimings, TokenUsage};
     use chrono::Utc;
 
     fn make_run(events: Vec<RunEvent>) -> Run {
@@ -257,12 +231,51 @@ mod tests {
     #[test]
     fn test_tool_call_counts() {
         let run = make_run(vec![
-            RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 10 },
-            RunEvent::ToolResult { call_id: "test_call".into(), name: "read_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
-            RunEvent::ToolCall { call_id: "test_call".into(), name: "edit_file".into(), args: None, risk: None, duration_ms: 20 },
-            RunEvent::ToolResult { call_id: "test_call".into(), name: "edit_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
-            RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 5 },
-            RunEvent::ToolResult { call_id: "test_call".into(), name: "read_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
+            RunEvent::ToolCall {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                args: None,
+                risk: None,
+                duration_ms: 10,
+            },
+            RunEvent::ToolResult {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                success: true,
+                output_preview: None,
+                output_truncated: false,
+                duration_ms: 0,
+            },
+            RunEvent::ToolCall {
+                call_id: "test_call".into(),
+                name: "edit_file".into(),
+                args: None,
+                risk: None,
+                duration_ms: 20,
+            },
+            RunEvent::ToolResult {
+                call_id: "test_call".into(),
+                name: "edit_file".into(),
+                success: true,
+                output_preview: None,
+                output_truncated: false,
+                duration_ms: 0,
+            },
+            RunEvent::ToolCall {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                args: None,
+                risk: None,
+                duration_ms: 5,
+            },
+            RunEvent::ToolResult {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                success: true,
+                output_preview: None,
+                output_truncated: false,
+                duration_ms: 0,
+            },
         ]);
         let replay = TrajectoryReplay::new(run);
         let counts = replay.tool_call_counts();
@@ -273,10 +286,36 @@ mod tests {
     #[test]
     fn test_constraint_max_tool_calls() {
         let run = make_run(vec![
-            RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 10 },
-            RunEvent::ToolResult { call_id: "test_call".into(), name: "read_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
-            RunEvent::ToolCall { call_id: "test_call".into(), name: "edit_file".into(), args: None, risk: None, duration_ms: 20 },
-            RunEvent::ToolResult { call_id: "test_call".into(), name: "edit_file".into(), success: true, output_preview: None, output_truncated: false, duration_ms: 0 },
+            RunEvent::ToolCall {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                args: None,
+                risk: None,
+                duration_ms: 10,
+            },
+            RunEvent::ToolResult {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                success: true,
+                output_preview: None,
+                output_truncated: false,
+                duration_ms: 0,
+            },
+            RunEvent::ToolCall {
+                call_id: "test_call".into(),
+                name: "edit_file".into(),
+                args: None,
+                risk: None,
+                duration_ms: 20,
+            },
+            RunEvent::ToolResult {
+                call_id: "test_call".into(),
+                name: "edit_file".into(),
+                success: true,
+                output_preview: None,
+                output_truncated: false,
+                duration_ms: 0,
+            },
         ]);
         let replay = TrajectoryReplay::new(run);
         let constraints = EvalConstraints {
@@ -290,8 +329,18 @@ mod tests {
     #[test]
     fn test_error_count() {
         let run = make_run(vec![
-            RunEvent::ToolCall { call_id: "test_call".into(), name: "read_file".into(), args: None, risk: None, duration_ms: 10 },
-            RunEvent::ToolError { call_id: "test_call".into(), name: "read_file".into(), message: "not found".into() },
+            RunEvent::ToolCall {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                args: None,
+                risk: None,
+                duration_ms: 10,
+            },
+            RunEvent::ToolError {
+                call_id: "test_call".into(),
+                name: "read_file".into(),
+                message: "not found".into(),
+            },
         ]);
         let replay = TrajectoryReplay::new(run);
         assert_eq!(replay.error_count(), 1);

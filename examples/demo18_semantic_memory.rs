@@ -184,7 +184,10 @@ async fn demo_set_memory_store() -> echo_agent::error::Result<()> {
     agent.set_memory_store(store.clone());
     println!("  ✅ EmbeddingStore 已挂载");
     let names = agent.tool_names();
-    if !names.contains(&"remember") || !names.contains(&"recall") || !names.contains(&"forget") {
+    if !names.contains(&"remember".to_string())
+        || !names.contains(&"recall".to_string())
+        || !names.contains(&"forget".to_string())
+    {
         return Err(echo_agent::error::ReactError::Other(
             "demo18 验收失败：热挂载 EmbeddingStore 后记忆工具未完整注册".to_string(),
         ));
