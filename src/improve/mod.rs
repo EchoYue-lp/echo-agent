@@ -12,6 +12,35 @@
 //! - Relax security policies
 //! - Change permission rules
 //! - Publish or deploy anything
+//!
+//! # Component Usage Status
+//!
+//! This module contains 8 components, but only 4 are actively used in echo-agent-cli:
+//!
+//! ## Active Components (Integrated)
+//!
+//! - [`TrajectorySaver`] — Automatically saves conversation trajectories to `~/.echo-agent/trajectories/` in ShareGPT JSONL format after every conversation. Used for fine-tuning and analysis.
+//! - [`BackgroundReviewer`] — LLM-based conversation review that extracts memories and skill suggestions. Triggered manually via `/review` command or `POST /api/evolution/review`.
+//! - [`Curator`] — Manages skill lifecycle (Active → Stale → Archived). Triggered manually via `/curator` command or `POST /api/evolution/curator`.
+//! - [`Analyzer`] — Statically analyzes Run traces to detect failure patterns (WriteWithoutRead, ExcessiveRetries, etc.). Used by `/self-review` command.
+//!
+//! ## Experimental Components (Not Integrated)
+//!
+//! The following components are defined but not currently instantiated in echo-agent-cli:
+//!
+//! - [`CritiqueStore`] / [`DualLayerCritiqueStore`] — Storage for RunCritique analysis results with pattern aggregation. Designed for project-level and global-level persistence, but not wired into any pipeline.
+//! - [`ImprovementLoop`] — Iterative prompt optimization loop that evaluates, analyzes failures, and suggests improvements across multiple iterations.
+//! - [`SelfEvolution`] — Unified entry point for the self-improvement pipeline. Wraps ImprovementLoop with eval cases and HTML report generation.
+//! - [`PromptGenerator`] — LLM-driven prompt improvement generator. Creates improved system prompts based on failure analysis.
+//!
+//! These components are available for future integration and can be used via the library API or custom implementations. See `echo-agent/examples/demo51_self_improvement.rs` for usage examples.
+//!
+//! # Data Storage Locations
+//!
+//! - Trajectories: `~/.echo-agent/trajectories/YYYY-MM-DD.jsonl`
+//! - Curator state: `~/.echo-agent/curator_state.json`
+//! - Background review memories: Memory store under `["background_reviews"]` namespace
+//! - CritiqueStore (unused): Would store to `.echo-agent/evolution/critiques/` (project) and `~/.echo-agent/evolution/critiques/` (global)
 
 pub mod analyzer;
 pub mod background_review;
@@ -28,6 +57,7 @@ pub use evolution::SelfEvolution;
 pub use generator::PromptGenerator;
 pub use r#loop::{ImprovementLoop, LoopResult};
 pub use store::CritiqueStore;
+pub use store::DualLayerCritiqueStore;
 pub use trajectory::{TrajectoryEntry, TrajectorySaver, TrajectoryStats};
 
 use serde::{Deserialize, Serialize};

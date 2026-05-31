@@ -86,7 +86,7 @@ impl MockTool {
     pub fn with_response(self, text: impl Into<String>) -> Self {
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push_back(MockToolResponse::Success(text.into()));
         self
     }
@@ -94,7 +94,7 @@ impl MockTool {
     /// Append multiple successful responses in bulk
     pub fn with_responses(self, texts: impl IntoIterator<Item = impl Into<String>>) -> Self {
         {
-            let mut q = self.responses.lock().unwrap();
+            let mut q = self.responses.lock().unwrap_or_else(|e| e.into_inner());
             for t in texts {
                 q.push_back(MockToolResponse::Success(t.into()));
             }
@@ -106,29 +106,29 @@ impl MockTool {
     pub fn with_failure(self, msg: impl Into<String>) -> Self {
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push_back(MockToolResponse::Failure(msg.into()));
         self
     }
 
     /// Total number of calls executed
     pub fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The parameters passed in the last call (returns `None` if never called)
     pub fn last_args(&self) -> Option<HashMap<String, Value>> {
-        self.calls.lock().unwrap().last().cloned()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
     }
 
     /// All historical call parameters (in chronological order)
     pub fn all_calls(&self) -> Vec<HashMap<String, Value>> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Clear recorded call history
     pub fn reset_calls(&self) {
-        self.calls.lock().unwrap().clear();
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -148,9 +148,9 @@ impl Tool for MockTool {
     fn execute(&self, params: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
         Box::pin(async move {
             // Record this call's parameters
-            self.calls.lock().unwrap().push(params.clone());
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(params.clone());
 
-            let response = self.responses.lock().unwrap().pop_front();
+            let response = self.responses.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
             match response {
                 Some(MockToolResponse::Success(text)) => Ok(ToolResult::success(text)),
                 Some(MockToolResponse::Failure(msg)) => Ok(ToolResult::error(msg)),

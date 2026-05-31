@@ -80,6 +80,8 @@ These examples stay focused on API understanding, interaction style, or walkthro
 - `demo36_multimodal.rs`
 - `demo39_workflow.rs`
 - `demo40_snapshot.rs`
+- `demo50_eval.rs`
+- `demo51_self_improvement.rs`
 
 ## Maintenance Rules
 

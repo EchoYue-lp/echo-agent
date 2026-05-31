@@ -11,7 +11,7 @@ Procedural macros for the [echo-agent](https://crates.io/crates/echo_agent) fram
 
 ```toml
 [dependencies]
-echo_macros = "0.1"
+echo_macros = "0.2"
 ```
 
 ```rust

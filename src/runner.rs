@@ -20,13 +20,14 @@
 //! - **Context Engine** → [`ContextAssembler`]
 //! - **Tool Runtime** → [`ToolExecutionPipeline`]
 //! - **Orchestration** → [`TeamAgent`]
-//! - **Evaluation** → [`EvalRunner`]
+//! - **Evaluation** → [`EvalRunner`] (feature `eval`)
 //! - **Trace** → [`RunStore`]
 
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
 use crate::agent::subagent::team::TeamAgent;
 use crate::agent::ReactAgent;
 use crate::context::ContextAssembler;
+#[cfg(feature = "eval")]
 use crate::eval::EvalRunner;
 use crate::prelude::ReactAgentBuilder;
 use crate::trace::RunStore;
@@ -43,6 +44,7 @@ pub struct AgentRunner {
     context_engine: Option<ContextAssembler>,
     tool_pipeline: Option<ToolExecutionPipeline>,
     orchestrator: Option<TeamAgent>,
+    #[cfg(feature = "eval")]
     eval_recorder: Option<EvalRunner>,
     run_store: Option<Arc<dyn RunStore>>,
     max_iterations: usize,
@@ -65,6 +67,7 @@ impl AgentRunner {
             context_engine: None,
             tool_pipeline: None,
             orchestrator: None,
+            #[cfg(feature = "eval")]
             eval_recorder: None,
             run_store: None,
             max_iterations: 10,
@@ -133,6 +136,10 @@ impl AgentRunner {
     /// **Status: stored but not yet executed automatically.**
     /// Use `runner.run(&case, agent)` manually after `build()`.
     /// Future integration will auto-evaluate runs against configured cases.
+    ///
+    /// Requires feature: `eval`
+    #[cfg(feature = "eval")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "eval")))]
     pub fn with_eval_recorder(mut self, runner: EvalRunner) -> Self {
         self.eval_recorder = Some(runner);
         self

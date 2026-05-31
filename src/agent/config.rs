@@ -1,11 +1,15 @@
 //! Agent configuration
 
 use crate::agent::AgentCallback;
+use crate::agent::AgentMode;
 use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
 use echo_core::budget::TokenBudgetConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Default token limit for agent context (8000 tokens).
+pub const DEFAULT_TOKEN_LIMIT: usize = 8000;
 
 /// Agent role enum, determining its responsibility scope in a multi-agent system.
 ///
@@ -106,6 +110,13 @@ pub struct AgentConfig {
     pub(crate) working_dir: Option<PathBuf>,
     /// Token budget configuration for fine-grained context window management
     pub(crate) token_budget_config: TokenBudgetConfig,
+    /// Agent operating mode (General/Coding/Research/Data/Writing).
+    /// When set, the mode's system prompt and recommended tools are used as defaults.
+    pub(crate) mode: Option<AgentMode>,
+    /// Whether to enable notebook tracking for reproducibility (default false).
+    /// When enabled, each tool invocation is recorded as a NotebookCell
+    /// that can be exported as Markdown or JSON.
+    pub(crate) enable_notebook: bool,
 }
 
 impl AgentConfig {
@@ -154,6 +165,8 @@ impl AgentConfig {
             auto_project_rules: true,
             working_dir: None,
             token_budget_config: TokenBudgetConfig::default(),
+            mode: None,
+            enable_notebook: false,
         }
     }
 
@@ -575,6 +588,19 @@ impl AgentConfig {
         self
     }
 
+    /// Enable or disable notebook tracking for reproducibility
+    ///
+    /// # Parameters
+    /// * `enable` - `true` to enable notebook tracking, `false` to disable
+    ///
+    /// # Description
+    /// When enabled, each tool invocation is recorded as a `NotebookCell`,
+    /// and the full session can be exported as Markdown or JSON.
+    pub fn enable_notebook(mut self, enable: bool) -> Self {
+        self.enable_notebook = enable;
+        self
+    }
+
     /// Set long-term memory store file path
     ///
     /// # Parameters
@@ -682,6 +708,21 @@ impl AgentConfig {
         self
     }
 
+    /// Set the agent operating mode.
+    ///
+    /// When a mode is set, it indicates the agent's domain specialization
+    /// (General/Coding/Research/Data/Writing). The mode can be used by
+    /// `ModeEngine` to auto-configure system prompts and tool recommendations.
+    pub fn mode(mut self, mode: AgentMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Get the agent operating mode.
+    pub fn get_mode(&self) -> Option<AgentMode> {
+        self.mode
+    }
+
     /// Set token budget configuration for fine-grained context window management.
     pub fn token_budget(mut self, config: TokenBudgetConfig) -> Self {
         self.token_budget_config = config;
@@ -776,7 +817,7 @@ mod tests {
     fn test_agent_config_builder_chain() {
         let config = AgentConfig::new("model", "agent", "prompt")
             .max_iterations(20)
-            .token_limit(8000)
+            .token_limit(DEFAULT_TOKEN_LIMIT)
             .enable_tool(true)
             .enable_task(true)
             .enable_human_in_loop(true)
@@ -788,7 +829,7 @@ mod tests {
             .tool_error_feedback(false);
 
         assert_eq!(config.get_max_iterations(), 20);
-        assert_eq!(config.get_token_limit(), 8000);
+        assert_eq!(config.get_token_limit(), DEFAULT_TOKEN_LIMIT);
         assert!(config.is_tool_enabled());
         assert!(config.is_task_enabled());
         assert!(config.is_human_in_loop_enabled());

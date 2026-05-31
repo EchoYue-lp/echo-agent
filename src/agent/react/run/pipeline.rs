@@ -59,6 +59,58 @@ pub(crate) trait PipelineStage: Send + Sync {
 
 // ── Stage implementations ──────────────────────────────────────────
 
+/// Intervention callback stage — checks intervention callbacks before all other stages.
+///
+/// This is the highest-priority decision point. Intervention callbacks can
+/// block, cancel, redirect, modify arguments, or inject context.
+pub struct InterventionStage;
+
+#[async_trait]
+impl PipelineStage for InterventionStage {
+    fn name(&self) -> &str {
+        "intervention"
+    }
+
+    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
+        for intervention in &agent.tools.intervention_callbacks {
+            let result = intervention
+                .on_tool_call(&agent.config.agent_name, &ctx.tool_name, &ctx.input)
+                .await;
+            if result.cancel {
+                return Err(ReactError::Other(format!(
+                    "Agent execution cancelled by intervention: tool {}",
+                    ctx.tool_name
+                )));
+            }
+            if result.block {
+                let reason = result
+                    .block_reason
+                    .unwrap_or_else(|| "blocked by intervention callback".into());
+                ctx.blocked = true;
+                ctx.block_reason = Some(format!(
+                    "Tool {} blocked by intervention: {}",
+                    ctx.tool_name, reason
+                ));
+                ctx.output = Some(ctx.block_reason.clone().unwrap_or_default());
+                return Ok(());
+            }
+            if let Some(redirect) = result.redirect_to {
+                ctx.tool_name = redirect;
+            }
+            if let Some(modified) = result.modified_args {
+                ctx.input = modified;
+                if let serde_json::Value::Object(map) = &ctx.input {
+                    ctx.params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                }
+            }
+            if let Some(injected) = result.injected_context {
+                ctx.hook_messages.pre.push(injected);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Validates tool parameters with type checking.
 pub struct ParseValidateStage;
 
@@ -475,6 +527,7 @@ impl ToolExecutionPipeline {
     pub fn default_pipeline() -> Self {
         Self {
             stages: vec![
+                Box::new(InterventionStage),
                 Box::new(ParseValidateStage),
                 Box::new(PlanModeStage),
                 Box::new(PreToolUseHookStage),

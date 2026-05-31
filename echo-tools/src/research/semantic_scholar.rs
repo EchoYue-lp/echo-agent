@@ -4,8 +4,8 @@
 //! (citation counts, references, fields of study).
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -118,14 +118,15 @@ impl Tool for SemanticScholarSearchTool {
 
             let client = shared_client();
 
-            let response = client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Semantic Scholar API request failed: {}", e),
-                })?;
+            let response =
+                client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("Semantic Scholar API request failed: {}", e),
+                    })?;
 
             let status = response.status();
             if !status.is_success() {
@@ -137,10 +138,13 @@ impl Tool for SemanticScholarSearchTool {
                 .into());
             }
 
-            let json: Value = response.json().await.map_err(|e| ToolError::ExecutionFailed {
-                tool: TOOL_NAME.to_string(),
-                message: format!("Failed to parse Semantic Scholar response: {}", e),
-            })?;
+            let json: Value = response
+                .json()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: TOOL_NAME.to_string(),
+                    message: format!("Failed to parse Semantic Scholar response: {}", e),
+                })?;
 
             let total = json.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
             let papers = json

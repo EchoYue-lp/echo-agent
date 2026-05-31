@@ -59,7 +59,12 @@ impl ReactAgent {
 
         let config = TaskExecutorConfig {
             max_concurrent: 5,
-            default_timeout_secs: self.config.max_iterations as u64 * 30,
+            // max_iterations == 0 means unlimited; use 4 hours as a reasonable default timeout
+            default_timeout_secs: if self.config.max_iterations == 0 {
+                4 * 3600
+            } else {
+                self.config.max_iterations as u64 * 30
+            },
             enable_hooks: true,
             ..Default::default()
         };
@@ -119,12 +124,19 @@ impl ReactAgent {
             task_results_summary
         )));
 
-        for _ in 0..self.config.max_iterations {
+        let max_iters = self.config.max_iterations;
+        let unlimited = max_iters == 0;
+        let mut iter_count = 0usize;
+        loop {
+            if !unlimited && iter_count >= max_iters {
+                break;
+            }
             let steps = self.think().await?;
             if let Some(answer) = self.process_steps(steps).await? {
                 info!(agent = %agent, "🏁 Task planning mode execution complete");
                 return Ok(answer);
             }
+            iter_count += 1;
         }
 
         warn!(agent = %agent, max = self.config.max_iterations, "Reached maximum iteration count");
@@ -155,7 +167,12 @@ impl ReactAgent {
             .await
             .push(Message::user(planning_prompt));
 
-        let planning_max_rounds = self.config.max_iterations;
+        // For planning phase, use max_iterations as safety limit; 0 = use reasonable default (50 rounds)
+        let planning_max_rounds = if self.config.max_iterations == 0 {
+            50
+        } else {
+            self.config.max_iterations
+        };
         let mut has_created_tasks = false;
 
         for round in 0..planning_max_rounds {
@@ -333,15 +350,22 @@ impl ReactAgent {
             task_results_summary
         )));
 
-        for _ in 0..self.config.max_iterations {
+        let max_iters = self.config.max_iterations;
+        let unlimited = max_iters == 0;
+        let mut iter_count = 0usize;
+        loop {
+            if !unlimited && iter_count >= max_iters {
+                return Err(ReactError::Agent(Box::new(
+                    AgentError::MaxIterationsExceeded(max_iters),
+                )));
+            }
+
             let steps = self.think().await?;
             if let Some(answer) = self.process_steps(steps).await? {
                 return Ok(answer);
             }
-        }
 
-        Err(ReactError::Agent(Box::new(
-            AgentError::MaxIterationsExceeded(self.config.max_iterations),
-        )))
+            iter_count += 1;
+        }
     }
 }

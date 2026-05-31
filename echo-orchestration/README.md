@@ -11,7 +11,7 @@ Orchestration layer for the [echo-agent](https://crates.io/crates/echo_agent) fr
 
 ```toml
 [dependencies]
-echo_orchestration = "0.1"
+echo_orchestration = "0.2"
 ```
 
 ```rust

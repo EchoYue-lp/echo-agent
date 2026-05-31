@@ -1,6 +1,6 @@
 use super::ReactAgent;
 use crate::agent::Agent;
-use crate::agent::config::AgentConfig;
+use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
 use crate::llm::types::{Message, Role};
 use crate::sandbox::SandboxManager;
 use crate::skills::builtin::ShellSkill;
@@ -267,9 +267,7 @@ async fn react_agent_set_system_prompt() {
     let mut agent = ReactAgent::new(config);
 
     let _original_prompt = agent.system_prompt().to_string();
-    agent
-        .set_system_prompt("New system prompt".to_string())
-        .await;
+    agent.set_system_prompt("New system prompt");
 
     assert_eq!(agent.system_prompt(), "New system prompt");
 
@@ -608,11 +606,11 @@ fn react_agent_builder_max_iterations() {
 fn react_agent_builder_token_limit() {
     let agent = crate::agent::ReactAgentBuilder::new()
         .model("qwen3-max")
-        .token_limit(8000)
+        .token_limit(DEFAULT_TOKEN_LIMIT)
         .build()
         .unwrap();
 
-    assert_eq!(agent.config().get_token_limit(), 8000);
+    assert_eq!(agent.config().get_token_limit(), DEFAULT_TOKEN_LIMIT);
 }
 
 #[test]
@@ -1400,7 +1398,7 @@ fn remove_tool_basic() {
     assert!(agent.tool_names().contains(&String::from("tool_a")));
 
     let removed = agent.remove_tool("tool_a");
-    assert!(removed.is_some(), "Should return the removed tool");
+    assert!(removed, "Should return true for successful removal");
     assert!(
         !agent.tool_names().contains(&String::from("tool_a")),
         "Should not exist after removal"
@@ -1416,7 +1414,7 @@ fn remove_tool_nonexistent() {
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);
     let removed = agent.remove_tool("nonexistent");
-    assert!(removed.is_none());
+    assert!(!removed, "Should return false for nonexistent tool");
 }
 
 #[test]

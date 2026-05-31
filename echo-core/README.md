@@ -13,7 +13,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-echo_core = "0.1"
+echo_core = "0.2"
 ```
 
 Use the prelude to import all core traits:
@@ -34,9 +34,14 @@ impl Agent for MyAgent {
 - **Agent traits**: `Agent`, `ReActAgent`, `SubAgent`
 - **LLM abstractions**: `LlmClient`, `ChatRequest`, `ChatResponse`, `TokenUsage`
 - **Tool system**: `Tool`, `TypedTool`, `ToolResult`, `ToolPermission`
+- **Memory traits**: `Store`, `Checkpointer`, `Embedder`, tiered memory, decay, scope isolation
 - **Error handling**: `AgentError`, unified error types
 - **Guard system**: Content filtering traits (`Guard`, `GuardResult`)
 - **Retry**: `RetryPolicy` with exponential backoff
+- **Hooks**: `AgentCallback` lifecycle hooks
+- **Budget**: Token budget allocation
+- **Sandbox**: Sandbox execution trait
+- **Compression**: `ContextCompressor` trait
 - **Project rules**: `.claude/rules` parsing
 
 ## Feature Flags

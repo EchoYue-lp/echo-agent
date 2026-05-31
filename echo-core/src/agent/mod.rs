@@ -2,10 +2,19 @@
 
 pub mod builder;
 mod critic;
+pub mod factory;
+pub mod intervention;
+pub mod mode;
 mod executor;
 mod plan;
+pub mod prompt_template;
 mod reflection;
 mod types;
+
+pub use intervention::{InterventionCallback, InterventionResult, CallbackBridge};
+pub use mode::{AgentMode, DefaultModeEngine, ModeConfig, ModeEngine};
+pub use factory::{AgentFactory, AgentFactoryConfig, AgentParadigm, DefaultAgentFactory};
+pub use prompt_template::PromptTemplateManager;
 
 pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, ThresholdCritic};
 pub use executor::{Executor, ReactExecutor, SimpleExecutor};
@@ -71,8 +80,15 @@ pub enum AgentEvent {
         /// Error message
         error: String,
     },
+    /// Streaming tool progress event
+    ToolStream {
+        /// Tool name
+        name: String,
+        /// Stream event payload
+        event: crate::tools::ToolStreamEvent,
+    },
 
-    // ── Step-level Events ────────────────────────────────────────────────────────
+    // ── Step-level Events ────────────────────────────────────────────────────────────────
     /// Plan-and-Execute engine generated a plan
     PlanGenerated {
         /// List of plan step descriptions
@@ -291,6 +307,7 @@ impl AgentEvent {
             AgentEvent::ToolCall { .. }
             | AgentEvent::ToolResult { .. }
             | AgentEvent::ToolError { .. }
+            | AgentEvent::ToolStream { .. }
             | AgentEvent::GuardTriggered { .. }
             | AgentEvent::SafetyNotice { .. }
             | AgentEvent::ParameterError { .. } => AgentPhase::Acting,
@@ -492,7 +509,60 @@ pub trait Agent: Send + Sync {
 
     /// Get the current run ID, if the agent is tracking one.
     /// Default: None. ReactAgent overrides this.
-    fn current_run_id(&self) -> Option<String> { None }
+    fn current_run_id(&self) -> Option<String> {
+        None
+    }
+
+    // ── Dynamic capability methods (default noop) ────────────────────
+
+    /// Dynamically register a tool at runtime.
+    ///
+    /// Default: noop (returns without action). ReactAgent overrides this
+    /// to add the tool to its ToolManager.
+    fn register_tool(&self, _tool: Box<dyn crate::tools::Tool>) {}
+
+    /// Dynamically remove a tool by name at runtime.
+    ///
+    /// Returns `true` if the tool was found and removed, `false` otherwise.
+    /// Default: returns `false` (no action). ReactAgent overrides this.
+    fn remove_tool(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// Get the current conversation history.
+    ///
+    /// Default: empty list. ReactAgent overrides this to return
+    /// messages from its ContextManager.
+    fn messages(&self) -> Vec<Message> {
+        vec![]
+    }
+
+    /// Update the system prompt at runtime.
+    ///
+    /// Default: noop. ReactAgent overrides this to update its config
+    /// and re-inject the prompt into the context.
+    fn set_system_prompt(&self, _prompt: &str) {}
+
+    /// Get the current agent mode, if one is set.
+    ///
+    /// Default: None. ReactAgent overrides this to return config.mode.
+    fn mode(&self) -> Option<crate::agent::mode::AgentMode> {
+        None
+    }
+
+    /// Delegate a task to a named sub-agent or team member.
+    ///
+    /// Default: returns error ("delegation not supported").
+    /// ReactAgent overrides this when SubAgent feature is enabled.
+    fn delegate_to<'a>(
+        &'a self,
+        _target: &'a str,
+        _task: &'a str,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async {
+            Err(ReactError::Other("delegation not supported by this agent".into()))
+        })
+    }
 }
 
 // ── Blanket impl for Box<dyn Agent> ──────────────────────────────────────
@@ -549,6 +619,24 @@ impl Agent for Box<dyn Agent> {
     }
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         self.as_ref().reset()
+    }
+    fn register_tool(&self, tool: Box<dyn crate::tools::Tool>) {
+        self.as_ref().register_tool(tool)
+    }
+    fn remove_tool(&self, name: &str) -> bool {
+        self.as_ref().remove_tool(name)
+    }
+    fn messages(&self) -> Vec<Message> {
+        self.as_ref().messages()
+    }
+    fn set_system_prompt(&self, prompt: &str) {
+        self.as_ref().set_system_prompt(prompt)
+    }
+    fn mode(&self) -> Option<crate::agent::mode::AgentMode> {
+        self.as_ref().mode()
+    }
+    fn delegate_to<'a>(&'a self, target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        self.as_ref().delegate_to(target, task)
     }
 }
 

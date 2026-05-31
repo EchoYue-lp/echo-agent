@@ -267,7 +267,10 @@ impl Tool for ReadFileTool {
                 .get("offset")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as usize;
-            let limit = parameters.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize);
+            let limit = parameters
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|l| l as usize);
 
             let path = resolve_path("read_file", path_str, &self.base_dir)?;
 
@@ -285,12 +288,13 @@ impl Tool for ReadFileTool {
             }
 
             // Size guard: warn for files > 100KB
-            let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: "read_file".to_string(),
-                    message: format!("Failed to read metadata: {}", e),
-                }
-            })?;
+            let metadata =
+                tokio::fs::metadata(&path)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: "read_file".to_string(),
+                        message: format!("Failed to read metadata: {}", e),
+                    })?;
             let file_size = metadata.len();
             if file_size > 100 * 1024 && limit.is_none() && offset == 1 {
                 // For large files without offset/limit, read only first 2000 lines
@@ -316,12 +320,13 @@ impl Tool for ReadFileTool {
                 return Ok(ToolResult::success(output));
             }
 
-            let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: "read_file".to_string(),
-                    message: format!("Failed to read: {}", e),
-                }
-            })?;
+            let content =
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: "read_file".to_string(),
+                        message: format!("Failed to read: {}", e),
+                    })?;
 
             let all_lines: Vec<&str> = content.lines().collect();
             let total_lines = all_lines.len();

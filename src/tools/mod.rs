@@ -76,6 +76,10 @@ pub mod media {
     pub use echo_tools::media::*;
 }
 
+/// LSP tools — language server integration
+#[cfg(feature = "lsp")]
+pub mod lsp;
+
 /// Direct re-exports from `echo_execution::tools`.
 pub mod execution {
     pub use echo_execution::tools::*;
@@ -83,6 +87,7 @@ pub mod execution {
 
 pub use echo_execution::tools::{
     Tool, ToolExecutionConfig, ToolManager, ToolParameters, ToolResult, ToolRiskLevel,
+    ToolStreamEvent,
 };
 
 // ── Common file tool classification ──────────────────────────────────────────

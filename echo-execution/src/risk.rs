@@ -71,34 +71,22 @@ impl ToolRiskClassifier {
         match tool_name {
             // Read-only
             "read_file" | "read_text" | "search" | "grep" | "list_files" | "git_log"
-            | "git_status" | "git_diff" | "git_blame" | "git_branch" => {
-                ToolRiskCategory::ReadOnly
-            }
+            | "git_status" | "git_diff" | "git_blame" | "git_branch" => ToolRiskCategory::ReadOnly,
             // File write
             "edit_file" | "write_file" | "append_file" | "create_file" | "update_file"
-            | "move_file" => {
-                ToolRiskCategory::FileWrite
-            }
+            | "move_file" => ToolRiskCategory::FileWrite,
             // Shell
-            "shell" | "execute" => {
-                ToolRiskCategory::ShellExec
-            }
+            "shell" | "execute" => ToolRiskCategory::ShellExec,
             // Git write
-            "git_commit" | "git_add" | "git_push" | "git_tag" => {
-                ToolRiskCategory::GitWrite
-            }
+            "git_commit" | "git_add" | "git_push" | "git_tag" => ToolRiskCategory::GitWrite,
             // Database
-            "db_query" | "db_execute" | "sql" => {
-                ToolRiskCategory::DatabaseWrite
-            }
+            "db_query" | "db_execute" | "sql" => ToolRiskCategory::DatabaseWrite,
             // Network
             "web_fetch" | "web_search" | "http_request" | "api_call" => {
                 ToolRiskCategory::NetworkCall
             }
             // Destructive
-            "delete_file" | "rm" | "drop_table" | "truncate" => {
-                ToolRiskCategory::Destructive
-            }
+            "delete_file" | "rm" | "drop_table" | "truncate" => ToolRiskCategory::Destructive,
             // Default: ReadOnly for unknown tools
             _ => ToolRiskCategory::ReadOnly,
         }
@@ -112,10 +100,7 @@ impl ToolRiskClassifier {
             .or_else(|| params.get("file_path"))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let command = params
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
         match category {
             ToolRiskCategory::ReadOnly => String::new(),

@@ -3,8 +3,8 @@
 //! Queries the ArXiv API (Atom/XML) and returns structured paper metadata.
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -93,7 +93,11 @@ impl Tool for ArxivSearchTool {
 
             // Build search query (URL-encode to prevent parameter injection)
             let search_query = if let Some(cat) = category {
-                format!("cat:{}+AND+{}", urlencoding::encode(cat), urlencoding::encode(query))
+                format!(
+                    "cat:{}+AND+{}",
+                    urlencoding::encode(cat),
+                    urlencoding::encode(query)
+                )
             } else {
                 urlencoding::encode(query).to_string()
             };
@@ -111,19 +115,23 @@ impl Tool for ArxivSearchTool {
 
             let client = shared_client();
 
-            let response = client
-                .get(&url)
-                .send()
+            let response =
+                client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("ArXiv API request failed: {}", e),
+                    })?;
+
+            let xml_text = response
+                .text()
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("ArXiv API request failed: {}", e),
+                    message: format!("Failed to read ArXiv response: {}", e),
                 })?;
-
-            let xml_text = response.text().await.map_err(|e| ToolError::ExecutionFailed {
-                tool: TOOL_NAME.to_string(),
-                message: format!("Failed to read ArXiv response: {}", e),
-            })?;
 
             let papers = parse_arxiv_atom(&xml_text)?;
 
@@ -140,8 +148,8 @@ impl Tool for ArxivSearchTool {
 
 /// Parse ArXiv Atom XML response into structured paper records.
 fn parse_arxiv_atom(xml: &str) -> Result<Vec<Value>> {
-    use quick_xml::events::Event;
     use quick_xml::Reader;
+    use quick_xml::events::Event;
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -198,9 +206,7 @@ fn parse_arxiv_atom(xml: &str) -> Result<Vec<Value>> {
                     "link" if in_entry => {
                         // Check for PDF link
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"title"
-                                && attr.value.as_ref() == b"pdf"
-                            {
+                            if attr.key.as_ref() == b"title" && attr.value.as_ref() == b"pdf" {
                                 for attr2 in e.attributes().flatten() {
                                     if attr2.key.as_ref() == b"href" {
                                         pdf_url = String::from_utf8_lossy(&attr2.value).to_string();
@@ -237,11 +243,8 @@ fn parse_arxiv_atom(xml: &str) -> Result<Vec<Value>> {
                     "entry" => {
                         if in_entry {
                             // Extract arxiv ID from URL
-                            let clean_id = arxiv_id
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or(&arxiv_id)
-                                .to_string();
+                            let clean_id =
+                                arxiv_id.rsplit('/').next().unwrap_or(&arxiv_id).to_string();
 
                             papers.push(serde_json::json!({
                                 "arxiv_id": clean_id,

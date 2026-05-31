@@ -1,6 +1,11 @@
-# echo_tools
+# echo-tools
 
-Domain tools for the [echo-agent](https://github.com/EchoYue-lp/echo-agent) framework.
+[![crates.io](https://img.shields.io/crates/v/echo_tools?color=brightgreen)](https://crates.io/crates/echo_tools)
+[![docs.rs](https://docs.rs/echo_tools/badge.svg)](https://docs.rs/echo_tools)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org/)
+
+Domain tools for the [echo-agent](https://crates.io/crates/echo_agent) framework.
 
 ## Features
 
@@ -15,12 +20,13 @@ Domain tools for the [echo-agent](https://github.com/EchoYue-lp/echo-agent) fram
 | `database` | DatabaseTool (sqlx-based queries) | sqlx |
 | `git` | GitTool | — |
 | `rag` | RAG retrieval tool | uuid |
+| `research` | ArXiv search, Semantic Scholar, PDF fetch, BibTeX generation | reqwest, scraper |
 
 ## Usage
 
 ```toml
 [dependencies]
-echo_tools = "0.1"
+echo_tools = "0.2"
 ```
 
 ## License

@@ -11,7 +11,7 @@ Integration layer for the [echo-agent](https://crates.io/crates/echo_agent) fram
 
 ```toml
 [dependencies]
-echo_integration = "0.1"
+echo_integration = "0.2"
 ```
 
 ```rust

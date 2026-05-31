@@ -12,6 +12,8 @@ use std::sync::Mutex;
 static MEMORY: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+const MAX_MEMORY_ENTRIES: usize = 500;
+
 pub struct MemoryWriteTool;
 
 #[async_trait]
@@ -48,10 +50,14 @@ impl Tool for MemoryWriteTool {
                 return Ok(ToolResult::error("key is required"));
             }
             let full_key = format!("{scope}:{key}");
-            MEMORY
-                .lock()
-                .unwrap()
-                .insert(full_key.clone(), value.to_string());
+            let mut mem = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+            // Evict oldest entry if at capacity (FIFO via iter().next())
+            if mem.len() >= MAX_MEMORY_ENTRIES && !mem.contains_key(&full_key) {
+                if let Some(oldest_key) = mem.keys().next().cloned() {
+                    mem.remove(&oldest_key);
+                }
+            }
+            mem.insert(full_key.clone(), value.to_string());
             Ok(ToolResult::success(format!("Stored: {full_key}")))
         })
     }

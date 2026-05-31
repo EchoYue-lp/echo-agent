@@ -7,8 +7,8 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
 // ── generate_chart tool ──────────────────────────────────────────────────────
 
@@ -65,6 +65,11 @@ impl Tool for GenerateChartTool {
                 "height": {
                     "type": "integer",
                     "description": "Chart height in pixels (default 400)"
+                },
+                "output_format": {
+                    "type": "string",
+                    "description": "Output format: 'json' (default, Vega-Lite spec) or 'html' (standalone HTML page with embedded chart)",
+                    "enum": ["json", "html"]
                 }
             },
             "required": ["chart_type", "data", "x_field", "y_field"]
@@ -109,6 +114,11 @@ impl Tool for GenerateChartTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(400) as u32;
 
+            let output_format = parameters
+                .get("output_format")
+                .and_then(|v| v.as_str())
+                .unwrap_or("json");
+
             let spec = build_vega_lite_spec(
                 chart_type,
                 title,
@@ -120,9 +130,13 @@ impl Tool for GenerateChartTool {
                 height,
             );
 
-            let json_str = serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
+            let output = if output_format == "html" {
+                generate_html_page(&spec, title)
+            } else {
+                serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string())
+            };
 
-            Ok(ToolResult::success(json_str))
+            Ok(ToolResult::success(output))
         })
     }
 }
@@ -204,4 +218,83 @@ fn mark_type(chart_type: &str) -> &str {
         "boxplot" => "boxplot",
         _ => "line", // default to line
     }
+}
+
+// ── HTML Page Generator ─────────────────────────────────────────────────────
+
+fn generate_html_page(spec: &Value, title: &str) -> String {
+    let spec_json = serde_json::to_string_pretty(spec).unwrap_or_else(|_| "{}".to_string());
+    let display_title = if title.is_empty() {
+        "Chart Visualization"
+    } else {
+        title
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{}</title>
+    <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #333;
+            margin-top: 0;
+        }}
+        #vis {{
+            margin: 20px 0;
+        }}
+        .info {{
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-left: 4px solid #4CAF50;
+            font-size: 14px;
+            color: #666;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{}</h1>
+        <div id="vis"></div>
+        <div class="info">
+            <strong>Chart Type:</strong> {} |
+            <strong>Powered by:</strong> Vega-Lite v5
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        var spec = {};
+        vegaEmbed('#vis', spec, {{
+            actions: {{
+                export: true,
+                source: false,
+                compiled: false,
+                editor: false
+            }}
+        }}).catch(console.error);
+    </script>
+</body>
+</html>"#,
+        display_title, display_title, "Interactive Chart", spec_json
+    )
 }

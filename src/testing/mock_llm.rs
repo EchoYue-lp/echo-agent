@@ -84,7 +84,7 @@ impl MockLlmClient {
     pub fn with_response(self, text: impl Into<String>) -> Self {
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::Content(text.into()));
         self
     }
@@ -92,7 +92,7 @@ impl MockLlmClient {
     /// Append multiple successful responses in bulk
     pub fn with_responses(self, texts: impl IntoIterator<Item = impl Into<String>>) -> Self {
         {
-            let mut q = self.responses.lock().unwrap();
+            let mut q = self.responses.lock().unwrap_or_else(|e| e.into_inner());
             for t in texts {
                 q.push_back(MockLlmResponse::Content(t.into()));
             }
@@ -104,7 +104,7 @@ impl MockLlmClient {
     pub fn with_error(self, err: ReactError) -> Self {
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::Err(err));
         self
     }
@@ -136,7 +136,7 @@ impl MockLlmClient {
         };
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(vec![tc]));
         self
     }
@@ -145,7 +145,7 @@ impl MockLlmClient {
     pub fn then_tool_calls(self, calls: Vec<ToolCall>) -> Self {
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(calls));
         self
     }
@@ -167,32 +167,32 @@ impl MockLlmClient {
 
     /// Total number of calls that have occurred
     pub fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The messages passed in the last call (returns `None` if never called)
     pub fn last_messages(&self) -> Option<Vec<Message>> {
-        self.calls.lock().unwrap().last().cloned()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
     }
 
     /// All historical call messages (in chronological order)
     pub fn all_calls(&self) -> Vec<Vec<Message>> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Number of remaining unconsumed preset responses
     pub fn remaining(&self) -> usize {
-        self.responses.lock().unwrap().len()
+        self.responses.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Clear all recorded call history (response queue is unaffected)
     pub fn reset_calls(&self) {
-        self.calls.lock().unwrap().clear();
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Pop the next response (text or tool calls)
     fn pop_response(&self) -> Result<PopResult> {
-        match self.responses.lock().unwrap().pop_front() {
+        match self.responses.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
             Some(MockLlmResponse::Content(text)) => Ok(PopResult::Content(text)),
             Some(MockLlmResponse::ToolCalls(calls)) => Ok(PopResult::ToolCalls(calls)),
             Some(MockLlmResponse::Err(e)) => Err(e),
@@ -210,7 +210,7 @@ impl LlmClient for MockLlmClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
         Box::pin(async move {
             // Record this call
-            self.calls.lock().unwrap().push(request.messages);
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(request.messages);
 
             match self.pop_response()? {
                 PopResult::Content(text) => Ok(ChatResponse {
@@ -233,7 +233,7 @@ impl LlmClient for MockLlmClient {
     ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
         Box::pin(async move {
             // Record this call
-            self.calls.lock().unwrap().push(request.messages);
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(request.messages);
 
             match self.pop_response()? {
                 PopResult::Content(text) => {

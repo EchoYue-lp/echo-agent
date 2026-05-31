@@ -13,9 +13,9 @@ pub mod compressor;
 pub use echo_core::compression::{CompressionInput, CompressionOutput, ContextCompressor};
 
 use crate::compression::compressor::SlidingWindowCompressor;
+use echo_core::budget::TokenBudget;
 use echo_core::error::Result;
 use echo_core::llm::types::{Message, MessageContent, Role};
-use echo_core::budget::TokenBudget;
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
 
@@ -435,21 +435,24 @@ impl ContextManager {
         let needs_compression = if let Some(ref budget) = self.budget {
             // Budget-aware check: use percentage-based allocation
             let system_tokens = 0; // system prompt tokens already counted in messages
-            let tool_tokens = 0;   // tool defs not in messages
+            let tool_tokens = 0; // tool defs not in messages
             let allocation = budget.allocate(system_tokens, tool_tokens, estimated_tokens);
             allocation.needs_compression()
         } else {
             estimated_tokens > self.token_limit
         };
 
-        let compressed = if let Some(compressor) = &self.compressor && needs_compression {
+        let compressed = if let Some(compressor) = &self.compressor
+            && needs_compression
+        {
             let before_count = self.messages.len();
             let before_tokens = self.token_estimate();
 
             // Compute effective token limit for compression
             let effective_limit = if let Some(ref budget) = self.budget {
                 let allocation = budget.allocate(0, 0, estimated_tokens);
-                (estimated_tokens.saturating_sub(allocation.conversation_excess)).max(self.token_limit / 2)
+                (estimated_tokens.saturating_sub(allocation.conversation_excess))
+                    .max(self.token_limit / 2)
             } else {
                 self.token_limit
             };

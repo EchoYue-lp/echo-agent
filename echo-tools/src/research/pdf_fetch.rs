@@ -4,8 +4,8 @@
 //! Bridges the gap between web fetch (HTML only) and local PDF parsing.
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -85,7 +85,10 @@ impl Tool for PdfFetchTool {
 
             let response = client
                 .get(url)
-                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                )
                 .send()
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
@@ -101,10 +104,13 @@ impl Tool for PdfFetchTool {
                 .into());
             }
 
-            let bytes = response.bytes().await.map_err(|e| ToolError::ExecutionFailed {
-                tool: TOOL_NAME.to_string(),
-                message: format!("Failed to read PDF response: {}", e),
-            })?;
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: TOOL_NAME.to_string(),
+                    message: format!("Failed to read PDF response: {}", e),
+                })?;
 
             // Verify it's a PDF
             if bytes.len() < 4 || &bytes[..4] != b"%PDF" {
@@ -116,10 +122,11 @@ impl Tool for PdfFetchTool {
             }
 
             // Parse PDF from memory (single parse for both text and metadata)
-            let doc = lopdf::Document::load_mem(&bytes).map_err(|e| ToolError::ExecutionFailed {
-                tool: TOOL_NAME.to_string(),
-                message: format!("Failed to parse PDF: {}", e),
-            })?;
+            let doc =
+                lopdf::Document::load_mem(&bytes).map_err(|e| ToolError::ExecutionFailed {
+                    tool: TOOL_NAME.to_string(),
+                    message: format!("Failed to parse PDF: {}", e),
+                })?;
 
             let text = extract_pdf_text_from_doc(&doc, pages_spec, max_chars)?;
             let metadata = extract_pdf_metadata_from_doc(&doc);
@@ -138,7 +145,11 @@ impl Tool for PdfFetchTool {
 }
 
 /// Extract text from a parsed PDF Document.
-fn extract_pdf_text_from_doc(doc: &lopdf::Document, pages_spec: &str, max_chars: usize) -> Result<String> {
+fn extract_pdf_text_from_doc(
+    doc: &lopdf::Document,
+    pages_spec: &str,
+    max_chars: usize,
+) -> Result<String> {
     let page_count = doc.get_pages().len() as u32;
     let page_numbers = parse_page_range(pages_spec, page_count)?;
 
@@ -215,18 +226,22 @@ fn parse_page_range(spec: &str, total_pages: u32) -> Result<Vec<u32>> {
         if part.contains('-') {
             let bounds: Vec<&str> = part.split('-').collect();
             if bounds.len() == 2 {
-                let start: u32 = bounds[0].trim().parse().map_err(|_| {
-                    ToolError::InvalidParameter {
-                        name: "pages".to_string(),
-                        message: format!("Invalid page number: '{}'", bounds[0]),
-                    }
-                })?;
-                let end: u32 = bounds[1].trim().parse().map_err(|_| {
-                    ToolError::InvalidParameter {
-                        name: "pages".to_string(),
-                        message: format!("Invalid page number: '{}'", bounds[1]),
-                    }
-                })?;
+                let start: u32 =
+                    bounds[0]
+                        .trim()
+                        .parse()
+                        .map_err(|_| ToolError::InvalidParameter {
+                            name: "pages".to_string(),
+                            message: format!("Invalid page number: '{}'", bounds[0]),
+                        })?;
+                let end: u32 =
+                    bounds[1]
+                        .trim()
+                        .parse()
+                        .map_err(|_| ToolError::InvalidParameter {
+                            name: "pages".to_string(),
+                            message: format!("Invalid page number: '{}'", bounds[1]),
+                        })?;
                 for p in start..=end.min(total_pages) {
                     pages.push(p);
                 }

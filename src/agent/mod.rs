@@ -30,7 +30,11 @@
 //! ```
 
 pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
-pub use echo_core::agent::{Agent, AgentCallback, AgentEvent, CancellationToken, StepType};
+pub use echo_core::agent::mode::{AgentMode, DefaultModeEngine, ModeConfig, ModeEngine};
+pub use echo_core::agent::{
+    Agent, AgentCallback, AgentEvent, CancellationToken, InterventionCallback, InterventionResult,
+    StepType,
+};
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -42,6 +46,8 @@ pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
 
 pub mod approval_stack;
 pub mod config;
+pub mod default_factory;
+pub mod mode_engine;
 pub mod react;
 pub mod runner;
 pub mod snapshot;
@@ -56,11 +62,22 @@ pub mod subagent;
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
+pub use crate::agent::mode_engine::LocalizedModeEngine;
 pub use crate::agent::react::ReactAgent;
 pub use crate::agent::react::builder::ReactAgentBuilder;
 pub use crate::agent::react::structured::StructuredAgent;
 pub use config::{AgentConfig, AgentRole};
 pub use runner::Runner;
+
+/// Agent factory types — re-exported from echo-core with facade-level overrides.
+///
+/// This module provides [`AgentFactory`], [`AgentFactoryConfig`], [`AgentParadigm`],
+/// and [`DefaultAgentFactory`] (the concrete facade implementation that uses
+/// `ReactAgentBuilder`).
+pub mod factory {
+    pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig, AgentParadigm};
+    pub use crate::agent::default_factory::DefaultAgentFactory;
+}
 
 /// Alias for backward compatibility with macros and minimal API.
 pub type AgentBuilder = ReactAgentBuilder;

@@ -81,14 +81,14 @@ impl MockAgent {
 
     /// Append a preset response
     pub fn with_response(self, text: impl Into<String>) -> Self {
-        self.responses.lock().unwrap().push_back(text.into());
+        self.responses.lock().unwrap_or_else(|e| e.into_inner()).push_back(text.into());
         self
     }
 
     /// Append multiple preset responses in bulk
     pub fn with_responses(self, texts: impl IntoIterator<Item = impl Into<String>>) -> Self {
         {
-            let mut q = self.responses.lock().unwrap();
+            let mut q = self.responses.lock().unwrap_or_else(|e| e.into_inner());
             for t in texts {
                 q.push_back(t.into());
             }
@@ -98,30 +98,30 @@ impl MockAgent {
 
     /// Total number of times called
     pub fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// All historical call task strings (in chronological order)
     pub fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The task string from the last call (returns `None` if never called)
     pub fn last_task(&self) -> Option<String> {
-        self.calls.lock().unwrap().last().cloned()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
     }
 
     /// Clear call history (response queue is unaffected)
     ///
     /// Used only for test assertion reset, not equivalent to `Agent::reset()`.
     pub fn reset_calls(&self) {
-        self.calls.lock().unwrap().clear();
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     fn next_response(&self) -> String {
         self.responses
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .pop_front()
             .unwrap_or_else(|| "mock agent response".to_string())
     }
@@ -142,7 +142,7 @@ impl Agent for MockAgent {
 
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            self.calls.lock().unwrap().push(task.to_string());
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(task.to_string());
             Ok(self.next_response())
         })
     }
@@ -162,7 +162,7 @@ impl Agent for MockAgent {
     /// Note: MockAgent does not maintain a real conversation context; this only satisfies the call contract.
     fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            self.calls.lock().unwrap().push(message.to_string());
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(message.to_string());
             Ok(self.next_response())
         })
     }
@@ -181,7 +181,7 @@ impl Agent for MockAgent {
     /// Clear call history, simulating the reset semantics of a real Agent.
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            self.calls.lock().unwrap().clear();
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
         })
     }
 }
@@ -205,7 +205,7 @@ impl FailingMockAgent {
 
     /// Get the number of times this Mock Agent has been called.
     pub fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
@@ -224,7 +224,7 @@ impl Agent for FailingMockAgent {
 
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            self.calls.lock().unwrap().push(task.to_string());
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(task.to_string());
             Err(ReactError::Agent(Box::new(
                 AgentError::InitializationFailed(self.error_message.clone()),
             )))
@@ -248,7 +248,7 @@ impl Agent for FailingMockAgent {
 
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            self.calls.lock().unwrap().clear();
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
         })
     }
 }

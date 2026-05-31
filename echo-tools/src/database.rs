@@ -11,8 +11,8 @@ use sqlx::any::AnyPoolOptions;
 use sqlx::{Column, Row};
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
 // ── SQL Query (read-only) ─────────────────────────────────────────────────────────
 
@@ -91,8 +91,20 @@ impl Tool for SqlQueryTool {
 
             // Additional dangerous keyword scan
             let dangerous = [
-                "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT",
-                "REVOKE", "REPLACE", "EXECUTE", "EXEC", "INTO OUTFILE", "LOAD_FILE",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "DROP",
+                "ALTER",
+                "CREATE",
+                "TRUNCATE",
+                "GRANT",
+                "REVOKE",
+                "REPLACE",
+                "EXECUTE",
+                "EXEC",
+                "INTO OUTFILE",
+                "LOAD_FILE",
             ];
             for keyword in &dangerous {
                 if trimmed.contains(keyword) {
@@ -235,7 +247,10 @@ impl Tool for DescribeTableTool {
                 .ok_or_else(|| ToolError::MissingParameter("table_name".to_string()))?;
 
             // Validate table name: only allow alphanumeric, underscore, dot (for schema.table)
-            if !table_name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+            if !table_name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            {
                 return Ok(ToolResult::error(format!(
                     "Invalid table name '{}': only alphanumeric, underscore, and dot characters allowed",
                     table_name

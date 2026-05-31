@@ -1,3 +1,4 @@
+pub mod code_search;
 pub mod diff;
 pub mod edit;
 #[allow(clippy::module_inception)]

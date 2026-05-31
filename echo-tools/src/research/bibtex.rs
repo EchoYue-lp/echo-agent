@@ -3,8 +3,8 @@
 //! Generates BibTeX entries from paper metadata (arxiv, Semantic Scholar results).
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -92,12 +92,12 @@ impl Tool for BibtexGenerateTool {
 
             // Optionally write to file
             if let Some(path) = output_file {
-                tokio::fs::write(path, &bibtex_content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
+                tokio::fs::write(path, &bibtex_content).await.map_err(|e| {
+                    ToolError::ExecutionFailed {
                         tool: TOOL_NAME.to_string(),
                         message: format!("Failed to write .bib file: {}", e),
-                    })?;
+                    }
+                })?;
             }
 
             let result = serde_json::json!({
@@ -113,14 +113,18 @@ impl Tool for BibtexGenerateTool {
 
 /// Generate a single BibTeX entry from a paper JSON object.
 /// `cite_key_counts` tracks how many times each base key has been used for disambiguation.
-fn generate_bibtex_entry(paper: &Value, cite_key_counts: &mut HashMap<String, u32>) -> Result<String> {
-    let title = paper
-        .get("title")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolError::InvalidParameter {
-            name: "papers".to_string(),
-            message: "Each paper must have a 'title' field".to_string(),
-        })?;
+fn generate_bibtex_entry(
+    paper: &Value,
+    cite_key_counts: &mut HashMap<String, u32>,
+) -> Result<String> {
+    let title =
+        paper
+            .get("title")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameter {
+                name: "papers".to_string(),
+                message: "Each paper must have a 'title' field".to_string(),
+            })?;
 
     let authors: Vec<String> = paper
         .get("authors")

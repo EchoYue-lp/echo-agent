@@ -11,13 +11,18 @@ pub mod compression;
 pub mod config;
 pub mod context;
 pub mod error;
+#[cfg(feature = "eval")]
+#[cfg_attr(docsrs, doc(cfg(feature = "eval")))]
 pub mod eval;
 pub mod event_bus;
 pub mod guard;
+#[cfg(feature = "improve")]
+#[cfg_attr(docsrs, doc(cfg(feature = "improve")))]
 pub mod improve;
 pub mod layered_compress;
 pub mod llm;
 pub mod memory;
+pub mod notebook;
 pub mod plugin;
 pub mod retry;
 pub mod sandbox;
@@ -49,9 +54,19 @@ pub mod handoff;
 #[cfg_attr(docsrs, doc(cfg(feature = "human-loop")))]
 pub mod human_loop;
 
+/// Unified hook bridge — connects task/subagent hooks to the central HookRegistry
+pub mod hooks_bridge;
+
+/// Agent types re-exported from echo-agents crate
+pub use echo_agents;
+
 #[cfg(feature = "mcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
+
+#[cfg(feature = "lsp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "lsp")))]
+pub mod lsp;
 
 #[cfg(feature = "tasks")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tasks")))]
@@ -99,9 +114,12 @@ pub mod workspace {
 pub mod prelude {
     // Agent
     pub use crate::agent::{
-        Agent, AgentCallback, AgentConfig, AgentEvent, AgentRole, CancellationToken, ReactAgent,
-        ReactAgentBuilder, Runner, StepType, StructuredAgent,
+        Agent, AgentCallback, AgentConfig, AgentEvent, AgentMode, AgentRole, CancellationToken,
+        DefaultModeEngine, InterventionCallback, InterventionResult, LocalizedModeEngine,
+        ModeConfig, ModeEngine, ReactAgent, ReactAgentBuilder, Runner, StepType, StructuredAgent,
     };
+    // Prompt Template
+    pub use echo_core::agent::PromptTemplateManager;
     // Config
     pub use crate::config::AppConfig;
 
@@ -121,7 +139,7 @@ pub mod prelude {
     pub use crate::tools::permission::{
         DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
     };
-    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, ToolRiskLevel};
+    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, ToolRiskLevel, ToolStreamEvent};
 
     // Web Tools
     #[cfg(feature = "web")]
@@ -186,9 +204,10 @@ pub mod prelude {
 
     // Workflow
     pub use crate::workflow::{
-        ConcurrentWorkflow, DagWorkflow, Graph, GraphBuilder, GraphResult, SequentialWorkflow,
-        SharedAgent, SharedState, StepOutput, Workflow, WorkflowDefinition, WorkflowEvent,
-        WorkflowOutput, shared_agent,
+        ConcurrentWorkflow, DagWorkflow, DataPipelineConfig, Graph, GraphBuilder, GraphResult,
+        SequentialWorkflow, SharedAgent, SharedState, StepOutput, Workflow, WorkflowDefinition,
+        WorkflowEvent, WorkflowOutput, WritingPipelineConfig, run_data_pipeline,
+        run_writing_pipeline, shared_agent,
     };
 
     // Sandbox
@@ -209,7 +228,8 @@ pub mod prelude {
 
     // Trace
     pub use crate::trace::{
-        InMemoryRunStore, JsonlRunStore, Run, RunEvent, RunStatus, RunStore, RunSummary,
+        ErrorPattern, InMemoryRunStore, JsonlRunStore, Run, RunEvent, RunStatus, RunStore,
+        RunSummary, SessionSummary, TokenBreakdown, ToolUsageStats, TraceAnalyzer,
     };
 
     // Testing

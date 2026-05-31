@@ -6,6 +6,7 @@
 //! is cheap to clone and safe to move into a `tokio::spawn` future.
 
 use crate::agent::AgentCallback;
+use crate::agent::InterventionCallback;
 use crate::audit::AuditLogger;
 use crate::memory::checkpointer::Checkpointer;
 use crate::memory::snapshot::SnapshotManager;
@@ -67,11 +68,12 @@ impl RuntimeConfig {
 
 // ── ToolRuntime ──────────────────────────────────────────────────────
 
-/// Tool execution state (tools, hooks). Shared via `Arc`.
+/// Tool execution state (tools, hooks, interventions). Shared via `Arc`.
 #[derive(Clone)]
 pub struct ToolRuntime {
     pub tool_manager: Arc<ToolManager>,
     pub hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
+    pub intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,
 }
 
 impl ToolRuntime {
@@ -79,6 +81,7 @@ impl ToolRuntime {
         Self {
             tool_manager: Arc::clone(&agent.tools.tool_manager),
             hook_registry: agent.tools.hook_registry.clone(),
+            intervention_callbacks: agent.tools.intervention_callbacks.clone(),
         }
     }
 }

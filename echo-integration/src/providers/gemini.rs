@@ -6,11 +6,9 @@
 //! Auth: `x-goog-api-key: {api_key}` header.
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::types::{
-    ChatCompletionRequest, ChatCompletionResponse,
-};
-use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use echo_core::llm::capabilities::ProviderCapabilities;
+use echo_core::llm::types::{ChatCompletionRequest, ChatCompletionResponse};
+use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -74,16 +72,15 @@ fn build_headers(config: &ModelConfig) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-goog-api-key",
-        config
-            .apikey
-            .parse()
-            .map_err(|e| echo_core::error::ReactError::Other(format!("Invalid API key header: {}", e)))?,
+        config.apikey.parse().map_err(|e| {
+            echo_core::error::ReactError::Other(format!("Invalid API key header: {}", e))
+        })?,
     );
     headers.insert(
         "Content-Type",
-        "application/json"
-            .parse()
-            .map_err(|e| echo_core::error::ReactError::Other(format!("Invalid Content-Type: {}", e)))?,
+        "application/json".parse().map_err(|e| {
+            echo_core::error::ReactError::Other(format!("Invalid Content-Type: {}", e))
+        })?,
     );
     Ok(headers)
 }

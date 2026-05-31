@@ -1,8 +1,8 @@
 //! Image fetch tool for downloading images from URLs and converting to base64.
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::Value;

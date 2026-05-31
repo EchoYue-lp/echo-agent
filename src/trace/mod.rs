@@ -14,6 +14,8 @@
 //! // Attach via ReactAgentBuilder::with_run_store(store)
 //! ```
 
+pub mod analyzer;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,6 +24,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 pub use crate::error::Result;
+
+// Re-export analyzer types for convenience
+pub use analyzer::{ErrorPattern, SessionSummary, TokenBreakdown, ToolUsageStats, TraceAnalyzer};
 
 // ── Run ──────────────────────────────────────────────────────────────
 

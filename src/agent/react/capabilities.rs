@@ -276,6 +276,22 @@ impl ReactAgent {
         self.config.model_name = model_name.to_string();
     }
 
+    /// Set the temperature for LLM generation.
+    ///
+    /// # Parameters
+    /// * `temperature` - Temperature value (typically 0.0 - 2.0)
+    pub fn set_temperature(&mut self, temperature: Option<f32>) {
+        self.config.temperature = temperature;
+    }
+
+    /// Set the maximum number of tokens for LLM generation.
+    ///
+    /// # Parameters
+    /// * `max_tokens` - Maximum tokens to generate
+    pub fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
+        self.config.max_tokens = max_tokens;
+    }
+
     /// Add Agent callback
     ///
     /// # Parameters
@@ -560,6 +576,38 @@ impl ReactAgent {
     /// Get the shared hook registry handle.
     pub fn hook_registry(&self) -> &Arc<tokio::sync::RwLock<crate::skills::hooks::HookRegistry>> {
         &self.tools.hook_registry
+    }
+
+    /// Create a `TaskHookBridge` that fires task lifecycle events
+    /// (TaskCreated, TaskCompleted, TaskTimeout, TaskCancelled) into the
+    /// central `HookRegistry`.
+    ///
+    /// Register the returned `BridgedTaskHooks` with your `TaskHookRegistry`
+    /// to ensure YAML-configured hooks see task events.
+    pub fn create_task_hook_bridge(&self) -> crate::hooks_bridge::BridgedTaskHooks {
+        let bridge = std::sync::Arc::new(crate::hooks_bridge::TaskHookBridge::new(
+            self.tools.hook_registry.clone(),
+            self.config
+                .session_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            self.config.agent_name.clone(),
+        ));
+        crate::hooks_bridge::BridgedTaskHooks::new(bridge)
+    }
+
+    /// Create a `SubagentHookBridge` that fires subagent lifecycle events
+    /// (SubagentStart, SubagentStop, SubagentCancelled) into the
+    /// central `HookRegistry`.
+    pub fn create_subagent_hook_bridge(&self) -> crate::hooks_bridge::SubagentHookBridge {
+        crate::hooks_bridge::SubagentHookBridge::new(
+            self.tools.hook_registry.clone(),
+            self.config
+                .session_id
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            self.config.agent_name.clone(),
+        )
     }
 
     // ── MCP ──────────────────────────────────────────────────────────────────

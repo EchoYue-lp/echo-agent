@@ -10,8 +10,11 @@ use futures::future::BoxFuture;
 use std::sync::Mutex;
 
 /// In-memory task state shared across tool calls.
+/// Capped at MAX_TASKS to prevent unbounded memory growth.
 static TASKS: std::sync::LazyLock<Mutex<Vec<TodoEntry>>> =
     std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+const MAX_TASKS: usize = 100;
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct TodoEntry {
@@ -52,10 +55,18 @@ impl Tool for TodoWriteTool {
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or("list");
-            let mut tasks = TASKS.lock().unwrap();
+            let mut tasks = TASKS.lock().unwrap_or_else(|e| e.into_inner());
             match action {
                 "create" => {
                     let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    // Evict oldest completed/cancelled tasks if at capacity
+                    if tasks.len() >= MAX_TASKS {
+                        if let Some(pos) = tasks.iter().position(|t| t.status == "completed" || t.status == "cancelled") {
+                            tasks.remove(pos);
+                        } else {
+                            tasks.remove(0); // fallback: evict oldest
+                        }
+                    }
                     let id = format!("task_{}", tasks.len() + 1);
                     tasks.push(TodoEntry {
                         id: id.clone(),
