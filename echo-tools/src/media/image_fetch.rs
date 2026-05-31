@@ -12,6 +12,7 @@ use std::time::Duration;
 ///
 /// Downloads images from URLs and converts them to base64 format
 /// suitable for LLM vision processing.
+// TODO(v0.3): integrate into default tool registry once media pipeline is stable
 #[allow(dead_code)]
 pub struct ImageFetchTool {
     client: Client,

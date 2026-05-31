@@ -47,7 +47,8 @@ impl NotebookTracker {
         output_summary: String,
         duration_ms: u64,
     ) {
-        let mut cells = self.cells.write().unwrap();
+        // recover from poison — data is still valid
+        let mut cells = self.cells.write().unwrap_or_else(|e| e.into_inner());
         let step_index = cells.len();
         cells.push(NotebookCell {
             step_index,
@@ -61,12 +62,14 @@ impl NotebookTracker {
 
     /// Get all recorded cells.
     pub fn cells(&self) -> Vec<NotebookCell> {
-        self.cells.read().unwrap().clone()
+        // recover from poison — data is still valid
+        self.cells.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Export the notebook as Markdown.
     pub fn export_markdown(&self) -> String {
-        let cells = self.cells.read().unwrap();
+        // recover from poison — data is still valid
+        let cells = self.cells.read().unwrap_or_else(|e| e.into_inner());
         let mut md = String::from("# Analysis Notebook\n\n");
         for cell in cells.iter() {
             md.push_str(&format!(
@@ -80,18 +83,21 @@ impl NotebookTracker {
 
     /// Export the notebook as JSON.
     pub fn export_json(&self) -> String {
-        let cells = self.cells.read().unwrap();
+        // recover from poison — data is still valid
+        let cells = self.cells.read().unwrap_or_else(|e| e.into_inner());
         serde_json::to_string_pretty(&*cells).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Get the number of recorded steps.
     pub fn len(&self) -> usize {
-        self.cells.read().unwrap().len()
+        // recover from poison — data is still valid
+        self.cells.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Check if the notebook is empty.
     pub fn is_empty(&self) -> bool {
-        self.cells.read().unwrap().is_empty()
+        // recover from poison — data is still valid
+        self.cells.read().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 }
 

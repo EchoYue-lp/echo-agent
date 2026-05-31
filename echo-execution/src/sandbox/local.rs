@@ -336,12 +336,17 @@ fn configure_command_process_group(_command: &mut Command) {}
 async fn cleanup_child_process(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        let _ = std::process::Command::new("kill")
+        if let Err(e) = std::process::Command::new("kill")
             .args(["-KILL", &format!("-{pid}")])
-            .status();
+            .status()
+        {
+            tracing::warn!("Failed to send SIGKILL to process group {pid}: {e}");
+        }
     }
 
-    let _ = child.kill().await;
+    if let Err(e) = child.kill().await {
+        tracing::warn!("Failed to kill child process: {e}");
+    }
     let _ = child.wait().await;
 }
 

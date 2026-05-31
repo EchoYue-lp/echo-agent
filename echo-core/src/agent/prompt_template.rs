@@ -288,7 +288,8 @@ impl PromptTemplateManager {
     ///
     /// If a template with the same name already exists, it is overwritten.
     pub fn register(&self, name: &str, template: &str) {
-        let mut guard = self.templates.write().expect("PromptTemplateManager lock poisoned");
+        // recover from poison — data is still valid
+        let mut guard = self.templates.write().unwrap_or_else(|e| e.into_inner());
         guard.insert(name.to_string(), template.to_string());
     }
 
@@ -296,19 +297,22 @@ impl PromptTemplateManager {
     ///
     /// Returns `true` if the template existed and was removed.
     pub fn remove(&self, name: &str) -> bool {
-        let mut guard = self.templates.write().expect("PromptTemplateManager lock poisoned");
+        // recover from poison — data is still valid
+        let mut guard = self.templates.write().unwrap_or_else(|e| e.into_inner());
         guard.remove(name).is_some()
     }
 
     /// Check whether a template with the given name is registered.
     pub fn contains(&self, name: &str) -> bool {
-        let guard = self.templates.read().expect("PromptTemplateManager lock poisoned");
+        // recover from poison — data is still valid
+        let guard = self.templates.read().unwrap_or_else(|e| e.into_inner());
         guard.contains_key(name)
     }
 
     /// List all registered template names.
     pub fn template_names(&self) -> Vec<String> {
-        let guard = self.templates.read().expect("PromptTemplateManager lock poisoned");
+        // recover from poison — data is still valid
+        let guard = self.templates.read().unwrap_or_else(|e| e.into_inner());
         guard.keys().cloned().collect()
     }
 
@@ -322,7 +326,8 @@ impl PromptTemplateManager {
     ///
     /// Returns `ReactError::Other` if the template name is not registered.
     pub fn render(&self, name: &str, variables: &[(&str, &str)]) -> Result<String> {
-        let guard = self.templates.read().expect("PromptTemplateManager lock poisoned");
+        // recover from poison — data is still valid
+        let guard = self.templates.read().unwrap_or_else(|e| e.into_inner());
         let template = guard
             .get(name)
             .ok_or_else(|| ReactError::Other(format!("Prompt template '{}' not found", name)))?;
@@ -354,7 +359,8 @@ impl PromptTemplateManager {
     ///
     /// Returns `None` if the template name is not registered.
     pub fn get_template(&self, name: &str) -> Option<String> {
-        let guard = self.templates.read().expect("PromptTemplateManager lock poisoned");
+        // recover from poison — data is still valid
+        let guard = self.templates.read().unwrap_or_else(|e| e.into_inner());
         guard.get(name).cloned()
     }
 
@@ -364,7 +370,8 @@ impl PromptTemplateManager {
     ///
     /// This is an optimization for templates that are static text.
     pub fn render_or_raw(&self, name: &str, variables: &[(&str, &str)]) -> Result<String> {
-        let guard = self.templates.read().expect("PromptTemplateManager lock poisoned");
+        // recover from poison — data is still valid
+        let guard = self.templates.read().unwrap_or_else(|e| e.into_inner());
         let template = guard
             .get(name)
             .ok_or_else(|| ReactError::Other(format!("Prompt template '{}' not found", name)))?;

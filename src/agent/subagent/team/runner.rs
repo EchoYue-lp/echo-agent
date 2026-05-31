@@ -53,7 +53,20 @@ impl TeamRunner {
             let timeout = self.timeout_secs;
 
             handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
+                // Handle semaphore closed gracefully instead of panicking
+                let _permit = match sem.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!("Semaphore closed, skipping team member {}", name);
+                        return MemberResult {
+                            name,
+                            role,
+                            output: "Semaphore closed".to_string(),
+                            success: false,
+                            duration_ms: 0,
+                        };
+                    }
+                };
                 let start = std::time::Instant::now();
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout),
@@ -117,7 +130,20 @@ impl TeamRunner {
             let timeout = self.timeout_secs;
 
             handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
+                // Handle semaphore closed gracefully instead of panicking
+                let _permit = match sem.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!("Semaphore closed, skipping team member {}", name);
+                        return MemberResult {
+                            name,
+                            role,
+                            output: "Semaphore closed".to_string(),
+                            success: false,
+                            duration_ms: 0,
+                        };
+                    }
+                };
                 let start = std::time::Instant::now();
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout),

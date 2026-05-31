@@ -34,7 +34,9 @@ impl CritiqueStore {
             persist_dir: Some(dir.clone()),
         };
         // Ensure directory exists
-        let _ = std::fs::create_dir_all(&dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!("Failed to create critique persistence directory {}: {e}", dir.display());
+        }
         // Load existing data
         store.load_from_disk();
         store
@@ -95,7 +97,11 @@ impl CritiqueStore {
         self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner()).clear();
         if let Some(ref dir) = self.persist_dir {
             let patterns_file = dir.join("patterns.json");
-            let _ = std::fs::remove_file(patterns_file);
+            if let Err(e) = std::fs::remove_file(patterns_file) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove patterns file: {e}");
+                }
+            }
         }
     }
 
@@ -104,7 +110,9 @@ impl CritiqueStore {
         let patterns = self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner());
         let patterns_file = dir.join("patterns.json");
         if let Ok(json) = serde_json::to_string_pretty(&*patterns) {
-            let _ = std::fs::write(patterns_file, json);
+            if let Err(e) = std::fs::write(patterns_file, json) {
+                tracing::warn!("Failed to persist critique patterns to disk: {e}");
+            }
         }
     }
 

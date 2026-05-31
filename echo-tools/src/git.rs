@@ -25,6 +25,7 @@ use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel, ToolRunn
     description = "View working directory status of the current repo: modified, staged, untracked files",
     risk_level = "ReadOnly"
 )]
+// TODO(v0.3): integrate into default tool registry once git tool suite is stabilized
 #[allow(dead_code)]
 pub struct GitStatusTool {
     #[tool_param(description = "Repository path (defaults to current working directory)")]

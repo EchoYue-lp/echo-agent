@@ -99,14 +99,22 @@ impl SelfEvolution {
             .await;
 
         if let Some(ref dir) = self.report_dir {
-            let _ = std::fs::create_dir_all(dir);
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                tracing::warn!("Failed to create report directory {dir}: {e}");
+            }
             for (i, iter) in result.iterations.iter().enumerate() {
                 let html = generate_html(&iter.eval_report, &format!("Iteration {i}"));
-                let _ = std::fs::write(format!("{dir}/iter_{i}.html"), html);
+                let path = format!("{dir}/iter_{i}.html");
+                if let Err(e) = std::fs::write(&path, html) {
+                    tracing::warn!("Failed to write iteration report to {path}: {e}");
+                }
             }
             if let Some(last) = result.iterations.last() {
                 let html = generate_html(&last.eval_report, "Final");
-                let _ = std::fs::write(format!("{dir}/final.html"), html);
+                let path = format!("{dir}/final.html");
+                if let Err(e) = std::fs::write(&path, html) {
+                    tracing::warn!("Failed to write final report to {path}: {e}");
+                }
             }
         }
         Some(result)

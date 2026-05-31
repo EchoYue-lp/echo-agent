@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use regex::Regex;
@@ -30,6 +31,31 @@ use crate::sandbox::{SandboxCommand, SandboxManager};
 use crate::skills::minimal_env;
 
 const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Pre-compiled regex for block command syntax: ```! ... ```
+static BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid block regex")
+});
+
+/// Pre-compiled regex for inline command syntax: !`...`
+static INLINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid inline regex")
+});
+
+/// Pre-compiled regex for detecting block command markers.
+static BLOCK_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"```!\s*\n?").expect("valid block marker regex")
+});
+
+/// Pre-compiled regex for detecting inline command markers.
+static INLINE_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|\s)!`[^`]*`").expect("valid inline marker regex")
+});
+
+/// Pre-compiled regex for SOH-delimited placeholders.
+static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\x01CMD_OUT_\d+\x01").expect("valid placeholder regex")
+});
 
 /// Source of a skill (affects security policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,12 +181,9 @@ struct CmdRegion {
 
 /// Extract all command regions (block and inline) from content, in order.
 fn extract_command_regions(content: &str) -> Vec<CmdRegion> {
-    let block_re = Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid block regex");
-    let inline_re = Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid inline regex");
-
     let mut regions: Vec<CmdRegion> = Vec::new();
 
-    for cap in block_re.captures_iter(content) {
+    for cap in BLOCK_RE.captures_iter(content) {
         let m = cap.get(0).unwrap();
         regions.push(CmdRegion {
             start: m.start(),
@@ -173,7 +196,7 @@ fn extract_command_regions(content: &str) -> Vec<CmdRegion> {
             is_block: true,
         });
     }
-    for cap in inline_re.captures_iter(content) {
+    for cap in INLINE_RE.captures_iter(content) {
         let m = cap.get(0).unwrap();
         regions.push(CmdRegion {
             start: m.start(),
@@ -193,15 +216,12 @@ fn extract_command_regions(content: &str) -> Vec<CmdRegion> {
 
 /// Check if content contains block or inline command markers.
 fn has_command_markers(content: &str) -> bool {
-    let block_re = Regex::new(r"```!\s*\n?").expect("valid block regex");
-    let inline_re = Regex::new(r"(?:^|\s)!`[^`]*`").expect("valid inline regex");
-    block_re.is_match(content) || inline_re.is_match(content)
+    BLOCK_MARKER_RE.is_match(content) || INLINE_MARKER_RE.is_match(content)
 }
 
 /// Remove placeholder markers from content.
 fn strip_placeholders(content: &str) -> String {
-    let re = Regex::new(r"\x01CMD_OUT_\d+\x01").expect("valid placeholder regex");
-    re.replace_all(content, "").to_string()
+    PLACEHOLDER_RE.replace_all(content, "").to_string()
 }
 
 /// Substitute template variables in skill content.
@@ -236,10 +256,8 @@ fn substitute_variables(content: &str, ctx: &PromptContext) -> String {
 #[cfg(test)]
 async fn execute_block_commands(content: &str, ctx: &PromptContext) -> String {
     // Pattern: ```! followed by optional newline, then command(s), then ```
-    let re = Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid regex");
-
     let mut result = content.to_string();
-    let matches: Vec<_> = re.captures_iter(content).collect();
+    let matches: Vec<_> = BLOCK_RE.captures_iter(content).collect();
 
     // Process in reverse order so byte offsets remain valid
     for cap in matches.into_iter().rev() {
@@ -267,10 +285,8 @@ async fn execute_block_commands(content: &str, ctx: &PromptContext) -> String {
 /// matching Markdown image syntax (`![alt](url)`).
 #[cfg(test)]
 async fn execute_inline_commands(content: &str, ctx: &PromptContext) -> String {
-    let re = Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid regex");
-
     let mut result = content.to_string();
-    let matches: Vec<_> = re.captures_iter(content).collect();
+    let matches: Vec<_> = INLINE_RE.captures_iter(content).collect();
 
     for cap in matches.into_iter().rev() {
         let full_match = match cap.get(0) {

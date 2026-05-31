@@ -33,6 +33,7 @@ fn build_client() -> &'static Client {
 /// Enhanced web fetch tool with image download support
 ///
 /// Can fetch web pages and download images as base64.
+// TODO(v0.3): replace WebFetchTool with this enhanced version after image pipeline validation
 #[allow(dead_code)]
 pub struct WebFetchToolEnhanced {
     client: Client,

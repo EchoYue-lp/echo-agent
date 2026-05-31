@@ -10,6 +10,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use super::super::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use super::super::types::JsonRpcError;
 use echo_core::error::{McpError, ReactError, Result};
 
 use super::McpTransport;
@@ -113,7 +114,21 @@ impl StdioTransport {
                     Ok(None) => {
                         tracing::debug!("MCP stdio: stdout 已关闭");
                         let mut map = pending_clone.lock().await;
-                        map.clear();
+                        // Send error responses to all pending requests before clearing,
+                        // so callers know which specific request failed due to transport close
+                        for (id, tx) in map.drain() {
+                            let error_response = JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: Some(serde_json::Value::Number(id.into())),
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32000,
+                                    message: "MCP transport closed: stdout reached EOF".to_string(),
+                                    data: None,
+                                }),
+                            };
+                            let _ = tx.send(error_response);
+                        }
                         break;
                     }
                     Err(e) => {
