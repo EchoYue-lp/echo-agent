@@ -178,8 +178,9 @@ mod tests {
     #[test]
     fn test_failure_streak() {
         let mut detector = LoopDetector::new(LoopDetectorConfig::default());
-        for _ in 0..3 {
-            detector.record_tool_call("shell", "bad_cmd", false);
+        // Use different args each time to avoid exact duplicate detection
+        for i in 0..3 {
+            detector.record_tool_call("shell", &format!("bad_cmd_{}", i), false);
         }
         match detector.check() {
             LoopVerdict::Warn(msg) => assert!(msg.contains("failed 3 times")),

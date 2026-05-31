@@ -570,7 +570,7 @@ mod tests {
                 },
             ],
             final_output: None,
-            error: Some("permission denied".to_string()),
+            error: Some("something went wrong".to_string()),
             token_usage: TokenUsage {
                 prompt_tokens: 80,
                 completion_tokens: 40,
