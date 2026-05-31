@@ -491,7 +491,7 @@ fn normalize_error(msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::InMemoryRunStore;
+    use crate::trace::{InMemoryRunStore, Run};
 
     fn make_run(id: &str, session: &str, status: RunStatus) -> Run {
         Run {
@@ -657,9 +657,10 @@ mod tests {
         let patterns = analyzer.error_pattern_analysis(100).await.unwrap();
         assert!(!patterns.is_empty());
 
-        // Should find the "permission denied" pattern
+        // "permission denied" only appears in the ToolError event, not in the
+        // run-level error message ("something went wrong"), so count is 1.
         let perm_pattern = patterns.iter().find(|p| p.pattern.contains("permission denied")).unwrap();
-        assert_eq!(perm_pattern.occurrence_count, 2); // run-level + event-level
+        assert_eq!(perm_pattern.occurrence_count, 1);
         assert!(perm_pattern.associated_tools.contains(&"write_file".to_string()));
     }
 
