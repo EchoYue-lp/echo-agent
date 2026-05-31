@@ -2,6 +2,7 @@
 
 use crate::agent::AgentCallback;
 use crate::agent::AgentMode;
+use crate::agent::react::loop_detector::LoopDetectorConfig;
 use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
 use echo_core::budget::TokenBudgetConfig;
@@ -117,6 +118,10 @@ pub struct AgentConfig {
     /// When enabled, each tool invocation is recorded as a NotebookCell
     /// that can be exported as Markdown or JSON.
     pub(crate) enable_notebook: bool,
+    /// Loop detection configuration.
+    pub(crate) loop_detector_config: LoopDetectorConfig,
+    /// Permission mode for tool execution (default, plan, auto-edit, full-auto, auto, dontask).
+    pub(crate) permission_mode: String,
 }
 
 impl AgentConfig {
@@ -167,6 +172,8 @@ impl AgentConfig {
             token_budget_config: TokenBudgetConfig::default(),
             mode: None,
             enable_notebook: false,
+            loop_detector_config: LoopDetectorConfig::default(),
+            permission_mode: "default".to_string(),
         }
     }
 
@@ -761,6 +768,33 @@ impl AgentConfig {
     /// Maximum token count, `None` means use model default
     pub fn get_max_tokens(&self) -> Option<u32> {
         self.max_tokens
+    }
+
+    /// Set loop detector configuration.
+    pub fn loop_detector(mut self, config: LoopDetectorConfig) -> Self {
+        self.loop_detector_config = config;
+        self
+    }
+
+    /// Get loop detector configuration.
+    pub fn get_loop_detector_config(&self) -> &LoopDetectorConfig {
+        &self.loop_detector_config
+    }
+
+    /// Set the permission mode (default, plan, auto-edit, full-auto, auto, dontask).
+    pub fn permission_mode(mut self, mode: &str) -> Self {
+        self.permission_mode = mode.to_string();
+        self
+    }
+
+    /// Get the current permission mode.
+    pub fn get_permission_mode(&self) -> &str {
+        &self.permission_mode
+    }
+
+    /// Set the permission mode at runtime (mutable reference).
+    pub fn set_permission_mode(&mut self, mode: &str) {
+        self.permission_mode = mode.to_string();
     }
 }
 

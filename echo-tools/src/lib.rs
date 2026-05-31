@@ -20,6 +20,7 @@
 #[cfg(feature = "files")]
 #[cfg_attr(docsrs, doc(cfg(feature = "files")))]
 pub mod files;
+pub mod git_checkpoint;
 pub mod security;
 #[cfg(feature = "shell")]
 #[cfg_attr(docsrs, doc(cfg(feature = "shell")))]

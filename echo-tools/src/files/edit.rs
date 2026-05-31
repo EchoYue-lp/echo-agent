@@ -200,6 +200,12 @@ impl Tool for EditFileTool {
                 )));
             }
 
+            // Create git checkpoint before mutation
+            let checkpoint_tag = crate::git_checkpoint::create_checkpoint(&path);
+            if checkpoint_tag.is_some() {
+                crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
+            }
+
             // Create a backup before overwriting ({filename}.bak)
             let bak_path = PathBuf::from(format!("{}.bak", path.display()));
             fs::copy(&path, &bak_path)
@@ -218,7 +224,7 @@ impl Tool for EditFileTool {
                 })?;
 
             let replaced_count = if replace_all { count } else { 1 };
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "Edited '{}' ({} replacement{}):\n{}",
                 path.display(),
                 replaced_count,
@@ -227,7 +233,13 @@ impl Tool for EditFileTool {
             ))
             .with_meta("backup_path", bak_path.to_string_lossy().to_string())
             .with_meta("original_size", original.len().to_string())
-            .with_meta("updated_size", updated.len().to_string()))
+            .with_meta("updated_size", updated.len().to_string());
+
+            if let Some(tag) = checkpoint_tag {
+                result = result.with_meta("git_checkpoint", tag);
+            }
+
+            Ok(result)
         })
     }
 }

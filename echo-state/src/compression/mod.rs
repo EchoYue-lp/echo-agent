@@ -8,6 +8,7 @@
 //! - [`compressor::HybridCompressor`]: Multi-strategy pipeline chaining
 
 pub mod compressor;
+pub mod levels;
 
 // Re-export from echo_core for backward compatibility
 pub use echo_core::compression::{CompressionInput, CompressionOutput, ContextCompressor};

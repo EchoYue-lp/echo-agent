@@ -176,6 +176,12 @@ impl Tool for DeleteFileTool {
                 )));
             }
 
+            // Create git checkpoint before deletion
+            let checkpoint_tag = crate::git_checkpoint::create_checkpoint(&path);
+            if checkpoint_tag.is_some() {
+                crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
+            }
+
             tokio::fs::remove_file(&path)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
@@ -183,10 +189,16 @@ impl Tool for DeleteFileTool {
                     message: format!("Failed to delete: {}", e),
                 })?;
 
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "File deleted successfully: {}",
                 path.display()
-            )))
+            ));
+
+            if let Some(tag) = checkpoint_tag {
+                result = result.with_meta("git_checkpoint", tag);
+            }
+
+            Ok(result)
         })
     }
 }
@@ -444,6 +456,17 @@ impl Tool for WriteFileTool {
                 })?;
             }
 
+            // Create git checkpoint before mutation (only if file already exists)
+            let checkpoint_tag = if path.exists() {
+                let tag = crate::git_checkpoint::create_checkpoint(&path);
+                if tag.is_some() {
+                    crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
+                }
+                tag
+            } else {
+                None
+            };
+
             let bytes = content.len();
             tokio::fs::write(&path, content)
                 .await
@@ -452,11 +475,17 @@ impl Tool for WriteFileTool {
                     message: format!("Failed to write: {}", e),
                 })?;
 
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "Successfully wrote {} bytes to '{}'",
                 bytes,
                 path.display()
-            )))
+            ));
+
+            if let Some(tag) = checkpoint_tag {
+                result = result.with_meta("git_checkpoint", tag);
+            }
+
+            Ok(result)
         })
     }
 }

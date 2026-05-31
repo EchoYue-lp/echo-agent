@@ -62,6 +62,7 @@ use crate::agent::react::subsystems::tool_exec::ToolExecutionSubsystem;
 pub mod builder;
 mod capabilities;
 mod extract;
+pub mod loop_detector;
 #[cfg(feature = "tasks")]
 mod planning;
 mod run;
@@ -1094,6 +1095,21 @@ impl ReactAgent {
     /// Check if plan mode is active.
     pub fn is_plan_mode(&self) -> bool {
         self.config.plan_mode
+    }
+
+    /// Set the permission mode at runtime.
+    ///
+    /// Accepted values: "default", "plan", "auto-edit", "full-auto", "auto", "dontask".
+    /// When "plan" is set, write operations are rejected (equivalent to plan_mode).
+    pub fn set_permission_mode(&mut self, mode: &str) {
+        self.config.permission_mode = mode.to_string();
+        // Sync plan_mode flag for consistency
+        self.config.plan_mode = mode == "plan";
+    }
+
+    /// Get the current permission mode.
+    pub fn get_permission_mode(&self) -> &str {
+        &self.config.permission_mode
     }
 
     pub fn set_max_iterations(&mut self, max: usize) {
