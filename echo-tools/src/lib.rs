@@ -47,6 +47,12 @@ pub mod excel;
 #[cfg(feature = "git")]
 #[cfg_attr(docsrs, doc(cfg(feature = "git")))]
 pub mod git;
+#[cfg(feature = "git")]
+#[cfg_attr(docsrs, doc(cfg(feature = "git")))]
+pub mod git_worktree;
+#[cfg(feature = "git")]
+#[cfg_attr(docsrs, doc(cfg(feature = "git")))]
+pub mod worktree_tool;
 #[cfg(feature = "media")]
 #[cfg_attr(docsrs, doc(cfg(feature = "media")))]
 pub mod image;

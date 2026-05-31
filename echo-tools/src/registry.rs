@@ -66,12 +66,16 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         use crate::git::{
             GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
         };
+        use crate::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
         tool_manager.register(Box::new(GitStatusTool::default()));
         tool_manager.register(Box::new(GitDiffTool));
         tool_manager.register(Box::new(GitLogTool));
         tool_manager.register(Box::new(GitBlameTool));
         tool_manager.register(Box::new(GitBranchTool));
         tool_manager.register(Box::new(GitCommitTool));
+        tool_manager.register(Box::new(EnterWorktreeTool));
+        tool_manager.register(Box::new(ExitWorktreeTool));
+        tool_manager.register(Box::new(ListWorktreesTool));
     }
 
     #[cfg(feature = "rag")]
