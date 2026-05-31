@@ -240,6 +240,37 @@ impl PluginRegistry {
         subdir: Option<&str>,
         target_dir: &Path,
     ) -> Result<PluginId, String> {
+        // Validate git URL: only allow https:// to prevent SSRF via file://, ssh://, git://
+        if !url.starts_with("https://") {
+            return Err(format!(
+                "Only https:// URLs are allowed for git clone (received: {}). \
+                 file://, ssh://, git://, and http:// are rejected for security.",
+                url.split("://").next().unwrap_or(url)
+            ));
+        }
+
+        // Additional URL validation: parse and check host is not a private IP
+        if let Some(rest) = url.strip_prefix("https://") {
+            let host = rest.split('/').next().unwrap_or("");
+            let host = host.split(':').next().unwrap_or(host);
+            let host = host.split('@').last().unwrap_or(host);
+            // Check for IPv4 literals in the host — reject private IPs
+            if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+                let octets = ip.octets();
+                if octets[0] == 127
+                    || octets[0] == 10
+                    || (octets[0] == 172 && (octets[1] & 0xF0) == 16)
+                    || (octets[0] == 192 && octets[1] == 168)
+                    || octets[0] == 0
+                {
+                    return Err(format!(
+                        "Git clone URL '{}' resolves to a private IP address, rejected for security",
+                        url
+                    ));
+                }
+            }
+        }
+
         // Clone to a temporary directory
         let tmp_dir = target_dir.join(".tmp-clone");
         if tmp_dir.exists() {

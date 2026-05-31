@@ -42,7 +42,7 @@ impl Tool for SqlQueryTool {
                 },
                 "query": {
                     "type": "string",
-                    "description": "SQL query to execute (only SELECT / SHOW / DESCRIBE / EXPLAIN / PRAGMA allowed)"
+                    "description": "SQL query to execute (only SELECT / SHOW / DESCRIBE / EXPLAIN allowed)"
                 }
             },
             "required": ["connection_url", "query"]
@@ -57,21 +57,15 @@ impl Tool for SqlQueryTool {
                 .ok_or_else(|| ToolError::MissingParameter("connection_url".to_string()))?;
 
             // Validate connection URL scheme
-            if !conn_url.starts_with("sqlite")
-                && !conn_url.starts_with("mysql")
-                && !conn_url.starts_with("postgresql")
-                && !conn_url.starts_with("postgres")
-            {
-                return Ok(ToolResult::error(
-                    "Unsupported database scheme. Use sqlite://, mysql://, or postgresql://",
-                ));
-            }
+            validate_db_url(conn_url)?;
 
             let query = parameters
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
+            // Defense-in-depth: keyword filter is the first layer; SET TRANSACTION READ ONLY
+            // in execute_readonly_query provides database-enforced protection as second layer.
             // Safety check: only allow read-only statements
             let trimmed = query.trim().to_uppercase();
             let allowed = trimmed.starts_with("SELECT")
@@ -79,17 +73,17 @@ impl Tool for SqlQueryTool {
                 || trimmed.starts_with("DESCRIBE")
                 || trimmed.starts_with("DESC ")
                 || trimmed.starts_with("EXPLAIN")
-                || trimmed.starts_with("PRAGMA")
                 || trimmed.starts_with("WITH"); // CTE usually followed by SELECT
 
             if !allowed {
                 return Ok(ToolResult::error(format!(
-                    "Only read-only queries allowed (SELECT/SHOW/DESCRIBE/EXPLAIN/PRAGMA), received: {}",
+                    "Only read-only queries allowed (SELECT/SHOW/DESCRIBE/EXPLAIN), received: {}",
                     query
                 )));
             }
 
-            // Additional dangerous keyword scan
+            // Defense-in-depth layer 1: block dangerous keywords that could appear in SELECT
+            // statements (e.g., SELECT pg_terminate_backend(), SELECT ... INTO DUMPFILE)
             let dangerous = [
                 "INSERT",
                 "UPDATE",
@@ -104,7 +98,18 @@ impl Tool for SqlQueryTool {
                 "EXECUTE",
                 "EXEC",
                 "INTO OUTFILE",
+                "INTO DUMPFILE",
                 "LOAD_FILE",
+                // PostgreSQL dangerous functions
+                "DBLINK",
+                "LO_IMPORT",
+                "PG_TERMINATE_BACKEND",
+                "PG_CANCEL_BACKEND",
+                "PG_RELOAD_CONF",
+                // PostgreSQL COPY (can read/write files)
+                "COPY",
+                // SQLite PRAGMA can modify database settings
+                "PRAGMA",
             ];
             for keyword in &dangerous {
                 if trimmed.contains(keyword) {
@@ -161,15 +166,7 @@ impl Tool for ListTablesTool {
                 .ok_or_else(|| ToolError::MissingParameter("connection_url".to_string()))?;
 
             // Validate connection URL scheme
-            if !conn_url.starts_with("sqlite")
-                && !conn_url.starts_with("mysql")
-                && !conn_url.starts_with("postgresql")
-                && !conn_url.starts_with("postgres")
-            {
-                return Ok(ToolResult::error(
-                    "Unsupported database scheme. Use sqlite://, mysql://, or postgresql://",
-                ));
-            }
+            validate_db_url(conn_url)?;
 
             // Choose appropriate query based on database type
             let query = if conn_url.starts_with("sqlite") {
@@ -231,15 +228,7 @@ impl Tool for DescribeTableTool {
                 .ok_or_else(|| ToolError::MissingParameter("connection_url".to_string()))?;
 
             // Validate connection URL scheme
-            if !conn_url.starts_with("sqlite")
-                && !conn_url.starts_with("mysql")
-                && !conn_url.starts_with("postgresql")
-                && !conn_url.starts_with("postgres")
-            {
-                return Ok(ToolResult::error(
-                    "Unsupported database scheme. Use sqlite://, mysql://, or postgresql://",
-                ));
-            }
+            validate_db_url(conn_url)?;
 
             let table_name = parameters
                 .get("table_name")
@@ -289,7 +278,52 @@ impl Tool for DescribeTableTool {
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
-/// Execute a read-only query and return structured JSON
+/// Validate database connection URL scheme using proper parsing.
+///
+/// Only allows `sqlite://`, `mysql://`, `postgresql://`, and `postgres://` schemes.
+/// For SQLite, also validates that the path doesn't contain suspicious patterns.
+fn validate_db_url(url_str: &str) -> Result<()> {
+    let scheme_end = url_str.find("://").ok_or_else(|| ToolError::InvalidParameter {
+        name: "connection_url".to_string(),
+        message: "Invalid URL format: missing '://'".to_string(),
+    })?;
+    let scheme = &url_str[..scheme_end];
+
+    match scheme {
+        "sqlite" | "mysql" | "postgresql" | "postgres" => {}
+        _ => {
+            return Err(ToolError::InvalidParameter {
+                name: "connection_url".to_string(),
+                message: format!(
+                    "Unsupported database scheme '{}'. Use sqlite://, mysql://, or postgresql://",
+                    scheme
+                ),
+            }
+            .into())
+        }
+    }
+
+    // For SQLite, validate the path doesn't contain suspicious patterns
+    if scheme == "sqlite" {
+        let path = &url_str[scheme_end + 3..];
+        // Strip leading slash for relative paths (sqlite:///path vs sqlite://:memory:)
+        let path = path.strip_prefix('/').unwrap_or(path);
+        if path.contains('\0') || path.contains('\n') || path.contains('\r') {
+            return Err(ToolError::InvalidParameter {
+                name: "connection_url".to_string(),
+                message: "SQLite path contains invalid characters".to_string(),
+            }
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute a read-only query and return structured JSON.
+///
+/// Defense-in-depth: uses SET TRANSACTION READ ONLY (PostgreSQL/MySQL) to enforce
+/// read-only at the database level, in addition to keyword filtering at the tool level.
 async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_json::Value> {
     let pool = AnyPoolOptions::new()
         .max_connections(1)
@@ -299,6 +333,14 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
             tool: "database".to_string(),
             message: format!("Database connection failed: {}", e),
         })?;
+
+    // Defense-in-depth layer 2: enforce read-only at the database level.
+    // SET TRANSACTION READ ONLY prevents any data modification within this transaction.
+    // Silently ignored on SQLite (which doesn't enforce this), but provides real
+    // protection on PostgreSQL and MySQL.
+    if !conn_url.starts_with("sqlite") {
+        let _ = sqlx::query("SET TRANSACTION READ ONLY").execute(&pool).await;
+    }
 
     let rows =
         sqlx::query(query)

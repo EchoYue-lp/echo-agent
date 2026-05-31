@@ -100,6 +100,22 @@ async fn serve_inner(
     jwt_config: JwtConfig,
     max_body_bytes: usize,
 ) -> crate::error::Result<()> {
+    // Security warning: log prominently when auth is disabled on non-loopback addresses
+    if !jwt_config.is_enabled() {
+        let is_loopback = bind_addr.starts_with("127.0.0.1")
+            || bind_addr.starts_with("localhost")
+            || bind_addr.starts_with("[::1]")
+            || bind_addr == "localhost:0";
+        if !is_loopback {
+            warn!(
+                "⚠️  A2A server starting WITHOUT authentication on {} — \
+                 this is insecure for non-local addresses! \
+                 Use serve_with_auth() or JwtConfig::hs256() to enable JWT authentication.",
+                bind_addr
+            );
+        }
+    }
+
     let state = AppState {
         server: Arc::new(server),
     };

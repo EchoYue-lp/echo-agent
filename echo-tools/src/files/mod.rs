@@ -16,6 +16,10 @@ use echo_core::error::{Result, ToolError};
 ///
 /// - Absolute path: normalize then verify it stays within base_dir
 /// - Relative path: expand relative to base_dir then verify
+///
+/// After textual normalization, `std::fs::canonicalize()` is used to resolve symlinks
+/// and verify the real path stays within the allowed directory. For write operations
+/// where the target file doesn't exist yet, the parent directory is canonicalized instead.
 fn resolve_path(tool: &str, path_str: &str, base_dir: &Option<PathBuf>) -> Result<PathBuf> {
     let requested = Path::new(path_str);
 
@@ -36,9 +40,63 @@ fn resolve_path(tool: &str, path_str: &str, base_dir: &Option<PathBuf>) -> Resul
             }
             .into());
         }
-        normalized
+
+        // Defense against symlink bypass: canonicalize to resolve symlinks and
+        // verify the real (resolved) path stays within the base directory.
+        match std::fs::canonicalize(&normalized) {
+            Ok(canonical) => {
+                let canonical_base = std::fs::canonicalize(&normalized_base).map_err(|e| {
+                    ToolError::ExecutionFailed {
+                        tool: tool.to_string(),
+                        message: format!("Cannot resolve base directory: {}", e),
+                    }
+                })?;
+                if !canonical.starts_with(&canonical_base) {
+                    return Err(ToolError::ExecutionFailed {
+                        tool: tool.to_string(),
+                        message: format!(
+                            "Path '{}' resolves via symlink to location outside allowed scope",
+                            path_str
+                        ),
+                    }
+                    .into());
+                }
+                canonical
+            }
+            Err(_) => {
+                // File doesn't exist yet (write operation) — canonicalize parent directory
+                if let Some(parent) = normalized.parent() {
+                    if parent != Path::new("") {
+                        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
+                            let canonical_base =
+                                std::fs::canonicalize(&normalized_base).unwrap_or_else(|_| {
+                                    normalized_base.clone()
+                                });
+                            if !canonical_parent.starts_with(&canonical_base) {
+                                return Err(ToolError::ExecutionFailed {
+                                    tool: tool.to_string(),
+                                    message: format!(
+                                        "Parent directory of '{}' resolves outside allowed scope",
+                                        path_str
+                                    ),
+                                }
+                                .into());
+                            }
+                            let filename = normalized
+                                .file_name()
+                                .unwrap_or_default();
+                            return Ok(canonical_parent.join(filename));
+                        }
+                    }
+                }
+                // Fallback: return textually normalized path if parent doesn't exist
+                normalized
+            }
+        }
     } else {
-        normalize_path(requested)
+        let normalized = normalize_path(requested);
+        // Best-effort canonicalization when no base_dir constraint
+        std::fs::canonicalize(&normalized).unwrap_or(normalized)
     };
 
     Ok(resolved)
