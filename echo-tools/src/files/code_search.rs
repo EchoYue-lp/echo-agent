@@ -1,7 +1,14 @@
-//! Code Search tool — search for code symbols across the project
+//! Code Search tool — search for code across the project
 //!
-//! Searches for function definitions, class definitions, type definitions,
-//! and other code symbols. Supports multiple programming languages.
+//! Primary backend: ripgrep (`rg`) with full flag support and JSON output parsing.
+//! Fallback: built-in symbol search using language-specific regex patterns.
+//!
+//! When `rg` is available on PATH, the tool supports:
+//! - `--glob` / `--type` for file filtering
+//! - `-i` (case insensitive), `-F` (fixed strings), `-w` (word regexp)
+//! - `-C` / `-A` / `-B` for context lines
+//! - `-m` for max matches per file
+//! - Total result count limiting via `max_results`
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
@@ -10,13 +17,17 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use tokio::process::Command;
+
+/// Maximum bytes of output before truncation (prevents token overflow).
+const MAX_OUTPUT_BYTES: usize = 50_000;
 
 // ── CodeSearchTool ──────────────────────────────────────────────────────────
 
-/// Search for code symbols (functions, classes, types) across the project.
+/// Search for code patterns across the project.
 ///
-/// Uses language-specific patterns to find symbol definitions. Returns
-/// structured results with file paths, line numbers, and symbol types.
+/// Uses ripgrep (`rg`) when available for fast, feature-rich searching.
+/// Falls back to built-in symbol search when `rg` is not on PATH.
 pub struct CodeSearchTool {
     base_dir: Option<PathBuf>,
 }
@@ -45,9 +56,10 @@ impl Tool for CodeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for code symbols (functions, classes, types, methods) across the project. \
-         Returns definitions with file paths and line numbers. \
-         Supports Rust, Python, JavaScript, TypeScript, Go, Java, and more."
+        "Search for code patterns across the project using ripgrep. \
+         Supports regex, literal strings, glob filters, file type filters, \
+         context lines, and case-insensitive matching. \
+         Falls back to symbol search (functions, classes, types) if ripgrep is unavailable."
     }
 
     fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
@@ -62,14 +74,9 @@ impl Tool for CodeSearchTool {
         json!({
             "type": "object",
             "properties": {
-                "symbol": {
+                "query": {
                     "type": "string",
-                    "description": "Symbol name or pattern to search for (e.g., 'calculate_total', 'User', 'process_*')"
-                },
-                "symbol_type": {
-                    "type": "string",
-                    "enum": ["function", "class", "struct", "enum", "trait", "interface", "type", "method", "any"],
-                    "description": "Type of symbol to search for (default: any)"
+                    "description": "Search pattern (regex by default, literal if fixed_strings=true)"
                 },
                 "path": {
                     "type": "string",
@@ -77,28 +84,61 @@ impl Tool for CodeSearchTool {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "File pattern to filter (e.g., '*.rs', '*.py')"
+                    "description": "File glob filter (e.g., '*.rs', '*.py')"
+                },
+                "file_type": {
+                    "type": "string",
+                    "description": "File type filter recognized by ripgrep (e.g., 'rust', 'python', 'js')"
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Case-insensitive search (-i flag)",
+                    "default": false
+                },
+                "fixed_strings": {
+                    "type": "boolean",
+                    "description": "Treat pattern as literal string, not regex (-F flag)",
+                    "default": false
+                },
+                "word_regexp": {
+                    "type": "boolean",
+                    "description": "Only match whole words (-w flag)",
+                    "default": false
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Number of context lines to show around each match (-C N)"
+                },
+                "max_count": {
+                    "type": "integer",
+                    "description": "Maximum matches per file (-m N)"
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results (default: 50)"
+                    "description": "Maximum total results to return (default: 50)"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "(Legacy) Symbol name or pattern — used as fallback query"
+                },
+                "symbol_type": {
+                    "type": "string",
+                    "enum": ["function", "class", "struct", "enum", "trait", "interface", "type", "method", "any"],
+                    "description": "(Legacy) Type of symbol to search for (default: any)"
                 }
             },
-            "required": ["symbol"]
+            "required": ["query"]
         })
     }
 
     fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
         Box::pin(async move {
-            let symbol = parameters
-                .get("symbol")
+            // Parse new-style query, falling back to legacy "symbol" parameter
+            let query = parameters
+                .get("query")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("symbol".to_string()))?;
-
-            let symbol_type = parameters
-                .get("symbol_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("any");
+                .or_else(|| parameters.get("symbol").and_then(|v| v.as_str()))
+                .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
             let path_str = parameters
                 .get("path")
@@ -106,6 +146,33 @@ impl Tool for CodeSearchTool {
                 .unwrap_or(".");
 
             let glob_pattern = parameters.get("glob").and_then(|v| v.as_str());
+
+            let file_type = parameters.get("file_type").and_then(|v| v.as_str());
+
+            let case_insensitive = parameters
+                .get("case_insensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let fixed_strings = parameters
+                .get("fixed_strings")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let word_regexp = parameters
+                .get("word_regexp")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let context = parameters
+                .get("context")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+
+            let max_count = parameters
+                .get("max_count")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
 
             let max_results = parameters
                 .get("max_results")
@@ -123,55 +190,327 @@ impl Tool for CodeSearchTool {
                 .into());
             }
 
-            // Convert glob pattern to regex if provided
-            let file_filter = glob_pattern.map(|g| glob_to_regex(g));
-
-            // Search for symbols
-            let results = search_symbols(
+            // Try ripgrep first; fall back to built-in symbol search
+            match try_ripgrep_search(
                 &search_path,
-                symbol,
-                symbol_type,
-                file_filter.as_ref(),
+                query,
+                glob_pattern,
+                file_type,
+                case_insensitive,
+                fixed_strings,
+                word_regexp,
+                context,
+                max_count,
                 max_results,
             )
-            .await?;
+            .await
+            {
+                Ok(output) => Ok(ToolResult::success(output)),
+                Err(RgError::NotAvailable) => {
+                    // Fallback to built-in symbol search
+                    let symbol_type = parameters
+                        .get("symbol_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("any");
 
-            if results.is_empty() {
-                return Ok(ToolResult::success(format!(
-                    "No {} symbols matching '{}' found in {}",
-                    symbol_type,
-                    symbol,
-                    search_path.display()
-                )));
-            }
+                    let file_filter = glob_pattern.map(|g| glob_to_regex(g));
 
-            // Format results
-            let mut output = format!(
-                "Found {} {} symbol(s) matching '{}':\n\n",
-                results.len(),
-                symbol_type,
-                symbol
-            );
+                    let results = search_symbols(
+                        &search_path,
+                        query,
+                        symbol_type,
+                        file_filter.as_ref(),
+                        max_results,
+                    )
+                    .await?;
 
-            for result in &results {
-                output.push_str(&format!(
-                    "{}:{} - {} {}\n",
-                    result.file.display(),
-                    result.line,
-                    result.symbol_type,
-                    result.name
-                ));
-                if let Some(ref context) = result.context {
-                    output.push_str(&format!("  {}\n", context.trim()));
+                    if results.is_empty() {
+                        return Ok(ToolResult::success(format!(
+                            "No {} symbols matching '{}' found in {}",
+                            symbol_type,
+                            query,
+                            search_path.display()
+                        )));
+                    }
+
+                    let mut output = format!(
+                        "Found {} {} symbol(s) matching '{}' (fallback mode, rg not available):\n\n",
+                        results.len(),
+                        symbol_type,
+                        query
+                    );
+
+                    for result in &results {
+                        output.push_str(&format!(
+                            "{}:{} - {} {}\n",
+                            result.file.display(),
+                            result.line,
+                            result.symbol_type,
+                            result.name
+                        ));
+                        if let Some(ref ctx) = result.context {
+                            output.push_str(&format!("  {}\n", ctx.trim()));
+                        }
+                    }
+
+                    Ok(ToolResult::success(output))
                 }
+                Err(RgError::Failed(msg)) => Err(ToolError::ExecutionFailed {
+                    tool: "code_search".to_string(),
+                    message: msg,
+                }
+                .into()),
             }
-
-            Ok(ToolResult::success(output))
         })
     }
 }
 
-// ── Symbol search implementation ────────────────────────────────────────────
+// ── Ripgrep backend ─────────────────────────────────────────────────────────
+
+/// Internal error type for ripgrep operations.
+enum RgError {
+    /// `rg` binary not found on PATH — triggers fallback.
+    NotAvailable,
+    /// `rg` ran but failed with an error.
+    Failed(String),
+}
+
+/// Attempt to search using ripgrep (`rg --json`).
+///
+/// Returns `Err(RgError::NotAvailable)` when the binary is not found,
+/// signaling the caller to fall back to the built-in search.
+async fn try_ripgrep_search(
+    search_path: &Path,
+    query: &str,
+    glob: Option<&str>,
+    file_type: Option<&str>,
+    case_insensitive: bool,
+    fixed_strings: bool,
+    word_regexp: bool,
+    context: Option<u32>,
+    max_count: Option<u32>,
+    max_results: usize,
+) -> std::result::Result<String, RgError> {
+    // Build rg command arguments
+    let mut args: Vec<String> = vec!["--json".to_string()];
+
+    if case_insensitive {
+        args.push("-i".to_string());
+    }
+    if fixed_strings {
+        args.push("-F".to_string());
+    }
+    if word_regexp {
+        args.push("-w".to_string());
+    }
+    if let Some(ctx) = context {
+        args.push("-C".to_string());
+        args.push(ctx.to_string());
+    }
+    if let Some(mc) = max_count {
+        args.push("-m".to_string());
+        args.push(mc.to_string());
+    }
+    if let Some(g) = glob {
+        args.push("--glob".to_string());
+        args.push(g.to_string());
+    }
+    if let Some(ft) = file_type {
+        args.push("--type".to_string());
+        args.push(ft.to_string());
+    }
+
+    // The search pattern
+    args.push(query.to_string());
+
+    // Search path
+    args.push(search_path.to_string_lossy().to_string());
+
+    // Execute rg
+    let output = Command::new("rg")
+        .args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                RgError::NotAvailable
+            } else {
+                RgError::Failed(format!("Failed to execute rg: {}", e))
+            }
+        })?;
+
+    // rg exits with code 1 when no matches found — that is not an error
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Check for real errors (exit code 2 = error)
+    if let Some(code) = output.status.code() {
+        if code == 2 {
+            return Err(RgError::Failed(format!(
+                "rg error: {}",
+                stderr.trim()
+            )));
+        }
+    }
+
+    // Parse JSON output
+    let results = parse_rg_json(&stdout, max_results);
+
+    if results.is_empty() {
+        return Ok(format!(
+            "No matches found for '{}' in {}",
+            query,
+            search_path.display()
+        ));
+    }
+
+    // Format output
+    let mut output = format!(
+        "Found {} match(es) for '{}' in {}:\n\n",
+        results.len(),
+        query,
+        search_path.display()
+    );
+
+    for entry in &results {
+        output.push_str(&format!(
+            "{}:{}: {}\n",
+            entry.path, entry.line_number, entry.text
+        ));
+        // Include context lines if present
+        for ctx_line in &entry.context_lines {
+            output.push_str(&format!("  {}\n", ctx_line));
+        }
+    }
+
+    // Truncate to prevent token overflow
+    if output.len() > MAX_OUTPUT_BYTES {
+        output.truncate(MAX_OUTPUT_BYTES);
+        output.push_str("\n\n... [output truncated to prevent overflow]");
+    }
+
+    Ok(output)
+}
+
+/// A single result from ripgrep JSON output.
+struct RgResult {
+    path: String,
+    line_number: usize,
+    text: String,
+    context_lines: Vec<String>,
+}
+
+/// Parse ripgrep `--json` output into structured results.
+///
+/// Each line of stdout is a JSON object with a `type` field.
+/// We extract `match` events (containing path, line_number, lines).
+fn parse_rg_json(stdout: &str, max_results: usize) -> Vec<RgResult> {
+    let mut results = Vec::new();
+
+    for line in stdout.lines() {
+        if results.len() >= max_results {
+            break;
+        }
+
+        let obj: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let event_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match event_type {
+            "match" => {
+                let data = match obj.get("data") {
+                    Some(d) => d,
+                    None => continue,
+                };
+
+                let path = data
+                    .get("path")
+                    .and_then(|p| p.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("<unknown>")
+                    .to_string();
+
+                let line_number = data
+                    .get("line_number")
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0) as usize;
+
+                let text = data
+                    .get("lines")
+                    .and_then(|l| l.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_string();
+
+                // Extract context lines if present
+                let context_lines = data
+                    .get("context")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|ctx| {
+                                let ctx_line = ctx
+                                    .get("lines")
+                                    .and_then(|l| l.get("text"))
+                                    .and_then(|t| t.as_str())?
+                                    .trim_end()
+                                    .to_string();
+                                let ctx_num =
+                                    ctx.get("line_number").and_then(|n| n.as_u64()).unwrap_or(0);
+                                Some(format!("{}: {}", ctx_num, ctx_line))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                results.push(RgResult {
+                    path,
+                    line_number,
+                    text,
+                    context_lines,
+                });
+            }
+            "context" => {
+                // Context-only lines (from -A/-B/-C); attach to previous result if possible
+                let data = match obj.get("data") {
+                    Some(d) => d,
+                    None => continue,
+                };
+
+                let ctx_text = data
+                    .get("lines")
+                    .and_then(|l| l.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_string();
+
+                let ctx_num = data
+                    .get("line_number")
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
+
+                if let Some(last) = results.last_mut() {
+                    last.context_lines
+                        .push(format!("{}- {}", ctx_num, ctx_text));
+                }
+            }
+            _ => {
+                // Ignore "begin", "end", "summary" events
+            }
+        }
+    }
+
+    results
+}
+
+// ── Symbol search implementation (fallback) ─────────────────────────────────
 
 #[derive(Debug)]
 struct SymbolResult {
@@ -182,7 +521,7 @@ struct SymbolResult {
     context: Option<String>,
 }
 
-/// Search for symbols in the given path
+/// Search for symbols in the given path (fallback when rg is unavailable)
 async fn search_symbols(
     path: &Path,
     symbol_pattern: &str,

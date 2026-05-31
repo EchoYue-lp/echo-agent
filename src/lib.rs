@@ -16,6 +16,7 @@ pub mod error;
 pub mod eval;
 pub mod event_bus;
 pub mod guard;
+pub mod headless;
 #[cfg(feature = "improve")]
 #[cfg_attr(docsrs, doc(cfg(feature = "improve")))]
 pub mod improve;
@@ -225,6 +226,9 @@ pub mod prelude {
 
     // Error
     pub use crate::error::Result;
+
+    // Headless
+    pub use crate::headless::{HeadlessConfig, HeadlessResult, run_headless};
 
     // Trace
     pub use crate::trace::{
