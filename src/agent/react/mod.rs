@@ -534,6 +534,11 @@ impl ReactAgent {
         self.llm_client = Some(client);
     }
 
+    /// Set the working directory for the agent (affects project rules, tool paths, etc.).
+    pub fn set_working_dir(&mut self, path: Option<std::path::PathBuf>) {
+        self.config.working_dir = path;
+    }
+
     /// Get the current LLM configuration.
     pub fn llm_config(&self) -> Option<&LlmConfig> {
         self.llm_config.as_ref()
