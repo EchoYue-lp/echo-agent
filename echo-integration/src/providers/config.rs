@@ -29,6 +29,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// Well-known provider API base URLs
+pub mod provider_urls {
+    pub const OPENAI: &str = "https://api.openai.com/v1/chat/completions";
+    pub const ANTHROPIC: &str = "https://api.anthropic.com/v1/messages";
+    pub const OLLAMA: &str = "http://localhost:11434/api/chat";
+    pub const DEEPSEEK: &str = "https://api.deepseek.com/chat/completions";
+    pub const DASHSCOPE: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+    pub const GEMINI: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
+    pub const MOONSHOT: &str = "https://api.moonshot.cn/v1/chat/completions";
+    pub const ZHIPU: &str = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+}
+
 // ── 公共类型 ─────────────────────────────────────────────────────────────────
 
 /// LLM 供应商类型
@@ -139,7 +151,7 @@ impl LlmConfig {
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
-            base_url: "https://api.openai.com/v1/chat/completions".to_string(),
+            base_url: provider_urls::OPENAI.to_string(),
             api_key: api_key.into(),
             model: model.into(),
         }
@@ -149,7 +161,7 @@ impl LlmConfig {
     pub fn anthropic(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::Anthropic,
-            base_url: "https://api.anthropic.com/v1/messages".to_string(),
+            base_url: provider_urls::ANTHROPIC.to_string(),
             api_key: api_key.into(),
             model: model.into(),
         }
@@ -159,7 +171,7 @@ impl LlmConfig {
     pub fn ollama(model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::Ollama,
-            base_url: "http://localhost:11434/api/chat".to_string(),
+            base_url: provider_urls::OLLAMA.to_string(),
             api_key: String::new(),
             model: model.into(),
         }
@@ -169,7 +181,7 @@ impl LlmConfig {
     pub fn deepseek(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
-            base_url: "https://api.deepseek.com/chat/completions".to_string(),
+            base_url: provider_urls::DEEPSEEK.to_string(),
             api_key: api_key.into(),
             model: model.into(),
         }
@@ -179,8 +191,7 @@ impl LlmConfig {
     pub fn dashscope(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
-            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-                .to_string(),
+            base_url: provider_urls::DASHSCOPE.to_string(),
             api_key: api_key.into(),
             model: model.into(),
         }
@@ -190,7 +201,7 @@ impl LlmConfig {
     pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::Gemini,
-            base_url: "https://generativelanguage.googleapis.com/v1beta/openai/".to_string(),
+            base_url: provider_urls::GEMINI.to_string(),
             api_key: api_key.into(),
             model: model.into(),
         }
@@ -430,11 +441,11 @@ fn parse_provider(provider: &str) -> LlmProvider {
 /// 根据 base_url 自动推断 [`LlmProvider`]
 fn detect_provider_from_url(url: &str) -> LlmProvider {
     let lower = url.to_lowercase();
-    if lower.contains("anthropic.com") {
+    if lower.contains(provider_urls::ANTHROPIC) {
         LlmProvider::Anthropic
-    } else if lower.contains("localhost:11434") || lower.contains("ollama") {
+    } else if lower.contains(provider_urls::OLLAMA) || lower.contains("ollama") {
         LlmProvider::Ollama
-    } else if lower.contains("generativelanguage.googleapis.com") {
+    } else if lower.contains(provider_urls::GEMINI) {
         LlmProvider::Gemini
     } else if lower.contains(".openai.azure.com") {
         LlmProvider::Azure
@@ -1139,7 +1150,7 @@ mod tests {
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// RAII guard that sets an env var and restores (or removes) it on drop.

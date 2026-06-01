@@ -151,6 +151,20 @@ pub enum HookAction {
         #[serde(default = "default_hook_timeout")]
         timeout: u64,
     },
+    /// Spawn a subagent to handle the hook action.
+    Agent {
+        /// Name of the agent to invoke.
+        name: String,
+        /// Task description to pass to the agent.
+        #[serde(default)]
+        task: Option<String>,
+        /// Maximum number of iterations for the agent.
+        #[serde(default)]
+        max_iterations: Option<u32>,
+        /// Timeout in seconds.
+        #[serde(default = "default_hook_timeout")]
+        timeout: u64,
+    },
 }
 
 impl HookAction {
@@ -218,6 +232,19 @@ impl HookAction {
                 if *timeout > MAX_HOOK_TIMEOUT {
                     return Err(format!(
                         "McpTool hook timeout {}s exceeds maximum {}s",
+                        timeout, MAX_HOOK_TIMEOUT
+                    ));
+                }
+            }
+            HookAction::Agent {
+                name, timeout, ..
+            } => {
+                if name.is_empty() {
+                    return Err("Agent hook has empty agent name".into());
+                }
+                if *timeout > MAX_HOOK_TIMEOUT {
+                    return Err(format!(
+                        "Agent hook timeout {}s exceeds maximum {}s",
                         timeout, MAX_HOOK_TIMEOUT
                     ));
                 }
@@ -408,6 +435,7 @@ impl HookRegistry {
                 let name = match source {
                     HookSource::UserConfig => "user_config".to_string(),
                     HookSource::Skill(name) => format!("skill:{}", name),
+                    HookSource::Plugin(name) => format!("plugin:{}", name),
                 };
                 let count = registered.definition.rules.values().map(|v| v.len()).sum();
                 (name, count)
@@ -496,6 +524,9 @@ impl HookRegistry {
         sorted_sources.sort_by(|a, b| match (a, b) {
             (HookSource::UserConfig, _) => std::cmp::Ordering::Less,
             (_, HookSource::UserConfig) => std::cmp::Ordering::Greater,
+            (HookSource::Plugin(a), HookSource::Plugin(b)) => a.cmp(b),
+            (HookSource::Plugin(_), _) => std::cmp::Ordering::Less,
+            (_, HookSource::Plugin(_)) => std::cmp::Ordering::Greater,
             (HookSource::Skill(a), HookSource::Skill(b)) => a.cmp(b),
         });
 
@@ -727,6 +758,29 @@ async fn execute_action(
                 HookResult::default()
             }
         },
+        HookAction::Agent {
+            name,
+            task,
+            timeout,
+            ..
+        } => {
+            // Agent hook action: spawn a subagent to handle the task.
+            // This is a placeholder — actual agent spawning requires access
+            // to the agent registry which is not available in the execution layer.
+            // The facade layer should provide an agent_executor callback
+            // similar to mcp_executor.
+            warn!(
+                agent = %name,
+                task = ?task,
+                "Agent hook action triggered but no agent_executor registered (not yet implemented in execution layer)"
+            );
+            let mut result = HookResult::default();
+            result.messages.push(format!(
+                "Agent hook '{name}' would be spawned with task: {}",
+                task.as_deref().unwrap_or("(none)")
+            ));
+            result
+        }
     }
 }
 

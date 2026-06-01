@@ -16,15 +16,15 @@ use serde_json::Value;
 
 use crate::security::SecurityConfig;
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
 const TOOL_NAME: &str = "data_tools";
 
 // ── Shared data loading helpers ──────────────────────────────────────
 
 /// Detect format based on file extension
-fn detect_format<'a>(path: &'a Path, hint: Option<&'a str>) -> &'a str {
+pub fn detect_format<'a>(path: &'a Path, hint: Option<&'a str>) -> &'a str {
     hint.unwrap_or_else(|| match path.extension().and_then(|e| e.to_str()) {
         Some("csv") | Some("txt") | Some("tsv") => "csv",
         Some("json") | Some("jsonl") => "json",
@@ -34,7 +34,7 @@ fn detect_format<'a>(path: &'a Path, hint: Option<&'a str>) -> &'a str {
 }
 
 /// Load DataFrame (eager), supports CSV/JSON/Parquet
-fn load_dataframe(path: &Path, format: Option<&str>) -> Result<DataFrame> {
+pub fn load_dataframe(path: &Path, format: Option<&str>) -> Result<DataFrame> {
     let fmt = detect_format(path, format);
 
     let file = std::fs::File::open(path).map_err(|e| ToolError::ExecutionFailed {
@@ -120,7 +120,7 @@ fn load_lazyframe(path: &Path, format: Option<&str>) -> Result<LazyFrame> {
 }
 
 /// Check if a column type is numeric
-fn is_numeric(dtype: &DataType) -> bool {
+pub fn is_numeric(dtype: &DataType) -> bool {
     matches!(
         dtype,
         DataType::Int8
@@ -2267,7 +2267,11 @@ fn load_multi_dataframes(paths: &[&Path], format: Option<&str>) -> Result<DataFr
     if paths.len() > MAX_MULTI_FILES {
         return Err(ToolError::InvalidParameter {
             name: "file_paths".to_string(),
-            message: format!("Too many files ({}). Maximum is {}.", paths.len(), MAX_MULTI_FILES),
+            message: format!(
+                "Too many files ({}). Maximum is {}.",
+                paths.len(),
+                MAX_MULTI_FILES
+            ),
         }
         .into());
     }
@@ -2348,10 +2352,15 @@ impl Tool for DataMultiReadTool {
                     message: "Must be an array of strings".to_string(),
                 })?
                 .iter()
-                .map(|v| v.as_str().ok_or_else(|| ToolError::InvalidParameter {
-                    name: "file_paths".to_string(),
-                    message: "All entries must be strings".to_string(),
-                }.into()))
+                .map(|v| {
+                    v.as_str().ok_or_else(|| {
+                        ToolError::InvalidParameter {
+                            name: "file_paths".to_string(),
+                            message: "All entries must be strings".to_string(),
+                        }
+                        .into()
+                    })
+                })
                 .collect::<Result<Vec<_>>>()?;
 
             if path_strs.is_empty() {
@@ -2511,12 +2520,13 @@ impl Tool for DataJoinTool {
                 })?
                 .iter()
                 .map(|v| {
-                    v.as_str()
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| ToolError::InvalidParameter {
+                    v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                        ToolError::InvalidParameter {
                             name: "join_keys".to_string(),
                             message: "All entries must be strings".to_string(),
-                        }.into())
+                        }
+                        .into()
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -2556,10 +2566,16 @@ impl Tool for DataJoinTool {
             let right_df = load_dataframe(&r_path, format)?;
 
             // Validate join keys exist in both DataFrames
-            let left_names: std::collections::HashSet<String> =
-                left_df.get_column_names().iter().map(|s| s.to_string()).collect();
-            let right_names: std::collections::HashSet<String> =
-                right_df.get_column_names().iter().map(|s| s.to_string()).collect();
+            let left_names: std::collections::HashSet<String> = left_df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let right_names: std::collections::HashSet<String> = right_df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
             for key in &key_strs {
                 if !left_names.contains(key.as_str()) {
@@ -2584,7 +2600,8 @@ impl Tool for DataJoinTool {
             let mut right_rename_map = std::collections::HashMap::new();
             for col_name in &right_names {
                 if !key_set.contains(col_name.as_str()) && left_names.contains(col_name.as_str()) {
-                    right_rename_map.insert(col_name.clone(), format!("{}{}", col_name, right_suffix));
+                    right_rename_map
+                        .insert(col_name.clone(), format!("{}{}", col_name, right_suffix));
                 }
             }
 
@@ -2931,4 +2948,316 @@ fn parse_aggregations(agg_str: &str) -> Result<Vec<Expr>> {
     }
 
     Ok(exprs)
+}
+
+// ── Helper functions for data tools ──────────────────────────────────
+
+/// Compute covariance between two Series
+fn compute_covariance(s1: &Series, s2: &Series) -> f64 {
+    if s1.len() != s2.len() || s1.is_empty() {
+        return f64::NAN;
+    }
+
+    let mean1 = s1.mean().unwrap_or(f64::NAN);
+    let mean2 = s2.mean().unwrap_or(f64::NAN);
+
+    let mut sum = 0.0;
+    let mut count = 0;
+
+    for i in 0..s1.len() {
+        if let (Ok(v1), Ok(v2)) = (s1.get(i), s2.get(i)) {
+            if let (Some(val1), Some(val2)) =
+                (v1.try_extract::<f64>().ok(), v2.try_extract::<f64>().ok())
+            {
+                sum += (val1 - mean1) * (val2 - mean2);
+                count += 1;
+            }
+        }
+    }
+
+    if count > 1 {
+        sum / (count as f64 - 1.0) // Sample covariance
+    } else {
+        f64::NAN
+    }
+}
+
+// ── CorrelateTool ────────────────────────────────────────────────────────────
+
+/// Compute correlation matrix between numeric columns
+pub struct CorrelateTool;
+
+impl Tool for CorrelateTool {
+    fn name(&self) -> &str {
+        "correlate_data"
+    }
+
+    fn description(&self) -> &str {
+        "Compute correlation matrix between numeric columns. Returns Pearson correlation coefficients between -1 and 1."
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the data file"
+                },
+                "columns": {
+                    "type": "string",
+                    "description": "Comma-separated list of numeric columns to correlate (default: all numeric columns)"
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["pearson", "spearman"],
+                    "description": "Correlation method (default: pearson)"
+                }
+            },
+            "required": ["file_path"]
+        })
+    }
+
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let file_path = parameters
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
+
+            let security = SecurityConfig::global();
+            let path = security.validate_file(file_path)?;
+
+            let columns = parameters.get("columns").and_then(|v| v.as_str());
+            let method = parameters
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pearson");
+
+            let df = load_dataframe(&path, None)?;
+
+            // Select numeric columns
+            let numeric_cols: Vec<String> = if let Some(cols_str) = columns {
+                cols_str.split(',').map(|s| s.trim().to_string()).collect()
+            } else {
+                df.get_column_names()
+                    .into_iter()
+                    .filter(|col| {
+                        df.column(*col)
+                            .map(|s| s.dtype().is_numeric())
+                            .unwrap_or(false)
+                    })
+                    .map(|s| s.to_string())
+                    .collect()
+            };
+
+            if numeric_cols.len() < 2 {
+                return Ok(ToolResult::success(
+                    "Need at least 2 numeric columns for correlation analysis".to_string(),
+                ));
+            }
+
+            // Compute correlation matrix
+            let mut matrix = Vec::new();
+            for col1 in &numeric_cols {
+                let mut row = Vec::new();
+                for col2 in &numeric_cols {
+                    let corr = if col1 == col2 {
+                        1.0
+                    } else {
+                        let s1 = df.column(col1).unwrap().as_materialized_series();
+                        let s2 = df.column(col2).unwrap().as_materialized_series();
+
+                        // Convert to f64 for correlation
+                        let s1_f64 = s1.cast(&DataType::Float64).unwrap();
+                        let s2_f64 = s2.cast(&DataType::Float64).unwrap();
+
+                        // Compute Pearson correlation manually: corr(X,Y) = cov(X,Y) / (std(X) * std(Y))
+                        let cov = compute_covariance(&s1_f64, &s2_f64);
+                        let std1 = s1_f64.std(1).unwrap_or(f64::NAN);
+                        let std2 = s2_f64.std(1).unwrap_or(f64::NAN);
+
+                        if std1 == 0.0 || std2 == 0.0 {
+                            f64::NAN
+                        } else {
+                            cov / (std1 * std2)
+                        }
+                    };
+                    row.push(corr);
+                }
+                matrix.push(row);
+            }
+
+            // Format output
+            let mut output = format!("Correlation matrix ({} method):\n\n", method);
+            output.push_str(&format!("{:>15}", ""));
+            for col in &numeric_cols {
+                output.push_str(&format!("{:>12}", &col[..col.len().min(10)]));
+            }
+            output.push('\n');
+
+            for (i, col1) in numeric_cols.iter().enumerate() {
+                output.push_str(&format!("{:>15}", &col1[..col1.len().min(13)]));
+                for val in &matrix[i] {
+                    if val.is_nan() {
+                        output.push_str(&format!("{:>12}", "N/A"));
+                    } else {
+                        output.push_str(&format!("{:>12.3}", val));
+                    }
+                }
+                output.push('\n');
+            }
+
+            Ok(ToolResult::success(output))
+        })
+    }
+}
+
+// ── PivotTool ────────────────────────────────────────────────────────────────
+
+/// Create pivot tables from data
+pub struct PivotTool;
+
+impl Tool for PivotTool {
+    fn name(&self) -> &str {
+        "pivot_data"
+    }
+
+    fn description(&self) -> &str {
+        "Create pivot tables. Reshape data by grouping rows by one or more columns and pivoting another column's values into new columns."
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the data file"
+                },
+                "index": {
+                    "type": "string",
+                    "description": "Column(s) to use as row index (comma-separated)"
+                },
+                "columns": {
+                    "type": "string",
+                    "description": "Column whose unique values will become new columns"
+                },
+                "values": {
+                    "type": "string",
+                    "description": "Column(s) to aggregate (comma-separated)"
+                },
+                "agg_function": {
+                    "type": "string",
+                    "enum": ["sum", "mean", "count", "min", "max", "first", "last"],
+                    "description": "Aggregation function (default: sum)"
+                }
+            },
+            "required": ["file_path", "index", "columns", "values"]
+        })
+    }
+
+    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+        Box::pin(async move {
+            let file_path = parameters
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
+
+            let security = SecurityConfig::global();
+            let path = security.validate_file(file_path)?;
+
+            let index = parameters
+                .get("index")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("index".to_string()))?;
+
+            let columns = parameters
+                .get("columns")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("columns".to_string()))?;
+
+            let values = parameters
+                .get("values")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("values".to_string()))?;
+
+            let agg_function = parameters
+                .get("agg_function")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sum");
+
+            let df = load_dataframe(&path, None)?;
+
+            // Parse column lists
+            let index_cols: Vec<String> = index.split(',').map(|s| s.trim().to_string()).collect();
+            let value_cols: Vec<String> = values.split(',').map(|s| s.trim().to_string()).collect();
+
+            // Validate columns exist
+            for col in index_cols.iter().chain(value_cols.iter()) {
+                let col_str = col.as_str();
+                if !df.get_column_names().iter().any(|c| c.as_str() == col_str) {
+                    return Err(ToolError::InvalidParameter {
+                        name: "columns".to_string(),
+                        message: format!("Column '{}' not found in data", col),
+                    }
+                    .into());
+                }
+            }
+
+            let columns_str = columns;
+            if !df
+                .get_column_names()
+                .iter()
+                .any(|c| c.as_str() == columns_str)
+            {
+                return Err(ToolError::InvalidParameter {
+                    name: "columns".to_string(),
+                    message: format!("Column '{}' not found in data", columns_str),
+                }
+                .into());
+            }
+
+            // Perform pivot operation using group_by and aggregation
+            let mut agg_exprs = Vec::new();
+            for val_col in &value_cols {
+                let expr = match agg_function {
+                    "mean" => col(val_col).mean(),
+                    "count" => col(val_col).count(),
+                    "min" => col(val_col).min(),
+                    "max" => col(val_col).max(),
+                    "first" => col(val_col).first(),
+                    "last" => col(val_col).last(),
+                    _ => col(val_col).sum(),
+                };
+                agg_exprs.push(expr.alias(format!("{}_{}", val_col, agg_function)));
+            }
+
+            let index_exprs: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+
+            let result = df
+                .lazy()
+                .group_by(index_exprs)
+                .agg(agg_exprs)
+                .collect()
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "pivot_data".to_string(),
+                    message: format!("Pivot operation failed: {}", e),
+                })?;
+
+            // Convert to JSON for output
+            let json_value = df_to_json(&result)?;
+
+            Ok(ToolResult::success_json(serde_json::json!({
+                "pivot_result": {
+                    "index": index_cols,
+                    "columns": columns,
+                    "values": value_cols,
+                    "agg_function": agg_function,
+                    "shape": [result.height(), result.width()],
+                    "data": json_value
+                }
+            })))
+        })
+    }
 }

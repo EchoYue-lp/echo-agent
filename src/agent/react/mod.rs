@@ -62,6 +62,7 @@ use crate::agent::react::subsystems::tool_exec::ToolExecutionSubsystem;
 pub mod builder;
 mod capabilities;
 mod extract;
+pub mod loop_detector;
 #[cfg(feature = "tasks")]
 mod planning;
 mod run;
@@ -110,6 +111,9 @@ pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
 /// - **Hook system**: Tool-call interception and modification
 pub struct ReactAgent {
     pub(crate) config: AgentConfig,
+    /// Runtime-mutable system prompt override (set via `set_system_prompt` trait method).
+    /// When set, this overrides `config.system_prompt` for subsequent turns.
+    pub(crate) mutable_system_prompt: std::sync::RwLock<Option<String>>,
     /// Tool execution subsystem: tool registry/execution, Skill, Hook, MCP, SubAgent, Sandbox
     pub(crate) tools: ToolExecutionSubsystem,
     /// Guard & safety subsystem: guards, permission policy, audit logging, circuit breaker
@@ -146,6 +150,11 @@ pub struct ReactAgent {
     /// Optional context assembler for centralized message list construction.
     pub(crate) context_assembler: Option<crate::context::ContextAssembler>,
 
+    /// Optional prompt template engine for variable substitution.
+    /// When set, system prompts can use template syntax (`{{variable}}`)
+    /// and the engine resolves them dynamically.
+    pub(crate) prompt_template_engine: Option<Arc<echo_core::agent::PromptTemplateManager>>,
+
     /// Current agent turn (if one is in progress).
     pub(crate) current_turn: std::sync::Mutex<Option<crate::agent::turn::AgentTurn>>,
 
@@ -155,10 +164,6 @@ pub struct ReactAgent {
     /// is true. Entries are evicted when they exceed the TTL (30 min) or when
     /// the set exceeds `MAX_READ_FILES`.
     pub(crate) recently_read_files: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
-
-    /// File content cache for avoiding repeated disk reads.
-    #[allow(dead_code)]
-    pub(crate) file_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -310,6 +315,7 @@ impl ReactAgent {
                 #[cfg(feature = "mcp")]
                 mcp_manager: McpManager::new(),
                 sandbox_manager: None,
+                intervention_callbacks: Vec::new(),
             },
             guard: GuardSubsystem {
                 guard_manager: None,
@@ -340,9 +346,10 @@ impl ReactAgent {
             current_run_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
             context_assembler: None,
+            prompt_template_engine: None,
             current_turn: std::sync::Mutex::new(None),
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            file_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            mutable_system_prompt: std::sync::RwLock::new(None),
         }
     }
 
@@ -525,6 +532,11 @@ impl ReactAgent {
     pub fn set_llm_client(&mut self, client: Arc<dyn crate::llm::LlmClient>) {
         self.config.model_name = client.model_name().to_string();
         self.llm_client = Some(client);
+    }
+
+    /// Set the working directory for the agent (affects project rules, tool paths, etc.).
+    pub fn set_working_dir(&mut self, path: Option<std::path::PathBuf>) {
+        self.config.working_dir = path;
     }
 
     /// Get the current LLM configuration.
@@ -718,6 +730,17 @@ impl ReactAgent {
         self.guard.circuit_breaker = Some(Arc::new(CircuitBreaker::new(config)));
     }
 
+    /// Set the prompt template engine for dynamic prompt variable substitution.
+    ///
+    /// When set, the agent can use template syntax (`{{variable}}`) in system
+    /// prompts and the engine resolves them dynamically at render time.
+    pub fn set_prompt_template_engine(
+        &mut self,
+        engine: Arc<echo_core::agent::PromptTemplateManager>,
+    ) {
+        self.prompt_template_engine = Some(engine);
+    }
+
     /// Set the guard manager.
     pub fn set_guard_manager(&mut self, manager: GuardManager) {
         self.guard.guard_manager = Some(manager);
@@ -892,6 +915,21 @@ impl ReactAgent {
 
     // ── Conversation persistence ──────────────────────────────────────────────────
 
+    /// Add an intervention callback that can influence agent behavior.
+    ///
+    /// Intervention callbacks are checked before tool execution, LLM reasoning,
+    /// and final answers. They can block actions, inject context, redirect
+    /// execution, modify tool arguments, or cancel the entire run.
+    ///
+    /// Unlike `AgentCallback` (which is observational), `InterventionCallback`
+    /// can *influence* the agent's decisions.
+    pub fn add_intervention_callback(
+        &mut self,
+        callback: Arc<dyn crate::agent::InterventionCallback>,
+    ) {
+        self.tools.intervention_callbacks.push(callback);
+    }
+
     /// Set the conversation history projection Store.
     ///
     /// When enabled, the agent projects the current transcript into a
@@ -960,7 +998,7 @@ impl ReactAgent {
 
     /// Clear the read-files set at the start of a new conversation turn.
     pub(crate) fn clear_read_files(&self) {
-        self.recently_read_files.lock().unwrap().clear();
+        self.recently_read_files.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     // ── Trace / run recording ─────────────────────────────────────────────────
@@ -968,9 +1006,11 @@ impl ReactAgent {
     /// Record a trace event to the current run (if a run store is attached).
     /// Also publishes trace lifecycle to global event bus for audit subscribers.
     pub(crate) async fn record_trace_event(&self, event: crate::trace::RunEvent) {
-        let run_id = self.current_run_id.lock().unwrap().clone();
+        let run_id = self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let (Some(store), Some(run_id)) = (&self.run_store, &run_id) {
-            let _ = store.append_event(run_id, event).await;
+            if let Err(e) = store.append_event(run_id, event).await {
+                tracing::warn!(error = %e, run_id = %run_id, "Failed to append trace event");
+            }
         }
     }
 
@@ -992,8 +1032,10 @@ impl ReactAgent {
                 started_at: chrono::Utc::now(),
                 finished_at: None,
             };
-            *self.current_run_id.lock().unwrap() = Some(run_id);
-            let _ = store.save(run).await;
+            *self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(run_id);
+            if let Err(e) = store.save(run).await {
+                tracing::warn!(error = %e, "Failed to save trace run on start");
+            }
         }
     }
 
@@ -1004,7 +1046,7 @@ impl ReactAgent {
         output: Option<&str>,
         error: Option<&str>,
     ) {
-        let run_id = self.current_run_id.lock().unwrap().take();
+        let run_id = self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let (Some(store), Some(run_id)) = (&self.run_store, run_id)
             && let Ok(Some(mut run)) = store.load(&run_id).await
         {
@@ -1012,7 +1054,9 @@ impl ReactAgent {
             run.final_output = output.map(|s| s.to_string());
             run.error = error.map(|s| s.to_string());
             run.finished_at = Some(chrono::Utc::now());
-            let _ = store.save(run).await;
+            if let Err(e) = store.save(run).await {
+                tracing::warn!(error = %e, "Failed to save trace run on finalize");
+            }
         }
     }
 
@@ -1056,6 +1100,21 @@ impl ReactAgent {
     /// Check if plan mode is active.
     pub fn is_plan_mode(&self) -> bool {
         self.config.plan_mode
+    }
+
+    /// Set the permission mode at runtime.
+    ///
+    /// Accepted values: "default", "plan", "auto-edit", "full-auto", "auto", "dontask".
+    /// When "plan" is set, write operations are rejected (equivalent to plan_mode).
+    pub fn set_permission_mode(&mut self, mode: &str) {
+        self.config.permission_mode = mode.to_string();
+        // Sync plan_mode flag for consistency
+        self.config.plan_mode = mode == "plan";
+    }
+
+    /// Get the current permission mode.
+    pub fn get_permission_mode(&self) -> &str {
+        &self.config.permission_mode
     }
 
     pub fn set_max_iterations(&mut self, max: usize) {
@@ -1153,10 +1212,18 @@ impl Agent for ReactAgent {
     }
 
     fn current_run_id(&self) -> Option<String> {
-        self.current_run_id.lock().unwrap().clone()
+        self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn system_prompt(&self) -> &str {
+        // Check for runtime override first
+        if let Some(ref prompt) = *self.mutable_system_prompt.read().unwrap() {
+            // We can't return a reference to the RwLock contents directly,
+            // so fall back to config prompt. The override is picked up at
+            // the start of each new turn via build_system_prompt().
+            // This method returns the "base" prompt for inspection.
+            return &self.config.system_prompt;
+        }
         &self.config.system_prompt
     }
 
@@ -1308,6 +1375,43 @@ impl Agent for ReactAgent {
             info!(agent = %self.config.agent_name, "Agent shut down complete");
             Ok(())
         })
+    }
+
+    fn messages(&self) -> Vec<crate::llm::types::Message> {
+        // context_manager uses tokio::sync::Mutex, requiring async.
+        // Return empty for sync method. Use async get_messages_async() for full data.
+        vec![]
+    }
+
+    fn register_tool(&self, tool: Box<dyn crate::tools::Tool>) {
+        self.tools.tool_manager.register(tool);
+    }
+
+    fn remove_tool(&self, name: &str) -> bool {
+        self.tools.tool_manager.unregister(name).is_some()
+    }
+
+    fn set_system_prompt(&self, prompt: &str) {
+        *self.mutable_system_prompt.write().unwrap() = Some(prompt.to_string());
+    }
+
+    fn mode(&self) -> Option<echo_core::agent::mode::AgentMode> {
+        self.config.mode
+    }
+
+    fn delegate_to<'a>(&'a self, _target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {
+        #[cfg(feature = "subagent")]
+        {
+            Box::pin(self.delegate_task(task))
+        }
+        #[cfg(not(feature = "subagent"))]
+        {
+            Box::pin(async {
+                Err(echo_core::error::ReactError::Other(
+                    "delegation not supported (subagent feature disabled)".into(),
+                ))
+            })
+        }
     }
 }
 

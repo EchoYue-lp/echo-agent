@@ -9,13 +9,14 @@ use echo_core::error::{Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
 pub use echo_core::tools::{
     Tool, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult, ToolRiskLevel,
+    ToolStreamEvent,
 };
 
 impl ToolRegistrar for ToolManager {
@@ -259,4 +260,116 @@ impl ToolManager {
         tool.validate_parameters(parameters).await
     }
 
+    /// Whether the named tool supports streaming execution via [`Tool::execute_stream`].
+    ///
+    /// Returns `false` for unknown tools (they don't exist).
+    pub fn supports_streaming(&self, tool_name: &str) -> bool {
+        match self.get_tool(tool_name) {
+            Some(tool) => tool.supports_streaming(),
+            None => false,
+        }
+    }
+
+    /// Stream tool execution, collecting all [`ToolStreamEvent`]s into a Vec.
+    ///
+    /// This method applies the same concurrency control, timeout, and retry
+    /// semantics as [`Self::execute_tool`], but routes through
+    /// [`Tool::execute_stream`] when the tool supports streaming.
+    ///
+    /// For tools that do not support streaming, the default `execute_stream`
+    /// implementation wraps [`Tool::execute`] into a single
+    /// [`ToolStreamEvent::Complete`], so this method still works correctly
+    /// (it simply returns a Vec with one element).
+    ///
+    /// # Returns
+    ///
+    /// A Vec of [`ToolStreamEvent`] ending with a [`ToolStreamEvent::Complete`].
+    /// If the stream does not produce a `Complete` event (e.g. timeout), the
+    /// last event may be a `Progress` or `PartialOutput`, and the caller
+    /// should treat this as an incomplete execution.
+    pub async fn execute_tool_stream_collect(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+    ) -> Result<Vec<ToolStreamEvent>> {
+        let tool = self
+            .get_tool(tool_name)
+            .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
+
+        // Concurrency control: acquire semaphore permit (read/write separation)
+        let is_read = crate::risk::ToolRiskClassifier::classify(tool_name)
+            == crate::risk::ToolRiskCategory::ReadOnly;
+
+        let _permit = if is_read {
+            if let Some(sem) = &self.read_semaphore {
+                match sem.acquire().await {
+                    Ok(permit) => Some(permit),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            if let Some(sem) = &self.semaphore {
+                match sem.acquire().await {
+                    Ok(permit) => Some(permit),
+                    Err(e) => {
+                        tracing::warn!("Failed to acquire semaphore permit: {}", e);
+                        return Err(ToolError::ExecutionFailed {
+                            tool: tool_name.to_string(),
+                            message: format!("Concurrency limit error: {}", e),
+                        }
+                        .into());
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
+        let max_retries = if self.config.retry_on_fail {
+            self.config.max_retries
+        } else {
+            0
+        };
+
+        let mut last_err: Option<echo_core::error::ReactError> = None;
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let delay_ms =
+                    self.config.retry_delay_ms * (1u64 << (attempt as u64 - 1).min(5));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+
+            let stream_result = if self.config.timeout_ms > 0 {
+                match tokio::time::timeout(
+                    Duration::from_millis(self.config.timeout_ms),
+                    tool.execute_stream(parameters.clone()),
+                )
+                .await
+                {
+                    Ok(future_result) => future_result,
+                    Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
+                }
+            } else {
+                tool.execute_stream(parameters.clone()).await
+            };
+
+            match stream_result {
+                Ok(stream) => {
+                    // Consume the stream, collecting all events
+                    use futures::StreamExt;
+                    let events: Vec<ToolStreamEvent> = stream.collect().await;
+                    return Ok(events);
+                }
+                Err(e) if attempt < max_retries => {
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| ToolError::NotFound(tool_name.to_string()).into()))
+    }
 }

@@ -28,3 +28,6 @@ pub use conversation::{
 };
 pub use embedder::Embedder;
 pub use store::{SearchMode, SearchQuery, Store, StoreItem};
+
+pub use core_memory::CoreMemoryBlock;
+pub use tiered::MemoryEntry;

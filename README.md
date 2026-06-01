@@ -234,13 +234,13 @@ echo-agent ships with **67 registered tools** across 6 crates, all accessible th
 
 ```toml
 # Minimal — just the ReAct engine
-echo-agent = { version = "0.1.4", default-features = false }
+echo-agent = { version = "0.2.0", default-features = false }
 
 # Full (default) — all features enabled
 echo-agent = "0.2.0"
 
 # Pick only what you need
-echo-agent = { version = "0.1.4", default-features = false, features = ["mcp", "web"] }
+echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "web"] }
 ```
 
 | Feature | Enables | Key Dependencies |
@@ -289,7 +289,7 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── src/                 Agent engine, re-exports, and facade layer
-├── examples/            33 runnable demos
+├── examples/            52 runnable demos
 ├── docs/                Bilingual documentation (en + zh)
 ├── skills/              External skill packs (Markdown-based)
 └── echo-agent.yaml      Example configuration
@@ -384,7 +384,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 ## Highlights
 
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
-- **33 runnable examples** — every feature has a demo you can `cargo run` immediately
+- **52 runnable examples** — every feature has a demo you can `cargo run` immediately
 - **Comprehensive unit tests** — full coverage across all modules
 - **6 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
@@ -1087,6 +1087,8 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 41 | [`demo41_web_tools`](examples/demo41_web_tools.rs) | Web search + fetch |
 | 42 | [`demo42_playwright_mcp`](examples/demo42_playwright_mcp.rs) | Playwright MCP browser automation |
 | 43 | [`demo43_data_tools`](examples/demo43_data_tools.rs) | Excel / CSV / Word / Text processing |
+| 50 | [`demo50_eval`](examples/demo50_eval.rs) | Eval system: cases, criteria, constraints, replay, HTML reports |
+| 51 | [`demo51_self_improvement`](examples/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
 
 Plus **6 comprehensive examples** demonstrating real-world use cases:
 
@@ -1137,6 +1139,17 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Graph Workflow | [EN](docs/en/17-graph-workflow.md) | [ZH](docs/zh/17-graph-workflow.md) |
 | Guard System | [EN](docs/en/18-guard-system.md) | [ZH](docs/zh/18-guard-system.md) |
 | Self-Reflection | [EN](docs/en/19-self-reflection.md) | [ZH](docs/zh/19-self-reflection.md) |
+| Multi-Turn Chat | [EN](docs/en/13-chat.md) | [ZH](docs/zh/13-chat.md) |
+| Semantic Search | [EN](docs/en/14-semantic-search.md) | [ZH](docs/zh/14-semantic-search.md) |
+| Web Tools | [EN](docs/en/20-web-tools.md) | [ZH](docs/zh/20-web-tools.md) |
+| Common Tools | [EN](docs/en/21-common-tools.md) | [ZH](docs/zh/21-common-tools.md) |
+| Research Tools | [EN](docs/en/22-research-tools.md) | [ZH](docs/zh/22-research-tools.md) |
+| Hooks System | [EN](docs/en/23-hooks.md) | [ZH](docs/zh/23-hooks.md) |
+| Eval System | [EN](docs/en/24-eval-system.md) | [ZH](docs/zh/24-eval-system.md) |
+| Self-Improvement | [EN](docs/en/25-self-improvement.md) | [ZH](docs/zh/25-self-improvement.md) |
+| Multi-Agent Patterns | [EN](docs/en/26-multi-agent.md) | [ZH](docs/zh/26-multi-agent.md) |
+| Tracing System | [EN](docs/en/27-tracing.md) | [ZH](docs/zh/27-tracing.md) |
+| Config Reference | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
 
 ---
 

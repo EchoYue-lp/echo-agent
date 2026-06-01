@@ -176,6 +176,12 @@ impl Tool for DeleteFileTool {
                 )));
             }
 
+            // Create git checkpoint before deletion
+            let checkpoint_tag = crate::git_checkpoint::create_checkpoint(&path);
+            if checkpoint_tag.is_some() {
+                crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
+            }
+
             tokio::fs::remove_file(&path)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
@@ -183,10 +189,16 @@ impl Tool for DeleteFileTool {
                     message: format!("Failed to delete: {}", e),
                 })?;
 
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "File deleted successfully: {}",
                 path.display()
-            )))
+            ));
+
+            if let Some(tag) = checkpoint_tag {
+                result = result.with_meta("git_checkpoint", tag);
+            }
+
+            Ok(result)
         })
     }
 }
@@ -267,7 +279,10 @@ impl Tool for ReadFileTool {
                 .get("offset")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as usize;
-            let limit = parameters.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize);
+            let limit = parameters
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|l| l as usize);
 
             let path = resolve_path("read_file", path_str, &self.base_dir)?;
 
@@ -285,12 +300,13 @@ impl Tool for ReadFileTool {
             }
 
             // Size guard: warn for files > 100KB
-            let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: "read_file".to_string(),
-                    message: format!("Failed to read metadata: {}", e),
-                }
-            })?;
+            let metadata =
+                tokio::fs::metadata(&path)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: "read_file".to_string(),
+                        message: format!("Failed to read metadata: {}", e),
+                    })?;
             let file_size = metadata.len();
             if file_size > 100 * 1024 && limit.is_none() && offset == 1 {
                 // For large files without offset/limit, read only first 2000 lines
@@ -316,12 +332,13 @@ impl Tool for ReadFileTool {
                 return Ok(ToolResult::success(output));
             }
 
-            let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: "read_file".to_string(),
-                    message: format!("Failed to read: {}", e),
-                }
-            })?;
+            let content =
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: "read_file".to_string(),
+                        message: format!("Failed to read: {}", e),
+                    })?;
 
             let all_lines: Vec<&str> = content.lines().collect();
             let total_lines = all_lines.len();
@@ -439,6 +456,17 @@ impl Tool for WriteFileTool {
                 })?;
             }
 
+            // Create git checkpoint before mutation (only if file already exists)
+            let checkpoint_tag = if path.exists() {
+                let tag = crate::git_checkpoint::create_checkpoint(&path);
+                if tag.is_some() {
+                    crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
+                }
+                tag
+            } else {
+                None
+            };
+
             let bytes = content.len();
             tokio::fs::write(&path, content)
                 .await
@@ -447,11 +475,17 @@ impl Tool for WriteFileTool {
                     message: format!("Failed to write: {}", e),
                 })?;
 
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "Successfully wrote {} bytes to '{}'",
                 bytes,
                 path.display()
-            )))
+            ));
+
+            if let Some(tag) = checkpoint_tag {
+                result = result.with_meta("git_checkpoint", tag);
+            }
+
+            Ok(result)
         })
     }
 }

@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
 // ── Shared vector store ───────────────────────────────────────────────────
 

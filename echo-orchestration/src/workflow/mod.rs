@@ -26,6 +26,7 @@
 pub mod checkpoint_store;
 mod graph;
 mod node;
+pub mod pipelines;
 pub mod state;
 
 pub use checkpoint_store::{
@@ -47,6 +48,12 @@ mod sequential;
 pub use concurrent::{ConcurrentWorkflow, ConcurrentWorkflowBuilder};
 pub use dag::{DagEdge, DagNode, DagWorkflow, DagWorkflowBuilder};
 pub use sequential::{SequentialWorkflow, SequentialWorkflowBuilder, WorkflowStep};
+
+// ── Pre-built Pipelines ──────────────────────────────────────────────────────
+
+pub use pipelines::{
+    DataPipelineConfig, WritingPipelineConfig, run_data_pipeline, run_writing_pipeline,
+};
 
 use echo_core::agent::Agent;
 use echo_core::error::Result;

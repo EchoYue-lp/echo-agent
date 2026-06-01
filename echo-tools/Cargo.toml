@@ -14,7 +14,7 @@ readme = "README.md"
 
 [features]
 default = []
-full = ["web", "chart", "data", "database", "media", "git", "rag", "shell", "files", "research"]
+full = ["web", "chart", "data", "database", "media", "git", "rag", "shell", "files", "research", "statistics"]
 research = ["dep:quick-xml", "dep:lopdf"]
 shell = []
 files = []
@@ -22,6 +22,7 @@ web = ["dep:scraper", "dep:html2text", "dep:url", "dep:async-trait"]
 media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "dep:rust_xlsxwriter"]
 chart = []
 data = ["dep:polars"]
+statistics = ["data"]
 database = ["dep:sqlx"]
 git = []
 rag = ["dep:uuid"]
@@ -57,3 +58,7 @@ polars = { version = "0.53", features = ["lazy", "csv", "json", "parquet", "dtyp
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "any"], optional = true }
 quick-xml = { version = "0.37", features = ["serialize"], optional = true }
 urlencoding = "2"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

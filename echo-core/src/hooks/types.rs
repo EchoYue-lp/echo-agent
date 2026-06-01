@@ -96,6 +96,22 @@ pub enum HookEvent {
     // ── Error events ──
     /// Agent encounters an unrecoverable error.
     StopFailure,
+
+    // ── Plugin lifecycle events ──
+    /// A plugin has been loaded and its components registered.
+    PluginLoaded,
+    /// A plugin has been disabled or unloaded.
+    PluginDisabled,
+
+    // ── Extended task events ──
+    /// Task execution timed out.
+    TaskTimeout,
+    /// Task was cancelled by the user or system.
+    TaskCancelled,
+
+    // ── Extended subagent events ──
+    /// Subagent was cancelled.
+    SubagentCancelled,
 }
 
 impl HookEvent {
@@ -108,9 +124,14 @@ impl HookEvent {
             | HookEvent::PermissionRequest
             | HookEvent::PermissionDenied => HookEventCategory::Tool,
 
-            HookEvent::SubagentStart | HookEvent::SubagentStop => HookEventCategory::Subagent,
+            HookEvent::SubagentStart | HookEvent::SubagentStop | HookEvent::SubagentCancelled => {
+                HookEventCategory::Subagent
+            }
 
-            HookEvent::TaskCreated | HookEvent::TaskCompleted => HookEventCategory::Task,
+            HookEvent::TaskCreated
+            | HookEvent::TaskCompleted
+            | HookEvent::TaskTimeout
+            | HookEvent::TaskCancelled => HookEventCategory::Task,
 
             HookEvent::StopFailure => HookEventCategory::Error,
 
@@ -123,7 +144,9 @@ impl HookEvent {
             | HookEvent::PostCompact
             | HookEvent::ConfigChange
             | HookEvent::InstructionsLoaded
-            | HookEvent::PostToolBatch => HookEventCategory::Lifecycle,
+            | HookEvent::PostToolBatch
+            | HookEvent::PluginLoaded
+            | HookEvent::PluginDisabled => HookEventCategory::Lifecycle,
         }
     }
 
@@ -168,6 +191,11 @@ impl HookEvent {
             HookEvent::TaskCreated => "TaskCreated",
             HookEvent::TaskCompleted => "TaskCompleted",
             HookEvent::StopFailure => "StopFailure",
+            HookEvent::PluginLoaded => "PluginLoaded",
+            HookEvent::PluginDisabled => "PluginDisabled",
+            HookEvent::TaskTimeout => "TaskTimeout",
+            HookEvent::TaskCancelled => "TaskCancelled",
+            HookEvent::SubagentCancelled => "SubagentCancelled",
         }
     }
 }
@@ -433,6 +461,17 @@ impl HookContext {
     pub fn for_session_end(matcher: &str, session_id: &str, agent_name: &str) -> Self {
         Self {
             event: HookEvent::SessionEnd,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(matcher.to_string()),
+            ..Self::default()
+        }
+    }
+
+    /// Generic constructor for lifecycle events that don't have a dedicated factory.
+    pub fn for_lifecycle(event: HookEvent, matcher: &str, session_id: &str, agent_name: &str) -> Self {
+        Self {
+            event,
             session_id: session_id.to_string(),
             agent_name: agent_name.to_string(),
             matcher: Some(matcher.to_string()),
@@ -740,6 +779,8 @@ pub enum HookSource {
     Skill(String),
     /// Hooks from user configuration (echo-agent.yaml).
     UserConfig,
+    /// Hooks from an installed plugin.
+    Plugin(String),
 }
 
 impl std::fmt::Display for HookSource {
@@ -747,6 +788,7 @@ impl std::fmt::Display for HookSource {
         match self {
             HookSource::Skill(name) => write!(f, "skill:{}", name),
             HookSource::UserConfig => write!(f, "user_config"),
+            HookSource::Plugin(name) => write!(f, "plugin:{}", name),
         }
     }
 }

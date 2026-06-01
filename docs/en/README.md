@@ -32,14 +32,19 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 | Doc | Module | Key Concepts |
 |-----|--------|--------------|
-| [19 - Self-Reflection Agent](./19-self-reflection.md) | Self-Reflection | Generate → Critique → Refine, episodic memory, LlmCritic |
 | [16 - Plan-and-Execute](./16-plan-execute.md) | Plan-Execute | Planner/Executor, incremental replanning, DAG scheduling |
 | [17 - Graph Workflow](./17-graph-workflow.md) | Workflow | LangGraph-style, SharedState, conditional edges, fan-out/fan-in |
 | [18 - Guard System](./18-guard-system.md) | Guards | RuleGuard, LlmGuard, input/output filtering |
+| [19 - Self-Reflection Agent](./19-self-reflection.md) | Self-Reflection | Generate → Critique → Refine, episodic memory, LlmCritic |
 | [20 - Web Tools](./20-web-tools.md) | Web Search / Fetch | DuckDuckGo / Brave / Tavily search, HTML→text |
 | [21 - Common Tools](./21-common-tools.md) | Tool Guide | Web search, web fetch, browser automation, data tools |
 | [22 - Research Tools](./22-research-tools.md) | Research | ArXiv search, Semantic Scholar, PDF fetch, BibTeX generation |
 | [23 - Hooks System](./23-hooks.md) | Hooks | Skills hooks (20 events), Task hooks, Subagent hooks |
+| [24 - Eval System](./24-eval-system.md) | Eval | EvalCase, SuccessCriteria, LlmGrader, A/B comparison, regression, HTML reports |
+| [25 - Self-Improvement](./25-self-improvement.md) | Improve | Analyzer, ImprovementLoop, SelfEvolution, BackgroundReviewer, Curator, TrajectorySaver |
+| [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerWorker/Pipeline/Debate/Swarm) |
+| [27 - Tracing System](./27-tracing.md) | Trace | Run, RunEvent (11 types), RunStore, JsonlRunStore, lifecycle, secret redaction |
+| [28 - Config Reference](./28-config-reference.md) | Config | AgentConfig, ReactAgentBuilder, ToolExecutionConfig, TokenBudgetConfig, YAML config, feature flags |
 
 ### Knowledge Base
 
@@ -173,3 +178,5 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo16_testing.rs` | Mock testing infrastructure (zero real LLM calls) |
 | `examples/demo17_chat.rs` | Multi-turn chat (chat / chat_stream / reset) |
 | `examples/demo18_semantic_memory.rs` | Store semantic search (EmbeddingStore / vector retrieval) |
+| `examples/demo50_eval.rs` | Eval system: cases, criteria, constraints, trajectory replay, trigger accuracy, HTML reports |
+| `examples/demo51_self_improvement.rs` | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver, SelfEvolution |

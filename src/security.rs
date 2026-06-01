@@ -1,11 +1,15 @@
 //! Secret scanner and redaction — prevent credential leakage.
 //!
-//! TODO(security): Split patterns into high-confidence (AWS/GH/Anthropic key prefixes)
+//! TODO(security, v0.3): Split patterns into high-confidence (AWS/GH/Anthropic key prefixes)
 //! vs heuristic/generic (token/password patterns with high false-positive rate).
-//! High-confidence matches should block; generic matches should warn only.
+//! High-confidence matches should block execution; generic matches should warn only.
+//! Priority: start with AWS (AKIA prefix) and GitHub (ghp_/github_pat_) as they have
+//! near-zero false-positive rates, then expand to other providers.
 //!
-//! TODO(security): "Password in URL" pattern matches harmless examples in docs.
-//! Add boundary checks or exclude lines starting with "//" or "#" (comment lines).
+//! TODO(security, v0.3): "Password in URL" pattern matches harmless examples in docs
+//! and code comments. Add boundary checks: exclude lines starting with "//" or "#"
+//! (comment lines), and require the match to appear in a configuration context
+//! (e.g., inside a connection string or URI assignment).
 //!
 //! Scans text for secrets (API keys, tokens, passwords, private keys) and
 //! either redacts them or warns the user. Used by the output guard pipeline
@@ -108,8 +112,18 @@ pub fn redact_secrets(text: &str) -> String {
     for m in &matches {
         let replacement = format!("[REDACTED: {}]", m.secret_type);
         let end = m.position + m.matched.len();
-        if end <= result.len() {
+        // Safety: ensure byte range is on valid UTF-8 char boundaries before replacing
+        if end <= result.len()
+            && result.is_char_boundary(m.position)
+            && result.is_char_boundary(end)
+        {
             result.replace_range(m.position..end, &replacement);
+        } else {
+            tracing::warn!(
+                "Skipping secret redaction at {}..{}: not on UTF-8 char boundary",
+                m.position,
+                end
+            );
         }
     }
     result

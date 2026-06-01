@@ -17,6 +17,10 @@
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
 
+#[cfg(feature = "lsp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "lsp")))]
+pub mod lsp;
+
 #[cfg(feature = "channels")]
 #[cfg_attr(docsrs, doc(cfg(feature = "channels")))]
 pub mod channels;

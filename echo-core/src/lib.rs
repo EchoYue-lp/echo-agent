@@ -27,7 +27,11 @@ pub mod error;
 pub mod guard;
 pub mod hooks;
 pub mod llm;
+#[cfg(feature = "lsp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "lsp")))]
+pub mod lsp;
 pub mod memory;
+pub mod plugin;
 pub mod project_rules;
 pub mod retry;
 pub mod sandbox;

@@ -77,7 +77,7 @@ impl ReactAgent {
 
         let mut snap = make_snapshot(self);
         // Pass current run_id from the agent to the snapshot
-        snap.current_run_id = self.current_run_id.lock().unwrap().clone();
+        snap.current_run_id = self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         tokio::spawn(async move {
             if let Err(e) = snap
@@ -218,6 +218,29 @@ impl AgentSnapshot {
             let messages = prepare_result.messages;
             for cb in &callbacks {
                 cb.on_think_start(&agent, &messages).await;
+            }
+
+            // ── Intervention callbacks for think (streaming path) ──
+            for intervention in &self.tools.intervention_callbacks {
+                let result = intervention.on_think_start(&agent, &messages).await;
+                if result.cancel {
+                    let _ = tx.try_send(Err(ReactError::Other(
+                        "Agent execution cancelled by intervention at think".into(),
+                    )));
+                    return Ok(());
+                }
+                if result.block {
+                    let reason = result
+                        .block_reason
+                        .unwrap_or_else(|| "blocked by intervention at think".into());
+                    let _ = tx.try_send(Err(ReactError::Other(format!(
+                        "Think blocked by intervention: {}", reason
+                    ))));
+                    return Ok(());
+                }
+                if let Some(injected) = result.injected_context {
+                    context.lock().await.push(Message::system(injected));
+                }
             }
 
             let mut llm_stream = Box::pin(try_send!(
@@ -730,6 +753,29 @@ impl AgentSnapshot {
         for cb in &callbacks {
             cb.on_final_answer(&agent, output).await;
         }
+
+        // ── Intervention callbacks for final answer (streaming path) ──
+        for intervention in &self.tools.intervention_callbacks {
+            let result = intervention.on_final_answer(&agent, output).await;
+            if result.cancel {
+                return Err(ReactError::Other(
+                    "Agent execution cancelled by intervention at final answer".into(),
+                ));
+            }
+            if result.block {
+                let reason = result
+                    .block_reason
+                    .unwrap_or_else(|| "blocked by intervention at final answer".into());
+                info!(agent = %agent, reason = %reason, "Intervention blocked final answer (streaming)");
+                return Err(ReactError::Other(format!(
+                    "Final answer blocked by intervention: {}", reason
+                )));
+            }
+            if let Some(injected) = result.injected_context {
+                context.lock().await.push(Message::system(injected));
+            }
+        }
+
         info!(agent = %agent, "Streaming execution completed{label}");
         if let Some(al) = &self.guard.audit_logger {
             let ev = crate::audit::AuditEvent::now(
@@ -772,12 +818,58 @@ impl AgentSnapshot {
     ///
     /// Mirrors `ReactAgent::execute_tool_feedback_raw` but uses the
     /// snapshot's owned state so it can run inside a `'static` future.
-    async fn execute_tool_with_policy(
-        &self,
-        tool_name: &str,
-        params: &ToolParameters,
-        input: &Value,
-    ) -> std::result::Result<String, crate::error::ReactError> {
+    fn execute_tool_with_policy<'a>(
+        &'a self,
+        tool_name: &'a str,
+        params: &'a ToolParameters,
+        input: &'a Value,
+    ) -> futures::future::BoxFuture<'a, std::result::Result<String, crate::error::ReactError>> {
+        Box::pin(async move {
+        // ── Intervention callbacks (highest-priority decision point, streaming path) ──
+        for intervention in &self.tools.intervention_callbacks {
+            let result = intervention
+                .on_tool_call(&self.config.agent_name, tool_name, input)
+                .await;
+            if result.cancel {
+                return Err(crate::error::ReactError::Other(format!(
+                    "Agent execution cancelled by intervention: tool {}",
+                    tool_name
+                )));
+            }
+            if result.block {
+                let reason = result
+                    .block_reason
+                    .unwrap_or_else(|| "blocked by intervention callback".into());
+                return Ok(format!(
+                    "Tool {} blocked by intervention: {}",
+                    tool_name, reason
+                ));
+            }
+            if let Some(redirect) = result.redirect_to {
+                let redirect_args = result.modified_args.unwrap_or_else(|| input.clone());
+                let redirect_params: ToolParameters = if let Value::Object(map) = &redirect_args {
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                } else {
+                    params.clone()
+                };
+                return self
+                    .execute_tool_with_policy(&redirect, &redirect_params, &redirect_args)
+                    .await;
+            }
+            if let Some(modified) = result.modified_args {
+                let modified_params: ToolParameters = if let Value::Object(map) = &modified {
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                } else {
+                    params.clone()
+                };
+                return self
+                    .execute_tool_with_policy(tool_name, &modified_params, &modified)
+                    .await;
+            }
+            // injected_context from interventions is handled at the think level
+            // (not directly applicable in the tool execution policy path)
+        }
+
         // ── PreToolUse hooks ──
         let hook_reg = self.tools.hook_registry.read().await.clone();
         let pre_result = hook_reg
@@ -907,6 +999,7 @@ impl AgentSnapshot {
         // ── Truncate ──
         let truncated = self.truncate_output(result.output).await;
         Ok(truncated)
+        })
     }
 
     fn validate_read_before_edit(
@@ -921,7 +1014,7 @@ impl AgentSnapshot {
         if let Some(path) = extract_path_param(params) {
             let canonical = canonicalize_for_read_tracking(&path);
             let ttl = std::time::Duration::from_secs(30 * 60);
-            let mut files = self.recently_read_files.lock().unwrap();
+            let mut files = self.recently_read_files.lock().unwrap_or_else(|e| e.into_inner());
             let read = match files.get(&canonical) {
                 Some(instant) if instant.elapsed() < ttl => true,
                 Some(_) => {
@@ -951,7 +1044,7 @@ impl AgentSnapshot {
             let canonical = canonicalize_for_read_tracking(&path);
             self.recently_read_files
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(canonical, std::time::Instant::now());
         }
     }

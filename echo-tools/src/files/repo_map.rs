@@ -129,7 +129,9 @@ impl Tool for RepoMapTool {
             };
 
             if output.is_empty() {
-                return Ok(ToolResult::success("Empty directory or no source files found.".to_string()));
+                return Ok(ToolResult::success(
+                    "Empty directory or no source files found.".to_string(),
+                ));
             }
 
             Ok(ToolResult::success(output))
@@ -141,10 +143,7 @@ impl Tool for RepoMapTool {
 
 async fn build_tree(root: &Path, max_depth: usize) -> Result<String> {
     let mut lines = Vec::new();
-    let root_name = root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(".");
+    let root_name = root.file_name().and_then(|n| n.to_str()).unwrap_or(".");
     lines.push(format!("{}/", root_name));
     walk_tree(root, "", max_depth, 0, &mut lines).await?;
     Ok(lines.join("\n"))
@@ -163,12 +162,12 @@ fn walk_tree<'a>(
         }
 
         let mut entries: Vec<(String, PathBuf, bool)> = Vec::new();
-        let mut dir_entries = fs::read_dir(dir).await.map_err(|e| {
-            ToolError::ExecutionFailed {
+        let mut dir_entries = fs::read_dir(dir)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
                 tool: "repo_map".to_string(),
                 message: format!("Cannot read directory: {}", e),
-            }
-        })?;
+            })?;
 
         while let Ok(Some(entry)) = dir_entries.next_entry().await {
             let path = entry.path();
@@ -196,7 +195,14 @@ fn walk_tree<'a>(
 
             if *is_dir {
                 lines.push(format!("{}{}{}/", prefix, connector, name));
-                walk_tree(path, &format!("{}{}", prefix, child_prefix), max_depth, depth + 1, lines).await?;
+                walk_tree(
+                    path,
+                    &format!("{}{}", prefix, child_prefix),
+                    max_depth,
+                    depth + 1,
+                    lines,
+                )
+                .await?;
             } else {
                 // Count symbols in source files
                 let symbol_count = if is_source_file(name) {
@@ -205,7 +211,10 @@ fn walk_tree<'a>(
                     0
                 };
                 if symbol_count > 0 {
-                    lines.push(format!("{}{}{} ({} symbols)", prefix, connector, name, symbol_count));
+                    lines.push(format!(
+                        "{}{}{} ({} symbols)",
+                        prefix, connector, name, symbol_count
+                    ));
                 } else {
                     lines.push(format!("{}{}{}", prefix, connector, name));
                 }
@@ -226,10 +235,7 @@ async fn build_symbol_map(root: &Path, max_depth: usize) -> Result<String> {
     for (file, syms) in &symbols {
         if !syms.is_empty() {
             let file_path = Path::new(file.as_str());
-            let rel = file_path
-                .strip_prefix(root)
-                .unwrap_or(file_path)
-                .display();
+            let rel = file_path.strip_prefix(root).unwrap_or(file_path).display();
             lines.push(format!("{}:", rel));
             for sym in syms {
                 lines.push(format!("  {}", sym));
@@ -250,12 +256,12 @@ async fn collect_symbols(
         return Ok(());
     }
 
-    let mut dir_entries = fs::read_dir(dir).await.map_err(|e| {
-        ToolError::ExecutionFailed {
+    let mut dir_entries = fs::read_dir(dir)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
             tool: "repo_map".to_string(),
             message: format!("Cannot read directory: {}", e),
-        }
-    })?;
+        })?;
 
     while let Ok(Some(entry)) = dir_entries.next_entry().await {
         let path = entry.path();
@@ -290,10 +296,7 @@ async fn extract_symbols(path: &Path) -> Vec<String> {
         Err(_) => return vec![],
     };
 
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "rs" => extract_rust_symbols(&content),
@@ -365,7 +368,11 @@ fn extract_python_symbols(content: &str) -> Vec<String> {
             }
         } else if trimmed.starts_with("class ") {
             let rest = &trimmed[6..];
-            let name = rest.split(|c: char| c == '(' || c == ':' || c == '{').next().unwrap_or("").trim();
+            let name = rest
+                .split(|c: char| c == '(' || c == ':' || c == '{')
+                .next()
+                .unwrap_or("")
+                .trim();
             if !name.is_empty() {
                 symbols.push(format!("class {}", name));
             }
@@ -399,7 +406,11 @@ fn extract_js_symbols(content: &str) -> Vec<String> {
             } else {
                 &trimmed[6..]
             };
-            let name = rest.split(|c: char| c == ' ' || c == '{').next().unwrap_or("").trim();
+            let name = rest
+                .split(|c: char| c == ' ' || c == '{')
+                .next()
+                .unwrap_or("")
+                .trim();
             if !name.is_empty() {
                 symbols.push(format!("class {}", name));
             }
@@ -409,7 +420,11 @@ fn extract_js_symbols(content: &str) -> Vec<String> {
             } else {
                 &trimmed[10..]
             };
-            let name = rest.split(|c: char| c == ' ' || c == '{').next().unwrap_or("").trim();
+            let name = rest
+                .split(|c: char| c == ' ' || c == '{')
+                .next()
+                .unwrap_or("")
+                .trim();
             if !name.is_empty() {
                 symbols.push(format!("interface {}", name));
             }
@@ -468,15 +483,16 @@ fn extract_java_symbols(content: &str) -> Vec<String> {
             if let Some(name) = name {
                 symbols.push(format!("class {}", name));
             }
-        } else if (trimmed.contains("public interface ")
-            || trimmed.contains("interface "))
+        } else if (trimmed.contains("public interface ") || trimmed.contains("interface "))
             && !trimmed.starts_with("//")
         {
             let name = extract_java_type_name(trimmed, "interface");
             if let Some(name) = name {
                 symbols.push(format!("interface {}", name));
             }
-        } else if (trimmed.starts_with("public ") || trimmed.starts_with("private ") || trimmed.starts_with("protected "))
+        } else if (trimmed.starts_with("public ")
+            || trimmed.starts_with("private ")
+            || trimmed.starts_with("protected "))
             && trimmed.contains("(")
             && !trimmed.contains("class ")
             && !trimmed.contains("interface ")
@@ -511,8 +527,8 @@ fn should_skip(name: &str) -> bool {
 
 fn is_source_file(name: &str) -> bool {
     let exts = [
-        "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "kt",
-        "c", "cpp", "h", "hpp", "cs", "rb", "swift", "scala",
+        "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "kt", "c", "cpp", "h", "hpp", "cs",
+        "rb", "swift", "scala",
     ];
     if let Some(dot_pos) = name.rfind('.') {
         let ext = &name[dot_pos + 1..];
@@ -537,29 +553,56 @@ async fn count_symbols(path: &Path) -> Result<usize> {
 }
 
 fn extract_fn_name(line: &str) -> Option<String> {
-    let rest = line.trim_start_matches("pub ").trim_start_matches("async ").trim_start_matches("fn ");
+    let rest = line
+        .trim_start_matches("pub ")
+        .trim_start_matches("async ")
+        .trim_start_matches("fn ");
     let name = rest.split('(').next()?.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn extract_type_name(line: &str, keyword: &str) -> Option<String> {
-    let rest = line.trim_start_matches("pub ").trim_start_matches(&format!("{} ", keyword));
-    let name = rest.split(|c: char| c == ' ' || c == '{' || c == '<' || c == ';').next()?.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    let rest = line
+        .trim_start_matches("pub ")
+        .trim_start_matches(&format!("{} ", keyword));
+    let name = rest
+        .split(|c: char| c == ' ' || c == '{' || c == '<' || c == ';')
+        .next()?
+        .trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn extract_java_type_name(line: &str, keyword: &str) -> Option<String> {
     let idx = line.find(keyword)?;
     let rest = &line[idx + keyword.len()..];
-    let name = rest.split(|c: char| c == ' ' || c == '{' || c == '<').next()?.trim();
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    let name = rest
+        .split(|c: char| c == ' ' || c == '{' || c == '<')
+        .next()?
+        .trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn extract_java_method_name(line: &str) -> Option<String> {
     let paren_idx = line.find('(')?;
     let before = &line[..paren_idx];
     let name = before.split_whitespace().last()?;
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(test)]

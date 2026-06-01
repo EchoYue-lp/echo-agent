@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::security::{ResourceLimits, SecurityConfig};
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
 const TOOL_NAME: &str = "excel_tools";
 
@@ -200,7 +200,11 @@ impl Tool for ExcelInfoTool {
                                 .unwrap_or_default()
                         })
                         .collect();
-                    let non_empty: Vec<&str> = headers.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                    let non_empty: Vec<&str> = headers
+                        .iter()
+                        .map(|s| s.as_str())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     if !non_empty.is_empty() {
                         info.push(format!("    Headers: {}", non_empty.join(" | ")));
                     }
@@ -555,7 +559,10 @@ impl Tool for ExcelProfileTool {
                 .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
 
             let sheet_name = parameters.get("sheet").and_then(|v| v.as_str());
-            let max_rows = parameters.get("max_rows").and_then(|v| v.as_u64()).map(|r| r as usize);
+            let max_rows = parameters
+                .get("max_rows")
+                .and_then(|v| v.as_u64())
+                .map(|r| r as usize);
 
             let security = SecurityConfig::global();
             let _path = security.validate_file(file_path)?;
@@ -572,7 +579,10 @@ impl Tool for ExcelProfileTool {
             let target_sheet = if let Some(name) = sheet_name {
                 name.to_string()
             } else {
-                sheets.first().cloned().unwrap_or_else(|| "Sheet1".to_string())
+                sheets
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Sheet1".to_string())
             };
 
             let range = workbook.worksheet_range(&target_sheet).map_err(|e| {
@@ -659,7 +669,10 @@ impl Tool for ExcelProfileTool {
                     let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
                     let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-                    detail.push_str(&format!(" | min={:.2} max={:.2} mean={:.2}", min, max, mean));
+                    detail.push_str(&format!(
+                        " | min={:.2} max={:.2} mean={:.2}",
+                        min, max, mean
+                    ));
                 }
 
                 report.push(detail);
@@ -733,7 +746,11 @@ impl Tool for ExcelWriteTool {
             let headers: Option<Vec<String>> = parameters
                 .get("headers")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
 
             let data = parameters
                 .get("data")
@@ -755,10 +772,12 @@ impl Tool for ExcelWriteTool {
             let worksheet = workbook.add_worksheet();
 
             // Set sheet name
-            worksheet.set_name(sheet_name).map_err(|e| ToolError::ExecutionFailed {
-                tool: TOOL_NAME.to_string(),
-                message: format!("Failed to set sheet name: {}", e),
-            })?;
+            worksheet
+                .set_name(sheet_name)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: TOOL_NAME.to_string(),
+                    message: format!("Failed to set sheet name: {}", e),
+                })?;
 
             let mut row = 0u32;
 
@@ -787,26 +806,32 @@ impl Tool for ExcelWriteTool {
                         match value {
                             serde_json::Value::Number(n) => {
                                 if let Some(f) = n.as_f64() {
-                                    worksheet.write_number(row, col as u16, f).map_err(write_err)?;
+                                    worksheet
+                                        .write_number(row, col as u16, f)
+                                        .map_err(write_err)?;
                                 } else if let Some(i) = n.as_i64() {
-                                    worksheet.write_number(row, col as u16, i as f64).map_err(write_err)?;
+                                    worksheet
+                                        .write_number(row, col as u16, i as f64)
+                                        .map_err(write_err)?;
                                 }
                             }
                             serde_json::Value::String(s) => {
-                                worksheet.write_string(row, col as u16, s).map_err(write_err)?;
+                                worksheet
+                                    .write_string(row, col as u16, s)
+                                    .map_err(write_err)?;
                             }
                             serde_json::Value::Bool(b) => {
-                                worksheet.write_boolean(row, col as u16, *b).map_err(write_err)?;
+                                worksheet
+                                    .write_boolean(row, col as u16, *b)
+                                    .map_err(write_err)?;
                             }
                             serde_json::Value::Null => {
                                 // Skip null cells
                             }
                             _ => {
-                                worksheet.write_string(
-                                    row,
-                                    col as u16,
-                                    &value.to_string(),
-                                ).map_err(write_err)?;
+                                worksheet
+                                    .write_string(row, col as u16, &value.to_string())
+                                    .map_err(write_err)?;
                             }
                         }
                     }
@@ -815,10 +840,12 @@ impl Tool for ExcelWriteTool {
                 row += 1;
             }
 
-            workbook.save(&output_path).map_err(|e| ToolError::ExecutionFailed {
-                tool: TOOL_NAME.to_string(),
-                message: format!("Failed to save Excel file: {}", e),
-            })?;
+            workbook
+                .save(&output_path)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: TOOL_NAME.to_string(),
+                    message: format!("Failed to save Excel file: {}", e),
+                })?;
 
             Ok(ToolResult::success(format!(
                 "Excel file written: {} (sheet: {}, {} rows, {} cols)",
@@ -942,7 +969,10 @@ impl Tool for ExcelLoadTool {
             let target_sheet = if let Some(name) = sheet_name {
                 name.to_string()
             } else {
-                sheets.first().cloned().unwrap_or_else(|| "Sheet1".to_string())
+                sheets
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Sheet1".to_string())
             };
 
             let range = workbook.worksheet_range(&target_sheet).map_err(|e| {
@@ -954,7 +984,9 @@ impl Tool for ExcelLoadTool {
 
             let (height, width) = range.get_size();
             if height == 0 || width == 0 {
-                return Ok(ToolResult::success("Sheet is empty, nothing to load.".to_string()));
+                return Ok(ToolResult::success(
+                    "Sheet is empty, nothing to load.".to_string(),
+                ));
             }
 
             let data_start_row = if has_header { 1 } else { 0 };
@@ -972,7 +1004,9 @@ impl Tool for ExcelLoadTool {
                     })
                     .collect()
             } else {
-                (0..width).map(|col| format!("Column_{}", col + 1)).collect()
+                (0..width)
+                    .map(|col| format!("Column_{}", col + 1))
+                    .collect()
             };
 
             // Detect column types by scanning all data rows
@@ -1012,56 +1046,53 @@ impl Tool for ExcelLoadTool {
                 if col_is_bool[col] {
                     // Boolean column
                     let vals: Vec<Option<bool>> = (data_start_row..(data_start_row + load_rows))
-                        .map(|row_idx| {
-                            match range.get_value((row_idx as u32, col as u32)) {
+                        .map(
+                            |row_idx| match range.get_value((row_idx as u32, col as u32)) {
                                 Some(calamine::Data::Bool(b)) => Some(*b),
                                 _ => None,
-                            }
-                        })
+                            },
+                        )
                         .collect();
                     series_list.push(Series::new(col_name, vals));
                 } else if col_is_numeric[col] {
                     if col_has_float[col] {
                         // Float column
-                        let vals: Vec<Option<f64>> =
-                            (data_start_row..(data_start_row + load_rows))
-                                .map(|row_idx| {
-                                    match range.get_value((row_idx as u32, col as u32)) {
-                                        Some(calamine::Data::Float(f)) => Some(*f),
-                                        Some(calamine::Data::Int(i)) => Some(*i as f64),
-                                        _ => None,
-                                    }
-                                })
-                                .collect();
+                        let vals: Vec<Option<f64>> = (data_start_row..(data_start_row + load_rows))
+                            .map(
+                                |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                    Some(calamine::Data::Float(f)) => Some(*f),
+                                    Some(calamine::Data::Int(i)) => Some(*i as f64),
+                                    _ => None,
+                                },
+                            )
+                            .collect();
                         series_list.push(Series::new(col_name, vals));
                     } else {
                         // Integer column
-                        let vals: Vec<Option<i64>> =
-                            (data_start_row..(data_start_row + load_rows))
-                                .map(|row_idx| {
-                                    match range.get_value((row_idx as u32, col as u32)) {
-                                        Some(calamine::Data::Int(i)) => Some(*i),
-                                        Some(calamine::Data::Float(f)) => Some(*f as i64),
-                                        _ => None,
-                                    }
-                                })
-                                .collect();
+                        let vals: Vec<Option<i64>> = (data_start_row..(data_start_row + load_rows))
+                            .map(
+                                |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                    Some(calamine::Data::Int(i)) => Some(*i),
+                                    Some(calamine::Data::Float(f)) => Some(*f as i64),
+                                    _ => None,
+                                },
+                            )
+                            .collect();
                         series_list.push(Series::new(col_name, vals));
                     }
                 } else {
                     // String column
-                    let vals: Vec<Option<String>> =
-                        (data_start_row..(data_start_row + load_rows))
-                            .map(|row_idx| {
-                                match range.get_value((row_idx as u32, col as u32)) {
-                                    Some(calamine::Data::Empty) | None => None,
-                                    Some(v) => {
-                                        let s = format_cell_value(v);
-                                        if s.is_empty() { None } else { Some(s) }
-                                    }
+                    let vals: Vec<Option<String>> = (data_start_row..(data_start_row + load_rows))
+                        .map(
+                            |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                Some(calamine::Data::Empty) | None => None,
+                                Some(v) => {
+                                    let s = format_cell_value(v);
+                                    if s.is_empty() { None } else { Some(s) }
                                 }
-                            })
-                            .collect();
+                            },
+                        )
+                        .collect();
                     series_list.push(Series::new(col_name, vals));
                 }
             }
@@ -1070,12 +1101,11 @@ impl Tool for ExcelLoadTool {
             let columns: Vec<polars::prelude::Column> =
                 series_list.into_iter().map(|s| s.into_column()).collect();
             let col_count = columns.len();
-            let mut df = DataFrame::new(col_count, columns).map_err(|e| {
-                ToolError::ExecutionFailed {
+            let mut df =
+                DataFrame::new(col_count, columns).map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("Failed to create DataFrame: {}", e),
-                }
-            })?;
+                })?;
 
             // Create parent directory if needed
             if let Some(parent) = out_path.parent() {
@@ -1127,7 +1157,10 @@ impl Tool for ExcelLoadTool {
             let dtypes: Vec<String> = col_names
                 .iter()
                 .map(|name| {
-                    let dtype = df.column(name).map(|c| c.dtype().clone()).unwrap_or_default();
+                    let dtype = df
+                        .column(name)
+                        .map(|c| c.dtype().clone())
+                        .unwrap_or_default();
                     format!("{}: {:?}", name, dtype)
                 })
                 .collect();
@@ -1142,10 +1175,7 @@ impl Tool for ExcelLoadTool {
                 out_path.display(),
                 format
             ));
-            result.push(format!(
-                "Shape: {} rows x {} columns",
-                shape.0, shape.1
-            ));
+            result.push(format!("Shape: {} rows x {} columns", shape.0, shape.1));
             result.push(String::new());
             result.push("Columns:".to_string());
             for d in &dtypes {

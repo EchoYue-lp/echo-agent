@@ -80,13 +80,23 @@ impl std::error::Error for StateError {}
 impl From<StateError> for ReactError {
     fn from(e: StateError) -> Self {
         match e {
-            StateError::Serialize(msg) => ReactError::Other(format!("State serialization error: {msg}")),
-            StateError::LockPoisoned(msg) => ReactError::Other(format!("State lock poisoned: {msg}")),
-            StateError::TypeMismatch { key, expected, found } => ReactError::Other(format!(
+            StateError::Serialize(msg) => {
+                ReactError::Other(format!("State serialization error: {msg}"))
+            }
+            StateError::LockPoisoned(msg) => {
+                ReactError::Other(format!("State lock poisoned: {msg}"))
+            }
+            StateError::TypeMismatch {
+                key,
+                expected,
+                found,
+            } => ReactError::Other(format!(
                 "State type mismatch for '{key}': expected {expected}, found {found}"
             )),
             StateError::MissingKey(key) => ReactError::Other(format!("State missing key: '{key}'")),
-            StateError::InvalidOperation(msg) => ReactError::Other(format!("State invalid operation: {msg}")),
+            StateError::InvalidOperation(msg) => {
+                ReactError::Other(format!("State invalid operation: {msg}"))
+            }
         }
     }
 }

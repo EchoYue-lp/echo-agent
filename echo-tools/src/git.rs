@@ -25,6 +25,7 @@ use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel, ToolRunn
     description = "View working directory status of the current repo: modified, staged, untracked files",
     risk_level = "ReadOnly"
 )]
+// TODO(v0.3): integrate into default tool registry once git tool suite is stabilized
 #[allow(dead_code)]
 pub struct GitStatusTool {
     #[tool_param(description = "Repository path (defaults to current working directory)")]
@@ -107,11 +108,15 @@ impl Tool for GitDiffTool {
             let target = parameters.get("target").and_then(|v| v.as_str());
             let file_path = parameters.get("file_path").and_then(|v| v.as_str());
 
+            // Add -- separator before user-supplied arguments to prevent
+            // argument injection (e.g., target starting with -)
+            if target.is_some() || file_path.is_some() {
+                args.push("--");
+            }
             if let Some(t) = target {
                 args.push(t);
             }
             if let Some(fp) = file_path {
-                args.push("--");
                 args.push(fp);
             }
 
@@ -285,6 +290,8 @@ impl Tool for GitBlameTool {
                 args.push("-L".to_string());
                 args.push(format!("{},{}", start, end));
             }
+            // Add -- separator before user-supplied file path to prevent argument injection
+            args.push("--".to_string());
             args.push(file_path.to_string());
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

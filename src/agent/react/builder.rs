@@ -1,7 +1,10 @@
 //! Agent builder
 
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
-use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole};
+use crate::agent::{
+    Agent, AgentCallback, AgentConfig, AgentMode, AgentRole, DefaultModeEngine,
+    InterventionCallback, ModeEngine,
+};
 use crate::audit::AuditLogger;
 use crate::context::ContextAssembler;
 use crate::error::Result;
@@ -17,6 +20,7 @@ use crate::sandbox::SandboxManager;
 use crate::tools::permission::PermissionPolicy;
 use crate::tools::{Tool, ToolExecutionConfig};
 use crate::trace::RunStore;
+use echo_core::agent::PromptTemplateManager;
 use echo_core::circuit_breaker::CircuitBreakerConfig;
 use std::sync::Arc;
 
@@ -63,6 +67,15 @@ pub struct ReactAgentBuilder {
     run_store: Option<Arc<dyn RunStore>>,
     tool_execution_pipeline: Option<Arc<ToolExecutionPipeline>>,
     context_assembler: Option<ContextAssembler>,
+    /// Agent operating mode, used to auto-configure system prompt and tools
+    mode: Option<AgentMode>,
+    /// Mode engine for resolving mode configuration (defaults to DefaultModeEngine)
+    mode_engine: Option<Arc<dyn ModeEngine>>,
+    /// Prompt template engine for variable substitution in system prompts
+    prompt_template_engine: Option<Arc<PromptTemplateManager>>,
+    /// Intervention callbacks that can influence agent behavior
+    /// (block tool calls, inject context, redirect execution, cancel).
+    intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,
 }
 
 impl Default for ReactAgentBuilder {
@@ -113,6 +126,10 @@ impl ReactAgentBuilder {
             run_store: None,
             tool_execution_pipeline: None,
             context_assembler: None,
+            mode: None,
+            mode_engine: None,
+            prompt_template_engine: None,
+            intervention_callbacks: Vec::new(),
         }
     }
 
@@ -363,6 +380,56 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Add an intervention callback that can influence agent behavior.
+    ///
+    /// Intervention callbacks are checked before tool execution, LLM reasoning,
+    /// and final answers. They can block actions, inject context, redirect
+    /// execution, modify tool arguments, or cancel the entire run.
+    ///
+    /// Unlike `AgentCallback` (which is observational), `InterventionCallback`
+    /// can *influence* the agent's decisions.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::prelude::*;
+    /// use echo_agent::agent::InterventionCallback;
+    /// use echo_agent::agent::InterventionResult;
+    ///
+    /// struct BlockShell;
+    ///
+    /// impl InterventionCallback for BlockShell {
+    ///     fn on_tool_call<'a>(
+    ///         &'a self,
+    ///         _agent: &'a str,
+    ///         tool: &'a str,
+    ///         _args: &'a serde_json::Value,
+    ///     ) -> futures::future::BoxFuture<'a, InterventionResult> {
+    ///         Box::pin(async move {
+    ///             if tool == "shell" {
+    ///                 InterventionResult::block("shell is blocked")
+    ///             } else {
+    ///                 InterventionResult::allow()
+    ///             }
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> echo_agent::error::Result<()> {
+    /// let agent = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .system_prompt("You are a helpful assistant")
+    ///     .enable_tools()
+    ///     .intervention_callback(Arc::new(BlockShell))
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn intervention_callback(mut self, callback: Arc<dyn InterventionCallback>) -> Self {
+        self.intervention_callbacks.push(callback);
+        self
+    }
+
     /// Set long-term memory Store
     pub fn store(mut self, store: Arc<dyn Store>) -> Self {
         self.store = Some(store);
@@ -540,6 +607,52 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Set the agent operating mode.
+    ///
+    /// When set, this auto-configures:
+    /// - System prompt from the mode engine (can be overridden by `system_prompt()`)
+    /// - Recommended tools from the mode engine (added to the tool list)
+    /// - The mode field on `AgentConfig`
+    pub fn mode(mut self, mode: AgentMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    /// Set a custom mode engine for resolving mode configuration.
+    ///
+    /// Defaults to `DefaultModeEngine` if not set. Use `LocalizedModeEngine`
+    /// for Chinese or other locale-specific prompts.
+    pub fn mode_engine(mut self, engine: Arc<dyn ModeEngine>) -> Self {
+        self.mode_engine = Some(engine);
+        self
+    }
+
+    /// Set a prompt template engine for variable substitution in system prompts.
+    ///
+    /// When set, the agent can use the template engine to render prompt
+    /// templates with dynamic variable substitution (e.g., `{{name}}`,
+    /// `{{mode}}`). This enables centralized template management and
+    /// dynamic prompt assembly.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::prelude::*;
+    /// use echo_core::agent::PromptTemplateManager;
+    /// use std::sync::Arc;
+    ///
+    /// let engine = Arc::new(PromptTemplateManager::with_default_mode_templates());
+    /// let agent = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .with_prompt_template_engine(engine)
+    ///     .build()?;
+    /// # Ok(())
+    /// ```
+    pub fn with_prompt_template_engine(mut self, engine: Arc<PromptTemplateManager>) -> Self {
+        self.prompt_template_engine = Some(engine);
+        self
+    }
+
     // ── Build ──────────────────────────────────────────────────────────────────
 
     /// Build ReAct Agent (internal method)
@@ -552,12 +665,7 @@ impl ReactAgentBuilder {
             )
             .into());
         }
-        if self.max_iterations == 0 {
-            return Err(crate::error::ConfigError::ConfigFileError(
-                "max_iterations must be greater than 0".to_string(),
-            )
-            .into());
-        }
+        // max_iterations == 0 means unlimited (no iteration limit)
         if self.enable_subagent && !self.enable_builtin_tools {
             return Err(crate::error::ConfigError::ConfigFileError(
                 "Enabling sub-agent dispatch (enable_subagent) requires enabling tool calls (enable_builtin_tools)"
@@ -597,6 +705,33 @@ impl ReactAgentBuilder {
             config = config.conversation_id(conversation_id);
         }
 
+        // ── Mode auto-configuration ─────────────────────────────────────────────
+        // When a mode is set, auto-apply the mode's system prompt and recommended tools.
+        let tools_to_register_after_build: Vec<Box<dyn Tool>>;
+        if let Some(mode) = self.mode {
+            config = config.mode(mode);
+            let engine: Arc<dyn ModeEngine> = self
+                .mode_engine
+                .unwrap_or_else(|| Arc::new(DefaultModeEngine));
+            let mode_config = engine.mode_config(&mode);
+            // Only override system prompt if the user hasn't explicitly set one
+            // (i.e., the system_prompt is still the default "You are a helpful assistant")
+            if self.system_prompt == "You are a helpful assistant" {
+                config = config.system_prompt(&mode_config.system_prompt_template);
+            }
+            // Note: recommended_tools filtering is handled by AgentConfig.allowed_tools.
+            // The actual tool registration happens after agent construction below.
+            // For now, we set allowed_tools to restrict the agent to mode-recommended tools
+            // only when the mode has a non-empty recommended list.
+            if !mode_config.recommended_tools.is_empty() {
+                config = config.allowed_tools(mode_config.recommended_tools);
+            }
+            // No additional tools to register; mode filtering uses allowed_tools
+            tools_to_register_after_build = self.tools;
+        } else {
+            tools_to_register_after_build = self.tools;
+        }
+
         // When the user passes a custom Store via with_memory_tools(store),
         // skip the automatic FileStore initialization inside ReactAgent::new(),
         // instead manually inject the user-provided Store during the build() phase.
@@ -617,7 +752,7 @@ impl ReactAgentBuilder {
         }
 
         // Register custom tools
-        for tool in self.tools {
+        for tool in tools_to_register_after_build {
             agent.add_tool(tool);
         }
 
@@ -684,6 +819,16 @@ impl ReactAgentBuilder {
         // Set context assembler
         if let Some(assembler) = self.context_assembler {
             agent.context_assembler = Some(assembler);
+        }
+
+        // Set prompt template engine
+        if let Some(engine) = self.prompt_template_engine {
+            agent.set_prompt_template_engine(engine);
+        }
+
+        // Set intervention callbacks
+        if !self.intervention_callbacks.is_empty() {
+            agent.tools.intervention_callbacks = self.intervention_callbacks;
         }
 
         Ok(agent)

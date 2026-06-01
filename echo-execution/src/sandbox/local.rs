@@ -179,9 +179,13 @@ impl LocalSandbox {
         profile.push_str("(allow sysctl-read)\n");
         profile.push_str("(allow mach-lookup)\n");
 
-        // 读取权限：转义路径中的引号防止 sandbox profile 语法破坏
+        // 读取权限：validate paths to prevent Seatbelt profile injection
         for path in &self.config.allowed_read_paths {
-            let escaped = path.display().to_string().replace('"', "\\\"");
+            let path_str = path.display().to_string();
+            if validate_sandbox_path(&path_str).is_err() {
+                continue; // Skip invalid paths silently
+            }
+            let escaped = path_str.replace('"', "\\\"");
             profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
         }
         // 始终允许读取基本系统路径
@@ -192,9 +196,13 @@ impl LocalSandbox {
         profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
         profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
 
-        // 写入权限：转义路径中的引号
+        // 写入权限：validate paths to prevent Seatbelt profile injection
         for path in &self.config.allowed_write_paths {
-            let escaped = path.display().to_string().replace('"', "\\\"");
+            let path_str = path.display().to_string();
+            if validate_sandbox_path(&path_str).is_err() {
+                continue; // Skip invalid paths silently
+            }
+            let escaped = path_str.replace('"', "\\\"");
             profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", escaped));
         }
         // 允许写 /dev/null
@@ -298,6 +306,25 @@ impl LocalSandbox {
     }
 }
 
+/// Validate a path for safe inclusion in a macOS Seatbelt sandbox profile.
+///
+/// Rejects paths containing characters that could be used for Seatbelt profile
+/// injection (parentheses for S-expression manipulation, newlines for rule injection,
+/// null bytes for string truncation, semicolons and hash for comment injection).
+/// Only allows: alphanumeric characters, `/`, `.`, `-`, `_`, and spaces.
+fn validate_sandbox_path(path: &str) -> std::result::Result<(), String> {
+    for c in path.chars() {
+        if c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | ' ') {
+            continue;
+        }
+        return Err(format!(
+            "Path '{}' contains disallowed character '{}' — only alphanumeric, /, ., -, _, and spaces are allowed in sandbox paths",
+            path, c
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn configure_command_process_group(command: &mut Command) {
     command.process_group(0);
@@ -309,12 +336,17 @@ fn configure_command_process_group(_command: &mut Command) {}
 async fn cleanup_child_process(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        let _ = std::process::Command::new("kill")
+        if let Err(e) = std::process::Command::new("kill")
             .args(["-KILL", &format!("-{pid}")])
-            .status();
+            .status()
+        {
+            tracing::warn!("Failed to send SIGKILL to process group {pid}: {e}");
+        }
     }
 
-    let _ = child.kill().await;
+    if let Err(e) = child.kill().await {
+        tracing::warn!("Failed to kill child process: {e}");
+    }
     let _ = child.wait().await;
 }
 

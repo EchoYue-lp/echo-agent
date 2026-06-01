@@ -18,6 +18,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
     // ── files ─────────────────────────────────────────────────────────────
     #[cfg(feature = "files")]
     {
+        use crate::files::code_search::CodeSearchTool;
         use crate::files::diff::DiffTool;
         use crate::files::edit::EditFileTool;
         use crate::files::files::{
@@ -41,6 +42,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(EditFileTool::new()));
         tool_manager.register(Box::new(DiffTool::new()));
         tool_manager.register(Box::new(RepoMapTool::new()));
+        tool_manager.register(Box::new(CodeSearchTool::new()));
     }
 
     #[cfg(not(any(
@@ -53,7 +55,8 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         feature = "web",
         feature = "media",
         feature = "data",
-        feature = "research"
+        feature = "research",
+        feature = "statistics"
     )))]
     {
         let _ = tool_manager; // Suppress unused warning when no feature-gated tools
@@ -63,12 +66,16 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         use crate::git::{
             GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
         };
+        use crate::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
         tool_manager.register(Box::new(GitStatusTool::default()));
         tool_manager.register(Box::new(GitDiffTool));
         tool_manager.register(Box::new(GitLogTool));
         tool_manager.register(Box::new(GitBlameTool));
         tool_manager.register(Box::new(GitBranchTool));
         tool_manager.register(Box::new(GitCommitTool));
+        tool_manager.register(Box::new(EnterWorktreeTool));
+        tool_manager.register(Box::new(ExitWorktreeTool));
+        tool_manager.register(Box::new(ListWorktreesTool));
     }
 
     #[cfg(feature = "rag")]
@@ -103,7 +110,9 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
 
     #[cfg(feature = "media")]
     {
-        use crate::excel::{ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool, ExcelWriteTool};
+        use crate::excel::{
+            ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool, ExcelWriteTool,
+        };
         use crate::image::ImageAnalysisTool;
         use crate::media::image_fetch::ImageFetchTool;
         use crate::media::web_fetch_enhanced::WebFetchToolEnhanced;
@@ -143,9 +152,9 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
     #[cfg(feature = "data")]
     {
         use crate::data::{
-            DataAggregateTool, DataBinTool, DataContributionTool, DataExportTool, DataFilterTool,
-            DataJoinTool, DataMultiReadTool, DataProfileTool, DataRatioTool, DataReadTool,
-            DataStatsTool, DataTopNTool, DataTransformTool,
+            CorrelateTool, DataAggregateTool, DataBinTool, DataContributionTool, DataExportTool,
+            DataFilterTool, DataJoinTool, DataMultiReadTool, DataProfileTool, DataRatioTool,
+            DataReadTool, DataStatsTool, DataTopNTool, DataTransformTool, PivotTool,
         };
 
         tool_manager.register(Box::new(DataReadTool));
@@ -161,15 +170,44 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(DataRatioTool));
         tool_manager.register(Box::new(DataMultiReadTool));
         tool_manager.register(Box::new(DataJoinTool));
+        tool_manager.register(Box::new(CorrelateTool));
+        tool_manager.register(Box::new(PivotTool));
+    }
+
+    #[cfg(feature = "data")]
+    {
+        use crate::data_quality::{
+            ConsistencyCheckTool, MissingValueAnalysisTool, OutlierDetectionTool,
+        };
+
+        tool_manager.register(Box::new(MissingValueAnalysisTool));
+        tool_manager.register(Box::new(OutlierDetectionTool));
+        tool_manager.register(Box::new(ConsistencyCheckTool));
+    }
+
+    #[cfg(feature = "statistics")]
+    {
+        use crate::statistics::{
+            DescriptiveAdvancedTool, HypothesisTestTool, RegressionTool,
+        };
+
+        tool_manager.register(Box::new(HypothesisTestTool::default()));
+        tool_manager.register(Box::new(RegressionTool::default()));
+        tool_manager.register(Box::new(DescriptiveAdvancedTool::default()));
     }
 
     // ── research ──────────────────────────────────────────────────────────
     #[cfg(feature = "research")]
     {
-        use crate::research::{ArxivSearchTool, BibtexGenerateTool, PdfFetchTool, SemanticScholarSearchTool};
+        use crate::research::{
+            ArxivSearchTool, BibtexGenerateTool, PdfFetchTool, ResearchRecallTool,
+            ResearchRememberTool, SemanticScholarSearchTool,
+        };
         tool_manager.register(Box::new(ArxivSearchTool));
         tool_manager.register(Box::new(SemanticScholarSearchTool));
         tool_manager.register(Box::new(PdfFetchTool));
         tool_manager.register(Box::new(BibtexGenerateTool));
+        tool_manager.register(Box::new(ResearchRememberTool));
+        tool_manager.register(Box::new(ResearchRecallTool));
     }
 }

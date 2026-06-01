@@ -30,14 +30,19 @@
 
 | 文档 | 功能模块 | 核心关键词 |
 |------|---------|-----------|
-| [19 - Self-Reflection Agent](19-self-reflection.md) | 自我反思 | 生成 → 评估 → 修正、情景记忆、LlmCritic |
 | [16 - Plan-and-Execute](16-plan-execute.md) | 规划执行 | Planner/Executor、增量重规划、DAG 调度 |
 | [17 - Graph Workflow](17-graph-workflow.md) | 图工作流 | LangGraph 风格、SharedState、条件边、fan-out/fan-in |
 | [18 - Guard 系统](18-guard-system.md) | 护栏系统 | RuleGuard、LlmGuard、输入/输出过滤 |
+| [19 - Self-Reflection Agent](19-self-reflection.md) | 自我反思 | 生成 → 评估 → 修正、情景记忆、LlmCritic |
 | [20 - Web 工具](20-web-tools.md) | Web 搜索 / 网页获取 | DuckDuckGo / Brave / Tavily 搜索、HTML→文本 |
 | [21 - 常用工具速查](21-common-tools.md) | Tool Guide | Web 搜索、网页抓取、浏览器自动化、数据工具 |
 | [22 - 论文检索工具](22-research-tools.md) | Research | ArXiv 搜索、Semantic Scholar、PDF 下载、BibTeX 生成 |
 | [23 - Hooks 系统](23-hooks.md) | Hooks | Skills hooks（20 个事件）、Task hooks、Subagent hooks |
+| [24 - 评估系统](24-eval-system.md) | Eval | EvalCase、SuccessCriteria、LlmGrader、A/B 对比、回归套件、HTML 报告 |
+| [25 - 自进化系统](25-self-improvement.md) | Improve | Analyzer、ImprovementLoop、SelfEvolution、BackgroundReviewer、Curator、TrajectorySaver |
+| [26 - 多 Agent 模式](26-multi-agent.md) | SubAgent / TeamAgent | 父子委托（Sync/Fork/Teammate）、对等协作（ManagerWorker/Pipeline/Debate/Swarm） |
+| [27 - 追踪系统](27-tracing.md) | Trace | Run、RunEvent（11 种类型）、RunStore、JsonlRunStore、生命周期、密钥脱敏 |
+| [28 - 配置参考](28-config-reference.md) | Config | AgentConfig、ReactAgentBuilder、ToolExecutionConfig、TokenBudgetConfig、YAML 配置、Feature Flags |
 
 ### 知识库
 
@@ -168,3 +173,5 @@ async fn main() -> Result<()> {
 | `examples/demo16_testing.rs` | Mock 测试基础设施（零真实 LLM 调用） |
 | `examples/demo17_chat.rs` | 多轮对话（chat / chat_stream / reset） |
 | `examples/demo18_semantic_memory.rs` | Store 语义搜索（EmbeddingStore / 向量检索） |
+| `examples/demo50_eval.rs` | 评估系统：用例、标准、约束、轨迹回放、触发准确率、HTML 报告 |
+| `examples/demo51_self_improvement.rs` | 自进化：Analyzer、CritiqueStore、Curator、TrajectorySaver、SelfEvolution |

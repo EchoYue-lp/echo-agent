@@ -4,6 +4,7 @@
 //! a task description, and the agent's output, then determines whether the
 //! assertion passes and extracts supporting evidence.
 
+use crate::agent::config::DEFAULT_TOKEN_LIMIT;
 use crate::agent::Agent;
 use serde::{Deserialize, Serialize};
 
@@ -116,7 +117,7 @@ impl LlmGrader {
             sections.push(format!("--- TRAJECTORY ---\n{traj}"));
         }
 
-        sections.push(format!("--- OUTPUT ---\n{}", truncate(output, 8000)));
+        sections.push(format!("--- OUTPUT ---\n{}", truncate(output, DEFAULT_TOKEN_LIMIT)));
         sections.push(format!("--- ASSERTIONS ---\n{assertions_text}"));
         sections.push("Provide your grading in the JSON format specified.".to_string());
 

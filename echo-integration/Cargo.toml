@@ -21,6 +21,7 @@ exclude = ["**/.DS_Store"]
 [features]
 default = []
 mcp = ["dep:tokio-tungstenite", "echo_core/mcp"]
+lsp = ["echo_core/lsp"]
 channels = ["echo_core/channels", "dep:axum"]
 
 [dependencies]

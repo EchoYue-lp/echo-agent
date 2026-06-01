@@ -291,8 +291,11 @@ impl HumanLoopManager {
     }
 
     /// 尝试非阻塞接收事件
+    ///
+    /// Uses `try_lock()` to avoid blocking the caller. Returns `None` if the
+    /// lock is currently held or if no event is available.
     pub fn try_recv_event(&self) -> Option<HumanLoopEvent> {
-        let mut guard = self.event_rx.blocking_lock();
+        let mut guard = self.event_rx.try_lock().ok()?;
         let receiver = guard.as_mut()?;
         receiver.try_recv().ok()
     }

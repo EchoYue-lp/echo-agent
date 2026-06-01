@@ -1,8 +1,8 @@
 //! Image fetch tool for downloading images from URLs and converting to base64.
 
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::Value;
@@ -12,6 +12,7 @@ use std::time::Duration;
 ///
 /// Downloads images from URLs and converts them to base64 format
 /// suitable for LLM vision processing.
+// TODO(v0.3): integrate into default tool registry once media pipeline is stable
 #[allow(dead_code)]
 pub struct ImageFetchTool {
     client: Client,
@@ -68,6 +69,9 @@ impl ImageFetchTool {
     /// Download image from URL and return base64 encoded data
     #[allow(dead_code)]
     async fn download_image_as_base64(&self, url: &str) -> Result<(String, String)> {
+        // SSRF protection: validate URL before making the request
+        crate::security::validate_url(url)?;
+
         let response = self.client.get(url).send().await.map_err(|e| {
             echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
                 tool: "image_fetch".into(),

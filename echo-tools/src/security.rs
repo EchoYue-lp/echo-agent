@@ -438,6 +438,11 @@ pub fn create_safe_regex(pattern: &str, limits: &ResourceLimits) -> Result<regex
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Validate URL target address, rejecting requests to private/link-local IPs (SSRF protection)
+// TODO: This function resolves DNS once for validation, then the HTTP client resolves
+// again — creating a TOCTOU window for DNS rebinding attacks. A proper fix requires
+// implementing a custom reqwest connector (via `hyper::client::connect::HttpConnector`
+// with a custom `Resolve` implementation) that pins the IP address from validation
+// and reuses it for the actual connection.
 pub fn validate_url(url_str: &str) -> Result<()> {
     let host = extract_host(url_str)?;
 
@@ -506,22 +511,14 @@ fn extract_host(url_str: &str) -> Result<&str> {
 /// Check if an IP address is private/link-local
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 127.0.0.0/8 (loopback)
-            octets[0] == 127
-                // 10.0.0.0/8 (RFC 1918)
-                || octets[0] == 10
-                // 172.16.0.0/12 (RFC 1918)
-                || (octets[0] == 172 && (octets[1] & 0xF0) == 16)
-                // 192.168.0.0/16 (RFC 1918)
-                || (octets[0] == 192 && octets[1] == 168)
-                // 169.254.0.0/16 (link-local)
-                || (octets[0] == 169 && octets[1] == 254)
-                // 0.0.0.0/8 (current network)
-                || octets[0] == 0
-        }
+        std::net::IpAddr::V4(v4) => is_private_v4(v4),
         std::net::IpAddr::V6(v6) => {
+            // Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+            // and validate the mapped IPv4 address
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_v4(&v4);
+            }
+
             let octets = v6.octets();
             // ::1 (localhost)
             *v6 == std::net::Ipv6Addr::LOCALHOST
@@ -531,6 +528,35 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || (octets[0] == 0xfe && (octets[1] & 0xC0) == 0x80)
         }
     }
+}
+
+/// Check if an IPv4 address is private/link-local/reserved
+fn is_private_v4(v4: &std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    // 127.0.0.0/8 (loopback)
+    octets[0] == 127
+        // 10.0.0.0/8 (RFC 1918)
+        || octets[0] == 10
+        // 172.16.0.0/12 (RFC 1918)
+        || (octets[0] == 172 && (octets[1] & 0xF0) == 16)
+        // 192.168.0.0/16 (RFC 1918)
+        || (octets[0] == 192 && octets[1] == 168)
+        // 169.254.0.0/16 (link-local)
+        || (octets[0] == 169 && octets[1] == 254)
+        // 0.0.0.0/8 (current network)
+        || octets[0] == 0
+        // 100.64.0.0/10 (CGNAT / Shared Address Space)
+        || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+        // 192.0.0.0/24 (IETF Protocol Assignments)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        // 198.18.0.0/15 (Network benchmark testing)
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        // 192.0.2.0/24 (TEST-NET-1)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+        // 198.51.100.0/24 (TEST-NET-2)
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+        // 203.0.113.0/24 (TEST-NET-3)
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
 }
 
 /// Create an SSRF-safe redirect policy

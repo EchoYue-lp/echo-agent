@@ -11,7 +11,7 @@ Execution layer for the [echo-agent](https://crates.io/crates/echo_agent) framew
 
 ```toml
 [dependencies]
-echo_execution = "0.1"
+echo_execution = "0.2"
 ```
 
 ```rust

@@ -11,7 +11,7 @@ State management layer for the [echo-agent](https://crates.io/crates/echo_agent)
 
 ```toml
 [dependencies]
-echo_state = "0.1"
+echo_state = "0.2"
 ```
 
 ```rust

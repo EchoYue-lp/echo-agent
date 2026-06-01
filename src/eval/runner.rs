@@ -251,6 +251,25 @@ impl EvalRunner {
                 test_patch,
                 test_command,
             } => {
+                // Validate repo_url: only allow https:// scheme
+                if !repo_url.starts_with("https://") {
+                    return EvalResult::new("criteria", false).with_metric(
+                        "swe_bench",
+                        0.0,
+                        "Only https:// URLs are allowed for repository cloning",
+                    );
+                }
+
+                // Validate test_command: reject shell metacharacters that could
+                // lead to command injection when passed to `sh -c`
+                if let Err(msg) = validate_shell_command(test_command) {
+                    return EvalResult::new("criteria", false).with_metric(
+                        "swe_bench",
+                        0.0,
+                        &msg,
+                    );
+                }
+
                 // SWE-bench eval workflow:
                 // 1. Clone repo (if not already cloned)
                 // 2. Checkout base commit
@@ -263,29 +282,79 @@ impl EvalRunner {
                         .args(["clone", repo_url, repo_dir.to_str().unwrap_or("repo")])
                         .current_dir(cwd)
                         .output();
-                    if let Err(e) = clone_result {
+                    match clone_result {
+                        Ok(output) if output.status.success() => {}
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            tracing::warn!("git clone failed for {}: {}", repo_url, stderr);
+                            return EvalResult::new("criteria", false).with_metric(
+                                "swe_bench",
+                                0.0,
+                                &format!("Clone failed: {}", stderr),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("git clone error for {}: {}", repo_url, e);
+                            return EvalResult::new("criteria", false).with_metric(
+                                "swe_bench",
+                                0.0,
+                                &format!("Clone failed: {e}"),
+                            );
+                        }
+                    }
+                }
+
+                let checkout_result = std::process::Command::new("git")
+                    .args(["checkout", base_commit])
+                    .current_dir(&repo_dir)
+                    .output();
+                match checkout_result {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!("git checkout {} failed: {}", base_commit, stderr);
                         return EvalResult::new("criteria", false).with_metric(
                             "swe_bench",
                             0.0,
-                            &format!("Clone failed: {e}"),
+                            &format!("Checkout failed: {}", stderr),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("git checkout error: {}", e);
+                        return EvalResult::new("criteria", false).with_metric(
+                            "swe_bench",
+                            0.0,
+                            &format!("Checkout failed: {e}"),
                         );
                     }
                 }
 
-                let _checkout = std::process::Command::new("git")
-                    .args(["checkout", base_commit])
-                    .current_dir(&repo_dir)
-                    .output();
-
-                let apply = std::process::Command::new("git")
+                let apply_result = std::process::Command::new("git")
                     .args(["apply", test_patch])
                     .current_dir(&repo_dir)
                     .output();
+                match apply_result {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!("git apply failed: {}", stderr);
+                        return EvalResult::new("criteria", false).with_metric(
+                            "swe_bench",
+                            0.0,
+                            &format!("Apply failed: {}", stderr),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("git apply error: {}", e);
+                        return EvalResult::new("criteria", false).with_metric(
+                            "swe_bench",
+                            0.0,
+                            &format!("Apply failed: {e}"),
+                        );
+                    }
+                }
 
-                let passed = match apply {
-                    Ok(o) if o.status.success() => run_command(test_command, &repo_dir).await,
-                    _ => false,
-                };
+                let passed = run_command(test_command, &repo_dir).await;
 
                 let mut result = EvalResult::new("criteria", passed);
                 result.metrics.push(crate::eval::EvalMetric {
@@ -332,6 +401,23 @@ impl EvalRunner {
 
         violations
     }
+}
+
+/// Validate a shell command for dangerous metacharacters.
+///
+/// Rejects commands containing characters that could be used for command injection
+/// or unintended shell expansion when passed to `sh -c`.
+fn validate_shell_command(cmd: &str) -> std::result::Result<(), String> {
+    let dangerous_chars = [';', '|', '&', '$', '`', '>', '<'];
+    for c in &dangerous_chars {
+        if cmd.contains(*c) {
+            return Err(format!(
+                "Test command rejected: contains '{}' which is not allowed (shell metacharacters are blocked for security)",
+                c
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Run a shell command and return whether it succeeded.

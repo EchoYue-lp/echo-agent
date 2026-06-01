@@ -5,8 +5,10 @@ pub mod skill;
 
 use crate::error::Result;
 use futures::future::BoxFuture;
+use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::pin::Pin;
 
 /// Classifies the kind of result a tool produced.
 ///
@@ -28,21 +30,13 @@ pub enum ToolResultKind {
         rows: Vec<Vec<String>>,
     },
     /// A unified diff (e.g., from `edit_file`).
-    Diff {
-        unified_diff: String,
-    },
+    Diff { unified_diff: String },
     /// A reference to a file (path in metadata).
-    FileReference {
-        path: String,
-    },
+    FileReference { path: String },
     /// Command execution output with exit code.
-    CommandOutput {
-        exit_code: Option<i32>,
-    },
+    CommandOutput { exit_code: Option<i32> },
     /// A structured error with an error code.
-    StructuredError {
-        error_code: String,
-    },
+    StructuredError { error_code: String },
 }
 
 impl Default for ToolResultKind {
@@ -134,7 +128,9 @@ impl ToolResult {
     /// Construct a failed result with an error message.
     pub fn error(error: impl Into<String>) -> Self {
         Self {
-            kind: ToolResultKind::StructuredError { error_code: "tool_error".into() },
+            kind: ToolResultKind::StructuredError {
+                error_code: "tool_error".into(),
+            },
             success: false,
             output: String::new(),
             error: Some(error.into()),
@@ -211,6 +207,31 @@ impl ToolResult {
     }
 }
 
+/// Streaming tool output event
+///
+/// When a tool implements [`Tool::execute_stream`] and [`Tool::supports_streaming`],
+/// it produces a sequence of these events during execution, enabling real-time
+/// progress reporting and incremental output delivery to the UI / caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum ToolStreamEvent {
+    /// Progress notification with optional percentage (0-100).
+    Progress {
+        /// Human-readable progress description.
+        message: String,
+        /// Optional completion percentage (0-100).
+        percent: Option<u8>,
+    },
+    /// Incremental partial output chunk (e.g. streaming text generation).
+    PartialOutput {
+        /// Output fragment produced so far.
+        chunk: String,
+    },
+    /// Terminal event carrying the final [`ToolResult`].
+    /// The stream ends after this event is emitted.
+    Complete(ToolResult),
+}
+
 /// Tool execution config: timeout, retry, concurrency
 #[derive(Debug, Clone)]
 pub struct ToolExecutionConfig {
@@ -260,16 +281,16 @@ impl ParamValue {
     pub fn from_json(v: &serde_json::Value) -> Self {
         match v {
             serde_json::Value::String(s) => Self::String(s.clone()),
-            serde_json::Value::Number(n) => {
-                Self::Number(n.as_f64().unwrap_or(0.0))
-            }
+            serde_json::Value::Number(n) => Self::Number(n.as_f64().unwrap_or(0.0)),
             serde_json::Value::Bool(b) => Self::Bool(*b),
             serde_json::Value::Array(arr) => {
                 Self::Array(arr.iter().map(|v| Self::from_json(v)).collect())
             }
-            serde_json::Value::Object(obj) => {
-                Self::Object(obj.iter().map(|(k, v)| (k.clone(), Self::from_json(v))).collect())
-            }
+            serde_json::Value::Object(obj) => Self::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), Self::from_json(v)))
+                    .collect(),
+            ),
             serde_json::Value::Null => Self::Null,
         }
     }
@@ -324,7 +345,9 @@ impl ToolCallParams {
     /// Create from a raw JSON value.
     pub fn from_value(value: &serde_json::Value) -> Self {
         let parsed = if let serde_json::Value::Object(map) = value {
-            map.iter().map(|(k, v)| (k.clone(), ParamValue::from_json(v))).collect()
+            map.iter()
+                .map(|(k, v)| (k.clone(), ParamValue::from_json(v)))
+                .collect()
         } else {
             HashMap::new()
         };
@@ -365,15 +388,17 @@ impl ToolCallParams {
 
     /// Validate that a required parameter exists and has the expected type.
     /// Returns `Ok(())` or `Err(error_message)`.
-    pub fn validate_required(&self, key: &str, expected_type: &str) -> std::result::Result<(), String> {
+    pub fn validate_required(
+        &self,
+        key: &str,
+        expected_type: &str,
+    ) -> std::result::Result<(), String> {
         match self.parsed.get(key) {
             None => Err(format!("Missing required parameter: {key}")),
-            Some(v) if v.type_name() != expected_type => {
-                Err(format!(
-                    "Parameter '{key}': expected {expected_type}, got {}",
-                    v.type_name()
-                ))
-            }
+            Some(v) if v.type_name() != expected_type => Err(format!(
+                "Parameter '{key}': expected {expected_type}, got {}",
+                v.type_name()
+            )),
             _ => Ok(()),
         }
     }
@@ -434,6 +459,40 @@ pub trait Tool: Send + Sync {
     fn parameters(&self) -> serde_json::Value;
     /// Execute the tool with untyped JSON parameters.
     fn execute<'a>(&'a self, parameters: ToolParameters) -> BoxFuture<'a, Result<ToolResult>>;
+
+    /// Stream tool execution, producing incremental [`ToolStreamEvent`]s.
+    ///
+    /// The default implementation wraps [`Self::execute`] into a single
+    /// [`ToolStreamEvent::Complete`] event, so existing tools work without
+    /// any changes. Override this and [`Self::supports_streaming`] when
+    /// the tool can produce real-time progress or partial output.
+    ///
+    /// # Returns
+    ///
+    /// A future that resolves to a boxed [`Stream`] of [`ToolStreamEvent`].
+    /// The stream MUST end with a [`ToolStreamEvent::Complete`] event that
+    /// carries the final [`ToolResult`].
+    fn execute_stream<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>> {
+        Box::pin(async move {
+            let result = self.execute(params).await?;
+            let stream: Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> =
+                Box::pin(stream::once(async move { ToolStreamEvent::Complete(result) }));
+            Ok(stream)
+        })
+    }
+
+    /// Whether this tool supports streaming execution.
+    ///
+    /// Return `true` only if [`Self::execute_stream`] emits meaningful
+    /// intermediate events (Progress / PartialOutput). The default is
+    /// `false` so that non-streaming tools are not inadvertently routed
+    /// through the stream path.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
 
     /// Validate parameters before execution.
     fn validate_parameters<'a>(&'a self, _params: &'a ToolParameters) -> BoxFuture<'a, Result<()>> {

@@ -232,6 +232,32 @@ impl ReactAgent {
             cb.on_think_start(&agent, &messages).await;
         }
 
+        // ── Intervention callbacks for think ──
+        for intervention in &self.tools.intervention_callbacks {
+            let result = intervention.on_think_start(&agent, &messages).await;
+            if result.cancel {
+                return Err(ReactError::Other(
+                    "Agent execution cancelled by intervention at think".into(),
+                ));
+            }
+            if result.block {
+                let reason = result
+                    .block_reason
+                    .unwrap_or_else(|| "blocked by intervention at think".into());
+                warn!(agent = %agent, reason = %reason, "Intervention blocked think");
+                return Err(ReactError::Other(format!(
+                    "Think blocked by intervention: {}", reason
+                )));
+            }
+            if let Some(context) = result.injected_context {
+                self.memory
+                    .context
+                    .lock()
+                    .await
+                    .push(Message::system(context));
+            }
+        }
+
         let tools = self.tools.tool_manager.get_openai_tools();
 
         // Circuit breaker check
@@ -487,8 +513,37 @@ impl ReactAgent {
                 output.clone(),
             ));
             if function_name == TOOL_FINAL_ANSWER {
-                info!(agent = %agent, "🏁 Final answer generated");
-                final_answer = Some(output);
+                // ── Intervention callbacks for final answer ──
+                let mut answer_blocked = false;
+                for intervention in &self.tools.intervention_callbacks {
+                    let result = intervention
+                        .on_final_answer(&agent, &output)
+                        .await;
+                    if result.cancel {
+                        return Err(ReactError::Other(
+                            "Agent execution cancelled by intervention at final answer".into(),
+                        ));
+                    }
+                    if result.block {
+                        let reason = result
+                            .block_reason
+                            .unwrap_or_else(|| "blocked by intervention at final answer".into());
+                        warn!(agent = %agent, reason = %reason, "Intervention blocked final answer");
+                        answer_blocked = true;
+                        break;
+                    }
+                    if let Some(context) = result.injected_context {
+                        self.memory
+                            .context
+                            .lock()
+                            .await
+                            .push(Message::system(context));
+                    }
+                }
+                if !answer_blocked {
+                    info!(agent = %agent, "🏁 Final answer generated");
+                    final_answer = Some(output);
+                }
             }
         }
 
@@ -549,7 +604,7 @@ impl ReactAgent {
 
         // Begin a new agent turn (phase: ReceiveInput)
         let mut turn = crate::agent::turn::AgentTurn::new(message);
-        *self.current_turn.lock().unwrap() = Some(turn.clone());
+        *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
 
         // Clear read-before-edit tracking for the new conversation turn
         self.clear_read_files();
@@ -570,7 +625,9 @@ impl ReactAgent {
                             reason: reason.clone(),
                         },
                     );
-                    let _ = al.log(event).await;
+                    if let Err(e) = al.log(event).await {
+                        tracing::warn!(error = %e, "Failed to log guard audit event");
+                    }
                 }
                 return Ok(format!("Request blocked by safety guard: {reason}"));
             }
@@ -585,7 +642,7 @@ impl ReactAgent {
             iteration: 0,
         })
         .await;
-        *self.current_turn.lock().unwrap() = Some(turn.clone());
+        *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
 
         // Fire UserPromptSubmit hook
         {
@@ -658,7 +715,16 @@ impl ReactAgent {
         const MAX_STOP_CONTINUE: usize = 3;
         let mut stop_continue_count = 0usize;
 
-        for iteration in 0..self.config.max_iterations {
+        let max_iters = self.config.max_iterations;
+        let unlimited = max_iters == 0;
+
+        let mut iteration = 0usize;
+        loop {
+            // Iteration limit check (0 = unlimited)
+            if !unlimited && iteration >= max_iters {
+                break;
+            }
+
             // Cancel check: if a cancellation token is set and triggered, stop the loop
             if let Some(ref cancel) = *self.cancel_token.lock().await
                 && cancel.is_cancelled()
@@ -688,7 +754,7 @@ impl ReactAgent {
                 iteration: iteration + 1,
             })
             .await;
-            *self.current_turn.lock().unwrap() = Some(turn.clone());
+            *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
 
             let think_model = self.config.model_name.clone();
             let steps = self
@@ -714,7 +780,7 @@ impl ReactAgent {
                 iteration: iteration + 1,
             })
             .await;
-            *self.current_turn.lock().unwrap() = Some(turn.clone());
+            *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
 
             if let Some(mut answer) = self.process_steps(steps).await? {
                 // Output guard check
@@ -732,7 +798,9 @@ impl ReactAgent {
                                     reason: reason.clone(),
                                 },
                             );
-                            let _ = al.log(event).await;
+                            if let Err(e) = al.log(event).await {
+                                tracing::warn!(error = %e, "Failed to log output guard audit event");
+                            }
                         }
                         answer = format!("Response content filtered by safety guard: {reason}");
                     }
@@ -805,7 +873,7 @@ impl ReactAgent {
                     iteration: iteration + 1,
                 })
                 .await;
-                *self.current_turn.lock().unwrap() = Some(turn.clone());
+                *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
 
                 // Finalize trace run as completed
                 self.finalize_trace_run(crate::trace::RunStatus::Completed, Some(&answer), None)
@@ -816,6 +884,8 @@ impl ReactAgent {
 
             // Intermediate iteration snapshot (final answer not yet produced)
             self.auto_snapshot(iteration).await;
+
+            iteration += 1;
         }
 
         warn!(agent = %agent, max = self.config.max_iterations, "Maximum iterations reached");
@@ -826,7 +896,9 @@ impl ReactAgent {
         {
             // Best-effort checkpoint save — don't fail the run if this errors
             if let Ok(Some(state)) = checkpointer.get_state(session_id).await {
-                let _ = checkpointer.put_state(session_id, state).await;
+                if let Err(e) = checkpointer.put_state(session_id, state).await {
+                    tracing::warn!(error = %e, session_id = %session_id, "Failed to save checkpoint state");
+                }
             }
             info!(agent = %agent, session = %session_id, "Saved checkpoint on max_iterations exceeded");
         }

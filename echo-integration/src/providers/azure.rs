@@ -7,11 +7,9 @@
 //! The request/response format is identical to OpenAI.
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::types::{
-    ChatCompletionRequest, ChatCompletionResponse,
-};
-use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use echo_core::llm::capabilities::ProviderCapabilities;
+use echo_core::llm::types::{ChatCompletionRequest, ChatCompletionResponse};
+use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -108,16 +106,15 @@ fn build_azure_headers(config: &ModelConfig) -> Result<HeaderMap> {
     // Azure uses `api-key` header, not Bearer token
     headers.insert(
         "api-key",
-        config
-            .apikey
-            .parse()
-            .map_err(|e| echo_core::error::ReactError::Other(format!("Invalid api-key header: {}", e)))?,
+        config.apikey.parse().map_err(|e| {
+            echo_core::error::ReactError::Other(format!("Invalid api-key header: {}", e))
+        })?,
     );
     headers.insert(
         "Content-Type",
-        "application/json"
-            .parse()
-            .map_err(|e| echo_core::error::ReactError::Other(format!("Invalid Content-Type: {}", e)))?,
+        "application/json".parse().map_err(|e| {
+            echo_core::error::ReactError::Other(format!("Invalid Content-Type: {}", e))
+        })?,
     );
     Ok(headers)
 }
@@ -140,13 +137,8 @@ impl LlmClient for AzureOpenAiClient {
                     response_format: request.response_format,
                 };
 
-                let raw: ChatCompletionResponse = post(
-                    self.client.clone(),
-                    &req,
-                    self.header_map.clone(),
-                    &url,
-                )
-                .await?;
+                let raw: ChatCompletionResponse =
+                    post(self.client.clone(), &req, self.header_map.clone(), &url).await?;
 
                 let choice = raw.choices.first().ok_or(LlmError::EmptyResponse)?;
 

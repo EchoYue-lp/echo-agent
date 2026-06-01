@@ -192,12 +192,21 @@ impl Tool for EditFileTool {
                 )));
             }
 
+            // Add ANSI coloring to the diff for terminal display
+            let colored_diff = colorize_diff(&diff);
+
             if dry_run {
                 return Ok(ToolResult::success(format!(
                     "[DRY RUN] Changes preview for '{}':\n{}\n\n(No changes written — set dry_run=false to apply)",
                     path.display(),
-                    diff
+                    colored_diff
                 )));
+            }
+
+            // Create git checkpoint before mutation
+            let checkpoint_tag = crate::git_checkpoint::create_checkpoint(&path);
+            if checkpoint_tag.is_some() {
+                crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
             }
 
             // Create a backup before overwriting ({filename}.bak)
@@ -218,16 +227,22 @@ impl Tool for EditFileTool {
                 })?;
 
             let replaced_count = if replace_all { count } else { 1 };
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "Edited '{}' ({} replacement{}):\n{}",
                 path.display(),
                 replaced_count,
                 if replaced_count > 1 { "s" } else { "" },
-                diff
+                colored_diff
             ))
             .with_meta("backup_path", bak_path.to_string_lossy().to_string())
             .with_meta("original_size", original.len().to_string())
-            .with_meta("updated_size", updated.len().to_string()))
+            .with_meta("updated_size", updated.len().to_string());
+
+            if let Some(tag) = checkpoint_tag {
+                result = result.with_meta("git_checkpoint", tag);
+            }
+
+            Ok(result)
         })
     }
 }
@@ -308,6 +323,40 @@ fn bigram_similarity(a: &str, b: &str) -> f64 {
     }
 }
 
+/// Add ANSI colors to a unified diff string for terminal display.
+///
+/// - File headers (`---`/`+++`) → bold
+/// - Hunk headers (`@@`) → cyan
+/// - Added lines (`+`) → green
+/// - Removed lines (`-`) → red
+/// - Context lines → unchanged
+fn colorize_diff(diff: &str) -> String {
+    let mut out = String::with_capacity(diff.len() + diff.len() / 4);
+    for line in diff.lines() {
+        if line.starts_with("---") || line.starts_with("+++") {
+            out.push_str("\x1b[1m");
+            out.push_str(line);
+            out.push_str("\x1b[0m");
+        } else if line.starts_with("@@") {
+            out.push_str("\x1b[36m");
+            out.push_str(line);
+            out.push_str("\x1b[0m");
+        } else if line.starts_with('+') {
+            out.push_str("\x1b[32m");
+            out.push_str(line);
+            out.push_str("\x1b[0m");
+        } else if line.starts_with('-') {
+            out.push_str("\x1b[31m");
+            out.push_str(line);
+            out.push_str("\x1b[0m");
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +409,17 @@ mod tests {
             Some(("test.txt", "test.txt")),
         );
         assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn test_colorize_diff() {
+        let raw = "--- a/test.txt\n+++ b/test.txt\n@@ -1,2 +1,2 @@\n hello\n-world\n+rust\n";
+        let colored = colorize_diff(raw);
+        assert!(colored.contains("\x1b[1m"));  // bold header
+        assert!(colored.contains("\x1b[36m")); // cyan hunk
+        assert!(colored.contains("\x1b[31m")); // red removed
+        assert!(colored.contains("\x1b[32m")); // green added
+        // Context lines should not have ANSI codes
+        assert!(colored.contains(" hello\n"));
     }
 }

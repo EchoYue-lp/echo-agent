@@ -357,6 +357,16 @@ impl ReactAgent {
                 &session_id,
                 &agent_name,
             ),
+            // New events — use generic lifecycle context
+            HookEvent::PluginLoaded | HookEvent::PluginDisabled => {
+                HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
+            }
+            HookEvent::TaskTimeout | HookEvent::TaskCancelled => {
+                HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
+            }
+            HookEvent::SubagentCancelled => {
+                HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
+            }
             // Tool events should use run_pre_tool_use / run_post_tool_use / run_post_tool_use_failure directly
             HookEvent::PreToolUse
             | HookEvent::PostToolUse

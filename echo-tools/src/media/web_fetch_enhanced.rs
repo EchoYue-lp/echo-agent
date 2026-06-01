@@ -2,8 +2,8 @@
 
 use crate::security::{ssrf_safe_redirect_policy, validate_url};
 use echo_core::error::{Result, ToolError};
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::tools::permission::ToolPermission;
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::Value;
@@ -33,6 +33,7 @@ fn build_client() -> &'static Client {
 /// Enhanced web fetch tool with image download support
 ///
 /// Can fetch web pages and download images as base64.
+// TODO(v0.3): replace WebFetchTool with this enhanced version after image pipeline validation
 #[allow(dead_code)]
 pub struct WebFetchToolEnhanced {
     client: Client,

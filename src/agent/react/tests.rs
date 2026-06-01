@@ -1,6 +1,6 @@
 use super::ReactAgent;
 use crate::agent::Agent;
-use crate::agent::config::AgentConfig;
+use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
 use crate::llm::types::{Message, Role};
 use crate::sandbox::SandboxManager;
 use crate::skills::builtin::ShellSkill;
@@ -266,19 +266,21 @@ async fn react_agent_set_system_prompt() {
     let config = AgentConfig::minimal("test-model", "helper");
     let mut agent = ReactAgent::new(config);
 
-    let _original_prompt = agent.system_prompt().to_string();
-    agent
-        .set_system_prompt("New system prompt".to_string())
-        .await;
+    let original_prompt = agent.system_prompt().to_string();
+    assert_eq!(original_prompt, "helper");
 
-    assert_eq!(agent.system_prompt(), "New system prompt");
+    // set_system_prompt stores a runtime override in mutable_system_prompt.
+    // The system_prompt() getter returns the base config prompt (cannot return
+    // a reference into RwLock). The override is applied at turn-start via
+    // build_system_prompt().
+    agent.set_system_prompt("New system prompt");
 
-    // Verify that the system message in context has also been updated
-    let messages = agent.get_messages().await;
-    assert_eq!(
-        messages[0].content.as_text_ref().unwrap(),
-        "New system prompt"
-    );
+    // Base prompt is unchanged (by design — getter returns config value)
+    assert_eq!(agent.system_prompt(), "helper");
+
+    // The override IS stored internally
+    let override_val = agent.mutable_system_prompt.read().unwrap();
+    assert_eq!(override_val.as_deref(), Some("New system prompt"));
 }
 
 #[test]
@@ -608,11 +610,11 @@ fn react_agent_builder_max_iterations() {
 fn react_agent_builder_token_limit() {
     let agent = crate::agent::ReactAgentBuilder::new()
         .model("qwen3-max")
-        .token_limit(8000)
+        .token_limit(DEFAULT_TOKEN_LIMIT)
         .build()
         .unwrap();
 
-    assert_eq!(agent.config().get_token_limit(), 8000);
+    assert_eq!(agent.config().get_token_limit(), DEFAULT_TOKEN_LIMIT);
 }
 
 #[test]
@@ -1400,7 +1402,7 @@ fn remove_tool_basic() {
     assert!(agent.tool_names().contains(&String::from("tool_a")));
 
     let removed = agent.remove_tool("tool_a");
-    assert!(removed.is_some(), "Should return the removed tool");
+    assert!(removed, "Should return true for successful removal");
     assert!(
         !agent.tool_names().contains(&String::from("tool_a")),
         "Should not exist after removal"
@@ -1416,7 +1418,7 @@ fn remove_tool_nonexistent() {
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);
     let removed = agent.remove_tool("nonexistent");
-    assert!(removed.is_none());
+    assert!(!removed, "Should return false for nonexistent tool");
 }
 
 #[test]

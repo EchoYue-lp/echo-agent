@@ -50,6 +50,13 @@
 //! | [`SharedState`] | State passed between nodes |
 //! | [`WorkflowEvent`] | Streaming events per node |
 //! | [`WorkflowDefinition`] | YAML/JSON workflow definition |
+//!
+//! # Pre-built Pipelines
+//!
+//! | Pipeline | Stages | Description |
+//! |----------|--------|-------------|
+//! | [`run_data_pipeline`] | load_data -> profile -> analyze -> visualize -> summarize | End-to-end data analysis |
+//! | [`run_writing_pipeline`] | outline -> draft -> review -> revise (loop) -> finalize | Content creation with quality loop |
 
 /// Direct re-exports from `echo_orchestration::workflow`.
 pub mod orchestration {

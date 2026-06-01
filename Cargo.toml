@@ -32,7 +32,7 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules"]
+features = ["a2a", "mcp", "lsp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
 # NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
 # unconditionally enables `feature="nightly"` on nightly compilers, then uses
@@ -42,9 +42,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-full = ["a2a", "mcp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "sandbox", "semantic-memory", "macros", "provider-factory", "workflow", "multimodal", "research"]
+full = ["a2a", "mcp", "lsp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
+lsp = ["echo_core/lsp", "echo_integration/lsp"]
 sqlite = ["echo_state/sqlite", "dep:rusqlite"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 plan-execute = []
@@ -57,6 +58,7 @@ subagent = []
 web = ["dep:scraper", "dep:html2text", "dep:url", "echo_tools/web"]
 media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "echo_tools/media"]
 data = ["dep:polars", "echo_tools/data"]
+statistics = ["dep:polars", "echo_tools/statistics"]
 channels = ["echo_integration/channels"]
 git = ["echo_tools/git"]
 database = ["dep:sqlx", "echo_tools/database"]
@@ -66,18 +68,21 @@ content-guard = ["echo_core/guard"]
 project-rules = []
 shell = ["echo_tools/shell"]
 files = ["echo_tools/files"]
+research = ["echo_tools/research"]
+eval = []
+improve = []
+testing = []
 sandbox = []
 semantic-memory = []
 macros = []
 provider-factory = []
 workflow = []
 multimodal = []
-research = ["echo_tools/research"]
-testing = []
 
 [dependencies]
-echo_core = { version = "0.2.0", path = "echo-core", features = ["reqwest"] }
+echo_core = { version = "0.2.0", path = "echo-core", features = ["reqwest", "permission"] }
 echo_macros = { version = "0.2.0", path = "echo-macros" }
+echo_agents = { version = "0.2.0", path = "echo-agents" }
 echo_execution = { version = "0.2.0", path = "echo-execution" }
 echo_integration = { version = "0.2.0", path = "echo-integration" }
 echo_tools = { version = "0.2.0", path = "echo-tools" }
@@ -85,7 +90,7 @@ echo_state = { version = "0.2.0", path = "echo-state" }
 echo_orchestration = { version = "0.2.0", path = "echo-orchestration" }
 reqwest = { version = "0.12.23", features = ["json", "stream"] }
 async-stream = "0.3"
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util", "fs", "signal", "process"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 serde_json = "1.0.143"
@@ -270,6 +275,14 @@ required-features = ["sqlite"]
 [[example]]
 name = "demo35_dynamic_tools"
 required-features = ["macros"]
+
+[[example]]
+name = "demo50_eval"
+required-features = ["eval"]
+
+[[example]]
+name = "demo51_self_improvement"
+required-features = ["eval", "improve"]
 
 [dev-dependencies]
 proptest = "1"

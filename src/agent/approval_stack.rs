@@ -34,7 +34,7 @@ impl ApprovalStack {
 
     /// Check if a decision has already been made for this tool+path.
     pub fn check(&self, tool_name: &str, path: &str) -> Option<ApprovalDecision> {
-        let map = self.decisions.lock().unwrap();
+        let map = self.decisions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tool_map) = map.get(tool_name) {
             // Exact path match
             if let Some(&dec) = tool_map.get(path) {
@@ -50,7 +50,7 @@ impl ApprovalStack {
 
     /// Record a decision for a tool+path.
     pub fn record(&self, tool_name: &str, path: &str, decision: ApprovalDecision) {
-        let mut map = self.decisions.lock().unwrap();
+        let mut map = self.decisions.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(tool_name.to_string())
             .or_default()
             .insert(path.to_string(), decision);
@@ -58,7 +58,7 @@ impl ApprovalStack {
 
     /// Clear all decisions (e.g., on session reset).
     pub fn clear(&self) {
-        self.decisions.lock().unwrap().clear();
+        self.decisions.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
