@@ -54,46 +54,257 @@ ToolManager                      ← 注册表 + 执行器
 
 ---
 
-## 工具权限
+## Tool trait 完整定义
 
-每个工具通过 `ToolPermission` 声明所需权限，框架在执行时通过审批链强制执行。
-
-| 权限 | 说明 | 示例工具 |
-|------|------|----------|
-| `Read` | 读取文件/目录 | `read_file`、`excel_read`、`pdf_extract` |
-| `Write` | 写入/修改文件 | `write_file`、`data_export`、`generate_chart` |
-| `Network` | 网络访问 | `web_fetch`、`web_search`、`arxiv_search`、`pdf_fetch` |
-| `Execute` | 执行命令/代码 | `shell`、`run_skill_script` |
-| `Sensitive` | 敏感操作 | `human_in_loop` |
-
-工具通过实现 `fn permissions() -> Vec<ToolPermission>` 声明权限：
+> **v0.2.0 起 trait 签名已变更。** 不再使用 `#[async_trait]`，`execute` 返回 `BoxFuture`。
 
 ```rust
-impl Tool for MyTool {
-    fn permissions(&self) -> Vec<ToolPermission> {
-        vec![ToolPermission::Read, ToolPermission::Network]
+pub trait Tool: Send + Sync {
+    /// 工具名称（暴露给 LLM 的稳定标识符）
+    fn name(&self) -> &str;
+
+    /// 工具描述（人类可读）
+    fn description(&self) -> &str;
+
+    /// JSON Schema 参数定义
+    fn parameters(&self) -> serde_json::Value;
+
+    /// 执行工具（核心方法，必须实现）
+    fn execute<'a>(
+        &'a self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'a, Result<ToolResult>>;
+
+    // ── 以下为可选方法，均有默认实现 ──
+
+    /// 流式执行，产生增量 ToolStreamEvent
+    fn execute_stream<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>>;
+
+    /// 是否支持流式执行（默认 false）
+    fn supports_streaming(&self) -> bool;
+
+    /// 执行前参数校验（默认 Ok(())）
+    fn validate_parameters<'a>(
+        &'a self,
+        params: &'a ToolParameters,
+    ) -> BoxFuture<'a, Result<()>>;
+
+    /// 所需权限列表（默认空 = 无需权限）
+    fn permissions(&self) -> Vec<ToolPermission>;
+
+    /// 风险级别（默认 Standard）
+    fn risk_level(&self) -> ToolRiskLevel;
+
+    /// 人类可读的能力描述（默认根据 risk_level 生成）
+    fn capability_description(&self) -> &str;
+}
+```
+
+### 方法说明
+
+| 方法 | 必须实现 | 默认值 | 用途 |
+|------|---------|--------|------|
+| `name()` | ✅ | — | 工具标识符 |
+| `description()` | ✅ | — | LLM 看到的工具描述 |
+| `parameters()` | ✅ | — | JSON Schema 参数定义 |
+| `execute()` | ✅ | — | 核心执行逻辑 |
+| `execute_stream()` | ❌ | 包装 `execute()` 为单个 `Complete` 事件 | 流式进度输出 |
+| `supports_streaming()` | ❌ | `false` | 声明是否支持流式 |
+| `validate_parameters()` | ❌ | `Ok(())` | 执行前参数校验 |
+| `permissions()` | ❌ | `vec![]` | 声明所需权限 |
+| `risk_level()` | ❌ | `Standard` | 风险分类 |
+| `capability_description()` | ❌ | 根据 risk_level 生成 | 人类可读能力描述 |
+
+---
+
+## ToolResult 与 ToolResultKind
+
+### ToolResult
+
+```rust
+pub struct ToolResult {
+    pub kind: ToolResultKind,        // 结果类型分类
+    pub success: bool,               // 是否成功
+    pub output: String,              // 文本输出
+    pub error: Option<String>,       // 错误信息
+    pub bytes: Option<Vec<u8>>,      // 二进制输出
+    pub data: Option<Value>,         // 结构化 JSON 数据
+    pub truncated: bool,             // 是否被截断
+    pub mime_type: Option<String>,   // MIME 类型
+    pub metadata: HashMap<String, String>, // 元数据
+}
+```
+
+**构造函数：**
+
+| 方法 | 用途 |
+|------|------|
+| `ToolResult::success(output)` | 成功文本结果 |
+| `ToolResult::success_json(data)` | 成功 JSON 结果 |
+| `ToolResult::success_with_kind(kind, output)` | 带类型分类的成功结果 |
+| `ToolResult::error(msg)` | 失败结果 |
+| `ToolResult::binary(bytes)` | 二进制输出 |
+
+**链式构造器：**
+
+```rust
+ToolResult::success("output")
+    .with_meta("file_path", "/tmp/result.csv")
+    .with_mime_type("text/csv")
+    .with_truncated(true)
+```
+
+### ToolResultKind
+
+```rust
+pub enum ToolResultKind {
+    Text,                                    // 纯文本
+    Json,                                    // 结构化 JSON
+    Image { mime_type: String },             // 图片
+    Table { columns: Vec<String>, rows: Vec<Vec<String>> }, // 表格
+    Diff { unified_diff: String },           // unified diff
+    FileReference { path: String },          // 文件引用
+    CommandOutput { exit_code: Option<i32> }, // 命令输出
+    StructuredError { error_code: String },  // 结构化错误
+}
+```
+
+下游消费者（CLI 渲染、trace 分析、eval 打分）可根据 `kind` 做差异化处理，无需解析 `output` 字符串。
+
+---
+
+## ToolStreamEvent（流式工具事件）
+
+```rust
+pub enum ToolStreamEvent {
+    /// 进度通知
+    Progress { message: String, percent: Option<u8> },
+    /// 增量输出片段
+    PartialOutput { chunk: String },
+    /// 终止事件，携带最终 ToolResult（流在此事件后结束）
+    Complete(ToolResult),
+}
+```
+
+实现流式工具：
+
+```rust
+impl Tool for LongRunningTool {
+    // ... name / description / parameters ...
+
+    fn supports_streaming(&self) -> bool { true }
+
+    fn execute_stream<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>> {
+        Box::pin(async move {
+            let stream = async_stream::stream! {
+                yield ToolStreamEvent::Progress {
+                    message: "Starting...".into(),
+                    percent: Some(0),
+                };
+                // ... 中间步骤 ...
+                yield ToolStreamEvent::PartialOutput {
+                    chunk: "partial result...".into(),
+                };
+                yield ToolStreamEvent::Progress {
+                    message: "Done".into(),
+                    percent: Some(100),
+                };
+                yield ToolStreamEvent::Complete(
+                    ToolResult::success("final result")
+                );
+            };
+            Ok(Box::pin(stream))
+        })
     }
+
+    fn execute<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        // 非流式回退
+        Box::pin(async move { Ok(ToolResult::success("final result")) })
+    }
+}
+```
+
+---
+
+## ToolRiskLevel（风险级别）
+
+```rust
+pub enum ToolRiskLevel {
+    ReadOnly,   // 只读操作，无副作用
+    Standard,   // 标准操作，有限副作用
+    Dangerous,  // 危险操作，不可逆副作用
+}
+```
+
+工具通过 `risk_level()` 声明风险：
+
+```rust
+impl Tool for DeleteFileTool {
+    fn risk_level(&self) -> ToolRiskLevel { ToolRiskLevel::Dangerous }
+    fn capability_description(&self) -> &str { "删除文件 — 不可逆操作" }
     // ...
 }
 ```
 
-详见 [安全指南](./security.md) 了解完整的权限模型和审批链。
+风险分类器 `ToolRiskClassifier`（在 `echo-execution` 中）会自动根据工具名称细分为 7 类风险：
+
+| 类别 | 风险等级 | 示例工具 |
+|------|---------|---------|
+| `ReadOnly` | 0 | `read_file`、`grep`、`git_status` |
+| `NetworkCall` | 1 | `web_fetch`、`web_search` |
+| `FileWrite` | 2 | `edit_file`、`write_file` |
+| `GitWrite` | 2 | `git_commit`、`git_push` |
+| `DatabaseWrite` | 2 | `db_execute`、`sql` |
+| `ShellExec` | 3 | `shell`、`execute` |
+| `Destructive` | 3 | `delete_file`、`drop_table` |
+
+详见 [权限系统](./tool-permissions.md) 了解完整的权限模型、规则引擎和风险分类。
+
+---
+
+## ToolCallParams（类型安全参数）
+
+从 LLM 传来的原始 JSON 参数可以通过 `ToolCallParams` 做类型安全的提取和校验：
+
+```rust
+use echo_core::tools::{ToolCallParams, ParamValue};
+
+let params = ToolCallParams::from_value(&raw_json);
+
+// 类型安全提取
+let path: Option<&str> = params.get_str("path");
+let count: Option<f64> = params.get_number("count");
+let force: Option<bool> = params.get_bool("force");
+
+// 必填参数校验
+params.validate_required("path", "string")?;
+```
 
 ---
 
 ## 如何实现一个自定义工具
 
-实现 `Tool` trait 即可：
+实现 `Tool` trait（注意：不再使用 `#[async_trait]`，`execute` 返回 `BoxFuture`）：
 
 ```rust
-use echo_agent::tools::{Tool, ToolParameters, ToolResult};
+use echo_agent::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
+use echo_agent::tools::permission::ToolPermission;
 use echo_agent::error::Result;
+use echo_core::tools::ToolCallParams;
 use serde_json::{Value, json};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 struct TranslateTool;
 
-#[async_trait]
 impl Tool for TranslateTool {
     fn name(&self) -> &str {
         "translate"
@@ -114,12 +325,44 @@ impl Tool for TranslateTool {
         })
     }
 
-    async fn execute(&self, params: ToolParameters) -> Result<ToolResult> {
-        let text   = params["text"].as_str().unwrap_or("");
-        let target = params["target"].as_str().unwrap_or("en");
-        // 调用实际翻译 API ...
-        let result = format!("（已翻译到 {}）{}", target, text);
-        Ok(ToolResult::success(result))
+    fn execute<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let typed = ToolCallParams::from_params(&params);
+            let text = typed.get_str("text").unwrap_or("");
+            let target = typed.get_str("target").unwrap_or("en");
+            // 调用实际翻译 API ...
+            let result = format!("（已翻译到 {}）{}", target, text);
+            Ok(ToolResult::success(result))
+        })
+    }
+
+    // ── 可选：声明权限和风险 ──
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]  // 需要网络访问
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly  // 只读操作
+    }
+
+    // ── 可选：参数校验 ──
+
+    fn validate_parameters<'a>(
+        &'a self,
+        params: &'a ToolParameters,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let typed = ToolCallParams::from_params(params);
+            typed.validate_required("text", "string")
+                .map_err(|e| echo_agent::error::ReactError::Other(e))?;
+            typed.validate_required("target", "string")
+                .map_err(|e| echo_agent::error::ReactError::Other(e))?;
+            Ok(())
+        })
     }
 }
 ```
@@ -218,4 +461,85 @@ agent.add_tools(vec![
 | `generate_chart` | chart | 图表生成（需 `chart` feature） |
 | `db_query` / `db_schema` | database | SQL 数据库工具（需 `database` feature） |
 
-对应示例：`examples/demo01_tools.rs`、`examples/demo09_file_shell.rs`、`examples/demo13_tool_execution.rs`
+对应示例：`examples/demo01_tools.rs`、`examples/demo09_file_shell.rs`、`examples/demo13_tool_execution.rs`、`examples/demo64_tool_pipeline.rs`
+
+---
+
+## ToolChoice 枚举（v0.2.1 新增）
+
+控制 LLM 如何调用工具的类型安全枚举：
+
+| 变体 | 含义 | OpenAI 格式 |
+|------|------|------------|
+| `Auto` | 模型自行决定是否调用工具（默认） | `"auto"` |
+| `None` | 禁止调用任何工具 | `"none"` |
+| `Required` | 必须调用至少一个工具 | `"required"` |
+| `Function { name }` | 强制调用指定工具 | `{"type":"function","function":{"name":"..."}}` |
+
+```rust
+use echo_core::llm::ToolChoice;
+
+// 让模型自行决定
+let choice = ToolChoice::Auto;
+
+// 强制调用特定工具
+let choice = ToolChoice::function("web_search");
+
+// 禁止工具调用
+let choice = ToolChoice::None;
+```
+
+---
+
+## 工具执行管线（ToolExecutionPipeline）
+
+> **新增于 v0.2.0。** 可配置的多阶段工具执行流水线。
+
+工具调用不再直接执行，而是经过一条可插拔的管线处理。每个阶段可以检查、修改、拦截或增强工具执行行为。
+
+### 管线阶段
+
+```
+Tool Call → PlanMode → ReadBeforeEdit → Permission → ApprovalStack
+           → Sandbox → Execution → Output Truncation → Hooks → Trace
+```
+
+| 阶段 | 作用 |
+|------|------|
+| **PlanModeStage** | 在计划模式下拦截工具调用 |
+| **ReadBeforeEdit** | 编辑前强制先读取文件（防止盲写） |
+| **Permission** | 检查工具权限（ToolPermission） |
+| **ApprovalStack** | 人工审批栈（Once/Always/Deny 策略） |
+| **Sandbox** | 沙箱隔离执行 |
+| **Execution** | 实际执行工具 |
+| **Output Truncation** | 输出截断（head+tail 70/30 分割） |
+| **Hooks** | 触发工具生命周期钩子 |
+| **Trace** | 记录执行轨迹 |
+
+### ApprovalStack 策略
+
+```rust
+use echo_agent::agent::ApprovalStack;
+
+let stack = ApprovalStack::new()
+    .with_default_policy("once");  // once | always | deny
+
+// Once: 首次审批后记住决策
+// Always: 每次都要求审批
+// Deny: 自动拒绝
+```
+
+### 配置管线
+
+```rust
+use echo_agent::agent::react::run::pipeline::ToolExecutionPipeline;
+use echo_agent::prelude::*;
+
+let pipeline = ToolExecutionPipeline::default();
+
+let agent = ReactAgentBuilder::new()
+    .tool_execution_pipeline(pipeline)
+    .build(config);
+```
+
+详见 [demo64_tool_pipeline.rs](../examples/demo64_tool_pipeline.rs)。

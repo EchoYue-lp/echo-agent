@@ -147,3 +147,42 @@ async fn chat_sse(task: String) -> Sse<impl futures::Stream<Item = Result<axum::
 3. **Error handling**: Every event in the stream is `Result<AgentEvent>` — handle LLM or tool errors that may occur mid-stream
 
 See: `examples/demo10_streaming.rs`
+
+---
+
+## Stream Timeout Mechanism (Planned)
+
+> **Note:** The API below is planned but not yet implemented in the current version. Stream timeouts are currently controlled via the LLM client's request timeout.
+
+The SSE client plans to include three-level timeout protection:
+
+| Timeout Type | Planned Value | Purpose |
+|-------------|---------|---------|
+| **first_chunk** | 30s | Maximum time to wait for the first chunk |
+| **idle** | 60s | Maximum idle time between chunks |
+| **overall** | 300s | Total stream timeout |
+
+Currently, LLM request timeouts can be controlled via `AgentConfig`'s `request_timeout`.
+
+### Stream Loop Architecture
+
+v0.2.1 splits the monolithic `stream_loop.rs` into a modular subdirectory:
+
+```
+src/agent/react/run/stream_loop/
+├── mod.rs           # Entry point and main orchestration
+├── llm_stream.rs    # LLM streaming request and SSE parsing
+└── processor.rs     # Event processing and dispatch
+```
+
+### Tool Output Truncation
+
+v0.2.1 introduces head+tail truncation (70/30 split), aligned to newline boundaries:
+
+```
+Full output:    [────────────────────────────────────────] 10KB
+After truncate: [────── head (70%) ──────][── tail (30%) ──]
+                                      ↑ middle omitted
+```
+
+This ensures the Agent always sees the beginning and end of tool output while controlling token consumption.

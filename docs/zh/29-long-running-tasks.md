@@ -1,199 +1,334 @@
 # 长程任务
 
-> **状态：分析与设计建议。**
-> 当前系统尚无通用的长程任务机制。
-> 本文档分析现有能力、缺失项及推荐设计。
+> **状态：已实现。**
+> 系统具备完整的长程任务支持，包括非阻塞任务句柄、跨重启恢复、进度追踪、人在回路、定时调度等。
 
 ---
 
-## 现有能力
+## 概述
 
-### 1. DAG 任务系统（`echo-orchestration::tasks`，feature = `tasks`）
+echo-agent 的长程任务系统由以下子系统组成：
 
-DAG 任务系统将复杂目标分解为带依赖的子任务，按拓扑序执行。无依赖的子任务通过 `tokio::spawn` 并行执行，受 `Semaphore` 限流。
-
-**生命周期受限于父 Agent 会话：**
-```
-用户请求 → Agent 创建 Task → TaskExecutor::execute_all() 阻塞等待 → 返回最终答案
-```
-
-关键特征：
-- `execute_all()` 阻塞调用方 Agent 循环，直到所有任务到达终态
-- 任务生命周期绑定在单次 `agent.execute()` 调用内
-- SQLite 持久化（`SqliteTaskStore`、`SqliteCheckpointStore`）仅用于 **会话内崩溃恢复**，不支持跨进程重启后继续
-- 所有任务共用同一个 `TaskExecuteFn` —— 不同任务类型无法有不同的执行逻辑
-
-### 2. BackgroundReviewer（`improve` feature）
-
-每轮对话结束后，`BackgroundReviewer::review()` 通过 `tokio::spawn` fork 出一个后台任务，回顾对话并决定是否更新记忆或技能。
-
-关键特征：
-- Fire-and-forget：spawn 出的任务独立于主循环运行
-- 但 `review()` 内部执行 `tokio::spawn(...).await`，**实际阻塞了调用方** —— 等同于同步
-- 外部代码无法获取 handle 来 poll 状态或取消
-- 无队列、无背压、无去重
+| 子系统 | 模块 | 说明 |
+|--------|------|------|
+| DAG 任务引擎 | `echo_orchestration::tasks` | 有向无环图任务编排，支持依赖、并行、重试 |
+| 后台任务句柄 | `tasks::background_task` | `BackgroundTask<T>` + `TaskSpawner`，非阻塞任务管理 |
+| 进度追踪 | `tasks::progress` | `PhasePlan` + `ProgressReporter`，实时进度广播 |
+| 人在回路门 | `tasks::human_gate` | `HumanGate`，暂停任务等待人类审批 |
+| 复合执行 | `tasks::composite` | `CompositePlan`，异构步骤链的顺序/并行执行 |
+| 定时调度 | `scheduler` | `CronTask` + `SchedulerRunner`，基于 cron 表达式的定时触发 |
 
 ---
 
-## 缺失的能力
+## 后台任务句柄（BackgroundTask）
 
-通用**长程任务**系统需要：
+`BackgroundTask<T>` 提供对异步任务的非阻塞控制：
 
-| 能力 | 现状 |
-|------|------|
-| 提交任务 → 获取句柄 | 无 |
-| 轮询任务状态 | `TaskManager::get_task()` 存在但仅限 session 内 |
-| 取消运行中的任务 | `TaskExecutor::cancel_task()` 存在但仅内存级 |
-| 任务完成后获取结果 | `Task::result` 存在但 session 结束后丢失 |
-| 进程重启后继续执行 | SQLite 持久化已存在，但缺少 resume API |
-| 不同任务类型不同执行逻辑 | `TaskExecuteFn` 是全局单函数 |
-| 单任务超时 | 已支持（`Task::timeout_secs`） |
-| 指数退避重试 | 已支持（`TaskExecutor` 内） |
-| 并发控制 | Semaphore 限流，可配置 |
-| 进度/状态事件 | `TaskEventBus` 广播通道 |
+```rust,ignore
+use echo_orchestration::tasks::{TaskSpawner, TaskSpawnerConfig};
 
----
+let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
 
-## 割裂分析
+// Spawn 后台任务 — 立即返回句柄
+let handle = spawner.spawn("fetch-data", async {
+    Ok("result".to_string())
+});
 
-### DAG Task vs ReAct 循环
+// 非阻塞状态查询
+println!("{:?}", handle.status().await);
 
-当 Planner 角色介入时，Agent 切换到 DAG 驱动模式，与标准 ReAct 循环**互斥**：
+// 阻塞等待（带超时）
+let result = handle.wait(Some(Duration::from_secs(30))).await?;
 
-```
-ReactAgent
-├── 标准路径: ReAct 循环 (think → act → observe → 重复)
-└── Planner 路径: Plan → to_task_dag() → TaskExecutor::execute_all() → final_answer
+// 取消
+handle.cancel();
 ```
 
-两条路径不共享状态（除了消息历史）。DAG 任务无法在执行中途"让出"控制权回到 ReAct 循环，ReAct 循环也无法 spawn 一个后台 DAG 后继续运行。
-
-### DAG Task vs BackgroundReviewer
-
-两套完全独立的系统，无共享抽象：
-- DAG Task：结构化分解、依赖图、并行执行、重试
-- BackgroundReviewer：单次 fire-and-forget LLM 调用，用于每轮对话后的分析
-
-### DAG Task vs Handoff
-
-`HandoffManager` 在 Agent 之间转移控制权，但 Handoff 目标是完整的 Agent 会话 —— 不与 DAG 任务调度器集成。无法只 handoff 单个子任务，只能 handoff 整个对话。
-
-### 架构图
+### BackgroundTaskStatus 生命周期
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Agent Session                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │  ReAct 循环   │  │  PlanExecute │  │  Background   │  │
-│  │  (默认)      │  │  (DAG tasks) │  │  Review       │  │
-│  │              │  │              │  │  (fire+forget)│  │
-│  │  think→act   │  │  plan→exec   │  │               │  │
-│  │  →observe    │  │  →全阻塞     │  │  spawn+await  │  │
-│  └──────────────┘  └──────────────┘  └───────────────┘  │
-│         │                 │                  │           │
-│         └─────────┬───────┘                  │           │
-│                   │                          │           │
-│              互斥关系                   与两者均无集成       │
-│         (Planner 角色切换)                              │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## 推荐设计
-
-### 核心抽象：`BackgroundTask`
-
-```rust
-/// 后台运行中或已完成的任务的句柄。
-pub struct BackgroundTask<T> {
-    /// 唯一任务 ID（跨重启可持久化）
-    pub id: String,
-    /// 当前状态
-    status: Arc<RwLock<BackgroundTaskStatus>>,
-    /// 最终结果的 oneshot 接收端
-    result_rx: Mutex<Option<oneshot::Receiver<Result<T>>>>,
-    /// 取消令牌
-    cancel: CancellationToken,
-}
-
-pub enum BackgroundTaskStatus {
-    Pending,
-    Running { started_at: Instant },
-    Completed { finished_at: Instant },
-    Failed { error: String, at: Instant },
-    Cancelled,
-}
-
-impl<T: Send + 'static> BackgroundTask<T> {
-    /// 非阻塞查询当前状态。
-    pub fn status(&self) -> BackgroundTaskStatus { ... }
-
-    /// 等待完成（可设超时）。
-    pub async fn wait(self, timeout: Option<Duration>) -> Result<T> { ... }
-
-    /// 请求取消。
-    pub fn cancel(&self) { ... }
-}
+Pending → Running → Completed
+                  ↘ Failed
+                  ↘ Cancelled
 ```
 
 ### TaskSpawner
 
-```rust
-/// 在系统层面 spawn 并管理后台任务。
-pub struct TaskSpawner {
-    tasks: Arc<DashMap<String, Arc<dyn AnyBackgroundTask>>>,
-    store: Option<Arc<dyn TaskStore>>,       // 跨重启持久化
-    max_concurrent: usize,
-    semaphore: Arc<Semaphore>,
-}
+系统级任务管理器，支持并发控制（Semaphore）和跨重启恢复：
 
-impl TaskSpawner {
-    /// 将闭包作为后台任务 spawn，立即返回句柄。
-    pub fn spawn<F, T>(&self, name: &str, fut: F) -> BackgroundTask<T>
-    where
-        F: Future<Output = Result<T>> + Send + 'static,
-        T: Send + 'static,
-    { ... }
+```rust,ignore
+let spawner = TaskSpawner::new(TaskSpawnerConfig::default())
+    .with_store(Arc::new(SqliteTaskStore::new("tasks.db").await?));
 
-    /// 将 Agent 执行作为后台任务 spawn。
-    pub fn spawn_agent(
-        &self,
-        agent: Arc<dyn Agent>,
-        input: String,
-    ) -> BackgroundTask<String> { ... }
+// 列出所有任务
+let tasks = spawner.list().await;
 
-    /// 列出所有任务（用于状态面板）。
-    pub fn list(&self) -> Vec<TaskSummary> { ... }
+// 取消指定/全部任务
+spawner.cancel("task-id");
+spawner.cancel_all();
 
-    /// 重启后恢复 pending/in-progress 任务。
-    pub async fn resume_from_store(&self) -> Result<Vec<BackgroundTask<String>>> { ... }
+// 跨重启恢复
+let incomplete = spawner.resume_from_store().await?;
+```
+
+### Per-task 执行逻辑
+
+每个 `Task` 可设置独立的 `execute_fn`，覆盖 executor 的全局函数：
+
+```rust,ignore
+let task = Task::new("code-review", "Review pull request")
+    .with_execute_fn(Arc::new(|ctx| Box::pin(async move {
+        Ok(format!("Reviewed: {}", ctx.description))
+    })));
+```
+
+### 非阻塞 DAG 执行
+
+`TaskExecutor::execute_all_async()` 立即返回句柄，不阻塞调用方：
+
+```rust,ignore
+let handles = executor.execute_all_async();
+// Agent 可以继续做其他工作
+for handle in &handles {
+    if !handle.is_completed().await {
+        println!("Task {} still running", handle.name);
+    }
 }
 ```
 
-### 集成点
+### 跨重启恢复
 
-1. **ReAct 循环**：Agent 可调用 `spawn_background_task` 工具来异步 offload 工作，不阻塞主循环
-2. **PlanExecute**：不再 `execute_all()` 阻塞，改为 `execute_all_async()` 返回 `BackgroundTask<Vec<TaskExecutionResult>>`
-3. **Handoff**：Handoff 目标可通过 `TaskSpawner::spawn_agent()` 作为后台任务执行
-4. **BackgroundReviewer**：重构为使用 `TaskSpawner` 替代裸 `tokio::spawn`
+```rust,ignore
+let executor = TaskExecutor::new(manager, config)
+    .with_task_store(store)
+    .with_execute_fn(my_execute_fn);  // execute_fn 不可序列化，需重新注册
 
-### 优先级建议
-
-| 优先级 | 事项 | 工作量 |
-|--------|------|--------|
-| P0 | 修复 `BackgroundReviewer::review()` —— 去掉 `.await`，返回句柄 | 小 |
-| P1 | 添加 `BackgroundTask<T>` 句柄抽象（poll/wait/cancel） | 中 |
-| P2 | `TaskExecuteFn` 从全局改为 per-task（`Task` 增加 `execute_fn` 字段） | 中 |
-| P3 | `TaskExecutor` 增加 `execute_all_async()` 返回 `BackgroundTask` | 中 |
-| P4 | 通过 `SqliteTaskStore` 实现跨重启任务恢复 | 大 |
-| P5 | Agent 增加 `spawn_background_task` 工具 | 中 |
+let results = executor.resume_from_store().await?;
+```
 
 ---
 
-## 总结
+## Agent 后台任务工具
 
-- DAG 任务系统是一个**并行子任务执行器**，不是长程任务系统
-- BackgroundReviewer 是 **fire-and-forget 但阻塞调用方**（因为 `.await`）
-- 两套系统彼此完全隔离，与 ReAct 循环也隔离
-- 架构分层良好，基础组件（持久化、重试、取消、Semaphore）扎实 —— 缺失的是将它们串联成真正长程任务系统的 **handle/poll/resume 抽象**
+`tasks` feature 下，以下工具随 `enable_task` 自动注册：
+
+| 工具 | 描述 |
+|------|------|
+| `spawn_background_task` | Spawn 一个后台任务，返回 task ID |
+| `check_task_status` | 查询后台任务的当前状态 |
+| `list_background_tasks` | 列出所有活跃的后台任务 |
+
+---
+
+## 进度追踪（ProgressReporter）
+
+为长程任务提供实时进度反馈：
+
+```
+PhasePlan → ProgressReporter → watch::Receiver<TaskProgress>  → SSE/WS/UI
+                             → TaskEvent::Progress → TaskEventBus → 日志/持久化
+```
+
+### Phase 与 PhasePlan
+
+`Phase` 定义流水线中的单个阶段，支持权重、重试、超时和人工检查点：
+
+```rust,ignore
+use echo_agent::tasks::{Phase, PhasePlan};
+
+let plan = PhasePlan::new(vec![
+    Phase::new("search",  "Search",  2.0),  // 权重 2
+    Phase::new("analyze", "Analyze", 3.0),  // 权重 3
+    Phase::new("report",  "Report",  1.0),  // 权重 1
+]);
+
+plan.progress_pct(0, 0.5);  //  16.7%  (1.0 / 6.0)
+plan.progress_pct(1, 0.0);  //  33.3%  (2.0 / 6.0)
+plan.progress_pct(2, 1.0);  // 100.0%  (6.0 / 6.0)
+```
+
+### ProgressReporter
+
+基于 `watch` 通道的进度广播器，最新值语义：
+
+| 方法 | 说明 |
+|------|------|
+| `new(task_id, plan)` | 创建 reporter |
+| `enter_phase(idx, msg)` | 进入新阶段 |
+| `update_phase_progress(pct, msg)` | 阶段内进度更新（0.0–1.0） |
+| `subscribe()` | 获取 `watch::Receiver<TaskProgress>` |
+| `current()` | 获取当前快照 |
+
+### TaskEvent::Progress
+
+进度事件可注入 `TaskEventBus`，与生命周期事件统一分发：
+
+```rust,ignore
+let mut reporter = ProgressReporter::new("task-42".into(), plan);
+let bus = TaskEventBus::new();
+
+reporter.enter_phase(0, Some("Searching...".into()));
+let progress = reporter.current();
+bus.emit(TaskEvent::Progress {
+    task_id: "task-42".into(),
+    progress,
+});
+```
+
+完整可运行示例：`cargo run --example demo67_progress`
+
+---
+
+## 人在回路门（HumanGate）
+
+为任务流水线提供人工检查点。运行中的任务可暂停自身，等待人类审批后再继续。
+
+### 核心类型
+
+```rust,ignore
+use echo_agent::tasks::{HumanGate, HumanRequest, HumanResponse};
+
+pub struct HumanRequest {
+    pub prompt: String,             // 展示给用户的问题
+    pub context: serde_json::Value, // 任意上下文
+    pub options: Vec<String>,       // 可选响应 ["Approve", "Revise", "Cancel"]
+    pub phase: String,              // 等待输入的阶段名
+}
+
+pub struct HumanResponse {
+    pub selection: String,            // 选择的选项
+    pub instructions: Option<String>, // 可选的自由文本指令
+}
+```
+
+### 使用方式
+
+```rust,ignore
+use tokio_util::sync::CancellationToken;
+
+let gate = HumanGate::new();
+let cancel = CancellationToken::new();
+
+// 任务侧：发起请求并阻塞等待
+let response = gate.request("task-1", HumanRequest {
+    prompt: "Review the draft".into(),
+    context: serde_json::json!({ "draft": "..." }),
+    options: vec!["Approve".into(), "Revise".into(), "Cancel".into()],
+    phase: "review".into(),
+}, &cancel).await?;
+
+// 前端侧：检查待处理请求并回复
+let pending = gate.pending().await;
+gate.respond("task-1", HumanResponse {
+    selection: "Approve".into(),
+    instructions: None,
+}).await;
+```
+
+| HumanGate 方法 | 说明 |
+|----------------|------|
+| `request(task_id, req, cancel)` | 阻塞等待回复或取消 |
+| `respond(task_id, resp)` | 回复待处理请求 |
+| `pending()` | 列出所有待处理请求 |
+| `pending_count()` | 待处理数量 |
+
+完整可运行示例：`cargo run --example demo68_human_gate --features tasks,subagent`
+
+---
+
+## 定时调度（Scheduler）
+
+基于 cron 表达式的定时任务能力，支持持久化存储和运行时管理。
+
+### CronTask
+
+```rust,ignore
+use echo_agent::scheduler::{CronTask, CronTaskStatus};
+
+let task = CronTask::new("daily-backup", "0 2 * * *", "Run nightly backup");
+task.validate_cron();      // -> true
+task.next_run();           // -> Some(DateTime<Utc>)
+```
+
+Cron 表达式为 5 字段标准格式：`分 时 日 月 星期`
+
+| 示例 | 含义 |
+|------|------|
+| `0 2 * * *` | 每天凌晨 2:00 |
+| `*/5 * * * *` | 每 5 分钟 |
+| `0 9 * * 1` | 每周一 9:00 |
+
+### CronTaskStore
+
+持久化存储，支持双后端：
+
+| 后端 | 创建方式 |
+|------|----------|
+| **Store trait**（推荐） | `CronTaskStore::with_store(store)` |
+| **文件**（回退） | `CronTaskStore::new()` |
+
+### SchedulerRunner
+
+后台调度器，每 30 秒 tick 一次，到期时触发任务：
+
+```rust,ignore
+use echo_agent::scheduler::{CronTask, CronTaskStore, SchedulerRunner, FireFn};
+
+let store = CronTaskStore::new();
+store.add(CronTask::new("daily-backup", "0 2 * * *", "Run nightly backup"))?;
+
+let fire_fn: FireFn = Arc::new(|task| Box::pin(async move {
+    Ok(format!("Executed: {}", task.name))
+}));
+
+let runner = Arc::new(SchedulerRunner::new(store, cancel, fire_fn));
+runner.clone().spawn();               // 启动后台 tick 循环
+runner.run_once("daily").await?;      // 手动触发一次
+runner.set_status("daily", CronTaskStatus::Disabled).await?;
+```
+
+| 管理方法 | 说明 |
+|----------|------|
+| `add_task(task)` | 添加并持久化 |
+| `remove_task(id)` | 按 id 前缀删除 |
+| `set_status(id, status)` | 启用/禁用 |
+| `list_tasks()` | 返回所有任务 |
+| `run_once(id)` | 立即触发一次 |
+| `reload()` | 从 Store 重新加载 |
+
+完整可运行示例：`cargo run --example demo70_scheduler`
+
+---
+
+## 类型化元数据
+
+`Task` 支持附加任意类型数据，`metadata_json` 跨重启存活：
+
+```rust,ignore
+use echo_agent::tasks::Task;
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct ResearchParams { topic: String, max_papers: u32 }
+
+let task = Task::new("r1", "Research task")
+    .with_metadata(ResearchParams { topic: "AI".into(), max_papers: 20 });
+
+// 类型化访问
+let params = task.get_metadata::<ResearchParams>().unwrap();
+```
+
+---
+
+## 集成架构
+
+```
+ReactAgent
+├── 标准路径: ReAct 循环 (think → act → observe → 重复)
+│   └── 可调用 spawn_background_task (非阻塞)
+├── Planner 路径: Plan → to_task_dag() → TaskExecutor::execute_all() → final_answer
+│   └── 阻塞等待所有 DAG 任务完成（设计如此）
+└── BackgroundReviewer: fire-and-forget LLM 调用
+```
+
+`execute_all_async()` 作为公共 API 提供，供外部编排器在 ReAct 循环外异步触发 DAG 执行。

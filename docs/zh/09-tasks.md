@@ -29,20 +29,38 @@ DAG 任务规划先"想清楚"再"做"：LLM 先将目标分解为结构化的�
 Task {
     id: String,            // 唯一标识
     description: String,   // 任务描述
-    status: TaskStatus,    // Pending / Running / Completed / Failed / Skipped
+    status: TaskStatus,    // 见下方状态枚举
     dependencies: Vec<String>, // 前置任务 ID 列表
-    priority: u8,          // 优先级（1-10，数字越大优先级越高）
+    priority: u8,          // 优先级（0-10，10 最高）
     result: Option<String>,// 执行结果
     reasoning: Option<String>, // 执行理由或备注
+    // 其他字段：assigned_agent, tags, parent_id, created_at, updated_at,
+    //          subject, timeout_secs, max_retries, retry_count, execute_fn
 }
 ```
 
-### TaskStatus（状态机）
+### TaskStatus（状态枚举）
 
+```rust
+pub enum TaskStatus {
+    Pending,                           // 等待执行
+    InProgress,                        // 正在执行
+    Completed,                         // 成功完成
+    Failed(String),                    // 执行失败
+    Cancelled,                         // 已取消
+    Blocked(String),                   // 被依赖阻塞
+    TimedOut { error: String },        // 执行超时
+    Retrying { attempt: u32, last_error: String }, // 重试中
+}
 ```
-Pending → Running → Completed
-                 ↘ Failed
-                 ↘ Skipped
+
+**状态转换：**
+```
+Pending → InProgress → Completed
+                    ↘ Failed → Retrying → InProgress
+                    ↘ TimedOut
+                    ↘ Cancelled
+       → Blocked（依赖未完成）
 ```
 
 ### TaskManager（DAG 管理器）
@@ -160,3 +178,70 @@ graph TD
 | `visualize_dependencies` | 输出 Mermaid 依赖图 |
 
 对应示例：`examples/demo02_tasks.rs`
+
+---
+
+## 复合任务执行（CompositePlan）
+
+> 模块：`echo_orchestration::tasks::composite`（feature = `tasks`）
+
+复合任务将多个异构步骤串联或并联执行，支持步骤间的上游结果传递，适用于"先搜索、再摘要、后报告"等多阶段流水线。
+
+### CompositeStrategy
+
+| 变体 | 行为 |
+|------|------|
+| `Sequential` | 顺序执行，将上游输出注入下游 `TaskContext` |
+| `Parallel` | 所有步骤通过 `tokio::spawn` 并发执行 |
+
+### CompositeStep
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | `String` | 唯一标识，供 `input_from` 引用 |
+| `name` | `String` | 可读名称 |
+| `execute_fn` | `TaskExecuteFn` | 异步执行函数，接收 `TaskContext` |
+| `input_from` | `Vec<String>` | 依赖的上游步骤 id 列表 |
+
+### 使用示例
+
+```rust,ignore
+use echo_agent::tasks::composite::{CompositePlan, CompositeStep, CompositeStrategy, execute_composite};
+use std::sync::Arc;
+
+let plan = CompositePlan {
+    steps: vec![
+        CompositeStep {
+            id: "fetch".into(),
+            name: "Fetch Data".into(),
+            execute_fn: Arc::new(|ctx| Box::pin(async move {
+                Ok("raw_data: 42 records".to_string())
+            })),
+            input_from: vec![],
+        },
+        CompositeStep {
+            id: "parse".into(),
+            name: "Parse Data".into(),
+            execute_fn: Arc::new(|ctx| Box::pin(async move {
+                let upstream = ctx.upstream_results.iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>().join(", ");
+                Ok(format!("parsed from: {upstream}"))
+            })),
+            input_from: vec!["fetch".into()],
+        },
+    ],
+    strategy: CompositeStrategy::Sequential,
+};
+
+let results = execute_composite(plan).await?;
+// [("fetch", "raw_data: 42 records"),
+//  ("parse", "parsed from: fetch=raw_data: 42 records")]
+```
+
+**设计要点：**
+- Sequential 保证顺序，Parallel 不保证
+- 任一步骤失败，整个 plan 立即返回错误（fail-fast）
+- `input_from` 仅对 Sequential 有效
+
+完整可运行示例：`cargo run --example demo69_composite`

@@ -32,9 +32,8 @@
 //! # }
 //! ```
 
-use crate::agent::react::builder::ReactAgentBuilder;
-use crate::agent::react::ReactAgent;
 use crate::agent::Agent;
+use crate::agent::react::builder::ReactAgentBuilder;
 use crate::error::Result;
 
 /// Concrete factory that creates agents using [`ReactAgentBuilder`].
@@ -91,13 +90,13 @@ impl AgentFactory for DefaultAgentFactory {
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
-pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig, AgentParadigm};
 /// Re-export of the core-level `DefaultAgentFactory` stub.
 ///
 /// For actual agent creation, use the facade-level [`DefaultAgentFactory`]
 /// defined in this module, which provides the concrete `ReactAgentBuilder`
 /// implementation.
 pub use echo_core::agent::factory::DefaultAgentFactory as CoreDefaultAgentFactory;
+pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig, AgentParadigm};
 
 #[cfg(test)]
 mod tests {

@@ -35,7 +35,10 @@ impl CritiqueStore {
         };
         // Ensure directory exists
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::warn!("Failed to create critique persistence directory {}: {e}", dir.display());
+            tracing::warn!(
+                "Failed to create critique persistence directory {}: {e}",
+                dir.display()
+            );
         }
         // Load existing data
         store.load_from_disk();
@@ -44,11 +47,17 @@ impl CritiqueStore {
 
     /// Store a critique and update pattern counts.
     pub fn store(&self, critique: RunCritique) {
-        let mut patterns = self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut patterns = self
+            .pattern_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for issue in &critique.issues {
             *patterns.entry(format!("{:?}", issue)).or_default() += 1;
         }
-        self.critiques.lock().unwrap_or_else(|e| e.into_inner()).push(critique);
+        self.critiques
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(critique);
 
         // Persist to disk if configured
         if let Some(ref dir) = self.persist_dir {
@@ -58,7 +67,10 @@ impl CritiqueStore {
 
     /// Get top-N most frequent issue patterns.
     pub fn top_patterns(&self, n: usize) -> Vec<(String, usize)> {
-        let patterns = self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner());
+        let patterns = self
+            .pattern_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut sorted: Vec<_> = patterns.iter().map(|(k, v)| (k.clone(), *v)).collect();
         sorted.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
         sorted.truncate(n);
@@ -67,7 +79,10 @@ impl CritiqueStore {
 
     /// Get all patterns with counts.
     pub fn all_patterns(&self) -> HashMap<String, usize> {
-        self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.pattern_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Retrieve critiques for a specific run.
@@ -83,7 +98,10 @@ impl CritiqueStore {
 
     /// Total stored critiques.
     pub fn len(&self) -> usize {
-        self.critiques.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.critiques
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Whether empty.
@@ -93,8 +111,14 @@ impl CritiqueStore {
 
     /// Clear all stored data.
     pub fn clear(&self) {
-        self.critiques.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.critiques
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.pattern_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         if let Some(ref dir) = self.persist_dir {
             let patterns_file = dir.join("patterns.json");
             if let Err(e) = std::fs::remove_file(patterns_file) {
@@ -107,7 +131,10 @@ impl CritiqueStore {
 
     /// Save patterns to disk.
     fn save_patterns_to_disk(&self, dir: &Path) {
-        let patterns = self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner());
+        let patterns = self
+            .pattern_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let patterns_file = dir.join("patterns.json");
         if let Ok(json) = serde_json::to_string_pretty(&*patterns) {
             if let Err(e) = std::fs::write(patterns_file, json) {
@@ -122,7 +149,10 @@ impl CritiqueStore {
             let patterns_file = dir.join("patterns.json");
             if let Ok(content) = std::fs::read_to_string(patterns_file) {
                 if let Ok(patterns) = serde_json::from_str::<HashMap<String, usize>>(&content) {
-                    let mut stored = self.pattern_counts.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut stored = self
+                        .pattern_counts
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     *stored = patterns;
                 }
             }

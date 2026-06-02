@@ -122,7 +122,10 @@ impl TraceAnalyzer {
     }
 
     /// Produce a summary for a single session by aggregating all its runs.
-    pub async fn summarize_session(&self, session_id: &str) -> crate::error::Result<SessionSummary> {
+    pub async fn summarize_session(
+        &self,
+        session_id: &str,
+    ) -> crate::error::Result<SessionSummary> {
         let summaries = self.run_store.list_by_session(session_id).await?;
 
         let mut completed_count = 0;
@@ -146,18 +149,20 @@ impl TraceAnalyzer {
                 RunStatus::Cancelled => cancelled_count += 1,
                 _ => {}
             }
-            total_prompt_tokens = total_prompt_tokens.saturating_add(summary.token_usage.prompt_tokens);
-            total_completion_tokens = total_completion_tokens.saturating_add(summary.token_usage.completion_tokens);
+            total_prompt_tokens =
+                total_prompt_tokens.saturating_add(summary.token_usage.prompt_tokens);
+            total_completion_tokens =
+                total_completion_tokens.saturating_add(summary.token_usage.completion_tokens);
             total_tokens = total_tokens.saturating_add(summary.token_usage.total_tokens);
             total_duration_ms += summary.total_duration_ms;
 
             if first_started_at.is_none() || summary.started_at < first_started_at.unwrap() {
                 first_started_at = Some(summary.started_at);
             }
-            if let Some(fa) = summary.finished_at {
-                if last_finished_at.is_none() || fa > last_finished_at.unwrap() {
-                    last_finished_at = Some(fa);
-                }
+            if let Some(fa) = summary.finished_at
+                && (last_finished_at.is_none() || fa > last_finished_at.unwrap())
+            {
+                last_finished_at = Some(fa);
             }
 
             // Load full run to extract tool names and LLM call count
@@ -198,7 +203,10 @@ impl TraceAnalyzer {
     }
 
     /// Compute per-tool usage statistics across all runs (up to `limit`).
-    pub async fn tool_usage_stats(&self, limit: usize) -> crate::error::Result<Vec<ToolUsageStats>> {
+    pub async fn tool_usage_stats(
+        &self,
+        limit: usize,
+    ) -> crate::error::Result<Vec<ToolUsageStats>> {
         let summaries = self.run_store.list_all(limit).await?;
 
         // Accumulate per-tool data
@@ -208,7 +216,9 @@ impl TraceAnalyzer {
             if let Some(run) = self.run_store.load(&summary.run_id).await? {
                 for event in &run.events {
                     match event {
-                        RunEvent::ToolCall { name, duration_ms, .. } => {
+                        RunEvent::ToolCall {
+                            name, duration_ms, ..
+                        } => {
                             let acc = tool_data.entry(name.clone()).or_default();
                             acc.call_count += 1;
                             acc.total_duration_ms += *duration_ms;
@@ -270,12 +280,15 @@ impl TraceAnalyzer {
             .collect();
 
         // Sort by total_duration descending
-        stats.sort_by(|a, b| b.total_duration_ms.cmp(&a.total_duration_ms));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.total_duration_ms));
         Ok(stats)
     }
 
     /// Compute token usage breakdown across all runs (up to `limit`).
-    pub async fn token_usage_breakdown(&self, limit: usize) -> crate::error::Result<TokenBreakdown> {
+    pub async fn token_usage_breakdown(
+        &self,
+        limit: usize,
+    ) -> crate::error::Result<TokenBreakdown> {
         let summaries = self.run_store.list_all(limit).await?;
 
         let mut prompt_tokens = 0u32;
@@ -286,7 +299,8 @@ impl TraceAnalyzer {
 
         for summary in &summaries {
             prompt_tokens = prompt_tokens.saturating_add(summary.token_usage.prompt_tokens);
-            completion_tokens = completion_tokens.saturating_add(summary.token_usage.completion_tokens);
+            completion_tokens =
+                completion_tokens.saturating_add(summary.token_usage.completion_tokens);
             total_tokens = total_tokens.saturating_add(summary.token_usage.total_tokens);
             per_run.insert(summary.run_id.clone(), summary.token_usage);
 
@@ -333,7 +347,10 @@ impl TraceAnalyzer {
     /// Analyze error patterns across runs. Groups errors by normalized
     /// message (lowercased, trimmed) and reports occurrence counts, associated
     /// tools, and timing.
-    pub async fn error_pattern_analysis(&self, limit: usize) -> crate::error::Result<Vec<ErrorPattern>> {
+    pub async fn error_pattern_analysis(
+        &self,
+        limit: usize,
+    ) -> crate::error::Result<Vec<ErrorPattern>> {
         let summaries = self.run_store.list_all(limit).await?;
 
         // pattern_key -> accumulator
@@ -342,14 +359,14 @@ impl TraceAnalyzer {
         for summary in &summaries {
             if let Some(run) = self.run_store.load(&summary.run_id).await? {
                 // Run-level error
-                if run.status == RunStatus::Failed {
-                    if let Some(ref error_msg) = run.error {
-                        let key = normalize_error(error_msg);
-                        let acc = patterns.entry(key.clone()).or_default();
-                        acc.occurrence_count += 1;
-                        acc.run_ids.push(run.run_id.clone());
-                        acc.update_time(run.started_at, run.finished_at);
-                    }
+                if run.status == RunStatus::Failed
+                    && let Some(ref error_msg) = run.error
+                {
+                    let key = normalize_error(error_msg);
+                    let acc = patterns.entry(key.clone()).or_default();
+                    acc.occurrence_count += 1;
+                    acc.run_ids.push(run.run_id.clone());
+                    acc.update_time(run.started_at, run.finished_at);
                 }
 
                 // Event-level errors
@@ -389,17 +406,14 @@ impl TraceAnalyzer {
             .collect();
 
         // Sort by occurrence count descending
-        result.sort_by(|a, b| b.occurrence_count.cmp(&a.occurrence_count));
+        result.sort_by_key(|b| std::cmp::Reverse(b.occurrence_count));
         Ok(result)
     }
 
     /// List all sessions (unique session IDs from stored runs).
     pub async fn list_sessions(&self, limit: usize) -> crate::error::Result<Vec<String>> {
         let summaries = self.run_store.list_all(limit).await?;
-        let mut session_ids: Vec<String> = summaries
-            .iter()
-            .map(|s| s.session_id.clone())
-            .collect();
+        let mut session_ids: Vec<String> = summaries.iter().map(|s| s.session_id.clone()).collect();
         session_ids.sort();
         session_ids.dedup();
         Ok(session_ids)
@@ -432,6 +446,7 @@ impl Default for ToolAccumulator {
 }
 
 /// Accumulator for error pattern grouping.
+#[derive(Default)]
 struct ErrorAccumulator {
     occurrence_count: usize,
     run_ids: Vec<String>,
@@ -440,27 +455,15 @@ struct ErrorAccumulator {
     last_seen: Option<DateTime<Utc>>,
 }
 
-impl Default for ErrorAccumulator {
-    fn default() -> Self {
-        Self {
-            occurrence_count: 0,
-            run_ids: Vec::new(),
-            associated_tools: HashMap::new(),
-            first_seen: None,
-            last_seen: None,
-        }
-    }
-}
-
 impl ErrorAccumulator {
     fn update_time(&mut self, started_at: DateTime<Utc>, finished_at: Option<DateTime<Utc>>) {
         if self.first_seen.is_none() || started_at < self.first_seen.unwrap() {
             self.first_seen = Some(started_at);
         }
-        if let Some(fa) = finished_at {
-            if self.last_seen.is_none() || fa > self.last_seen.unwrap() {
-                self.last_seen = Some(fa);
-            }
+        if let Some(fa) = finished_at
+            && (self.last_seen.is_none() || fa > self.last_seen.unwrap())
+        {
+            self.last_seen = Some(fa);
         }
     }
 }
@@ -589,8 +592,14 @@ mod tests {
     #[tokio::test]
     async fn test_summarize_session() {
         let store = Arc::new(InMemoryRunStore::new());
-        store.save(make_run("r1", "s1", RunStatus::Completed)).await.unwrap();
-        store.save(make_run("r2", "s1", RunStatus::Failed)).await.unwrap();
+        store
+            .save(make_run("r1", "s1", RunStatus::Completed))
+            .await
+            .unwrap();
+        store
+            .save(make_run("r2", "s1", RunStatus::Failed))
+            .await
+            .unwrap();
 
         let analyzer = TraceAnalyzer::new(store);
         let summary = analyzer.summarize_session("s1").await.unwrap();
@@ -607,7 +616,10 @@ mod tests {
     #[tokio::test]
     async fn test_tool_usage_stats() {
         let store = Arc::new(InMemoryRunStore::new());
-        store.save(make_run("r1", "s1", RunStatus::Completed)).await.unwrap();
+        store
+            .save(make_run("r1", "s1", RunStatus::Completed))
+            .await
+            .unwrap();
 
         let analyzer = TraceAnalyzer::new(store);
         let stats = analyzer.tool_usage_stats(100).await.unwrap();
@@ -622,7 +634,10 @@ mod tests {
     #[tokio::test]
     async fn test_token_usage_breakdown() {
         let store = Arc::new(InMemoryRunStore::new());
-        store.save(make_run("r1", "s1", RunStatus::Completed)).await.unwrap();
+        store
+            .save(make_run("r1", "s1", RunStatus::Completed))
+            .await
+            .unwrap();
 
         let analyzer = TraceAnalyzer::new(store);
         let breakdown = analyzer.token_usage_breakdown(100).await.unwrap();
@@ -636,7 +651,10 @@ mod tests {
     #[tokio::test]
     async fn test_find_slow_tools() {
         let store = Arc::new(InMemoryRunStore::new());
-        store.save(make_run("r1", "s1", RunStatus::Completed)).await.unwrap();
+        store
+            .save(make_run("r1", "s1", RunStatus::Completed))
+            .await
+            .unwrap();
 
         let analyzer = TraceAnalyzer::new(store);
         // read_file avg duration is 50ms, so threshold=40 should include it
@@ -651,7 +669,10 @@ mod tests {
     #[tokio::test]
     async fn test_error_pattern_analysis() {
         let store = Arc::new(InMemoryRunStore::new());
-        store.save(make_failed_run_with_tool_error("r1", "s1")).await.unwrap();
+        store
+            .save(make_failed_run_with_tool_error("r1", "s1"))
+            .await
+            .unwrap();
 
         let analyzer = TraceAnalyzer::new(store);
         let patterns = analyzer.error_pattern_analysis(100).await.unwrap();
@@ -659,16 +680,29 @@ mod tests {
 
         // "permission denied" only appears in the ToolError event, not in the
         // run-level error message ("something went wrong"), so count is 1.
-        let perm_pattern = patterns.iter().find(|p| p.pattern.contains("permission denied")).unwrap();
+        let perm_pattern = patterns
+            .iter()
+            .find(|p| p.pattern.contains("permission denied"))
+            .unwrap();
         assert_eq!(perm_pattern.occurrence_count, 1);
-        assert!(perm_pattern.associated_tools.contains(&"write_file".to_string()));
+        assert!(
+            perm_pattern
+                .associated_tools
+                .contains(&"write_file".to_string())
+        );
     }
 
     #[tokio::test]
     async fn test_list_sessions() {
         let store = Arc::new(InMemoryRunStore::new());
-        store.save(make_run("r1", "s1", RunStatus::Completed)).await.unwrap();
-        store.save(make_run("r2", "s2", RunStatus::Completed)).await.unwrap();
+        store
+            .save(make_run("r1", "s1", RunStatus::Completed))
+            .await
+            .unwrap();
+        store
+            .save(make_run("r2", "s2", RunStatus::Completed))
+            .await
+            .unwrap();
 
         let analyzer = TraceAnalyzer::new(store);
         let sessions = analyzer.list_sessions(100).await.unwrap();
@@ -679,7 +713,10 @@ mod tests {
 
     #[test]
     fn test_normalize_error() {
-        assert_eq!(normalize_error("  Permission   DENIED:  /etc  "), "permission denied: /etc");
+        assert_eq!(
+            normalize_error("  Permission   DENIED:  /etc  "),
+            "permission denied: /etc"
+        );
         assert_eq!(normalize_error("timeout"), "timeout");
         assert_eq!(normalize_error(""), "");
     }

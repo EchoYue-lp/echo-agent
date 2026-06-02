@@ -4,11 +4,11 @@
 //! SubAgent, Sandbox, intervention callbacks, and other components directly
 //! related to tool invocation.
 
+use crate::agent::InterventionCallback;
 #[cfg(feature = "subagent")]
 use crate::agent::subagent::SubagentRegistry;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
-use crate::agent::InterventionCallback;
 use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;

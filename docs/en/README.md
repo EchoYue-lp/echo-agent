@@ -45,6 +45,37 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerWorker/Pipeline/Debate/Swarm) |
 | [27 - Tracing System](./27-tracing.md) | Trace | Run, RunEvent (11 types), RunStore, JsonlRunStore, lifecycle, secret redaction |
 | [28 - Config Reference](./28-config-reference.md) | Config | AgentConfig, ReactAgentBuilder, ToolExecutionConfig, TokenBudgetConfig, YAML config, feature flags |
+| [29 - Long-Running Tasks](./29-long-running-tasks.md) | Long-Running Tasks | Task handle, checkpoint/resume, per-task execution, non-blocking scheduling |
+
+### New Features (v0.2.1)
+
+| Doc | Module | Key Concepts |
+|-----|--------|--------------|
+| [30 - ReAct Safety](./30-react-safety.md) | Loop Detection / Adaptive Compression | Loop detection, 5-level adaptive compression, Git checkpoint |
+| [31 - LSP Integration](./31-lsp-integration.md) | LSP | Language Server Protocol, code navigation, diagnostics, rust-analyzer |
+| [32 - Plugin System](./32-plugin-system.md) | Plugin | PluginManifest, PluginRegistry, PluginScope, lifecycle management |
+| [33 - Headless Mode](./33-headless-mode.md) | Headless | Non-interactive execution, CI/CD integration, JSON output, exit_code |
+| [34 - Git Isolation](./34-git-isolation.md) | Git Worktree / Checkpoint | Parallel sub-agent isolation, worktree management, file operation rollback |
+| [35 - Pipelines](./35-pipelines.md) | Data Pipeline / Writing Pipeline | Data processing pipeline, writing pipeline, quality loop |
+| [36 - Data Quality & Statistics](./36-data-quality-statistics.md) | Data Quality / Statistics | Data profiling, anomaly detection, descriptive stats, correlation analysis |
+| [37 - Code Search](./37-code-search.md) | Code Search | Ripgrep, structured output, glob/type filtering, 50KB cap |
+| [38 - Agent Factory & Modes](./38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | AgentParadigm, mode switching, localization, template rendering |
+| [39 - Tiered Memory](./39-tiered-memory.md) | Tiered Memory | Hot/warm/cold tiers, automatic eviction, token budget management |
+| [40 - Context System](./40-context-system.md) | Context System | ContextAssembler, ContextBudgeter, ContextSelector, priority ordering, budget awareness |
+
+### Getting Started Guides
+
+| Doc | Description |
+|-----|-------------|
+| [Getting Started](./getting-started.md) | Build your first Agent from scratch |
+| [Skill Authoring Guide](./skill-authoring.md) | Create custom Code-based and File-based Skills |
+
+### Security
+
+| Doc | Module | Key Concepts |
+|-----|--------|--------------|
+| [Security Guide](./security.md) | Security | Security model, sandbox config, secret management, MCP trust boundaries |
+| [Tool Permissions](./tool-permissions.md) | Tool Permissions | ToolPermission, PermissionMode, RuleRegistry, deny-first, ToolRiskClassifier |
 
 ### Knowledge Base
 
@@ -178,5 +209,36 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo16_testing.rs` | Mock testing infrastructure (zero real LLM calls) |
 | `examples/demo17_chat.rs` | Multi-turn chat (chat / chat_stream / reset) |
 | `examples/demo18_semantic_memory.rs` | Store semantic search (EmbeddingStore / vector retrieval) |
+| `examples/demo19_guard.rs` | Guard system (rule / LLM content filtering) |
+| `examples/demo20_audit.rs` | Audit logging |
+| `examples/demo21_handoff.rs` | Agent handoff |
+| `examples/demo22_plan_execute.rs` | Plan-and-Execute |
+| `examples/demo23_a2a.rs` | A2A protocol |
+| `examples/demo24_topology.rs` | Multi-agent topology visualization |
+| `examples/demo25_macros.rs` | Macro system showcase |
+| `examples/demo26_provider_factory.rs` | Dynamic LLM factory |
+| `examples/demo27_sqlite_memory.rs` | SQLite persistence |
+| `examples/demo28_workflow.rs` | Workflow pipeline |
+| `examples/demo29_sandbox.rs` | Sandbox execution |
+| `examples/demo30_mcp_server.rs` | MCP server mode |
+| `examples/demo31_memory_tools.rs` | Memory tool injection |
+| `examples/demo32_token_budget.rs` | Token budget control |
+| `examples/demo33_retry_policy.rs` | Unified retry |
+| `examples/demo34_workflow_stream.rs` | Workflow streaming |
+| `examples/demo35_dynamic_tools.rs` | Dynamic tool management |
+| `examples/demo36_multimodal.rs` | Multi-modal messages |
+| `examples/demo37_declarative_workflow.rs` | YAML/JSON workflows |
+| `examples/demo38_im_channels.rs` | IM channel integration |
+| `examples/demo39_workflow.rs` | Graph workflow engine |
+| `examples/demo40_snapshot.rs` | Snapshot & rollback |
+| `examples/demo41_web_tools.rs` | Web search + fetch |
+| `examples/demo42_playwright_mcp.rs` | Playwright MCP browser automation |
+| `examples/demo43_data_tools.rs` | Data tools (Excel / CSV / Word / Text) |
+| `examples/demo44_code_laboratory.rs` | Code execution assistant |
+| `examples/demo45_customer_service.rs` | Intelligent customer service |
+| `examples/demo46_data_analyst.rs` | Data analysis assistant |
+| `examples/demo47_enterprise.rs` | Enterprise workflow automation |
+| `examples/demo48_personal_assistant.rs` | Personal smart assistant |
+| `examples/demo49_research_agent.rs` | Research & report assistant |
 | `examples/demo50_eval.rs` | Eval system: cases, criteria, constraints, trajectory replay, trigger accuracy, HTML reports |
 | `examples/demo51_self_improvement.rs` | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver, SelfEvolution |

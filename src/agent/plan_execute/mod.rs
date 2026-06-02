@@ -93,6 +93,9 @@ impl PlanExt for Plan {
                     timeout_secs: 0,
                     max_retries: 0,
                     retry_count: 0,
+                    execute_fn: None,
+                    metadata_json: None,
+                    metadata: None,
                 }
             })
             .collect()

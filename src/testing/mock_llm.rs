@@ -172,7 +172,11 @@ impl MockLlmClient {
 
     /// The messages passed in the last call (returns `None` if never called)
     pub fn last_messages(&self) -> Option<Vec<Message>> {
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .cloned()
     }
 
     /// All historical call messages (in chronological order)
@@ -182,7 +186,10 @@ impl MockLlmClient {
 
     /// Number of remaining unconsumed preset responses
     pub fn remaining(&self) -> usize {
-        self.responses.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Clear all recorded call history (response queue is unaffected)
@@ -192,7 +199,12 @@ impl MockLlmClient {
 
     /// Pop the next response (text or tool calls)
     fn pop_response(&self) -> Result<PopResult> {
-        match self.responses.lock().unwrap_or_else(|e| e.into_inner()).pop_front() {
+        match self
+            .responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+        {
             Some(MockLlmResponse::Content(text)) => Ok(PopResult::Content(text)),
             Some(MockLlmResponse::ToolCalls(calls)) => Ok(PopResult::ToolCalls(calls)),
             Some(MockLlmResponse::Err(e)) => Err(e),
@@ -210,7 +222,10 @@ impl LlmClient for MockLlmClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
         Box::pin(async move {
             // Record this call
-            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(request.messages);
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.messages);
 
             match self.pop_response()? {
                 PopResult::Content(text) => Ok(ChatResponse {
@@ -233,7 +248,10 @@ impl LlmClient for MockLlmClient {
     ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
         Box::pin(async move {
             // Record this call
-            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(request.messages);
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.messages);
 
             match self.pop_response()? {
                 PopResult::Content(text) => {

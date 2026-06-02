@@ -66,7 +66,8 @@ execute(task)
 |------|-------------|
 | `Worker` (default) | Directly executes tasks using its tools |
 | `Orchestrator` | Delegates sub-tasks to SubAgents via `agent_tool` |
-| `Planner` | Decomposes the task into a DAG using the `plan` tool, then executes step by step |
+
+> **Note:** Task planning is enabled via `.enable_task(true)` (registers `plan`/`create_task`/`update_task` tools). No separate `Planner` role needed.
 
 ---
 
@@ -75,16 +76,15 @@ execute(task)
 ```rust
 AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
     .enable_tool(true)          // enable tool calling (default: true)
-    .enable_task(true)          // enable DAG task planning (Planner mode)
+    .enable_task(true)          // enable DAG task planning
     .enable_subagent(true)      // enable SubAgent dispatch (Orchestrator mode)
     .enable_memory(true)        // enable long-term memory (Store + remember/recall/forget tools)
     .enable_human_in_loop(true) // enable human approval gate
-    .enable_cot(true)           // enable Chain-of-Thought prompt injection (default: true)
+    .enable_cot(true)           // enable Chain-of-Thought prompt injection (Builder default: true)
     .session_id("thread-001")   // thread ID for Checkpointer restore/resume
     .conversation_id("conv-001")// optional transcript/history projection ID
     .token_limit(8192)          // context token limit (auto-compress when exceeded)
     .max_iterations(30)         // max iterations (prevents infinite loops)
-    .verbose(true)              // print detailed execution logs
 ```
 
 ---
@@ -95,26 +95,33 @@ Implement `AgentCallback` to observe every phase of execution (for analytics, lo
 
 ```rust
 use echo_agent::agent::{AgentCallback, AgentEvent};
-use async_trait::async_trait;
+use echo_agent::llm::types::Message;
+use futures::future::BoxFuture;
 use serde_json::Value;
 
 struct MyCallback;
 
-#[async_trait]
 impl AgentCallback for MyCallback {
-    async fn on_think_start(&self, agent: &str, messages: &[echo_agent::llm::types::Message]) {
-        println!("[{}] Thinking with {} messages in context", agent, messages.len());
+    fn on_think_start<'a>(&'a self, agent: &'a str, messages: &'a [Message]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("[{}] Thinking with {} messages in context", agent, messages.len());
+        })
     }
 
-    async fn on_tool_start(&self, agent: &str, tool: &str, args: &Value) {
-        println!("[{}] Calling tool: {} {:?}", agent, tool, args);
+    fn on_tool_start<'a>(&'a self, agent: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("[{}] Calling tool: {} {:?}", agent, tool, args);
+        })
     }
 
-    async fn on_tool_end(&self, agent: &str, tool: &str, result: &str) {
-        println!("[{}] Tool result: {} -> {}", agent, tool, &result[..result.len().min(80)]);
+    fn on_tool_end<'a>(&'a self, agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("[{}] Tool result: {} -> {}", agent, tool, &result[..result.len().min(80)]);
+        })
     }
 
-    async fn on_final_answer(&self, agent: &str, answer: &str) {
+    fn on_final_answer<'a>(&'a self, agent: &'a str, answer: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
         println!("[{}] Final answer: {}", agent, answer);
     }
 }

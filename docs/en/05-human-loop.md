@@ -168,7 +168,7 @@ for entry in recent {
 | Field | Description |
 |-------|-------------|
 | `tool_name` | Tool that was checked |
-| `args_hash` | SHA-256 hash (first 8 chars) of tool input |
+| `args_hash` | DefaultHasher hex hash (8 chars) of tool input |
 | `decision` | "allow" / "deny" / "require_approval" / "ask" |
 | `reason` | Pipeline stage: "bypass" / "plan_mode" / "rule_match" / "protected_path" / "cache_hit" / "denial_tracker" / "classifier" / "handler" / "dont_ask" / "no_handler" |
 | `source` | Which stage made the decision |
@@ -268,17 +268,15 @@ let decision = service.check("Bash", &serde_json::json!({"command": "ls"})).awai
 ### WebhookHumanLoopProvider (HTTP callback)
 
 ```rust
-let provider = WebhookHumanLoopProvider::new(
-    "https://your-approval-service/approve",
-    30,
-);
+let provider = WebhookHumanLoopProvider::new("https://your-approval-service/approve")
+    .with_timeout(Duration::from_secs(30));
 agent.set_human_loop_provider(Arc::new(provider));
 ```
 
 ### WebSocketHumanLoopProvider (WebSocket push)
 
 ```rust
-let provider = WebSocketHumanLoopProvider::new("127.0.0.1:9000").await?;
+let provider = WebSocketHumanLoopProvider::bind(9000).await?;
 agent.set_human_loop_provider(Arc::new(provider));
 ```
 

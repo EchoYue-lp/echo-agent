@@ -1,199 +1,334 @@
 # Long-Running Tasks
 
-> **Status: Analysis & Design Recommendation.**
-> The current system does NOT have a general-purpose long-running task mechanism.
-> This document analyzes what exists, what's missing, and the recommended design.
+> **Status: Implemented.**
+> The system provides full long-running task support including non-blocking handles, cross-restart recovery, progress tracking, human-in-the-loop gates, and cron scheduling.
 
 ---
 
-## What Exists Today
+## Overview
 
-### 1. DAG Task System (`echo-orchestration::tasks`, feature `tasks`)
+The echo-agent long-running task system consists of the following subsystems:
 
-The DAG task system decomposes a complex goal into sub-tasks with dependencies, then executes them in topological order. Independent tasks run in parallel via `tokio::spawn`, bounded by a `Semaphore`.
+| Subsystem | Module | Description |
+|-----------|--------|-------------|
+| DAG Task Engine | `echo_orchestration::tasks` | Directed acyclic graph task orchestration with dependencies, parallelism, and retry |
+| Background Task Handle | `tasks::background_task` | `BackgroundTask<T>` + `TaskSpawner` for non-blocking task management |
+| Progress Tracking | `tasks::progress` | `PhasePlan` + `ProgressReporter` for real-time progress broadcasting |
+| Human Gate | `tasks::human_gate` | `HumanGate` to pause tasks awaiting human approval |
+| Composite Execution | `tasks::composite` | `CompositePlan` for sequential/parallel execution of heterogeneous step chains |
+| Task Scheduler | `scheduler` | `CronTask` + `SchedulerRunner` for cron-based periodic triggering |
 
-**Lifecycle is bounded by the parent agent session:**
+---
+
+## Background Task Handle (BackgroundTask)
+
+`BackgroundTask<T>` provides non-blocking control over async tasks:
+
+```rust,ignore
+use echo_orchestration::tasks::{TaskSpawner, TaskSpawnerConfig};
+
+let spawner = TaskSpawner::new(TaskSpawnerConfig::default());
+
+// Spawn a background task — returns handle immediately
+let handle = spawner.spawn("fetch-data", async {
+    Ok("result".to_string())
+});
+
+// Non-blocking status check
+println!("{:?}", handle.status().await);
+
+// Blocking wait with timeout
+let result = handle.wait(Some(Duration::from_secs(30))).await?;
+
+// Cancel
+handle.cancel();
 ```
-User request → Agent creates Tasks → TaskExecutor::execute_all() blocks → Final answer
+
+### BackgroundTaskStatus Lifecycle
+
+```
+Pending → Running → Completed
+                  ↘ Failed
+                  ↘ Cancelled
 ```
 
-Key characteristics:
-- `execute_all()` blocks the calling agent loop until all tasks reach a terminal state
-- Tasks are ephemeral — they live and die within one `agent.execute()` call
-- SQLite persistence (`SqliteTaskStore`, `SqliteCheckpointStore`) exists but is only used for **crash recovery within a session**, not cross-restart resumption
-- All tasks share a single `TaskExecuteFn` — the same execution logic applies to every task
+### TaskSpawner
 
-### 2. Background Review (`improve` feature)
+System-level task manager with concurrency control (Semaphore) and cross-restart recovery:
 
-After each conversation turn, `BackgroundReviewer::review()` spawns a `tokio::spawn` that replays the conversation and decides whether to update memory or skills.
+```rust,ignore
+let spawner = TaskSpawner::new(TaskSpawnerConfig::default())
+    .with_store(Arc::new(SqliteTaskStore::new("tasks.db").await?));
 
-Key characteristics:
-- Fire-and-forget: the spawned task runs independently of the main loop
-- BUT `review()` does `tokio::spawn(...).await`, so it **blocks the caller** — effectively synchronous
-- No handle/token is returned for polling or cancellation by external code
-- No queue, no backpressure, no deduplication
+// List all tasks
+let tasks = spawner.list().await;
+
+// Cancel specific/all tasks
+spawner.cancel("task-id");
+spawner.cancel_all();
+
+// Cross-restart recovery
+let incomplete = spawner.resume_from_store().await?;
+```
+
+### Per-task Execution Logic
+
+Each `Task` can set its own `execute_fn`, overriding the executor's global function:
+
+```rust,ignore
+let task = Task::new("code-review", "Review pull request")
+    .with_execute_fn(Arc::new(|ctx| Box::pin(async move {
+        Ok(format!("Reviewed: {}", ctx.description))
+    })));
+```
+
+### Non-blocking DAG Execution
+
+`TaskExecutor::execute_all_async()` returns handles immediately without blocking the caller:
+
+```rust,ignore
+let handles = executor.execute_all_async();
+// Agent can continue doing other work
+for handle in &handles {
+    if !handle.is_completed().await {
+        println!("Task {} still running", handle.name);
+    }
+}
+```
+
+### Cross-Restart Recovery
+
+```rust,ignore
+let executor = TaskExecutor::new(manager, config)
+    .with_task_store(store)
+    .with_execute_fn(my_execute_fn);  // execute_fn is not serializable, must re-register
+
+let results = executor.resume_from_store().await?;
+```
 
 ---
 
-## What's Missing
+## Agent Background Task Tools
 
-A general-purpose **long-running task** system needs:
+With the `tasks` feature, the following tools are auto-registered when `enable_task` is true:
 
-| Capability | Current State |
-|---|---|
-| Submit task → get a handle | None |
-| Poll task status | `TaskManager::get_task()` exists but session-bound |
-| Cancel a running task | `TaskExecutor::cancel_task()` exists but in-memory only |
-| Retrieve results after completion | `Task::result` exists but lost after session ends |
-| Survive process restart | SQLite persistence exists but no resume API |
-| Different execution logic per task type | `TaskExecuteFn` is global (one function for all tasks) |
-| Timeout per task | Supported (`Task::timeout_secs`) |
-| Retry with backoff | Supported in `TaskExecutor` |
-| Concurrency control | Semaphore-based, configurable |
-| Progress/status events | `TaskEventBus` with broadcast channel |
+| Tool | Description |
+|------|-------------|
+| `spawn_background_task` | Spawn a background task, return task ID |
+| `check_task_status` | Query the current status of a background task |
+| `list_background_tasks` | List all active background tasks |
 
 ---
 
-## Isolation Analysis
+## Progress Tracking (ProgressReporter)
 
-### DAG Tasks vs ReAct Loop
+Provides real-time progress feedback for long-running tasks:
 
-When the Planner role engages, the agent enters a DAG-driven mode that is **mutually exclusive** with the standard ReAct loop:
+```
+PhasePlan → ProgressReporter → watch::Receiver<TaskProgress>  → SSE/WS/UI
+                             → TaskEvent::Progress → TaskEventBus → logging/persistence
+```
+
+### Phase and PhasePlan
+
+`Phase` defines a single stage in a pipeline, with weight, retry, timeout, and human checkpoint support:
+
+```rust,ignore
+use echo_agent::tasks::{Phase, PhasePlan};
+
+let plan = PhasePlan::new(vec![
+    Phase::new("search",  "Search",  2.0),  // weight 2
+    Phase::new("analyze", "Analyze", 3.0),  // weight 3
+    Phase::new("report",  "Report",  1.0),  // weight 1
+]);
+
+plan.progress_pct(0, 0.5);  //  16.7%  (1.0 / 6.0)
+plan.progress_pct(1, 0.0);  //  33.3%  (2.0 / 6.0)
+plan.progress_pct(2, 1.0);  // 100.0%  (6.0 / 6.0)
+```
+
+### ProgressReporter
+
+Watch-channel-based progress broadcaster with latest-value semantics:
+
+| Method | Description |
+|--------|-------------|
+| `new(task_id, plan)` | Create a reporter |
+| `enter_phase(idx, msg)` | Enter a new phase |
+| `update_phase_progress(pct, msg)` | Intra-phase progress update (0.0–1.0) |
+| `subscribe()` | Get a `watch::Receiver<TaskProgress>` |
+| `current()` | Get current snapshot |
+
+### TaskEvent::Progress
+
+Progress events can be emitted into `TaskEventBus`, unified with lifecycle events:
+
+```rust,ignore
+let mut reporter = ProgressReporter::new("task-42".into(), plan);
+let bus = TaskEventBus::new();
+
+reporter.enter_phase(0, Some("Searching...".into()));
+let progress = reporter.current();
+bus.emit(TaskEvent::Progress {
+    task_id: "task-42".into(),
+    progress,
+});
+```
+
+Runnable example: `cargo run --example demo67_progress`
+
+---
+
+## Human Gate (HumanGate)
+
+Provides human-in-the-loop checkpoints for task pipelines. Running tasks can pause themselves and wait for human approval before continuing.
+
+### Core Types
+
+```rust,ignore
+use echo_agent::tasks::{HumanGate, HumanRequest, HumanResponse};
+
+pub struct HumanRequest {
+    pub prompt: String,             // Question shown to the user
+    pub context: serde_json::Value, // Arbitrary context
+    pub options: Vec<String>,       // Available responses ["Approve", "Revise", "Cancel"]
+    pub phase: String,              // Name of the phase waiting for input
+}
+
+pub struct HumanResponse {
+    pub selection: String,            // Selected option
+    pub instructions: Option<String>, // Optional free-text instructions
+}
+```
+
+### Usage
+
+```rust,ignore
+use tokio_util::sync::CancellationToken;
+
+let gate = HumanGate::new();
+let cancel = CancellationToken::new();
+
+// Task side: send request and block
+let response = gate.request("task-1", HumanRequest {
+    prompt: "Review the draft".into(),
+    context: serde_json::json!({ "draft": "..." }),
+    options: vec!["Approve".into(), "Revise".into(), "Cancel".into()],
+    phase: "review".into(),
+}, &cancel).await?;
+
+// Frontend side: check pending requests and respond
+let pending = gate.pending().await;
+gate.respond("task-1", HumanResponse {
+    selection: "Approve".into(),
+    instructions: None,
+}).await;
+```
+
+| HumanGate Method | Description |
+|------------------|-------------|
+| `request(task_id, req, cancel)` | Block until response or cancellation |
+| `respond(task_id, resp)` | Respond to a pending request |
+| `pending()` | List all pending requests |
+| `pending_count()` | Number of pending requests |
+
+Runnable example: `cargo run --example demo68_human_gate --features tasks,subagent`
+
+---
+
+## Task Scheduler
+
+Cron-based task scheduling with persistence and runtime management.
+
+### CronTask
+
+```rust,ignore
+use echo_agent::scheduler::{CronTask, CronTaskStatus};
+
+let task = CronTask::new("daily-backup", "0 2 * * *", "Run nightly backup");
+task.validate_cron();      // -> true
+task.next_run();           // -> Some(DateTime<Utc>)
+```
+
+Cron expressions use the standard 5-field format: `min hour dom month dow`
+
+| Example | Meaning |
+|---------|---------|
+| `0 2 * * *` | Daily at 2:00 AM |
+| `*/5 * * * *` | Every 5 minutes |
+| `0 9 * * 1` | Every Monday at 9:00 AM |
+
+### CronTaskStore
+
+Persistent storage with dual backend:
+
+| Backend | Creation |
+|---------|----------|
+| **Store trait** (recommended) | `CronTaskStore::with_store(store)` |
+| **File** (fallback) | `CronTaskStore::new()` |
+
+### SchedulerRunner
+
+Background scheduler with 30-second tick interval, fires tasks when due:
+
+```rust,ignore
+use echo_agent::scheduler::{CronTask, CronTaskStore, SchedulerRunner, FireFn};
+
+let store = CronTaskStore::new();
+store.add(CronTask::new("daily-backup", "0 2 * * *", "Run nightly backup"))?;
+
+let fire_fn: FireFn = Arc::new(|task| Box::pin(async move {
+    Ok(format!("Executed: {}", task.name))
+}));
+
+let runner = Arc::new(SchedulerRunner::new(store, cancel, fire_fn));
+runner.clone().spawn();               // Start background tick loop
+runner.run_once("daily").await?;      // Manual trigger
+runner.set_status("daily", CronTaskStatus::Disabled).await?;
+```
+
+| Management Method | Description |
+|-------------------|-------------|
+| `add_task(task)` | Add and persist |
+| `remove_task(id)` | Remove by id prefix |
+| `set_status(id, status)` | Enable/disable |
+| `list_tasks()` | Return all tasks |
+| `run_once(id)` | Trigger immediately |
+| `reload()` | Reload from store |
+
+Runnable example: `cargo run --example demo70_scheduler`
+
+---
+
+## Typed Metadata
+
+`Task` supports attaching arbitrary typed data. `metadata_json` survives cross-restart serialization:
+
+```rust,ignore
+use echo_agent::tasks::Task;
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct ResearchParams { topic: String, max_papers: u32 }
+
+let task = Task::new("r1", "Research task")
+    .with_metadata(ResearchParams { topic: "AI".into(), max_papers: 20 });
+
+// Typed access
+let params = task.get_metadata::<ResearchParams>().unwrap();
+```
+
+---
+
+## Integration Architecture
 
 ```
 ReactAgent
 ├── Standard path: ReAct loop (think → act → observe → repeat)
-└── Planner path: Plan → to_task_dag() → TaskExecutor::execute_all() → final_answer
+│   └── Can call spawn_background_task (non-blocking)
+├── Planner path: Plan → to_task_dag() → TaskExecutor::execute_all() → final_answer
+│   └── Blocks until all DAG tasks complete (by design)
+└── BackgroundReviewer: fire-and-forget LLM call
 ```
 
-The two paths do not share state beyond the agent's message history. There is no mechanism for a DAG task to "yield" back to the ReAct loop mid-execution, nor for the ReAct loop to spawn a background DAG and continue.
-
-### DAG Tasks vs BackgroundReviewer
-
-These are entirely separate systems with no shared abstraction:
-- DAG tasks: structured decomposition, dependency graph, parallel execution, retry
-- BackgroundReviewer: single fire-and-forget LLM call for post-turn analysis
-
-### DAG Tasks vs Handoff
-
-`HandoffManager` transfers control from one agent to another, but the handoff target runs as a full agent session — it does not integrate with the DAG task scheduler. You cannot hand off a single sub-task; you hand off the entire conversation.
-
-### Diagram
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Agent Session                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │  ReAct Loop  │  │  PlanExecute │  │  Background   │  │
-│  │  (default)   │  │  (DAG tasks) │  │  Review       │  │
-│  │              │  │              │  │  (fire+forget)│  │
-│  │  think→act   │  │  plan→exec   │  │               │  │
-│  │  →observe    │  │  →all block  │  │  spawn+await  │  │
-│  └──────────────┘  └──────────────┘  └───────────────┘  │
-│         │                 │                  │           │
-│         └─────────┬───────┘                  │           │
-│                   │                          │           │
-│            Mutually exclusive         No integration      │
-│         (Planner role switches)       with either path    │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## Recommended Design
-
-### Core Abstraction: `BackgroundTask`
-
-```rust
-/// A handle to a running or completed background task.
-pub struct BackgroundTask<T> {
-    /// Unique task ID (survives restarts)
-    pub id: String,
-    /// Current status
-    status: Arc<RwLock<BackgroundTaskStatus>>,
-    /// Oneshot receiver for the final result
-    result_rx: Mutex<Option<oneshot::Receiver<Result<T>>>>,
-    /// Cancellation token
-    cancel: CancellationToken,
-}
-
-pub enum BackgroundTaskStatus {
-    Pending,
-    Running { started_at: Instant },
-    Completed { finished_at: Instant },
-    Failed { error: String, at: Instant },
-    Cancelled,
-}
-
-impl<T: Send + 'static> BackgroundTask<T> {
-    /// Poll current status without blocking.
-    pub fn status(&self) -> BackgroundTaskStatus { ... }
-
-    /// Wait for completion (with optional timeout).
-    pub async fn wait(self, timeout: Option<Duration>) -> Result<T> { ... }
-
-    /// Request cancellation.
-    pub fn cancel(&self) { ... }
-}
-```
-
-### Task Spawner
-
-```rust
-/// Spawns and manages background tasks across the system.
-pub struct TaskSpawner {
-    tasks: Arc<DashMap<String, Arc<dyn AnyBackgroundTask>>>,
-    store: Option<Arc<dyn TaskStore>>,       // for cross-restart persistence
-    max_concurrent: usize,
-    semaphore: Arc<Semaphore>,
-}
-
-impl TaskSpawner {
-    /// Spawn a closure as a background task. Returns a handle immediately.
-    pub fn spawn<F, T>(&self, name: &str, fut: F) -> BackgroundTask<T>
-    where
-        F: Future<Output = Result<T>> + Send + 'static,
-        T: Send + 'static,
-    { ... }
-
-    /// Spawn an agent execution as a background task.
-    pub fn spawn_agent(
-        &self,
-        agent: Arc<dyn Agent>,
-        input: String,
-    ) -> BackgroundTask<String> { ... }
-
-    /// List all tasks (for status dashboards).
-    pub fn list(&self) -> Vec<TaskSummary> { ... }
-
-    /// Resume pending/in-progress tasks after a restart.
-    pub async fn resume_from_store(&self) -> Result<Vec<BackgroundTask<String>>> { ... }
-}
-```
-
-### Integration Points
-
-1. **ReAct loop**: Agent can call a `spawn_background_task` tool to offload work without blocking
-2. **PlanExecute**: Instead of `execute_all()` blocking, `execute_all_async()` returns a `BackgroundTask<Vec<TaskExecutionResult>>`
-3. **Handoff**: Handoff targets can be spawned as background tasks via `TaskSpawner::spawn_agent()`
-4. **BackgroundReviewer**: Refactored to use `TaskSpawner` instead of raw `tokio::spawn`
-
-### Priority: What to Fix First
-
-| Priority | Item | Effort |
-|----------|------|--------|
-| P0 | Fix `BackgroundReviewer::review()` — remove `.await` on the spawned task, return a handle | Small |
-| P1 | Add `BackgroundTask<T>` handle abstraction with poll/wait/cancel | Medium |
-| P2 | Make `TaskExecuteFn` per-task instead of global (add `execute_fn` field to `Task`) | Medium |
-| P3 | Add `execute_all_async()` to `TaskExecutor` that returns a `BackgroundTask` | Medium |
-| P4 | Add cross-restart task resumption via `SqliteTaskStore` | Large |
-| P5 | Add `spawn_background_task` tool for the agent to offload work | Medium |
-
----
-
-## Summary
-
-- The DAG task system is a **parallel sub-task executor**, not a long-running task system
-- The BackgroundReviewer is **fire-and-forget but blocks the caller** due to `.await`
-- The two systems are completely isolated from each other and from the ReAct loop
-- The architecture is well-layered and the building blocks (persistence, retry, cancellation, semaphore) are solid — what's missing is the **handle/poll/resume abstraction** that ties them together into a true long-running task system
+`execute_all_async()` is available as a public API for external orchestrators that need to trigger DAG execution asynchronously outside the ReAct loop.

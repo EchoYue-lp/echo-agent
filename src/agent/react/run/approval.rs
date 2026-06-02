@@ -1,9 +1,8 @@
 //! Tool execution approval (human-in-the-loop)
 
 use super::super::ReactAgent;
-use crate::error::{ReactError, Result};
+use crate::error::Result;
 use serde_json::Value;
-use tracing::{info, warn};
 
 impl ReactAgent {
     #[cfg(feature = "human-loop")]

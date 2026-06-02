@@ -1,146 +1,314 @@
-# Security Guide
+# Security & Permissions
 
-Echo Agent provides multiple layers of security mechanisms to protect your system and data. This guide covers the tool security model, sandbox configuration, secret management, and MCP trust boundaries.
+echo-agent provides multi-layer security: tool permissions, sandbox isolation, secret management, SSRF protection, and audit logging.
 
 ---
 
-## 1. Tool Security Model
+## 1. Tool Permission Model
 
-### Permission Declarations
+### Permission Types (ToolPermission)
 
-Each built-in tool declares its required permissions and risk level:
+Each tool declares its required permissions:
 
-| Tool | Permissions | Risk Level | Notes |
-|------|-------------|------------|-------|
-| `read_file` | `Read` | `ReadOnly` | Read-only file access |
-| `write_file` | `Write` | `Standard` | Write to file |
-| `delete_file` | `Write` | `Dangerous` | Delete file |
-| `edit_file` | `Read, Write` | `Standard` | Edit file (auto .bak backup) |
-| `shell` | `Execute` | `Dangerous` | Execute shell commands (whitelist-restricted) |
-| `web_fetch` | `Network` | `Standard` | HTTP requests (SSRF protected) |
-| `web_search` | `Network` | `Standard` | Web search (DuckDuckGo/Brave/Tavily) |
-| `git_commit` | `Write, Execute` | `Dangerous` | Create Git commits |
-| `run_skill_script` | `Execute` | `Dangerous` | Execute skill scripts |
-| `arxiv_search` | `Network` | `Standard` | ArXiv API (HTTPS, SSRF redirect policy) |
-| `semantic_scholar_search` | `Network` | `Standard` | Semantic Scholar API (HTTPS, SSRF redirect) |
-| `pdf_fetch` | `Network` | `Standard` | PDF download (SSRF protected, %PDF validation) |
-| `bibtex_generate` | `Write` | `ReadOnly` | BibTeX text generation |
-| `rag_index` | `Read, Write` | `Standard` | Document chunking + vector index |
-| `rag_search` | `Read` | `ReadOnly` | Semantic search over indexed docs |
-| `excel_read` / `excel_info` | `Read` | `ReadOnly` | Read Excel files |
-| `excel_write` | `Write` | `Standard` | Write Excel files |
-| `data_read` / `data_filter` / ... | `Read` | `ReadOnly` | Data analysis tools |
-| `data_transform` | `Read, Write` | `Standard` | Data transformation |
-| `generate_chart` | `Read, Write` | `Standard` | Chart image generation |
-| `db_query` | `Network` | `Standard` | SQL database queries (blacklist protected) |
-
-### Permission Types
-
-- **`Read`** — Read files/directories
-- **`Write`** — Write/modify files
-- **`Network`** — Network access
-- **`Execute`** — Execute commands/code
-- **`Sensitive`** — Sensitive operations (keys, env vars, etc.)
-
-### Approval Chain
-
-Tool execution goes through the following approval chain:
-
-```
-Tool.metadata (permissions, risk_level)
-    → PolicyEngine (RuleRegistry + PermissionPolicy)
-    → PermissionRequest (risk_level, context)
-    → HumanLoopProvider (approve/deny/ask)
-    → AuditLogger (record decision)
-    → SandboxExecutor (isolated execution)
-```
-
-### Read-Before-Edit Enforcement
-
-Set `force_read_before_edit: true` in AgentConfig to require the model to read a file before modifying or deleting it:
+| Permission | Description |
+|------------|-------------|
+| `Read` | Read files/directories |
+| `Write` | Write/modify files |
+| `Network` | Network access |
+| `Execute` | Execute commands/code |
+| `Sensitive` | Sensitive operations (secrets, env vars) |
 
 ```rust
-let config = AgentConfig::new("qwen-plus", "agent", "system prompt")
+use echo_core::tools::permission::ToolPermission;
+
+impl Tool for FileReadTool {
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Read]
+    }
+}
+```
+
+### Risk Levels (ToolRiskLevel)
+
+| Level | Description |
+|-------|-------------|
+| `ReadOnly` | No side effects |
+| `Standard` | Limited side effects |
+| `Dangerous` | Irreversible side effects |
+
+`ToolRiskClassifier` auto-classifies by tool name:
+
+```rust
+use echo_execution::risk::ToolRiskClassifier;
+
+let category = ToolRiskClassifier::classify("shell");  // ShellExec, level 3
+let category = ToolRiskClassifier::classify("read_file");  // ReadOnly, level 0
+```
+
+### Built-in Tool Permissions
+
+| Tool | Permissions | Risk |
+|------|------------|------|
+| `read_file` | `Read` | `ReadOnly` |
+| `write_file` | `Write` | `Standard` |
+| `delete_file` | `Write` | `Dangerous` |
+| `edit_file` | `Read, Write` | `Standard` |
+| `shell` | `Execute` | `Dangerous` |
+| `web_fetch` / `web_search` | `Network` | `Standard` |
+| `git_commit` | `Write, Execute` | `Dangerous` |
+| `run_skill_script` | `Execute` | `Dangerous` |
+| `db_query` | `Network` | `Standard` |
+
+---
+
+## 2. Permission Modes
+
+| Mode | Allows Write | Interactive | Classifier | Use Case |
+|------|-------------|-------------|------------|----------|
+| `Default` | ❌ | ✅ | ❌ | Normal interaction |
+| `Plan` | ❌ | ✅ | ❌ | Read-only planning |
+| `AcceptEdits` | ✅ | Partial | ❌ | Trusted file edits |
+| `BypassPermissions` | ✅ | ❌ | ❌ | Full trust |
+| `Auto` | ❌ | ❌ | ✅ | AI auto-decides |
+| `Bubble` | ❌ | ✅ | ❌ | Sub-agent bubbling |
+| `DontAsk` | ❌ | ❌ | ❌ | CI/CD unattended |
+
+```rust
+let config = AgentConfig::new("qwen-max", "agent", "system prompt")
+    .permission_mode(PermissionMode::Plan);
+```
+
+---
+
+## 3. Permission Rules System
+
+### Rule Structure
+
+```rust
+pub struct PermissionRule {
+    pub matcher: RuleMatcher,    // which tools to match
+    pub behavior: RuleBehavior,  // allow/deny/ask
+    pub source: RuleSource,      // priority source
+}
+```
+
+### Matchers
+
+```rust
+RuleMatcher::Tool { name: "read_file".into() }         // exact
+RuleMatcher::Pattern { pattern: "Bash(git:*)".into() }  // wildcard
+RuleMatcher::Permission { permission: ToolPermission::Execute } // by permission
+RuleMatcher::All                                        // match all
+```
+
+### Source Priority (high → low)
+
+| Priority | Source | Description |
+|----------|--------|-------------|
+| 6 | `Session` | Temporary session rules |
+| 5 | `CliArg` | CLI arguments |
+| 4 | `Managed` | Admin policies (enterprise) |
+| 3 | `UserSettings` | `~/.echo/settings.json` |
+| 2 | `ProjectSettings` | `.echo/settings.json` |
+| 1 | `LocalSettings` | `.echo/settings.local.json` |
+| 0 | `Default` | Default rules |
+
+### RuleRegistry — deny-first evaluation
+
+```rust
+use echo_core::tools::permission::*;
+
+let mut registry = RuleRegistry::new();
+
+// Deny all by default
+registry.add_rule(PermissionRule::deny(RuleMatcher::All, "Default deny".into(), RuleSource::Default));
+
+// Allow reads
+registry.add_rule(PermissionRule::allow(
+    RuleMatcher::Permission { permission: ToolPermission::Read }, RuleSource::UserSettings));
+
+// Session: allow git commands (highest priority)
+registry.add_rule(PermissionRule::allow(
+    RuleMatcher::Pattern { pattern: "Bash(git:*)".into() }, RuleSource::Session));
+
+let decision = registry.check("read_file", &[ToolPermission::Read]);
+```
+
+**Evaluation order:** Deny rules reject immediately → Ask rules by source priority → Allow rules by source priority.
+
+### YAML Configuration
+
+```yaml
+permissions:
+  mode: "prompt"
+  rules:
+    - matcher: "tool:shell"
+      behavior: "ask"
+    - matcher: "*"
+      behavior: "allow"
+```
+
+---
+
+## 4. Permission Policy
+
+```rust
+pub trait PermissionPolicy: Send + Sync {
+    fn check<'a>(&'a self, tool_name: &'a str, permissions: &'a [ToolPermission])
+        -> BoxFuture<'a, PermissionDecision>;
+}
+
+let policy = DefaultPermissionPolicy::new()
+    .grant(ToolPermission::Read)
+    .grant(ToolPermission::Network)
+    .require_approval(ToolPermission::Execute);
+```
+
+### Agent Integration
+
+```rust
+let agent = ReactAgent::new(config)
+    .with_permission_registry(registry)
+    .with_permission_mode(PermissionMode::Default);
+```
+
+`force_read_before_edit: true` requires reading a file before modifying:
+
+```rust
+let config = AgentConfig::new("qwen-plus", "agent", "...")
     .force_read_before_edit(true);
 ```
 
 ---
 
-## 2. Sandbox Configuration
+## 5. Sandbox
 
-### Security Levels
-
-Framework-level `SecurityLevel` (4 isolation tiers):
-
-| Level | Value | Description |
-|-------|------|-------------|
-| `Trusted` | 0 | No isolation, direct host execution |
-| `Standard` | 1 | Process-level isolation |
-| `Strict` | 2 | Container isolation (Docker) |
-| `Maximum` | 3 | Orchestrated isolation (Kubernetes) |
-
-### Docker Sandbox
+| Level | Isolation |
+|-------|-----------|
+| `Trusted` (0) | None, direct host execution |
+| `Standard` (1) | Process-level isolation |
+| `Strict` (2) | Container (Docker) |
+| `Maximum` (3) | Orchestrated (Kubernetes) |
 
 ```rust
 let sandbox = DockerSandbox::new()
     .with_image("rust:latest")
     .with_network(false)
     .with_memory_limit("512m")
-    .with_cpu_limit(1.0)
     .with_timeout_secs(30);
+
+let agent = ReactAgent::builder(config).with_sandbox(sandbox).build()?;
 ```
 
 ---
 
-## 3. Secret Management
+## 6. Secret Management
 
-- Always use environment variables for API keys
-- Never store secrets in `echo-agent.yaml`
-- Add `.env` to `.gitignore`
-- Enable JWT authentication for web server mode
-- Default host should be `127.0.0.1` for local-only access
+Always inject via environment variables, **never hardcode in config files**:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+### JWT Authentication (Web Server mode)
+
+```bash
+export AUTH_ENABLED=true
+export JWT_SECRET="your-secret-at-least-32-characters-long"
+```
 
 ---
 
-## 4. MCP Trust Boundaries
+## 7. MCP Trust Boundaries
 
-- Local MCP servers run on the same machine — can access local filesystem
-- Remote MCP servers connect via HTTP/SSE — verify trustworthiness of the URL
-- Apply strict permission rules for MCP-provided tools
-- All MCP tool calls are logged in the audit trail
+**Local MCP servers** run on the same machine. **Remote MCP servers** require: URL verification, tool whitelisting, network isolation.
+
+```json
+{
+  "mcpServers": {
+    "remote-search": {
+      "transport": "sse",
+      "url": "https://trusted-server.example.com/sse",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+    }
+  }
+}
+```
 
 ---
 
-## 5. SSRF Protection
+## 8. SSRF & Injection Protection
 
-All network-capable tools share a unified SSRF (Server-Side Request Forgery) protection layer:
+### SSRF Protection
 
+All network tools share unified protection:
 - **Private IP blocking**: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-- **Localhost blocking**: `localhost`, `*.local` domains
-- **Protocol restriction**: Only `http://` and `https://` allowed (blocks `file://`, `gopher://`, etc.)
-- **Safe redirect policy**: Redirects are re-validated against the same rules
-- **Shared HTTP client**: `OnceLock<reqwest::Client>` with configurable timeout (30-60s)
+- **Localhost blocking**: `localhost`, `*.local`
+- **Protocol restriction**: only `http://` and `https://`
+- **Safe redirects**: re-validate redirect targets
+- **Response limit**: 10MB
 
-This protection applies to: `web_fetch`, `web_search`, `arxiv_search`, `semantic_scholar_search`, `pdf_fetch`.
+Applies to: `web_fetch`, `web_search`, `arxiv_search`, `semantic_scholar_search`, `pdf_fetch`.
 
 ### SQL Injection Protection
 
-Database tools (`db_query`) include additional protections:
-
-- **SQL blacklist**: Blocks `DROP`, `DELETE`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `EXECUTE`, `INTO OUTFILE`, `LOAD_FILE`
-- **Table name validation**: Only alphanumeric, `_`, and `.` characters allowed
-- **URL scheme validation**: Only `sqlite`, `mysql`, `postgresql`, `postgres` schemes accepted
-- **MySQL escaping**: Single quotes escaped as `''` (not `\'`)
+`db_query` protections: SQL blacklist (`DROP`, `DELETE`, `TRUNCATE`, etc.), table name validation, URL scheme validation.
 
 ---
 
-## 6. Security Checklist
+## 9. Audit Logging
 
-- [ ] JWT authentication enabled (`AUTH_ENABLED=true`)
+All tool calls, permission decisions, and Guard interceptions are logged:
+
+```rust
+let logs = state.get_audit_logs().await;
+// Each: tool_name, decision, reason, source, timestamp, duration
+```
+
+---
+
+## 10. Usage Scenarios
+
+### CI/CD (strict)
+
+```rust
+let config = AgentConfig::new("qwen-max", "agent", "...")
+    .permission_mode(PermissionMode::DontAsk);
+
+let mut registry = RuleRegistry::new();
+registry.add_rule(PermissionRule::allow(
+    RuleMatcher::Tool { name: "read_file".into() }, RuleSource::Default));
+registry.add_rule(PermissionRule::deny(
+    RuleMatcher::All, "CI/CD whitelist mode".into(), RuleSource::Default));
+```
+
+### Enterprise (admin policy)
+
+```rust
+registry.add_rule(PermissionRule::deny(
+    RuleMatcher::Tool { name: "shell".into() },
+    "Enterprise policy".into(), RuleSource::Managed));
+```
+
+---
+
+## 11. Security Checklist
+
+- [ ] Enable JWT authentication
 - [ ] Strong JWT secret (≥32 characters)
-- [ ] Server host set to `127.0.0.1` (or TLS reverse proxy configured)
-- [ ] Dangerous tools (shell, delete_file, git_commit) set to `ask` permission
-- [ ] Sandbox execution enabled (Docker/K8s)
-- [ ] API keys injected via environment variables only
-- [ ] MCP servers only connect to trusted sources
+- [ ] Server host set to `127.0.0.1` (or TLS reverse proxy)
+- [ ] Dangerous tools configured as `ask`
+- [ ] Sandbox execution enabled
+- [ ] API keys via environment variables only
+- [ ] MCP servers trusted sources only
 - [ ] Audit logs reviewed regularly
+
+---
+
+## See Also
+
+- [Tools](./02-tools.md)
+- [Human-in-the-Loop](./05-human-loop.md)
+- [Guard System](./18-guard-system.md)
+- [Hooks](./23-hooks.md)

@@ -309,9 +309,17 @@ pub struct TaskExecutor {
     execute_fn: Option<TaskExecuteFn>,
     hooks: Arc<TaskHookRegistry>,
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    /// Optional persistent task store for cross-restart resumption.
+    task_store: Option<Arc<dyn super::store::TaskStore>>,
     /// Tracks cancellation tokens for running tasks.
     /// Used by `cancel_task()` to abort in-flight executions.
     running_tasks: Arc<DashMap<String, CancellationToken>>,
+    /// Optional shared [`TaskSpawner`] for `execute_all_async()`.
+    ///
+    /// When set, all async DAG executions share the same spawner so tasks
+    /// appear in a unified `list()` and share concurrency control. When
+    /// `None`, each `execute_all_async()` call creates an isolated spawner.
+    shared_spawner: Option<Arc<super::background_task::TaskSpawner>>,
 }
 
 impl TaskExecutor {
@@ -326,7 +334,9 @@ impl TaskExecutor {
             execute_fn: None,
             hooks,
             checkpoint_store: None,
+            task_store: None,
             running_tasks: Arc::new(DashMap::new()),
+            shared_spawner: None,
         }
     }
 
@@ -339,6 +349,24 @@ impl TaskExecutor {
     /// Set checkpoint store for periodic saving during execute_all
     pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
         self.checkpoint_store = Some(store);
+        self
+    }
+
+    /// Set a persistent task store for cross-restart task resumption.
+    pub fn with_task_store(mut self, store: Arc<dyn super::store::TaskStore>) -> Self {
+        self.task_store = Some(store);
+        self
+    }
+
+    /// Set a shared [`TaskSpawner`] for `execute_all_async()`.
+    ///
+    /// When set, all async DAG executions share the same spawner so tasks
+    /// appear in a unified `list()` and share concurrency control.
+    pub fn with_task_spawner(
+        mut self,
+        spawner: Arc<super::background_task::TaskSpawner>,
+    ) -> Self {
+        self.shared_spawner = Some(spawner);
         self
     }
 
@@ -392,7 +420,8 @@ impl TaskExecutor {
                 .map_err(|e| ReactError::Other(format!("Semaphore acquire error: {}", e)))?;
             let manager = self.task_manager.clone();
             let config = self.config.clone();
-            let execute_fn = self.execute_fn.clone();
+            // Per-task execute_fn overrides global execute_fn
+            let execute_fn = task.execute_fn.clone().or_else(|| self.execute_fn.clone());
             let hooks = self.hooks.clone();
             let running_tasks = self.running_tasks.clone();
             let task_id = task.id.clone();
@@ -873,6 +902,126 @@ impl TaskExecutor {
         }
 
         Ok(all_results)
+    }
+
+    /// Non-blocking variant of `execute_all` that spawns execution as background tasks.
+    ///
+    /// Returns handles immediately — the caller's ReAct loop is not blocked.
+    /// Each returned [`BackgroundTask`] can be polled for status, awaited, or cancelled.
+    ///
+    /// DAG dependency waking is handled automatically: when a task completes,
+    /// its dependents are woken and the next batch is spawned.
+    pub fn execute_all_async(
+        &self,
+    ) -> Vec<super::background_task::BackgroundTask<TaskExecutionResult>> {
+        let ready_tasks = self.task_manager.get_ready_tasks();
+        if ready_tasks.is_empty() {
+            return Vec::new();
+        }
+
+        info!(
+            tasks = ready_tasks.len(),
+            "Spawning {} tasks as background tasks (non-blocking)",
+            ready_tasks.len()
+        );
+
+        let spawner = self
+            .shared_spawner
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(super::background_task::TaskSpawner::new(
+                    super::background_task::TaskSpawnerConfig {
+                        max_concurrent: self.config.max_concurrent,
+                        default_timeout_secs: self.config.default_timeout_secs,
+                    },
+                ))
+            });
+
+        let mut handles = Vec::with_capacity(ready_tasks.len());
+        for task in ready_tasks {
+            let task_id = task.id.clone();
+            let task_name = format!("dag-task-{}", &task_id);
+
+            // Clone everything needed for the spawn
+            let manager = self.task_manager.clone();
+            let config = self.config.clone();
+            let execute_fn = task.execute_fn.clone().or_else(|| self.execute_fn.clone());
+            let hooks = self.hooks.clone();
+            let semaphore = self.semaphore.clone();
+
+            let handle = spawner.spawn(&task_name, async move {
+                let _permit = semaphore
+                    .acquire()
+                    .await
+                    .map_err(|e| ReactError::Other(format!("Semaphore error: {e}")))?;
+
+                let result = Self::run_task_with_retry(
+                    task,
+                    manager.clone(),
+                    config,
+                    execute_fn,
+                    hooks,
+                    CancellationToken::new(),
+                )
+                .await;
+
+                // Wake dependents so the next batch becomes ready
+                if matches!(result.status, TaskStatus::Completed) {
+                    manager.wake_dependents(&task_id);
+                }
+
+                Ok(result)
+            });
+
+            handles.push(handle);
+        }
+
+        handles
+    }
+
+    /// Resume incomplete tasks from a persistent task store after a process restart.
+    ///
+    /// Tasks that were `InProgress` when the process died are reset to `Pending`
+    /// so the executor can pick them up. The `retry_count` is preserved so
+    /// retry logic continues from where it left off.
+    ///
+    /// **Important:** Since `execute_fn` is not serializable, callers must
+    /// re-register execute functions (via `with_execute_fn` or per-task
+    /// `execute_fn`) before calling this method.
+    pub async fn resume_from_store(&self) -> Result<Vec<TaskExecutionResult>> {
+        let store = self
+            .task_store
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("No task store configured".into()))?;
+
+        let all_tasks = store.load_all().await?;
+        let incomplete: Vec<super::Task> = all_tasks
+            .into_iter()
+            .filter(|t| !t.status.is_terminal())
+            .collect();
+
+        if incomplete.is_empty() {
+            info!("No incomplete tasks to resume from store");
+            return Ok(Vec::new());
+        }
+
+        info!(
+            count = incomplete.len(),
+            "Resuming {} incomplete tasks from store",
+            incomplete.len()
+        );
+
+        // Re-add incomplete tasks to the TaskManager
+        for mut task in incomplete {
+            // Reset InProgress → Pending so execute_ready_tasks picks them up
+            if matches!(task.status, TaskStatus::InProgress) {
+                task.status = TaskStatus::Pending;
+            }
+            self.task_manager.add_task(task);
+        }
+
+        // Now run the normal execution loop for the resumed tasks
+        self.execute_all().await
     }
 }
 

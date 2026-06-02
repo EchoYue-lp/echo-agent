@@ -45,7 +45,9 @@ impl Tool for MissingValueAnalysisTool {
             let mut columns_json = Vec::new();
             let mut total_missing = 0usize;
             for col_name in df.get_column_names() {
-                let col = df.column(col_name)?;
+                let col = df.column(col_name).map_err(|e| ToolError::ExecutionFailed {
+                    tool: "missing_value_analysis".to_string(), message: format!("Column '{}' error: {}", col_name, e),
+                })?;
                 let null_count = col.null_count();
                 let total = col.len();
                 let missing_pct = if total > 0 { (null_count as f64 / total as f64) * 100.0 } else { 0.0 };
@@ -137,10 +139,16 @@ impl Tool for OutlierDetectionTool {
             };
             let mut columns_json = Vec::new();
             for col_name in &target_cols {
-                let col = df.column(col_name.as_str())?;
+                let col = df.column(col_name.as_str()).map_err(|e| ToolError::ExecutionFailed {
+                    tool: "outlier_detection".to_string(), message: format!("Column '{}' error: {}", col_name, e),
+                })?;
                 if !is_numeric(col.dtype()) { columns_json.push(serde_json::json!({ "name": col_name, "error": "Non-numeric column" })); continue; }
-                let casted = col.cast(&DataType::Float64)?;
-                let values: Vec<f64> = casted.f64()?.into_iter().filter_map(|opt| opt).collect();
+                let casted = col.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+                    tool: "outlier_detection".to_string(), message: format!("Cast '{}' failed: {}", col_name, e),
+                })?;
+                let values: Vec<f64> = casted.f64().map_err(|e| ToolError::ExecutionFailed {
+                    tool: "outlier_detection".to_string(), message: format!("Convert '{}' to f64 failed: {}", col_name, e),
+                })?.into_iter().filter_map(|opt| opt).collect();
                 if values.len() < 4 { columns_json.push(serde_json::json!({ "name": col_name, "n_valid": values.len(), "error": "Need at least 4 values" })); continue; }
                 columns_json.push(if method == "iqr" { detect_iqr_outliers(&values, threshold, col_name) } else { detect_zscore_outliers(&values, threshold, col_name) });
             }
@@ -150,13 +158,13 @@ impl Tool for OutlierDetectionTool {
 }
 
 fn detect_iqr_outliers(values: &[f64], k: f64, col_name: &str) -> serde_json::Value {
-    let mut sorted = values.to_vec(); sorted.sort();
+    let mut sorted = values.to_vec(); sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
     let q1 = sorted[n / 4.min(n - 1)];
     let q3 = sorted[3 * n / 4.min(n - 1)];
     let iqr = q3 - q1;
     let lower = q1 - k * iqr; let upper = q3 + k * iqr;
-    let outliers: Vec<f64> = values.iter().filter(|&v| v < lower || v > upper).cloned().collect();
+    let outliers: Vec<f64> = values.iter().filter(|&&v| v < lower || v > upper).cloned().collect();
     let pct = if n > 0 { (outliers.len() as f64 / n as f64) * 100.0 } else { 0.0 };
     serde_json::json!({
         "name": col_name, "n_valid": n, "q1": q1, "q3": q3, "iqr": iqr,
@@ -212,10 +220,14 @@ impl Tool for ConsistencyCheckTool {
             let mut issues = Vec::new();
             // ── Automatic type mismatch detection ──
             for col_name in df.get_column_names() {
-                let col = df.column(col_name)?;
+                let col = df.column(col_name).map_err(|e| ToolError::ExecutionFailed {
+                    tool: "consistency_check".to_string(), message: format!("Column '{}' error: {}", col_name, e),
+                })?;
                 let dtype = col.dtype();
                 if matches!(dtype, DataType::String) {
-                    let ca = col.str()?;
+                    let ca = col.str().map_err(|e| ToolError::ExecutionFailed {
+                        tool: "consistency_check".to_string(), message: format!("Cast '{}' to string failed: {}", col_name, e),
+                    })?;
                     let mut numeric_count = 0usize; let mut empty_count = 0usize; let mut total_valid = 0usize;
                     for opt in ca.into_iter() { if let Some(s) = opt { total_valid += 1; if s.trim().parse::<f64>().is_ok() { numeric_count += 1; } if s.trim().is_empty() { empty_count += 1; } } }
                     if total_valid > 0 && numeric_count as f64 / total_valid as f64 > 0.8 {
@@ -224,9 +236,13 @@ impl Tool for ConsistencyCheckTool {
                     if empty_count > 0 { issues.push(serde_json::json!({ "column": col_name, "type": "empty_strings", "detail": format!("Found {} empty strings that should be null", empty_count), "severity": "low" })); }
                 }
                 if is_numeric(dtype) {
-                    let casted = col.cast(&DataType::Float64)?;
-                    let values: Vec<f64> = casted.f64()?.into_iter().filter_map(|opt| opt).collect();
-                    let negatives = values.iter().filter(|&v| v < 0.0).count();
+                    let casted = col.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+                        tool: "consistency_check".to_string(), message: format!("Cast '{}' to Float64 failed: {}", col_name, e),
+                    })?;
+                    let values: Vec<f64> = casted.f64().map_err(|e| ToolError::ExecutionFailed {
+                        tool: "consistency_check".to_string(), message: format!("Convert '{}' to f64 failed: {}", col_name, e),
+                    })?.into_iter().filter_map(|opt| opt).collect();
+                    let negatives = values.iter().filter(|&&v| v < 0.0).count();
                     if negatives > 0 && negatives < values.len() / 10 {
                         issues.push(serde_json::json!({ "column": col_name, "type": "negative_values", "detail": format!("Found {} negative values", negatives), "severity": "medium" }));
                     }
@@ -234,7 +250,7 @@ impl Tool for ConsistencyCheckTool {
                         let mean = values.iter().sum::<f64>() / values.len() as f64;
                         let std_dev = (values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (values.len() as f64 - 1.0)).sqrt();
                         if std_dev > 0.0 {
-                            let extreme = values.iter().filter(|&v| ((v - mean) / std_dev).abs() > 5.0).count();
+                            let extreme = values.iter().filter(|&&v| ((v - mean) / std_dev).abs() > 5.0).count();
                             if extreme > 0 { issues.push(serde_json::json!({ "column": col_name, "type": "extreme_values", "detail": format!("Found {} values beyond 5σ", extreme), "severity": "high" })); }
                         }
                     }
@@ -250,15 +266,23 @@ impl Tool for ConsistencyCheckTool {
                     let col = df.column(col_name).map_err(|e| ToolError::ExecutionFailed { tool: "data_quality_tools".into(), message: format!("Column '{}' not found: {}", col_name, e) })?;
                     match rule_type {
                         "range" => {
-                            let casted = col.cast(&DataType::Float64)?;
-                            let values: Vec<Option<f64>> = casted.f64()?.into_iter().collect();
+                            let casted = col.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+                                tool: "consistency_check".to_string(), message: format!("Cast '{}' failed: {}", col_name, e),
+                            })?;
+                            let values: Vec<Option<f64>> = casted.f64().map_err(|e| ToolError::ExecutionFailed {
+                                tool: "consistency_check".to_string(), message: format!("Convert '{}' failed: {}", col_name, e),
+                            })?.into_iter().collect();
                             let min = rule.get("min").and_then(|v| v.as_f64()); let max = rule.get("max").and_then(|v| v.as_f64());
-                            let violations = values.iter().filter(|opt| if let Some(v) = opt { (min.is_some_and(|m| v < m)) || (max.is_some_and(|mx| v > mx)) } else { false }).count();
+                            let violations = values.iter().filter(|opt| if let Some(v) = opt { (min.is_some_and(|m| *v < m)) || (max.is_some_and(|mx| *v > mx)) } else { false }).count();
                             if violations > 0 { issues.push(serde_json::json!({ "column": col_name, "type": "range_violation", "detail": format!("{} values outside range", violations), "severity": "high", "rule": rule })); }
                         }
                         "regex" => {
                             let pattern = rule.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-                            let col_str = col.cast(&DataType::String)?; let ca = col_str.str()?;
+                            let col_str = col.cast(&DataType::String).map_err(|e| ToolError::ExecutionFailed {
+                                tool: "consistency_check".to_string(), message: format!("Cast '{}' to string failed: {}", col_name, e),
+                            })?; let ca = col_str.str().map_err(|e| ToolError::ExecutionFailed {
+                                tool: "consistency_check".to_string(), message: format!("Get string column '{}' failed: {}", col_name, e),
+                            })?;
                             let violations = ca.into_iter().filter(|opt| if let Some(s) = opt { !s.contains(pattern) } else { false }).count();
                             if violations > 0 { issues.push(serde_json::json!({ "column": col_name, "type": "regex_violation", "detail": format!("{} values don't match pattern '{}'", violations, pattern), "severity": "medium", "rule": rule })); }
                         }

@@ -43,6 +43,37 @@
 | [26 - 多 Agent 模式](26-multi-agent.md) | SubAgent / TeamAgent | 父子委托（Sync/Fork/Teammate）、对等协作（ManagerWorker/Pipeline/Debate/Swarm） |
 | [27 - 追踪系统](27-tracing.md) | Trace | Run、RunEvent（11 种类型）、RunStore、JsonlRunStore、生命周期、密钥脱敏 |
 | [28 - 配置参考](28-config-reference.md) | Config | AgentConfig、ReactAgentBuilder、ToolExecutionConfig、TokenBudgetConfig、YAML 配置、Feature Flags |
+| [29 - 长程任务](29-long-running-tasks.md) | Long-Running Tasks | 任务句柄、断点恢复、per-task 执行逻辑、非阻塞调度 |
+
+### 新增功能 (v0.2.1)
+
+| 文档 | 功能模块 | 核心关键词 |
+|------|---------|-----------|
+| [30 - ReAct 安全机制](30-react-safety.md) | Loop Detection / Adaptive Compression | 循环检测、5 级自适应压缩、Git Checkpoint |
+| [31 - LSP 集成](31-lsp-integration.md) | LSP | Language Server Protocol、代码导航、诊断、rust-analyzer |
+| [32 - 插件系统](32-plugin-system.md) | Plugin | PluginManifest、PluginRegistry、PluginScope、生命周期管理 |
+| [33 - Headless 模式](33-headless-mode.md) | Headless | 非交互执行、CI/CD 集成、JSON 输出、exit_code |
+| [34 - Git 隔离](34-git-isolation.md) | Git Worktree / Checkpoint | 并行子代理隔离、worktree 管理、文件操作回滚 |
+| [35 - 流水线](35-pipelines.md) | Data Pipeline / Writing Pipeline | 数据处理流水线、写作流水线、质量循环 |
+| [36 - 数据质量与统计](36-data-quality-statistics.md) | Data Quality / Statistics | 数据画像、异常检测、描述统计、相关性分析 |
+| [37 - 代码搜索](37-code-search.md) | Code Search | Ripgrep、结构化输出、glob/type 过滤、50KB 上限 |
+| [38 - Agent 工厂与模式](38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | AgentParadigm、模式切换、本地化、模板渲染 |
+| [39 - 分层记忆](39-tiered-memory.md) | Tiered Memory | 热/温/冷三层、自动淘汰、Token 预算管理 |
+| [40 - Context 系统](40-context-system.md) | Context System | ContextAssembler、ContextBudgeter、ContextSelector、优先级排序、预算感知 |
+
+### 入门指南
+
+| 文档 | 说明 |
+|------|------|
+| [快速入门](getting-started.md) | 从零开始构建你的第一个 Agent |
+| [Skill 创作指南](skill-authoring.md) | 创建自定义 Code-based 和 File-based Skill |
+
+### 安全
+
+| 文档 | 功能模块 | 核心关键词 |
+|------|---------|-----------|
+| [安全指南](security.md) | Security | 安全模型、沙箱配置、密钥管理、MCP 信任边界 |
+| [工具权限系统](tool-permissions.md) | Tool Permissions | ToolPermission、PermissionMode、RuleRegistry、deny-first、ToolRiskClassifier |
 
 ### 知识库
 
@@ -173,5 +204,36 @@ async fn main() -> Result<()> {
 | `examples/demo16_testing.rs` | Mock 测试基础设施（零真实 LLM 调用） |
 | `examples/demo17_chat.rs` | 多轮对话（chat / chat_stream / reset） |
 | `examples/demo18_semantic_memory.rs` | Store 语义搜索（EmbeddingStore / 向量检索） |
+| `examples/demo19_guard.rs` | Guard 系统（规则 / LLM 内容过滤） |
+| `examples/demo20_audit.rs` | 审计日志 |
+| `examples/demo21_handoff.rs` | Agent 切换（Handoff） |
+| `examples/demo22_plan_execute.rs` | Plan-and-Execute 规划执行 |
+| `examples/demo23_a2a.rs` | A2A 协议 |
+| `examples/demo24_topology.rs` | 多 Agent 拓扑可视化 |
+| `examples/demo25_macros.rs` | 宏系统综合展示 |
+| `examples/demo26_provider_factory.rs` | 动态 LLM 工厂 |
+| `examples/demo27_sqlite_memory.rs` | SQLite 持久化记忆 |
+| `examples/demo28_workflow.rs` | 工作流管道 |
+| `examples/demo29_sandbox.rs` | 沙箱执行 |
+| `examples/demo30_mcp_server.rs` | MCP 服务端模式 |
+| `examples/demo31_memory_tools.rs` | 记忆工具注入 |
+| `examples/demo32_token_budget.rs` | Token 预算控制 |
+| `examples/demo33_retry_policy.rs` | 统一重试策略 |
+| `examples/demo34_workflow_stream.rs` | 工作流流式输出 |
+| `examples/demo35_dynamic_tools.rs` | 动态工具管理 |
+| `examples/demo36_multimodal.rs` | 多模态消息 |
+| `examples/demo37_declarative_workflow.rs` | YAML/JSON 声明式工作流 |
+| `examples/demo38_im_channels.rs` | IM 频道集成 |
+| `examples/demo39_workflow.rs` | 图工作流引擎 |
+| `examples/demo40_snapshot.rs` | 快照与回滚 |
+| `examples/demo41_web_tools.rs` | Web 搜索与页面获取 |
+| `examples/demo42_playwright_mcp.rs` | Playwright MCP 浏览器自动化 |
+| `examples/demo43_data_tools.rs` | 数据工具（Excel / CSV / Word / 文本） |
+| `examples/demo44_code_laboratory.rs` | 代码执行助手 |
+| `examples/demo45_customer_service.rs` | 智能客服 |
+| `examples/demo46_data_analyst.rs` | 数据分析助手 |
+| `examples/demo47_enterprise.rs` | 企业工作流自动化 |
+| `examples/demo48_personal_assistant.rs` | 个人智能助理 |
+| `examples/demo49_research_agent.rs` | 研究与报告助手 |
 | `examples/demo50_eval.rs` | 评估系统：用例、标准、约束、轨迹回放、触发准确率、HTML 报告 |
 | `examples/demo51_self_improvement.rs` | 自进化：Analyzer、CritiqueStore、Curator、TrajectorySaver、SelfEvolution |

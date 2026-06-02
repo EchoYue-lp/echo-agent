@@ -31,15 +31,21 @@ use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 #[cfg(feature = "tasks")]
 use crate::tasks::TaskManager;
+#[cfg(feature = "tasks")]
+use crate::tasks::TaskSpawner;
 use crate::tools::ToolManager;
 #[cfg(feature = "subagent")]
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
 use crate::tools::builtin::answer::FinalAnswerTool;
+#[cfg(feature = "tasks")]
+use crate::tools::builtin::check_task::{CheckTaskStatusTool, ListBackgroundTasksTool};
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
 use crate::tools::builtin::memory::{ForgetTool, RecallTool, RememberTool, SearchMemoryTool};
 #[cfg(feature = "tasks")]
 use crate::tools::builtin::plan::PlanTool;
+#[cfg(feature = "tasks")]
+use crate::tools::builtin::spawn_task::SpawnBackgroundTaskTool;
 #[cfg(feature = "tasks")]
 use crate::tools::builtin::task::{
     CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
@@ -164,6 +170,14 @@ pub struct ReactAgent {
     /// is true. Entries are evicted when they exceed the TTL (30 min) or when
     /// the set exceeds `MAX_READ_FILES`.
     pub(crate) recently_read_files: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
+
+    /// Shared background task spawner for non-blocking task execution.
+    /// When `enable_task` is true, this spawner is created and shared between
+    /// the `SpawnBackgroundTaskTool`, `CheckTaskStatusTool`, and
+    /// `ListBackgroundTasksTool`, allowing the agent to spawn, monitor, and
+    /// manage background tasks during a conversation.
+    #[cfg(feature = "tasks")]
+    pub(crate) task_spawner: Option<Arc<TaskSpawner>>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -236,6 +250,8 @@ impl ReactAgent {
         // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
         let task_manager = Arc::new(TaskManager::default());
+        #[cfg(feature = "tasks")]
+        let task_spawner = Arc::new(TaskSpawner::new(crate::tasks::TaskSpawnerConfig::default()));
         #[cfg(feature = "subagent")]
         let subagent_registry = Arc::new(SubagentRegistry::new());
 
@@ -284,6 +300,7 @@ impl ReactAgent {
 
         #[cfg(feature = "tasks")]
         if config.enable_task {
+            // DAG planning tools
             tool_manager.register(Box::new(PlanTool));
             tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
             tool_manager.register(Box::new(UpdateTaskTool::new(task_manager.clone())));
@@ -292,6 +309,11 @@ impl ReactAgent {
                 task_manager.clone(),
             )));
             tool_manager.register(Box::new(GetExecutionOrderTool::new(task_manager.clone())));
+
+            // Background task tools (long-running task support)
+            tool_manager.register(Box::new(SpawnBackgroundTaskTool::new(task_spawner.clone())));
+            tool_manager.register(Box::new(CheckTaskStatusTool::new(task_spawner.clone())));
+            tool_manager.register(Box::new(ListBackgroundTasksTool::new(task_spawner.clone())));
         }
         Self::register_feature_gated_tools(&config, &mut tool_manager);
 
@@ -300,6 +322,9 @@ impl ReactAgent {
 
         // ── Checkpointer ─────────────────────────────────────────
         let checkpointer = Self::setup_checkpointer(&config);
+
+        #[cfg(feature = "tasks")]
+        let tasks_enabled = config.enable_task;
 
         Self {
             config,
@@ -350,6 +375,12 @@ impl ReactAgent {
             current_turn: std::sync::Mutex::new(None),
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
+            #[cfg(feature = "tasks")]
+            task_spawner: if tasks_enabled {
+                Some(task_spawner)
+            } else {
+                None
+            },
         }
     }
 
@@ -369,7 +400,7 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
-        let mut prompt = if config.enable_tool && config.enable_cot {
+        let prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -998,7 +1029,10 @@ impl ReactAgent {
 
     /// Clear the read-files set at the start of a new conversation turn.
     pub(crate) fn clear_read_files(&self) {
-        self.recently_read_files.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.recently_read_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     // ── Trace / run recording ─────────────────────────────────────────────────
@@ -1006,11 +1040,15 @@ impl ReactAgent {
     /// Record a trace event to the current run (if a run store is attached).
     /// Also publishes trace lifecycle to global event bus for audit subscribers.
     pub(crate) async fn record_trace_event(&self, event: crate::trace::RunEvent) {
-        let run_id = self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let (Some(store), Some(run_id)) = (&self.run_store, &run_id) {
-            if let Err(e) = store.append_event(run_id, event).await {
-                tracing::warn!(error = %e, run_id = %run_id, "Failed to append trace event");
-            }
+        let run_id = self
+            .current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let (Some(store), Some(run_id)) = (&self.run_store, &run_id)
+            && let Err(e) = store.append_event(run_id, event).await
+        {
+            tracing::warn!(error = %e, run_id = %run_id, "Failed to append trace event");
         }
     }
 
@@ -1032,7 +1070,10 @@ impl ReactAgent {
                 started_at: chrono::Utc::now(),
                 finished_at: None,
             };
-            *self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(run_id);
+            *self
+                .current_run_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(run_id);
             if let Err(e) = store.save(run).await {
                 tracing::warn!(error = %e, "Failed to save trace run on start");
             }
@@ -1046,7 +1087,11 @@ impl ReactAgent {
         output: Option<&str>,
         error: Option<&str>,
     ) {
-        let run_id = self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let run_id = self
+            .current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let (Some(store), Some(run_id)) = (&self.run_store, run_id)
             && let Ok(Some(mut run)) = store.load(&run_id).await
         {
@@ -1212,12 +1257,15 @@ impl Agent for ReactAgent {
     }
 
     fn current_run_id(&self) -> Option<String> {
-        self.current_run_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn system_prompt(&self) -> &str {
         // Check for runtime override first
-        if let Some(ref prompt) = *self.mutable_system_prompt.read().unwrap() {
+        if self.mutable_system_prompt.read().unwrap().is_some() {
             // We can't return a reference to the RwLock contents directly,
             // so fall back to config prompt. The override is picked up at
             // the start of each new turn via build_system_prompt().
@@ -1399,7 +1447,11 @@ impl Agent for ReactAgent {
         self.config.mode
     }
 
-    fn delegate_to<'a>(&'a self, _target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {
+    fn delegate_to<'a>(
+        &'a self,
+        _target: &'a str,
+        _task: &'a str,
+    ) -> BoxFuture<'a, Result<String>> {
         #[cfg(feature = "subagent")]
         {
             Box::pin(self.delegate_task(task))

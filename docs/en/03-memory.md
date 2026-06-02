@@ -220,3 +220,83 @@ SubAgent B    session_id = "sub-b-001"    namespace = ["sub_b", "memories"]
 If you enable a `ConversationStore`, set `conversation_id` explicitly. It no longer falls back to `session_id`.
 
 See: `examples/demo14_memory_isolation.rs`
+
+---
+
+## Tiered Memory System (TieredMemory)
+
+> **New in v0.2.1.** Automatically manages memory storage, retrieval, and eviction.
+
+`TieredMemory` implements a four-layer memory architecture, automatically managing memory entries across different tiers:
+
+### Four-Layer Architecture
+
+| Layer | Name | Characteristics | Storage |
+|-------|------|-----------------|---------|
+| **Working** | Working layer | Active messages in current turn | Context window |
+| **ShortTerm** | Short-term layer | Recent structured entries | In-memory (`Vec<MemoryEntry>`) |
+| **LongTerm** | Long-term layer | Archived memories, searchable | Persistent (`Store`) |
+| **Core** | Core layer | Permanent memories, injected into system prompt | In-memory (`CoreMemory`) |
+
+### Configuration
+
+```rust
+use echo_core::memory::tiered::TieredMemory;
+
+let memory = TieredMemory::new(
+    5,     // max_short_term: maximum entries in short-term layer
+    2000,  // max_core_chars: character limit for core layer
+)
+.with_overflow_bound(50)   // overflow queue limit
+.with_store(store);        // optional: attach persistent store (LongTerm layer)
+```
+
+### Automatic Eviction
+
+When `short_term` exceeds `max_short_term`, the entry with the **lowest importance** is moved to `overflow_queue` (eviction by importance, not by time). When the overflow queue is full:
+- With `Store`: wait for `flush_overflow()` to write to long-term
+- Without `Store`: evict the lowest-importance entries
+
+### Usage Example
+
+```rust
+use echo_core::memory::tiered::TieredMemory;
+use echo_core::memory::MemoryEntry;
+
+let mut memory = TieredMemory::new(3, 2000).with_overflow_bound(10);
+
+// Add memory (simple way)
+memory.add_short_term_simple("User prefers clean code style".into());
+memory.add_short_term_simple("Project uses Rust + tokio".into());
+
+// Add structured memory entry
+memory.add_short_term(MemoryEntry::new(
+    "User is building an Agent framework".into(),
+    7.5,                          // importance (1.0-10.0)
+    vec!["project".into()],       // tags
+    "conversation".into(),        // source
+));
+
+// Recall relevant memories (keyword matching)
+let results = memory.recall("Rust project", 3);
+println!("Related memories: {:?}", results);
+
+// Build context injection (Core + ShortTerm, sorted by importance)
+if let Some(ctx) = memory.build_context_injection() {
+    println!("Context injection: {}", ctx);
+}
+```
+
+### Agent Integration
+
+`TieredMemory` is currently decoupled from `AgentConfig` — construct it independently and integrate with the Agent system:
+
+```rust
+use echo_core::memory::tiered::TieredMemory;
+
+let mut memory = TieredMemory::new(5, 2000)
+    .with_store(store);
+// Integrate with Agent via memory subsystem or custom logic
+```
+
+See [demo63_tiered_memory.rs](../examples/demo63_tiered_memory.rs).

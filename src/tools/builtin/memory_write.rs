@@ -52,10 +52,11 @@ impl Tool for MemoryWriteTool {
             let full_key = format!("{scope}:{key}");
             let mut mem = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
             // Evict oldest entry if at capacity (FIFO via iter().next())
-            if mem.len() >= MAX_MEMORY_ENTRIES && !mem.contains_key(&full_key) {
-                if let Some(oldest_key) = mem.keys().next().cloned() {
-                    mem.remove(&oldest_key);
-                }
+            if mem.len() >= MAX_MEMORY_ENTRIES
+                && !mem.contains_key(&full_key)
+                && let Some(oldest_key) = mem.keys().next().cloned()
+            {
+                mem.remove(&oldest_key);
             }
             mem.insert(full_key.clone(), value.to_string());
             Ok(ToolResult::success(format!("Stored: {full_key}")))

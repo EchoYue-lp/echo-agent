@@ -75,8 +75,8 @@ pub use runner::Runner;
 /// and [`DefaultAgentFactory`] (the concrete facade implementation that uses
 /// `ReactAgentBuilder`).
 pub mod factory {
-    pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig, AgentParadigm};
     pub use crate::agent::default_factory::DefaultAgentFactory;
+    pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig, AgentParadigm};
 }
 
 /// Alias for backward compatibility with macros and minimal API.

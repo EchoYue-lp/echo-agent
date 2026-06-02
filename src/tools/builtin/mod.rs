@@ -6,12 +6,16 @@
 #[cfg(feature = "subagent")]
 pub(crate) mod agent_dispatch;
 pub(crate) mod answer;
+#[cfg(feature = "tasks")]
+pub(crate) mod check_task;
 #[cfg(feature = "human-loop")]
 pub(crate) mod human_in_loop;
 pub(crate) mod memory;
 pub(crate) mod memory_write;
 #[cfg(feature = "tasks")]
 pub(crate) mod plan;
+#[cfg(feature = "tasks")]
+pub(crate) mod spawn_task;
 #[cfg(feature = "tasks")]
 pub(crate) mod task;
 /// Think tool for reasoning and reflection.

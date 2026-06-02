@@ -20,7 +20,7 @@
 //! traits directly. The bridges ensure that YAML-configured hooks also
 //! see these lifecycle events.
 
-use echo_core::hooks::{HookContext, HookEvent, HookSource};
+use echo_core::hooks::{HookContext, HookEvent};
 use echo_execution::skills::hooks::HookRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -53,13 +53,9 @@ impl TaskHookBridge {
     }
 
     /// Fire a task lifecycle event in the central hook registry.
-    async fn fire_event(&self, event: HookEvent, task_id: &str, task_subject: &str) {
-        let ctx = HookContext::for_lifecycle(
-            event,
-            task_subject,
-            &self.session_id,
-            &self.agent_name,
-        );
+    async fn fire_event(&self, event: HookEvent, _task_id: &str, task_subject: &str) {
+        let ctx =
+            HookContext::for_lifecycle(event, task_subject, &self.session_id, &self.agent_name);
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
     }
@@ -77,13 +73,9 @@ impl TaskHookBridge {
     }
 
     /// Fire StopFailure event (maps to on_failure).
-    pub async fn on_failure(&self, task_id: &str, task_subject: &str, error: &str) {
-        let ctx = HookContext::for_stop_failure(
-            task_subject,
-            error,
-            &self.session_id,
-            &self.agent_name,
-        );
+    pub async fn on_failure(&self, _task_id: &str, task_subject: &str, error: &str) {
+        let ctx =
+            HookContext::for_stop_failure(task_subject, error, &self.session_id, &self.agent_name);
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
     }
@@ -129,12 +121,7 @@ impl SubagentHookBridge {
     }
 
     /// Fire SubagentStart event (maps to before_dispatch).
-    pub async fn on_before_dispatch(
-        &self,
-        subagent_name: &str,
-        execution_mode: &str,
-        task: &str,
-    ) {
+    pub async fn on_before_dispatch(&self, subagent_name: &str, execution_mode: &str, task: &str) {
         let ctx = HookContext::for_subagent_start(
             subagent_name,
             execution_mode,
@@ -147,12 +134,7 @@ impl SubagentHookBridge {
     }
 
     /// Fire SubagentStop event (maps to after_dispatch).
-    pub async fn on_after_dispatch(
-        &self,
-        subagent_name: &str,
-        execution_mode: &str,
-        task: &str,
-    ) {
+    pub async fn on_after_dispatch(&self, subagent_name: &str, execution_mode: &str, task: &str) {
         let ctx = HookContext::for_subagent_stop(
             subagent_name,
             execution_mode,
@@ -166,12 +148,8 @@ impl SubagentHookBridge {
 
     /// Fire StopFailure event (maps to on_failure).
     pub async fn on_failure(&self, subagent_name: &str, error: &str) {
-        let ctx = HookContext::for_stop_failure(
-            subagent_name,
-            error,
-            &self.session_id,
-            &self.agent_name,
-        );
+        let ctx =
+            HookContext::for_stop_failure(subagent_name, error, &self.session_id, &self.agent_name);
         let registry = self.hook_registry.read().await;
         let _ = registry.run_lifecycle_hooks(&ctx).await;
     }
@@ -207,20 +185,13 @@ impl BridgedTaskHooks {
 
 #[async_trait::async_trait]
 impl echo_orchestration::tasks::TaskHooks for BridgedTaskHooks {
-    async fn before_execute(
-        &self,
-        ctx: &echo_orchestration::tasks::TaskHookContext,
-    ) {
+    async fn before_execute(&self, ctx: &echo_orchestration::tasks::TaskHookContext) {
         self.bridge
             .on_before_execute(&ctx.task.id, &ctx.task.subject)
             .await;
     }
 
-    async fn after_execute(
-        &self,
-        ctx: &echo_orchestration::tasks::TaskHookContext,
-        _result: &str,
-    ) {
+    async fn after_execute(&self, ctx: &echo_orchestration::tasks::TaskHookContext, _result: &str) {
         self.bridge
             .on_after_execute(&ctx.task.id, &ctx.task.subject)
             .await;
@@ -247,10 +218,7 @@ impl echo_orchestration::tasks::TaskHooks for BridgedTaskHooks {
         echo_orchestration::tasks::RetryDecision::Fail
     }
 
-    async fn on_cancelled(
-        &self,
-        ctx: &echo_orchestration::tasks::TaskHookContext,
-    ) {
+    async fn on_cancelled(&self, ctx: &echo_orchestration::tasks::TaskHookContext) {
         self.bridge
             .on_cancelled(&ctx.task.id, &ctx.task.subject)
             .await;
@@ -298,7 +266,9 @@ mod tests {
         // These should not panic even with an empty registry
         bridge.on_before_execute("task-1", "Build project").await;
         bridge.on_after_execute("task-1", "Build project").await;
-        bridge.on_failure("task-1", "Build project", "compile error").await;
+        bridge
+            .on_failure("task-1", "Build project", "compile error")
+            .await;
         bridge.on_timeout("task-1", "Build project").await;
         bridge.on_cancelled("task-1", "Build project").await;
     }
@@ -313,8 +283,12 @@ mod tests {
         );
 
         // These should not panic even with an empty registry
-        bridge.on_before_dispatch("researcher", "sync", "Find papers").await;
-        bridge.on_after_dispatch("researcher", "sync", "Find papers").await;
+        bridge
+            .on_before_dispatch("researcher", "sync", "Find papers")
+            .await;
+        bridge
+            .on_after_dispatch("researcher", "sync", "Find papers")
+            .await;
         bridge.on_failure("researcher", "timeout").await;
         bridge.on_cancelled("researcher").await;
     }

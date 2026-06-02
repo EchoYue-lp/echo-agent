@@ -82,6 +82,21 @@ These examples stay focused on API understanding, interaction style, or walkthro
 - `demo40_snapshot.rs`
 - `demo50_eval.rs`
 - `demo51_self_improvement.rs`
+- `demo52_loop_detection.rs`
+- `demo53_adaptive_compression.rs`
+- `demo54_headless.rs`
+- `demo55_lsp_tools.rs`
+- `demo56_plugin_system.rs`
+- `demo57_data_pipeline.rs`
+- `demo58_git_worktree.rs`
+- `demo59_code_search.rs`
+- `demo60_data_quality.rs`
+- `demo61_agent_factory.rs`
+- `demo62_prompt_templates.rs`
+- `demo63_tiered_memory.rs`
+- `demo64_tool_pipeline.rs`
+- `demo65_context_assembler.rs`
+- `demo66_context_selector.rs`
 
 ## Maintenance Rules
 

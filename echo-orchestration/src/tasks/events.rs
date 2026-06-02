@@ -3,6 +3,7 @@
 //! Uses async broadcast channel for non-blocking event distribution.
 //! Listeners can subscribe and receive events in their own async tasks.
 
+use super::progress::TaskProgress;
 use super::task::{Task, TaskStatus};
 use serde::Serialize;
 use std::sync::Arc;
@@ -42,6 +43,14 @@ pub enum TaskEvent {
         task_id: String,
         result: String,
     },
+    /// Intra-task progress update (percentage, current phase, ETA).
+    ///
+    /// Emitted by [`ProgressReporter`](super::progress::ProgressReporter) for
+    /// long-running tasks with a [`PhasePlan`](super::progress::PhasePlan).
+    Progress {
+        task_id: String,
+        progress: TaskProgress,
+    },
 }
 
 impl TaskEvent {
@@ -53,6 +62,7 @@ impl TaskEvent {
             TaskEvent::Assigned { task_id, .. } => task_id,
             TaskEvent::Failed { task_id, .. } => task_id,
             TaskEvent::Completed { task_id, .. } => task_id,
+            TaskEvent::Progress { task_id, .. } => task_id,
         }
     }
 }
@@ -117,6 +127,16 @@ impl TaskEventListener for LoggingListener {
                     task_id = %task_id,
                     result = %result_preview,
                     "task_completed"
+                );
+            }
+            TaskEvent::Progress {
+                task_id, progress, ..
+            } => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    pct = progress.percentage,
+                    phase = %progress.current_phase,
+                    "task_progress"
                 );
             }
         }

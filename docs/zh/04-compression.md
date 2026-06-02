@@ -294,3 +294,71 @@ ContextCompressor (唯一的压缩策略扩展点)
  │     └── with_prompt()      (使用自定义闭包)
  └── HybridCompressor         (串联多个 ContextCompressor)
 ```
+
+---
+
+## 自适应压缩（AdaptiveCompressor）
+
+> **新增于 v0.2.1。** 自动根据上下文长度选择压缩级别。
+
+`AdaptiveCompressor` 实现 5 级渐进式压缩策略，当上下文超过 token 阈值时自动升级压缩强度：
+
+| 级别 | 名称 | 策略 | 触发阈值 |
+|------|------|------|---------|
+| L1 | **Snip** | 移除超过 token 上限的工具输出 | `l1_snip_threshold_tokens` (80k) |
+| L2 | **Micro** | 截断工具输出，保留首尾各 N 行 | `l2_micro_threshold_tokens` (100k) |
+| L3 | **Collapse** | 丢弃较早消息，保留系统提示 + 最近 N 条 | `l3_collapse_threshold_tokens` (120k) |
+| L4 | **Auto Compact** | LLM 全文摘要（需外部集成） | `l4_compact_threshold_tokens` (150k) |
+| L5 | **Reactive** | 紧急模式：仅保留系统提示 + 最近 3 条消息 | 超过 L3 阈值时 |
+
+**注意：** L4 需要外部 LLM 调用，`AdaptiveCompressor` 内部实现 L1 → L2 → L3 → L5 顺序压缩，达到 `target_tokens` 时停止。
+
+### 配置
+
+```rust
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let config = AdaptiveCompressionConfig {
+    l1_snip_threshold_tokens: 80_000,
+    l1_max_output_tokens: 4_000,        // Snip 时单条输出最大 token
+    l2_micro_threshold_tokens: 100_000,
+    l2_keep_lines: 50,                   // Micro 时保留首尾行数
+    l3_collapse_threshold_tokens: 120_000,
+    l3_keep_recent: 10,                  // Collapse 时保留最近消息数
+    l4_compact_threshold_tokens: 150_000,
+    l4_keep_recent: 6,                   // Compact 时保留最近消息数（外部 LLM 处理）
+};
+
+let compressor = AdaptiveCompressor::new(config);
+```
+
+### 工作原理
+
+```
+Token 数:     0 ──── 80k ──── 100k ──── 120k ──── 150k ──── ∞
+               │       │        │         │         │        │
+               │ 无压缩 │  Snip  │  Micro  │Collapse │Compact │
+               │       │截断长输出│ 精简结果 │丢弃旧消息│外部LLM │
+```
+
+### 与 ContextManager 集成
+
+`AdaptiveCompressor` 通过 `ContextManager::builder()` 集成，而非 `AgentConfig`：
+
+```rust
+use echo_state::compression::ContextManager;
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default());
+let mut ctx = ContextManager::builder(token_limit)
+    .compressor(Box::new(compressor))
+    .with_system("系统提示词")
+    .build();
+
+// prepare() 会自动检测 token 并触发压缩
+let result = ctx.prepare(None).await?;
+// result.messages — 压缩后的消息列表
+// result.compressed — 压缩统计信息（如果有）
+```
+
+详见 [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs)。

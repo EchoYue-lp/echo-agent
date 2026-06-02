@@ -1,6 +1,7 @@
 //! Task definitions
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Task status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,7 +77,7 @@ impl TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Task {
     /// Task ID
     pub id: String,
@@ -107,6 +108,73 @@ pub struct Task {
     pub max_retries: u32,
     /// Current retry count
     pub retry_count: u32,
+    /// Optional per-task execution function.
+    ///
+    /// When set, this overrides the executor's global `execute_fn` for this task.
+    /// Not serialized — callers must re-register after deserialization.
+    #[serde(skip)]
+    pub execute_fn: Option<super::executor::TaskExecuteFn>,
+
+    /// Serializable typed metadata (survives persistence/serialization).
+    ///
+    /// Application layers can store domain-specific data (e.g., task kind,
+    /// pipeline parameters, UI hints) as JSON. Use [`with_metadata`](Self::with_metadata)
+    /// to set both this field and the typed [`metadata`](Self::metadata) simultaneously.
+    pub metadata_json: Option<serde_json::Value>,
+
+    /// Typed metadata (not serialized — re-register after deserialization).
+    ///
+    /// Provides zero-cost downcast access to the original typed value.
+    /// Paired with [`metadata_json`](Self::metadata_json) for round-tripping.
+    #[serde(skip)]
+    pub metadata: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Task")
+            .field("id", &self.id)
+            .field("description", &self.description)
+            .field("status", &self.status)
+            .field("dependencies", &self.dependencies)
+            .field("priority", &self.priority)
+            .field("result", &self.result)
+            .field("reasoning", &self.reasoning)
+            .field("assigned_agent", &self.assigned_agent)
+            .field("tags", &self.tags)
+            .field("parent_id", &self.parent_id)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("subject", &self.subject)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_retries", &self.max_retries)
+            .field("retry_count", &self.retry_count)
+            .field("execute_fn", &self.execute_fn.as_ref().map(|_| "Some(<fn>)"))
+            .field("metadata_json", &self.metadata_json)
+            .finish()
+    }
+}
+
+impl PartialEq for Task {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.description == other.description
+            && self.status == other.status
+            && self.dependencies == other.dependencies
+            && self.priority == other.priority
+            && self.result == other.result
+            && self.reasoning == other.reasoning
+            && self.assigned_agent == other.assigned_agent
+            && self.tags == other.tags
+            && self.parent_id == other.parent_id
+            && self.created_at == other.created_at
+            && self.updated_at == other.updated_at
+            && self.subject == other.subject
+            && self.timeout_secs == other.timeout_secs
+            && self.max_retries == other.max_retries
+            && self.retry_count == other.retry_count
+        // execute_fn, metadata_json, metadata intentionally excluded — not comparable
+    }
 }
 
 impl Task {
@@ -129,6 +197,9 @@ impl Task {
             timeout_secs: 0,
             max_retries: 0,
             retry_count: 0,
+            execute_fn: None,
+            metadata_json: None,
+            metadata: None,
         }
     }
 
@@ -176,6 +247,50 @@ impl Task {
     /// Add a single tag
     pub fn add_tag(&mut self, tag: impl Into<String>) {
         self.tags.push(tag.into());
+    }
+
+    /// Set a per-task execution function that overrides the executor's global execute_fn.
+    pub fn with_execute_fn(mut self, f: super::executor::TaskExecuteFn) -> Self {
+        self.execute_fn = Some(f);
+        self
+    }
+
+    /// Set typed metadata.
+    ///
+    /// Stores both the typed value (for zero-cost downcast access) and its
+    /// JSON serialization (for persistence). After deserialization from a
+    /// store, only `metadata_json` survives — call [`get_metadata`] to
+    /// attempt a typed read, or re-register with `with_metadata`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// #[derive(Serialize)]
+    /// struct ResearchParams { topic: String, max_papers: u32 }
+    ///
+    /// let task = Task::new("r1", "Research task")
+    ///     .with_metadata(ResearchParams { topic: "AI".into(), max_papers: 20 });
+    ///
+    /// // Later, retrieve typed access:
+    /// let params = task.get_metadata::<ResearchParams>().unwrap();
+    /// ```
+    pub fn with_metadata<T: serde::Serialize + Send + Sync + 'static>(mut self, meta: T) -> Self {
+        self.metadata_json = serde_json::to_value(&meta).ok();
+        self.metadata = Some(std::sync::Arc::new(meta));
+        self
+    }
+
+    /// Set raw JSON metadata (without a typed value).
+    pub fn with_metadata_json(mut self, json: serde_json::Value) -> Self {
+        self.metadata_json = Some(json);
+        self
+    }
+
+    /// Attempt to downcast the typed metadata to a concrete type.
+    ///
+    /// Returns `None` if no metadata was set or the type doesn't match.
+    pub fn get_metadata<T: 'static>(&self) -> Option<&T> {
+        self.metadata.as_ref()?.downcast_ref::<T>()
     }
 
     /// Whether already cancelled

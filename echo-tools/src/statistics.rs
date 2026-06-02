@@ -19,6 +19,9 @@ const TOOL_NAME: &str = "statistics_tools";
 
 // ── Statistical helper functions ─────────────────────────────────────
 
+/// √(2π) — defined locally for toolchains that lack `std::f64::consts::SQRT_2PI`.
+const SQRT_2PI: f64 = 2.506_628_274_631_000_2;
+
 /// Normal CDF approximation (Abramowitz & Stegun, formula 26.2.19).
 /// Accurate to ~1.5e-7 for |x| <= 5.
 fn normal_cdf(x: f64) -> f64 {
@@ -30,7 +33,7 @@ fn normal_cdf(x: f64) -> f64 {
     let a2 = -0.00976;
     let a3 = 0.00746;
     let t = 1.0 / (1.0 + p * x);
-    let z = (1.0 / std::f64::consts::SQRT_2PI) * (-0.5 * x * x).exp();
+    let z = (1.0 / SQRT_2PI) * (-0.5 * x * x).exp();
     1.0 - z * t * (a1 + t * (a2 + t * a3))
 }
 
@@ -167,14 +170,26 @@ fn chi_square_test(df: &DataFrame, col1: &str, col2: Option<&str>, alpha: f64) -
     let c2_str = c2.cast(&DataType::String).map_err(|e| ToolError::ExecutionFailed {
         tool: TOOL_NAME.to_string(), message: format!("Cast '{}' to string failed: {}", col2_name, e),
     })?;
-    let unique1: Vec<String> = c1_str.unique()?.str()?.into_iter().filter_map(|opt| opt.map(|s| s.to_string())).collect();
-    let unique2: Vec<String> = c2_str.unique()?.str()?.into_iter().filter_map(|opt| opt.map(|s| s.to_string())).collect();
+    let unique1: Vec<String> = c1_str.unique().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Unique '{}' failed: {}", col1, e),
+    })?.str().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Cast '{}' to str failed: {}", col1, e),
+    })?.into_iter().filter_map(|opt| opt.map(|s| s.to_string())).collect();
+    let unique2: Vec<String> = c2_str.unique().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Unique '{}' failed: {}", col2_name, e),
+    })?.str().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Cast '{}' to str failed: {}", col2_name, e),
+    })?.into_iter().filter_map(|opt| opt.map(|s| s.to_string())).collect();
     let r = unique1.len(); let c = unique2.len();
     if r < 2 || c < 2 {
         return Ok(ToolResult::success("Each column needs at least 2 unique values for chi-square test"));
     }
-    let s1: Vec<&str> = c1_str.str()?.into_iter().map(|opt| opt.unwrap_or("")).collect();
-    let s2: Vec<&str> = c2_str.str()?.into_iter().map(|opt| opt.unwrap_or("")).collect();
+    let s1: Vec<&str> = c1_str.str().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Get str '{}' failed: {}", col1, e),
+    })?.into_iter().map(|opt| opt.unwrap_or("")).collect();
+    let s2: Vec<&str> = c2_str.str().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Get str '{}' failed: {}", col2_name, e),
+    })?.into_iter().map(|opt| opt.unwrap_or("")).collect();
     let mut observed: Vec<Vec<usize>> = vec![vec![0; c]; r];
     for i in 0..df.height() {
         if let (Some(idx1), Some(idx2)) = (unique1.iter().position(|x| x == s1[i]), unique2.iter().position(|x| x == s2[i])) {
@@ -211,10 +226,22 @@ fn chi_square_test(df: &DataFrame, col1: &str, col2: Option<&str>, alpha: f64) -
 
 fn correlation_significance(df: &DataFrame, col1: &str, col2: Option<&str>, alpha: f64) -> Result<ToolResult> {
     let col2_name = col2.ok_or_else(|| ToolError::MissingParameter("column2".to_string()))?;
-    let s1 = df.column(col1)?.cast(&DataType::Float64)?;
-    let s2 = df.column(col2_name)?.cast(&DataType::Float64)?;
-    let v1: Vec<Option<f64>> = s1.f64()?.into_iter().collect();
-    let v2: Vec<Option<f64>> = s2.f64()?.into_iter().collect();
+    let s1 = df.column(col1).map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Column '{}' not found: {}", col1, e),
+    })?.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Cast '{}' failed: {}", col1, e),
+    })?;
+    let s2 = df.column(col2_name).map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Column '{}' not found: {}", col2_name, e),
+    })?.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Cast '{}' failed: {}", col2_name, e),
+    })?;
+    let v1: Vec<Option<f64>> = s1.f64().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Convert '{}' to f64 failed: {}", col1, e),
+    })?.into_iter().collect();
+    let v2: Vec<Option<f64>> = s2.f64().map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(), message: format!("Convert '{}' to f64 failed: {}", col2_name, e),
+    })?.into_iter().collect();
     let n_valid: usize = v1.iter().zip(v2.iter()).filter(|(a, b)| a.is_some() && b.is_some()).count();
     if n_valid < 3 {
         return Ok(ToolResult::success("Need at least 3 valid pairs for correlation significance test"));
@@ -281,8 +308,12 @@ impl ToolRunner<RegressionToolParams> for RegressionTool {
         if !is_numeric(target_col.dtype()) {
             return Err(ToolError::InvalidParameter { name: "target_column".into(), message: format!("Target column must be numeric, got {}", target_col.dtype()) }.into());
         }
-        let target_f64 = target_col.cast(&DataType::Float64)?;
-        let y: Vec<Option<f64>> = target_f64.f64()?.into_iter().collect();
+        let target_f64 = target_col.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+            tool: TOOL_NAME.to_string(), message: format!("Cast target column failed: {}", e),
+        })?;
+        let y: Vec<Option<f64>> = target_f64.f64().map_err(|e| ToolError::ExecutionFailed {
+            tool: TOOL_NAME.to_string(), message: format!("Convert to f64 failed: {}", e),
+        })?.into_iter().collect();
         let y_mean: f64 = y.iter().filter_map(|x| *x).sum::<f64>() / y.iter().filter_map(|x| *x).count() as f64;
         let mut total_ss = 0.0;
         for y_val in y.iter() { if let Some(v) = y_val { total_ss += (v - y_mean).powi(2); } }
@@ -296,13 +327,17 @@ impl ToolRunner<RegressionToolParams> for RegressionTool {
             if !is_numeric(feat_col.dtype()) {
                 return Err(ToolError::InvalidParameter { name: feat_name.to_string(), message: format!("Feature column must be numeric, got {}", feat_col.dtype()) }.into());
             }
-            let (mean_x, std_x, n) = column_mean_std(df, *feat_name)?;
+            let (mean_x, std_x, n) = column_mean_std(&df, *feat_name)?;
             if n < 3 || std_x == 0.0 {
                 coefficients.push(serde_json::json!({ "feature": feat_name, "slope": 0.0, "intercept": y_mean, "r_squared": 0.0, "p_value": 1.0, "note": "Insufficient variance or sample size" }));
                 continue;
             }
-            let feat_f64 = feat_col.cast(&DataType::Float64)?;
-            let x: Vec<Option<f64>> = feat_f64.f64()?.into_iter().collect();
+            let feat_f64 = feat_col.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+                tool: TOOL_NAME.to_string(), message: format!("Cast feature column '{}' failed: {}", feat_name, e),
+            })?;
+            let x: Vec<Option<f64>> = feat_f64.f64().map_err(|e| ToolError::ExecutionFailed {
+                tool: TOOL_NAME.to_string(), message: format!("Convert feature '{}' to f64 failed: {}", feat_name, e),
+            })?.into_iter().collect();
             let mut cov_xy = 0.0; let mut var_x = 0.0;
             for i in 0..x.len() { if let (Some(xi), Some(yi)) = (x[i], y[i]) { cov_xy += (xi - mean_x) * (yi - y_mean); var_x += (xi - mean_x).powi(2); } }
             let slope = if var_x > 0.0 { cov_xy / var_x } else { 0.0 };
@@ -374,8 +409,12 @@ impl ToolRunner<DescriptiveAdvancedToolParams> for DescriptiveAdvancedTool {
                 columns_json.push(serde_json::json!({ "name": col_name, "error": "Non-numeric column" }));
                 continue;
             }
-            let casted = col.cast(&DataType::Float64)?;
-            let values: Vec<f64> = casted.f64()?.into_iter().filter_map(|opt| opt).collect();
+            let casted = col.cast(&DataType::Float64).map_err(|e| ToolError::ExecutionFailed {
+                tool: TOOL_NAME.to_string(), message: format!("Cast column '{}' failed: {}", col_name, e),
+            })?;
+            let values: Vec<f64> = casted.f64().map_err(|e| ToolError::ExecutionFailed {
+                tool: TOOL_NAME.to_string(), message: format!("Convert '{}' to f64 failed: {}", col_name, e),
+            })?.into_iter().filter_map(|opt| opt).collect();
             let n = values.len();
             if n < 3 {
                 columns_json.push(serde_json::json!({ "name": col_name, "n_valid": n, "error": "Need at least 3 values for skewness/kurtosis" }));

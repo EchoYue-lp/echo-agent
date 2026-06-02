@@ -185,15 +185,19 @@ impl BackgroundReviewer {
     /// 1. Builds a transcript from the run events
     /// 2. Sends it to the LLM with the review prompt
     /// 3. Parses the response for memory/skill actions
-    /// 4. Returns a ReviewOutcome
-    pub async fn review(&self, run: &Run) -> Result<ReviewOutcome> {
+    /// 4. Returns a JoinHandle that resolves to a ReviewOutcome
+    ///
+    /// The returned handle is non-blocking — the caller can poll, await, or
+    /// discard it. Use [`Self::review_and_wait`] for the old blocking behavior.
+    pub fn review(&self, run: &Run) -> Result<tokio::task::JoinHandle<ReviewOutcome>> {
         if !self.config.enabled {
-            return Ok(ReviewOutcome {
+            let outcome = ReviewOutcome {
                 run_id: run.run_id.clone(),
                 actions: vec![],
                 nothing_to_save: true,
                 error: None,
-            });
+            };
+            return Ok(tokio::spawn(async move { outcome }));
         }
 
         let transcript = Self::build_transcript(run);
@@ -208,45 +212,95 @@ impl BackgroundReviewer {
              Other tools will be denied at runtime — do not attempt them."
         );
 
-        // Spawn background task
-        let run_id_clone = run_id.clone();
-        let outcome = tokio::spawn(async move {
+        // Spawn background task — return handle immediately (non-blocking)
+        let handle = tokio::spawn(async move {
             Self::run_review(llm_client, memory_store, run_id, review_message).await
-        })
-        .await
-        .unwrap_or_else(|e| ReviewOutcome {
-            run_id: run_id_clone,
+        });
+
+        Ok(handle)
+    }
+
+    /// Blocking variant that spawns a review and waits for the result.
+    ///
+    /// This is a convenience wrapper around [`Self::review`] for callers
+    /// that need the outcome before proceeding.
+    pub async fn review_and_wait(&self, run: &Run) -> Result<ReviewOutcome> {
+        let run_id = run.run_id.clone();
+        let handle = self.review(run)?;
+        let outcome = handle.await.unwrap_or_else(|e| ReviewOutcome {
+            run_id,
             actions: vec![],
             nothing_to_save: true,
             error: Some(format!("Review task panicked: {e}")),
         });
-
         Ok(outcome)
     }
 
     /// Run a review for a specific run ID (loading from the run store).
-    pub async fn review_by_run_id(&self, run_id: &str) -> Result<ReviewOutcome> {
+    ///
+    /// Returns a JoinHandle — use `.await` to wait for the result if needed.
+    pub fn review_by_run_id(&self, run_id: &str) -> Result<tokio::task::JoinHandle<ReviewOutcome>> {
         let store = match &self.run_store {
             Some(s) => s,
             None => {
-                return Ok(ReviewOutcome {
+                let outcome = ReviewOutcome {
                     run_id: run_id.to_string(),
                     actions: vec![],
                     nothing_to_save: true,
                     error: Some("No run store configured".into()),
-                });
+                };
+                return Ok(tokio::spawn(async move { outcome }));
             }
         };
 
-        match store.load(run_id).await? {
-            Some(run) => self.review(&run).await,
-            None => Ok(ReviewOutcome {
-                run_id: run_id.to_string(),
-                actions: vec![],
-                nothing_to_save: true,
-                error: Some(format!("Run {run_id} not found")),
-            }),
-        }
+        // load() is async, so we need to spawn a wrapper that does the load + review
+        let store = store.clone();
+        let run_id = run_id.to_string();
+        let llm_client = self.llm_client.clone();
+        let memory_store = self.memory_store.clone();
+        let config = self.config.clone();
+        let prompt = self.review_prompt().to_string();
+
+        let handle = tokio::spawn(async move {
+            let run = match store.load(&run_id).await {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return ReviewOutcome {
+                        run_id: run_id.clone(),
+                        actions: vec![],
+                        nothing_to_save: true,
+                        error: Some(format!("Run {run_id} not found")),
+                    };
+                }
+                Err(e) => {
+                    return ReviewOutcome {
+                        run_id: run_id.clone(),
+                        actions: vec![],
+                        nothing_to_save: true,
+                        error: Some(format!("Failed to load run: {e}")),
+                    };
+                }
+            };
+
+            if !config.enabled {
+                return ReviewOutcome {
+                    run_id: run.run_id.clone(),
+                    actions: vec![],
+                    nothing_to_save: true,
+                    error: None,
+                };
+            }
+
+            let transcript = BackgroundReviewer::build_transcript(&run);
+            let review_message = format!(
+                "{transcript}\n\n---\n\n{prompt}\n\nYou can only call memory management tools. \
+                 Other tools will be denied at runtime — do not attempt them."
+            );
+
+            BackgroundReviewer::run_review(llm_client, memory_store, run_id, review_message).await
+        });
+
+        Ok(handle)
     }
 
     /// Execute the review using the LLM client directly.

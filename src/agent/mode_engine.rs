@@ -179,18 +179,36 @@ mod tests {
     #[test]
     fn test_from_str_chinese() {
         let engine = LocalizedModeEngine::with_chinese();
-        assert_eq!(LocalizedModeEngine::from_str("编程"), Some(AgentMode::Coding));
-        assert_eq!(LocalizedModeEngine::from_str("代码"), Some(AgentMode::Coding));
-        assert_eq!(LocalizedModeEngine::from_str("研究"), Some(AgentMode::Research));
+        assert_eq!(
+            LocalizedModeEngine::from_str("编程"),
+            Some(AgentMode::Coding)
+        );
+        assert_eq!(
+            LocalizedModeEngine::from_str("代码"),
+            Some(AgentMode::Coding)
+        );
+        assert_eq!(
+            LocalizedModeEngine::from_str("研究"),
+            Some(AgentMode::Research)
+        );
         assert_eq!(LocalizedModeEngine::from_str("数据"), Some(AgentMode::Data));
-        assert_eq!(LocalizedModeEngine::from_str("写作"), Some(AgentMode::Writing));
+        assert_eq!(
+            LocalizedModeEngine::from_str("写作"),
+            Some(AgentMode::Writing)
+        );
     }
 
     #[test]
     fn test_from_str_english() {
         let engine = LocalizedModeEngine::with_chinese();
-        assert_eq!(LocalizedModeEngine::from_str("coding"), Some(AgentMode::Coding));
-        assert_eq!(LocalizedModeEngine::from_str("research"), Some(AgentMode::Research));
+        assert_eq!(
+            LocalizedModeEngine::from_str("coding"),
+            Some(AgentMode::Coding)
+        );
+        assert_eq!(
+            LocalizedModeEngine::from_str("research"),
+            Some(AgentMode::Research)
+        );
     }
 
     #[test]

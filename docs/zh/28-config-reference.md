@@ -526,3 +526,50 @@ let agent = ReactAgentBuilder::full_featured("qwen3-max", "assistant", "你是�
 ```rust
 let config = AppConfig::load()?;  // 加载 echo-agent.yaml
 ```
+
+---
+
+## 模型窗口注册表（v0.2.1 新增）
+
+动态注册和查询模型的上下文窗口大小：
+
+```rust
+use echo_core::budget::{register_model_window, resolve_model_window};
+
+// 注册自定义模型的窗口大小
+register_model_window("my-custom-model", 128_000);
+
+// 查询窗口大小（未知模型回退到启发式估计）
+let window = resolve_model_window("qwen3-max");  // 从注册表查
+let fallback = resolve_model_window("unknown-model");  // 启发式估计
+```
+
+内置模型已有默认窗口大小注册。可通过 `register_model_window()` 覆盖或扩展。
+
+---
+
+## 全局事件总线（EventBus）
+
+统一的 `tokio::broadcast` 事件通道，供 Webhook / Trace / UI / Audit 订阅同一事件流：
+
+```rust
+use echo_agent::event_bus::{GLOBAL_EVENT_BUS, BusEvent};
+
+// 订阅事件
+let mut rx = GLOBAL_EVENT_BUS.subscribe();
+
+// 发送事件
+GLOBAL_EVENT_BUS.send(AgentEvent::Token("hello".into()));
+
+// 发送带 run 上下文的事件
+GLOBAL_EVENT_BUS.send_for_run(event, "run-123");
+
+// 接收事件
+while let Ok(bus_event) = rx.recv().await {
+    println!("Event: {:?}, run_id: {:?}", bus_event.event, bus_event.run_id);
+}
+```
+
+`BusEvent` 包含 `run_id` 和 `agent_id`，支持多 Agent 场景下的事件过滤。
+
+容量 1024，消费端落后时收到 `RecvError::Lagged`。

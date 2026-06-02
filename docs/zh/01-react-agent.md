@@ -66,7 +66,8 @@ execute(task)
 |------|------|
 | `Worker`（默认） | 直接执行任务，使用工具 |
 | `Orchestrator` | 编排者，优先通过 `agent_tool` 将任务分发给 SubAgent |
-| `Planner` | 先用 `plan` 工具拆解任务，再逐步创建并执行子任务 |
+
+> **注意：** 任务规划能力通过 `.enable_task(true)` 启用（注册 `plan`/`create_task`/`update_task` 工具），无需单独的 `Planner` 角色。
 
 ---
 
@@ -75,16 +76,15 @@ execute(task)
 ```rust
 AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
     .enable_tool(true)          // 启用工具调用（默认 true）
-    .enable_task(true)          // 启用 DAG 任务规划（Planner 模式）
+    .enable_task(true)          // 启用 DAG 任务规划
     .enable_subagent(true)      // 启用 SubAgent 编排（Orchestrator 模式）
     .enable_memory(true)        // 启用长期记忆（Store + remember/recall/forget 工具）
     .enable_human_in_loop(true) // 启用人工介入
-    .enable_cot(true)           // 启用 Chain-of-Thought 引导语（默认 true）
+    .enable_cot(true)           // 启用 Chain-of-Thought 引导语（Builder 默认 true）
     .session_id("thread-001")   // 线程 ID：用于 Checkpointer 恢复/续接
     .conversation_id("conv-001")// 可选：用于 transcript/history 投影
     .token_limit(8192)          // 上下文 token 上限（超限自动压缩）
     .max_iterations(30)         // 最大迭代次数（防止死循环）
-    .verbose(true)              // 打印详细执行日志
 ```
 
 ---
@@ -95,27 +95,35 @@ AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
 
 ```rust
 use echo_agent::agent::{AgentCallback, AgentEvent};
-use async_trait::async_trait;
+use echo_agent::llm::types::Message;
+use futures::future::BoxFuture;
 use serde_json::Value;
 
 struct MyCallback;
 
-#[async_trait]
 impl AgentCallback for MyCallback {
-    async fn on_think_start(&self, agent: &str, messages: &[echo_agent::llm::types::Message]) {
-        println!("[{}] 开始推理，上下文 {} 条消息", agent, messages.len());
+    fn on_think_start<'a>(&'a self, agent: &'a str, messages: &'a [Message]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("[{}] 开始推理，上下文 {} 条消息", agent, messages.len());
+        })
     }
 
-    async fn on_tool_start(&self, agent: &str, tool: &str, args: &Value) {
-        println!("[{}] 调用工具: {} {:?}", agent, tool, args);
+    fn on_tool_start<'a>(&'a self, agent: &'a str, tool: &'a str, args: &'a Value) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("[{}] 调用工具: {} {:?}", agent, tool, args);
+        })
     }
 
-    async fn on_tool_end(&self, agent: &str, tool: &str, result: &str) {
-        println!("[{}] 工具结果: {} -> {}", agent, tool, &result[..result.len().min(80)]);
+    fn on_tool_end<'a>(&'a self, agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("[{}] 工具结果: {} -> {}", agent, tool, &result[..result.len().min(80)]);
+        })
     }
 
-    async fn on_final_answer(&self, agent: &str, answer: &str) {
-        println!("[{}] 最终答案: {}", agent, answer);
+    fn on_final_answer<'a>(&'a self, agent: &'a str, answer: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            println!("[{}] 最终答案: {}", agent, answer);
+        })
     }
 }
 ```

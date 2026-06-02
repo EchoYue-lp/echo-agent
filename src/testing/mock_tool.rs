@@ -118,7 +118,11 @@ impl MockTool {
 
     /// The parameters passed in the last call (returns `None` if never called)
     pub fn last_args(&self) -> Option<HashMap<String, Value>> {
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .cloned()
     }
 
     /// All historical call parameters (in chronological order)
@@ -148,9 +152,16 @@ impl Tool for MockTool {
     fn execute(&self, params: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
         Box::pin(async move {
             // Record this call's parameters
-            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(params.clone());
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(params.clone());
 
-            let response = self.responses.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+            let response = self
+                .responses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front();
             match response {
                 Some(MockToolResponse::Success(text)) => Ok(ToolResult::success(text)),
                 Some(MockToolResponse::Failure(msg)) => Ok(ToolResult::error(msg)),

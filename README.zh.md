@@ -135,7 +135,7 @@ cargo run --example demo38_im_channels --features channels  # IM 通道
 
 ## 功能矩阵
 
-echo-agent 提供 **67 个注册工具**，跨越 6 个 crate，通过一行 `use echo_agent::prelude::*` 即可全部使用。
+echo-agent 提供 **67 个注册工具**，跨越 8 个 crate，通过一行 `use echo_agent::prelude::*` 即可全部使用。
 
 ### 核心
 
@@ -249,8 +249,10 @@ echo-agent/
 ├── echo-state/          记忆、压缩和审计日志
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
+├── echo-agents/         Agent 实现：ReactAgent、PlanExecute、Subagent
+├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
 ├── src/                 Agent 引擎、重导出和门面层
-├── examples/            33 个可运行示例
+├── examples/            66 个可运行示例
 ├── docs/                双语文档（en + zh）
 ├── skills/              外部技能包（Markdown 格式）
 └── echo-agent.yaml      示例配置
@@ -349,7 +351,7 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 - **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
 - **33 个可运行示例** — 每个功能都有 `cargo run` 即可运行的 Demo
 - **全模块单元测试** — 覆盖核心路径的测试
-- **6 个 crate，1 行导入** — 模块化 Workspace，但只需 `use echo_agent::prelude::*`
+- **8 个 crate，1 行导入** — 模块化 Workspace，但只需 `use echo_agent::prelude::*`
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
@@ -840,6 +842,17 @@ agent.set_circuit_breaker(cb_config);
 | 图工作流 | [EN](docs/en/17-graph-workflow.md) | [ZH](docs/zh/17-graph-workflow.md) |
 | 护栏系统 | [EN](docs/en/18-guard-system.md) | [ZH](docs/zh/18-guard-system.md) |
 | 自反思 Agent | [EN](docs/en/19-self-reflection.md) | [ZH](docs/zh/19-self-reflection.md) |
+| Web 工具 | [EN](docs/en/20-web-tools.md) | [ZH](docs/zh/20-web-tools.md) |
+| 常用工具 | [EN](docs/en/21-common-tools.md) | [ZH](docs/zh/21-common-tools.md) |
+| 论文检索 | [EN](docs/en/22-research-tools.md) | [ZH](docs/zh/22-research-tools.md) |
+| Hooks 系统 | [EN](docs/en/23-hooks.md) | [ZH](docs/zh/23-hooks.md) |
+| 评估系统 | [EN](docs/en/24-eval-system.md) | [ZH](docs/zh/24-eval-system.md) |
+| 自进化系统 | [EN](docs/en/25-self-improvement.md) | [ZH](docs/zh/25-self-improvement.md) |
+| 多 Agent 模式 | [EN](docs/en/26-multi-agent.md) | [ZH](docs/zh/26-multi-agent.md) |
+| 追踪系统 | [EN](docs/en/27-tracing.md) | [ZH](docs/zh/27-tracing.md) |
+| 配置参考 | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
+| 长程任务 | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
+| 安全指南 | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
 
 ---
 
