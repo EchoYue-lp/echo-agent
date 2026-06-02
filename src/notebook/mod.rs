@@ -97,7 +97,10 @@ impl NotebookTracker {
     /// Check if the notebook is empty.
     pub fn is_empty(&self) -> bool {
         // recover from poison — data is still valid
-        self.cells.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+        self.cells
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 }
 

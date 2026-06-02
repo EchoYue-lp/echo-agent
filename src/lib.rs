@@ -27,6 +27,7 @@ pub mod notebook;
 pub mod plugin;
 pub mod retry;
 pub mod sandbox;
+pub mod scheduler;
 pub mod security;
 pub mod skills;
 #[cfg(any(test, feature = "testing"))]
@@ -140,7 +141,9 @@ pub mod prelude {
     pub use crate::tools::permission::{
         DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
     };
-    pub use crate::tools::{Tool, ToolExecutionConfig, ToolParameters, ToolResult, ToolRiskLevel, ToolStreamEvent};
+    pub use crate::tools::{
+        Tool, ToolExecutionConfig, ToolParameters, ToolResult, ToolRiskLevel, ToolStreamEvent,
+    };
 
     // Web Tools
     #[cfg(feature = "web")]

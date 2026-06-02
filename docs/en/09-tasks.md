@@ -28,20 +28,38 @@ DAG task planning follows a "think first, then act" approach: the LLM first deco
 Task {
     id: String,                   // unique identifier
     description: String,          // what to do
-    status: TaskStatus,           // Pending / Running / Completed / Failed / Skipped
+    status: TaskStatus,           // see status enum below
     dependencies: Vec<String>,    // IDs of prerequisite tasks
-    priority: u8,                 // priority (1-10, higher = more urgent)
+    priority: u8,                 // priority (0-10, 10 = highest)
     result: Option<String>,       // execution result
     reasoning: Option<String>,    // notes or rationale
+    // Other fields: assigned_agent, tags, parent_id, created_at, updated_at,
+    //               subject, timeout_secs, max_retries, retry_count, execute_fn
 }
 ```
 
-### Task State Machine
+### TaskStatus (enum)
 
+```rust
+pub enum TaskStatus {
+    Pending,                           // waiting to execute
+    InProgress,                        // currently executing
+    Completed,                         // succeeded
+    Failed(String),                    // execution failed
+    Cancelled,                         // cancelled
+    Blocked(String),                   // blocked by dependencies
+    TimedOut { error: String },        // timed out
+    Retrying { attempt: u32, last_error: String }, // retrying
+}
 ```
-Pending → Running → Completed
-                 ↘ Failed
-                 ↘ Skipped
+
+**State transitions:**
+```
+Pending → InProgress → Completed
+                    ↘ Failed → Retrying → InProgress
+                    ↘ TimedOut
+                    ↘ Cancelled
+       → Blocked (dependencies not met)
 ```
 
 ### TaskManager
@@ -158,3 +176,70 @@ When `enable_task(true)` is set, these tools are automatically registered for th
 | `visualize_dependencies` | Output a Mermaid dependency graph |
 
 See: `examples/demo02_tasks.rs`
+
+---
+
+## Composite Task Execution (CompositePlan)
+
+> Module: `echo_orchestration::tasks::composite` (feature = `tasks`)
+
+Composite tasks chain multiple heterogeneous steps in sequential or parallel execution, with upstream result passing between steps — ideal for multi-stage pipelines like "search → summarize → report".
+
+### CompositeStrategy
+
+| Variant | Behavior |
+|---------|----------|
+| `Sequential` | Execute in order, inject upstream output into downstream `TaskContext` |
+| `Parallel` | Execute all steps concurrently via `tokio::spawn` |
+
+### CompositeStep
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `String` | Unique identifier, referenced by `input_from` |
+| `name` | `String` | Human-readable name |
+| `execute_fn` | `TaskExecuteFn` | Async execution function, receives `TaskContext` |
+| `input_from` | `Vec<String>` | IDs of upstream steps this step depends on |
+
+### Usage Example
+
+```rust,ignore
+use echo_agent::tasks::composite::{CompositePlan, CompositeStep, CompositeStrategy, execute_composite};
+use std::sync::Arc;
+
+let plan = CompositePlan {
+    steps: vec![
+        CompositeStep {
+            id: "fetch".into(),
+            name: "Fetch Data".into(),
+            execute_fn: Arc::new(|ctx| Box::pin(async move {
+                Ok("raw_data: 42 records".to_string())
+            })),
+            input_from: vec![],
+        },
+        CompositeStep {
+            id: "parse".into(),
+            name: "Parse Data".into(),
+            execute_fn: Arc::new(|ctx| Box::pin(async move {
+                let upstream = ctx.upstream_results.iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>().join(", ");
+                Ok(format!("parsed from: {upstream}"))
+            })),
+            input_from: vec!["fetch".into()],
+        },
+    ],
+    strategy: CompositeStrategy::Sequential,
+};
+
+let results = execute_composite(plan).await?;
+// [("fetch", "raw_data: 42 records"),
+//  ("parse", "parsed from: fetch=raw_data: 42 records")]
+```
+
+**Design notes:**
+- Sequential guarantees order; Parallel does not
+- Any step failure causes the entire plan to fail (fail-fast)
+- `input_from` only applies in Sequential mode
+
+Runnable example: `cargo run --example demo69_composite`

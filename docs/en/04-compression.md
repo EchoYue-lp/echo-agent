@@ -291,3 +291,72 @@ ContextCompressor (the sole compression strategy extension point)
  │     └── with_prompt()      (uses custom closure)
  └── HybridCompressor         (chains multiple ContextCompressors)
 ```
+
+---
+
+## Adaptive Compression (AdaptiveCompressor)
+
+> **New in v0.2.1.** Automatically selects compression level based on context length.
+
+`AdaptiveCompressor` implements a 5-level progressive compression strategy, automatically escalating compression intensity as context exceeds token thresholds:
+
+| Level | Name | Strategy | Trigger Threshold |
+|-------|------|----------|-------------------|
+| L1 | **Snip** | Remove tool outputs exceeding token limit | `l1_snip_threshold_tokens` (80k) |
+| L2 | **Micro** | Truncate tool outputs, keep first/last N lines | `l2_micro_threshold_tokens` (100k) |
+| L3 | **Collapse** | Drop older messages, keep system prompt + last N recent | `l3_collapse_threshold_tokens` (120k) |
+| L4 | **Auto Compact** | Full LLM summarization (requires external integration) | `l4_compact_threshold_tokens` (150k) |
+| L5 | **Reactive** | Emergency: keep only system prompt + last 3 messages | Beyond L3 threshold |
+
+**Note:** L4 requires an external LLM call. `AdaptiveCompressor` internally applies L1 → L2 → L3 → L5 in order, stopping once `target_tokens` is reached.
+
+### Configuration
+
+```rust
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let config = AdaptiveCompressionConfig {
+    l1_snip_threshold_tokens: 80_000,
+    l1_max_output_tokens: 4_000,        // Max tokens per output for Snip
+    l2_micro_threshold_tokens: 100_000,
+    l2_keep_lines: 50,                   // Lines to keep at head/tail for Micro
+    l3_collapse_threshold_tokens: 120_000,
+    l3_keep_recent: 10,                  // Recent messages to keep for Collapse
+    l4_compact_threshold_tokens: 150_000,
+    l4_keep_recent: 6,                   // Recent messages for Compact (external LLM)
+};
+
+let compressor = AdaptiveCompressor::new(config);
+```
+
+### How It Works
+
+```
+Tokens:    0 ──── 80k ──── 100k ──── 120k ──── 150k ──── ∞
+            │       │        │         │         │        │
+            │ None  │  Snip  │  Micro  │Collapse │Compact │
+            │       │Trim long│Truncate │Drop old │Ext LLM │
+            │       │outputs │outputs  │messages │summary │
+```
+
+### Integration with ContextManager
+
+`AdaptiveCompressor` is integrated via `ContextManager::builder()`, not `AgentConfig`:
+
+```rust
+use echo_state::compression::ContextManager;
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default());
+let mut ctx = ContextManager::builder(token_limit)
+    .compressor(Box::new(compressor))
+    .with_system("System prompt")
+    .build();
+
+// prepare() auto-detects token count and triggers compression
+let result = ctx.prepare(None).await?;
+// result.messages — compressed message list
+// result.compressed — compression stats (if any)
+```
+
+See [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs).

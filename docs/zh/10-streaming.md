@@ -150,3 +150,42 @@ async fn chat_stream(
 3. **错误处理**：流中的每个事件都是 `Result<AgentEvent>`，需要处理中途发生的 LLM 或工具错误
 
 对应示例：`examples/demo10_streaming.rs`
+
+---
+
+## 流式超时机制（规划中）
+
+> **注意：** 以下 API 为设计规划，尚未在当前版本中实现。流式超时通过 LLM 客户端层的请求超时控制。
+
+SSE 客户端计划内置三级超时保护：
+
+| 超时类型 | 计划值 | 作用 |
+|---------|--------|------|
+| **first_chunk** | 30s | 等待首个 chunk 的最大时间 |
+| **idle** | 60s | 两个 chunk 之间的最大空闲时间 |
+| **overall** | 300s | 整个流的总超时 |
+
+当前可通过 `AgentConfig` 的 `request_timeout` 控制 LLM 请求超时。
+
+### Stream Loop 架构
+
+v0.2.1 将单体 `stream_loop.rs` 拆分为模块化子目录：
+
+```
+src/agent/react/run/stream_loop/
+├── mod.rs           # 入口和主编排
+├── llm_stream.rs    # LLM 流式请求和 SSE 解析
+└── processor.rs     # 事件处理和分发
+```
+
+### 工具输出截断
+
+v0.2.1 引入 head+tail 截断策略（70/30 分割），对齐换行边界：
+
+```
+完整输出: [────────────────────────────────────────] 10KB
+截断后:   [────── head (70%) ──────][── tail (30%) ──]
+                              ↑ 省略中间部分
+```
+
+这确保 Agent 始终能看到工具输出的开头和结尾，同时控制 token 消耗。

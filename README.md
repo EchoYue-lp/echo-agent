@@ -178,7 +178,7 @@ echo-agent = { version = "0.2", features = ["mcp", "sqlite", "web"] }
 
 ## Feature Matrix
 
-echo-agent ships with **67 registered tools** across 6 crates, all accessible through a single `use echo_agent::prelude::*`.
+echo-agent ships with **67 registered tools** across 8 crates, all accessible through a single `use echo_agent::prelude::*`.
 
 ### Core
 
@@ -288,8 +288,10 @@ echo-agent/
 ├── echo-state/          Memory, compression, and audit logging
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
+├── echo-agents/         Agent implementations: ReactAgent, PlanExecute, Subagent
+├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
 ├── src/                 Agent engine, re-exports, and facade layer
-├── examples/            52 runnable demos
+├── examples/            64 runnable demos
 ├── docs/                Bilingual documentation (en + zh)
 ├── skills/              External skill packs (Markdown-based)
 └── echo-agent.yaml      Example configuration
@@ -384,9 +386,9 @@ export FEISHU_APP_SECRET=your-feishu-app-secret
 ## Highlights
 
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
-- **52 runnable examples** — every feature has a demo you can `cargo run` immediately
+- **66 runnable examples** — every feature has a demo you can `cargo run` immediately
 - **Comprehensive unit tests** — full coverage across all modules
-- **6 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
+- **8 crates, 1 import** — modular workspace, but `use echo_agent::prelude::*` is all you need
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
@@ -1089,6 +1091,21 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 43 | [`demo43_data_tools`](examples/demo43_data_tools.rs) | Excel / CSV / Word / Text processing |
 | 50 | [`demo50_eval`](examples/demo50_eval.rs) | Eval system: cases, criteria, constraints, replay, HTML reports |
 | 51 | [`demo51_self_improvement`](examples/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
+| 52 | [`demo52_loop_detection`](examples/demo52_loop_detection.rs) | Loop detection: exact/same-tool/no-progress loops |
+| 53 | [`demo53_adaptive_compression`](examples/demo53_adaptive_compression.rs) | 5-level adaptive compression (Snip→Micro→Collapse→Compact→Reactive) |
+| 54 | [`demo54_headless`](examples/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
+| 55 | [`demo55_lsp_tools`](examples/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |
+| 56 | [`demo56_plugin_system`](examples/demo56_plugin_system.rs) | Plugin system: manifest, registry, lifecycle, scope |
+| 57 | [`demo57_data_pipeline`](examples/demo57_data_pipeline.rs) | Data pipeline: ingest → clean → analyze → report |
+| 58 | [`demo58_git_worktree`](examples/demo58_git_worktree.rs) | Git worktree isolation + checkpoint rollback |
+| 59 | [`demo59_code_search`](examples/demo59_code_search.rs) | Ripgrep-powered code search with structured output |
+| 60 | [`demo60_data_quality`](examples/demo60_data_quality.rs) | Data quality profiling + statistical analysis |
+| 61 | [`demo61_agent_factory`](examples/demo61_agent_factory.rs) | Agent factory, mode engine, prompt templates |
+| 62 | [`demo62_prompt_templates`](examples/demo62_prompt_templates.rs) | Prompt template manager with variable substitution |
+| 63 | [`demo63_tiered_memory`](examples/demo63_tiered_memory.rs) | Tiered memory: hot/warm/cold with auto-eviction |
+| 64 | [`demo64_tool_pipeline`](examples/demo64_tool_pipeline.rs) | Tool execution pipeline + approval stack |
+| 65 | [`demo65_context_assembler`](examples/demo65_context_assembler.rs) | ContextAssembler: budget-aware context assembly with priority ordering |
+| 66 | [`demo66_context_selector`](examples/demo66_context_selector.rs) | ContextSelector: score and select files by task relevance |
 
 Plus **6 comprehensive examples** demonstrating real-world use cases:
 
@@ -1150,6 +1167,18 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Multi-Agent Patterns | [EN](docs/en/26-multi-agent.md) | [ZH](docs/zh/26-multi-agent.md) |
 | Tracing System | [EN](docs/en/27-tracing.md) | [ZH](docs/zh/27-tracing.md) |
 | Config Reference | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
+| Long-Running Tasks | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
+| ReAct Safety | [EN](docs/en/30-react-safety.md) | [ZH](docs/zh/30-react-safety.md) |
+| LSP Integration | [EN](docs/en/31-lsp-integration.md) | [ZH](docs/zh/31-lsp-integration.md) |
+| Plugin System | [EN](docs/en/32-plugin-system.md) | [ZH](docs/zh/32-plugin-system.md) |
+| Headless Mode | [EN](docs/en/33-headless-mode.md) | [ZH](docs/zh/33-headless-mode.md) |
+| Git Isolation | [EN](docs/en/34-git-isolation.md) | [ZH](docs/zh/34-git-isolation.md) |
+| Pipelines | [EN](docs/en/35-pipelines.md) | [ZH](docs/zh/35-pipelines.md) |
+| Data Quality & Statistics | [EN](docs/en/36-data-quality-statistics.md) | [ZH](docs/zh/36-data-quality-statistics.md) |
+| Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
+| Agent Factory & Modes | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
+| Tiered Memory | [EN](docs/en/39-tiered-memory.md) | [ZH](docs/zh/39-tiered-memory.md) |
+| Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
 
 ---
 

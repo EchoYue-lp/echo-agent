@@ -526,3 +526,50 @@ let agent = ReactAgentBuilder::full_featured("qwen3-max", "assistant", "You are 
 ```rust
 let config = AppConfig::load()?;  // loads echo-agent.yaml
 ```
+
+---
+
+## Model Window Registry (v0.2.1)
+
+Dynamically register and query model context window sizes:
+
+```rust
+use echo_core::budget::{register_model_window, resolve_model_window};
+
+// Register a custom model's window size
+register_model_window("my-custom-model", 128_000);
+
+// Query window size (unknown models fall back to heuristic estimation)
+let window = resolve_model_window("qwen3-max");  // from registry
+let fallback = resolve_model_window("unknown-model");  // heuristic
+```
+
+Built-in models have default window sizes pre-registered. Use `register_model_window()` to override or extend.
+
+---
+
+## Global Event Bus (EventBus)
+
+Unified `tokio::broadcast` event channel for Webhook / Trace / UI / Audit to subscribe to the same event stream:
+
+```rust
+use echo_agent::event_bus::{GLOBAL_EVENT_BUS, BusEvent};
+
+// Subscribe to events
+let mut rx = GLOBAL_EVENT_BUS.subscribe();
+
+// Send an event
+GLOBAL_EVENT_BUS.send(AgentEvent::Token("hello".into()));
+
+// Send an event with run context
+GLOBAL_EVENT_BUS.send_for_run(event, "run-123");
+
+// Receive events
+while let Ok(bus_event) = rx.recv().await {
+    println!("Event: {:?}, run_id: {:?}", bus_event.event, bus_event.run_id);
+}
+```
+
+`BusEvent` includes `run_id` and `agent_id` for multi-agent event filtering.
+
+Capacity: 1024. Consumers that fall behind receive `RecvError::Lagged`.

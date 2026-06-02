@@ -232,12 +232,17 @@ impl ReactAgent {
         let is_orchestrator = self.config.role == AgentRole::Orchestrator;
         let subagent_names: Vec<String> = if is_orchestrator {
             // Use blocking read from the registry since we're in sync context
-            self.tools
-                .subagent_registry
-                .agents_map()
-                .try_read()
-                .map(|agents| agents.keys().cloned().collect())
-                .unwrap_or_default()
+            #[cfg(feature = "subagent")]
+            {
+                self.tools
+                    .subagent_registry
+                    .agents_map()
+                    .try_read()
+                    .map(|agents| agents.keys().cloned().collect())
+                    .unwrap_or_default()
+            }
+            #[cfg(not(feature = "subagent"))]
+            Vec::new()
         } else {
             Vec::new()
         };

@@ -238,10 +238,10 @@ async fn demo_external_skills() -> Result<()> {
     println!("Part 1: 外部技能系统 (File-based Skills)");
     println!("═══════════════════════════════════════════════════════\n");
 
-    let skills_dir = std::path::Path::new("skills");
+    let skills_dir = std::path::Path::new("examples/demo_skills");
     if !skills_dir.exists() {
         return Err(echo_agent::error::ReactError::Other(
-            "综合验收失败：缺少 skills/ 目录，无法验证外部技能系统".to_string(),
+            "综合验收失败：缺少 examples/demo_skills/ 目录，无法验证外部技能系统".to_string(),
         ));
     }
 

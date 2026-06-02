@@ -37,7 +37,10 @@ impl AgentCallback for ToolRecorder {
         _args: &'a Value,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(tool.to_string());
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(tool.to_string());
         })
     }
 }

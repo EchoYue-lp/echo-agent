@@ -168,7 +168,7 @@ for entry in recent {
 | 字段 | 说明 |
 |------|------|
 | `tool_name` | 被检查的工具 |
-| `args_hash` | 工具输入的 SHA-256 哈希（前 8 位） |
+| `args_hash` | 工具输入的 DefaultHasher 哈希（8 位十六进制） |
 | `decision` | "allow" / "deny" / "require_approval" / "ask" |
 | `reason` | 管线阶段："bypass" / "plan_mode" / "rule_match" / "protected_path" / "cache_hit" / "denial_tracker" / "classifier" / "handler" / "dont_ask" / "no_handler" |
 | `source` | 做出决策的阶段 |
@@ -268,17 +268,15 @@ let decision = service.check("Bash", &serde_json::json!({"command": "ls"})).awai
 ### WebhookHumanLoopProvider（HTTP 回调）
 
 ```rust
-let provider = WebhookHumanLoopProvider::new(
-    "https://your-approval-service/approve",
-    30,
-);
+let provider = WebhookHumanLoopProvider::new("https://your-approval-service/approve")
+    .with_timeout(Duration::from_secs(30));
 agent.set_human_loop_provider(Arc::new(provider));
 ```
 
 ### WebSocketHumanLoopProvider（WebSocket 推送）
 
 ```rust
-let provider = WebSocketHumanLoopProvider::new("127.0.0.1:9000").await?;
+let provider = WebSocketHumanLoopProvider::bind(9000).await?;
 agent.set_human_loop_provider(Arc::new(provider));
 ```
 

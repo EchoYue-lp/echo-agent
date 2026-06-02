@@ -63,10 +63,10 @@ async fn demo_1_discovery() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(59));
     println!("Part 1: Skill Discovery (Tier 1 — frontmatter only)\n");
 
-    let skills_dir = std::path::Path::new("skills");
+    let skills_dir = std::path::Path::new("examples/demo_skills");
     if !skills_dir.exists() {
         return Err(echo_agent::error::ReactError::Other(
-            "demo08 验收失败：缺少 ./skills/ 目录".to_string(),
+            "demo08 验收失败：缺少 ./examples/demo_skills/ 目录".to_string(),
         ));
     }
 
@@ -146,7 +146,7 @@ async fn demo_2_catalog() -> echo_agent::error::Result<()> {
     println!("Part 2: Skill Catalog (injected into system prompt)\n");
 
     let mut loader = SkillLoader::new();
-    let descriptors = loader.discover_from_dir("skills").await?;
+    let descriptors = loader.discover_from_dir("examples/demo_skills").await?;
 
     let mut registry = SkillRegistry::new();
     for desc in descriptors {
@@ -185,7 +185,7 @@ async fn demo_3_activation() -> echo_agent::error::Result<()> {
     println!("Part 3: Skill Activation (Tier 2 — full instructions)\n");
 
     let mut loader = SkillLoader::new();
-    let descriptors = loader.discover_from_dir("skills").await?;
+    let descriptors = loader.discover_from_dir("examples/demo_skills").await?;
 
     if descriptors.is_empty() {
         return Err(echo_agent::error::ReactError::Other(
@@ -272,7 +272,7 @@ async fn demo_4_script_execution() -> echo_agent::error::Result<()> {
         .unwrap_or_else(|_| ".".to_string());
 
     let mut loader = SkillLoader::new();
-    let descriptors = loader.discover_from_dir("skills").await?;
+    let descriptors = loader.discover_from_dir("examples/demo_skills").await?;
     let mut registry = SkillRegistry::new();
     for desc in descriptors {
         registry.register_descriptor(desc);
@@ -478,10 +478,10 @@ async fn demo_5_agent_integration() -> echo_agent::error::Result<()> {
     println!("{}", "─".repeat(59));
     println!("Part 5: Agent + Skills (Full Progressive Disclosure)\n");
 
-    let skills_dir = std::path::Path::new("skills");
+    let skills_dir = std::path::Path::new("examples/demo_skills");
     if !skills_dir.exists() {
         return Err(echo_agent::error::ReactError::Other(
-            "demo08 验收失败：缺少 ./skills/ 目录".to_string(),
+            "demo08 验收失败：缺少 ./examples/demo_skills/ 目录".to_string(),
         ));
     }
 
@@ -701,7 +701,7 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
     println!("  ──────────────────────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir("skills").await?;
+        let descriptors = loader.discover_from_dir("examples/demo_skills").await?;
         let constrained_count = descriptors
             .iter()
             .filter(|desc| !desc.paths.is_empty() || !desc.allowed_tools.is_empty())
@@ -836,7 +836,7 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
     println!("  ────────────────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir("skills").await?;
+        let descriptors = loader.discover_from_dir("examples/demo_skills").await?;
 
         let mut registry = SkillRegistry::new();
         for desc in descriptors {
@@ -888,7 +888,7 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
     println!("  ──────────────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir("skills").await?;
+        let descriptors = loader.discover_from_dir("examples/demo_skills").await?;
 
         let xhs = descriptors
             .iter()
@@ -940,7 +940,7 @@ async fn demo_7_xiaohongshu_image_generator() -> echo_agent::error::Result<()> {
     println!("  ─────────────────────────");
     {
         let mut loader = SkillLoader::new();
-        let descriptors = loader.discover_from_dir("skills").await?;
+        let descriptors = loader.discover_from_dir("examples/demo_skills").await?;
         let mut registry = SkillRegistry::new();
         for desc in descriptors {
             registry.register_descriptor(desc);

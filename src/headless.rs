@@ -71,11 +71,7 @@ pub struct HeadlessResult {
 impl HeadlessResult {
     /// Compute the process exit code: 0 on success, 1 on failure.
     pub fn exit_code(&self) -> i32 {
-        if self.success {
-            0
-        } else {
-            1
-        }
+        if self.success { 0 } else { 1 }
     }
 
     /// Format the result for stdout according to the requested output format.

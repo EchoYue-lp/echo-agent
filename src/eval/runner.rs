@@ -263,11 +263,7 @@ impl EvalRunner {
                 // Validate test_command: reject shell metacharacters that could
                 // lead to command injection when passed to `sh -c`
                 if let Err(msg) = validate_shell_command(test_command) {
-                    return EvalResult::new("criteria", false).with_metric(
-                        "swe_bench",
-                        0.0,
-                        &msg,
-                    );
+                    return EvalResult::new("criteria", false).with_metric("swe_bench", 0.0, &msg);
                 }
 
                 // SWE-bench eval workflow:

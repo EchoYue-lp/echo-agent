@@ -19,9 +19,9 @@
 // ── Re-exports from echo-core ──────────────────────────────────────────
 
 pub use echo_core::plugin::{
-    InstallSource, PluginAuthor, PluginCapability, PluginComponents, PluginDependency,
-    PluginEntry, PluginId, PluginLifecycle, PluginManifest, PluginRegistry, PluginScope,
-    PluginUserConfigEntry, PluginUserConfigType, PluginVariables, ResolvedComponents,
+    InstallSource, PluginAuthor, PluginCapability, PluginComponents, PluginDependency, PluginEntry,
+    PluginId, PluginLifecycle, PluginManifest, PluginRegistry, PluginScope, PluginUserConfigEntry,
+    PluginUserConfigType, PluginVariables, ResolvedComponents,
 };
 
 use std::path::PathBuf;
@@ -88,22 +88,27 @@ impl PluginIntegrator {
         let ordered_ids = match registry.resolve_dependencies() {
             Ok(ids) => ids,
             Err(e) => {
-                result.errors.push(format!("Dependency resolution failed: {e}"));
+                result
+                    .errors
+                    .push(format!("Dependency resolution failed: {e}"));
                 return result;
             }
         };
 
         // Collect components from all enabled plugins
         let mut skill_dirs: Vec<PathBuf> = Vec::new();
-        let mut hooks_defs: Vec<(String, String, echo_execution::skills::hooks::HooksDefinition)> =
-            Vec::new();
+        let mut hooks_defs: Vec<(
+            String,
+            String,
+            echo_execution::skills::hooks::HooksDefinition,
+        )> = Vec::new();
         let mut mcp_files: Vec<PathBuf> = Vec::new();
 
         for plugin_id in &ordered_ids {
             // Extract entry info before mutable borrow
-            let entry_info = registry.get(plugin_id).map(|e| {
-                (e.enabled, e.root.display().to_string())
-            });
+            let entry_info = registry
+                .get(plugin_id)
+                .map(|e| (e.enabled, e.root.display().to_string()));
 
             let Some((enabled, root_display)) = entry_info else {
                 continue;
@@ -126,24 +131,19 @@ impl PluginIntegrator {
             skill_dirs.extend(resolved.skill_dirs.iter().cloned());
 
             // Collect hooks
-            if let Some(ref hooks_file) = resolved.hooks_file {
-                if let Ok(content) = std::fs::read_to_string(hooks_file) {
-                    match serde_yaml_ng::from_str::<
-                        echo_execution::skills::hooks::HooksDefinition,
-                    >(&content)
-                    {
-                        Ok(def) => {
-                            hooks_defs.push((
-                                plugin_id.clone(),
-                                root_display,
-                                def,
-                            ));
-                        }
-                        Err(e) => {
-                            result.errors.push(format!(
-                                "Plugin '{plugin_id}' hooks YAML parse: {e}"
-                            ));
-                        }
+            if let Some(ref hooks_file) = resolved.hooks_file
+                && let Ok(content) = std::fs::read_to_string(hooks_file)
+            {
+                match serde_yaml_ng::from_str::<echo_execution::skills::hooks::HooksDefinition>(
+                    &content,
+                ) {
+                    Ok(def) => {
+                        hooks_defs.push((plugin_id.clone(), root_display, def));
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(format!("Plugin '{plugin_id}' hooks YAML parse: {e}"));
                     }
                 }
             }
@@ -172,11 +172,7 @@ impl PluginIntegrator {
         {
             let mut hook_reg = agent.hook_registry().write().await;
             for (plugin_name, source_dir, def) in &hooks_defs {
-                hook_reg.register(
-                    &format!("plugin:{plugin_name}"),
-                    source_dir,
-                    def.clone(),
-                );
+                hook_reg.register(&format!("plugin:{plugin_name}"), source_dir, def.clone());
                 result.hooks_registered.push(plugin_name.clone());
             }
         }
@@ -188,9 +184,7 @@ impl PluginIntegrator {
                 match agent.load_mcp_from_file(mcp_file).await {
                     Ok(clients) => {
                         for _c in &clients {
-                            result
-                                .mcp_connected
-                                .push(mcp_file.display().to_string());
+                            result.mcp_connected.push(mcp_file.display().to_string());
                         }
                     }
                     Err(e) => {
@@ -224,15 +218,15 @@ impl PluginIntegrator {
     pub async fn wire_hooks(
         &self,
         agent: &crate::agent::react::ReactAgent,
-        hooks: &[(String, String, echo_execution::skills::hooks::HooksDefinition)],
+        hooks: &[(
+            String,
+            String,
+            echo_execution::skills::hooks::HooksDefinition,
+        )],
     ) {
         let mut registry = agent.hook_registry().write().await;
         for (plugin_name, source_dir, def) in hooks {
-            registry.register(
-                &format!("plugin:{plugin_name}"),
-                source_dir,
-                def.clone(),
-            );
+            registry.register(&format!("plugin:{plugin_name}"), source_dir, def.clone());
         }
     }
 

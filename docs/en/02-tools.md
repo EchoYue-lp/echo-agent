@@ -54,46 +54,257 @@ Total: 67 registered tools across 26 feature categories.
 
 ---
 
-## Tool Permissions
+## Tool Trait — Complete Definition
 
-Every tool declares required permissions via `ToolPermission`. The framework enforces these at execution time through the approval chain.
-
-| Permission | Description | Example Tools |
-|------------|-------------|---------------|
-| `Read` | Read files/directories | `read_file`, `excel_read`, `pdf_extract` |
-| `Write` | Write/modify files | `write_file`, `data_export`, `generate_chart` |
-| `Network` | Network access | `web_fetch`, `web_search`, `arxiv_search`, `pdf_fetch` |
-| `Execute` | Execute commands/code | `shell`, `run_skill_script` |
-| `Sensitive` | Sensitive operations | `human_in_loop` |
-
-Tools implement `fn permissions() -> Vec<ToolPermission>` to declare their requirements:
+> **Trait signature changed in v0.2.0.** No longer uses `#[async_trait]`; `execute` returns `BoxFuture`.
 
 ```rust
-impl Tool for MyTool {
-    fn permissions(&self) -> Vec<ToolPermission> {
-        vec![ToolPermission::Read, ToolPermission::Network]
+pub trait Tool: Send + Sync {
+    /// Stable tool identifier exposed to the model.
+    fn name(&self) -> &str;
+
+    /// Human-readable tool description.
+    fn description(&self) -> &str;
+
+    /// JSON Schema describing accepted parameters.
+    fn parameters(&self) -> serde_json::Value;
+
+    /// Execute the tool (core method, must implement).
+    fn execute<'a>(
+        &'a self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'a, Result<ToolResult>>;
+
+    // ── Optional methods below — all have default implementations ──
+
+    /// Stream tool execution, producing incremental ToolStreamEvents.
+    fn execute_stream<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>>;
+
+    /// Whether this tool supports streaming execution (default: false).
+    fn supports_streaming(&self) -> bool;
+
+    /// Validate parameters before execution (default: Ok(())).
+    fn validate_parameters<'a>(
+        &'a self,
+        params: &'a ToolParameters,
+    ) -> BoxFuture<'a, Result<()>>;
+
+    /// Permissions required to invoke this tool (default: empty).
+    fn permissions(&self) -> Vec<ToolPermission>;
+
+    /// Risk level of this tool (default: Standard).
+    fn risk_level(&self) -> ToolRiskLevel;
+
+    /// Human-readable capability declaration (default: derived from risk_level).
+    fn capability_description(&self) -> &str;
+}
+```
+
+### Method Summary
+
+| Method | Required | Default | Purpose |
+|--------|----------|---------|---------|
+| `name()` | ✅ | — | Tool identifier |
+| `description()` | ✅ | — | Description shown to LLM |
+| `parameters()` | ✅ | — | JSON Schema parameter definition |
+| `execute()` | ✅ | — | Core execution logic |
+| `execute_stream()` | ❌ | Wraps `execute()` into single `Complete` event | Streaming progress output |
+| `supports_streaming()` | ❌ | `false` | Declare streaming support |
+| `validate_parameters()` | ❌ | `Ok(())` | Pre-execution parameter validation |
+| `permissions()` | ❌ | `vec![]` | Declare required permissions |
+| `risk_level()` | ❌ | `Standard` | Risk classification |
+| `capability_description()` | ❌ | Derived from risk_level | Human-readable capability text |
+
+---
+
+## ToolResult and ToolResultKind
+
+### ToolResult
+
+```rust
+pub struct ToolResult {
+    pub kind: ToolResultKind,        // Result type classification
+    pub success: bool,               // Whether the tool succeeded
+    pub output: String,              // Text output
+    pub error: Option<String>,       // Error message
+    pub bytes: Option<Vec<u8>>,      // Binary output
+    pub data: Option<Value>,         // Structured JSON data
+    pub truncated: bool,             // Whether output was truncated
+    pub mime_type: Option<String>,   // MIME type
+    pub metadata: HashMap<String, String>, // Key-value metadata
+}
+```
+
+**Constructors:**
+
+| Method | Purpose |
+|--------|---------|
+| `ToolResult::success(output)` | Successful text result |
+| `ToolResult::success_json(data)` | Successful JSON result |
+| `ToolResult::success_with_kind(kind, output)` | Typed success result |
+| `ToolResult::error(msg)` | Failed result |
+| `ToolResult::binary(bytes)` | Binary output |
+
+**Builder pattern:**
+
+```rust
+ToolResult::success("output")
+    .with_meta("file_path", "/tmp/result.csv")
+    .with_mime_type("text/csv")
+    .with_truncated(true)
+```
+
+### ToolResultKind
+
+```rust
+pub enum ToolResultKind {
+    Text,                                    // Plain text
+    Json,                                    // Structured JSON
+    Image { mime_type: String },             // Image
+    Table { columns: Vec<String>, rows: Vec<Vec<String>> }, // Tabular data
+    Diff { unified_diff: String },           // Unified diff
+    FileReference { path: String },          // File reference
+    CommandOutput { exit_code: Option<i32> }, // Command output
+    StructuredError { error_code: String },  // Structured error
+}
+```
+
+Downstream consumers (CLI rendering, trace analysis, eval scoring) can use `kind` for type-aware handling without parsing the `output` string.
+
+---
+
+## ToolStreamEvent (Streaming Tool Events)
+
+```rust
+pub enum ToolStreamEvent {
+    /// Progress notification with optional percentage (0-100).
+    Progress { message: String, percent: Option<u8> },
+    /// Incremental partial output chunk.
+    PartialOutput { chunk: String },
+    /// Terminal event carrying the final ToolResult. Stream ends after this.
+    Complete(ToolResult),
+}
+```
+
+Implementing a streaming tool:
+
+```rust
+impl Tool for LongRunningTool {
+    // ... name / description / parameters ...
+
+    fn supports_streaming(&self) -> bool { true }
+
+    fn execute_stream<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>> {
+        Box::pin(async move {
+            let stream = async_stream::stream! {
+                yield ToolStreamEvent::Progress {
+                    message: "Starting...".into(),
+                    percent: Some(0),
+                };
+                // ... intermediate steps ...
+                yield ToolStreamEvent::PartialOutput {
+                    chunk: "partial result...".into(),
+                };
+                yield ToolStreamEvent::Progress {
+                    message: "Done".into(),
+                    percent: Some(100),
+                };
+                yield ToolStreamEvent::Complete(
+                    ToolResult::success("final result")
+                );
+            };
+            Ok(Box::pin(stream))
+        })
     }
+
+    fn execute<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        // Non-streaming fallback
+        Box::pin(async move { Ok(ToolResult::success("final result")) })
+    }
+}
+```
+
+---
+
+## ToolRiskLevel
+
+```rust
+pub enum ToolRiskLevel {
+    ReadOnly,   // Read-only, no side effects
+    Standard,   // Standard, limited side effects
+    Dangerous,  // Dangerous, irreversible side effects
+}
+```
+
+Tools declare risk via `risk_level()`:
+
+```rust
+impl Tool for DeleteFileTool {
+    fn risk_level(&self) -> ToolRiskLevel { ToolRiskLevel::Dangerous }
+    fn capability_description(&self) -> &str { "Delete files — irreversible" }
     // ...
 }
 ```
 
-See [Security Guide](./security.md) for the full permission model and approval chain.
+`ToolRiskClassifier` (in `echo-execution`) auto-classifies tools by name into 7 risk categories:
+
+| Category | Risk Level | Example Tools |
+|----------|-----------|---------------|
+| `ReadOnly` | 0 | `read_file`, `grep`, `git_status` |
+| `NetworkCall` | 1 | `web_fetch`, `web_search` |
+| `FileWrite` | 2 | `edit_file`, `write_file` |
+| `GitWrite` | 2 | `git_commit`, `git_push` |
+| `DatabaseWrite` | 2 | `db_execute`, `sql` |
+| `ShellExec` | 3 | `shell`, `execute` |
+| `Destructive` | 3 | `delete_file`, `drop_table` |
+
+See [Tool Permissions](./tool-permissions.md) for the full permission model, rule engine, and risk classification.
+
+---
+
+## ToolCallParams (Type-Safe Parameters)
+
+Raw JSON parameters from the LLM can be extracted and validated type-safely via `ToolCallParams`:
+
+```rust
+use echo_core::tools::{ToolCallParams, ParamValue};
+
+let params = ToolCallParams::from_value(&raw_json);
+
+// Type-safe extraction
+let path: Option<&str> = params.get_str("path");
+let count: Option<f64> = params.get_number("count");
+let force: Option<bool> = params.get_bool("force");
+
+// Required parameter validation
+params.validate_required("path", "string")?;
+```
 
 ---
 
 ## Implementing a Custom Tool
 
-Implement the `Tool` trait:
+Implement the `Tool` trait (note: no longer uses `#[async_trait]`; `execute` returns `BoxFuture`):
 
 ```rust
-use echo_agent::tools::{Tool, ToolParameters, ToolResult};
+use echo_agent::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
+use echo_agent::tools::permission::ToolPermission;
 use echo_agent::error::Result;
+use echo_core::tools::ToolCallParams;
 use serde_json::{Value, json};
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 
 struct TranslateTool;
 
-#[async_trait]
 impl Tool for TranslateTool {
     fn name(&self) -> &str {
         "translate"
@@ -114,12 +325,44 @@ impl Tool for TranslateTool {
         })
     }
 
-    async fn execute(&self, params: ToolParameters) -> Result<ToolResult> {
-        let text   = params["text"].as_str().unwrap_or("");
-        let target = params["target"].as_str().unwrap_or("en");
-        // Call actual translation API ...
-        let result = format!("(Translated to {}) {}", target, text);
-        Ok(ToolResult::success(result))
+    fn execute<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let typed = ToolCallParams::from_params(&params);
+            let text = typed.get_str("text").unwrap_or("");
+            let target = typed.get_str("target").unwrap_or("en");
+            // Call actual translation API ...
+            let result = format!("(Translated to {}) {}", target, text);
+            Ok(ToolResult::success(result))
+        })
+    }
+
+    // ── Optional: declare permissions and risk ──
+
+    fn permissions(&self) -> Vec<ToolPermission> {
+        vec![ToolPermission::Network]  // Requires network access
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly  // Read-only operation
+    }
+
+    // ── Optional: parameter validation ──
+
+    fn validate_parameters<'a>(
+        &'a self,
+        params: &'a ToolParameters,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let typed = ToolCallParams::from_params(params);
+            typed.validate_required("text", "string")
+                .map_err(|e| echo_agent::error::ReactError::Other(e))?;
+            typed.validate_required("target", "string")
+                .map_err(|e| echo_agent::error::ReactError::Other(e))?;
+            Ok(())
+        })
     }
 }
 ```
@@ -218,4 +461,85 @@ agent.add_tools(vec![
 | `generate_chart` | chart | Chart generation (requires `chart` feature) |
 | `db_query` / `db_schema` | database | SQL database tools (requires `database` feature) |
 
-See: `examples/demo01_tools.rs`, `examples/demo09_file_shell.rs`, `examples/demo13_tool_execution.rs`
+See: `examples/demo01_tools.rs`, `examples/demo09_file_shell.rs`, `examples/demo13_tool_execution.rs`, `examples/demo64_tool_pipeline.rs`
+
+---
+
+## ToolChoice Enum (v0.2.1)
+
+Type-safe enum controlling how the LLM uses tools:
+
+| Variant | Meaning | OpenAI Format |
+|---------|---------|---------------|
+| `Auto` | Model decides whether to call tools (default) | `"auto"` |
+| `None` | Prevent any tool calls | `"none"` |
+| `Required` | Model must call at least one tool | `"required"` |
+| `Function { name }` | Force call to a specific tool | `{"type":"function","function":{"name":"..."}}` |
+
+```rust
+use echo_core::llm::ToolChoice;
+
+// Let the model decide
+let choice = ToolChoice::Auto;
+
+// Force a specific tool
+let choice = ToolChoice::function("web_search");
+
+// Disable tool calls
+let choice = ToolChoice::None;
+```
+
+---
+
+## Tool Execution Pipeline (ToolExecutionPipeline)
+
+> **New in v0.2.0.** Configurable multi-stage tool execution pipeline.
+
+Tool calls no longer execute directly — they flow through a pluggable pipeline. Each stage can inspect, modify, intercept, or augment tool execution behavior.
+
+### Pipeline Stages
+
+```
+Tool Call → PlanMode → ReadBeforeEdit → Permission → ApprovalStack
+           → Sandbox → Execution → Output Truncation → Hooks → Trace
+```
+
+| Stage | Purpose |
+|-------|---------|
+| **PlanModeStage** | Intercept tool calls in planning mode |
+| **ReadBeforeEdit** | Force file read before edit (prevents blind writes) |
+| **Permission** | Check tool permissions (ToolPermission) |
+| **ApprovalStack** | Human approval stack (Once/Always/Deny policies) |
+| **Sandbox** | Isolated execution sandbox |
+| **Execution** | Actual tool execution |
+| **Output Truncation** | Head+tail truncation (70/30 split) |
+| **Hooks** | Trigger tool lifecycle hooks |
+| **Trace** | Record execution trace |
+
+### ApprovalStack Policies
+
+```rust
+use echo_agent::agent::ApprovalStack;
+
+let stack = ApprovalStack::new()
+    .with_default_policy("once");  // once | always | deny
+
+// Once: approve first time, remember decision
+// Always: require approval every time
+// Deny: auto-reject
+```
+
+### Configuring the Pipeline
+
+```rust
+use echo_agent::agent::react::run::pipeline::ToolExecutionPipeline;
+use echo_agent::prelude::*;
+
+let pipeline = ToolExecutionPipeline::default();
+
+let agent = ReactAgentBuilder::new()
+    .tool_execution_pipeline(pipeline)
+    .build(config);
+```
+
+See [demo64_tool_pipeline.rs](../examples/demo64_tool_pipeline.rs).

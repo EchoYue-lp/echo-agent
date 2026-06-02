@@ -395,6 +395,7 @@ impl ReactAgentBuilder {
     /// use echo_agent::prelude::*;
     /// use echo_agent::agent::InterventionCallback;
     /// use echo_agent::agent::InterventionResult;
+    /// use std::sync::Arc;
     ///
     /// struct BlockShell;
     ///
@@ -641,12 +642,14 @@ impl ReactAgentBuilder {
     /// use echo_core::agent::PromptTemplateManager;
     /// use std::sync::Arc;
     ///
+    /// # fn main() -> echo_agent::error::Result<()> {
     /// let engine = Arc::new(PromptTemplateManager::with_default_mode_templates());
     /// let agent = ReactAgentBuilder::new()
     ///     .model("qwen3-max")
     ///     .with_prompt_template_engine(engine)
     ///     .build()?;
     /// # Ok(())
+    /// # }
     /// ```
     pub fn with_prompt_template_engine(mut self, engine: Arc<PromptTemplateManager>) -> Self {
         self.prompt_template_engine = Some(engine);

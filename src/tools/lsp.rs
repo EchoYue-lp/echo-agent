@@ -75,8 +75,10 @@ impl Tool for LspDiagnosticsTool {
                         return Ok(ToolResult::success("No diagnostics found. File is clean."));
                     }
 
-                    let mut output =
-                        format!("Diagnostics for {file_path} ({} issues):\n\n", diagnostics.len());
+                    let mut output = format!(
+                        "Diagnostics for {file_path} ({} issues):\n\n",
+                        diagnostics.len()
+                    );
                     for diag in &diagnostics {
                         let severity = match diag.severity {
                             DiagnosticSeverity::Error => "ERROR",
@@ -162,7 +164,9 @@ impl Tool for LspGotoDefinitionTool {
 
             let manager = self.lsp_manager.read().await;
             let Some((_lang, client)) = manager.get_client_for_file(file_path).await else {
-                return Ok(ToolResult::error(format!("No language server for: {file_path}")));
+                return Ok(ToolResult::error(format!(
+                    "No language server for: {file_path}"
+                )));
             };
 
             let client = client.read().await;
@@ -253,7 +257,9 @@ impl Tool for LspFindReferencesTool {
 
             let manager = self.lsp_manager.read().await;
             let Some((_lang, client)) = manager.get_client_for_file(file_path).await else {
-                return Ok(ToolResult::error(format!("No language server for: {file_path}")));
+                return Ok(ToolResult::error(format!(
+                    "No language server for: {file_path}"
+                )));
             };
 
             let client = client.read().await;
@@ -344,7 +350,9 @@ impl Tool for LspHoverTool {
 
             let manager = self.lsp_manager.read().await;
             let Some((_lang, client)) = manager.get_client_for_file(file_path).await else {
-                return Ok(ToolResult::error(format!("No language server for: {file_path}")));
+                return Ok(ToolResult::error(format!(
+                    "No language server for: {file_path}"
+                )));
             };
 
             let client = client.read().await;

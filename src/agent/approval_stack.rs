@@ -58,7 +58,10 @@ impl ApprovalStack {
 
     /// Clear all decisions (e.g., on session reset).
     pub fn clear(&self) {
-        self.decisions.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.decisions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 

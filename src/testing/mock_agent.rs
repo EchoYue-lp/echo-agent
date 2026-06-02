@@ -81,7 +81,10 @@ impl MockAgent {
 
     /// Append a preset response
     pub fn with_response(self, text: impl Into<String>) -> Self {
-        self.responses.lock().unwrap_or_else(|e| e.into_inner()).push_back(text.into());
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(text.into());
         self
     }
 
@@ -108,7 +111,11 @@ impl MockAgent {
 
     /// The task string from the last call (returns `None` if never called)
     pub fn last_task(&self) -> Option<String> {
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .cloned()
     }
 
     /// Clear call history (response queue is unaffected)
@@ -142,7 +149,10 @@ impl Agent for MockAgent {
 
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(task.to_string());
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(task.to_string());
             Ok(self.next_response())
         })
     }
@@ -162,7 +172,10 @@ impl Agent for MockAgent {
     /// Note: MockAgent does not maintain a real conversation context; this only satisfies the call contract.
     fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(message.to_string());
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(message.to_string());
             Ok(self.next_response())
         })
     }
@@ -224,7 +237,10 @@ impl Agent for FailingMockAgent {
 
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(task.to_string());
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(task.to_string());
             Err(ReactError::Agent(Box::new(
                 AgentError::InitializationFailed(self.error_message.clone()),
             )))

@@ -13,7 +13,7 @@ keywords = ["ai", "agent", "llm", "react", "mcp"]
 categories = ["development-tools", "asynchronous", "web-programming::http-client"]
 
 exclude = [
-    "/skills/",
+    "/examples/demo_skills/",
     ".github/",
     ".claude/",
     ".idea/",
@@ -283,6 +283,72 @@ required-features = ["eval"]
 [[example]]
 name = "demo51_self_improvement"
 required-features = ["eval", "improve"]
+
+[[example]]
+name = "demo52_loop_detection"
+
+[[example]]
+name = "demo53_adaptive_compression"
+
+[[example]]
+name = "demo54_headless"
+
+[[example]]
+name = "demo55_lsp_tools"
+required-features = ["lsp"]
+
+[[example]]
+name = "demo56_plugin_system"
+
+[[example]]
+name = "demo57_data_pipeline"
+required-features = ["testing"]
+
+[[example]]
+name = "demo58_git_worktree"
+required-features = ["git"]
+
+[[example]]
+name = "demo59_code_search"
+required-features = ["files"]
+
+[[example]]
+name = "demo60_data_quality"
+required-features = ["data", "statistics"]
+
+[[example]]
+name = "demo61_agent_factory"
+required-features = ["testing"]
+
+[[example]]
+name = "demo62_prompt_templates"
+
+[[example]]
+name = "demo63_tiered_memory"
+
+[[example]]
+name = "demo64_tool_pipeline"
+
+[[example]]
+name = "demo65_context_assembler"
+
+[[example]]
+name = "demo66_context_selector"
+
+[[example]]
+name = "demo67_progress"
+required-features = ["tasks"]
+
+[[example]]
+name = "demo68_human_gate"
+required-features = ["tasks"]
+
+[[example]]
+name = "demo69_composite"
+required-features = ["tasks"]
+
+[[example]]
+name = "demo70_scheduler"
 
 [dev-dependencies]
 proptest = "1"

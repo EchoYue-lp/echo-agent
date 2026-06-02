@@ -246,7 +246,8 @@ impl ReactAgent {
                     .unwrap_or_else(|| "blocked by intervention at think".into());
                 warn!(agent = %agent, reason = %reason, "Intervention blocked think");
                 return Err(ReactError::Other(format!(
-                    "Think blocked by intervention: {}", reason
+                    "Think blocked by intervention: {}",
+                    reason
                 )));
             }
             if let Some(context) = result.injected_context {
@@ -516,9 +517,7 @@ impl ReactAgent {
                 // ── Intervention callbacks for final answer ──
                 let mut answer_blocked = false;
                 for intervention in &self.tools.intervention_callbacks {
-                    let result = intervention
-                        .on_final_answer(&agent, &output)
-                        .await;
+                    let result = intervention.on_final_answer(&agent, &output).await;
                     if result.cancel {
                         return Err(ReactError::Other(
                             "Agent execution cancelled by intervention at final answer".into(),
@@ -895,10 +894,10 @@ impl ReactAgent {
             && let Some(ref session_id) = self.config.session_id
         {
             // Best-effort checkpoint save — don't fail the run if this errors
-            if let Ok(Some(state)) = checkpointer.get_state(session_id).await {
-                if let Err(e) = checkpointer.put_state(session_id, state).await {
-                    tracing::warn!(error = %e, session_id = %session_id, "Failed to save checkpoint state");
-                }
+            if let Ok(Some(state)) = checkpointer.get_state(session_id).await
+                && let Err(e) = checkpointer.put_state(session_id, state).await
+            {
+                tracing::warn!(error = %e, session_id = %session_id, "Failed to save checkpoint state");
             }
             info!(agent = %agent, session = %session_id, "Saved checkpoint on max_iterations exceeded");
         }

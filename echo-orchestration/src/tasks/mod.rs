@@ -11,6 +11,18 @@ pub mod store;
 mod task;
 mod time;
 
+pub mod background_task;
+pub mod composite;
+pub mod human_gate;
+pub mod progress;
+
+pub use background_task::{
+    AnyBackgroundTask, BackgroundTask, BackgroundTaskStatus, TaskSpawner, TaskSpawnerConfig,
+    TaskSummary,
+};
+pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
+pub use human_gate::{HumanGate, HumanRequest, HumanResponse};
+pub use composite::{CompositePlan, CompositeStep, CompositeStrategy, execute_composite};
 pub use events::{
     AsyncTaskEventListener, LoggingListener, TaskEvent, TaskEventBus, TaskEventListener,
 };
@@ -49,6 +61,9 @@ mod tests {
             timeout_secs: 0,
             max_retries: 0,
             retry_count: 0,
+            execute_fn: None,
+            metadata_json: None,
+            metadata: None,
         }
     }
 
@@ -305,6 +320,9 @@ mod tests {
             timeout_secs: 0,
             max_retries: 0,
             retry_count: 0,
+            execute_fn: None,
+            metadata_json: None,
+            metadata: None,
         });
 
         manager.add_task(Task {
@@ -324,6 +342,9 @@ mod tests {
             timeout_secs: 0,
             max_retries: 0,
             retry_count: 0,
+            execute_fn: None,
+            metadata_json: None,
+            metadata: None,
         });
 
         let next = manager.get_next_task();
