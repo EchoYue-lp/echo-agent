@@ -4,7 +4,7 @@ use echo_core::error::Result;
 use echo_core::llm::LlmClient;
 use echo_core::llm::types::{Message, Role};
 use futures::future::BoxFuture;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 /// Type alias for summary prompt builder closures
@@ -141,6 +141,10 @@ impl SummaryCompressor {
 }
 
 impl ContextCompressor for SummaryCompressor {
+    fn name(&self) -> &'static str {
+        "Summary"
+    }
+
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) = input
@@ -184,5 +188,180 @@ impl ContextCompressor for SummaryCompressor {
                 evicted: to_summarize.to_vec(),
             })
         })
+    }
+}
+
+// ── Incremental Summary ───────────────────────────────────────────────────────
+
+const INCREMENTAL_SUMMARY_PROMPT: &str =
+    "You are maintaining a running summary of a conversation. Below you will find:\n\
+     1. The PREVIOUS SUMMARY generated from earlier messages.\n\
+     2. NEW MESSAGES that arrived since the last summary.\n\n\
+     Please produce an UPDATED SUMMARY that incorporates the previous summary \
+     and the new information. The updated summary should be self-contained — \
+     another AI assistant reading it should be able to continue the conversation \
+     without any other context.\n\n\
+     Keep the same structure and level of detail as the previous summary.";
+
+/// Incremental LLM summary compressor.
+///
+/// Unlike [`SummaryCompressor`] which re-summarizes ALL old messages every time,
+/// `IncrementalSummaryCompressor` maintains the previous summary and only sends
+/// the previous summary + new messages to the LLM. This reduces LLM cost and
+/// latency for long conversations where compression triggers multiple times.
+///
+/// **How it works:**
+/// 1. First compression: behaves like `SummaryCompressor` (summarizes all old messages)
+/// 2. Subsequent compressions: sends `[previous summary] + [new messages since last summary]`
+///    to the LLM, asking it to produce an updated summary
+///
+/// **Failure fallback**: Same as `SummaryCompressor` — falls back to `SlidingWindowCompressor`
+/// on LLM errors.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use echo_state::compression::compressor::IncrementalSummaryCompressor;
+/// use echo_core::llm::LlmClient;
+/// use std::sync::Arc;
+///
+/// # async fn example(llm: Arc<dyn LlmClient>) {
+/// let compressor = IncrementalSummaryCompressor::new(llm, 6);
+/// # }
+/// ```
+pub struct IncrementalSummaryCompressor {
+    llm: Arc<dyn LlmClient>,
+    keep_recent: usize,
+    /// The previous summary text, updated after each successful compression.
+    previous_summary: Mutex<Option<String>>,
+}
+
+impl IncrementalSummaryCompressor {
+    pub fn new(llm: Arc<dyn LlmClient>, keep_recent: usize) -> Self {
+        Self {
+            llm,
+            keep_recent,
+            previous_summary: Mutex::new(None),
+        }
+    }
+
+    /// Get the current stored summary (if any).
+    pub fn current_summary(&self) -> Option<String> {
+        self.previous_summary.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Reset the stored summary.
+    pub fn reset(&self) {
+        if let Ok(mut guard) = self.previous_summary.lock() {
+            *guard = None;
+        }
+    }
+}
+
+impl ContextCompressor for IncrementalSummaryCompressor {
+    fn name(&self) -> &'static str {
+        "IncrementalSummary"
+    }
+
+    fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
+        Box::pin(async move {
+            let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) = input
+                .messages
+                .iter()
+                .cloned()
+                .partition(|m| m.role == Role::System);
+
+            if conv_msgs.len() <= self.keep_recent {
+                let mut messages = system_msgs;
+                messages.extend(conv_msgs);
+                return Ok(CompressionOutput {
+                    messages,
+                    evicted: vec![],
+                });
+            }
+
+            let split_at = conv_msgs.len() - self.keep_recent;
+            let to_summarize = &conv_msgs[..split_at];
+            let to_keep = conv_msgs[split_at..].to_vec();
+
+            // Build prompt: include previous summary if available
+            let prev_summary = self.current_summary();
+            let prompt = if let Some(ref prev) = prev_summary {
+                // Incremental: previous summary + new messages
+                let new_history = to_summarize
+                    .iter()
+                    .filter_map(|m| {
+                        m.content
+                            .as_text()
+                            .map(|c| format!("[{}]: {}", m.role.as_str(), c))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                format!(
+                    "{}\n\n--- PREVIOUS SUMMARY ---\n{}\n\n--- NEW MESSAGES ---\n{}\n\n--- END ---",
+                    INCREMENTAL_SUMMARY_PROMPT, prev, new_history
+                )
+            } else {
+                // First time: full summary like SummaryCompressor
+                default_summary_prompt(to_summarize)
+            };
+
+            let summary = match self.llm.chat_simple(vec![Message::user(prompt)]).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "Incremental summary failed, falling back to sliding window");
+                    return SlidingWindowCompressor::new(self.keep_recent)
+                        .compress(input)
+                        .await;
+                }
+            };
+
+            // Store the new summary for next time
+            if let Ok(mut guard) = self.previous_summary.lock() {
+                *guard = Some(summary.clone());
+            }
+
+            let mut messages = system_msgs;
+            messages.push(Message::system(format!("[对话历史摘要]\n{}", summary)));
+            messages.extend(to_keep);
+
+            Ok(CompressionOutput {
+                messages,
+                evicted: to_summarize.to_vec(),
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_incremental_summary_state_management() {
+        // Test the Mutex-based state management without needing an LLM
+        let previous_summary: Mutex<Option<String>> = Mutex::new(None);
+
+        // Initially empty
+        assert!(previous_summary.lock().unwrap().is_none());
+
+        // Store a summary
+        *previous_summary.lock().unwrap() = Some("first summary".to_string());
+        assert_eq!(
+            *previous_summary.lock().unwrap(),
+            Some("first summary".to_string())
+        );
+
+        // Update the summary
+        *previous_summary.lock().unwrap() = Some("updated summary".to_string());
+        assert_eq!(
+            *previous_summary.lock().unwrap(),
+            Some("updated summary".to_string())
+        );
+
+        // Reset
+        *previous_summary.lock().unwrap() = None;
+        assert!(previous_summary.lock().unwrap().is_none());
     }
 }

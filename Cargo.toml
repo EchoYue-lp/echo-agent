@@ -32,7 +32,7 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["a2a", "mcp", "lsp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
+features = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "handoff", "topology", "tasks", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
 # NOTE: `data` feature (polars) is excluded because polars-ops 0.46–0.53 has a build.rs that
 # unconditionally enables `feature="nightly"` on nightly compilers, then uses
@@ -42,18 +42,16 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-full = ["a2a", "mcp", "lsp", "telemetry", "plan-execute", "human-loop", "handoff", "topology", "tasks", "self-reflection", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics"]
+full = ["a2a", "mcp", "lsp", "telemetry", "human-loop", "handoff", "topology", "tasks", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics"]
 a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
 lsp = ["echo_core/lsp", "echo_integration/lsp"]
 sqlite = ["echo_state/sqlite", "dep:rusqlite"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
-plan-execute = []
 human-loop = ["echo_orchestration/websocket"]
 handoff = []
 topology = []
 tasks = []
-self-reflection = []
 subagent = []
 web = ["dep:scraper", "dep:html2text", "dep:url", "echo_tools/web"]
 media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "echo_tools/media"]
@@ -158,10 +156,6 @@ name = "demo15_structured_output"
 [[example]]
 name = "demo18_semantic_memory"
 required-features = ["semantic-memory"]
-
-[[example]]
-name = "demo22_plan_execute"
-required-features = ["plan-execute"]
 
 [[example]]
 name = "demo23_a2a"

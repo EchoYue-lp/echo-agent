@@ -73,6 +73,12 @@ pub struct TaskExecutorConfig {
     /// When set, TaskCreated/TaskCompleted events are fired into the
     /// unified HookRegistry alongside the trait-based TaskHooks.
     pub unified_hook_executor: Option<echo_core::hooks::UnifiedHookExecutorFn>,
+    /// Per-round timeout in seconds for `execute_all()`.
+    ///
+    /// If `execute_ready_tasks()` takes longer than this, the loop checks
+    /// whether tasks are legitimately blocked (e.g. waiting for human input)
+    /// or genuinely deadlocked. Default: 3600 (1 hour), 0 = no timeout.
+    pub round_timeout_secs: u64,
 }
 
 impl Clone for TaskExecutorConfig {
@@ -87,6 +93,7 @@ impl Clone for TaskExecutorConfig {
             enable_hooks: self.enable_hooks,
             checkpoint_interval_secs: self.checkpoint_interval_secs,
             unified_hook_executor: self.unified_hook_executor.clone(),
+            round_timeout_secs: self.round_timeout_secs,
         }
     }
 }
@@ -106,6 +113,7 @@ impl Default for TaskExecutorConfig {
             enable_hooks: true,
             checkpoint_interval_secs: 0,
             unified_hook_executor: None,
+            round_timeout_secs: 3600, // 1 hour
         }
     }
 }
@@ -320,6 +328,8 @@ pub struct TaskExecutor {
     /// appear in a unified `list()` and share concurrency control. When
     /// `None`, each `execute_all_async()` call creates an isolated spawner.
     shared_spawner: Option<Arc<super::background_task::TaskSpawner>>,
+    /// Cooperative cancellation token for the entire executor.
+    cancel: CancellationToken,
 }
 
 impl TaskExecutor {
@@ -337,7 +347,13 @@ impl TaskExecutor {
             task_store: None,
             running_tasks: Arc::new(DashMap::new()),
             shared_spawner: None,
+            cancel: CancellationToken::new(),
         }
+    }
+
+    /// Get a clone of the executor's cancellation token.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 
     /// Set a custom execution function
@@ -384,11 +400,16 @@ impl TaskExecutor {
     ///
     /// Returns the number of tasks executed
     pub async fn execute_ready_tasks(&self) -> Result<Vec<TaskExecutionResult>> {
-        let ready_tasks: Vec<Task> = self.task_manager.get_ready_tasks();
+        let mut ready_tasks: Vec<Task> = self.task_manager.get_ready_tasks();
 
         if ready_tasks.is_empty() {
             return Ok(Vec::new());
         }
+
+        // Sort by priority descending (highest priority first).
+        // When semaphore permits are limited, higher priority tasks get spawned
+        // first and thus acquire permits first.
+        ready_tasks.sort_by_key(|t| std::cmp::Reverse(t.priority));
 
         info!(
             tasks = ready_tasks.len(),
@@ -424,6 +445,7 @@ impl TaskExecutor {
             let execute_fn = task.execute_fn.clone().or_else(|| self.execute_fn.clone());
             let hooks = self.hooks.clone();
             let running_tasks = self.running_tasks.clone();
+            let task_store = self.task_store.clone();
             let task_id = task.id.clone();
             let cancel = CancellationToken::new();
             let cancel_clone = cancel.clone();
@@ -454,6 +476,7 @@ impl TaskExecutor {
                         execute_fn,
                         hooks,
                         cancel_clone.clone(),
+                        task_store,
                     ) => {
                         result
                     }
@@ -494,6 +517,7 @@ impl TaskExecutor {
         execute_fn: Option<TaskExecuteFn>,
         hooks: Arc<TaskHookRegistry>,
         cancel: CancellationToken,
+        task_store: Option<Arc<dyn super::store::TaskStore>>,
     ) -> TaskExecutionResult {
         let task_id = task.id.clone();
         let timeout_secs = if task.timeout_secs > 0 {
@@ -580,12 +604,26 @@ impl TaskExecutor {
                         let result =
                             TaskExecutionResult::timeout(&task_id, timeout_secs, current_attempt);
 
+                        // Update manager status to TimedOut
+                        let _ = manager.update_task_status(&task_id, TaskStatus::TimedOut {
+                            error: format!("Task timed out after {}s", timeout_secs),
+                        });
+
                         // Call on_timeout hook
                         if config.enable_hooks
                             && let Some(ctx) =
                                 manager.create_hook_context(&task_id, current_attempt, None)
                         {
                             hooks.on_timeout(&ctx).await;
+                        }
+
+                        // Immediately persist timed-out task to store
+                        if let Some(ref store) = task_store {
+                            if let Some(task_snapshot) = manager.get_task(&task_id) {
+                                if let Err(e) = store.save_task(&task_snapshot).await {
+                                    warn!(task_id = %task_id, error = %e, "Failed to persist timed-out task");
+                                }
+                            }
                         }
 
                         return result;
@@ -628,6 +666,15 @@ impl TaskExecutor {
                             "", // agent_name not available at this layer
                         );
                         executor(ctx).await;
+                    }
+
+                    // Immediately persist completed task to store (close crash window)
+                    if let Some(ref store) = task_store {
+                        if let Some(task_snapshot) = manager.get_task(&task_id) {
+                            if let Err(e) = store.save_task(&task_snapshot).await {
+                                warn!(task_id = %task_id, error = %e, "Failed to persist completed task");
+                            }
+                        }
                     }
 
                     return TaskExecutionResult::success(
@@ -750,6 +797,15 @@ impl TaskExecutor {
                         None,
                     );
 
+                    // Immediately persist failed task to store (close crash window)
+                    if let Some(ref store) = task_store {
+                        if let Some(task_snapshot) = manager.get_task(&task_id) {
+                            if let Err(e) = store.save_task(&task_snapshot).await {
+                                warn!(task_id = %task_id, error = %e, "Failed to persist failed task");
+                            }
+                        }
+                    }
+
                     return TaskExecutionResult::failure(
                         &task_id,
                         error_str,
@@ -829,14 +885,65 @@ impl TaskExecutor {
     /// This method repeatedly calls `execute_ready_tasks` and uses `wake_dependents`
     /// after each batch to discover newly-ready tasks, eliminating polling.
     ///
+    /// Each round is protected by a configurable timeout (`round_timeout_secs`).
+    /// If `execute_ready_tasks` exceeds the timeout (e.g. tasks blocked on
+    /// a `HumanLoopProvider` Selection request), the loop inspects task
+    /// statuses to distinguish legitimate blocking from real deadlocks.
+    ///
     /// Returns all execution results accumulated across batches.
     pub async fn execute_all(&self) -> Result<Vec<TaskExecutionResult>> {
         let mut all_results = Vec::new();
-        let mut empty_rounds = 0;
+        let mut empty_rounds: u32 = 0;
         let mut batch_count: u64 = 0;
+        let max_empty_rounds: u32 = 3;
+        let round_timeout = Duration::from_secs(
+            if self.config.round_timeout_secs > 0 {
+                self.config.round_timeout_secs
+            } else {
+                3600 // default 1 hour
+            },
+        );
 
         loop {
-            let results = self.execute_ready_tasks().await?;
+            // Check executor-level cancellation before each round
+            if self.cancel.is_cancelled() {
+                info!("Executor cancelled, stopping execute_all");
+                break;
+            }
+
+            // Wrap each round in a timeout to prevent indefinite hangs
+            // (e.g. all ready tasks blocked on a HumanLoopProvider Selection request).
+            let batch_result =
+                tokio::time::timeout(round_timeout, self.execute_ready_tasks()).await;
+
+            let results = match batch_result {
+                Ok(Ok(results)) => results,
+                Ok(Err(e)) => return Err(e),
+                Err(_elapsed) => {
+                    // Round timed out — diagnose why
+                    let in_progress_count = self.task_manager.get_in_progress_tasks().len();
+                    let pending_count = self.task_manager.get_pending_tasks().len();
+
+                    if in_progress_count > 0 {
+                        // Tasks are still running (possibly blocked on a Selection request or
+                        // long-running computations) — this is normal, keep waiting.
+                        debug!(
+                            in_progress = in_progress_count,
+                            "Round timed out but {} tasks still in progress, continuing",
+                            in_progress_count
+                        );
+                        continue;
+                    }
+
+                    // No tasks in progress and nothing became ready — treat as empty round
+                    warn!(
+                        pending = pending_count,
+                        "Round timed out with no tasks in progress"
+                    );
+                    Vec::new()
+                }
+            };
+
             let batch_size = results.len();
 
             // Wake dependents for each completed task in this batch
@@ -877,16 +984,46 @@ impl TaskExecutor {
 
             if batch_size == 0 {
                 empty_rounds += 1;
-                if empty_rounds >= 3 {
-                    warn!("No tasks became ready after 3 consecutive rounds, possible deadlock");
-                    if !self.is_completed() {
-                        let (completed, total) = self.get_progress();
-                        return Err(ReactError::Other(format!(
-                            "Task execution stopped with incomplete tasks: {}/{} completed. Possible deadlock or unresolved dependencies.",
-                            completed, total
-                        )));
+                if empty_rounds >= max_empty_rounds {
+                    // Enhanced deadlock diagnosis
+                    let in_progress_count = self.task_manager.get_in_progress_tasks().len();
+                    let pending_count = self.task_manager.get_pending_tasks().len();
+
+                    if in_progress_count > 0 {
+                        // Tasks still running — not a deadlock, reset counter
+                        debug!(
+                            in_progress = in_progress_count,
+                            "Empty round but {} tasks in progress, resetting counter",
+                            in_progress_count
+                        );
+                        empty_rounds = 0;
+                        continue;
                     }
-                    break;
+
+                    let (completed, total) = self.get_progress();
+                    if self.is_completed() {
+                        break;
+                    }
+
+                    let unresolvable = self.task_manager.has_unresolvable_pending();
+                    let detail = if unresolvable {
+                        "unresolvable dependencies (upstream failed/cancelled)"
+                    } else if pending_count > 0 {
+                        "unresolved dependencies"
+                    } else {
+                        "no pending tasks"
+                    };
+                    warn!(
+                        completed,
+                        total,
+                        pending = pending_count,
+                        empty_rounds,
+                        "Deadlock detected: {detail}"
+                    );
+                    return Err(ReactError::Other(format!(
+                        "Task execution deadlock: {completed}/{total} completed, \
+                         {pending_count} pending ({detail}).",
+                    )));
                 }
             } else {
                 empty_rounds = 0;
@@ -948,6 +1085,7 @@ impl TaskExecutor {
             let execute_fn = task.execute_fn.clone().or_else(|| self.execute_fn.clone());
             let hooks = self.hooks.clone();
             let semaphore = self.semaphore.clone();
+            let task_store = self.task_store.clone();
 
             let handle = spawner.spawn(&task_name, async move {
                 let _permit = semaphore
@@ -962,6 +1100,7 @@ impl TaskExecutor {
                     execute_fn,
                     hooks,
                     CancellationToken::new(),
+                    task_store,
                 )
                 .await;
 
@@ -1138,6 +1277,7 @@ mod tests {
             retry_jitter: false,
             checkpoint_interval_secs: 0,
             unified_hook_executor: None,
+            round_timeout_secs: 3600,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config);
@@ -1166,6 +1306,7 @@ mod tests {
             retry_jitter: false,
             checkpoint_interval_secs: 0,
             unified_hook_executor: None,
+            round_timeout_secs: 3600,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config);
@@ -1203,6 +1344,7 @@ mod tests {
             retry_jitter: false,
             checkpoint_interval_secs: 0,
             unified_hook_executor: None,
+            round_timeout_secs: 3600,
         };
 
         let executor =
@@ -1255,6 +1397,7 @@ mod tests {
             retry_jitter: false,
             checkpoint_interval_secs: 0,
             unified_hook_executor: None,
+            round_timeout_secs: 3600,
         };
 
         let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(

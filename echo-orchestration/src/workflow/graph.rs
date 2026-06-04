@@ -59,6 +59,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 // ── Edge ────────────────────────────────────────────────────────────────────
@@ -510,6 +511,7 @@ impl GraphBuilder {
             max_steps: 100,
             interrupt_config: self.interrupt_config,
             checkpoint_store: Arc::new(MemoryCheckpointStore::new()),
+            cancel_token: None,
         })
     }
 
@@ -543,6 +545,8 @@ pub struct Graph {
     interrupt_config: InterruptConfig,
     /// Checkpoint store
     checkpoint_store: Arc<dyn CheckpointStore>,
+    /// Optional cancellation token for cooperative cancellation between nodes.
+    cancel_token: Option<CancellationToken>,
 }
 
 /// Graph execution result
@@ -565,6 +569,24 @@ impl Graph {
         self.max_steps = max;
     }
 
+    /// Attach a cancellation token for cooperative cancellation between nodes.
+    ///
+    /// When the token is cancelled, the graph will stop at the next node boundary
+    /// and return an `AgentError::Cancelled` error. This allows long-running
+    /// workflows to be cancelled gracefully between node executions.
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(token);
+        self
+    }
+
+    /// Check if the cancellation token has been triggered.
+    fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .map(|t| t.is_cancelled())
+            .unwrap_or(false)
+    }
+
     /// Execute the graph workflow
     ///
     /// Starting from the entry node, execute nodes in sequence following edge routing logic, until reaching a finish node or `__end__`.
@@ -576,6 +598,14 @@ impl Graph {
         info!(graph = %self.name, entry = %current, "Starting graph execution");
 
         loop {
+            // Check cancellation at each node boundary
+            if self.is_cancelled() {
+                warn!(graph = %self.name, steps = step_count, "Graph execution cancelled");
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                    format!("Graph '{}' cancelled after {} steps", self.name, step_count),
+                ))));
+            }
+
             // Prevent infinite loop
             if step_count >= self.max_steps {
                 warn!(
@@ -651,6 +681,12 @@ impl Graph {
                     // - Nested object fields are recursively merged rather than wholesale overwritten
                     // - Simple keys (non-object) are still overwritten by later branches
                     for target_name in &targets {
+                        // Check cancellation between parallel branches
+                        if self.is_cancelled() {
+                            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                                format!("Graph '{}' cancelled during parallel fan-out", self.name),
+                            ))));
+                        }
                         if let Some(target_node) = self.nodes.get(target_name) {
                             // Clone the current state as the branch's independent state
                             let branch_state = state.fork()?;
@@ -704,6 +740,14 @@ impl Graph {
         info!(graph = %self.name, entry = %current, "Starting graph execution (with interrupt)");
 
         loop {
+            // Check cancellation at each node boundary
+            if self.is_cancelled() {
+                warn!(graph = %self.name, steps = step_count, "Graph execution (with interrupt) cancelled");
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                    format!("Graph '{}' cancelled after {} steps", self.name, step_count),
+                ))));
+            }
+
             // Prevent infinite loop
             if step_count >= self.max_steps {
                 warn!(
@@ -817,6 +861,12 @@ impl Graph {
 
                     // Parallel branch execution (using deep_merge to merge branch results)
                     for target_name in &targets {
+                        // Check cancellation between parallel branches
+                        if self.is_cancelled() {
+                            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                                format!("Graph '{}' cancelled during parallel fan-out", self.name),
+                            ))));
+                        }
                         if let Some(target_node) = self.nodes.get(target_name) {
                             // Clone state as branch-independent state
                             let branch_state = state.fork()?;
@@ -906,6 +956,14 @@ impl Graph {
 
         // Continue execution
         loop {
+            // Check cancellation at each node boundary
+            if self.is_cancelled() {
+                warn!(graph = %self.name, steps = step_count, "Graph resume cancelled");
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                    format!("Graph '{}' resume cancelled after {} steps", self.name, step_count),
+                ))));
+            }
+
             if step_count >= self.max_steps {
                 return Err(ReactError::Agent(Box::new(
                     AgentError::MaxIterationsExceeded(self.max_steps),
@@ -1001,6 +1059,12 @@ impl Graph {
                 NextStep::Parallel { targets, then } => {
                     // Parallel branch execution, shared SharedState (sequential execution)
                     for target_name in &targets {
+                        // Check cancellation between parallel branches
+                        if self.is_cancelled() {
+                            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                                format!("Graph '{}' cancelled during parallel fan-out", self.name),
+                            ))));
+                        }
                         if let Some(target_node) = self.nodes.get(target_name) {
                             state.set_current_node(target_name);
                             target_node.execute(&state).await?;
@@ -1174,6 +1238,14 @@ impl Graph {
             let workflow_start = Instant::now();
 
             loop {
+                // Check cancellation at each node boundary
+                if self.is_cancelled() {
+                    warn!(graph = %self.name, steps = step_count, "Graph streaming execution cancelled");
+                    Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                        format!("Graph '{}' cancelled after {} steps", self.name, step_count),
+                    ))))?;
+                }
+
                 if step_count >= self.max_steps {
                     Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(self.max_steps))))?;
                 }
@@ -1241,6 +1313,12 @@ impl Graph {
                     NextStep::Parallel { targets, then } => {
                         // Parallel branch execution (using deep_merge to merge branch results)
                         for target_name in &targets {
+                            // Check cancellation between parallel branches
+                            if self.is_cancelled() {
+                                Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                                    format!("Graph '{}' cancelled during parallel fan-out", self.name),
+                                ))))?;
+                            }
                             if let Some(target_node) = self.nodes.get(target_name) {
                                 // Clone state as branch-independent state
                                 let branch_state = state_clone.fork()?;

@@ -63,6 +63,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     /// Logging level configuration.
     pub logging: LoggingConfig,
+    /// TUI (Terminal User Interface) configuration.
+    pub tui: TuiConfig,
 }
 
 impl AppConfig {
@@ -133,14 +135,23 @@ impl AppConfig {
 
 /// Model configuration.
 ///
-/// The default model is `qwen-plus`, which requires `DASHSCOPE_API_KEY` or
-/// `QWEN_API_KEY` at runtime. Use `provider:model` (for example
-/// `openai:gpt-4o-mini`) to select another provider explicitly.
+/// The default provider is `deepseek` with model `deepseek-v4-flash`.
+/// Users can specify other providers (openai, anthropic, qwen, etc.) and their models.
+///
+/// Authentication and base URL can be set via:
+/// - Environment variables: ECHOCOWORK_AUTH_TOKEN, ECHOCOWORK_BASE_URL, ECHOCOWORK_MODEL (highest priority)
+/// - Config file: auth_token and base_url fields
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// Model name (e.g. "qwen-plus", "gpt-4o", "claude-3.5-sonnet").
+    /// Model provider (e.g. "deepseek", "openai", "anthropic", "qwen").
+    pub provider: String,
+    /// Model name (e.g. "deepseek-v4-flash", "gpt-4o", "claude-3.5-sonnet").
     pub name: String,
+    /// API authentication token (optional, can be set via ECHOCOWORK_AUTH_TOKEN env var).
+    pub auth_token: Option<String>,
+    /// API base URL (optional, can be set via ECHOCOWORK_BASE_URL env var).
+    pub base_url: Option<String>,
     /// Maximum tokens to generate (None means use model default).
     pub max_tokens: Option<u32>,
     /// Temperature parameter (0.0–2.0, None means use model default).
@@ -150,10 +161,42 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            name: "qwen-plus".to_string(),
+            provider: "deepseek".to_string(),
+            name: "deepseek-v4-flash".to_string(),
+            auth_token: None,
+            base_url: None,
             max_tokens: None,
             temperature: None,
         }
+    }
+}
+
+impl ModelConfig {
+    /// Get the effective authentication token.
+    /// Priority: ECHOCOWORK_AUTH_TOKEN env var > config file auth_token field
+    pub fn get_auth_token(&self) -> Option<String> {
+        std::env::var("ECHOCOWORK_AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.auth_token.clone())
+    }
+
+    /// Get the effective base URL.
+    /// Priority: ECHOCOWORK_BASE_URL env var > config file base_url field
+    pub fn get_base_url(&self) -> Option<String> {
+        std::env::var("ECHOCOWORK_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.base_url.clone())
+    }
+
+    /// Get the effective model name.
+    /// Priority: ECHOCOWORK_MODEL env var > config file name field
+    pub fn get_model_name(&self) -> String {
+        std::env::var("ECHOCOWORK_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.name.clone())
     }
 }
 
@@ -335,6 +378,23 @@ impl Default for LoggingConfig {
     }
 }
 
+/// TUI (Terminal User Interface) configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    /// Maximum total characters of chat messages to keep in the TUI display.
+    /// Oldest messages (excluding the welcome message) are trimmed when exceeded.
+    pub max_display_chars: usize,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            max_display_chars: 20_000,
+        }
+    }
+}
+
 /// Webhook configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
@@ -387,14 +447,14 @@ pub fn save_config(config: &AppConfig) -> std::result::Result<(), String> {
     let search = config_search_paths();
     // Prefer an already-existing file; otherwise use the first path (./echo-agent.yaml)
     let target = search.iter().find(|p| p.exists()).unwrap_or(&search[1]);
-    let yaml = serde_yaml_ng::to_string(config).map_err(|e| format!("序列化失败: {e}"))?;
-    // Preserve the header comment
-    let header = "# Echo Agent 配置文件\n# 通过 Web API 或 CLI 修改后自动保存\n\n";
+    let yaml =
+        serde_yaml_ng::to_string(config).map_err(|e| format!("serialization failed: {e}"))?;
+    let header = "# Echo Agent Configuration\n# Auto-saved via Web API or CLI\n\n";
     let content = format!("{header}{yaml}");
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create directory failed: {e}"))?;
     }
-    std::fs::write(target, content).map_err(|e| format!("写入失败: {e}"))
+    std::fs::write(target, content).map_err(|e| format!("write failed: {e}"))
 }
 
 /// Load configuration (searches default paths).
@@ -493,7 +553,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
-        assert_eq!(config.model.name, "qwen-plus");
+        assert_eq!(config.model.provider, "deepseek");
+        assert_eq!(config.model.name, "deepseek-v4-flash");
         assert_eq!(config.agent.name, "echo-assistant");
         assert_eq!(config.agent.max_iterations, 10);
         assert!(config.agent.enable_tools);
@@ -509,7 +570,7 @@ mod tests {
     fn test_to_agent_config() {
         let config = AppConfig::default();
         let agent_config = config.to_agent_config();
-        assert_eq!(agent_config.get_model_name(), "qwen-plus");
+        assert_eq!(agent_config.get_model_name(), "deepseek-v4-flash");
         assert_eq!(agent_config.get_agent_name(), "echo-assistant");
         assert!(agent_config.is_tool_enabled());
         assert!(agent_config.is_memory_enabled());
@@ -523,7 +584,8 @@ mod tests {
         let missing_path =
             std::env::temp_dir().join(format!("echo-agent-missing-config-{}.yaml", uuid()));
         let config = load_config(missing_path.to_str());
-        assert_eq!(config.model.name, "qwen-plus");
+        assert_eq!(config.model.provider, "deepseek");
+        assert_eq!(config.model.name, "deepseek-v4-flash");
     }
 
     #[test]

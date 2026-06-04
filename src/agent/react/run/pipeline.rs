@@ -200,7 +200,7 @@ impl PipelineStage for PreToolUseHookStage {
     }
 }
 
-/// Checks tool approval (PermissionService → PermissionPolicy).
+/// Checks tool approval (PermissionService).
 pub struct PermissionStage;
 
 #[async_trait]

@@ -1,7 +1,6 @@
 //! Task definitions
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// Task status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

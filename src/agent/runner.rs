@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 /// Stateless Agent executor
 ///
-/// Each `run()` / `run_stream()` creates a brand-new Agent instance,
+/// Each `run()` creates a brand-new Agent instance,
 /// retaining no state. Suitable for serverless functions, API handlers, etc.
 pub struct Runner;
 

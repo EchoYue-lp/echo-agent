@@ -42,8 +42,6 @@
 
 use super::executor::{TaskContext, TaskExecuteFn};
 use echo_core::error::{ReactError, Result};
-use futures::future::BoxFuture;
-use std::sync::Arc;
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -168,6 +166,7 @@ async fn execute_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn make_step(id: &str, output: &str) -> CompositeStep {
         let output = output.to_string();

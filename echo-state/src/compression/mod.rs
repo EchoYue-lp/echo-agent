@@ -52,6 +52,79 @@ pub struct PrepareResult {
     pub compressed: Option<ForceCompressStats>,
 }
 
+/// Cumulative compression metrics for observability.
+///
+/// Tracks the total number of compression events, tokens saved, messages
+/// evicted, and which strategies were used over the lifetime of a
+/// [`ContextManager`].
+#[derive(Debug, Clone)]
+pub struct CompressionMetrics {
+    /// Total number of compression events triggered.
+    pub total_compressions: u64,
+    /// Sum of estimated tokens before compression across all events.
+    pub total_tokens_before: u64,
+    /// Sum of estimated tokens after compression across all events.
+    pub total_tokens_after: u64,
+    /// Total number of messages evicted across all events.
+    pub total_messages_evicted: u64,
+    /// Count of times each compressor type name was used (e.g. "SlidingWindow" → 3).
+    pub strategies_used: std::collections::HashMap<String, u64>,
+}
+
+impl CompressionMetrics {
+    fn new() -> Self {
+        Self {
+            total_compressions: 0,
+            total_tokens_before: 0,
+            total_tokens_after: 0,
+            total_messages_evicted: 0,
+            strategies_used: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Total tokens saved across all compression events.
+    pub fn total_tokens_saved(&self) -> u64 {
+        self.total_tokens_before.saturating_sub(self.total_tokens_after)
+    }
+
+    /// Compression ratio (0.0 = no savings, 1.0 = all tokens saved).
+    pub fn compression_ratio(&self) -> f64 {
+        if self.total_tokens_before == 0 {
+            return 0.0;
+        }
+        self.total_tokens_saved() as f64 / self.total_tokens_before as f64
+    }
+
+    /// Human-readable summary.
+    pub fn report(&self) -> String {
+        let strategies: Vec<String> = self
+            .strategies_used
+            .iter()
+            .map(|(name, count)| format!("{}({})", name, count))
+            .collect();
+        format!(
+            "CompressionMetrics: {} compressions, {} tokens saved ({:.1}%), {} messages evicted, strategies: [{}]",
+            self.total_compressions,
+            self.total_tokens_saved(),
+            self.compression_ratio() * 100.0,
+            self.total_messages_evicted,
+            strategies.join(", "),
+        )
+    }
+
+    /// Record a compression event.
+    fn record(&mut self, stats: &ForceCompressStats, compressor_name: &str) {
+        self.total_compressions += 1;
+        self.total_tokens_before += stats.before_tokens as u64;
+        self.total_tokens_after += stats.after_tokens as u64;
+        self.total_messages_evicted += stats.evicted as u64;
+        *self
+            .strategies_used
+            .entry(compressor_name.to_string())
+            .or_insert(0) += 1;
+    }
+}
+
 /// Context manager: maintains full conversation history and automatically triggers compression when tokens exceed the limit.
 ///
 /// # Typical usage
@@ -115,6 +188,8 @@ pub struct ContextManager {
     /// Optional token budget for percentage-based allocation.
     /// When set, `prepare()` uses budget.allocate() instead of simple token_limit comparison.
     budget: Option<TokenBudget>,
+    /// Cumulative compression metrics for observability.
+    metrics: CompressionMetrics,
 }
 
 impl ContextManager {
@@ -334,6 +409,19 @@ impl ContextManager {
         self.compressor.is_some()
     }
 
+    /// Get cumulative compression metrics for observability.
+    ///
+    /// Tracks total compressions, tokens saved, messages evicted, and
+    /// which strategies were used over the lifetime of this `ContextManager`.
+    pub fn compression_metrics(&self) -> &CompressionMetrics {
+        &self.metrics
+    }
+
+    /// Reset cumulative compression metrics to zero.
+    pub fn reset_compression_metrics(&mut self) {
+        self.metrics = CompressionMetrics::new();
+    }
+
     /// Force-compress the context, regardless of whether the current token count exceeds the limit.
     ///
     /// - If a compressor is configured, use it;
@@ -347,12 +435,13 @@ impl ContextManager {
         let (compressible, protected) = self.split_protected(self.messages.clone());
 
         let output = if let Some(compressor) = &self.compressor {
-            let input = CompressionInput {
-                messages: compressible,
-                token_limit: self.token_limit,
-                current_query: None,
-            };
-            compressor.compress(input).await?
+            compressor
+                .compress(CompressionInput {
+                    messages: compressible,
+                    token_limit: self.token_limit,
+                    current_query: None,
+                })
+                .await?
         } else {
             SlidingWindowCompressor::new(fallback_window)
                 .compress(CompressionInput {
@@ -365,13 +454,20 @@ impl ContextManager {
 
         let evicted = output.evicted.len();
         self.messages = Self::merge_protected(output.messages, protected);
-        Ok(ForceCompressStats {
+        let stats = ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
             evicted,
             before_tokens,
             after_tokens: self.token_estimate(),
-        })
+        };
+        let name = if self.compressor.is_some() {
+            self.compressor.as_ref().map(|c| c.name()).unwrap_or("unknown")
+        } else {
+            "SlidingWindow(fallback)"
+        };
+        self.metrics.record(&stats, name);
+        Ok(stats)
     }
 
     /// Force-compress using a **specific compressor**, without affecting the currently installed compressor config.
@@ -396,13 +492,15 @@ impl ContextManager {
 
         let evicted = output.evicted.len();
         self.messages = Self::merge_protected(output.messages, protected);
-        Ok(ForceCompressStats {
+        let stats = ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
             evicted,
             before_tokens,
             after_tokens: self.token_estimate(),
-        })
+        };
+        self.metrics.record(&stats, compressor.name());
+        Ok(stats)
     }
 
     /// Update the system message content
@@ -448,6 +546,16 @@ impl ContextManager {
         {
             let before_count = self.messages.len();
             let before_tokens = self.token_estimate();
+            let compressor_name = compressor.name();
+
+            tracing::debug!(
+                before_messages = before_count,
+                before_tokens,
+                token_limit = self.token_limit,
+                compressor = compressor_name,
+                "Auto-compression triggered"
+            );
+            let start = std::time::Instant::now();
 
             // Compute effective token limit for compression
             let effective_limit = if let Some(ref budget) = self.budget {
@@ -458,26 +566,53 @@ impl ContextManager {
                 self.token_limit
             };
 
-            let (compressible, protected) = self.split_protected(self.messages.clone());
+            let owned = std::mem::take(&mut self.messages);
+            let (compressible, protected) = self.split_protected(owned);
 
-            let output = compressor
+            let compress_result = compressor
                 .compress(CompressionInput {
                     messages: compressible,
                     token_limit: effective_limit,
                     current_query: current_query.map(String::from),
                 })
-                .await?;
+                .await;
 
-            let evicted = output.evicted.len();
-            self.messages = Self::merge_protected(output.messages, protected);
+            match compress_result {
+                Ok(output) => {
+                    let evicted = output.evicted.len();
+                    self.messages = Self::merge_protected(output.messages, protected);
 
-            Some(ForceCompressStats {
-                before_count,
-                after_count: self.messages.len(),
-                evicted,
-                before_tokens,
-                after_tokens: self.token_estimate(),
-            })
+                    let stats = ForceCompressStats {
+                        before_count,
+                        after_count: self.messages.len(),
+                        evicted,
+                        before_tokens,
+                        after_tokens: self.token_estimate(),
+                    };
+                    let elapsed = start.elapsed();
+                    self.metrics.record(&stats, compressor_name);
+
+                    tracing::info!(
+                        compressor = compressor_name,
+                        before_messages = stats.before_count,
+                        after_messages = stats.after_count,
+                        before_tokens = stats.before_tokens,
+                        after_tokens = stats.after_tokens,
+                        evicted = stats.evicted,
+                        saved_tokens = stats.before_tokens.saturating_sub(stats.after_tokens),
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "Compression complete"
+                    );
+
+                    Some(stats)
+                }
+                Err(e) => {
+                    // Compression failed — restore protected messages at minimum.
+                    self.messages = Self::merge_protected(vec![], protected);
+                    tracing::warn!(error = %e, "Compression failed, messages may be partially lost");
+                    return Err(e);
+                }
+            }
         } else {
             None
         };
@@ -569,6 +704,7 @@ impl ContextManagerBuilder {
             protected_markers: Vec::new(),
             max_messages: self.max_messages.unwrap_or(200),
             budget: self.budget,
+            metrics: CompressionMetrics::new(),
         }
     }
 }

@@ -2,12 +2,16 @@
 
 use super::super::{ReactAgent, StepType, TOOL_FINAL_ANSWER};
 use super::execution::{ToolExecutionFailure, ToolExecutionOutcome};
+use super::types::StreamMode;
+use crate::agent::AgentEvent;
+use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{AgentError, ReactError, Result, ToolError};
 use crate::guard::GuardDirection;
 use crate::llm::types::Message;
 use crate::llm::{ChatRequest, chat};
 use futures::future::join_all;
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 impl ReactAgent {
@@ -594,12 +598,12 @@ impl ReactAgent {
         Ok(None)
     }
 
-    /// Core ReAct loop (inject memories → append message → think/act iteration).
-    /// `run_direct` and `run_chat_direct` share this implementation.
-    #[tracing::instrument(skip(self, message), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
-    pub(crate) async fn run_react_loop(&self, message: &str) -> Result<String> {
+    /// Prepare non-streaming execution context: guard check, turn tracking,
+    /// memory recall, push user message, start trace run.
+    ///
+    /// Returns the number of recalled long-term memories (for the `MemoryRecalled` event).
+    async fn prepare_react_context(&self, message: &str) -> Result<usize> {
         let agent = self.config.agent_name.clone();
-        let callbacks = self.config.callbacks.clone();
 
         // Begin a new agent turn (phase: ReceiveInput)
         let mut turn = crate::agent::turn::AgentTurn::new(message);
@@ -628,11 +632,11 @@ impl ReactAgent {
                         tracing::warn!(error = %e, "Failed to log guard audit event");
                     }
                 }
-                return Ok(format!("Request blocked by safety guard: {reason}"));
+                return Err(ReactError::Other(format!(
+                    "Request blocked by safety guard: {reason}"
+                )));
             }
         }
-
-        self.log_user_input_audit(message).await;
 
         // Phase: Recall
         turn.advance(crate::agent::turn::TurnPhase::Recall);
@@ -643,40 +647,11 @@ impl ReactAgent {
         .await;
         *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
 
-        // Fire UserPromptSubmit hook
-        {
-            let hook_ctx = crate::skills::hooks::HookContext::for_user_prompt_submit(
-                message,
-                None,
-                self.config.session_id.as_deref().unwrap_or(""),
-                &self.config.agent_name,
-            );
-            let registry = self.tools.hook_registry.read().await.clone();
-            let prompt_result = registry.run_lifecycle_hooks(&hook_ctx).await;
-            if prompt_result.block {
-                return Ok(format!(
-                    "Blocked by UserPromptSubmit hook: {}",
-                    prompt_result.block_reason.unwrap_or_default()
-                ));
-            }
-            if let Some(ctx) = &prompt_result.injected_context {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(ctx.clone()));
-            }
-            for msg in &prompt_result.messages {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(msg.clone()));
-            }
-        }
-
+        // Inject relevant long-term memories
+        let mut recalled = 0usize;
         match self.recall_long_term_memories(message).await {
             Ok(items) if !items.is_empty() => {
+                recalled = items.len();
                 debug!(agent = %agent, count = items.len(), "📚 Injecting relevant long-term memories");
                 let mut lines = vec!["[Related historical memories]".to_string()];
                 for (i, item) in items.iter().enumerate() {
@@ -701,6 +676,7 @@ impl ReactAgent {
             }
         }
 
+        // Push user message
         self.memory
             .context
             .lock()
@@ -710,227 +686,81 @@ impl ReactAgent {
         // Start trace run recording
         self.start_trace_run(message).await;
 
-        /// Maximum times a Stop hook can request continuation before being ignored.
-        const MAX_STOP_CONTINUE: usize = 3;
-        let mut stop_continue_count = 0usize;
+        Ok(recalled)
+    }
 
-        let max_iters = self.config.max_iterations;
-        let unlimited = max_iters == 0;
+    /// Core ReAct loop — thin wrapper that delegates to the shared `run_core_loop`.
+    ///
+    /// Creates a snapshot + channel, runs the unified core loop in a spawned task,
+    /// then collects `FinalAnswer` from the event stream.
+    #[tracing::instrument(skip(self, message), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
+    pub(crate) async fn run_react_loop(&self, message: &str) -> Result<String> {
+        // ★ Serialize all execution on this agent — only one run at a time.
+        let _execution_guard = self.execution_mutex.lock().await;
 
-        let mut iteration = 0usize;
-        loop {
-            // Iteration limit check (0 = unlimited)
-            if !unlimited && iteration >= max_iters {
-                break;
+        // Prepare context (guard check, memory recall, push message, start trace)
+        let recalled = match self.prepare_react_context(message).await {
+            Ok(n) => n,
+            Err(e) => {
+                // Guard blocked — return the message directly (not an error)
+                let msg = e.to_string();
+                if msg.starts_with("Request blocked by safety guard:") {
+                    return Ok(msg);
+                }
+                return Err(e);
             }
+        };
 
-            // Cancel check: if a cancellation token is set and triggered, stop the loop
-            if let Some(ref cancel) = *self.cancel_token.lock().await
-                && cancel.is_cancelled()
-            {
-                info!(agent = %agent, "Cancellation requested, stopping ReAct loop");
-                self.finalize_trace_run(
-                    crate::trace::RunStatus::Cancelled,
+        // Create channel + snapshot
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(self.config.stream_buffer_size);
+        let mut snap = AgentRunSnapshot::from_agent(self);
+        snap.current_run_id = self
+            .current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        // Run the shared core loop in a spawned task
+        let context = self.memory.context.clone();
+        let text = message.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = snap
+                .run_core_loop(
+                    context,
+                    text,
                     None,
-                    Some("Cancelled"),
+                    String::new(),
+                    StreamMode::Chat,
+                    recalled,
+                    tx,
                 )
-                .await;
-                return Ok("Cancelled.".to_string());
-            }
-
-            info!(agent = %agent, iteration = iteration + 1, "🔄 ReAct iteration starting");
-
-            for cb in &callbacks {
-                cb.on_iteration(&agent, iteration).await;
-            }
-
-            debug!(agent = %agent, iteration = iteration + 1, "--- Iteration ---");
-
-            // Phase: Think
-            turn.advance(crate::agent::turn::TurnPhase::Think);
-            self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
-                phase: "think".into(),
-                iteration: iteration + 1,
-            })
-            .await;
-            *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
-
-            let think_model = self.config.model_name.clone();
-            let steps = self
-                .think()
-                .instrument(info_span!("llm_think", model = %think_model))
-                .await?;
-            if steps.is_empty() {
-                warn!(
-                    agent = %agent,
-                    model = %think_model,
-                    iteration = iteration + 1,
-                    max_iterations = self.config.max_iterations,
-                    "⚠️ LLM returned empty response, continue to next iteration"
-                );
-                continue;
-            }
-
-            // Phase: Act
-            turn.advance(crate::agent::turn::TurnPhase::Act);
-            turn.record_iteration();
-            self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
-                phase: "act".into(),
-                iteration: iteration + 1,
-            })
-            .await;
-            *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
-
-            if let Some(mut answer) = self.process_steps(steps).await? {
-                // Output guard check
-                if let Some(gm) = &self.guard.guard_manager {
-                    let result = gm.check_all(&answer, GuardDirection::Output).await?;
-                    if let crate::guard::GuardResult::Block { reason } = &result {
-                        info!(agent = %agent, reason = %reason, "🛡️ Output blocked by guard");
-                        if let Some(al) = &self.guard.audit_logger {
-                            let event = crate::audit::AuditEvent::now(
-                                self.config.session_id.clone(),
-                                agent.clone(),
-                                crate::audit::AuditEventType::GuardBlock {
-                                    guard: "guard_manager".to_string(),
-                                    direction: GuardDirection::Output,
-                                    reason: reason.clone(),
-                                },
-                            );
-                            if let Err(e) = al.log(event).await {
-                                tracing::warn!(error = %e, "Failed to log output guard audit event");
-                            }
-                        }
-                        answer = format!("Response content filtered by safety guard: {reason}");
-                    }
-                }
-
-                // Final snapshot
-                self.auto_snapshot(iteration).await;
-
-                for cb in &callbacks {
-                    cb.on_final_answer(&agent, &answer).await;
-                }
-                info!(agent = %agent, "🏁 Execution complete");
-
-                self.log_final_answer_audit(&answer).await;
-
-                // Fire Stop hook — if it returns a continue_reason, inject it and keep going
-                {
-                    let hook_ctx = crate::skills::hooks::HookContext::for_stop(
-                        None,
-                        self.config.session_id.as_deref().unwrap_or(""),
-                        &self.config.agent_name,
-                        stop_continue_count > 0,
-                    );
-                    let registry = self.tools.hook_registry.read().await.clone();
-                    let stop_result = registry.run_lifecycle_hooks(&hook_ctx).await;
-                    // Block takes priority: suppress the final answer
-                    if stop_result.block {
-                        warn!(agent = %agent, reason = ?stop_result.block_reason, "Stop hook blocked final answer");
-                        answer = stop_result
-                            .block_reason
-                            .unwrap_or_else(|| "Response blocked by Stop hook".to_string());
-                    }
-                    if let Some(reason) = &stop_result.continue_reason {
-                        if stop_continue_count >= MAX_STOP_CONTINUE {
-                            warn!(
-                                agent = %agent,
-                                count = stop_continue_count,
-                                max = MAX_STOP_CONTINUE,
-                                "Stop hook continue limit reached, ignoring continuation request"
-                            );
-                        } else {
-                            info!(agent = %agent, reason = %reason, "Stop hook requested continuation");
-                            self.memory.context.lock().await.push(
-                                crate::llm::types::Message::system(format!(
-                                    "[Hook:Stop] Continue: {}",
-                                    reason
-                                )),
-                            );
-                            stop_continue_count += 1;
-                            self.auto_snapshot(iteration).await;
-                            continue;
-                        }
-                    }
-                    // Inject any hook messages
-                    for msg in &stop_result.messages {
-                        self.memory
-                            .context
-                            .lock()
-                            .await
-                            .push(crate::llm::types::Message::system(msg.clone()));
-                    }
-                }
-
-                self.persist_runtime_state().await;
-
-                // Phase: Finalize
-                turn.advance(crate::agent::turn::TurnPhase::Finalize);
-                self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
-                    phase: "finalize".into(),
-                    iteration: iteration + 1,
-                })
-                .await;
-                *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
-
-                // Finalize trace run as completed
-                self.finalize_trace_run(crate::trace::RunStatus::Completed, Some(&answer), None)
-                    .await;
-
-                return Ok(answer);
-            }
-
-            // Intermediate iteration snapshot (final answer not yet produced)
-            self.auto_snapshot(iteration).await;
-
-            iteration += 1;
-        }
-
-        warn!(agent = %agent, max = self.config.max_iterations, "Maximum iterations reached");
-
-        // Auto-save checkpoint so the conversation can be resumed
-        if let Some(checkpointer) = self.checkpointer()
-            && let Some(ref session_id) = self.config.session_id
-        {
-            // Best-effort checkpoint save — don't fail the run if this errors
-            if let Ok(Some(state)) = checkpointer.get_state(session_id).await
-                && let Err(e) = checkpointer.put_state(session_id, state).await
+                .await
             {
-                tracing::warn!(error = %e, session_id = %session_id, "Failed to save checkpoint state");
+                // Error already sent via tx in most cases; log as fallback
+                tracing::warn!(error = %e, "Core loop error (already sent via channel)");
             }
-            info!(agent = %agent, session = %session_id, "Saved checkpoint on max_iterations exceeded");
+        });
+
+        // Collect events, extract FinalAnswer
+        let mut answer = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                Ok(AgentEvent::FinalAnswer(a)) => {
+                    answer = a;
+                    break;
+                }
+                Ok(AgentEvent::Cancelled) => {
+                    answer = "Cancelled.".to_string();
+                    break;
+                }
+                Ok(AgentEvent::Error { message, .. }) => {
+                    return Err(ReactError::Other(message));
+                }
+                Err(e) => return Err(e),
+                _ => {} // Ignore intermediate events (Token, ToolCall, etc.)
+            }
         }
 
-        // Fire StopFailure hook before returning error
-        {
-            let hook_ctx = crate::skills::hooks::HookContext::for_stop_failure(
-                "MaxIterationsExceeded",
-                "max_iterations",
-                self.config.session_id.as_deref().unwrap_or(""),
-                &self.config.agent_name,
-            );
-            let registry = self.tools.hook_registry.read().await.clone();
-            let stop_failure_result = registry.run_lifecycle_hooks(&hook_ctx).await;
-            // StopFailure result cannot change the terminal outcome, but log any
-            // messages or injected_context for audit visibility.
-            if !stop_failure_result.messages.is_empty()
-                || stop_failure_result.injected_context.is_some()
-            {
-                warn!(agent = %agent, "StopFailure hook produced output that cannot be injected (terminal path)");
-            }
-        }
-
-        // Finalize trace run as failed
-        self.finalize_trace_run(
-            crate::trace::RunStatus::Failed,
-            None,
-            Some("Max iterations exceeded"),
-        )
-        .await;
-
-        Err(ReactError::from(AgentError::MaxIterationsExceeded(
-            self.config.max_iterations,
-        )))
+        Ok(answer)
     }
 }

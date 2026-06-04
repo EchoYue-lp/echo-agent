@@ -179,30 +179,48 @@ permissions:
 
 ---
 
-## 4. 权限策略（PermissionPolicy）
+## 4. 权限服务（PermissionService）
+
+统一权限检查入口，整合规则注册表、会话缓存、拒绝跟踪和人类审批流程：
 
 ```rust
-pub trait PermissionPolicy: Send + Sync {
-    fn check<'a>(&'a self, tool_name: &'a str, permissions: &'a [ToolPermission])
-        -> BoxFuture<'a, PermissionDecision>;
-}
+use echo_agent::human_loop::PermissionService;
+
+// 从 HumanLoopProvider 创建（推荐）
+let service = PermissionService::from_provider(provider);
+
+// 或通过 Builder 细粒度配置
+let service = PermissionServiceBuilder::new()
+    .mode(PermissionMode::Default)
+    .rule(PermissionRule::new(
+        RuleMatcher::Permission { permission: ToolPermission::Read },
+        RuleBehavior::Allow,
+        RuleSource::Default,
+    ))
+    .build();
 ```
 
-### 默认策略
+### 8 阶段检查管线
 
-```rust
-let policy = DefaultPermissionPolicy::new()
-    .grant(ToolPermission::Read)
-    .grant(ToolPermission::Network)
-    .require_approval(ToolPermission::Execute);
+```
+check(tool, input) → check_with_permissions(tool, input, permissions):
+  1. BypassPermissions → Allow
+  2. Plan 模式 → 按 permissions 过滤
+  3. 受保护路径 → .git/.env/.ssh 始终受保护
+  4. RuleRegistry → deny-first 评估 (Allow/Deny/Ask)
+  5. SessionApprovalCache → 缓存命中 = AutoApprove
+  6. DenialTracker → 连续拒绝超限升级
+  7. 模式分发: Auto→Classifier / Default→Handler / DontAsk→静默拒绝
+  8. 后处理: 缓存写入、审计记录
 ```
 
 ### 与 Agent 集成
 
 ```rust
-let agent = ReactAgent::new(config)
-    .with_permission_registry(registry)
-    .with_permission_mode(PermissionMode::Default);
+let agent = ReactAgentBuilder::new()
+    .model("qwen-plus")
+    .permission_service(Arc::new(service))
+    .build()?;
 ```
 
 `force_read_before_edit: true` 要求模型在修改文件前必须先读取：

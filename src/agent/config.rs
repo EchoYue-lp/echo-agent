@@ -1,7 +1,6 @@
 //! Agent configuration
 
 use crate::agent::AgentCallback;
-use crate::agent::AgentMode;
 use crate::agent::react::loop_detector::LoopDetectorConfig;
 use crate::llm::ResponseFormat;
 use crate::tools::ToolExecutionConfig;
@@ -111,9 +110,6 @@ pub struct AgentConfig {
     pub(crate) working_dir: Option<PathBuf>,
     /// Token budget configuration for fine-grained context window management
     pub(crate) token_budget_config: TokenBudgetConfig,
-    /// Agent operating mode (General/Coding/Research/Data/Writing).
-    /// When set, the mode's system prompt and recommended tools are used as defaults.
-    pub(crate) mode: Option<AgentMode>,
     /// Whether to enable notebook tracking for reproducibility (default false).
     /// When enabled, each tool invocation is recorded as a NotebookCell
     /// that can be exported as Markdown or JSON.
@@ -122,6 +118,15 @@ pub struct AgentConfig {
     pub(crate) loop_detector_config: LoopDetectorConfig,
     /// Permission mode for tool execution (default, plan, auto-edit, full-auto, auto, dontask).
     pub(crate) permission_mode: String,
+    /// How often to checkpoint the React loop state (in iterations).
+    /// 0 = only checkpoint at end of execution (default).
+    /// 1 = checkpoint every iteration.
+    /// N = checkpoint every N iterations.
+    ///
+    /// When a background task crashes mid-execution, the Agent can resume
+    /// from the last checkpointed iteration because the conversation history
+    /// (including all tool calls and results) is preserved.
+    pub(crate) react_checkpoint_interval: usize,
 }
 
 impl AgentConfig {
@@ -170,10 +175,10 @@ impl AgentConfig {
             auto_project_rules: true,
             working_dir: None,
             token_budget_config: TokenBudgetConfig::default(),
-            mode: None,
             enable_notebook: false,
             loop_detector_config: LoopDetectorConfig::default(),
             permission_mode: "default".to_string(),
+            react_checkpoint_interval: 0,
         }
     }
 
@@ -629,6 +634,18 @@ impl AgentConfig {
         self
     }
 
+    /// Set React loop checkpoint interval (in iterations).
+    ///
+    /// When > 0, the Agent saves a checkpoint every N iterations during the
+    /// React loop. This enables crash recovery: on restart, the Agent restores
+    /// the conversation history and continues from where it left off.
+    ///
+    /// Default: 0 (only checkpoint at end of execution).
+    pub fn react_checkpoint_interval(mut self, interval: usize) -> Self {
+        self.react_checkpoint_interval = interval;
+        self
+    }
+
     /// Set conversation identifier
     ///
     /// # Parameters
@@ -713,21 +730,6 @@ impl AgentConfig {
     pub fn working_dir(mut self, path: Option<PathBuf>) -> Self {
         self.working_dir = path;
         self
-    }
-
-    /// Set the agent operating mode.
-    ///
-    /// When a mode is set, it indicates the agent's domain specialization
-    /// (General/Coding/Research/Data/Writing). The mode can be used by
-    /// `ModeEngine` to auto-configure system prompts and tool recommendations.
-    pub fn mode(mut self, mode: AgentMode) -> Self {
-        self.mode = Some(mode);
-        self
-    }
-
-    /// Get the agent operating mode.
-    pub fn get_mode(&self) -> Option<AgentMode> {
-        self.mode
     }
 
     /// Set token budget configuration for fine-grained context window management.

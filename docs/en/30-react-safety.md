@@ -148,14 +148,15 @@ detector.reset();
 
 Unlike the `SlidingWindowCompressor` / `SummaryCompressor` described in `04-compression.md`, the `AdaptiveCompressor` (in the `echo-state` crate) provides **progressive multi-level compression**: from lightweight output trimming to aggressive emergency compression, escalating only when cheaper strategies are insufficient.
 
-### 5 Compression Levels
+### Compression Levels
 
 | Level | Name | Trigger Threshold (default) | Strategy | Requires LLM |
 |-------|------|----------------------------|----------|-------------|
-| L1 | **Snip** | 80,000 tokens | Trim oversized tool outputs (truncate anything above `l1_max_output_tokens`) | No |
+| L1 Snip | **Snip** | 80,000 tokens | Trim oversized tool outputs (truncate anything above `l1_max_output_tokens`) | No |
+| L1 Fold | **Fold** | (runs after Snip) | Collapse consecutive tool results, keep latest N | No |
 | L2 | **Micro** | 100,000 tokens | Keep first/last N lines of tool outputs, remove the middle | No |
 | L3 | **Collapse** | 120,000 tokens | Remove older messages, keep only recent N + system messages | No |
-| L4 | **Compact** | 150,000 tokens | Full LLM summarization of older messages (handled externally) | Yes |
+| L4 | **Compact** | 150,000 tokens | Full LLM summarization (via `.with_llm()`) | Yes (optional) |
 | L5 | **Reactive** | Emergency | Keep only system prompt + last 3 messages | No |
 
 ### Compression Flow
@@ -164,15 +165,20 @@ Unlike the `SlidingWindowCompressor` / `SummaryCompressor` described in `04-comp
 compress(messages, current_tokens, target_tokens):
     │
     ├─ tokens > L1 threshold AND > target? → Trim large tool outputs (Snip)
+    │                                      → Fold consecutive tool results (Fold)
     │
     ├─ tokens > L2 threshold AND > target? → Keep head/tail lines (Micro)
     │
     ├─ tokens > L3 threshold AND > target? → Remove old messages (Collapse)
     │
+    ├─ tokens > L4 threshold AND > target AND LLM configured? → LLM summary (Compact)
+    │
     └─ tokens > L4 threshold AND > 2×target? → Emergency mode (Reactive)
 
-Note: L4 requires an LLM call and is handled by external Agent logic;
-      AdaptiveCompressor internally implements L1, L2, L3, and L5.
+Note: L4 requires an LLM client configured via .with_llm(). Without it,
+      AdaptiveCompressor skips L4 and falls through to L5.
+      AdaptiveCompressor also implements ContextCompressor and integrates
+      directly with ContextManager::builder().compressor().
 ```
 
 ### AdaptiveCompressionConfig
@@ -181,14 +187,16 @@ Note: L4 requires an LLM call and is handled by external Agent logic;
 use echo_state::compression::levels::AdaptiveCompressionConfig;
 
 let config = AdaptiveCompressionConfig {
-    l1_snip_threshold_tokens: 80_000,      // L1 trigger threshold
+    l1_snip_threshold_tokens: 80_000,      // L1 Snip trigger threshold
     l1_max_output_tokens: 4_000,           // max tokens per tool output
+    l1_fold_consecutive_tools: true,       // L1 Fold: collapse consecutive tool results
+    l1_fold_keep_latest: 2,               // L1 Fold: keep latest N per run
     l2_micro_threshold_tokens: 100_000,    // L2 trigger threshold
     l2_keep_lines: 50,                     // lines to keep from start/end
     l3_collapse_threshold_tokens: 120_000, // L3 trigger threshold
     l3_keep_recent: 10,                    // recent messages to keep
     l4_compact_threshold_tokens: 150_000,  // L4/L5 trigger threshold
-    l4_keep_recent: 6,                     // messages to keep during compact (external use)
+    l4_keep_recent: 6,                     // messages to keep during compact
 };
 ```
 
@@ -198,7 +206,11 @@ let config = AdaptiveCompressionConfig {
 use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
 use echo_core::llm::types::{Message, MessageContent, Role};
 
+// Without LLM (L4 skipped):
 let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default());
+
+// With LLM (L4 enabled):
+// let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default()).with_llm(llm);
 
 let mut messages: Vec<Message> = vec![
     Message::system("You are a helpful assistant"),
@@ -207,7 +219,7 @@ let mut messages: Vec<Message> = vec![
     // ... more messages
 ];
 
-let result = compressor.compress(
+let result = compressor.compress_in_place(
     &mut messages,
     130_000, // current_tokens: estimated token count
     80_000,  // target_tokens: desired token count
@@ -216,7 +228,7 @@ let result = compressor.compress(
 println!("Before: {} tokens", result.tokens_before);
 println!("After: {} tokens", result.tokens_after);
 println!("Levels applied: {:?}", result.levels_applied);
-// Output: ["L1:Snip", "L2:Micro", "L3:Collapse"]
+// Output: ["L1:Snip", "L1:Fold", "L2:Micro", "L3:Collapse"]
 ```
 
 ### Integration with Context Management
@@ -235,11 +247,15 @@ When the available token ratio falls below `compress_threshold_ratio`, the Agent
 
 ### Level Details
 
-**L1 Snip** — Truncates Tool messages whose output exceeds `l1_max_output_tokens`. Keeps the first N tokens' worth of characters and appends an `[output truncated]` notice.
+**L1 Snip** — Truncates Tool messages whose output exceeds `l1_max_output_tokens`. Keeps the first N tokens' worth of characters (using char-boundary-safe slicing to avoid UTF-8 panics) and appends an `[output truncated]` notice.
+
+**L1 Fold** — Collapses consecutive tool result messages in a run. Keeps the latest `l1_fold_keep_latest` messages and replaces older ones with a `[L1 fold: N consecutive tool results collapsed]` user message. Runs after Snip when `l1_fold_consecutive_tools` is true.
 
 **L2 Micro** — Truncates Tool messages by line: keeps the first `l2_keep_lines` and last `l2_keep_lines` lines, replacing the middle with `[N lines truncated]`.
 
 **L3 Collapse** — Preserves all System messages and the most recent `l3_keep_recent` messages. Removes everything in between and inserts a `[Context compressed: N older messages removed]` System message.
+
+**L4 Compact** — Full LLM summarization of older messages. Only active when an LLM client is configured via `AdaptiveCompressor::with_llm(llm)`. On LLM failure, gracefully falls through to L5.
 
 **L5 Reactive** — Emergency mode. Keeps only System messages and the last 3 messages. Inserts an `[Emergency compression: context was critically large]` notice. Only triggered when tokens exceed both `l4_compact_threshold_tokens` and 2x the target.
 
@@ -362,6 +378,8 @@ async fn main() -> Result<()> {
 |-----------|------|---------|-------------|
 | `l1_snip_threshold_tokens` | `usize` | 80,000 | L1 Snip trigger threshold |
 | `l1_max_output_tokens` | `usize` | 4,000 | Max tokens per tool output |
+| `l1_fold_consecutive_tools` | `bool` | true | L1 Fold: collapse consecutive tool results |
+| `l1_fold_keep_latest` | `usize` | 2 | L1 Fold: keep latest N tool results per run |
 | `l2_micro_threshold_tokens` | `usize` | 100,000 | L2 Micro trigger threshold |
 | `l2_keep_lines` | `usize` | 50 | Lines to keep from start/end |
 | `l3_collapse_threshold_tokens` | `usize` | 120,000 | L3 Collapse trigger threshold |

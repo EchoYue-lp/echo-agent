@@ -7,7 +7,6 @@
 //! | 功能模块 | 实现方式 |
 //! |---------|---------|
 //! | File-based Skills | `discover_skills()` 动态加载外部技能 |
-//! | Plan-and-Execute | `PlanExecuteAgent` 复杂任务编排 |
 //! | Dynamic Tools | `add_tool/remove_tool` 运行时工具切换 |
 //! | Workflow | `DAG + Conditional + Parallel` 流程编排 |
 //! | Topology Tracking | `TopologyCallback` 调用关系追踪 |
@@ -207,8 +206,7 @@ async fn main() -> Result<()> {
     // ── Part 1: 外部技能系统（File-based Skills）─────────────────────────────
     demo_external_skills().await?;
 
-    // ── Part 2: Plan-and-Execute 复杂任务编排 ────────────────────────────────
-    demo_plan_execute().await?;
+    // ── Part 2: 动态工具切换 ────────────────────────────────────────────────────
 
     // ── Part 3: 动态工具切换 ─────────────────────────────────────────────────
     demo_dynamic_tools().await?;
@@ -293,60 +291,7 @@ async fn demo_external_skills() -> Result<()> {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Part 2: Plan-and-Execute
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-async fn demo_plan_execute() -> Result<()> {
-    println!("═══════════════════════════════════════════════════════");
-    println!("Part 2: Plan-and-Execute 任务编排");
-    println!("═══════════════════════════════════════════════════════\n");
-
-    use echo_agent::agent::plan_execute::{Executor, StaticPlanner};
-
-    struct VerboseExecutor;
-
-    impl Executor for VerboseExecutor {
-        fn execute_step<'a>(
-            &'a mut self,
-            description: &'a str,
-            _context: &'a str,
-        ) -> BoxFuture<'a, echo_agent::error::Result<String>> {
-            Box::pin(async move {
-                println!("  ▶ 执行步骤: {}", description);
-                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                Ok(format!("✓ 完成: {}", description))
-            })
-        }
-    }
-
-    let planner = StaticPlanner::new(vec![
-        "检查项目状态和代码质量",
-        "运行 CI/CD 管道检查",
-        "生成部署报告",
-        "总结项目健康状态",
-    ]);
-
-    let executor = VerboseExecutor;
-
-    let agent = PlanExecuteAgent::new("devops_agent", planner, executor).max_replans(1);
-
-    let task = "评估我的项目是否可以部署到生产环境";
-
-    println!("  任务: {}\n", task);
-
-    let result = agent.execute(task).await?;
-    if result.trim().is_empty() {
-        return Err(echo_agent::error::ReactError::Other(
-            "综合验收失败：Plan-and-Execute 返回空结果".to_string(),
-        ));
-    }
-    println!("\n  ✓ 最终结果:\n  {}\n", result);
-
-    Ok(())
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Part 3: 动态工具切换
+// Part 2: 动态工具切换
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async fn demo_dynamic_tools() -> Result<()> {

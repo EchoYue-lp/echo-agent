@@ -4,12 +4,13 @@
 
 Human-in-the-Loop (HIL) inserts human decision points into the Agent's automatic execution flow. Before performing a high-risk operation (deleting files, sending emails, making payments), the Agent pauses and requests human confirmation before proceeding.
 
-echo-agent supports two intervention scenarios:
+echo-agent supports three intervention scenarios:
 
 | Scenario | Description |
 |----------|-------------|
 | **Approval** | Show a y/n prompt before a tool executes; the user decides whether to allow it |
 | **Input** | When the Agent needs additional information, request free-text input from the user |
+| **Selection** | Task checkpoint pause; the user chooses from predefined options to continue |
 
 ---
 
@@ -291,11 +292,27 @@ struct SlackApprovalProvider;
 #[async_trait]
 impl HumanLoopProvider for SlackApprovalProvider {
     async fn request(&self, req: HumanLoopRequest) -> echo_agent::error::Result<HumanLoopResponse> {
-        let approved = send_slack_and_wait(&req.prompt).await;
-        if approved {
-            Ok(HumanLoopResponse::Approved)
-        } else {
-            Ok(HumanLoopResponse::Rejected { reason: Some("Rejected".to_string()) })
+        match req.kind {
+            HumanLoopKind::Approval => {
+                let approved = send_slack_and_wait(&req.prompt).await;
+                if approved {
+                    Ok(HumanLoopResponse::Approved)
+                } else {
+                    Ok(HumanLoopResponse::Rejected { reason: Some("Rejected".to_string()) })
+                }
+            }
+            HumanLoopKind::Input => {
+                let text = ask_slack_for_input(&req.prompt).await;
+                Ok(HumanLoopResponse::Text(text))
+            }
+            HumanLoopKind::Selection => {
+                let options = req.options.unwrap_or_default();
+                let choice = ask_slack_for_choice(&req.prompt, &options).await;
+                Ok(HumanLoopResponse::Selection {
+                    selection: choice,
+                    instructions: None,
+                })
+            }
         }
     }
 }

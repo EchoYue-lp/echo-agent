@@ -198,23 +198,26 @@ impl PermissionService {
     /// 从 `PermissionPolicy` 创建权限服务
     ///
     /// 便捷构造方法，自动将旧 Policy 适配到新管线。
+    /// Policy 的 `RequireApproval` 会正确委托给 `HumanLoopProvider`。
     pub fn from_policy(
         policy: Arc<dyn echo_core::tools::permission::PermissionPolicy>,
         provider: Arc<dyn super::HumanLoopProvider>,
     ) -> Self {
-        Self::from_provider(provider).with_legacy_policy(policy)
+        let handler = Arc::new(PolicyAwareHandler { policy, provider });
+        Self::new().with_request_handler(handler)
     }
 
     /// 注入旧 PermissionPolicy 的语义
     ///
-    /// 将旧 Policy 的工具权限规则转换为 `PermissionRule` 添加到规则注册表。
+    /// 将旧 Policy 和默认 Provider 组合为 `PolicyAwareHandler`，
+    /// 使 `RequireApproval` 正确路由到人类审批流程。
     pub fn with_legacy_policy(
         self,
-        _policy: Arc<dyn echo_core::tools::permission::PermissionPolicy>,
+        policy: Arc<dyn echo_core::tools::permission::PermissionPolicy>,
     ) -> Self {
-        // 旧 Policy 的语义通过 request_handler 桥接处理
-        // 此方法保留用于未来更细粒度的规则迁移
-        self
+        let provider = super::default_provider();
+        let handler = Arc::new(PolicyAwareHandler { policy, provider });
+        self.with_request_handler(handler)
     }
 
     /// 设置超时策略
@@ -768,6 +771,80 @@ impl PermissionRequestHandler for DynProviderHandler {
             HumanLoopResponse::Deferred => {
                 Ok(PermissionResponse::denied(Some("审批被推迟".to_string())))
             }
+            HumanLoopResponse::Selection { .. } => Ok(PermissionResponse::denied(Some(
+                "收到意外的 Selection 响应".to_string(),
+            ))),
+        }
+    }
+}
+
+// ── Policy Aware Handler (桥接 PermissionPolicy + HumanLoopProvider) ─────────
+
+/// 将旧 `PermissionPolicy` 桥接到 `PermissionRequestHandler`
+///
+/// 关键修复：`RequireApproval` 正确委托给 `HumanLoopProvider`，
+/// 而非返回 denied（旧 `PolicyBridgeHandler` 的语义丢失问题）。
+struct PolicyAwareHandler {
+    policy: Arc<dyn echo_core::tools::permission::PermissionPolicy>,
+    provider: Arc<dyn super::HumanLoopProvider>,
+}
+
+#[async_trait]
+impl PermissionRequestHandler for PolicyAwareHandler {
+    async fn handle(&self, request: PermissionRequest) -> Result<PermissionResponse> {
+        use super::{HumanLoopRequest, HumanLoopResponse};
+
+        // 先咨询旧 Policy
+        let decision = self
+            .policy
+            .check(&request.tool_name, &request.required_permissions)
+            .await;
+
+        match decision {
+            PermissionDecision::Allow => Ok(PermissionResponse::allowed()),
+            PermissionDecision::Deny { reason } => Ok(PermissionResponse::denied(Some(reason))),
+            PermissionDecision::RequireApproval => {
+                // 关键修复：委托给 HumanLoopProvider 请求人类审批
+                let req = HumanLoopRequest::approval(
+                    &request.tool_name,
+                    request.tool_input.clone(),
+                );
+                match self.provider.request(req).await? {
+                    HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
+                    HumanLoopResponse::ApprovedWithScope { .. } => {
+                        Ok(PermissionResponse::allowed())
+                    }
+                    HumanLoopResponse::ModifiedArgs { args, .. } => Ok(PermissionResponse {
+                        decision: PermissionResponseDecision::Allowed,
+                        rule_updates: Vec::new(),
+                        feedback: None,
+                        updated_input: Some(args),
+                    }),
+                    HumanLoopResponse::Rejected { reason } => {
+                        Ok(PermissionResponse::denied(reason))
+                    }
+                    HumanLoopResponse::Text(text) => {
+                        Ok(PermissionResponse::allowed().with_feedback(text))
+                    }
+                    HumanLoopResponse::Timeout => Ok(PermissionResponse::denied(Some(
+                        "审批请求超时".to_string(),
+                    ))),
+                    HumanLoopResponse::Deferred => Ok(PermissionResponse::denied(Some(
+                        "审批被推迟".to_string(),
+                    ))),
+                    HumanLoopResponse::Selection { .. } => Ok(PermissionResponse::denied(Some(
+                        "收到意外的 Selection 响应".to_string(),
+                    ))),
+                }
+            }
+            PermissionDecision::Ask { suggestions } => Ok(PermissionResponse {
+                decision: PermissionResponseDecision::NeedMoreInfo {
+                    question: suggestions.join(", "),
+                },
+                rule_updates: Vec::new(),
+                feedback: None,
+                updated_input: None,
+            }),
         }
     }
 }

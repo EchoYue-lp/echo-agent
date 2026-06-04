@@ -6,12 +6,12 @@
 
 | 组件 | 职责 | 所在模块 |
 |------|------|----------|
-| Agent Factory | 根据执行范式创建 Agent | `echo-core::agent::factory` + `echo_agent::agent::default_factory` |
+| Agent Factory | 创建 Agent 实例 | `echo-core::agent::factory` + `echo_agent::agent::default_factory` |
 | Mode Engine | 按工作模式定制系统提示词和工具推荐 | `echo-core::agent::mode` + `echo_agent::agent::mode_engine` |
 | Prompt Templates | 动态生成带变量替换的提示词 | `echo-core::agent::prompt_template` |
 
 ```
-用户需求 → AgentFactory（选择范式）→ ModeEngine（选择模式）→ PromptTemplate（渲染提示词）→ Agent
+用户需求 → AgentFactory（创建 Agent）→ ModeEngine（选择模式）→ PromptTemplate（渲染提示词）→ Agent
 ```
 
 ---
@@ -20,16 +20,9 @@
 
 ### 是什么
 
-Agent Factory 采用工厂模式，根据 `AgentParadigm`（执行范式）创建不同类型的 Agent。调用方无需了解具体的 Agent 实现类，只需提供配置即可获得对应范式的 Agent 实例。
+Agent Factory 采用工厂模式创建 Agent 实例。调用方无需了解具体的 Agent 实现类，只需提供配置即可获得配置好的 Agent 实例。
 
-### 执行范式（AgentParadigm）
-
-| 范式 | 说明 | 适用场景 |
-|------|------|----------|
-| `React` | Think-Act-Observe 循环（默认） | 通用任务、对话、代码编写 |
-| `PlanExecute` | 先规划步骤，再逐步执行 | 复杂多步骤任务、项目管理 |
-| `SelfReflection` | 生成→批判→优化的迭代循环 | 需要高质量输出的创作、分析 |
-| `Structured` | Schema 约束的结构化输出 | 需要确定性响应的数据提取、API 调用 |
+> **架构说明**：框架采用单一 Agent 引擎（ReactAgent）设计，不同的执行策略通过工具和配置实现，而非独立的 Agent 类型。这与业界主流框架（Hermes、Claude Code、LangGraph 等）保持一致。
 
 ### AgentFactoryConfig
 
@@ -37,21 +30,11 @@ Agent Factory 采用工厂模式，根据 `AgentParadigm`（执行范式）创�
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `paradigm` | `AgentParadigm` | 执行范式 |
 | `mode` | `Option<AgentMode>` | 可选的工作模式（如 Coding、Research） |
 | `model` | `String` | LLM 模型标识（如 "qwen3-max"） |
 | `name` | `String` | Agent 名称（用于日志和编排） |
 | `system_prompt` | `String` | 系统提示词 |
 | `tools` | `Vec<Box<dyn Tool>>` | 自定义工具列表 |
-
-提供便捷的构造函数：
-
-```rust
-AgentFactoryConfig::react()          // React 范式
-AgentFactoryConfig::plan_execute()   // PlanExecute 范式
-AgentFactoryConfig::self_reflection() // SelfReflection 范式
-AgentFactoryConfig::structured()     // Structured 范式
-```
 
 ### AgentFactory Trait
 
@@ -67,12 +50,9 @@ pub trait AgentFactory: Send + Sync {
 
 `DefaultAgentFactory` 是 facade 层（`echo_agent`）提供的具体工厂实现，基于 `ReactAgentBuilder` 构建 Agent：
 
-| 范式 | Builder 配置 |
+| 配置 | Builder 配置 |
 |------|-------------|
-| React | `.enable_tools()` |
-| PlanExecute | `.enable_tools().enable_planning()` |
-| SelfReflection | `.enable_tools()`（反思循环为内置能力） |
-| Structured | `.enable_tools()`（结构化输出单独配置） |
+| 默认 | `.enable_tools()` |
 
 > **注意**：`echo-core` 中也定义了 `DefaultAgentFactory`，但它只是一个 stub，会返回错误。实际使用时必须使用 `echo_agent::agent::default_factory::DefaultAgentFactory`。
 
@@ -80,28 +60,39 @@ pub trait AgentFactory: Send + Sync {
 
 ```rust
 use echo_agent::agent::default_factory::DefaultAgentFactory;
-use echo_agent::agent::factory::{AgentFactoryConfig, AgentParadigm};
+use echo_agent::agent::factory::AgentFactoryConfig;
 use echo_core::agent::factory::AgentFactory;
 
 let factory = DefaultAgentFactory;
 
-// 创建 React 范式的编程助手
-let config = AgentFactoryConfig::react()
+// 创建编程助手
+let config = AgentFactoryConfig::new()
     .model("qwen3-max")
     .name("coder")
-    .with_system_prompt("你是一个编程助手");
+    .with_system_prompt("你是一个编程助手")
+    .with_mode(AgentMode::Coding);
 
 let agent = factory.create_agent(config)?;
 println!("Agent: {}, Model: {}", agent.name(), agent.model_name());
 
-// 创建 PlanExecute 范式的研究助手
-let config = AgentFactoryConfig::plan_execute()
+// 创建研究助手
+let config = AgentFactoryConfig::new()
     .model("qwen3-max")
     .name("researcher")
     .with_mode(AgentMode::Research);
 
 let agent = factory.create_agent(config)?;
 ```
+
+### 扩展能力
+
+ReactAgent 通过工具和配置实现不同的执行策略：
+
+| 策略 | 实现方式 | 示例 |
+|------|---------|------|
+| 任务规划 | 注册 plan/create_task 工具 + `execute_with_planning()` | 复杂多步骤任务 |
+| 自我审查 | 注册 ReviewTool + LlmCritic | 高质量输出 |
+| 多Agent协作 | SubAgent 系统 | 并行任务执行 |
 
 ---
 
@@ -165,23 +156,22 @@ pub trait ModeEngine: Send + Sync {
 use echo_agent::agent::mode_engine::LocalizedModeEngine;
 use echo_core::agent::mode::{AgentMode, ModeEngine};
 
-// 使用中文提示词
-let engine = LocalizedModeEngine::with_chinese();
-let config = engine.mode_config(&AgentMode::Coding);
-println!("提示词: {}", config.system_prompt_template);  // 中文提示词
-println!("显示名称: {}", config.display_name);           // "编程"
-println!("推荐工具: {:?}", config.recommended_tools);    // 7 个工具
-
-// 自定义覆盖
+// 构建本地化引擎（提示词和显示名称由应用层提供）
 let engine = LocalizedModeEngine::new()
-    .with_override(AgentMode::Coding, "自定义编程提示词".into())
-    .with_display_name(AgentMode::Coding, "代码".into());
+    .with_override(AgentMode::Coding, "你是一个专业的编程助手…".into())
+    .with_display_name(AgentMode::Coding, "编程".into());
 
-// 支持中英文名称解析
-assert_eq!(LocalizedModeEngine::from_str("编程"), Some(AgentMode::Coding));
-assert_eq!(LocalizedModeEngine::from_str("代码"), Some(AgentMode::Coding));
-assert_eq!(LocalizedModeEngine::from_str("研究"), Some(AgentMode::Research));
-assert_eq!(LocalizedModeEngine::from_str("coding"), Some(AgentMode::Coding));
+let config = engine.mode_config(&AgentMode::Coding);
+println!("提示词: {}", config.system_prompt_template);  // 自定义提示词
+println!("显示名称: {}", config.display_name);           // "编程"
+println!("推荐工具: {:?}", config.recommended_tools);    // 7 个工具（继承自默认）
+
+// 英文模式名解析（框架层仅支持英文）
+assert_eq!(LocalizedModeEngine::parse_from_str("coding"), Some(AgentMode::Coding));
+assert_eq!(LocalizedModeEngine::parse_from_str("research"), Some(AgentMode::Research));
+assert_eq!(LocalizedModeEngine::parse_from_str("data"), Some(AgentMode::Data));
+
+// 中文别名解析由应用层实现（参见 echo-agent-cli 的 modes 模块）
 ```
 
 ### 模式解析
@@ -383,10 +373,9 @@ assert_eq!(r2, "你好，B！");
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. 选择范式 → AgentFactoryConfig::plan_execute()              │
-│ 2. 选择模式 → .with_mode(AgentMode::Coding)                   │
-│ 3. 选择模型 → .model("qwen3-max")                             │
-│ 4. 创建 Agent → factory.create_agent(config)?                 │
+│ 1. 选择模式 → .with_mode(AgentMode::Coding)                   │
+│ 2. 选择模型 → .model("qwen3-max")                             │
+│ 3. 创建 Agent → factory.create_agent(config)?                 │
 │                                                             │
 │    内部流程：                                                  │
 │    ┌────────────────────────────────────────────────────┐   │
@@ -400,11 +389,10 @@ assert_eq!(r2, "你好，B！");
 │    │ ReactAgentBuilder                                   │   │
 │    │   → .system_prompt(rendered_prompt)                 │   │
 │    │   → .tools(recommended_tools)                       │   │
-│    │   → .enable_planning()  // PlanExecute 范式         │   │
 │    │   → .build_boxed()                                  │   │
 │    └────────────────────────────────────────────────────┘   │
 │                                                             │
-│ 5. 返回 Box<dyn Agent>                                       │
+│ 4. 返回 Box<dyn Agent>                                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -419,7 +407,9 @@ use echo_core::agent::prompt_template::PromptTemplateManager;
 
 // 1. 初始化组件
 let factory = DefaultAgentFactory;
-let mode_engine = LocalizedModeEngine::with_chinese();
+let mode_engine = LocalizedModeEngine::new()
+    .with_override(AgentMode::Coding, "你是一个专业的编程助手…".into())
+    .with_display_name(AgentMode::Coding, "编程".into());
 let template_manager = PromptTemplateManager::with_default_mode_templates();
 
 // 2. 获取模式配置
@@ -433,7 +423,7 @@ let system_prompt = template_manager.render("custom_coding", &[
 ])?;
 
 // 4. 创建 Agent
-let config = AgentFactoryConfig::plan_execute()
+let config = AgentFactoryConfig::new()
     .model("qwen3-max")
     .name("rust-coder")
     .with_mode(mode)
@@ -445,15 +435,6 @@ let agent = factory.create_agent(config)?;
 ---
 
 ## 配置参考
-
-### AgentParadigm 解析
-
-| 输入字符串 | 解析结果 |
-|-----------|---------|
-| `"react"` | `AgentParadigm::React` |
-| `"plan-execute"` / `"plan_execute"` | `AgentParadigm::PlanExecute` |
-| `"self-reflection"` / `"self_reflection"` | `AgentParadigm::SelfReflection` |
-| `"structured"` | `AgentParadigm::Structured` |
 
 ### AgentMode 解析（LocalizedModeEngine）
 
@@ -469,7 +450,6 @@ let agent = factory.create_agent(config)?;
 
 | 字段 | 默认值 |
 |------|--------|
-| `paradigm` | `AgentParadigm::React` |
 | `mode` | `None` |
 | `model` | `""` |
 | `name` | `"assistant"` |
@@ -524,7 +504,7 @@ pub struct MyAgentFactory;
 
 impl AgentFactory for MyAgentFactory {
     fn create_agent(&self, config: AgentFactoryConfig) -> Result<Box<dyn Agent>> {
-        // 根据 config.paradigm() 自定义创建逻辑
+        // 自定义 Agent 创建逻辑
         // 可以注入自定义的 LLM 客户端、中间件等
         todo!("自定义 Agent 创建逻辑")
     }

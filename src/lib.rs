@@ -116,9 +116,9 @@ pub mod workspace {
 pub mod prelude {
     // Agent
     pub use crate::agent::{
-        Agent, AgentCallback, AgentConfig, AgentEvent, AgentMode, AgentRole, CancellationToken,
-        DefaultModeEngine, InterventionCallback, InterventionResult, LocalizedModeEngine,
-        ModeConfig, ModeEngine, ReactAgent, ReactAgentBuilder, Runner, StepType, StructuredAgent,
+        Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle, AgentRole, CancellationToken,
+        InterventionCallback, InterventionResult, ReactAgent, ReactAgentBuilder, Runner, StepType,
+        StructuredAgent,
     };
     // Prompt Template
     pub use echo_core::agent::PromptTemplateManager;
@@ -272,13 +272,6 @@ pub mod advanced {
         HandoffContext, HandoffManager, HandoffResult, HandoffTarget, HandoffTool,
     };
 
-    #[cfg(feature = "plan-execute")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "plan-execute")))]
-    pub use crate::agent::plan_execute::{
-        ExecutionMode, Executor, LlmPlanner, Plan, PlanExecuteAgent, PlanStep, Planner,
-        ReactExecutor, SimpleExecutor, StaticPlanner, StepResult, StepStatus,
-    };
-
     #[cfg(feature = "a2a")]
     #[cfg_attr(docsrs, doc(cfg(feature = "a2a")))]
     pub use crate::a2a::{
@@ -298,15 +291,9 @@ pub mod advanced {
     #[cfg_attr(docsrs, doc(cfg(feature = "tasks")))]
     pub use crate::tasks::{Task, TaskManager, TaskStatus};
 
-    #[cfg(feature = "self-reflection")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "self-reflection")))]
-    pub use crate::agent::self_reflection::{
-        CompositeCritic, CompositeStrategy, Critic, Critique, CritiqueOutput,
-        InMemoryReflectionStore, LlmCritic, ReflectionExperience, ReflectionRecord,
-        ReflectionStore, SelfReflectionAgent, StaticCritic, ThresholdCritic,
-        critique_output_schema, default_refinement_prompt, default_reflection_prompt,
+    // Critic module — evaluation and feedback tools for agent outputs
+    pub use crate::agent::critic::{
+        CompositeCritic, CompositeStrategy, Critic, Critique, CritiqueOutput, LlmCritic,
+        ReviewTool, StaticCritic, ThresholdCritic, critique_output_schema,
     };
-
-    #[cfg(all(feature = "self-reflection", feature = "plan-execute"))]
-    pub use crate::agent::self_reflection::ReflectiveExecutor;
 }

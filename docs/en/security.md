@@ -150,26 +150,48 @@ permissions:
 
 ---
 
-## 4. Permission Policy
+## 4. Permission Service
+
+Unified permission check entry point, integrating rule registry, session cache, denial tracking, and human approval:
 
 ```rust
-pub trait PermissionPolicy: Send + Sync {
-    fn check<'a>(&'a self, tool_name: &'a str, permissions: &'a [ToolPermission])
-        -> BoxFuture<'a, PermissionDecision>;
-}
+use echo_agent::human_loop::PermissionService;
 
-let policy = DefaultPermissionPolicy::new()
-    .grant(ToolPermission::Read)
-    .grant(ToolPermission::Network)
-    .require_approval(ToolPermission::Execute);
+// Create from HumanLoopProvider (recommended)
+let service = PermissionService::from_provider(provider);
+
+// Or configure via Builder for fine-grained control
+let service = PermissionServiceBuilder::new()
+    .mode(PermissionMode::Default)
+    .rule(PermissionRule::new(
+        RuleMatcher::Permission { permission: ToolPermission::Read },
+        RuleBehavior::Allow,
+        RuleSource::Default,
+    ))
+    .build();
+```
+
+### 8-Stage Check Pipeline
+
+```
+check(tool, input) → check_with_permissions(tool, input, permissions):
+  1. BypassPermissions → Allow
+  2. Plan mode → filter by permissions
+  3. Protected paths → .git/.env/.ssh always protected
+  4. RuleRegistry → deny-first evaluation (Allow/Deny/Ask)
+  5. SessionApprovalCache → cache hit = AutoApprove
+  6. DenialTracker → consecutive denials exceed threshold
+  7. Mode dispatch: Auto→Classifier / Default→Handler / DontAsk→silent deny
+  8. Post-processing: cache write, audit logging
 ```
 
 ### Agent Integration
 
 ```rust
-let agent = ReactAgent::new(config)
-    .with_permission_registry(registry)
-    .with_permission_mode(PermissionMode::Default);
+let agent = ReactAgentBuilder::new()
+    .model("qwen-plus")
+    .permission_service(Arc::new(service))
+    .build()?;
 ```
 
 `force_read_before_edit: true` requires reading a file before modifying:

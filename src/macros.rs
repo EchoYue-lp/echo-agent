@@ -62,9 +62,6 @@ macro_rules! agent {
     (@build $b:expr, enable_cot: $v:expr, $($rest:tt)*) => {
         $crate::agent!(@build { if $v { $b.enable_cot() } else { $b.disable_cot() } }, $($rest)*)
     };
-    (@build $b:expr, permission_policy: $v:expr, $($rest:tt)*) => {
-        $crate::agent!(@build $b.permission_policy(::std::sync::Arc::new($v)), $($rest)*)
-    };
     (@build $b:expr, audit_logger: $v:expr, $($rest:tt)*) => {
         $crate::agent!(@build $b.audit_logger(::std::sync::Arc::new($v)), $($rest)*)
     };

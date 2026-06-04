@@ -152,7 +152,7 @@ echo-agent 提供 **67 个注册工具**，跨越 8 个 crate，通过一行 `us
 | **结构化输出** | LLM 输出 → Rust 类型（JSON Schema） | `agent.extract::<Contact>(text)` |
 | **多模态** | 文本 + 图片 + 文件混合消息 | `Message::user_with_image(...)` |
 | **护栏系统** | 规则 / LLM 内容过滤 | `#[guard(name = "safety")] async fn ...` |
-| **权限模型** | 声明式工具权限 + 可插拔策略 | `DefaultPermissionPolicy::new()` |
+| **权限模型** | 声明式工具权限 + 统一权限服务 | `PermissionService::from_provider(...)` |
 | **审计日志** | 结构化事件 + 可插拔后端 | `agent.set_audit_logger(...)` |
 | **宏系统** | 11 个宏：`#[tool]`、`agent!{}`、`messages![]`... | `agent! { model: "..", tools: [...] }` |
 
@@ -162,8 +162,8 @@ echo-agent 提供 **67 个注册工具**，跨越 8 个 crate，通过一行 `us
 |------|------|---------|
 | **SubAgent** | Sync / Fork / Teammate 三种模式 | `agent.register_agent(sub)` |
 | **Agent Handoff** | 上下文感知的 Agent 间切换 | `HandoffManager::new()` |
-| **Plan-and-Execute** | 显式规划 → 逐步执行 | `PlanExecuteAgent::new(...)` |
-| **Self-Reflection** | LLM 自我批评与修正循环 | `SelfReflectionAgent::new(...)` |
+| **任务规划** | Plan → Execute → Summarize（内置于 ReactAgent） | `agent.execute_with_planning(task)` |
+| **自我审查** | LLM 质量评估作为工具 | `ReviewTool::new(critic)` |
 | **图工作流** | 线性、条件、循环、并行扇出/扇入 | `GraphBuilder::new("pipeline")` |
 | **DAG 任务** | 依赖感知的任务调度 | `TaskManager::default()` |
 | **声明式工作流** | YAML/JSON 定义图——无需 Rust 代码 | `Graph::from_yaml("wf.yaml")?` |
@@ -530,13 +530,20 @@ agent.add_tools(tools);
 
 支持三种传输方式：**stdio**、**SSE**、**HTTP**。
 
-### 12. Plan-and-Execute — 显式规划后再执行
+### 12. 任务规划 — 内置的 Plan-Execute-Summarize 工作流
 
-规划 Agent 创建任务 DAG，执行 Agent 逐步跟随，支持可选的重规划。
+ReactAgent 包含三阶段规划工作流：Plan → Execute → Summarize。无需独立的 Agent 类型。
 
-```rust
-let planner = PlanExecuteAgent::new(planner_config, executor_config);
-let result = planner.execute("研究量子计算趋势").await?;
+> **注意**: 需要启用 `tasks` feature。
+
+```rust,ignore
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .enable_planning()  // 启用 plan、create_task、update_task 工具
+    .build()?;
+
+// Agent 会自动规划任务、执行步骤并总结结果
+let result = agent.execute_with_planning("研究量子计算趋势").await?;
 ```
 
 ### 13. 流式输出 — 实时逐 Token 输出
@@ -695,13 +702,23 @@ agent.add_tool(Box::new(WebFetchTool::new()));
 | Brave | 免费 2k/月 | 高 | 官方 API |
 | Tavily | 付费（有免费额度） | 最高 | 为 Agent AI 优化 |
 
-### 21. 自反思 Agent — LLM 自我批评与修正
+### 21. 自我审查 — 作为工具的质量评估
 
-```rust
-let agent = SelfReflectionAgent::new(base_agent)
-    .max_iterations(3)
-    .critic(LlmCritic::new(critic_config));
-let result = agent.execute("撰写量子计算摘要").await?;
+使用 ReviewTool 让 Agent 评估和优化自己的输出。这遵循业界最佳实践（Hermes、Claude Code），反思是工具能力而非独立的 Agent 类型。
+
+```rust,ignore
+let critic = Arc::new(LlmCritic::new("qwen3-max"));
+let review_tool = ReviewTool::new(critic);
+
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .system_prompt("你是技术写手。使用 review 工具自我审查你的作品。")
+    .enable_tools()
+    .tool(Box::new(review_tool))
+    .build()?;
+
+// Agent 现在可以调用 review(task, output) 来评估自己的作品
+let result = agent.execute("撰写量子计算摘要，然后审查它").await?;
 ```
 
 ### 22. 快照与回滚 — 时光机调试
@@ -851,7 +868,7 @@ agent.set_circuit_breaker(cb_config);
 | 多 Agent 模式 | [EN](docs/en/26-multi-agent.md) | [ZH](docs/zh/26-multi-agent.md) |
 | 追踪系统 | [EN](docs/en/27-tracing.md) | [ZH](docs/zh/27-tracing.md) |
 | 配置参考 | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
-| 长程任务 | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
+| 运行时与任务系统 | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
 | 安全指南 | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
 
 ---

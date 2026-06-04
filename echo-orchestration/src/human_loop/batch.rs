@@ -135,6 +135,10 @@ pub trait BatchApprovalProvider: HumanLoopProvider {
                     args: Some(item.args.clone()),
                     risk_level: Some(item.risk_level),
                     timeout: batch.timeout,
+                    task_id: None,
+                    options: None,
+                    context: None,
+                    phase: None,
                 };
 
                 match self.request(req).await? {
@@ -158,6 +162,9 @@ pub trait BatchApprovalProvider: HumanLoopProvider {
                         decisions.push(BatchItemDecision::Skipped);
                     }
                     HumanLoopResponse::Text(_) => {
+                        decisions.push(BatchItemDecision::Skipped);
+                    }
+                    HumanLoopResponse::Selection { .. } => {
                         decisions.push(BatchItemDecision::Skipped);
                     }
                 }

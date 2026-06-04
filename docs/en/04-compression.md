@@ -17,7 +17,7 @@ The context compression system automatically checks token usage before each LLM 
 
 ---
 
-## Three Compression Strategies
+## Compression Strategies
 
 ### 1. SlidingWindowCompressor
 
@@ -67,7 +67,33 @@ SummaryCompressor::with_prompt(
 
 ---
 
-### 3. HybridCompressor
+### 3. IncrementalSummaryCompressor
+
+> **New in v0.2.2.** Incremental LLM summarization that reuses previous summaries.
+
+Unlike `SummaryCompressor` which re-summarizes ALL old messages every time, `IncrementalSummaryCompressor` maintains the previous summary and only sends `[previous summary] + [new messages]` to the LLM on subsequent compressions. This dramatically reduces LLM cost and latency for long conversations.
+
+```rust
+use echo_agent::compression::compressor::IncrementalSummaryCompressor;
+use std::sync::Arc;
+
+let compressor = IncrementalSummaryCompressor::new(llm, 6);
+// First compression: summarizes all old messages (like SummaryCompressor)
+// Second compression: sends previous summary + new messages only
+// Third compression: same pattern, even cheaper
+
+// Inspect or reset the stored summary:
+println!("Current summary: {:?}", compressor.current_summary());
+compressor.reset();
+```
+
+**Pros**: Much cheaper for long conversations with repeated compression.
+
+**Cons**: Requires mutable internal state (wrapped in `Mutex`); slightly more complex.
+
+---
+
+### 4. HybridCompressor
 
 **Principle**: Chain multiple strategies into a pipeline where each stage's output feeds the next.
 
@@ -81,6 +107,112 @@ let compressor = HybridCompressor::builder()
     .stage(SummaryCompressor::new(llm, 8))           // stage 2: summarize
     .build();
 ```
+
+**Short-circuit optimization** (new in v0.2.2): When enabled (default), the pipeline skips remaining stages once the estimated token count drops to or below `token_limit`. This avoids unnecessary LLM calls in later stages.
+
+```rust
+// Disable short-circuit (always run all stages)
+let compressor = HybridCompressor::builder()
+    .stage(SlidingWindowCompressor::new(30))
+    .stage(SummaryCompressor::new(llm, 8))
+    .short_circuit(false)
+    .build();
+```
+
+---
+
+### 5. AdaptiveCompressor
+
+> **New in v0.2.1, enhanced in v0.2.2.** Automatically selects compression level based on context length.
+
+`AdaptiveCompressor` implements a multi-level progressive compression strategy, automatically escalating compression intensity as context exceeds token thresholds:
+
+| Level | Name | Strategy | Trigger Threshold | LLM? |
+|-------|------|----------|-------------------|------|
+| L1 | **Snip** | Remove tool outputs exceeding token limit | `l1_snip_threshold_tokens` (80k) | No |
+| L1 | **Fold** | Collapse consecutive tool results, keep latest N | Runs after Snip | No |
+| L2 | **Micro** | Truncate tool outputs, keep first/last N lines | `l2_micro_threshold_tokens` (100k) | No |
+| L3 | **Collapse** | Drop older messages, keep system prompt + last N recent | `l3_collapse_threshold_tokens` (120k) | No |
+| L4 | **Auto Compact** | Full LLM summarization | `l4_compact_threshold_tokens` (150k) | Yes (optional) |
+| L5 | **Reactive** | Emergency: keep only system prompt + last 3 messages | Beyond L4 threshold + 2×target | No |
+
+**v0.2.2 changes:**
+- L4 is now **built-in** via `.with_llm()` — no external integration needed
+- L1 now includes **tool folding** (`l1_fold_consecutive_tools`) to collapse long runs of tool messages
+- `AdaptiveCompressor` now implements `ContextCompressor` — can be used via `ContextManager::builder().compressor()` directly
+
+### Configuration
+
+```rust
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let config = AdaptiveCompressionConfig {
+    l1_snip_threshold_tokens: 80_000,
+    l1_max_output_tokens: 4_000,        // Max tokens per output for Snip
+    l1_fold_consecutive_tools: true,     // Fold consecutive tool results (new)
+    l1_fold_keep_latest: 2,             // Keep latest N tool results per run (new)
+    l2_micro_threshold_tokens: 100_000,
+    l2_keep_lines: 50,                   // Lines to keep at head/tail for Micro
+    l3_collapse_threshold_tokens: 120_000,
+    l3_keep_recent: 10,                  // Recent messages to keep for Collapse
+    l4_compact_threshold_tokens: 150_000,
+    l4_keep_recent: 6,                   // Recent messages for Compact (LLM)
+};
+
+// Without LLM: L4 is skipped, falls through to L5
+let compressor = AdaptiveCompressor::new(config.clone());
+
+// With LLM: L4 auto-compact is enabled
+let compressor = AdaptiveCompressor::new(config).with_llm(llm);
+```
+
+### How It Works
+
+```
+Tokens:    0 ──── 80k ──── 100k ──── 120k ──── 150k ──── ∞
+            │       │        │         │         │        │
+            │ None  │  Snip  │  Micro  │Collapse │Compact │
+            │       │+Fold   │Truncate │Drop old │LLM sum │
+            │       │Trim    │outputs  │messages │        │
+            │       │long    │         │         │        │
+            │       │outputs │         │         │        │
+```
+
+### Integration with ContextManager
+
+`AdaptiveCompressor` implements `ContextCompressor` and integrates via `ContextManager::builder()` (new in v0.2.2):
+
+```rust
+use echo_state::compression::ContextManager;
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default())
+    .with_llm(llm); // optional: enable L4
+
+let mut ctx = ContextManager::builder(token_limit)
+    .compressor(compressor) // works directly now (was Box::new() before)
+    .with_system("System prompt".to_string())
+    .build();
+
+// prepare() auto-detects token count and triggers compression
+let result = ctx.prepare(None).await?;
+// result.messages — compressed message list
+// result.compressed — compression stats (if any)
+```
+
+### Low-level API (direct use without ContextManager)
+
+For advanced use cases, `compress_in_place()` mutates messages directly:
+
+```rust
+let mut messages = vec![/* ... */];
+let current_tokens = 50_000;
+let target_tokens = 30_000;
+let result = compressor.compress_in_place(&mut messages, current_tokens, target_tokens);
+println!("Levels applied: {:?}", result.levels_applied);
+```
+
+See [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs).
 
 ---
 
@@ -156,9 +288,78 @@ for i in 0..30 {
 println!("Tokens before: {}", ctx.token_estimate());
 
 // prepare() triggers auto-compression and returns the list to send to the LLM
-let messages = ctx.prepare(None).await?;
+let result = ctx.prepare(None).await?;
 
-println!("Messages after: {}", messages.len());
+println!("Messages after: {}", result.messages.len());
+```
+
+---
+
+## Compression Metrics
+
+> **New in v0.2.2.** Cumulative observability for compression events.
+
+`ContextManager` tracks compression statistics across its lifetime:
+
+```rust
+let metrics = ctx.compression_metrics();
+
+println!("Total compressions: {}", metrics.total_compressions);
+println!("Tokens saved: {}", metrics.total_tokens_saved());
+println!("Compression ratio: {:.1}%", metrics.compression_ratio() * 100.0);
+println!("Strategies used: {:?}", metrics.strategies_used);
+
+// Human-readable report:
+println!("{}", metrics.report());
+// → "CompressionMetrics: 5 compressions, 12340 tokens saved (35.2%), 48 messages evicted, strategies: [SlidingWindow(3), Adaptive(2)]"
+
+// Reset metrics:
+ctx.reset_compression_metrics();
+```
+
+Metrics are automatically recorded in:
+- `prepare()` (auto-compression)
+- `force_compress()`
+- `force_compress_with()`
+
+Each compression event also emits `tracing` log events at `info` level with fields: `compressor`, `before_messages`, `after_messages`, `before_tokens`, `after_tokens`, `evicted`, `saved_tokens`, `elapsed_ms`.
+
+---
+
+## Token Estimation
+
+### Built-in Tokenizers
+
+| Type | Algorithm | Accuracy |
+|------|----------|----------|
+| `HeuristicTokenizer` | ASCII weight 1, CJK weight 2, total / 4 | Medium (recommended for mixed CJK/English) |
+| `SimpleTokenizer` | `byte_count / 4 + 1` | Low (backward compatible) |
+
+### CalibratedTokenizer (new in v0.2.2)
+
+`CalibratedTokenizer` wraps any base tokenizer and improves accuracy over time by learning from actual API response data:
+
+```rust
+use echo_core::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
+use std::sync::Arc;
+
+let base = Arc::new(HeuristicTokenizer);
+let calibrated = CalibratedTokenizer::new(base);
+
+// Use like any other tokenizer
+let tokens = calibrated.count_tokens("some text");
+
+// After the LLM API returns actual token counts, feed them back:
+calibrated.calibrate(tokens, api_usage.prompt_tokens);
+
+// The calibration factor converges via exponential moving average (EMA)
+println!("Factor: {:.3}", calibrated.calibration_factor());
+println!("Samples: {}", calibrated.sample_count());
+
+// Use with ContextManager:
+let ctx = ContextManager::builder(4096)
+    .tokenizer(Arc::new(calibrated))
+    .build();
 ```
 
 ---
@@ -168,13 +369,17 @@ println!("Messages after: {}", messages.len());
 ```
 ctx.prepare() is called:
     │
-    ├─ Estimate current tokens (chars / 4, rough estimate)
+    ├─ Estimate current tokens (via configured Tokenizer)
     │
     ├─ estimate ≤ token_limit → return as-is, no compression
     │
     └─ estimate > token_limit → call compressor.compress()
            ├─ SlidingWindow: truncate in-memory (nanoseconds)
-           └─ Summary: call LLM to summarize (seconds, has cost)
+           ├─ Summary/IncrementalSummary: call LLM to summarize (seconds, has cost)
+           ├─ Hybrid: run pipeline stages (short-circuits when below limit)
+           └─ Adaptive: escalate L1→L2→L3→L4→L5 as needed
+    │
+    └─ Record metrics + emit tracing event
 ```
 
 ---
@@ -186,10 +391,12 @@ ctx.prepare() is called:
 | Chatbot (history unimportant) | `SlidingWindowCompressor(20~50)` |
 | Task-execution Agent (history matters) | `SummaryCompressor` or `Hybrid` |
 | High-frequency, cost-sensitive | `SlidingWindowCompressor` |
+| Long conversations with repeated compression | `IncrementalSummaryCompressor` |
 | Long document analysis | `HybridCompressor` (slide then summarize) |
+| Tool-heavy workflows | `AdaptiveCompressor` (auto-escalation with L1 tool folding) |
 | Test environment | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-See: `examples/demo05_compressor.rs`
+See: `examples/demo05_compressor.rs`, `examples/demo53_adaptive_compression.rs`
 
 ---
 
@@ -201,6 +408,7 @@ See: `examples/demo05_compressor.rs`
 What do you want to do?                          How
 ──────────────────────────────────────────────────────────────
 Change summary prompt wording/language/focus     →  SummaryCompressor::with_prompt(llm, n, |msgs| ...)
+Reduce LLM cost for repeated compressions        →  IncrementalSummaryCompressor
 Change compression logic (message filtering,     →  impl ContextCompressor
   fallback strategy, output structure, etc.)
 Quickly generate a compressor from an async fn   →  #[compressor] proc macro
@@ -234,6 +442,8 @@ use futures::future::BoxFuture;
 struct UserOnlyCompressor { keep: usize }
 
 impl ContextCompressor for UserOnlyCompressor {
+    fn name(&self) -> &'static str { "UserOnly" } // optional: for metrics tracking
+
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let (system, conv): (Vec<_>, Vec<_>) = input.messages
@@ -285,78 +495,16 @@ async fn tail_only(input: CompressionInput) -> Result<CompressionOutput> {
 
 ```text
 ContextCompressor (the sole compression strategy extension point)
- ├── SlidingWindowCompressor  (standalone, no dependencies)
- ├── SummaryCompressor        (uses Box<dyn Fn> internally for prompt generation)
- │     ├── new()              (uses default_summary_prompt)
- │     └── with_prompt()      (uses custom closure)
- └── HybridCompressor         (chains multiple ContextCompressors)
+ ├── SlidingWindowCompressor       (standalone, no dependencies)
+ ├── SummaryCompressor             (LLM summarization with fallback)
+ │     ├── new()                   (uses default_summary_prompt)
+ │     └── with_prompt()           (uses custom closure)
+ ├── IncrementalSummaryCompressor  (incremental LLM summarization, reuses previous)
+ ├── HybridCompressor              (pipeline with short-circuit optimization)
+ └── AdaptiveCompressor            (5-level auto-escalation, optional LLM for L4)
+       ├── L1: Snip + Fold         (truncate/fold tool outputs)
+       ├── L2: Micro               (truncate to first/last N lines)
+       ├── L3: Collapse            (drop old messages, keep recent)
+       ├── L4: Compact             (LLM summarization via .with_llm())
+       └── L5: Reactive            (emergency: system prompt + last 3)
 ```
-
----
-
-## Adaptive Compression (AdaptiveCompressor)
-
-> **New in v0.2.1.** Automatically selects compression level based on context length.
-
-`AdaptiveCompressor` implements a 5-level progressive compression strategy, automatically escalating compression intensity as context exceeds token thresholds:
-
-| Level | Name | Strategy | Trigger Threshold |
-|-------|------|----------|-------------------|
-| L1 | **Snip** | Remove tool outputs exceeding token limit | `l1_snip_threshold_tokens` (80k) |
-| L2 | **Micro** | Truncate tool outputs, keep first/last N lines | `l2_micro_threshold_tokens` (100k) |
-| L3 | **Collapse** | Drop older messages, keep system prompt + last N recent | `l3_collapse_threshold_tokens` (120k) |
-| L4 | **Auto Compact** | Full LLM summarization (requires external integration) | `l4_compact_threshold_tokens` (150k) |
-| L5 | **Reactive** | Emergency: keep only system prompt + last 3 messages | Beyond L3 threshold |
-
-**Note:** L4 requires an external LLM call. `AdaptiveCompressor` internally applies L1 → L2 → L3 → L5 in order, stopping once `target_tokens` is reached.
-
-### Configuration
-
-```rust
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
-
-let config = AdaptiveCompressionConfig {
-    l1_snip_threshold_tokens: 80_000,
-    l1_max_output_tokens: 4_000,        // Max tokens per output for Snip
-    l2_micro_threshold_tokens: 100_000,
-    l2_keep_lines: 50,                   // Lines to keep at head/tail for Micro
-    l3_collapse_threshold_tokens: 120_000,
-    l3_keep_recent: 10,                  // Recent messages to keep for Collapse
-    l4_compact_threshold_tokens: 150_000,
-    l4_keep_recent: 6,                   // Recent messages for Compact (external LLM)
-};
-
-let compressor = AdaptiveCompressor::new(config);
-```
-
-### How It Works
-
-```
-Tokens:    0 ──── 80k ──── 100k ──── 120k ──── 150k ──── ∞
-            │       │        │         │         │        │
-            │ None  │  Snip  │  Micro  │Collapse │Compact │
-            │       │Trim long│Truncate │Drop old │Ext LLM │
-            │       │outputs │outputs  │messages │summary │
-```
-
-### Integration with ContextManager
-
-`AdaptiveCompressor` is integrated via `ContextManager::builder()`, not `AgentConfig`:
-
-```rust
-use echo_state::compression::ContextManager;
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
-
-let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default());
-let mut ctx = ContextManager::builder(token_limit)
-    .compressor(Box::new(compressor))
-    .with_system("System prompt")
-    .build();
-
-// prepare() auto-detects token count and triggers compression
-let result = ctx.prepare(None).await?;
-// result.messages — compressed message list
-// result.compressed — compression stats (if any)
-```
-
-See [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs).

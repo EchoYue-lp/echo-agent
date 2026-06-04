@@ -211,7 +211,7 @@ ReactAgentBuilder::new()
     .guard(my_guard)                              // 添加输入/输出护栏
     .guards(vec![guard1, guard2])                 // 添加多个护栏
     .with_content_guard(ContentGuardMode::Block)  // PII 检测（需要 "content-guard" feature）
-    .permission_policy(my_policy)                 // 自定义权限策略
+    .permission_service(my_service)               // 统一权限服务（推荐）
     .audit_logger(my_logger)                      // 审计日志
 ```
 

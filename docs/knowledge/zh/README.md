@@ -8,10 +8,10 @@
 
 | 文档 | 描述 |
 |------|------|
-| [Agent 模式](./agent-patterns.md) | ReAct、Plan-and-Execute、Self-Reflection、LangGraph 工作流等 AI Agent 核心模式 |
-| [MCP 协议](./mcp-protocol.md) | Model Context Protocol 规范与 echo-agent 集成实现 |
-| [Skill 系统](./skill-system.md) | agentskills.io 规范、渐进式披露、代码型/文件型技能 |
-| [A2A 协议](./a2a-protocol.md) | Agent-to-Agent 协议、Agent Card、任务状态机 |
+| [Agent 模式](agent-patterns.md) | ReAct、Plan-and-Execute、Self-Reflection、LangGraph 工作流等 AI Agent 核心模式 |
+| [MCP 协议](mcp-protocol.md) | Model Context Protocol 规范与 echo-agent 集成实现 |
+| [Skill 系统](skill-system.md) | agentskills.io 规范、渐进式披露、代码型/文件型技能 |
+| [A2A 协议](a2a-protocol.md) | Agent-to-Agent 协议、Agent Card、任务状态机 |
 
 ---
 

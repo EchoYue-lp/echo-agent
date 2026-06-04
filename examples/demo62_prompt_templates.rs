@@ -6,7 +6,7 @@
 //! 2. 默认值语法 `{{name:default}}`
 //! 3. 条件块 `{{#if var}}…{{#else}}…{{#endif}}`
 //! 4. 模板组合 / 继承（通过 render_template 嵌套渲染）
-//! 5. 与 ModeEngine / LocalizedModeEngine 集成
+//! 5. 线程安全共享
 //!
 //! ```bash
 //! cargo run --example demo62_prompt_templates
@@ -39,12 +39,8 @@ async fn main() -> echo_agent::error::Result<()> {
     separator("Part 4: 模板组合 — 先渲染子模板，再嵌入父模板");
     demo_template_composition()?;
 
-    // ── Part 5: 与 ModeEngine 集成 ──────────────────────────────────────────
-    separator("Part 5: 与 ModeEngine / LocalizedModeEngine 集成");
-    demo_mode_engine_integration()?;
-
-    // ── Part 6: 线程安全共享 ────────────────────────────────────────────────
-    separator("Part 6: Arc<PromptTemplateManager> 线程安全共享");
+    // ── Part 5: 线程安全共享 ────────────────────────────────────────────────
+    separator("Part 5: Arc<PromptTemplateManager> 线程安全共享");
     demo_thread_safe_sharing()?;
 
     println!("\n{}", "═".repeat(64));
@@ -216,67 +212,7 @@ fn demo_template_composition() -> echo_agent::error::Result<()> {
     Ok(())
 }
 
-// ── Part 5: 与 ModeEngine 集成 ──────────────────────────────────────────────
-
-fn demo_mode_engine_integration() -> echo_agent::error::Result<()> {
-    // ── 5a. DefaultModeEngine 内置模板 ──
-    let default_engine = DefaultModeEngine;
-    let coding_config = default_engine.mode_config(&AgentMode::Coding);
-    println!("  [DefaultModeEngine] Coding 模式:");
-    println!(
-        "    Display: {} {}",
-        coding_config.icon, coding_config.display_name
-    );
-    println!("    推荐工具: {:?}", coding_config.recommended_tools);
-    println!(
-        "    系统提示 (前80字符): {:.80}...",
-        coding_config.system_prompt_template
-    );
-
-    // ── 5b. LocalizedModeEngine 中文本地化 ──
-    let zh_engine = LocalizedModeEngine::with_chinese();
-    let zh_coding = zh_engine.mode_config(&AgentMode::Coding);
-    println!("\n  [LocalizedModeEngine] 编程模式 (中文):");
-    println!("    Display: {} {}", zh_coding.icon, zh_coding.display_name);
-    println!(
-        "    系统提示 (前80字符): {:.80}...",
-        zh_coding.system_prompt_template
-    );
-
-    // ── 5c. 从 DefaultModeEngine 加载到 PromptTemplateManager ──
-    let manager = PromptTemplateManager::with_default_mode_templates();
-    let names = manager.template_names();
-    println!("\n  [PromptTemplateManager::with_default_mode_templates()]");
-    println!("    已注册模板: {:?}", names);
-    assert!(manager.contains("mode_general"));
-    assert!(manager.contains("mode_coding"));
-    assert!(manager.contains("mode_research"));
-    assert!(manager.contains("mode_data"));
-    assert!(manager.contains("mode_writing"));
-
-    // 渲染一个内置模式模板
-    let general_prompt = manager.render("mode_general", &[])?;
-    println!("    mode_general 渲染: {:.60}...", general_prompt);
-
-    // ── 5d. 自定义模式覆盖 + 模板注册 ──
-    let custom_engine = LocalizedModeEngine::new().with_override(
-        AgentMode::Coding,
-        "你是 {{team}} 团队的专属编程助手。".into(),
-    );
-    let custom_config = custom_engine.mode_config(&AgentMode::Coding);
-    // 将带变量的自定义模板注册到 PromptTemplateManager
-    let custom_manager = PromptTemplateManager::new();
-    custom_manager.register("custom_coding", &custom_config.system_prompt_template);
-    let rendered = custom_manager.render("custom_coding", &[("team", "Platform")])?;
-    println!("\n  [自定义模式覆盖]");
-    println!("    渲染: \"{rendered}\"");
-    assert_eq!(rendered, "你是 Platform 团队的专属编程助手。");
-
-    println!("  → ModeEngine 集成 ✓");
-    Ok(())
-}
-
-// ── Part 6: 线程安全共享 ────────────────────────────────────────────────────
+// ── Part 5: 线程安全共享 ────────────────────────────────────────────────────
 
 fn demo_thread_safe_sharing() -> echo_agent::error::Result<()> {
     let manager = Arc::new(PromptTemplateManager::new());

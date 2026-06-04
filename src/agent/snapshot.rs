@@ -11,7 +11,6 @@ use crate::audit::AuditLogger;
 use crate::memory::checkpointer::Checkpointer;
 use crate::memory::snapshot::SnapshotManager;
 use crate::skills::hooks::HookRegistry;
-use crate::tools::permission::PermissionPolicy;
 use crate::tools::{ToolExecutionConfig, ToolManager};
 use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
@@ -91,7 +90,6 @@ impl ToolRuntime {
 /// Guard / safety state. Shared via `Arc`.
 #[derive(Clone)]
 pub struct GuardRuntime {
-    pub permission_policy: Option<Arc<dyn PermissionPolicy>>,
     pub audit_logger: Option<Arc<dyn AuditLogger>>,
     pub circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
@@ -99,7 +97,6 @@ pub struct GuardRuntime {
 impl GuardRuntime {
     pub fn from_agent(agent: &super::ReactAgent) -> Self {
         Self {
-            permission_policy: agent.guard.permission_policy.clone(),
             audit_logger: agent.guard.audit_logger.clone(),
             circuit_breaker: agent.guard.circuit_breaker.clone(),
         }

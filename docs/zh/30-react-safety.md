@@ -148,14 +148,15 @@ detector.reset();
 
 与 `04-compression.md` 中介绍的 `SlidingWindowCompressor` / `SummaryCompressor` 不同，`AdaptiveCompressor`（位于 `echo-state` crate）提供**渐进式多级压缩**：从最轻量的输出裁剪到最激进的紧急压缩，逐级升级，只在必要时才使用更昂贵的策略。
 
-### 5 个压缩级别
+### 压缩级别
 
 | 级别 | 名称 | 触发阈值（默认） | 策略 | 是否需要 LLM |
 |------|------|-------------------|------|-------------|
-| L1 | **Snip** | 80,000 tokens | 裁剪超大工具输出（超过 `l1_max_output_tokens` 的截断） | 否 |
+| L1 Snip | **Snip** | 80,000 tokens | 裁剪超大工具输出（超过 `l1_max_output_tokens` 的截断） | 否 |
+| L1 Fold | **Fold** | （Snip 后执行） | 折叠连续的工具结果，保留最新 N 条 | 否 |
 | L2 | **Micro** | 100,000 tokens | 截取工具输出的首尾各 N 行，删除中间部分 | 否 |
 | L3 | **Collapse** | 120,000 tokens | 移除较早的消息，仅保留最近 N 条 + system 消息 | 否 |
-| L4 | **Compact** | 150,000 tokens | 调用 LLM 对旧消息进行完整摘要（由外部处理） | 是 |
+| L4 | **Compact** | 150,000 tokens | 调用 LLM 对旧消息进行完整摘要（通过 `.with_llm()` 启用） | 是（可选） |
 | L5 | **Reactive** | 紧急 | 仅保留 system 提示 + 最近 3 条消息 | 否 |
 
 ### 压缩流程
@@ -164,15 +165,20 @@ detector.reset();
 compress(messages, current_tokens, target_tokens):
     │
     ├─ tokens > L1 阈值且 > target？ → 裁剪超大工具输出（Snip）
+    │                                → 折叠连续工具结果（Fold）
     │
     ├─ tokens > L2 阈值且 > target？ → 截取首尾行（Micro）
     │
     ├─ tokens > L3 阈值且 > target？ → 移除旧消息（Collapse）
     │
+    ├─ tokens > L4 阈值且 > target 且配置了 LLM？ → LLM 摘要（Compact）
+    │
     └─ tokens > L4 阈值且 > 2×target？ → 紧急模式（Reactive）
 
-注意：L4 需要 LLM 调用，由 Agent 外部逻辑处理；
-      AdaptiveCompressor 内部实现 L1、L2、L3、L5。
+注意：L4 需要通过 .with_llm() 配置 LLM 客户端。未配置时，
+      AdaptiveCompressor 跳过 L4 并降级到 L5。
+      AdaptiveCompressor 同时实现了 ContextCompressor trait，
+      可直接通过 ContextManager::builder().compressor() 集成。
 ```
 
 ### AdaptiveCompressionConfig 配置
@@ -181,14 +187,16 @@ compress(messages, current_tokens, target_tokens):
 use echo_state::compression::levels::AdaptiveCompressionConfig;
 
 let config = AdaptiveCompressionConfig {
-    l1_snip_threshold_tokens: 80_000,     // L1 触发阈值
-    l1_max_output_tokens: 4_000,          // 单个工具输出最大 token 数
-    l2_micro_threshold_tokens: 100_000,   // L2 触发阈值
-    l2_keep_lines: 50,                    // 截取首尾各多少行
-    l3_collapse_threshold_tokens: 120_000,// L3 触发阈值
-    l3_keep_recent: 10,                   // 保留最近多少条消息
-    l4_compact_threshold_tokens: 150_000, // L4/L5 触发阈值
-    l4_keep_recent: 6,                    // L4 保留消息数（外部使用）
+    l1_snip_threshold_tokens: 80_000,      // L1 Snip 触发阈值
+    l1_max_output_tokens: 4_000,           // 单个工具输出最大 token 数
+    l1_fold_consecutive_tools: true,       // L1 Fold: 折叠连续工具结果
+    l1_fold_keep_latest: 2,               // L1 Fold: 每组保留最新 N 条
+    l2_micro_threshold_tokens: 100_000,    // L2 触发阈值
+    l2_keep_lines: 50,                     // 截取首尾各多少行
+    l3_collapse_threshold_tokens: 120_000, // L3 触发阈值
+    l3_keep_recent: 10,                    // 保留最近多少条消息
+    l4_compact_threshold_tokens: 150_000,  // L4/L5 触发阈值
+    l4_keep_recent: 6,                     // L4 保留消息数
 };
 ```
 
@@ -198,7 +206,11 @@ let config = AdaptiveCompressionConfig {
 use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
 use echo_core::llm::types::{Message, MessageContent, Role};
 
+// 不带 LLM（L4 被跳过）：
 let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default());
+
+// 带 LLM（L4 启用）：
+// let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default()).with_llm(llm);
 
 let mut messages: Vec<Message> = vec![
     Message::system("你是一个助手"),
@@ -207,7 +219,7 @@ let mut messages: Vec<Message> = vec![
     // ... 更多消息
 ];
 
-let result = compressor.compress(
+let result = compressor.compress_in_place(
     &mut messages,
     130_000, // current_tokens: 当前估算 token 数
     80_000,  // target_tokens: 目标 token 数
@@ -216,7 +228,7 @@ let result = compressor.compress(
 println!("压缩前: {} tokens", result.tokens_before);
 println!("压缩后: {} tokens", result.tokens_after);
 println!("应用的级别: {:?}", result.levels_applied);
-// 输出: ["L1:Snip", "L2:Micro", "L3:Collapse"]
+// 输出: ["L1:Snip", "L1:Fold", "L2:Micro", "L3:Collapse"]
 ```
 
 ### 与上下文管理的集成
@@ -235,11 +247,15 @@ let agent = ReactAgent::new(config);
 
 ### 各级别详细说明
 
-**L1 Snip** — 对超过 `l1_max_output_tokens` 的 Tool 消息输出进行截断，保留前 N 个 token 对应的字符，附加 `[output truncated]` 提示。
+**L1 Snip** — 对超过 `l1_max_output_tokens` 的 Tool 消息输出进行截断，保留前 N 个 token 对应的字符（使用字符边界安全切片，避免 UTF-8 panic），附加 `[output truncated]` 提示。
+
+**L1 Fold** — 折叠连续的工具结果消息。保留最新 `l1_fold_keep_latest` 条消息，将较旧的替换为一条 `[L1 fold: N consecutive tool results collapsed]` 用户消息。当 `l1_fold_consecutive_tools` 为 true 时，在 Snip 后执行。
 
 **L2 Micro** — 对 Tool 消息输出按行截取：保留首 `l2_keep_lines` 行和尾 `l2_keep_lines` 行，中间部分替换为 `[N lines truncated]`。
 
 **L3 Collapse** — 保留所有 System 消息和最近 `l3_keep_recent` 条消息，移除中间消息，插入一条 `[Context compressed: N older messages removed]` 的 System 消息作为说明。
+
+**L4 Compact** — 对旧消息进行完整 LLM 摘要。仅当通过 `AdaptiveCompressor::with_llm(llm)` 配置了 LLM 客户端时才激活。LLM 调用失败时，优雅降级到 L5。
 
 **L5 Reactive** — 紧急模式，仅保留 System 消息和最近 3 条消息。插入 `[Emergency compression: context was critically large]` 提示。仅在 token 数超过 `l4_compact_threshold_tokens` 且超过目标值 2 倍时触发。
 
@@ -362,6 +378,8 @@ async fn main() -> Result<()> {
 |------|------|--------|------|
 | `l1_snip_threshold_tokens` | `usize` | 80,000 | L1 Snip 触发阈值 |
 | `l1_max_output_tokens` | `usize` | 4,000 | 单个工具输出最大 token 数 |
+| `l1_fold_consecutive_tools` | `bool` | true | L1 Fold: 折叠连续工具结果 |
+| `l1_fold_keep_latest` | `usize` | 2 | L1 Fold: 每组保留最新 N 条 |
 | `l2_micro_threshold_tokens` | `usize` | 100,000 | L2 Micro 触发阈值 |
 | `l2_keep_lines` | `usize` | 50 | 截取首尾各多少行 |
 | `l3_collapse_threshold_tokens` | `usize` | 120,000 | L3 Collapse 触发阈值 |

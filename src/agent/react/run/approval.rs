@@ -1,8 +1,12 @@
 //! Tool execution approval (human-in-the-loop)
 
 use super::super::ReactAgent;
+#[cfg(feature = "human-loop")]
+use crate::error::ReactError;
 use crate::error::Result;
 use serde_json::Value;
+#[cfg(feature = "human-loop")]
+use tracing::{info, warn};
 
 impl ReactAgent {
     #[cfg(feature = "human-loop")]
@@ -44,31 +48,11 @@ impl ReactAgent {
             return decision.requires_approval();
         }
 
-        // 2. PermissionPolicy fallback
-        if let Some(policy) = &self.guard.permission_policy {
-            let tool_perms = self
-                .tools
-                .tool_manager
-                .get_tool(tool_name)
-                .map(|t| t.permissions())
-                .unwrap_or_default();
-
-            if !tool_perms.is_empty() {
-                let decision = policy.check(tool_name, &tool_perms).await;
-                if matches!(
-                    decision,
-                    crate::tools::permission::PermissionDecision::RequireApproval
-                        | crate::tools::permission::PermissionDecision::Ask { .. }
-                ) {
-                    return true;
-                }
-            }
-        }
-
         false
     }
 
     #[cfg(not(feature = "human-loop"))]
+    #[allow(dead_code)]
     pub(crate) async fn tool_needs_approval(&self, _tool_name: &str) -> bool {
         false
     }
@@ -179,43 +163,6 @@ impl ReactAgent {
             }
         }
 
-        // ── Phase 1 (fallback): PermissionPolicy check ──
-        if let Some(policy) = &self.guard.permission_policy {
-            let tool_perms = self
-                .tools
-                .tool_manager
-                .get_tool(tool_name)
-                .map(|t| t.permissions())
-                .unwrap_or_default();
-
-            if !tool_perms.is_empty() {
-                let decision = policy.check(tool_name, &tool_perms).await;
-                match decision {
-                    crate::tools::permission::PermissionDecision::Allow => {}
-                    crate::tools::permission::PermissionDecision::Deny { reason } => {
-                        let hook_result = self
-                            .log_permission_denied(tool_name, &tool_perms, &reason)
-                            .await;
-                        let retry_hint = if hook_result.retry {
-                            " (retry allowed by hook)"
-                        } else {
-                            ""
-                        };
-                        return Err(ReactError::Other(format!(
-                            "Tool {tool_name} has insufficient permissions: {reason}{retry_hint}"
-                        )));
-                    }
-                    crate::tools::permission::PermissionDecision::RequireApproval => {
-                        info!(agent = %agent, tool = %tool_name, "🔐 PermissionPolicy requires human approval");
-                        return self.request_human_approval(tool_name, input).await;
-                    }
-                    crate::tools::permission::PermissionDecision::Ask { suggestions } => {
-                        return self.handle_ask_decision(tool_name, &suggestions).await;
-                    }
-                }
-            }
-        }
-
         Ok(None)
     }
 
@@ -307,9 +254,25 @@ impl ReactAgent {
                     reason.map(|r| format!(", reason: {r}")).unwrap_or_default()
                 )));
             }
-            _ => {
+            crate::human_loop::HumanLoopResponse::Timeout => {
                 return Err(ReactError::Other(format!(
                     "Tool {tool_name} user confirmation timed out"
+                )));
+            }
+            crate::human_loop::HumanLoopResponse::ApprovedWithScope { .. } => {
+                info!(agent = %agent, tool = %tool_name, "✅ User confirmed execution (with scope)");
+            }
+            crate::human_loop::HumanLoopResponse::ModifiedArgs { .. } => {
+                info!(agent = %agent, tool = %tool_name, "✅ User confirmed execution (modified args)");
+            }
+            crate::human_loop::HumanLoopResponse::Deferred => {
+                return Err(ReactError::Other(format!(
+                    "Tool {tool_name} user deferred confirmation"
+                )));
+            }
+            crate::human_loop::HumanLoopResponse::Selection { .. } => {
+                return Err(ReactError::Other(format!(
+                    "Tool {tool_name} received unexpected Selection response in ask flow"
                 )));
             }
         }
@@ -416,6 +379,9 @@ impl ReactAgent {
                 crate::human_loop::HumanLoopResponse::Text(_) => {
                     ("unexpected".into(), "once".into(), None)
                 }
+                crate::human_loop::HumanLoopResponse::Selection { .. } => {
+                    ("unexpected".into(), "once".into(), None)
+                }
             };
             let event = crate::audit::AuditEvent::now(
                 self.config.session_id.clone(),
@@ -466,6 +432,12 @@ impl ReactAgent {
             }
             crate::human_loop::HumanLoopResponse::Text(_) => {
                 warn!(agent = %agent, tool = %tool_name, "⚠️ Approval request received unexpected Text response");
+                Err(ReactError::Other(format!(
+                    "Tool {tool_name} approval abnormal, execution skipped"
+                )))
+            }
+            crate::human_loop::HumanLoopResponse::Selection { .. } => {
+                warn!(agent = %agent, tool = %tool_name, "⚠️ Approval request received unexpected Selection response");
                 Err(ReactError::Other(format!(
                     "Tool {tool_name} approval abnormal, execution skipped"
                 )))

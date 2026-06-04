@@ -6,12 +6,12 @@ These three components work together to provide flexible Agent creation and conf
 
 | Component | Responsibility | Module |
 |-----------|---------------|--------|
-| Agent Factory | Create agents by execution paradigm | `echo-core::agent::factory` + `echo_agent::agent::default_factory` |
+| Agent Factory | Create Agent instances | `echo-core::agent::factory` + `echo_agent::agent::default_factory` |
 | Mode Engine | Customize system prompts and tool recommendations per work mode | `echo-core::agent::mode` + `echo_agent::agent::mode_engine` |
 | Prompt Templates | Dynamic prompt generation with variable substitution | `echo-core::agent::prompt_template` |
 
 ```
-User request → AgentFactory (choose paradigm) → ModeEngine (choose mode) → PromptTemplate (render prompt) → Agent
+User request → AgentFactory (create Agent) → ModeEngine (choose mode) → PromptTemplate (render prompt) → Agent
 ```
 
 ---
@@ -20,16 +20,9 @@ User request → AgentFactory (choose paradigm) → ModeEngine (choose mode) →
 
 ### What It Is
 
-Agent Factory implements the factory pattern, creating different Agent types based on `AgentParadigm` (execution paradigm). Callers do not need to know concrete Agent implementations — they provide a configuration and receive the corresponding paradigm's Agent instance.
+Agent Factory implements the factory pattern for creating Agent instances. Callers do not need to know concrete Agent implementations — they provide a configuration and receive a configured Agent instance.
 
-### Execution Paradigms (AgentParadigm)
-
-| Paradigm | Description | Use Cases |
-|----------|-------------|-----------|
-| `React` | Think-Act-Observe loop (default) | General tasks, conversation, code writing |
-| `PlanExecute` | Plan steps first, then execute each step | Complex multi-step tasks, project management |
-| `SelfReflection` | Generate → critique → refine cycle | High-quality output for writing, analysis |
-| `Structured` | Schema-constrained output | Deterministic responses for data extraction, API calls |
+> **Architecture Note**: The framework uses a single Agent engine (ReactAgent) design, where different execution strategies are implemented through tools and configuration rather than separate Agent types. This aligns with industry-leading frameworks (Hermes, Claude Code, LangGraph, etc.).
 
 ### AgentFactoryConfig
 
@@ -37,21 +30,11 @@ Agent Factory implements the factory pattern, creating different Agent types bas
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `paradigm` | `AgentParadigm` | Execution paradigm |
 | `mode` | `Option<AgentMode>` | Optional work mode (e.g., Coding, Research) |
 | `model` | `String` | LLM model identifier (e.g., "qwen3-max") |
 | `name` | `String` | Agent name (for logging and orchestration) |
 | `system_prompt` | `String` | System prompt |
 | `tools` | `Vec<Box<dyn Tool>>` | Custom tool list |
-
-Convenience constructors:
-
-```rust
-AgentFactoryConfig::react()           // React paradigm
-AgentFactoryConfig::plan_execute()    // PlanExecute paradigm
-AgentFactoryConfig::self_reflection() // SelfReflection paradigm
-AgentFactoryConfig::structured()      // Structured paradigm
-```
 
 ### AgentFactory Trait
 
@@ -67,12 +50,9 @@ Any type implementing this trait can serve as an Agent factory. The framework pr
 
 `DefaultAgentFactory` is the concrete factory implementation provided by the facade layer (`echo_agent`), built on `ReactAgentBuilder`:
 
-| Paradigm | Builder Configuration |
-|----------|----------------------|
-| React | `.enable_tools()` |
-| PlanExecute | `.enable_tools().enable_planning()` |
-| SelfReflection | `.enable_tools()` (reflection loop is built-in) |
-| Structured | `.enable_tools()` (structured output configured separately) |
+| Configuration | Builder Configuration |
+|--------------|----------------------|
+| Default | `.enable_tools()` |
 
 > **Note**: `echo-core` also defines a `DefaultAgentFactory`, but it is a stub that returns an error. For actual use, always use `echo_agent::agent::default_factory::DefaultAgentFactory`.
 
@@ -80,28 +60,39 @@ Any type implementing this trait can serve as an Agent factory. The framework pr
 
 ```rust
 use echo_agent::agent::default_factory::DefaultAgentFactory;
-use echo_agent::agent::factory::{AgentFactoryConfig, AgentParadigm};
+use echo_agent::agent::factory::AgentFactoryConfig;
 use echo_core::agent::factory::AgentFactory;
 
 let factory = DefaultAgentFactory;
 
-// Create a React paradigm coding assistant
-let config = AgentFactoryConfig::react()
+// Create a coding assistant
+let config = AgentFactoryConfig::new()
     .model("qwen3-max")
     .name("coder")
-    .with_system_prompt("You are a coding assistant");
+    .with_system_prompt("You are a coding assistant")
+    .with_mode(AgentMode::Coding);
 
 let agent = factory.create_agent(config)?;
 println!("Agent: {}, Model: {}", agent.name(), agent.model_name());
 
-// Create a PlanExecute paradigm research assistant
-let config = AgentFactoryConfig::plan_execute()
+// Create a research assistant
+let config = AgentFactoryConfig::new()
     .model("qwen3-max")
     .name("researcher")
     .with_mode(AgentMode::Research);
 
 let agent = factory.create_agent(config)?;
 ```
+
+### Extended Capabilities
+
+ReactAgent implements different execution strategies through tools and configuration:
+
+| Strategy | Implementation | Example |
+|----------|---------------|---------|
+| Task Planning | Register plan/create_task tools + `execute_with_planning()` | Complex multi-step tasks |
+| Self-Review | Register ReviewTool + LlmCritic | High-quality output |
+| Multi-Agent Collaboration | SubAgent system | Parallel task execution |
 
 ---
 
@@ -165,23 +156,23 @@ pub trait ModeEngine: Send + Sync {
 use echo_agent::agent::mode_engine::LocalizedModeEngine;
 use echo_core::agent::mode::{AgentMode, ModeEngine};
 
-// Use Chinese prompts
-let engine = LocalizedModeEngine::with_chinese();
-let config = engine.mode_config(&AgentMode::Coding);
-println!("Prompt: {}", config.system_prompt_template);  // Chinese prompt
-println!("Display: {}", config.display_name);           // "编程"
-println!("Tools: {:?}", config.recommended_tools);      // 7 tools
-
-// Custom overrides
+// Build a localized engine (prompts and display names provided by the application)
 let engine = LocalizedModeEngine::new()
-    .with_override(AgentMode::Coding, "Custom coding prompt".into())
+    .with_override(AgentMode::Coding, "You are a professional coding assistant…".into())
     .with_display_name(AgentMode::Coding, "Code".into());
 
-// Supports both English and Chinese name resolution
-assert_eq!(LocalizedModeEngine::from_str("coding"), Some(AgentMode::Coding));
-assert_eq!(LocalizedModeEngine::from_str("code"), Some(AgentMode::Coding));
-assert_eq!(LocalizedModeEngine::from_str("research"), Some(AgentMode::Research));
-assert_eq!(LocalizedModeEngine::from_str("编程"), Some(AgentMode::Coding));
+let config = engine.mode_config(&AgentMode::Coding);
+println!("Prompt: {}", config.system_prompt_template);  // Custom prompt
+println!("Display: {}", config.display_name);           // "Code"
+println!("Tools: {:?}", config.recommended_tools);      // 7 tools (inherited from defaults)
+
+// English-only parsing (framework level)
+assert_eq!(LocalizedModeEngine::parse_from_str("coding"), Some(AgentMode::Coding));
+assert_eq!(LocalizedModeEngine::parse_from_str("code"), Some(AgentMode::Coding));
+assert_eq!(LocalizedModeEngine::parse_from_str("research"), Some(AgentMode::Research));
+
+// Localized aliases (e.g. Chinese) are the application's responsibility
+// (see echo-agent-cli's modes module for an example)
 ```
 
 ### Mode Parsing
@@ -383,10 +374,9 @@ assert_eq!(r2, "Hello, B!");
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. Choose paradigm → AgentFactoryConfig::plan_execute()      │
-│ 2. Choose mode     → .with_mode(AgentMode::Coding)           │
-│ 3. Choose model    → .model("qwen3-max")                     │
-│ 4. Create Agent    → factory.create_agent(config)?           │
+│ 1. Choose mode     → .with_mode(AgentMode::Coding)           │
+│ 2. Choose model    → .model("qwen3-max")                     │
+│ 3. Create Agent    → factory.create_agent(config)?           │
 │                                                             │
 │    Internal flow:                                            │
 │    ┌────────────────────────────────────────────────────┐   │
@@ -400,11 +390,10 @@ assert_eq!(r2, "Hello, B!");
 │    │ ReactAgentBuilder                                   │   │
 │    │   → .system_prompt(rendered_prompt)                 │   │
 │    │   → .tools(recommended_tools)                       │   │
-│    │   → .enable_planning()  // PlanExecute paradigm     │   │
 │    │   → .build_boxed()                                  │   │
 │    └────────────────────────────────────────────────────┘   │
 │                                                             │
-│ 5. Return Box<dyn Agent>                                     │
+│ 4. Return Box<dyn Agent>                                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -419,7 +408,9 @@ use echo_core::agent::prompt_template::PromptTemplateManager;
 
 // 1. Initialize components
 let factory = DefaultAgentFactory;
-let mode_engine = LocalizedModeEngine::with_chinese();
+let mode_engine = LocalizedModeEngine::new()
+    .with_override(AgentMode::Coding, "You are a professional coding assistant…".into())
+    .with_display_name(AgentMode::Coding, "Code".into());
 let template_manager = PromptTemplateManager::with_default_mode_templates();
 
 // 2. Get mode configuration
@@ -433,7 +424,7 @@ let system_prompt = template_manager.render("custom_coding", &[
 ])?;
 
 // 4. Create Agent
-let config = AgentFactoryConfig::plan_execute()
+let config = AgentFactoryConfig::new()
     .model("qwen3-max")
     .name("rust-coder")
     .with_mode(mode)
@@ -445,15 +436,6 @@ let agent = factory.create_agent(config)?;
 ---
 
 ## Configuration Reference
-
-### AgentParadigm Parsing
-
-| Input String | Parsed Result |
-|-------------|---------------|
-| `"react"` | `AgentParadigm::React` |
-| `"plan-execute"` / `"plan_execute"` | `AgentParadigm::PlanExecute` |
-| `"self-reflection"` / `"self_reflection"` | `AgentParadigm::SelfReflection` |
-| `"structured"` | `AgentParadigm::Structured` |
 
 ### AgentMode Parsing (LocalizedModeEngine)
 
@@ -469,7 +451,6 @@ let agent = factory.create_agent(config)?;
 
 | Field | Default Value |
 |-------|--------------|
-| `paradigm` | `AgentParadigm::React` |
 | `mode` | `None` |
 | `model` | `""` |
 | `name` | `"assistant"` |
@@ -524,7 +505,7 @@ pub struct MyAgentFactory;
 
 impl AgentFactory for MyAgentFactory {
     fn create_agent(&self, config: AgentFactoryConfig) -> Result<Box<dyn Agent>> {
-        // Custom creation logic based on config.paradigm()
+        // Custom creation logic
         // Can inject custom LLM clients, middleware, etc.
         todo!("Custom Agent creation logic")
     }

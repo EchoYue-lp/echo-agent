@@ -761,7 +761,7 @@ async fn execute_action(
         HookAction::Agent {
             name,
             task,
-            timeout,
+            timeout: _,
             ..
         } => {
             // Agent hook action: spawn a subagent to handle the task.

@@ -5,9 +5,9 @@
 //! ## 设计原则
 //!
 //! - **事件驱动**: 审批请求通过事件通知上层应用，而非直接阻塞
-//! - **统一入口**: 用户输入和审批响应共用同一个输入通道
+//! - **统一入口**: 用户输入、审批响应和任务选择共用同一个输入通道
 //! - **异步解耦**: Agent 执行与用户交互分离，支持复杂 UI 场景
-//! - **策略驱动**: 通过 [`ApprovalPolicy`] 配置审批策略，支持风险等级和会话缓存
+//! - **策略驱动**: 通过 `PermissionService` 配置权限策略，支持风险等级和会话缓存
 //!
 //! ## 使用示例
 //!
@@ -33,6 +33,11 @@
 //!                 println!("Agent 询问: {}", prompt);
 //!                 responder.respond("用户输入的内容".to_string());
 //!             }
+//!             HumanLoopEvent::SelectionRequest { task_id, options, responder, .. } => {
+//!                 println!("任务 '{}' 需要选择", task_id);
+//!                 let selection = options.first().cloned().unwrap_or_default();
+//!                 responder.respond(selection, None);
+//!             }
 //!         }
 //!     }
 //! });
@@ -42,7 +47,6 @@
 //! # }
 //! ```
 
-pub mod adapter;
 mod approval_cache;
 mod audit;
 mod batch;
@@ -73,7 +77,7 @@ pub use permission::{
     PermissionRequestHandler, PermissionResponse, PermissionResponseDecision, PermissionUpdate,
     RiskLevel, SuggestedAction, Suggestion,
 };
-pub use policy::{ApprovalPolicy, ApprovalRule, ApprovalScope, PolicyDecision};
+pub use policy::{ApprovalRule, ApprovalScope, PolicyDecision};
 pub use protected::{ProtectedPathChecker, ProtectedPathResult};
 pub use service::PermissionService;
 pub use webhook::WebhookHumanLoopProvider;
@@ -216,6 +220,43 @@ impl std::fmt::Debug for InputResponder {
     }
 }
 
+/// 选择响应器：用于任务 checkpoint 的选项选择
+pub struct SelectionResponder {
+    sender: Option<oneshot::Sender<(String, Option<String>)>>,
+}
+
+impl SelectionResponder {
+    fn new(sender: oneshot::Sender<(String, Option<String>)>) -> Self {
+        Self {
+            sender: Some(sender),
+        }
+    }
+
+    /// 返回用户的选择和可选指令
+    pub fn respond(mut self, selection: String, instructions: Option<String>) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send((selection, instructions));
+        }
+    }
+}
+
+impl Drop for SelectionResponder {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            // 未响应时默认取消
+            let _ = sender.send(("cancel".to_string(), None));
+        }
+    }
+}
+
+impl std::fmt::Debug for SelectionResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectionResponder")
+            .field("has_sender", &self.sender.is_some())
+            .finish()
+    }
+}
+
 // ── 事件 ───────────────────────────────────────────────────────────────────
 
 /// 人工介入事件（通知上层应用需要用户介入）
@@ -244,6 +285,22 @@ pub enum HumanLoopEvent {
         prompt: String,
         /// 响应器：用于返回用户输入
         responder: InputResponder,
+    },
+
+    /// 任务 checkpoint 选择请求
+    SelectionRequest {
+        /// 任务 ID
+        task_id: String,
+        /// 给用户的提示信息
+        prompt: String,
+        /// 可选项列表
+        options: Vec<String>,
+        /// 上下文数据
+        context: Value,
+        /// 阶段名称
+        phase: String,
+        /// 响应器：用于返回用户选择
+        responder: SelectionResponder,
     },
 }
 
@@ -413,6 +470,44 @@ impl HumanLoopProvider for HumanLoopManager {
 
                     Ok(HumanLoopResponse::Text(text))
                 }
+                HumanLoopKind::Selection => {
+                    let (tx, rx) = oneshot::channel();
+                    let responder = SelectionResponder::new(tx);
+
+                    let event = HumanLoopEvent::SelectionRequest {
+                        task_id: req.task_id.clone().unwrap_or_default(),
+                        prompt: req.prompt.clone(),
+                        options: req.options.clone().unwrap_or_default(),
+                        context: req.context.clone().unwrap_or(Value::Null),
+                        phase: req.phase.clone().unwrap_or_default(),
+                        responder,
+                    };
+
+                    self.event_tx
+                        .send(event)
+                        .await
+                        .map_err(|_| ReactError::Other("HumanLoop channel closed".to_string()))?;
+
+                    let result = if let Some(timeout) = req.timeout {
+                        match tokio::time::timeout(timeout, rx).await {
+                            Ok(r) => r.map_err(|_| {
+                                ReactError::Other("Selection responder dropped".to_string())
+                            })?,
+                            Err(_) => {
+                                return Ok(HumanLoopResponse::Timeout);
+                            }
+                        }
+                    } else {
+                        rx.await.map_err(|_| {
+                            ReactError::Other("Selection responder dropped".to_string())
+                        })?
+                    };
+
+                    Ok(HumanLoopResponse::Selection {
+                        selection: result.0,
+                        instructions: result.1,
+                    })
+                }
             }
         })
     }
@@ -435,6 +530,26 @@ pub trait HumanLoopHandler: Send + Sync {
 
     /// 文本输入请求：展示提示信息，收集用户的自由文本输入
     fn on_input<'a>(&'a self, prompt: &'a str) -> BoxFuture<'a, String>;
+
+    /// 任务 checkpoint 选择：展示选项列表，收集用户的选择
+    ///
+    /// 默认实现选择第一个选项（向后兼容）。
+    fn on_selection<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _prompt: &'a str,
+        options: &'a [String],
+        _context: &'a Value,
+        _phase: &'a str,
+    ) -> BoxFuture<'a, (String, Option<String>)> {
+        Box::pin(async move {
+            let selection = options
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "approve".to_string());
+            (selection, None)
+        })
+    }
 }
 
 /// 将一个 [`HumanLoopEvent`] 分发给 `handler` 处理
@@ -454,6 +569,19 @@ pub async fn dispatch_event(event: HumanLoopEvent, handler: &dyn HumanLoopHandle
             let text = handler.on_input(&prompt).await;
             responder.respond(text);
         }
+        HumanLoopEvent::SelectionRequest {
+            task_id,
+            prompt,
+            options,
+            context,
+            phase,
+            responder,
+        } => {
+            let (selection, instructions) = handler
+                .on_selection(&task_id, &prompt, &options, &context, &phase)
+                .await;
+            responder.respond(selection, instructions);
+        }
     }
 }
 
@@ -466,6 +594,8 @@ pub enum HumanLoopKind {
     Approval,
     /// 交互澄清：需要用户回复自由文本
     Input,
+    /// 任务 checkpoint：用户从预定义选项中选择
+    Selection,
 }
 
 /// 向人工发起的介入请求
@@ -483,6 +613,14 @@ pub struct HumanLoopRequest {
     pub risk_level: Option<RiskLevel>,
     /// 超时时长（None 表示无限等待）
     pub timeout: Option<Duration>,
+    /// 任务 ID（Selection 场景：标识等待中的任务）
+    pub task_id: Option<String>,
+    /// 可选项列表（Selection 场景：如 ["Approve", "Revise", "Cancel"]）
+    pub options: Option<Vec<String>>,
+    /// 任意上下文数据（Selection 场景：如草稿内容）
+    pub context: Option<Value>,
+    /// 阶段名称（Selection 场景：等待输入的管线阶段）
+    pub phase: Option<String>,
 }
 
 impl HumanLoopRequest {
@@ -496,6 +634,10 @@ impl HumanLoopRequest {
             args: Some(args),
             risk_level: None,
             timeout: None,
+            task_id: None,
+            options: None,
+            context: None,
+            phase: None,
         }
     }
 
@@ -513,6 +655,10 @@ impl HumanLoopRequest {
             args: Some(args),
             risk_level: Some(risk_level),
             timeout: None,
+            task_id: None,
+            options: None,
+            context: None,
+            phase: None,
         }
     }
 
@@ -530,6 +676,10 @@ impl HumanLoopRequest {
             args: Some(args),
             risk_level: None,
             timeout: Some(timeout),
+            task_id: None,
+            options: None,
+            context: None,
+            phase: None,
         }
     }
 
@@ -542,7 +692,43 @@ impl HumanLoopRequest {
             args: None,
             risk_level: None,
             timeout: None,
+            task_id: None,
+            options: None,
+            context: None,
+            phase: None,
         }
+    }
+
+    /// 构造选择请求（任务 checkpoint 场景）
+    pub fn selection(
+        task_id: impl Into<String>,
+        prompt: impl Into<String>,
+        options: Vec<String>,
+    ) -> Self {
+        Self {
+            kind: HumanLoopKind::Selection,
+            prompt: prompt.into(),
+            task_id: Some(task_id.into()),
+            options: Some(options),
+            tool_name: None,
+            args: None,
+            risk_level: None,
+            timeout: None,
+            context: None,
+            phase: None,
+        }
+    }
+
+    /// 为选择请求添加上下文数据
+    pub fn with_context(mut self, context: Value) -> Self {
+        self.context = Some(context);
+        self
+    }
+
+    /// 为选择请求添加阶段名称
+    pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
+        self.phase = Some(phase.into());
+        self
     }
 }
 
@@ -565,6 +751,11 @@ pub enum HumanLoopResponse {
     Timeout,
     /// 用户推迟决策
     Deferred,
+    /// 用户选择了选项（任务 checkpoint 响应）
+    Selection {
+        selection: String,
+        instructions: Option<String>,
+    },
 }
 
 // ── Provider trait ──────────────────────────────────────────────────────────

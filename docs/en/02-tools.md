@@ -500,34 +500,27 @@ Tool calls no longer execute directly — they flow through a pluggable pipeline
 ### Pipeline Stages
 
 ```
-Tool Call → PlanMode → ReadBeforeEdit → Permission → ApprovalStack
-           → Sandbox → Execution → Output Truncation → Hooks → Trace
+Tool Call → InterventionStage → ParseValidate → PlanMode → PreToolUseHook
+           → Permission → ReadBeforeEdit → Callback(Start) → Execution
+           → TraceRecording → PostToolUseHook → OutputGuard → Truncation
+           → Callback(End)
 ```
 
 | Stage | Purpose |
 |-------|---------|
-| **PlanModeStage** | Intercept tool calls in planning mode |
+| **InterventionStage** | Intervention callbacks: block / cancel / redirect / modify_args |
+| **ParseValidate** | Parameter parsing and type validation |
+| **PlanMode** | Intercept write operations in planning mode |
+| **PreToolUseHook** | PreToolUse hooks: can modify input or block execution |
+| **Permission** | Permission check (PermissionService unified pipeline) |
 | **ReadBeforeEdit** | Force file read before edit (prevents blind writes) |
-| **Permission** | Check tool permissions (ToolPermission) |
-| **ApprovalStack** | Human approval stack (Once/Always/Deny policies) |
-| **Sandbox** | Isolated execution sandbox |
+| **Callback(Start)** | on_tool_start callbacks |
 | **Execution** | Actual tool execution |
-| **Output Truncation** | Head+tail truncation (70/30 split) |
-| **Hooks** | Trigger tool lifecycle hooks |
-| **Trace** | Record execution trace |
-
-### ApprovalStack Policies
-
-```rust
-use echo_agent::agent::ApprovalStack;
-
-let stack = ApprovalStack::new()
-    .with_default_policy("once");  // once | always | deny
-
-// Once: approve first time, remember decision
-// Always: require approval every time
-// Deny: auto-reject
-```
+| **TraceRecording** | Record trace events |
+| **PostToolUseHook** | PostToolUse hooks |
+| **OutputGuard** | Output content guard check |
+| **Truncation** | Output truncation (token budget) |
+| **Callback(End)** | on_tool_end callbacks |
 
 ### Configuring the Pipeline
 

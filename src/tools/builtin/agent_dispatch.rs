@@ -1,17 +1,60 @@
-use futures::future::BoxFuture;
-
+use crate::agent::subagent::ExecutionMode;
+use crate::agent::subagent::context::{ContextInheritance, SubagentContext};
 use crate::agent::subagent::executor::SubagentExecutor;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::agent::CancellationToken;
+use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Factory for lazily building parent context at dispatch time.
+///
+/// Holds Arc references to the parent agent's shared subsystems so
+/// that `SubagentContext` can be built with the latest messages and
+/// tool definitions when a dispatch actually occurs.
+pub struct ParentContextFactory {
+    /// Parent's system prompt.
+    pub system_prompt: String,
+    /// Parent's tool manager (to get current tool definitions).
+    pub tool_manager: Arc<crate::tools::ToolManager>,
+    /// Parent's context manager (to get recent messages).
+    pub context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+    /// Parent's memory store (for sharing with subagent).
+    pub store: Option<Arc<dyn crate::memory::Store>>,
+}
+
+impl ParentContextFactory {
+    /// Build a SubagentContext using the specified inheritance policy.
+    pub async fn build(&self, mode: &ExecutionMode) -> SubagentContext {
+        let inheritance = ContextInheritance::for_mode(mode);
+        let ctx = self.context.lock().await;
+        let messages = ctx.messages().to_vec();
+        let tool_defs: Vec<_> = self
+            .tool_manager
+            .get_tool_definitions()
+            .into_iter()
+            .filter(|d| d.function.name != "final_answer")
+            .collect();
+        SubagentContext::from_parent(
+            &self.system_prompt,
+            &tool_defs,
+            &messages,
+            self.store.clone(),
+            &inheritance,
+        )
+    }
+}
 
 pub struct AgentDispatchTool {
     executor: Arc<SubagentExecutor>,
     parent_agent: String,
     cancel: CancellationToken,
+    /// Optional factory for building parent context at dispatch time.
+    /// When set, subagents in Fork mode inherit conversation history,
+    /// system prompt, and tools from the parent agent.
+    parent_context_factory: Option<Arc<ParentContextFactory>>,
 }
 
 impl AgentDispatchTool {
@@ -24,7 +67,14 @@ impl AgentDispatchTool {
             executor,
             parent_agent: parent_agent.into(),
             cancel,
+            parent_context_factory: None,
         }
+    }
+
+    /// Create with a parent context factory for context inheritance.
+    pub fn with_parent_context(mut self, factory: Arc<ParentContextFactory>) -> Self {
+        self.parent_context_factory = Some(factory);
+        self
     }
 }
 
@@ -67,6 +117,7 @@ impl Tool for AgentDispatchTool {
         let executor = self.executor.clone();
         let parent_agent = self.parent_agent.clone();
         let cancel = self.cancel.clone();
+        let factory = self.parent_context_factory.clone();
 
         Box::pin(async move {
             let agent_name = parameters
@@ -84,9 +135,9 @@ impl Tool for AgentDispatchTool {
                     .get("mode")
                     .and_then(|v| v.as_str())
                     .and_then(|m| match m {
-                        "sync" => Some(crate::agent::subagent::ExecutionMode::Sync),
-                        "fork" => Some(crate::agent::subagent::ExecutionMode::Fork),
-                        "teammate" => Some(crate::agent::subagent::ExecutionMode::Teammate),
+                        "sync" => Some(ExecutionMode::Sync),
+                        "fork" => Some(ExecutionMode::Fork),
+                        "teammate" => Some(ExecutionMode::Teammate),
                         _ => None,
                     });
 
@@ -97,13 +148,22 @@ impl Tool for AgentDispatchTool {
                 "Dispatching task to subagent via SubagentExecutor"
             );
 
+            // Build parent context if factory is available
+            let parent_context = if let Some(ref f) = factory {
+                let effective_mode = mode_override.clone().unwrap_or(ExecutionMode::Sync);
+                let ctx = f.build(&effective_mode).await;
+                if ctx.has_content() { Some(ctx) } else { None }
+            } else {
+                None
+            };
+
             let req = crate::agent::subagent::DispatchRequest {
                 agent_name: agent_name.to_string(),
                 task: task.to_string(),
                 mode_override,
                 cancel,
                 parent_agent: parent_agent.clone(),
-                parent_context: None, // Context inheritance handled by executor based on definition
+                parent_context,
                 delegate_depth: 0,
             };
 

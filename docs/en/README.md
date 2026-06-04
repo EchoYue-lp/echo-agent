@@ -32,10 +32,8 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 | Doc | Module | Key Concepts |
 |-----|--------|--------------|
-| [16 - Plan-and-Execute](./16-plan-execute.md) | Plan-Execute | Planner/Executor, incremental replanning, DAG scheduling |
 | [17 - Graph Workflow](./17-graph-workflow.md) | Workflow | LangGraph-style, SharedState, conditional edges, fan-out/fan-in |
 | [18 - Guard System](./18-guard-system.md) | Guards | RuleGuard, LlmGuard, input/output filtering |
-| [19 - Self-Reflection Agent](./19-self-reflection.md) | Self-Reflection | Generate → Critique → Refine, episodic memory, LlmCritic |
 | [20 - Web Tools](./20-web-tools.md) | Web Search / Fetch | DuckDuckGo / Brave / Tavily search, HTML→text |
 | [21 - Common Tools](./21-common-tools.md) | Tool Guide | Web search, web fetch, browser automation, data tools |
 | [22 - Research Tools](./22-research-tools.md) | Research | ArXiv search, Semantic Scholar, PDF fetch, BibTeX generation |
@@ -45,7 +43,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerWorker/Pipeline/Debate/Swarm) |
 | [27 - Tracing System](./27-tracing.md) | Trace | Run, RunEvent (11 types), RunStore, JsonlRunStore, lifecycle, secret redaction |
 | [28 - Config Reference](./28-config-reference.md) | Config | AgentConfig, ReactAgentBuilder, ToolExecutionConfig, TokenBudgetConfig, YAML config, feature flags |
-| [29 - Long-Running Tasks](./29-long-running-tasks.md) | Long-Running Tasks | Task handle, checkpoint/resume, per-task execution, non-blocking scheduling |
+| [29 - Runtime & Task System](./29-long-running-tasks.md) | Runtime & Tasks | Unified runtime, execution serialization, DAG orchestration, ProgressBridge, background tasks, scheduling |
 
 ### New Features (v0.2.1)
 
@@ -59,7 +57,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [35 - Pipelines](./35-pipelines.md) | Data Pipeline / Writing Pipeline | Data processing pipeline, writing pipeline, quality loop |
 | [36 - Data Quality & Statistics](./36-data-quality-statistics.md) | Data Quality / Statistics | Data profiling, anomaly detection, descriptive stats, correlation analysis |
 | [37 - Code Search](./37-code-search.md) | Code Search | Ripgrep, structured output, glob/type filtering, 50KB cap |
-| [38 - Agent Factory & Modes](./38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | AgentParadigm, mode switching, localization, template rendering |
+| [38 - Agent Factory & Modes](./38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | mode switching, localization, template rendering |
 | [39 - Tiered Memory](./39-tiered-memory.md) | Tiered Memory | Hot/warm/cold tiers, automatic eviction, token budget management |
 | [40 - Context System](./40-context-system.md) | Context System | ContextAssembler, ContextBudgeter, ContextSelector, priority ordering, budget awareness |
 
@@ -79,11 +77,11 @@ echo-agent is a composable Agent development framework written in Rust, providin
 
 ### Knowledge Base
 
-See [Knowledge Base](../knowledge/README.md) for in-depth concept explanations:
-- [Agent Patterns](../knowledge/agent-patterns.md) — ReAct, Plan-and-Execute, Self-Reflection, Graph Workflow
-- [MCP Protocol](../knowledge/mcp-protocol.md) — Model Context Protocol specification
-- [Skill System Design](../knowledge/skill-system.md) — agentskills.io specification alignment
-- [A2A Protocol](../knowledge/a2a-protocol.md) — Agent-to-Agent communication
+See [Knowledge Base](../knowledge/zh/README.md) for in-depth concept explanations:
+- [Agent Patterns](../knowledge/zh/agent-patterns.md) — ReAct, Plan-and-Execute, Self-Reflection, Graph Workflow
+- [MCP Protocol](../knowledge/zh/mcp-protocol.md) — Model Context Protocol specification
+- [Skill System Design](../knowledge/zh/skill-system.md) — agentskills.io specification alignment
+- [A2A Protocol](../knowledge/zh/a2a-protocol.md) — Agent-to-Agent communication
 
 ---
 

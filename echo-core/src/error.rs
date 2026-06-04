@@ -190,6 +190,9 @@ pub enum AgentError {
     /// Execution interrupted
     #[error("Execution interrupted")]
     Interrupted,
+    /// Execution cancelled via CancellationToken
+    #[error("Cancelled: {0}")]
+    Cancelled(String),
     /// No response from LLM
     #[error("No response from LLM (model: {model}, agent: {agent})")]
     NoResponse {

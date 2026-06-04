@@ -66,6 +66,138 @@ impl Tokenizer for SimpleTokenizer {
     }
 }
 
+/// Self-calibrating tokenizer wrapper that improves estimation accuracy using
+/// actual API response data.
+///
+/// Wraps any [`Tokenizer`] implementation and adjusts its estimates by a
+/// calibration factor derived from the ratio of actual token counts (reported
+/// by the LLM API) to estimated counts.
+///
+/// # How it works
+///
+/// 1. `count_tokens()` returns `inner.estimate × calibration_factor`
+/// 2. After each LLM call, feed back the actual token count via `calibrate()`
+/// 3. The factor is an exponential moving average (EMA) that converges over time
+///
+/// # Example
+///
+/// ```rust
+/// use echo_core::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
+/// use std::sync::Arc;
+///
+/// let base = Arc::new(HeuristicTokenizer);
+/// let calibrated = CalibratedTokenizer::new(base);
+///
+/// // Initial estimate (factor = 1.0)
+/// let est = calibrated.count_tokens("hello world");
+///
+/// // After API returns actual count:
+/// calibrated.calibrate(est, 15); // actual was 15 tokens
+///
+/// // Subsequent estimates are now adjusted
+/// let adjusted = calibrated.count_tokens("another text");
+/// ```
+pub struct CalibratedTokenizer {
+    inner: std::sync::Arc<dyn Tokenizer>,
+    /// Calibration factor stored as f64 bits in AtomicU64 for lock-free access.
+    /// Factor = actual_tokens / estimated_tokens (EMA smoothed).
+    factor_bits: std::sync::atomic::AtomicU64,
+    /// Number of calibration samples received.
+    sample_count: std::sync::atomic::AtomicU64,
+    /// EMA smoothing factor (0.0 = no update, 1.0 = replace entirely).
+    /// Default 0.3 provides good convergence.
+    ema_alpha: f64,
+}
+
+impl CalibratedTokenizer {
+    /// Create a new calibrated tokenizer wrapping the given base tokenizer.
+    ///
+    /// Initial calibration factor is 1.0 (no adjustment).
+    pub fn new(inner: std::sync::Arc<dyn Tokenizer>) -> Self {
+        Self {
+            inner,
+            factor_bits: std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()),
+            sample_count: std::sync::atomic::AtomicU64::new(0),
+            ema_alpha: 0.3,
+        }
+    }
+
+    /// Create with a custom EMA alpha (smoothing factor).
+    ///
+    /// - `alpha = 0.1`: slow convergence, more stable
+    /// - `alpha = 0.3`: balanced (default)
+    /// - `alpha = 0.5`: fast convergence, more reactive
+    pub fn with_alpha(inner: std::sync::Arc<dyn Tokenizer>, alpha: f64) -> Self {
+        Self {
+            inner,
+            factor_bits: std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()),
+            sample_count: std::sync::atomic::AtomicU64::new(0),
+            ema_alpha: alpha.clamp(0.01, 1.0),
+        }
+    }
+
+    /// Feed back actual token count from an API response to improve future estimates.
+    ///
+    /// - `estimated`: the value returned by `count_tokens()` before the API call
+    /// - `actual`: the actual token count from the API response (`usage.prompt_tokens`)
+    pub fn calibrate(&self, estimated: usize, actual: u32) {
+        if estimated == 0 || actual == 0 {
+            return;
+        }
+
+        let observed_ratio = actual as f64 / estimated as f64;
+        // Clamp ratio to reasonable range to avoid wild swings
+        let observed_ratio = observed_ratio.clamp(0.2, 5.0);
+
+        let current_bits = self.factor_bits.load(std::sync::atomic::Ordering::Relaxed);
+        let current_factor = f64::from_bits(current_bits);
+
+        // EMA: new_factor = alpha * observed + (1 - alpha) * current
+        let new_factor = self.ema_alpha * observed_ratio + (1.0 - self.ema_alpha) * current_factor;
+
+        self.factor_bits
+            .store(new_factor.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.sample_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get the current calibration factor.
+    pub fn calibration_factor(&self) -> f64 {
+        let bits = self.factor_bits.load(std::sync::atomic::Ordering::Relaxed);
+        f64::from_bits(bits)
+    }
+
+    /// Get the number of calibration samples received.
+    pub fn sample_count(&self) -> u64 {
+        self.sample_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reset the calibration factor to 1.0.
+    pub fn reset_calibration(&self) {
+        self.factor_bits
+            .store(1.0_f64.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.sample_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Tokenizer for CalibratedTokenizer {
+    fn count_tokens(&self, text: &str) -> usize {
+        let base = self.inner.count_tokens(text);
+        let factor = self.calibration_factor();
+        (base as f64 * factor).round() as usize
+    }
+}
+
+impl std::fmt::Debug for CalibratedTokenizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CalibratedTokenizer")
+            .field("factor", &self.calibration_factor())
+            .field("samples", &self.sample_count())
+            .finish()
+    }
+}
+
 // ── Token Usage Tracking ─────────────────────────────────────────────────────────
 
 use std::sync::Mutex;
@@ -364,6 +496,7 @@ impl std::fmt::Display for UsageSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_heuristic_ascii() {
@@ -396,5 +529,80 @@ mod tests {
     fn test_simple_tokenizer() {
         let t = SimpleTokenizer;
         assert_eq!(t.count_tokens("hello"), 2); // 5/4+1 = 2
+    }
+
+    #[test]
+    fn test_calibrated_tokenizer_initial_factor() {
+        let base = Arc::new(HeuristicTokenizer);
+        let calibrated = CalibratedTokenizer::new(base);
+
+        // Initial factor should be 1.0
+        assert!((calibrated.calibration_factor() - 1.0).abs() < f64::EPSILON);
+        assert_eq!(calibrated.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_calibrated_tokenizer_calibration() {
+        let base = Arc::new(HeuristicTokenizer);
+        let calibrated = CalibratedTokenizer::with_alpha(base.clone(), 1.0); // alpha=1.0 for instant update
+
+        let text = "hello world test";
+        let estimated = base.count_tokens(text); // HeuristicTokenizer estimate
+        let actual = estimated * 2; // Simulate actual being 2x the estimate
+
+        calibrated.calibrate(estimated, actual as u32);
+
+        // With alpha=1.0, factor should jump directly to 2.0
+        assert!((calibrated.calibration_factor() - 2.0).abs() < f64::EPSILON);
+        assert_eq!(calibrated.sample_count(), 1);
+
+        // Now count_tokens should return ~2x the base estimate
+        let adjusted = calibrated.count_tokens(text);
+        assert_eq!(adjusted, estimated * 2);
+    }
+
+    #[test]
+    fn test_calibrated_tokenizer_ema_smoothing() {
+        let base = Arc::new(HeuristicTokenizer);
+        let calibrated = CalibratedTokenizer::with_alpha(base.clone(), 0.5);
+
+        let estimated = 100;
+
+        // First calibration: actual = 200 (ratio = 2.0)
+        calibrated.calibrate(estimated, 200);
+        let f1 = calibrated.calibration_factor();
+        // With alpha=0.5: 0.5 * 2.0 + 0.5 * 1.0 = 1.5
+        assert!((f1 - 1.5).abs() < 0.01);
+
+        // Second calibration: actual = 200 again (ratio = 2.0)
+        calibrated.calibrate(estimated, 200);
+        let f2 = calibrated.calibration_factor();
+        // With alpha=0.5: 0.5 * 2.0 + 0.5 * 1.5 = 1.75
+        assert!((f2 - 1.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_calibrated_tokenizer_reset() {
+        let base = Arc::new(HeuristicTokenizer);
+        let calibrated = CalibratedTokenizer::new(base);
+
+        calibrated.calibrate(100, 200);
+        assert!(calibrated.calibration_factor() > 1.0);
+
+        calibrated.reset_calibration();
+        assert!((calibrated.calibration_factor() - 1.0).abs() < f64::EPSILON);
+        assert_eq!(calibrated.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_calibrated_tokenizer_skips_zero() {
+        let base = Arc::new(HeuristicTokenizer);
+        let calibrated = CalibratedTokenizer::new(base);
+
+        // Should not update on zero values
+        calibrated.calibrate(0, 100);
+        calibrated.calibrate(100, 0);
+        assert!((calibrated.calibration_factor() - 1.0).abs() < f64::EPSILON);
+        assert_eq!(calibrated.sample_count(), 0);
     }
 }

@@ -1,5 +1,9 @@
 //! Layered compression — L1 (fold tool calls) → L2 (sliding window) → L3 (memory).
 //!
+//! **Note**: The L1 tool-folding logic is now integrated into
+//! [`AdaptiveCompressor`](crate::compression::levels::AdaptiveCompressor) via the
+//! `l1_fold_consecutive_tools` config. This module remains for standalone use.
+//!
 //! # Levels
 //! - **L1**: Fold repeated same-tool results into summary lines (0 LLM cost)
 //! - **L2**: Apply sliding window or LLM summarization (existing compressors)

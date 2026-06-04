@@ -211,7 +211,7 @@ ReactAgentBuilder::new()
     .guard(my_guard)                              // add input/output guard
     .guards(vec![guard1, guard2])                 // add multiple guards
     .with_content_guard(ContentGuardMode::Block)  // PII detection (requires "content-guard" feature)
-    .permission_policy(my_policy)                 // custom permission policy
+    .permission_service(my_service)               // unified permission service (recommended)
     .audit_logger(my_logger)                      // audit logging
 ```
 

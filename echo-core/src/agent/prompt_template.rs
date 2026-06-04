@@ -240,50 +240,6 @@ impl PromptTemplateManager {
         }
     }
 
-    /// Create a manager pre-loaded with the default mode prompt templates.
-    ///
-    /// This registers templates named `"mode_general"`, `"mode_coding"`,
-    /// `"mode_research"`, `"mode_data"`, and `"mode_writing"` with the
-    /// default English-language system prompts from `DefaultModeEngine`.
-    pub fn with_default_mode_templates() -> Self {
-        use crate::agent::mode::{AgentMode, DefaultModeEngine, ModeEngine};
-
-        let engine = DefaultModeEngine;
-        let mut templates = HashMap::new();
-
-        for mode in AgentMode::all() {
-            let config = engine.mode_config(mode);
-            // Use kebab-case key names (matching serde rename_all convention):
-            // "mode_general", "mode_coding", "mode_research", "mode_data", "mode_writing"
-            let key = match mode {
-                AgentMode::General => "mode_general",
-                AgentMode::Coding => "mode_coding",
-                AgentMode::Research => "mode_research",
-                AgentMode::Data => "mode_data",
-                AgentMode::Writing => "mode_writing",
-                // #[non_exhaustive] requires a wildcard arm even if all current
-                // variants are handled. Future modes get a generic key.
-                #[allow(unreachable_patterns)]
-                _ => {
-                    let name = mode.name().to_lowercase().replace(' ', "_");
-                    &format!("mode_{name}")
-                }
-            };
-            templates.insert(key.to_string(), config.system_prompt_template);
-        }
-
-        // Also register as the generic "mode" template with a mode variable
-        templates.insert(
-            "mode".into(),
-            "{{#if mode_general}}{{mode_general}}{{#endif}}"
-                .to_string(),
-        );
-
-        Self {
-            templates: RwLock::new(templates),
-        }
-    }
-
     /// Register a named prompt template.
     ///
     /// If a template with the same name already exists, it is overwritten.

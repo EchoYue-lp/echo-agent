@@ -255,6 +255,33 @@ impl TaskManager {
         self.tasks.iter().all(|r| r.value().status.is_terminal())
     }
 
+    /// Check if there are pending tasks whose dependencies include a
+    /// terminal-failure state (Failed / TimedOut / Cancelled).
+    ///
+    /// Such tasks can never become ready because their upstream will never
+    /// complete successfully. Used for deadlock diagnosis in the executor.
+    pub fn has_unresolvable_pending(&self) -> bool {
+        self.tasks.iter().any(|r| {
+            let task = r.value();
+            if task.status != TaskStatus::Pending {
+                return false;
+            }
+            task.dependencies.iter().any(|dep_id| {
+                self.tasks
+                    .get(dep_id)
+                    .map(|dep| {
+                        matches!(
+                            dep.value().status,
+                            TaskStatus::Failed(_)
+                                | TaskStatus::TimedOut { .. }
+                                | TaskStatus::Cancelled
+                        )
+                    })
+                    .unwrap_or(true) // missing dependency = unresolvable
+            })
+        })
+    }
+
     /// Generate a task progress summary suitable for injection into LLM context
     pub fn get_summary(&self) -> String {
         let (completed, total) = self.get_progress();

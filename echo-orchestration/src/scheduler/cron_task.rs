@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 // ── CronTask ───────────────────────────────────────────────────────
 
@@ -129,7 +129,7 @@ impl CronTaskStore {
         if let Some(ref backend) = self.backend {
             let rt = tokio::runtime::Handle::try_current()
                 .map_err(|_| echo_core::error::ReactError::Other("No tokio runtime".into()))?;
-            let item = rt.block_on(backend.get(STORE_NAMESPACE, STORE_KEY))?;
+            let item = tokio::task::block_in_place(|| rt.block_on(backend.get(STORE_NAMESPACE, STORE_KEY)))?;
             match item {
                 Some(store_item) => {
                     // Value is stored as serde_json::Value — extract the string
@@ -159,11 +159,13 @@ impl CronTaskStore {
         if let Some(ref backend) = self.backend {
             let rt = tokio::runtime::Handle::try_current()
                 .map_err(|_| echo_core::error::ReactError::Other("No tokio runtime".into()))?;
-            rt.block_on(backend.put(
-                STORE_NAMESPACE,
-                STORE_KEY,
-                serde_json::Value::String(json),
-            ))?;
+            tokio::task::block_in_place(|| {
+                rt.block_on(backend.put(
+                    STORE_NAMESPACE,
+                    STORE_KEY,
+                    serde_json::Value::String(json),
+                ))
+            })?;
         } else {
             self.save_to_file(&json)?;
         }

@@ -95,6 +95,7 @@ impl HumanLoopProvider for WebhookHumanLoopProvider {
             let kind_str = match req.kind {
                 HumanLoopKind::Approval => "approval",
                 HumanLoopKind::Input => "input",
+                HumanLoopKind::Selection => "selection",
             };
 
             let payload = WebhookPayload {
@@ -136,6 +137,13 @@ impl HumanLoopProvider for WebhookHumanLoopProvider {
                 },
                 HumanLoopKind::Input => match response.text {
                     Some(text) => Ok(HumanLoopResponse::Text(text)),
+                    None => Ok(HumanLoopResponse::Timeout),
+                },
+                HumanLoopKind::Selection => match response.text {
+                    Some(selection) => Ok(HumanLoopResponse::Selection {
+                        selection,
+                        instructions: response.reason,
+                    }),
                     None => Ok(HumanLoopResponse::Timeout),
                 },
             }

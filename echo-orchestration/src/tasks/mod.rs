@@ -13,7 +13,6 @@ mod time;
 
 pub mod background_task;
 pub mod composite;
-pub mod human_gate;
 pub mod progress;
 
 pub use background_task::{
@@ -21,7 +20,6 @@ pub use background_task::{
     TaskSummary,
 };
 pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
-pub use human_gate::{HumanGate, HumanRequest, HumanResponse};
 pub use composite::{CompositePlan, CompositeStep, CompositeStrategy, execute_composite};
 pub use events::{
     AsyncTaskEventListener, LoggingListener, TaskEvent, TaskEventBus, TaskEventListener,

@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
-description = "Agent implementations for the echo-agent framework (ReactAgent, PlanExecute, Subagent)"
+description = "Agent implementations for the echo-agent framework (ReactAgent, Subagent)"
 repository = "https://github.com/EchoYue-lp/echo-agent"
 homepage = "https://github.com/EchoYue-lp/echo-agent"
 documentation = "https://docs.rs/echo_agents"
@@ -13,10 +13,8 @@ categories = ["api-bindings", "asynchronous"]
 
 [features]
 default = []
-plan-execute = []
-self-reflection = []
 subagent = []
-full = ["plan-execute", "self-reflection", "subagent"]
+full = ["subagent"]
 
 [dependencies]
 echo_core = { version = "0.2.0", path = "../echo-core" }

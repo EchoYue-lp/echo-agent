@@ -127,6 +127,7 @@ pub struct ReactAgent {
     /// Memory & persistence subsystem: context management, long-term memory, snapshots, checkpointer
     pub(crate) memory: MemorySubsystem,
     /// Human-in-the-loop approval subsystem
+    #[allow(dead_code)]
     pub(crate) approval: ApprovalSubsystem,
     client: Arc<Client>,
     llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
@@ -171,13 +172,14 @@ pub struct ReactAgent {
     /// the set exceeds `MAX_READ_FILES`.
     pub(crate) recently_read_files: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
 
-    /// Shared background task spawner for non-blocking task execution.
-    /// When `enable_task` is true, this spawner is created and shared between
-    /// the `SpawnBackgroundTaskTool`, `CheckTaskStatusTool`, and
-    /// `ListBackgroundTasksTool`, allowing the agent to spawn, monitor, and
-    /// manage background tasks during a conversation.
-    #[cfg(feature = "tasks")]
-    pub(crate) task_spawner: Option<Arc<TaskSpawner>>,
+    /// Serializes all execution (chat, execute, stream) on this agent.
+    ///
+    /// Only one execution can be active at a time. Both non-streaming
+    /// (`run_react_loop`) and streaming (`AgentRunSnapshot::run_loop`)
+    /// acquire this mutex at their entry point and hold it for the
+    /// full duration. This prevents concurrent access to the
+    /// `ContextManager` and other internal mutable state.
+    pub(crate) execution_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -217,8 +219,9 @@ impl ReactAgent {
     /// - Memory system (long-term memory enabled per config)
     /// - Skill registry
     /// - Hook system
+    ///
     /// Prefer [`ReactAgentBuilder`] for construction — it handles subsystem
-    /// initialization and provides sensible defaults.  Direct construction with
+    /// initialization and provides sensible defaults. Direct construction with
     /// [`new`](Self::new) initialises every subsystem eagerly.
     pub fn new(config: AgentConfig) -> Self {
         let system_prompt = Self::build_system_prompt(&config);
@@ -283,16 +286,6 @@ impl ReactAgent {
         let approval_provider = crate::human_loop::default_provider();
 
         // ── Feature-gated tool registration ───────────────────────
-        // AgentDispatch is controlled by runtime config enable_subagent
-        #[cfg(feature = "subagent")]
-        if config.enable_subagent {
-            tool_manager.register(Box::new(AgentDispatchTool::new(
-                subagent_executor.clone(),
-                config.agent_name.clone(),
-                CancellationToken::new(),
-            )));
-        }
-
         #[cfg(feature = "human-loop")]
         if config.enable_human_in_loop {
             tool_manager.register(Box::new(HumanInLoop::new(approval_provider.clone())));
@@ -323,15 +316,38 @@ impl ReactAgent {
         // ── Checkpointer ─────────────────────────────────────────
         let checkpointer = Self::setup_checkpointer(&config);
 
-        #[cfg(feature = "tasks")]
-        let tasks_enabled = config.enable_task;
+        // Wrap tool_manager in Arc for sharing with subsystems and context factory
+        let tool_manager = Arc::new(tool_manager);
+
+        // ── AgentDispatch tool (after all other tools + store are ready) ──
+        // Context inheritance factory needs the final tool_manager Arc and store.
+        #[cfg(feature = "subagent")]
+        if config.enable_subagent {
+            let factory = Arc::new(
+                crate::tools::builtin::agent_dispatch::ParentContextFactory {
+                    system_prompt: system_prompt.clone(),
+                    tool_manager: tool_manager.clone(),
+                    context: context.clone(),
+                    store: store.clone(),
+                },
+            );
+            let dispatch_tool = AgentDispatchTool::new(
+                subagent_executor.clone(),
+                config.agent_name.clone(),
+                CancellationToken::new(),
+            )
+            .with_parent_context(factory);
+            tool_manager.register(Box::new(dispatch_tool));
+        }
 
         Self {
             config,
             tools: ToolExecutionSubsystem {
-                tool_manager: Arc::new(tool_manager),
+                tool_manager: tool_manager.clone(),
                 #[cfg(feature = "subagent")]
                 subagent_registry,
+                #[cfg(feature = "subagent")]
+                subagent_executor,
                 #[cfg(feature = "tasks")]
                 task_manager,
                 skill_registry: SkillRegistry::new(),
@@ -344,7 +360,6 @@ impl ReactAgent {
             },
             guard: GuardSubsystem {
                 guard_manager: None,
-                permission_policy: None,
                 audit_logger: None,
                 circuit_breaker: None,
             },
@@ -375,12 +390,7 @@ impl ReactAgent {
             current_turn: std::sync::Mutex::new(None),
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
-            #[cfg(feature = "tasks")]
-            task_spawner: if tasks_enabled {
-                Some(task_spawner)
-            } else {
-                None
-            },
+            execution_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -777,41 +787,19 @@ impl ReactAgent {
         self.guard.guard_manager = Some(manager);
     }
 
-    /// Set the permission policy.
-    pub fn set_permission_policy(
-        &mut self,
-        policy: Arc<dyn crate::tools::permission::PermissionPolicy>,
-    ) {
-        self.guard.permission_policy = Some(policy);
-    }
-
     #[cfg(feature = "human-loop")]
     /// Set the unified permission service.
-    ///
-    /// Once set, `check_tool_approval()` will prefer this service,
-    /// falling back to the legacy PermissionPolicy logic.
     pub fn set_permission_service(&mut self, service: Arc<PermissionService>) {
         self.approval.permission_service = Some(service);
     }
 
     #[cfg(feature = "human-loop")]
-    /// Build and set a unified PermissionService from legacy components.
-    ///
-    /// Merges the current `permission_policy` + `approval_provider` into a single
-    /// `PermissionService`, ensuring correct pipeline order (mode → hooks → rules → handler).
+    /// Build and set a unified PermissionService from the approval provider.
     pub fn build_permission_service(&mut self) {
         use crate::human_loop::service::PermissionService;
 
-        let policy = self.guard.permission_policy.take();
         let provider = self.approval.approval_provider.clone();
-
         let service = PermissionService::from_provider(provider);
-        let service = if let Some(p) = policy {
-            service.with_legacy_policy(p)
-        } else {
-            service
-        };
-
         self.approval.permission_service = Some(Arc::new(service));
     }
 
@@ -1035,6 +1023,45 @@ impl ReactAgent {
             .clear();
     }
 
+    /// Entry point for text-based streaming: clear read files, build `StreamInit`,
+    /// and delegate to `run_stream_channel`.
+    async fn run_stream_entry(
+        &self,
+        input: &str,
+        mode: run::StreamMode,
+    ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
+        self.clear_read_files();
+        self.run_stream_channel(
+            run::types::StreamInit {
+                text: input.to_string(),
+                message: None,
+                label: String::new(),
+            },
+            mode,
+        )
+        .await
+    }
+
+    /// Entry point for multimodal streaming: clear read files, build `StreamInit`,
+    /// and delegate to `run_stream_channel`.
+    async fn run_stream_message_entry(
+        &self,
+        message: crate::llm::types::Message,
+        mode: run::StreamMode,
+    ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
+        self.clear_read_files();
+        let text = message.content.as_text().unwrap_or_default();
+        self.run_stream_channel(
+            run::types::StreamInit {
+                text,
+                message: Some(message),
+                label: "(multimodal)".to_string(),
+            },
+            mode,
+        )
+        .await
+    }
+
     // ── Trace / run recording ─────────────────────────────────────────────────
 
     /// Record a trace event to the current run (if a run store is attached).
@@ -1195,21 +1222,83 @@ impl ReactAgent {
                 mode_override: Some(ExecutionMode::Fork),
                 cancel: CancellationToken::new(),
                 parent_agent: self.config.agent_name.clone(),
-                parent_context: None,
+                parent_context: self.build_parent_context(&ExecutionMode::Fork).await,
                 delegate_depth: 0,
             };
 
-            // Re-create a lightweight executor for this dispatch
-            let executor = SubagentExecutor::new(
-                self.tools.subagent_registry.clone(),
-                SubagentExecutorConfig::default(),
-            );
-            let result = executor.dispatch(req).await?;
+            // Reuse the stored executor (with hook configuration)
+            let result = self.tools.subagent_executor.dispatch(req).await?;
             Ok(result.output)
         } else {
             // Fallback: execute directly with the current agent
             <Self as Agent>::chat(self, task).await
         }
+    }
+
+    /// Delegate a task to a specific subagent by name.
+    ///
+    /// Unlike [`delegate_task`](Self::delegate_task) which picks the first
+    /// registered subagent, this method routes to the specified `target` agent.
+    /// Returns an error if the target agent is not registered.
+    ///
+    /// Context inheritance is applied automatically: the subagent receives
+    /// the parent's system prompt, tools, and recent conversation history
+    /// based on the Fork mode default policy.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_to_agent(&self, target: &str, task: &str) -> Result<String> {
+        use crate::agent::subagent::executor::DispatchRequest;
+        use crate::agent::subagent::types::ExecutionMode;
+
+        // Verify the target agent exists in the registry
+        let agents = self.tools.subagent_registry.list_available().await;
+        if !agents.iter().any(|d| d.name == target) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Subagent '{}' not found. Available agents: {:?}",
+                target,
+                agents.iter().map(|d| &d.name).collect::<Vec<_>>()
+            )));
+        }
+
+        let mode = ExecutionMode::Fork;
+        let req = DispatchRequest {
+            agent_name: target.to_string(),
+            task: task.to_string(),
+            mode_override: Some(mode.clone()),
+            cancel: CancellationToken::new(),
+            parent_agent: self.config.agent_name.clone(),
+            parent_context: self.build_parent_context(&mode).await,
+            delegate_depth: 0,
+        };
+
+        let result = self.tools.subagent_executor.dispatch(req).await?;
+        Ok(result.output)
+    }
+
+    /// Build parent context for subagent dispatch based on execution mode.
+    ///
+    /// Shared by `delegate_task()`, `delegate_to_agent()`, and conceptually
+    /// mirrors `ParentContextFactory::build()` (used by `AgentDispatchTool`).
+    #[cfg(feature = "subagent")]
+    async fn build_parent_context(
+        &self,
+        mode: &crate::agent::subagent::types::ExecutionMode,
+    ) -> Option<crate::agent::subagent::context::SubagentContext> {
+        use crate::agent::subagent::context::{ContextInheritance, SubagentContext};
+
+        let inheritance = ContextInheritance::for_mode(mode);
+        let system_prompt = self.system_prompt().to_string();
+        let tool_defs = self.tool_definitions();
+        let messages = self.memory.context.lock().await.messages().to_vec();
+        let store = self.memory.store.clone();
+
+        let ctx = SubagentContext::from_parent(
+            &system_prompt,
+            &tool_defs,
+            &messages,
+            store,
+            &inheritance,
+        );
+        if ctx.has_content() { Some(ctx) } else { None }
     }
 }
 
@@ -1297,7 +1386,7 @@ impl Agent for ReactAgent {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
         Box::pin(
-            async move { self.run_stream(task, run::StreamMode::Execute).await }.instrument(
+            async move { self.run_stream_entry(task, run::StreamMode::Execute).await }.instrument(
                 info_span!("agent_execute_stream", agent.name = %agent, agent.model = %model),
             ),
         )
@@ -1319,7 +1408,7 @@ impl Agent for ReactAgent {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
         Box::pin(
-            async move { self.run_stream(message, run::StreamMode::Chat).await }.instrument(
+            async move { self.run_stream_entry(message, run::StreamMode::Chat).await }.instrument(
                 info_span!("agent_chat_stream", agent.name = %agent, agent.model = %model),
             ),
         )
@@ -1335,7 +1424,7 @@ impl Agent for ReactAgent {
         Box::pin(
             async move {
                 *self.cancel_token.lock().await = Some(cancel);
-                self.run_stream(_message, run::StreamMode::Chat).await
+                self.run_stream_entry(_message, run::StreamMode::Chat).await
             }
             .instrument(info_span!("agent_chat_stream_with_cancel", agent.name = %agent, agent.model = %model)),
         )
@@ -1351,7 +1440,7 @@ impl Agent for ReactAgent {
         Box::pin(
             async move {
                 *self.cancel_token.lock().await = Some(cancel);
-                self.run_stream(_task, run::StreamMode::Execute).await
+                self.run_stream_entry(_task, run::StreamMode::Execute).await
             }
             .instrument(info_span!("agent_execute_stream_with_cancel", agent.name = %agent, agent.model = %model)),
         )
@@ -1443,21 +1532,14 @@ impl Agent for ReactAgent {
         *self.mutable_system_prompt.write().unwrap() = Some(prompt.to_string());
     }
 
-    fn mode(&self) -> Option<echo_core::agent::mode::AgentMode> {
-        self.config.mode
-    }
-
-    fn delegate_to<'a>(
-        &'a self,
-        _target: &'a str,
-        _task: &'a str,
-    ) -> BoxFuture<'a, Result<String>> {
+    fn delegate_to<'a>(&'a self, target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {
         #[cfg(feature = "subagent")]
         {
-            Box::pin(self.delegate_task(task))
+            Box::pin(self.delegate_to_agent(target, task))
         }
         #[cfg(not(feature = "subagent"))]
         {
+            let _ = (target, task);
             Box::pin(async {
                 Err(echo_core::error::ReactError::Other(
                     "delegation not supported (subagent feature disabled)".into(),
@@ -1479,7 +1561,7 @@ impl ReactAgent {
         &self,
         message: crate::llm::types::Message,
     ) -> Result<futures::stream::BoxStream<'_, Result<AgentEvent>>> {
-        self.run_stream_with_message(message, run::StreamMode::Chat)
+        self.run_stream_message_entry(message, run::StreamMode::Chat)
             .await
     }
 
@@ -1492,7 +1574,7 @@ impl ReactAgent {
         &self,
         message: crate::llm::types::Message,
     ) -> Result<futures::stream::BoxStream<'_, Result<AgentEvent>>> {
-        self.run_stream_with_message(message, run::StreamMode::Execute)
+        self.run_stream_message_entry(message, run::StreamMode::Execute)
             .await
     }
 
@@ -1565,6 +1647,9 @@ impl ReactAgent {
     /// ```
     pub async fn chat_multimodal(&self, message: crate::llm::types::Message) -> Result<String> {
         use crate::llm::{ChatRequest, chat};
+
+        // ★ Serialize execution — multimodal mutates context and calls LLM
+        let _execution_guard = self.execution_mutex.lock().await;
 
         // Ensure context is initialized (includes system prompt)
         {

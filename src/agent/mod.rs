@@ -2,14 +2,18 @@
 //!
 //! Defines the core [`Agent`] trait, event enum [`AgentEvent`], and callback interface [`AgentCallback`].
 //!
-//! ## Built-in Agent Paradigms
+//! ## Architecture
 //!
-//! | Module | Paradigm | Feature |
-//! |--------|----------|---------|
-//! | [`react`] | ReAct (Think-Act-Observe) | always available |
-//! | [`plan_execute`] | Plan-and-Execute | `plan-execute` |
-//! | [`self_reflection`] | Self-Reflection | `self-reflection` |
-//! | [`subagent`] | Subagent system | `subagent` |
+//! The framework provides a single, robust [`ReactAgent`] that implements the ReAct
+//! (Think-Act-Observe) pattern. Different execution paradigms are expressed through
+//! composable tools and configurations rather than separate agent types:
+//!
+//! | Capability | Mechanism |
+//! |------------|-----------|
+//! | ReAct reasoning | [`react`] — the default loop |
+//! | Task planning | Tools (plan, create_task, update_task) |
+//! | Self-reflection | [`critic`] — evaluation and feedback tools |
+//! | Subagent coordination | [`subagent`] — multi-agent orchestration |
 //!
 //! # Quick Start
 //!
@@ -30,7 +34,6 @@
 //! ```
 
 pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
-pub use echo_core::agent::mode::{AgentMode, DefaultModeEngine, ModeConfig, ModeEngine};
 pub use echo_core::agent::{
     Agent, AgentCallback, AgentEvent, CancellationToken, InterventionCallback, InterventionResult,
     StepType,
@@ -40,29 +43,27 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// SubAgent registry type alias
+#[allow(dead_code)]
 pub(crate) type SubAgentMap = Arc<RwLock<HashMap<String, Arc<dyn Agent>>>>;
 
 // ── Core sub-modules ───────────────────────────────────────────────────────
 
-pub mod approval_stack;
+pub mod callbacks;
 pub mod config;
+pub mod critic;
 pub mod default_factory;
-pub mod mode_engine;
+pub mod handle;
 pub mod react;
 pub mod runner;
 pub mod snapshot;
 pub mod turn;
 
-#[cfg(feature = "plan-execute")]
-pub mod plan_execute;
-#[cfg(feature = "self-reflection")]
-pub mod self_reflection;
 #[cfg(feature = "subagent")]
 pub mod subagent;
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
-pub use crate::agent::mode_engine::LocalizedModeEngine;
+pub use crate::agent::handle::AgentHandle;
 pub use crate::agent::react::ReactAgent;
 pub use crate::agent::react::builder::ReactAgentBuilder;
 pub use crate::agent::react::structured::StructuredAgent;
@@ -71,12 +72,12 @@ pub use runner::Runner;
 
 /// Agent factory types — re-exported from echo-core with facade-level overrides.
 ///
-/// This module provides [`AgentFactory`], [`AgentFactoryConfig`], [`AgentParadigm`],
+/// This module provides [`AgentFactory`], [`AgentFactoryConfig`],
 /// and [`DefaultAgentFactory`] (the concrete facade implementation that uses
 /// `ReactAgentBuilder`).
 pub mod factory {
     pub use crate::agent::default_factory::DefaultAgentFactory;
-    pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig, AgentParadigm};
+    pub use echo_core::agent::factory::{AgentFactory, AgentFactoryConfig};
 }
 
 /// Alias for backward compatibility with macros and minimal API.

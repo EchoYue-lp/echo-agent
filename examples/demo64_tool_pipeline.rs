@@ -1,6 +1,6 @@
-//! demo64_tool_pipeline —— ToolExecutionPipeline & ApprovalStack 综合演示
+//! demo64_tool_pipeline —— ToolExecutionPipeline 综合演示
 //!
-//! 展示工具执行管线的完整架构和审批决策栈：
+//! 展示工具执行管线的完整架构：
 //!
 //! **ToolExecutionPipeline 的 13 个阶段**（按执行顺序）：
 //!
@@ -8,7 +8,7 @@
 //!  2. `ParseValidateStage`   — 参数解析和类型校验
 //!  3. `PlanModeStage`        — 计划模式：阻止写操作
 //!  4. `PreToolUseHookStage`  — PreToolUse 钩子
-//!  5. `PermissionStage`      — 权限检查（PermissionService / Policy）
+//!  5. `PermissionStage`      — 权限检查（PermissionService）
 //!  6. `ReadBeforeEditStage`  — 编辑前必须读取文件
 //!  7. `CallbackStage(Start)` — on_tool_start 回调
 //!  8. `ExecuteStage`         — 实际工具执行
@@ -18,15 +18,10 @@
 //! 12. `TruncationStage`     — 输出截断（token 预算）
 //! 13. `CallbackStage(End)`   — on_tool_end 回调
 //!
-//! **ApprovalStack** 会话级审批决策栈：
-//! - `Once` / `Always` / `Deny` / `DenyAlways`
-//! - 按 tool_name + path 记录，`*` 通配兜底
-//!
 //! ```bash
 //! cargo run --example demo64_tool_pipeline
 //! ```
 
-use echo_agent::agent::approval_stack::{ApprovalDecision, ApprovalStack};
 use echo_agent::prelude::*;
 use echo_agent::tool;
 use futures::future::BoxFuture;
@@ -68,20 +63,12 @@ async fn main() -> echo_agent::error::Result<()> {
     separator("Part 2: InterventionCallback — 干预回调");
     demo_intervention_callback().await?;
 
-    // ── Part 3: ApprovalStack — 会话级审批决策 ────────────────────────────────
-    separator("Part 3: ApprovalStack — Once / Always / Deny / DenyAlways");
-    demo_approval_stack();
-
-    // ── Part 4: ApprovalStack 通配与作用域隔离 ────────────────────────────────
-    separator("Part 4: ApprovalStack — 通配符与工具隔离");
-    demo_approval_wildcard_and_isolation();
-
-    // ── Part 5: AgentCallback — 管线观测回调 ──────────────────────────────────
-    separator("Part 5: AgentCallback — 管线阶段回调");
+    // ── Part 3: AgentCallback — 管线观测回调 ──────────────────────────────────
+    separator("Part 3: AgentCallback — 管线阶段回调");
     demo_agent_callback().await?;
 
-    // ── Part 6: ToolExecutionConfig — 执行策略配置 ────────────────────────────
-    separator("Part 6: ToolExecutionConfig — 执行策略配置");
+    // ── Part 4: ToolExecutionConfig — 执行策略配置 ────────────────────────────
+    separator("Part 4: ToolExecutionConfig — 执行策略配置");
     demo_execution_config()?;
 
     println!("\n{}", "═".repeat(64));
@@ -114,11 +101,7 @@ fn demo_pipeline_stages() {
             "PreToolUseHookStage",
             "PreToolUse 钩子：可修改输入或阻止执行",
         ),
-        (
-            " 5",
-            "PermissionStage",
-            "权限检查：PermissionService → PermissionPolicy",
-        ),
+        (" 5", "PermissionStage", "权限检查（PermissionService）"),
         (
             " 6",
             "ReadBeforeEditStage",
@@ -277,118 +260,7 @@ async fn demo_intervention_callback() -> echo_agent::error::Result<()> {
     Ok(())
 }
 
-// ── Part 3: ApprovalStack ─────────────────────────────────────────────────────
-
-fn demo_approval_stack() {
-    let stack = ApprovalStack::new();
-
-    // ── 3a. 初始状态：没有任何决策 ──
-    assert!(stack.check("write_file", "src/main.rs").is_none());
-    println!("  初始 check(\"write_file\", \"src/main.rs\") → None");
-
-    // ── 3b. Once 决策：单次允许 ──
-    stack.record("write_file", "src/main.rs", ApprovalDecision::Once);
-    let d = stack.check("write_file", "src/main.rs");
-    println!("  record Once → check = {:?}", d);
-    assert_eq!(d, Some(ApprovalDecision::Once));
-
-    // 不同路径不受影响
-    assert!(stack.check("write_file", "src/lib.rs").is_none());
-    println!("  不同路径 \"src/lib.rs\" → None (路径隔离 ✓)");
-
-    // ── 3c. Always 决策：会话级通配 ──
-    stack.record("read_file", "*", ApprovalDecision::Always);
-    let d1 = stack.check("read_file", "any/path.rs");
-    let d2 = stack.check("read_file", "src/main.rs");
-    println!("\n  record Always(\"*\") for read_file:");
-    println!("    check(\"any/path.rs\")  → {:?}", d1);
-    println!("    check(\"src/main.rs\") → {:?}", d2);
-    assert_eq!(d1, Some(ApprovalDecision::Always));
-    assert_eq!(d2, Some(ApprovalDecision::Always));
-
-    // ── 3d. Deny 决策：精确拒绝 ──
-    stack.record("shell", "rm -rf /", ApprovalDecision::Deny);
-    let denied = stack.check("shell", "rm -rf /");
-    println!("\n  record Deny(\"rm -rf /\") for shell:");
-    println!("    check(\"rm -rf /\") → {:?}", denied);
-    assert_eq!(denied, Some(ApprovalDecision::Deny));
-    // 不同命令不受影响
-    assert!(stack.check("shell", "ls -la").is_none());
-    println!("    check(\"ls -la\")   → None (命令隔离 ✓)");
-
-    // ── 3e. DenyAlways 决策：会话级全面拒绝 ──
-    stack.record("delete_file", "*", ApprovalDecision::DenyAlways);
-    let deny_all = stack.check("delete_file", "any/file.txt");
-    println!("\n  record DenyAlways(\"*\") for delete_file:");
-    println!("    check(\"any/file.txt\") → {:?}", deny_all);
-    assert_eq!(deny_all, Some(ApprovalDecision::DenyAlways));
-
-    // ── 3f. 四种决策类型总结 ──
-    println!("\n  决策类型总结:");
-    println!("    Once       — 允许特定 tool+path 单次调用");
-    println!("    Always     — 允许该 tool 的所有 path（通配 *）");
-    println!("    Deny       — 拒绝特定 tool+path 单次调用");
-    println!("    DenyAlways — 拒绝该 tool 的所有 path（通配 *）");
-
-    println!("  → ApprovalStack ✓");
-}
-
-// ── Part 4: ApprovalStack 通配与作用域隔离 ────────────────────────────────────
-
-fn demo_approval_wildcard_and_isolation() {
-    let stack = ApprovalStack::new();
-
-    // ── 4a. 精确匹配 vs 通配匹配 ──
-    stack.record("edit_file", "src/main.rs", ApprovalDecision::Always);
-    stack.record("edit_file", "*", ApprovalDecision::Deny);
-
-    // 精确匹配优先
-    let exact = stack.check("edit_file", "src/main.rs");
-    println!("  edit_file: Always(\"src/main.rs\") + Deny(\"*\")");
-    println!("    check(\"src/main.rs\")  → {:?}", exact);
-    assert_eq!(exact, Some(ApprovalDecision::Always));
-
-    // 通配兜底
-    let wildcard = stack.check("edit_file", "other/path.rs");
-    println!("    check(\"other/path.rs\") → {:?}", wildcard);
-    assert_eq!(wildcard, Some(ApprovalDecision::Deny));
-
-    // ── 4b. 不同工具互不影响（工具隔离）──
-    stack.record("shell", "*", ApprovalDecision::Always);
-    assert!(stack.check("write_file", "test.rs").is_none());
-    println!("\n  shell: Always(\"*\")");
-    println!("    check(\"write_file\", \"test.rs\") → None (工具隔离 ✓)");
-
-    // ── 4c. clear() 清除所有决策 ──
-    stack.clear();
-    assert!(stack.check("edit_file", "src/main.rs").is_none());
-    assert!(stack.check("shell", "*").is_none());
-    println!("\n  clear() 后所有决策被清除");
-    println!("    check(\"edit_file\", \"src/main.rs\") → None");
-    println!("    check(\"shell\", \"*\")               → None");
-
-    // ── 4d. 覆盖决策 ──
-    stack.record("shell", "cargo build", ApprovalDecision::Deny);
-    assert_eq!(
-        stack.check("shell", "cargo build"),
-        Some(ApprovalDecision::Deny)
-    );
-    // 覆盖为 Always
-    stack.record("shell", "cargo build", ApprovalDecision::Always);
-    assert_eq!(
-        stack.check("shell", "cargo build"),
-        Some(ApprovalDecision::Always)
-    );
-    println!("\n  覆盖决策: Deny → Always for shell+cargo_build");
-    println!(
-        "    check(\"shell\", \"cargo build\") → {:?}",
-        stack.check("shell", "cargo build")
-    );
-
-    println!("  → 通配符与作用域隔离 ✓");
-}
-
-// ── Part 5: AgentCallback — 管线观测回调 ──────────────────────────────────────
+// ── Part 3: AgentCallback — 管线观测回调 ──────────────────────────────────────
 
 /// 追踪管线事件的回调
 struct PipelineTracker {
@@ -496,7 +368,7 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
     Ok(())
 }
 
-// ── Part 6: ToolExecutionConfig ───────────────────────────────────────────────
+// ── Part 4: ToolExecutionConfig ───────────────────────────────────────────────
 
 fn demo_execution_config() -> echo_agent::error::Result<()> {
     println!("  ToolExecutionConfig 的各配置项与管线阶段的关系\n");
@@ -583,7 +455,7 @@ fn demo_execution_config() -> echo_agent::error::Result<()> {
 
 fn print_banner() {
     println!("{}", "═".repeat(64));
-    println!("      Echo Agent × Tool Pipeline & ApprovalStack (demo64)");
+    println!("      Echo Agent × Tool Pipeline (demo64)");
     println!("{}", "═".repeat(64));
     println!();
 }

@@ -18,6 +18,9 @@ impl ReactAgent {
     /// 2. **Execution phase** (Framework): TaskExecutor schedules ready tasks in parallel, using custom execution functions
     /// 3. **Summary phase** (LLM): All task results are fed to the LLM to generate the final answer
     pub async fn execute_with_planning(&self, task: &str) -> crate::error::Result<String> {
+        // ★ Serialize execution — planning mutates context and calls LLM directly
+        let _execution_guard = self.execution_mutex.lock().await;
+
         let agent = self.config.agent_name.clone();
 
         // Reset message history and task manager to ensure a clean session for each planning run
@@ -229,6 +232,7 @@ impl ReactAgent {
     fn build_execute_fn(&self) -> TaskExecuteFn {
         let agent_name = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
+        let client = self.client.clone(); // Reuse Agent's HTTP client
         let is_orchestrator = self.config.role == AgentRole::Orchestrator;
         let subagent_names: Vec<String> = if is_orchestrator {
             // Use blocking read from the registry since we're in sync context
@@ -250,6 +254,7 @@ impl ReactAgent {
         Arc::new(move |ctx: TaskContext| {
             let agent_name = agent_name.clone();
             let model = model.clone();
+            let client = client.clone();
             let _subagent_names = subagent_names.clone();
 
             Box::pin(async move {
@@ -267,11 +272,7 @@ impl ReactAgent {
                     format!("{}\n\n{}", upstream_context, ctx.description)
                 };
 
-                // Default: use LLM to execute task
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(120))
-                    .build()
-                    .unwrap_or_default();
+                // Use LLM to execute task (reusing Agent's HTTP client)
                 let messages = vec![
                     crate::llm::types::Message::system(
                         "You are a task execution assistant. Please complete the following task and provide the result directly.".to_string(),
@@ -280,7 +281,7 @@ impl ReactAgent {
                 ];
 
                 let response = crate::llm::chat(
-                    Arc::new(client),
+                    client,
                     &model,
                     &messages,
                     Some(0.3),
@@ -310,6 +311,9 @@ impl ReactAgent {
         task: &str,
         execute_fn: TaskExecuteFn,
     ) -> crate::error::Result<String> {
+        // ★ Serialize execution — planning mutates context and calls LLM directly
+        let _execution_guard = self.execution_mutex.lock().await;
+
         let _agent = self.config.agent_name.clone();
 
         self.reset_messages().await;

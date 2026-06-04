@@ -1,10 +1,7 @@
 //! Agent builder
 
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
-use crate::agent::{
-    Agent, AgentCallback, AgentConfig, AgentMode, AgentRole, DefaultModeEngine,
-    InterventionCallback, ModeEngine,
-};
+use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole, InterventionCallback};
 use crate::audit::AuditLogger;
 use crate::context::ContextAssembler;
 use crate::error::Result;
@@ -17,7 +14,6 @@ use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
 use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
 use crate::sandbox::SandboxManager;
-use crate::tools::permission::PermissionPolicy;
 use crate::tools::{Tool, ToolExecutionConfig};
 use crate::trace::RunStore;
 use echo_core::agent::PromptTemplateManager;
@@ -56,7 +52,6 @@ pub struct ReactAgentBuilder {
     #[cfg(feature = "human-loop")]
     permission_service: Option<Arc<PermissionService>>,
     guards: Vec<Arc<dyn Guard>>,
-    permission_policy: Option<Arc<dyn PermissionPolicy>>,
     audit_logger: Option<Arc<dyn AuditLogger>>,
     snapshot_policy: Option<SnapshotPolicy>,
     max_snapshots: usize,
@@ -67,15 +62,13 @@ pub struct ReactAgentBuilder {
     run_store: Option<Arc<dyn RunStore>>,
     tool_execution_pipeline: Option<Arc<ToolExecutionPipeline>>,
     context_assembler: Option<ContextAssembler>,
-    /// Agent operating mode, used to auto-configure system prompt and tools
-    mode: Option<AgentMode>,
-    /// Mode engine for resolving mode configuration (defaults to DefaultModeEngine)
-    mode_engine: Option<Arc<dyn ModeEngine>>,
     /// Prompt template engine for variable substitution in system prompts
     prompt_template_engine: Option<Arc<PromptTemplateManager>>,
     /// Intervention callbacks that can influence agent behavior
     /// (block tool calls, inject context, redirect execution, cancel).
     intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,
+    /// React loop checkpoint interval (0 = only at end, N = every N iterations).
+    react_checkpoint_interval: usize,
 }
 
 impl Default for ReactAgentBuilder {
@@ -115,7 +108,6 @@ impl ReactAgentBuilder {
             #[cfg(feature = "human-loop")]
             permission_service: None,
             guards: Vec::new(),
-            permission_policy: None,
             audit_logger: None,
             snapshot_policy: None,
             max_snapshots: 10,
@@ -126,10 +118,9 @@ impl ReactAgentBuilder {
             run_store: None,
             tool_execution_pipeline: None,
             context_assembler: None,
-            mode: None,
-            mode_engine: None,
             prompt_template_engine: None,
             intervention_callbacks: Vec::new(),
+            react_checkpoint_interval: 0,
         }
     }
 
@@ -488,6 +479,18 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Set React loop checkpoint interval (in iterations).
+    ///
+    /// When > 0, the Agent saves a checkpoint every N iterations during the
+    /// React loop. This enables crash recovery: on restart, the Agent restores
+    /// the conversation history and continues from where it left off.
+    ///
+    /// Default: 0 (only checkpoint at end of execution).
+    pub fn react_checkpoint_interval(mut self, interval: usize) -> Self {
+        self.react_checkpoint_interval = interval;
+        self
+    }
+
     /// Set conversation_id (history projection identifier)
     ///
     /// Unlike `session_id`, `conversation_id` is only used for `ConversationStore`
@@ -533,12 +536,6 @@ impl ReactAgentBuilder {
     pub fn with_content_guard(mut self, mode: echo_core::guard::content::ContentGuardMode) -> Self {
         let guard = echo_core::guard::content::ContentGuard::new(mode);
         self.guards.push(Arc::new(guard));
-        self
-    }
-
-    /// Set tool permission policy
-    pub fn permission_policy(mut self, policy: Arc<dyn PermissionPolicy>) -> Self {
-        self.permission_policy = Some(policy);
         self
     }
 
@@ -608,26 +605,6 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Set the agent operating mode.
-    ///
-    /// When set, this auto-configures:
-    /// - System prompt from the mode engine (can be overridden by `system_prompt()`)
-    /// - Recommended tools from the mode engine (added to the tool list)
-    /// - The mode field on `AgentConfig`
-    pub fn mode(mut self, mode: AgentMode) -> Self {
-        self.mode = Some(mode);
-        self
-    }
-
-    /// Set a custom mode engine for resolving mode configuration.
-    ///
-    /// Defaults to `DefaultModeEngine` if not set. Use `LocalizedModeEngine`
-    /// for Chinese or other locale-specific prompts.
-    pub fn mode_engine(mut self, engine: Arc<dyn ModeEngine>) -> Self {
-        self.mode_engine = Some(engine);
-        self
-    }
-
     /// Set a prompt template engine for variable substitution in system prompts.
     ///
     /// When set, the agent can use the template engine to render prompt
@@ -643,7 +620,8 @@ impl ReactAgentBuilder {
     /// use std::sync::Arc;
     ///
     /// # fn main() -> echo_agent::error::Result<()> {
-    /// let engine = Arc::new(PromptTemplateManager::with_default_mode_templates());
+    /// let engine = Arc::new(PromptTemplateManager::new());
+    /// engine.register("my_prompt", "You are {{role}}.");
     /// let agent = ReactAgentBuilder::new()
     ///     .model("qwen3-max")
     ///     .with_prompt_template_engine(engine)
@@ -707,32 +685,8 @@ impl ReactAgentBuilder {
         if let Some(conversation_id) = &self.conversation_id {
             config = config.conversation_id(conversation_id);
         }
-
-        // ── Mode auto-configuration ─────────────────────────────────────────────
-        // When a mode is set, auto-apply the mode's system prompt and recommended tools.
-        let tools_to_register_after_build: Vec<Box<dyn Tool>>;
-        if let Some(mode) = self.mode {
-            config = config.mode(mode);
-            let engine: Arc<dyn ModeEngine> = self
-                .mode_engine
-                .unwrap_or_else(|| Arc::new(DefaultModeEngine));
-            let mode_config = engine.mode_config(&mode);
-            // Only override system prompt if the user hasn't explicitly set one
-            // (i.e., the system_prompt is still the default "You are a helpful assistant")
-            if self.system_prompt == "You are a helpful assistant" {
-                config = config.system_prompt(&mode_config.system_prompt_template);
-            }
-            // Note: recommended_tools filtering is handled by AgentConfig.allowed_tools.
-            // The actual tool registration happens after agent construction below.
-            // For now, we set allowed_tools to restrict the agent to mode-recommended tools
-            // only when the mode has a non-empty recommended list.
-            if !mode_config.recommended_tools.is_empty() {
-                config = config.allowed_tools(mode_config.recommended_tools);
-            }
-            // No additional tools to register; mode filtering uses allowed_tools
-            tools_to_register_after_build = self.tools;
-        } else {
-            tools_to_register_after_build = self.tools;
+        if self.react_checkpoint_interval > 0 {
+            config = config.react_checkpoint_interval(self.react_checkpoint_interval);
         }
 
         // When the user passes a custom Store via with_memory_tools(store),
@@ -755,7 +709,7 @@ impl ReactAgentBuilder {
         }
 
         // Register custom tools
-        for tool in tools_to_register_after_build {
+        for tool in self.tools {
             agent.add_tool(tool);
         }
 
@@ -782,11 +736,6 @@ impl ReactAgentBuilder {
         // Set guardrails
         if !self.guards.is_empty() {
             agent.set_guard_manager(GuardManager::from_guards(self.guards));
-        }
-
-        // Set permission policy
-        if let Some(policy) = self.permission_policy {
-            agent.set_permission_policy(policy);
         }
 
         // Set audit logger

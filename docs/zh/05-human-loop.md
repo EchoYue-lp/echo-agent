@@ -4,12 +4,13 @@
 
 Human-in-the-Loop（HIL）在 Agent 自动执行流程中插入人工决策点。在执行高风险操作（删除文件、发送邮件、转账）前，Agent 暂停并请求人工确认后再继续。
 
-echo-agent 支持两种介入场景：
+echo-agent 支持三种介入场景：
 
 | 场景 | 说明 |
 |------|------|
 | **审批（Approval）** | 工具执行前弹出 y/n 确认，由用户决定是否允许 |
 | **输入（Input）** | Agent 需要额外信息时，向用户请求自由文本输入 |
+| **选择（Selection）** | 任务 checkpoint 暂停，用户从预定义选项中选择后继续 |
 
 ---
 
@@ -291,11 +292,27 @@ struct SlackApprovalProvider;
 #[async_trait]
 impl HumanLoopProvider for SlackApprovalProvider {
     async fn request(&self, req: HumanLoopRequest) -> echo_agent::error::Result<HumanLoopResponse> {
-        let approved = send_slack_and_wait(&req.prompt).await;
-        if approved {
-            Ok(HumanLoopResponse::Approved)
-        } else {
-            Ok(HumanLoopResponse::Rejected { reason: Some("Rejected".to_string()) })
+        match req.kind {
+            HumanLoopKind::Approval => {
+                let approved = send_slack_and_wait(&req.prompt).await;
+                if approved {
+                    Ok(HumanLoopResponse::Approved)
+                } else {
+                    Ok(HumanLoopResponse::Rejected { reason: Some("Rejected".to_string()) })
+                }
+            }
+            HumanLoopKind::Input => {
+                let text = ask_slack_for_input(&req.prompt).await;
+                Ok(HumanLoopResponse::Text(text))
+            }
+            HumanLoopKind::Selection => {
+                let options = req.options.unwrap_or_default();
+                let choice = ask_slack_for_choice(&req.prompt, &options).await;
+                Ok(HumanLoopResponse::Selection {
+                    selection: choice,
+                    instructions: None,
+                })
+            }
         }
     }
 }

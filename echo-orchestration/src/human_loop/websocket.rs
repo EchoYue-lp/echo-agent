@@ -271,6 +271,7 @@ impl HumanLoopProvider for WebSocketHumanLoopProvider {
             let kind_str = match req.kind {
                 HumanLoopKind::Approval => "approval",
                 HumanLoopKind::Input => "input",
+                HumanLoopKind::Selection => "selection",
             };
 
             let msg = serde_json::to_string(&ServerMessage {
@@ -300,6 +301,12 @@ impl HumanLoopProvider for WebSocketHumanLoopProvider {
                     },
                     HumanLoopKind::Input => {
                         Ok(HumanLoopResponse::Text(response.text.unwrap_or_default()))
+                    }
+                    HumanLoopKind::Selection => {
+                        Ok(HumanLoopResponse::Selection {
+                            selection: response.text.unwrap_or_else(|| "cancel".to_string()),
+                            instructions: None,
+                        })
                     }
                 },
                 Ok(Err(_)) => {

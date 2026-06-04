@@ -1,5 +1,11 @@
 # Core AI Agent Patterns
 
+> ⚠️ **Important Note**: The Plan-and-Execute and Self-Reflection patterns described in this document are now implemented as **tools** in echo-agent, not as separate Agent types:
+> - **Task Planning**: Use the `execute_with_planning()` method
+> - **Self-Review**: Use the `ReviewTool` tool
+> 
+> This aligns with industry best practices (Hermes, Claude Code, LangGraph), where reflection and planning are composable tool capabilities rather than separate Agent types.
+
 This document describes the core AI Agent patterns implemented in echo-agent, drawing from cutting-edge research in academia and industry.
 
 ---

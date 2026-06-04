@@ -7,7 +7,8 @@
 //! - `execution` — Tool execution (invocation, guards, truncation)
 //! - `react_loop` — ReAct loop core (think / process_steps / run_react_loop)
 //! - `direct` — Direct execution entry (run_direct / run_chat_direct)
-//! - `stream_loop` — Streaming execution loop (modular)
+//! - `stream_channel` — Channel-based streaming execution (primary)
+//! - `processor` — SSE chunk → AgentEvent conversion
 //! - `types` — Shared types (StreamMode, StreamInit)
 
 pub(crate) mod approval;
@@ -15,11 +16,9 @@ pub(crate) mod context;
 pub(crate) mod direct;
 pub(crate) mod execution;
 pub(crate) mod pipeline;
+pub(crate) mod processor;
 pub(crate) mod react_loop;
 pub(crate) mod retry;
 pub(crate) mod stream_channel;
-#[deprecated(since = "0.2.0", note = "Use stream_channel implementation instead")]
-#[allow(deprecated)]
-pub(crate) mod stream_loop;
 pub(crate) mod types;
 pub(crate) use types::StreamMode;

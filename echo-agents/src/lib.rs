@@ -7,16 +7,14 @@
 //! | Agent | Description | Feature |
 //! |-------|-------------|---------|
 //! | `ReactAgent` | ReAct loop (think-act-observe) | default |
-//! | `PlanExecuteAgent` | Plan-and-Execute paradigm | `plan-execute` |
-//! | `SelfReflectionAgent` | Self-reflection paradigm | `self-reflection` |
 //! | `SubagentExecutor` | Multi-agent subagent dispatch | `subagent` |
 //!
 //! ## Architecture Note
 //!
-//! This crate establishes the API boundary for agent types. The current
-//! implementation lives in the facade crate (`echo_agent`) due to deep
-//! coupling with tools, memory, skills, and other subsystems. Future
-//! refactoring will move implementations here as coupling is reduced.
+//! echo-agent uses a single Agent engine (ReactAgent) design. Different execution
+//! strategies (planning, self-review) are implemented as tools and configurations
+//! rather than separate Agent types. This aligns with industry best practices
+//! (Hermes, Claude Code, LangGraph).
 //!
 //! ## Usage
 //!

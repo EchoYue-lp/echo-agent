@@ -98,6 +98,18 @@ impl Tool for HumanInLoop {
                 }
                 HumanLoopResponse::Timeout => "Timed out waiting for user input".to_string(),
                 HumanLoopResponse::Deferred => "User deferred the decision".to_string(),
+                HumanLoopResponse::Selection {
+                    selection,
+                    instructions,
+                } => {
+                    format!(
+                        "User selected: {}{}",
+                        selection,
+                        instructions
+                            .map(|i| format!(" (instructions: {})", i))
+                            .unwrap_or_default()
+                    )
+                }
             };
 
             Ok(ToolResult::success(format!(

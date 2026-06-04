@@ -28,6 +28,11 @@ pub(crate) struct ToolExecutionSubsystem {
     pub(crate) tool_manager: Arc<ToolManager>,
     #[cfg(feature = "subagent")]
     pub(crate) subagent_registry: Arc<SubagentRegistry>,
+    /// Shared subagent executor (with hook configuration) — reused by
+    /// `delegate_task()` and `delegate_to_agent()` instead of creating
+    /// throwaway executors.
+    #[cfg(feature = "subagent")]
+    pub(crate) subagent_executor: Arc<crate::agent::subagent::SubagentExecutor>,
     #[cfg(feature = "tasks")]
     pub(crate) task_manager: Arc<TaskManager>,
     pub(crate) skill_registry: SkillRegistry,
@@ -61,6 +66,7 @@ impl ToolExecutionSubsystem {
     }
 
     #[cfg(feature = "tasks")]
+    #[allow(dead_code)]
     pub(crate) fn task_manager(&self) -> Option<Arc<TaskManager>> {
         Some(Arc::clone(&self.task_manager))
     }

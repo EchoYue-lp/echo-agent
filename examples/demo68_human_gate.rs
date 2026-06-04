@@ -1,124 +1,140 @@
-//! demo68_human_gate — HumanGate (P2) checkpoint demo
+//! demo68_human_selection — HumanLoopProvider Selection (task checkpoint) demo
 //!
-//! Demonstrates the human-in-the-loop gate that pauses a running task
-//! until a frontend provides approval, revision, or cancellation.
+//! Demonstrates the unified human-in-the-loop Selection kind that replaces
+//! the legacy HumanGate. A running task can pause and wait for human input
+//! via the same HumanLoopProvider used for tool approvals.
 //!
 //! ```bash
-//! cargo run --example demo68_human_gate --features tasks,subagent
+//! cargo run --example demo68_human_gate --features tasks,subagent,human-loop
 //! ```
 
-use echo_agent::tasks::{HumanGate, HumanRequest, HumanResponse};
+use echo_agent::human_loop::{
+    ApprovalDecision, HumanLoopEvent, HumanLoopManager, HumanLoopRequest, HumanLoopResponse,
+};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-
-fn sample_request(prompt: &str, phase: &str) -> HumanRequest {
-    HumanRequest {
-        prompt: prompt.into(),
-        context: serde_json::json!({ "draft": "Hello, world!" }),
-        options: vec!["Approve".into(), "Revise".into(), "Cancel".into()],
-        phase: phase.into(),
-    }
-}
 
 #[tokio::main]
 async fn main() {
-    println!("=== demo68: HumanGate (P2) ===\n");
+    println!("=== demo68: HumanLoopProvider Selection ===\n");
 
-    // ── Scenario 1: normal request -> respond flow ──────────────────
-    println!("--- Scenario 1: Request / Respond ---");
-    let gate = HumanGate::new();
-    let cancel = CancellationToken::new();
+    // ── Scenario 1: Selection via HumanLoopManager event loop ─────────
+    println!("--- Scenario 1: Selection via Manager events ---");
+    let manager = Arc::new(HumanLoopManager::new());
 
-    let gate_task = gate.clone();
-    let cancel_task = cancel.clone();
-    let task_handle = tokio::spawn(async move {
-        println!("  🚀 [Task]      started");
-        println!("  ⏸️  [Task]      pausing for human review...");
-        let resp = gate_task
-            .request(
-                "task-1",
-                sample_request("Review the draft", "review"),
-                &cancel_task,
-            )
-            .await;
-        match resp {
-            Ok(r) => println!("  ✅ [Task]      resumed! selection = {:?}", r.selection),
-            Err(e) => println!("  ❌ [Task]      error: {e}"),
+    // Spawn event handler (simulates frontend)
+    let mgr = manager.clone();
+    let handler = tokio::spawn(async move {
+        while let Some(event) = mgr.recv_event().await {
+            match event {
+                HumanLoopEvent::SelectionRequest {
+                    task_id,
+                    prompt,
+                    options,
+                    phase,
+                    responder,
+                    ..
+                } => {
+                    println!("  👀 [Frontend]  task={task_id}, phase={phase}");
+                    println!("  📋 [Frontend]  \"{prompt}\"");
+                    for (i, opt) in options.iter().enumerate() {
+                        println!("  [{i}] {opt}");
+                    }
+                    // Auto-select "Approve"
+                    responder.respond("Approve".to_string(), None);
+                    println!("  📨 [Frontend]  responded: Approve");
+                }
+                _ => {}
+            }
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Task requests selection
+    let req = HumanLoopRequest::selection(
+        "task-1",
+        "Review the draft and choose an action",
+        vec!["Approve".into(), "Revise".into(), "Cancel".into()],
+    )
+    .with_context(serde_json::json!({ "draft": "Hello, world!" }))
+    .with_phase("review");
 
-    let gate_fe = gate.clone();
-    let fe_handle = tokio::spawn(async move {
-        let pending = gate_fe.pending().await;
-        println!("  👀 [Frontend]  sees {} pending request(s)", pending.len());
-        for (id, req) in &pending {
-            println!(
-                "  📋 [Frontend]    - {id}: \"{}\" (phase={})",
-                req.prompt, req.phase
-            );
+    println!("  🚀 [Task]      requesting selection...");
+    match manager.request(req).await {
+        Ok(HumanLoopResponse::Selection {
+            selection,
+            instructions,
+        }) => {
+            println!("  ✅ [Task]      selection={selection}, instructions={instructions:?}");
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let ok = gate_fe
-            .respond(
-                "task-1",
-                HumanResponse {
-                    selection: "Approve".into(),
-                    instructions: None,
-                },
-            )
-            .await;
-        println!("  📨 [Frontend]  responded (ok={ok})");
-    });
+        Ok(other) => println!("  ⚠️  [Task]      unexpected response: {other:?}"),
+        Err(e) => println!("  ❌ [Task]      error: {e}"),
+    }
 
-    let _ = tokio::join!(task_handle, fe_handle);
+    drop(manager);
+    let _ = handler.await;
 
-    // ── Scenario 2: cancellation ────────────────────────────────────
-    println!("\n--- Scenario 2: Cancellation ---");
-    let gate2 = HumanGate::new();
-    let cancel2 = CancellationToken::new();
+    // ── Scenario 2: Timeout ──────────────────────────────────────────
+    println!("\n--- Scenario 2: Selection timeout ---");
+    let manager2 = Arc::new(HumanLoopManager::new());
 
-    let gate2_task = gate2.clone();
-    let cancel2_task = cancel2.clone();
-    let task2_handle = tokio::spawn(async move {
-        println!("  🚀 [Task-2]    started, requesting human input...");
-        let resp = gate2_task
-            .request(
-                "task-2",
-                sample_request("Approve deployment", "deploy"),
-                &cancel2_task,
-            )
-            .await;
-        match resp {
-            Ok(r) => println!("  ⚠️  [Task-2]    unexpected resume: {:?}", r.selection),
-            Err(_) => println!("  🛑 [Task-2]    cancelled (as expected)"),
+    // Spawn handler that never responds (simulates no frontend)
+    let mgr2 = manager2.clone();
+    let handler2 = tokio::spawn(async move {
+        while let Some(_event) = mgr2.recv_event().await {
+            // Intentionally not responding to trigger timeout
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    println!("  🎛️  [Ctrl]      cancelling task-2...");
-    cancel2.cancel();
-
-    let _ = task2_handle.await;
-    println!(
-        "  🧹 [Ctrl]      pending count = {}",
-        gate2.pending_count().await
+    let req2 = HumanLoopRequest::selection(
+        "task-2",
+        "Approve deployment",
+        vec!["Deploy".into(), "Abort".into()],
     );
+    // Use the approval_with_timeout pattern adapted for selection
+    let mut req2 = req2;
+    req2.timeout = Some(Duration::from_millis(200));
 
-    // ── Scenario 3: respond to non-existent task ────────────────────
-    println!("\n--- Scenario 3: Respond to non-existent task ---");
-    let gate3 = HumanGate::new();
-    let ok = gate3
-        .respond(
-            "ghost",
-            HumanResponse {
-                selection: "Approve".into(),
-                instructions: Some("no one here".into()),
-            },
-        )
-        .await;
-    println!("  👻 respond(\"ghost\", ...) -> ok={ok}  (no pending request)");
+    println!("  🚀 [Task-2]    requesting with 200ms timeout...");
+    match manager2.request(req2).await {
+        Ok(HumanLoopResponse::Timeout) => println!("  ⏰ [Task-2]    timed out (as expected)"),
+        Ok(other) => println!("  ⚠️  [Task-2]    unexpected: {other:?}"),
+        Err(e) => println!("  ❌ [Task-2]    error: {e}"),
+    }
+
+    drop(manager2);
+    handler2.abort();
+
+    // ── Scenario 3: Approval kind still works ────────────────────────
+    println!("\n--- Scenario 3: Approval kind (backward compat) ---");
+    let manager3 = Arc::new(HumanLoopManager::new());
+
+    let mgr3 = manager3.clone();
+    let handler3 = tokio::spawn(async move {
+        while let Some(event) = mgr3.recv_event().await {
+            match event {
+                HumanLoopEvent::ApprovalRequest {
+                    tool_name,
+                    responder,
+                    ..
+                } => {
+                    println!("  👀 [Frontend]  approval for tool: {tool_name}");
+                    responder.respond(ApprovalDecision::Approved);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let req3 = HumanLoopRequest::approval("write_file", serde_json::json!({"path": "test.rs"}));
+    println!("  🚀 [Task-3]    requesting approval...");
+    match manager3.request(req3).await {
+        Ok(HumanLoopResponse::Approved) => println!("  ✅ [Task-3]    approved"),
+        Ok(other) => println!("  ⚠️  [Task-3]    unexpected: {other:?}"),
+        Err(e) => println!("  ❌ [Task-3]    error: {e}"),
+    }
+
+    drop(manager3);
+    let _ = handler3.await;
 
     println!("\n🎉 === demo68 complete ===");
 }

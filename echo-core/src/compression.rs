@@ -27,6 +27,12 @@ pub struct CompressionOutput {
 /// Unified interface for all compression strategies (async, supports `dyn` trait object)
 pub trait ContextCompressor: Send + Sync {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>>;
+
+    /// Human-readable name of this compressor, used for metrics tracking.
+    /// Override in implementations for a descriptive name.
+    fn name(&self) -> &'static str {
+        "custom"
+    }
 }
 
 /// Allows `Box<dyn ContextCompressor>` to be passed directly to any function accepting
@@ -34,5 +40,9 @@ pub trait ContextCompressor: Send + Sync {
 impl ContextCompressor for Box<dyn ContextCompressor> {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         (**self).compress(input)
+    }
+
+    fn name(&self) -> &'static str {
+        (**self).name()
     }
 }

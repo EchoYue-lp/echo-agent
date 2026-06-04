@@ -195,7 +195,7 @@ echo-agent ships with **67 registered tools** across 8 crates, all accessible th
 | **Structured Output** | LLM output → typed Rust structs via JSON Schema | `agent.extract::<Contact>(text)` |
 | **Multi-Modal** | Text + images (base64/URL) + files in one message | `Message::user_with_image(...)` |
 | **Guard System** | Rule-based / LLM-powered content filtering | `#[guard(name = "safety")] async fn ...` |
-| **Permission Model** | Declarative tool permissions with pluggable policies | `DefaultPermissionPolicy::new()` |
+| **Permission Model** | Declarative tool permissions with unified permission service | `PermissionService::from_provider(...)` |
 | **Audit Logging** | Structured events with pluggable backends | `agent.set_audit_logger(...)` |
 | **Macro System** | 11 macros: `#[tool]`, `agent!{}`, `messages![]`, ... | `agent! { model: "..", tools: [...] }` |
 
@@ -205,8 +205,8 @@ echo-agent ships with **67 registered tools** across 8 crates, all accessible th
 |---------|-------------|-------------|
 | **SubAgent** | Sync / Fork / Teammate execution modes | `agent.register_agent(sub)` |
 | **Agent Handoff** | Context-aware transfer between agents | `HandoffManager::new()` |
-| **Plan-and-Execute** | Explicit planning phase → step-by-step execution | `PlanExecuteAgent::new(...)` |
-| **Self-Reflection** | LLM-based self-critique and refinement loops | `SelfReflectionAgent::new(...)` |
+| **Task Planning** | Plan → Execute → Summarize (built into ReactAgent) | `agent.execute_with_planning(task)` |
+| **Self-Review** | LLM-based quality critique as a tool | `ReviewTool::new(critic)` |
 | **Graph Workflow** | Linear, conditional, loop, parallel fan-out/fan-in | `GraphBuilder::new("pipeline")` |
 | **DAG Tasks** | Dependency-aware task scheduling with hooks | `TaskManager::default()` |
 | **Declarative Workflow** | Define graphs in YAML/JSON — no Rust code needed | `Graph::from_yaml("wf.yaml")?` |
@@ -611,18 +611,25 @@ Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → Deni
 - **DenialTracker**: auto-fallback after consecutive denials
 - **PermissionMode**: Default/Plan/Auto/AcceptEdits/BypassPermissions/DontAsk/Bubble
 
-```rust
+```rust,ignore
 use echo_agent::prelude::*;
+use echo_agent::human_loop::PermissionService;
 
 #[tokio::main]
 async fn main() {
-    // Grant read access, require approval for execute
-    let policy = DefaultPermissionPolicy::new()
-        .grant(ToolPermission::Read)
-        .require_approval(ToolPermission::Execute);
+    // Create permission service with rules
+    let service = PermissionService::builder()
+        .mode(PermissionMode::Default)
+        .rule(PermissionRule::new(
+            RuleMatcher::Permission { permission: ToolPermission::Read },
+            RuleBehavior::Allow,
+            RuleSource::Default,
+        ))
+        .build();
 
-    let decision = policy.check("shell", &[ToolPermission::Execute]).await;
-    assert!(decision.requires_approval());
+    let decision = service.check("shell", &json!({"command": "ls"})).await;
+    // Routes through 8-stage pipeline: bypass → plan → protected → rules
+    // → cache → denial → mode dispatch → post-processing
 }
 ```
 
@@ -703,19 +710,26 @@ async fn main() -> echo_agent::error::Result<()> {
 
 Supports three transports: **stdio**, **SSE**, **HTTP**.
 
-### 12. Plan-and-Execute — Explicit planning phase before execution
+### 12. Task Planning — Built-in plan-execute-summarize workflow
 
-Planner agent creates a task DAG, Executor agent follows it step-by-step with optional replanning.
+ReactAgent includes a three-phase planning workflow: Plan → Execute → Summarize. No separate agent type needed.
+
+> **Note**: Requires the `tasks` feature to be enabled.
 
 ```rust,ignore
-// Requires feature: plan-execute
 use echo_agent::prelude::*;
-use echo_agent::advanced::PlanExecuteAgent;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    let planner = PlanExecuteAgent::new("research_agent", planner_config, executor_config);
-    let result = planner.execute("Research quantum computing trends").await?;
+    let agent = ReactAgentBuilder::new()
+        .model("qwen3-max")
+        .system_prompt("You are a research assistant.")
+        .enable_tools()
+        .enable_planning()  // Enable plan, create_task, update_task tools
+        .build()?;
+
+    // Agent will plan the task, execute steps, and summarize results
+    let result = agent.execute_with_planning("Research quantum computing trends").await?;
     println!("{result}");
     Ok(())
 }
@@ -952,27 +966,28 @@ fn main() -> echo_agent::error::Result<()> {
 | Brave | Free 2k/mo | High | Official API |
 | Tavily | Paid (free tier) | Highest | AI-optimized for agents |
 
-### 21. Self-Reflection Agent — LLM self-critique and refinement
+### 21. Self-Review — Quality critique as a tool
+
+Use ReviewTool to let agents evaluate and refine their own outputs. This follows industry best practices (Hermes, Claude Code) where reflection is a tool capability, not a separate agent type.
 
 ```rust,ignore
-// Requires feature: self-reflection
 use echo_agent::prelude::*;
-use echo_agent::advanced::LlmCritic;
-use echo_agent::agent::self_reflection::SelfReflectionAgent;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    let generator = ReactAgentBuilder::new()
+    let critic = Arc::new(LlmCritic::new("qwen3-max"));
+    let review_tool = ReviewTool::new(critic);
+
+    let agent = ReactAgentBuilder::new()
         .model("qwen3-max")
-        .system_prompt("You are a technical writer.")
+        .system_prompt("You are a technical writer. Use the review tool to self-critique your work.")
+        .enable_tools()
+        .tool(Box::new(review_tool))
         .build()?;
 
-    let critic = LlmCritic::new("qwen3-max");
-
-    let agent = SelfReflectionAgent::new("reflection_agent", generator, critic)
-        .max_reflections(3);
-
-    let result = agent.execute("Write a summary of quantum computing").await?;
+    // Agent can now call review(task, output) to evaluate its own work
+    let result = agent.execute("Write a summary of quantum computing, then review it").await?;
     println!("{result}");
     Ok(())
 }
@@ -1167,7 +1182,7 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Multi-Agent Patterns | [EN](docs/en/26-multi-agent.md) | [ZH](docs/zh/26-multi-agent.md) |
 | Tracing System | [EN](docs/en/27-tracing.md) | [ZH](docs/zh/27-tracing.md) |
 | Config Reference | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
-| Long-Running Tasks | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
+| Runtime & Task System | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
 | ReAct Safety | [EN](docs/en/30-react-safety.md) | [ZH](docs/zh/30-react-safety.md) |
 | LSP Integration | [EN](docs/en/31-lsp-integration.md) | [ZH](docs/zh/31-lsp-integration.md) |
 | Plugin System | [EN](docs/en/32-plugin-system.md) | [ZH](docs/zh/32-plugin-system.md) |

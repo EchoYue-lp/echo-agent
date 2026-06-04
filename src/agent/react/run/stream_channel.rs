@@ -1,11 +1,10 @@
 //! Channel-based streaming execution — returns `BoxStream<'static>`.
 //!
 //! Uses a tokio::mpsc channel + spawned task instead of `try_stream!`.
-//! This is the primary streaming implementation; `run_stream_inner` (try_stream!)
-//! is kept as a fallback for non-static borrow scenarios.
+//! All streaming execution goes through this module.
 
 use super::super::{ReactAgent, StepType, TOOL_FINAL_ANSWER};
-use super::stream_loop::processor::{build_tool_calls_from_map, process_stream_chunk};
+use super::processor::{build_tool_calls_from_map, process_stream_chunk};
 use super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
 use crate::error::{AgentError, ReactError, Result};
@@ -66,6 +65,11 @@ impl ReactAgent {
         let message = init.message.clone();
         let label = init.label.clone();
 
+        // ★ Acquire execution mutex BEFORE context mutation — using lock_owned()
+        // so the guard can be moved into the spawned task and held for the
+        // entire stream lifetime.
+        let execution_guard = self.execution_mutex.clone().lock_owned().await;
+
         let recalled = if let Some(ref msg) = init.message {
             self.prepare_stream_context_with_message(mode, msg).await
         } else {
@@ -84,8 +88,10 @@ impl ReactAgent {
             .clone();
 
         tokio::spawn(async move {
+            // Move the guard into the spawned task — held for full stream duration
+            let _execution_guard = execution_guard;
             if let Err(e) = snap
-                .run_loop(context, text, message, label, mode, recalled, tx.clone())
+                .run_core_loop(context, text, message, label, mode, recalled, tx.clone())
                 .await
             {
                 let _ = tx.try_send(Err(e));
@@ -109,7 +115,14 @@ fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
 impl AgentSnapshot {
     // ── Main loop ────────────────────────────────────────────────────
 
-    async fn run_loop(
+    /// Unified ReAct core loop — shared by both streaming and non-streaming paths.
+    ///
+    /// The non-streaming path (`run_react_loop`) creates a channel and runs this
+    /// method, then collects `FinalAnswer` from the events. The streaming path
+    /// (`run_stream_channel`) spawns this in a `tokio::spawn` and returns the
+    /// receiver as a `BoxStream`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_core_loop(
         self,
         context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
         text: String,
@@ -119,6 +132,10 @@ impl AgentSnapshot {
         recalled: usize,
         tx: mpsc::Sender<Result<AgentEvent>>,
     ) -> Result<()> {
+        // NOTE: execution_mutex is already held by the spawned task
+        // (acquired in run_stream_channel via lock_owned()), so we don't
+        // need to lock again here.
+
         let agent = self.config.agent_name.clone();
         let callbacks = self.config.callbacks.clone();
 
@@ -333,6 +350,7 @@ impl AgentSnapshot {
                     (a, c)
                 };
                 #[cfg(not(feature = "human-loop"))]
+                #[allow(clippy::type_complexity)]
                 let (appr, conc): (
                     Vec<(String, String, Value)>,
                     Vec<(String, String, Value)>,
@@ -721,24 +739,10 @@ impl AgentSnapshot {
                 .unwrap_or(PermissionDecision::RequireApproval)
                 .requires_approval();
         }
-        if let Some(pol) = &self.guard.permission_policy {
-            let perms = self
-                .tools
-                .tool_manager
-                .get_tool(tool_name)
-                .map(|t| t.permissions())
-                .unwrap_or_default();
-            if !perms.is_empty() {
-                let d = pol.check(tool_name, &perms).await;
-                return matches!(
-                    d,
-                    PermissionDecision::RequireApproval | PermissionDecision::Ask { .. }
-                );
-            }
-        }
         false
     }
     #[cfg(not(feature = "human-loop"))]
+    #[allow(dead_code)]
     async fn tool_needs_approval(&self, _: &str) -> bool {
         false
     }

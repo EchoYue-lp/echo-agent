@@ -17,7 +17,7 @@ LLM 的上下文窗口（Context Window）是有限的。当对话历史积累�
 
 ---
 
-## 三种压缩策略
+## 压缩策略
 
 ### 1. SlidingWindowCompressor（滑动窗口）
 
@@ -67,7 +67,33 @@ SummaryCompressor::with_prompt(
 
 ---
 
-### 3. HybridCompressor（混合管道）
+### 3. IncrementalSummaryCompressor（增量摘要压缩）
+
+> **新增于 v0.2.2。** 复用历史摘要的增量 LLM 摘要压缩器。
+
+与 `SummaryCompressor` 每次全量重新摘要不同，`IncrementalSummaryCompressor` 维护上次的摘要文本，后续压缩时只发送 `[上次摘要] + [新增消息]` 给 LLM。对于需要多次压缩的长对话，可显著降低 LLM 成本和延迟。
+
+```rust
+use echo_agent::compression::compressor::IncrementalSummaryCompressor;
+use std::sync::Arc;
+
+let compressor = IncrementalSummaryCompressor::new(llm, 6);
+// 第一次压缩：摘要全部旧消息（与 SummaryCompressor 相同）
+// 第二次压缩：只发送上次摘要 + 新增消息
+// 第三次压缩：同上，更便宜
+
+// 查看或重置存储的摘要：
+println!("当前摘要: {:?}", compressor.current_summary());
+compressor.reset();
+```
+
+**优点**：长对话多次压缩时成本大幅降低。
+
+**缺点**：需要维护内部状态（`Mutex` 保护）；逻辑略复杂。
+
+---
+
+### 4. HybridCompressor（混合管道）
 
 **原理**：将多个压缩策略串联为管道，前一策略的输出作为后一策略的输入。
 
@@ -81,6 +107,111 @@ let compressor = HybridCompressor::builder()
     .stage(SummaryCompressor::new(llm, 8))          // 第二阶段：摘要
     .build();
 ```
+
+**短路优化**（v0.2.2 新增）：默认启用。当某阶段执行后 token 数已降至阈值以下，跳过后续阶段，避免不必要的 LLM 调用。
+
+```rust
+// 禁用短路（始终执行所有阶段）
+let compressor = HybridCompressor::builder()
+    .stage(SlidingWindowCompressor::new(30))
+    .stage(SummaryCompressor::new(llm, 8))
+    .short_circuit(false)
+    .build();
+```
+
+---
+
+### 5. AdaptiveCompressor（自适应压缩）
+
+> **新增于 v0.2.1，v0.2.2 增强。** 自动根据上下文长度选择压缩级别。
+
+`AdaptiveCompressor` 实现多级渐进式压缩策略，当上下文超过 token 阈值时自动升级压缩强度：
+
+| 级别 | 名称 | 策略 | 触发阈值 | LLM? |
+|------|------|------|---------|------|
+| L1 | **Snip** | 移除超过 token 上限的工具输出 | `l1_snip_threshold_tokens` (80k) | 否 |
+| L1 | **Fold** | 折叠连续的工具结果，保留最新 N 条 | Snip 后执行 | 否 |
+| L2 | **Micro** | 截断工具输出，保留首尾各 N 行 | `l2_micro_threshold_tokens` (100k) | 否 |
+| L3 | **Collapse** | 丢弃较早消息，保留系统提示 + 最近 N 条 | `l3_collapse_threshold_tokens` (120k) | 否 |
+| L4 | **Auto Compact** | LLM 全文摘要 | `l4_compact_threshold_tokens` (150k) | 是（可选） |
+| L5 | **Reactive** | 紧急模式：仅保留系统提示 + 最近 3 条消息 | 超过 L4 阈值 + 2×target | 否 |
+
+**v0.2.2 变更：**
+- L4 现在**内置支持**，通过 `.with_llm()` 启用 — 无需外部集成
+- L1 新增**工具折叠**（`l1_fold_consecutive_tools`），自动折叠连续的工具消息
+- `AdaptiveCompressor` 现在实现了 `ContextCompressor` trait — 可直接通过 `ContextManager::builder().compressor()` 使用
+
+### 配置
+
+```rust
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let config = AdaptiveCompressionConfig {
+    l1_snip_threshold_tokens: 80_000,
+    l1_max_output_tokens: 4_000,        // Snip 时单条输出最大 token
+    l1_fold_consecutive_tools: true,     // 折叠连续工具结果（新增）
+    l1_fold_keep_latest: 2,             // 每组保留最新 N 条工具结果（新增）
+    l2_micro_threshold_tokens: 100_000,
+    l2_keep_lines: 50,                   // Micro 时保留首尾行数
+    l3_collapse_threshold_tokens: 120_000,
+    l3_keep_recent: 10,                  // Collapse 时保留最近消息数
+    l4_compact_threshold_tokens: 150_000,
+    l4_keep_recent: 6,                   // Compact 时保留最近消息数
+};
+
+// 不带 LLM：L4 被跳过，直接降级到 L5
+let compressor = AdaptiveCompressor::new(config.clone());
+
+// 带 LLM：L4 自动摘要被启用
+let compressor = AdaptiveCompressor::new(config).with_llm(llm);
+```
+
+### 工作原理
+
+```
+Token 数:     0 ──── 80k ──── 100k ──── 120k ──── 150k ──── ∞
+               │       │        │         │         │        │
+               │ 无压缩 │  Snip  │  Micro  │Collapse │Compact │
+               │       │+Fold   │截断首尾 │丢弃旧消息│LLM 摘要│
+               │       │裁剪长  │         │         │        │
+               │       │输出    │         │         │        │
+```
+
+### 与 ContextManager 集成
+
+`AdaptiveCompressor` 实现了 `ContextCompressor`，可通过 `ContextManager::builder()` 直接集成（v0.2.2 新增）：
+
+```rust
+use echo_state::compression::ContextManager;
+use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
+
+let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default())
+    .with_llm(llm); // 可选：启用 L4
+
+let mut ctx = ContextManager::builder(token_limit)
+    .compressor(compressor) // 现在可直接使用（之前需要 Box::new()）
+    .with_system("系统提示词".to_string())
+    .build();
+
+// prepare() 会自动检测 token 并触发压缩
+let result = ctx.prepare(None).await?;
+// result.messages — 压缩后的消息列表
+// result.compressed — 压缩统计信息（如果有）
+```
+
+### 底层 API（不通过 ContextManager 直接使用）
+
+对于高级用例，`compress_in_place()` 直接原地修改消息：
+
+```rust
+let mut messages = vec![/* ... */];
+let current_tokens = 50_000;
+let target_tokens = 30_000;
+let result = compressor.compress_in_place(&mut messages, current_tokens, target_tokens);
+println!("应用的级别: {:?}", result.levels_applied);
+```
+
+详见 [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs)。
 
 ---
 
@@ -157,9 +288,78 @@ for i in 0..30 {
 println!("压缩前 token: {}", ctx.token_estimate());
 
 // prepare() 触发自动压缩，返回可发送给 LLM 的消息列表
-let messages = ctx.prepare(None).await?;
+let result = ctx.prepare(None).await?;
 
-println!("压缩后消息数: {}", messages.len());
+println!("压缩后消息数: {}", result.messages.len());
+```
+
+---
+
+## 压缩指标
+
+> **新增于 v0.2.2。** 压缩事件的累积可观测性。
+
+`ContextManager` 在其生命周期内跟踪压缩统计：
+
+```rust
+let metrics = ctx.compression_metrics();
+
+println!("总压缩次数: {}", metrics.total_compressions);
+println!("节省 token: {}", metrics.total_tokens_saved());
+println!("压缩比率: {:.1}%", metrics.compression_ratio() * 100.0);
+println!("使用的策略: {:?}", metrics.strategies_used);
+
+// 人类可读的报告：
+println!("{}", metrics.report());
+// → "CompressionMetrics: 5 compressions, 12340 tokens saved (35.2%), 48 messages evicted, strategies: [SlidingWindow(3), Adaptive(2)]"
+
+// 重置指标：
+ctx.reset_compression_metrics();
+```
+
+指标在以下方法中自动记录：
+- `prepare()`（自动压缩）
+- `force_compress()`
+- `force_compress_with()`
+
+每次压缩事件还会发出 `tracing` 日志（`info` 级别），包含字段：`compressor`、`before_messages`、`after_messages`、`before_tokens`、`after_tokens`、`evicted`、`saved_tokens`、`elapsed_ms`。
+
+---
+
+## Token 估算
+
+### 内置 Tokenizer
+
+| 类型 | 算法 | 精度 |
+|------|------|------|
+| `HeuristicTokenizer` | ASCII 权重 1，CJK 权重 2，总量 / 4 | 中等（CJK/英文混合推荐） |
+| `SimpleTokenizer` | `字节数 / 4 + 1` | 低（向后兼容） |
+
+### CalibratedTokenizer（v0.2.2 新增）
+
+`CalibratedTokenizer` 包装任意基础 Tokenizer，通过从实际 API 响应数据学习，逐步提升估算精度：
+
+```rust
+use echo_core::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
+use std::sync::Arc;
+
+let base = Arc::new(HeuristicTokenizer);
+let calibrated = CalibratedTokenizer::new(base);
+
+// 像其他 Tokenizer 一样使用
+let tokens = calibrated.count_tokens("some text");
+
+// LLM API 返回实际 token 数后，反馈校准：
+calibrated.calibrate(tokens, api_usage.prompt_tokens);
+
+// 校准因子通过指数移动平均（EMA）逐步收敛
+println!("校准因子: {:.3}", calibrated.calibration_factor());
+println!("样本数: {}", calibrated.sample_count());
+
+// 与 ContextManager 配合使用：
+let ctx = ContextManager::builder(4096)
+    .tokenizer(Arc::new(calibrated))
+    .build();
 ```
 
 ---
@@ -169,13 +369,17 @@ println!("压缩后消息数: {}", messages.len());
 ```
 调用 ctx.prepare() 时：
     │
-    ├─ 估算当前 token 数（字符数 / 4，粗略估算）
+    ├─ 估算当前 token 数（通过配置的 Tokenizer）
     │
     ├─ 若 token_estimate() ≤ token_limit → 直接返回，不压缩
     │
     └─ 若 token_estimate() > token_limit → 调用 compressor.compress()
            ├─ SlidingWindow：直接截断（纳秒级）
-           └─ Summary：调用 LLM 生成摘要（秒级，有成本）
+           ├─ Summary/IncrementalSummary：调用 LLM 生成摘要（秒级，有成本）
+           ├─ Hybrid：依次执行管道阶段（低于阈值时短路跳过后续）
+           └─ Adaptive：按需升级 L1→L2→L3→L4→L5
+    │
+    └─ 记录指标 + 发出 tracing 日志事件
 ```
 
 ---
@@ -187,10 +391,12 @@ println!("压缩后消息数: {}", messages.len());
 | 聊天机器人（历史不重要） | `SlidingWindowCompressor(20~50)` |
 | 任务执行 Agent（历史有价值） | `SummaryCompressor` 或 `Hybrid` |
 | 高频调用、成本敏感 | `SlidingWindowCompressor` |
+| 长对话、需要多次压缩 | `IncrementalSummaryCompressor` |
 | 长文档分析 | `HybridCompressor`（先滑动窗口，再摘要） |
+| 工具密集型工作流 | `AdaptiveCompressor`（自动升级 + L1 工具折叠） |
 | 测试环境 | `SlidingWindowCompressor(5)` + `token_limit: 100` |
 
-对应示例：`examples/demo05_compressor.rs`
+对应示例：`examples/demo05_compressor.rs`、`examples/demo53_adaptive_compression.rs`
 
 ---
 
@@ -202,6 +408,7 @@ println!("压缩后消息数: {}", messages.len());
 你想做什么？                          怎么做
 ────────────────────────────────────────────────────────
 只改摘要提示词的措辞/语言/关注点     →  SummaryCompressor::with_prompt(llm, n, |msgs| ...)
+降低重复压缩的 LLM 成本              →  IncrementalSummaryCompressor
 修改压缩逻辑本身（消息过滤、回退       →  impl ContextCompressor
   策略、摘要放置位置、增量摘要等）
 快速从一个 async fn 生成压缩器        →  #[compressor] 过程宏
@@ -237,6 +444,8 @@ use futures::future::BoxFuture;
 struct UserOnlyCompressor { keep: usize }
 
 impl ContextCompressor for UserOnlyCompressor {
+    fn name(&self) -> &'static str { "UserOnly" } // 可选：用于指标追踪
+
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let (system, conv): (Vec<_>, Vec<_>) = input.messages
@@ -288,77 +497,16 @@ async fn tail_only(input: CompressionInput) -> Result<CompressionOutput> {
 
 ```text
 ContextCompressor (唯一的压缩策略扩展点)
- ├── SlidingWindowCompressor  (独立实现，无外部依赖)
- ├── SummaryCompressor        (内部使用 Box<dyn Fn> 生成摘要提示词)
- │     ├── new()              (使用 default_summary_prompt)
- │     └── with_prompt()      (使用自定义闭包)
- └── HybridCompressor         (串联多个 ContextCompressor)
+ ├── SlidingWindowCompressor       (独立实现，无外部依赖)
+ ├── SummaryCompressor             (LLM 摘要 + 失败回退)
+ │     ├── new()                   (使用 default_summary_prompt)
+ │     └── with_prompt()           (使用自定义闭包)
+ ├── IncrementalSummaryCompressor  (增量 LLM 摘要，复用上次结果)
+ ├── HybridCompressor              (管道串联 + 短路优化)
+ └── AdaptiveCompressor            (5 级自动升级，可选 LLM for L4)
+       ├── L1: Snip + Fold         (截断/折叠工具输出)
+       ├── L2: Micro               (保留首尾 N 行)
+       ├── L3: Collapse            (丢弃旧消息，保留最近)
+       ├── L4: Compact             (通过 .with_llm() 启用 LLM 摘要)
+       └── L5: Reactive            (紧急：系统提示 + 最近 3 条)
 ```
-
----
-
-## 自适应压缩（AdaptiveCompressor）
-
-> **新增于 v0.2.1。** 自动根据上下文长度选择压缩级别。
-
-`AdaptiveCompressor` 实现 5 级渐进式压缩策略，当上下文超过 token 阈值时自动升级压缩强度：
-
-| 级别 | 名称 | 策略 | 触发阈值 |
-|------|------|------|---------|
-| L1 | **Snip** | 移除超过 token 上限的工具输出 | `l1_snip_threshold_tokens` (80k) |
-| L2 | **Micro** | 截断工具输出，保留首尾各 N 行 | `l2_micro_threshold_tokens` (100k) |
-| L3 | **Collapse** | 丢弃较早消息，保留系统提示 + 最近 N 条 | `l3_collapse_threshold_tokens` (120k) |
-| L4 | **Auto Compact** | LLM 全文摘要（需外部集成） | `l4_compact_threshold_tokens` (150k) |
-| L5 | **Reactive** | 紧急模式：仅保留系统提示 + 最近 3 条消息 | 超过 L3 阈值时 |
-
-**注意：** L4 需要外部 LLM 调用，`AdaptiveCompressor` 内部实现 L1 → L2 → L3 → L5 顺序压缩，达到 `target_tokens` 时停止。
-
-### 配置
-
-```rust
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
-
-let config = AdaptiveCompressionConfig {
-    l1_snip_threshold_tokens: 80_000,
-    l1_max_output_tokens: 4_000,        // Snip 时单条输出最大 token
-    l2_micro_threshold_tokens: 100_000,
-    l2_keep_lines: 50,                   // Micro 时保留首尾行数
-    l3_collapse_threshold_tokens: 120_000,
-    l3_keep_recent: 10,                  // Collapse 时保留最近消息数
-    l4_compact_threshold_tokens: 150_000,
-    l4_keep_recent: 6,                   // Compact 时保留最近消息数（外部 LLM 处理）
-};
-
-let compressor = AdaptiveCompressor::new(config);
-```
-
-### 工作原理
-
-```
-Token 数:     0 ──── 80k ──── 100k ──── 120k ──── 150k ──── ∞
-               │       │        │         │         │        │
-               │ 无压缩 │  Snip  │  Micro  │Collapse │Compact │
-               │       │截断长输出│ 精简结果 │丢弃旧消息│外部LLM │
-```
-
-### 与 ContextManager 集成
-
-`AdaptiveCompressor` 通过 `ContextManager::builder()` 集成，而非 `AgentConfig`：
-
-```rust
-use echo_state::compression::ContextManager;
-use echo_state::compression::levels::{AdaptiveCompressor, AdaptiveCompressionConfig};
-
-let compressor = AdaptiveCompressor::new(AdaptiveCompressionConfig::default());
-let mut ctx = ContextManager::builder(token_limit)
-    .compressor(Box::new(compressor))
-    .with_system("系统提示词")
-    .build();
-
-// prepare() 会自动检测 token 并触发压缩
-let result = ctx.prepare(None).await?;
-// result.messages — 压缩后的消息列表
-// result.compressed — 压缩统计信息（如果有）
-```
-
-详见 [demo53_adaptive_compression.rs](../examples/demo53_adaptive_compression.rs)。

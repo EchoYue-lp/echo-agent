@@ -18,6 +18,10 @@ impl SlidingWindowCompressor {
 }
 
 impl ContextCompressor for SlidingWindowCompressor {
+    fn name(&self) -> &'static str {
+        "SlidingWindow"
+    }
+
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
             let (system_msgs, conv_msgs): (Vec<_>, Vec<_>) = input

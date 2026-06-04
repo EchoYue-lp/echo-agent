@@ -36,6 +36,7 @@ impl SpawnBackgroundTaskTool {
     }
 
     /// Create a new tool with a default spawner.
+    #[allow(dead_code)]
     pub fn with_default_spawner() -> Self {
         Self {
             spawner: Arc::new(TaskSpawner::new(TaskSpawnerConfig::default())),

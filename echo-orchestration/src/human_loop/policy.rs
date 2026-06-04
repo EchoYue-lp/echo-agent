@@ -1,19 +1,15 @@
 //! 审批策略引擎
 //!
-//! 提供可配置的工具审批策略接口。
+//! 提供可配置的工具审批策略类型。
 //!
 //! ## 核心概念
 //!
 //! - **ApprovalScope**: 审批范围（Once/Session/SessionAllTools）
 //! - **ApprovalRule**: 匹配工具调用的规则，决定风险等级
-//! - **ApprovalPolicy**: 策略 trait，评估工具调用是否需要审批
 //! - **PolicyDecision**: 策略评估结果
 //!
-//! **注意**: `DefaultApprovalPolicy` 和 `LegacyApprovalPolicy` 已移除。
+//! **注意**: 审批策略逻辑已统一到 `PermissionService`。
 //! 请使用 `PermissionService` 作为统一的权限检查入口。
-
-use futures::future::BoxFuture;
-use serde_json::Value;
 
 use super::permission::RiskLevel;
 
@@ -100,24 +96,6 @@ pub enum PolicyDecision {
         /// 拒绝原因
         reason: String,
     },
-}
-
-// ── Approval Policy Trait ─────────────────────────────────────────────────────
-
-/// 审批策略 trait
-///
-/// 核心接口：评估工具调用是否需要人工审批。
-/// 对于新项目，推荐直接使用 [`super::service::PermissionService`]。
-pub trait ApprovalPolicy: Send + Sync {
-    /// 评估工具调用是否需要审批
-    fn evaluate<'a>(&'a self, tool_name: &'a str, args: &'a Value)
-    -> BoxFuture<'a, PolicyDecision>;
-
-    /// 记录审批决策（用于缓存）
-    fn record_decision(&self, tool_name: &str, args: &Value, approved: bool, scope: ApprovalScope);
-
-    /// 检查是否有缓存决策
-    fn is_cached(&self, tool_name: &str, args: &Value) -> bool;
 }
 
 // ── 单元测试 ──────────────────────────────────────────────────────────────────

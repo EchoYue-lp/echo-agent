@@ -678,6 +678,11 @@ impl<P: super::HumanLoopProvider + 'static> PermissionRequestHandler
             HumanLoopResponse::Deferred => {
                 Ok(PermissionResponse::denied(Some("审批被推迟".to_string())))
             }
+            HumanLoopResponse::Selection { .. } => {
+                Ok(PermissionResponse::denied(Some(
+                    "收到意外的 Selection 响应".to_string(),
+                )))
+            }
         }
     }
 }

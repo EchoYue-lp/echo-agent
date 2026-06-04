@@ -6,6 +6,7 @@
 //! - SubAgent, compressor, callbacks, etc.
 
 use super::ReactAgent;
+#[cfg(feature = "subagent")]
 use crate::agent::Agent;
 use crate::compression::{ContextCompressor, ForceCompressStats};
 use crate::error::Result;
@@ -302,6 +303,30 @@ impl ReactAgent {
     /// Unlike the config builder's `with_callback`, this method can add callbacks dynamically at runtime.
     pub fn add_callback(&mut self, callback: Arc<dyn crate::agent::AgentCallback>) {
         self.config.callbacks.push(callback);
+    }
+
+    /// Remove all callbacks whose type name matches the given string.
+    ///
+    /// Useful for cleaning up temporary callbacks (e.g., progress bridges)
+    /// after a task completes.
+    pub fn remove_callbacks_by_type_name(&mut self, type_name: &str) {
+        self.config.callbacks.retain(|cb| {
+            let name = format!("{}", std::any::type_name_of_val(cb.as_ref()));
+            !name.contains(type_name)
+        });
+    }
+
+    /// Access the execution serializer.
+    ///
+    /// Use this when you need to hold the execution lock across multiple
+    /// agent operations (e.g., registering a temporary callback then
+    /// executing, where both steps must be atomic with respect to other
+    /// concurrent executions).
+    ///
+    /// For normal `execute()` / `chat()` / `chat_stream()` calls, the
+    /// lock is acquired automatically inside `run_react_loop` / `run_loop`.
+    pub fn execution_mutex(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.execution_mutex
     }
 
     // ── Skills (code-based) ──────────────────────────────────────────────────

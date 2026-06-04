@@ -4,28 +4,14 @@ pub mod builder;
 mod critic;
 pub mod factory;
 pub mod intervention;
-pub mod mode;
-mod executor;
-mod plan;
 pub mod prompt_template;
-mod reflection;
 mod types;
 
 pub use intervention::{InterventionCallback, InterventionResult, CallbackBridge};
-pub use mode::{AgentMode, DefaultModeEngine, ModeConfig, ModeEngine};
-pub use factory::{AgentFactory, AgentFactoryConfig, AgentParadigm, DefaultAgentFactory};
+pub use factory::{AgentFactory, AgentFactoryConfig, DefaultAgentFactory};
 pub use prompt_template::PromptTemplateManager;
 
 pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, ThresholdCritic};
-pub use executor::{Executor, ReactExecutor, SimpleExecutor};
-pub use plan::{
-    IssueSeverity, Plan, PlanOutput, PlanStep, PlanStepOutput, PlanStore, PlanSummary,
-    PlanValidationIssue, Planner, StaticPlanner, StepResult, StepStatus, plan_output_schema,
-};
-pub use reflection::{
-    InMemoryReflectionStore, ReflectionExperience, ReflectionRecord, ReflectionStore,
-    default_refinement_prompt, default_reflection_prompt,
-};
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 
 use crate::error::{ReactError, Result};
@@ -88,27 +74,6 @@ pub enum AgentEvent {
         event: crate::tools::ToolStreamEvent,
     },
 
-    // ── Step-level Events ────────────────────────────────────────────────────────────────
-    /// Plan-and-Execute engine generated a plan
-    PlanGenerated {
-        /// List of plan step descriptions
-        steps: Vec<String>,
-    },
-    /// Plan step execution started
-    StepStart {
-        /// Step index (0-based)
-        step_index: usize,
-        /// Step description
-        description: String,
-    },
-    /// Plan step execution ended
-    StepEnd {
-        /// Step index (0-based)
-        step_index: usize,
-        /// Whether the step executed successfully
-        success: bool,
-    },
-
     // ── Guard & Safety ──────────────────────────────────────────────────────
     /// A guard was triggered
     GuardTriggered {
@@ -134,48 +99,6 @@ pub enum AgentEvent {
         before_tokens: usize,
         /// Estimated token count after compression
         after_tokens: usize,
-    },
-    /// Agent-to-agent handoff started
-    HandoffStart {
-        /// Source agent name
-        from: String,
-        /// Target agent name
-        to: String,
-    },
-    /// Agent-to-agent handoff ended
-    HandoffEnd {
-        /// Target agent name
-        to: String,
-    },
-
-    // ── Introspection / Reflection ──────────────────────────────────────────────────────────
-    /// Reflection iteration started
-    ReflectionStart {
-        /// Current iteration number (starting from 1)
-        iteration: usize,
-    },
-    /// Reflection iteration ended
-    ReflectionEnd {
-        /// Iteration number (starting from 1)
-        iteration: usize,
-        /// Reflection score (0.0-1.0)
-        score: f64,
-        /// Whether reflection passed
-        passed: bool,
-    },
-    /// Evaluator produced a critique
-    CritiqueGenerated {
-        /// Critique score (0.0-1.0)
-        score: f64,
-        /// Whether the evaluation passed
-        passed: bool,
-        /// Evaluation feedback text
-        feedback: String,
-    },
-    /// Refining answer based on reflection
-    Refining {
-        /// Current iteration number (starting from 1)
-        iteration: usize,
     },
 
     // ── Visualization ────────────────────────────────────────────────────────────
@@ -235,12 +158,6 @@ pub enum AgentPhase {
     Thinking,
     /// Tool execution in progress (ToolCall → ToolResult / ToolError)
     Acting,
-    /// Plan formulation and step execution (PlanGenerated / StepStart / StepEnd)
-    Planning,
-    /// Reflection and refinement (ReflectionStart / CritiqueGenerated / Refining / ReflectionEnd)
-    Reflecting,
-    /// Agent-to-agent switching (HandoffStart → HandoffEnd)
-    HandingOff,
     /// Final result produced or cancelled
     Terminal,
 }
@@ -312,19 +229,6 @@ impl AgentEvent {
             | AgentEvent::SafetyNotice { .. }
             | AgentEvent::ParameterError { .. } => AgentPhase::Acting,
 
-            AgentEvent::PlanGenerated { .. }
-            | AgentEvent::StepStart { .. }
-            | AgentEvent::StepEnd { .. } => AgentPhase::Planning,
-
-            AgentEvent::ReflectionStart { .. }
-            | AgentEvent::ReflectionEnd { .. }
-            | AgentEvent::CritiqueGenerated { .. }
-            | AgentEvent::Refining { .. } => AgentPhase::Reflecting,
-
-            AgentEvent::HandoffStart { .. } | AgentEvent::HandoffEnd { .. } => {
-                AgentPhase::HandingOff
-            }
-
             AgentEvent::FinalAnswer(_) | AgentEvent::Cancelled | AgentEvent::Error { .. } => {
                 AgentPhase::Terminal
             }
@@ -352,10 +256,6 @@ impl AgentEvent {
                 | AgentEvent::ToolResult { .. }
                 | AgentEvent::ToolError { .. }
                 | AgentEvent::ParameterError { .. }
-                | AgentEvent::PlanGenerated { .. }
-                | AgentEvent::StepEnd { .. }
-                | AgentEvent::ReflectionEnd { .. }
-                | AgentEvent::HandoffEnd { .. }
                 | AgentEvent::ContextCompressed { .. }
                 | AgentEvent::FinalAnswer(_)
                 | AgentEvent::Cancelled
@@ -432,12 +332,34 @@ pub trait Agent: Send + Sync {
     /// (if `tasks` feature is enabled), then enters the ReAct loop.
     /// Use this for standalone, single-round tasks where the agent starts fresh
     /// or resumes from a checkpoint.
+    ///
+    /// # ⚠️ Warning: Do NOT use for multi-turn chat UIs
+    ///
+    /// `execute()` **clears conversation history** on every call (only the
+    /// system prompt survives). Calling it in a REPL / TUI / chatbot loop
+    /// will make the agent "forget" all previous turns.
+    ///
+    /// **Use [`chat()`](Agent::chat) instead** for any scenario where the
+    /// agent must remember prior messages across calls.
+    ///
+    /// | Scenario | Correct method |
+    /// |---|---|
+    /// | CLI one-shot command | `execute()` ✓ |
+    /// | Workflow / pipeline node | `execute()` ✓ |
+    /// | Batch processing (independent tasks) | `execute()` ✓ |
+    /// | REPL / TUI / chatbot | `chat()` ✓ |
+    /// | Multi-turn dialogue | `chat()` ✓ |
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>>;
 
     /// Execute a task and stream lifecycle events.
     ///
     /// Same semantics as [`Self::execute`] but returns a stream of
     /// [`AgentEvent`] for real-time observability.
+    ///
+    /// # ⚠️ Warning
+    ///
+    /// Clears conversation history on every call — see [`execute()`](Agent::execute)
+    /// for details. Use [`chat_stream()`](Agent::chat_stream) for multi-turn UIs.
     fn execute_stream<'a>(
         &'a self,
         task: &'a str,
@@ -448,6 +370,12 @@ pub trait Agent: Send + Sync {
     /// The default implementation wraps [`Self::execute_stream`] with a
     /// cancellation-aware wrapper. When `cancel` is triggered, the stream
     /// yields [`AgentEvent::Cancelled`] and terminates.
+    ///
+    /// # ⚠️ Warning
+    ///
+    /// Clears conversation history on every call — see [`execute()`](Agent::execute)
+    /// for details. Use [`chat_stream_with_cancel()`](Agent::chat_stream_with_cancel)
+    /// for multi-turn UIs.
     fn execute_stream_with_cancel<'a>(
         &'a self,
         task: &'a str,
@@ -466,6 +394,9 @@ pub trait Agent: Send + Sync {
     /// Use this for interactive, multi-turn dialogue where the agent
     /// accumulates state across calls.
     ///
+    /// **Prefer this over [`execute()`](Agent::execute)** for any UI that
+    /// sends multiple messages in sequence (REPL, TUI, chatbot, web chat).
+    ///
     /// By default this delegates to [`Self::execute`]; concrete implementations
     /// (like `ReactAgent`) override it to avoid resetting context.
     fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
@@ -476,6 +407,9 @@ pub trait Agent: Send + Sync {
     ///
     /// Same semantics as [`Self::chat`] but returns a stream of
     /// [`AgentEvent`] for real-time observability.
+    ///
+    /// **Prefer this over [`execute_stream()`](Agent::execute_stream)** for
+    /// any UI that sends multiple messages in sequence.
     fn chat_stream<'a>(
         &'a self,
         message: &'a str,
@@ -542,13 +476,6 @@ pub trait Agent: Send + Sync {
     /// Default: noop. ReactAgent overrides this to update its config
     /// and re-inject the prompt into the context.
     fn set_system_prompt(&self, _prompt: &str) {}
-
-    /// Get the current agent mode, if one is set.
-    ///
-    /// Default: None. ReactAgent overrides this to return config.mode.
-    fn mode(&self) -> Option<crate::agent::mode::AgentMode> {
-        None
-    }
 
     /// Delegate a task to a named sub-agent or team member.
     ///
@@ -631,9 +558,6 @@ impl Agent for Box<dyn Agent> {
     }
     fn set_system_prompt(&self, prompt: &str) {
         self.as_ref().set_system_prompt(prompt)
-    }
-    fn mode(&self) -> Option<crate::agent::mode::AgentMode> {
-        self.as_ref().mode()
     }
     fn delegate_to<'a>(&'a self, target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {
         self.as_ref().delegate_to(target, task)

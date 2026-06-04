@@ -32,6 +32,7 @@ impl HumanLoopProvider for ConsoleHumanLoopProvider {
             match req.kind {
                 HumanLoopKind::Approval => handle_approval(req).await,
                 HumanLoopKind::Input => handle_input(req).await,
+                HumanLoopKind::Selection => handle_selection(req).await,
             }
         })
     }
@@ -166,6 +167,43 @@ async fn handle_edit_args(req: &HumanLoopRequest) -> Result<HumanLoopResponse> {
     Ok(HumanLoopResponse::ModifiedArgs {
         args: new_args,
         scope,
+    })
+}
+
+// ── 选择处理 ──────────────────────────────────────────────────────────────────
+
+async fn handle_selection(req: HumanLoopRequest) -> Result<HumanLoopResponse> {
+    println!("\n=== Selection Required ===");
+    println!("  {}", req.prompt);
+    if let Some(ref options) = req.options {
+        for (i, opt) in options.iter().enumerate() {
+            println!("  [{}] {}", i + 1, opt);
+        }
+    }
+    print!("  > ");
+    let _ = std::io::stdout().flush();
+
+    let input = read_line_with_timeout(req.timeout).await?;
+    let trimmed = input.trim();
+
+    // Try to parse as number, otherwise use as-is
+    let selection = if let Ok(idx) = trimmed.parse::<usize>() {
+        if let Some(ref options) = req.options {
+            if idx >= 1 && idx <= options.len() {
+                options[idx - 1].clone()
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+
+    Ok(HumanLoopResponse::Selection {
+        selection,
+        instructions: None,
     })
 }
 

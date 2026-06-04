@@ -151,7 +151,7 @@ impl ReactAgent {
             }
 
             // ── Unified approval check ──
-            // PermissionService → PermissionPolicy
+            // PermissionService
             // Returns the user-modified parameters during approval (if any)
             let approval_modified_args = self
                 .check_tool_approval(tool_name, &hook_modified_input)
@@ -917,8 +917,8 @@ fn newline_boundary_fwd(chars: &[char], target: usize) -> usize {
 /// clean line boundary.
 fn newline_boundary_rev(chars: &[char], target: usize) -> usize {
     let t = target.min(chars.len());
-    for i in t..chars.len() {
-        if chars[i] == '\n' {
+    for (i, ch) in chars.iter().enumerate().skip(t) {
+        if *ch == '\n' {
             return i + 1; // start after the newline
         }
     }

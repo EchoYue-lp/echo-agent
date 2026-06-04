@@ -500,34 +500,27 @@ let choice = ToolChoice::None;
 ### 管线阶段
 
 ```
-Tool Call → PlanMode → ReadBeforeEdit → Permission → ApprovalStack
-           → Sandbox → Execution → Output Truncation → Hooks → Trace
+Tool Call → InterventionStage → ParseValidate → PlanMode → PreToolUseHook
+           → Permission → ReadBeforeEdit → Callback(Start) → Execution
+           → TraceRecording → PostToolUseHook → OutputGuard → Truncation
+           → Callback(End)
 ```
 
 | 阶段 | 作用 |
 |------|------|
-| **PlanModeStage** | 在计划模式下拦截工具调用 |
+| **InterventionStage** | 干预回调：block / cancel / redirect / modify_args |
+| **ParseValidate** | 参数解析与类型校验 |
+| **PlanMode** | 在计划模式下拦截写操作工具 |
+| **PreToolUseHook** | PreToolUse 钩子：可修改输入或阻止执行 |
+| **Permission** | 权限检查（PermissionService 统一管线） |
 | **ReadBeforeEdit** | 编辑前强制先读取文件（防止盲写） |
-| **Permission** | 检查工具权限（ToolPermission） |
-| **ApprovalStack** | 人工审批栈（Once/Always/Deny 策略） |
-| **Sandbox** | 沙箱隔离执行 |
+| **Callback(Start)** | on_tool_start 回调 |
 | **Execution** | 实际执行工具 |
-| **Output Truncation** | 输出截断（head+tail 70/30 分割） |
-| **Hooks** | 触发工具生命周期钩子 |
-| **Trace** | 记录执行轨迹 |
-
-### ApprovalStack 策略
-
-```rust
-use echo_agent::agent::ApprovalStack;
-
-let stack = ApprovalStack::new()
-    .with_default_policy("once");  // once | always | deny
-
-// Once: 首次审批后记住决策
-// Always: 每次都要求审批
-// Deny: 自动拒绝
-```
+| **TraceRecording** | 记录 Trace 事件 |
+| **PostToolUseHook** | PostToolUse 钩子 |
+| **OutputGuard** | 输出内容守卫检查 |
+| **Truncation** | 输出截断（token 预算） |
+| **Callback(End)** | on_tool_end 回调 |
 
 ### 配置管线
 

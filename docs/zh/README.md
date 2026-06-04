@@ -30,10 +30,8 @@
 
 | 文档 | 功能模块 | 核心关键词 |
 |------|---------|-----------|
-| [16 - Plan-and-Execute](16-plan-execute.md) | 规划执行 | Planner/Executor、增量重规划、DAG 调度 |
 | [17 - Graph Workflow](17-graph-workflow.md) | 图工作流 | LangGraph 风格、SharedState、条件边、fan-out/fan-in |
 | [18 - Guard 系统](18-guard-system.md) | 护栏系统 | RuleGuard、LlmGuard、输入/输出过滤 |
-| [19 - Self-Reflection Agent](19-self-reflection.md) | 自我反思 | 生成 → 评估 → 修正、情景记忆、LlmCritic |
 | [20 - Web 工具](20-web-tools.md) | Web 搜索 / 网页获取 | DuckDuckGo / Brave / Tavily 搜索、HTML→文本 |
 | [21 - 常用工具速查](21-common-tools.md) | Tool Guide | Web 搜索、网页抓取、浏览器自动化、数据工具 |
 | [22 - 论文检索工具](22-research-tools.md) | Research | ArXiv 搜索、Semantic Scholar、PDF 下载、BibTeX 生成 |
@@ -43,7 +41,7 @@
 | [26 - 多 Agent 模式](26-multi-agent.md) | SubAgent / TeamAgent | 父子委托（Sync/Fork/Teammate）、对等协作（ManagerWorker/Pipeline/Debate/Swarm） |
 | [27 - 追踪系统](27-tracing.md) | Trace | Run、RunEvent（11 种类型）、RunStore、JsonlRunStore、生命周期、密钥脱敏 |
 | [28 - 配置参考](28-config-reference.md) | Config | AgentConfig、ReactAgentBuilder、ToolExecutionConfig、TokenBudgetConfig、YAML 配置、Feature Flags |
-| [29 - 长程任务](29-long-running-tasks.md) | Long-Running Tasks | 任务句柄、断点恢复、per-task 执行逻辑、非阻塞调度 |
+| [29 - 运行时与任务系统](29-long-running-tasks.md) | Runtime & Tasks | 统一运行时、执行序列化、DAG 编排、ProgressBridge、后台任务、定时调度 |
 
 ### 新增功能 (v0.2.1)
 
@@ -57,7 +55,7 @@
 | [35 - 流水线](35-pipelines.md) | Data Pipeline / Writing Pipeline | 数据处理流水线、写作流水线、质量循环 |
 | [36 - 数据质量与统计](36-data-quality-statistics.md) | Data Quality / Statistics | 数据画像、异常检测、描述统计、相关性分析 |
 | [37 - 代码搜索](37-code-search.md) | Code Search | Ripgrep、结构化输出、glob/type 过滤、50KB 上限 |
-| [38 - Agent 工厂与模式](38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | AgentParadigm、模式切换、本地化、模板渲染 |
+| [38 - Agent 工厂与模式](38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | 模式切换、本地化、模板渲染 |
 | [39 - 分层记忆](39-tiered-memory.md) | Tiered Memory | 热/温/冷三层、自动淘汰、Token 预算管理 |
 | [40 - Context 系统](40-context-system.md) | Context System | ContextAssembler、ContextBudgeter、ContextSelector、优先级排序、预算感知 |
 
@@ -77,11 +75,11 @@
 
 ### 知识库
 
-参见 [知识库](../knowledge/README.md) 获取深入概念讲解：
-- [Agent 模式](../knowledge/agent-patterns.md) — ReAct、Plan-and-Execute、Self-Reflection、Graph Workflow
-- [MCP 协议](../knowledge/mcp-protocol.md) — Model Context Protocol 规范
-- [Skill 系统设计](../knowledge/skill-system.md) — agentskills.io 规范对齐
-- [A2A 协议](../knowledge/a2a-protocol.md) — Agent-to-Agent 通信
+参见 [知识库](../knowledge/zh/README.md) 获取深入概念讲解：
+- [Agent 模式](../knowledge/zh/agent-patterns.md) — ReAct、Plan-and-Execute、Self-Reflection、Graph Workflow
+- [MCP 协议](../knowledge/zh/mcp-protocol.md) — Model Context Protocol 规范
+- [Skill 系统设计](../knowledge/zh/skill-system.md) — agentskills.io 规范对齐
+- [A2A 协议](../knowledge/zh/a2a-protocol.md) — Agent-to-Agent 通信
 
 ---
 

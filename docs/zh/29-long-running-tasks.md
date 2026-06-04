@@ -1,20 +1,79 @@
-# 长程任务
+# Agent 运行时与任务系统
 
 > **状态：已实现。**
-> 系统具备完整的长程任务支持，包括非阻塞任务句柄、跨重启恢复、进度追踪、人在回路、定时调度等。
+> 统一的 Agent 运行时 + 可组合的任务子系统，支持执行序列化、DAG 编排、进度追踪、人在回路、定时调度等。
 
 ---
 
 ## 概述
 
-echo-agent 的长程任务系统由以下子系统组成：
+echo-agent 采用**单一 Agent 引擎**架构：所有执行路径（前台对话、后台任务、子 Agent 调度）共享同一个 `ReactAgent` 实例，通过内置的 `execution_mutex` 保证并发安全。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   ReactAgent (统一引擎)                      │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ execution_mutex — 全局执行序列化                        │ │
+│  │                                                        │ │
+│  │  前台 chat ──────┐                                     │ │
+│  │  execute()  ─────┤──→ 同一把锁 ──→ 互斥执行            │ │
+│  │  chat_stream() ──┤                                     │ │
+│  │  后台任务 ───────┘                                     │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                              │
+│  可组合能力:                                                 │
+│  ├── ReAct 循环 (think → act → observe)                     │
+│  ├── 任务规划 (execute_with_planning)                       │
+│  ├── 子 Agent 调度 (SubagentExecutor)                       │
+│  ├── 自我审查 (ReviewTool)                                  │
+│  └── 后台任务 (TaskSpawner / DAG 引擎)                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 执行序列化
+
+`ReactAgent` 内部持有 `execution_mutex: Arc<tokio::sync::Mutex<()>>`，所有执行入口自动加锁：
+
+| 执行路径 | 加锁位置 | 说明 |
+|---------|---------|------|
+| `execute()` / `chat()` | `run_react_loop()` 入口 | 非流式执行 |
+| `execute_stream()` / `chat_stream()` | `run_stream_channel()` 中 `lock_owned()` | 流式执行，锁移入 spawned task |
+| `execute_with_planning()` | 方法入口 | 三阶段规划 |
+| `chat_multimodal()` | 方法入口 | 多模态对话 |
+
+这意味着：前台 chat 和后台任务**自动互斥**，调用方无需手动管理任何锁。
+
+### AgentHandle
+
+`AgentHandle` 封装 `Arc<RwLock<ReactAgent>>`，提供安全的读写访问：
+
+```rust,ignore
+use echo_agent::prelude::*;
+
+let handle = AgentHandle::new(agent);
+
+// 读访问（可并发，但 execute/chat 内部自动序列化）
+let result = handle.read_async(|a| {
+    Box::pin(async move { a.execute("task").await })
+}).await;
+
+// 写访问（修改配置、注册回调等）
+handle.write(|a| { a.add_callback(callback); }).await;
+```
+
+---
+
+## 任务子系统
+
+在统一运行时之上，echo-agent 提供以下可组合的任务子系统：
 
 | 子系统 | 模块 | 说明 |
 |--------|------|------|
 | DAG 任务引擎 | `echo_orchestration::tasks` | 有向无环图任务编排，支持依赖、并行、重试 |
 | 后台任务句柄 | `tasks::background_task` | `BackgroundTask<T>` + `TaskSpawner`，非阻塞任务管理 |
-| 进度追踪 | `tasks::progress` | `PhasePlan` + `ProgressReporter`，实时进度广播 |
-| 人在回路门 | `tasks::human_gate` | `HumanGate`，暂停任务等待人类审批 |
+| 进度追踪 | `tasks::progress` + `callbacks::ProgressBridge` | `PhasePlan` + `ProgressReporter` + Agent 回调桥接 |
+| 人在回路选择 | `human_loop::Selection` | `HumanLoopProvider` 的 `Selection` kind，暂停任务等待人类选择 |
 | 复合执行 | `tasks::composite` | `CompositePlan`，异构步骤链的顺序/并行执行 |
 | 定时调度 | `scheduler` | `CronTask` + `SchedulerRunner`，基于 cron 表达式的定时触发 |
 
@@ -118,18 +177,47 @@ let results = executor.resume_from_store().await?;
 | `check_task_status` | 查询后台任务的当前状态 |
 | `list_background_tasks` | 列出所有活跃的后台任务 |
 
+这些工具在 ReAct 循环中被 Agent 调用时，会创建后台任务并立即返回 task ID，不阻塞 Agent 的推理循环。
+
 ---
 
-## 进度追踪（ProgressReporter）
+## 进度追踪
 
-为长程任务提供实时进度反馈：
+### ProgressBridge — Agent 回调桥接
+
+`ProgressBridge` 将 `AgentCallback` 事件翻译为 `TaskEvent::Progress`，实现执行过程中的实时进度反馈：
 
 ```
-PhasePlan → ProgressReporter → watch::Receiver<TaskProgress>  → SSE/WS/UI
-                             → TaskEvent::Progress → TaskEventBus → 日志/持久化
+AgentCallback (on_iteration, on_tool_start, ...)
+    ↓ ProgressBridge
+TaskEvent::Progress → TaskEventBus → 前端 / 日志
 ```
 
-### Phase 与 PhasePlan
+当 `max_iterations` 已知时，进度按线性计算。未知时使用递减曲线，渐近逼近 95%，确保任务不会在 `on_final_answer` 之前报告"完成"。
+
+```rust,ignore
+use echo_agent::agent::callbacks::ProgressBridge;
+
+let bridge = Arc::new(ProgressBridge::new(
+    task_id.clone(),
+    event_bus.clone(),
+    0,  // 0 = 无限迭代，使用递减曲线
+));
+
+// 注册为 Agent 回调
+agent.write(|a| { a.add_callback(bridge.clone()); }).await;
+
+// 执行任务（ReactAgent 内部自动序列化）
+let result = agent.read_async(|a| {
+    Box::pin(async move { a.execute(&prompt).await })
+}).await;
+
+// 清理
+bridge.disable();
+agent.write(|a| { a.remove_callbacks_by_type_name("ProgressBridge"); }).await;
+```
+
+### PhasePlan — 结构化进度
 
 `Phase` 定义流水线中的单个阶段，支持权重、重试、超时和人工检查点：
 
@@ -159,80 +247,57 @@ plan.progress_pct(2, 1.0);  // 100.0%  (6.0 / 6.0)
 | `subscribe()` | 获取 `watch::Receiver<TaskProgress>` |
 | `current()` | 获取当前快照 |
 
-### TaskEvent::Progress
-
-进度事件可注入 `TaskEventBus`，与生命周期事件统一分发：
-
-```rust,ignore
-let mut reporter = ProgressReporter::new("task-42".into(), plan);
-let bus = TaskEventBus::new();
-
-reporter.enter_phase(0, Some("Searching...".into()));
-let progress = reporter.current();
-bus.emit(TaskEvent::Progress {
-    task_id: "task-42".into(),
-    progress,
-});
-```
-
 完整可运行示例：`cargo run --example demo67_progress`
 
 ---
 
-## 人在回路门（HumanGate）
+## 人在回路选择（Selection Checkpoint）
 
-为任务流水线提供人工检查点。运行中的任务可暂停自身，等待人类审批后再继续。
+为任务流水线提供人工检查点。运行中的任务可通过 `HumanLoopProvider` 的 `Selection` kind 暂停自身，等待人类选择后再继续。这与工具审批（Approval）和文本输入（Input）共用同一套基础设施。
 
 ### 核心类型
 
 ```rust,ignore
-use echo_agent::tasks::{HumanGate, HumanRequest, HumanResponse};
+use echo_agent::human_loop::{HumanLoopProvider, HumanLoopRequest, HumanLoopResponse};
 
-pub struct HumanRequest {
-    pub prompt: String,             // 展示给用户的问题
-    pub context: serde_json::Value, // 任意上下文
-    pub options: Vec<String>,       // 可选响应 ["Approve", "Revise", "Cancel"]
-    pub phase: String,              // 等待输入的阶段名
-}
-
-pub struct HumanResponse {
-    pub selection: String,            // 选择的选项
-    pub instructions: Option<String>, // 可选的自由文本指令
-}
+// 构造选择请求
+let request = HumanLoopRequest::selection(
+    "task-1",                                      // 任务 ID
+    "Review the draft and choose an action",        // 提示
+    vec!["Approve".into(), "Revise".into(), "Cancel".into()], // 选项
+)
+.with_context(serde_json::json!({ "draft": "..." }))
+.with_phase("review");
 ```
 
 ### 使用方式
 
 ```rust,ignore
-use tokio_util::sync::CancellationToken;
+// 通过 HumanLoopProvider 请求选择（与审批/输入共用入口）
+let response = provider.request(request).await?;
 
-let gate = HumanGate::new();
-let cancel = CancellationToken::new();
-
-// 任务侧：发起请求并阻塞等待
-let response = gate.request("task-1", HumanRequest {
-    prompt: "Review the draft".into(),
-    context: serde_json::json!({ "draft": "..." }),
-    options: vec!["Approve".into(), "Revise".into(), "Cancel".into()],
-    phase: "review".into(),
-}, &cancel).await?;
-
-// 前端侧：检查待处理请求并回复
-let pending = gate.pending().await;
-gate.respond("task-1", HumanResponse {
-    selection: "Approve".into(),
-    instructions: None,
-}).await;
+match response {
+    HumanLoopResponse::Selection { selection, instructions } => {
+        if selection == "Cancel" {
+            return Err("Task cancelled by user".into());
+        }
+        if let Some(inst) = instructions {
+            // 处理用户的自由文本指令
+            phase_state.insert("human_feedback".into(), Value::String(inst));
+        }
+    }
+    _ => { /* 处理其他响应类型 */ }
+}
 ```
 
-| HumanGate 方法 | 说明 |
-|----------------|------|
-| `request(task_id, req, cancel)` | 阻塞等待回复或取消 |
-| `respond(task_id, resp)` | 回复待处理请求 |
-| `pending()` | 列出所有待处理请求 |
-| `pending_count()` | 待处理数量 |
+### 与 LongRunningTaskRunner 集成
 
-完整可运行示例：`cargo run --example demo68_human_gate --features tasks,subagent`
+```rust,ignore
+let runner = LongRunningTaskRunner::new(task_id, plan, store, cancel)
+    .with_human_loop_provider(provider);  // 接入 HumanLoopProvider
+```
+
+完整可运行示例：`cargo run --example demo68_human_gate --features tasks,subagent,human-loop`
 
 ---
 
@@ -258,15 +323,6 @@ Cron 表达式为 5 字段标准格式：`分 时 日 月 星期`
 | `*/5 * * * *` | 每 5 分钟 |
 | `0 9 * * 1` | 每周一 9:00 |
 
-### CronTaskStore
-
-持久化存储，支持双后端：
-
-| 后端 | 创建方式 |
-|------|----------|
-| **Store trait**（推荐） | `CronTaskStore::with_store(store)` |
-| **文件**（回退） | `CronTaskStore::new()` |
-
 ### SchedulerRunner
 
 后台调度器，每 30 秒 tick 一次，到期时触发任务：
@@ -286,15 +342,6 @@ runner.clone().spawn();               // 启动后台 tick 循环
 runner.run_once("daily").await?;      // 手动触发一次
 runner.set_status("daily", CronTaskStatus::Disabled).await?;
 ```
-
-| 管理方法 | 说明 |
-|----------|------|
-| `add_task(task)` | 添加并持久化 |
-| `remove_task(id)` | 按 id 前缀删除 |
-| `set_status(id, status)` | 启用/禁用 |
-| `list_tasks()` | 返回所有任务 |
-| `run_once(id)` | 立即触发一次 |
-| `reload()` | 从 Store 重新加载 |
 
 完整可运行示例：`cargo run --example demo70_scheduler`
 
@@ -317,18 +364,3 @@ let task = Task::new("r1", "Research task")
 // 类型化访问
 let params = task.get_metadata::<ResearchParams>().unwrap();
 ```
-
----
-
-## 集成架构
-
-```
-ReactAgent
-├── 标准路径: ReAct 循环 (think → act → observe → 重复)
-│   └── 可调用 spawn_background_task (非阻塞)
-├── Planner 路径: Plan → to_task_dag() → TaskExecutor::execute_all() → final_answer
-│   └── 阻塞等待所有 DAG 任务完成（设计如此）
-└── BackgroundReviewer: fire-and-forget LLM 调用
-```
-
-`execute_all_async()` 作为公共 API 提供，供外部编排器在 ReAct 循环外异步触发 DAG 执行。

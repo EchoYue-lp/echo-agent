@@ -1,20 +1,79 @@
-# Long-Running Tasks
+# Agent Runtime & Task System
 
 > **Status: Implemented.**
-> The system provides full long-running task support including non-blocking handles, cross-restart recovery, progress tracking, human-in-the-loop gates, and cron scheduling.
+> Unified Agent runtime + composable task subsystems with execution serialization, DAG orchestration, progress tracking, human-in-the-loop, and cron scheduling.
 
 ---
 
 ## Overview
 
-The echo-agent long-running task system consists of the following subsystems:
+echo-agent uses a **single Agent engine** architecture: all execution paths (foreground chat, background tasks, subagent dispatch) share the same `ReactAgent` instance, with a built-in `execution_mutex` ensuring concurrency safety.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                ReactAgent (Unified Engine)                   │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ execution_mutex — Global Execution Serialization       │ │
+│  │                                                        │ │
+│  │  Foreground chat ──┐                                   │ │
+│  │  execute()  ───────┤──→ Same mutex ──→ Mutual exclusion│ │
+│  │  chat_stream() ────┤                                   │ │
+│  │  Background tasks ─┘                                   │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                              │
+│  Composable capabilities:                                    │
+│  ├── ReAct loop (think → act → observe)                     │
+│  ├── Task planning (execute_with_planning)                  │
+│  ├── Subagent dispatch (SubagentExecutor)                   │
+│  ├── Self-review (ReviewTool)                               │
+│  └── Background tasks (TaskSpawner / DAG engine)            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Execution Serialization
+
+`ReactAgent` holds an internal `execution_mutex: Arc<tokio::sync::Mutex<()>>`, with all execution entry points automatically acquiring the lock:
+
+| Execution Path | Lock Location | Description |
+|---------------|---------------|-------------|
+| `execute()` / `chat()` | `run_react_loop()` entry | Non-streaming execution |
+| `execute_stream()` / `chat_stream()` | `run_stream_channel()` via `lock_owned()` | Streaming execution, lock moved into spawned task |
+| `execute_with_planning()` | Method entry | Three-phase planning |
+| `chat_multimodal()` | Method entry | Multimodal conversation |
+
+This means: foreground chat and background tasks **automatically serialize** — callers don't need to manually manage any locks.
+
+### AgentHandle
+
+`AgentHandle` wraps `Arc<RwLock<ReactAgent>>` for safe read/write access:
+
+```rust,ignore
+use echo_agent::prelude::*;
+
+let handle = AgentHandle::new(agent);
+
+// Read access (concurrent reads allowed, but execute/chat internally serialize)
+let result = handle.read_async(|a| {
+    Box::pin(async move { a.execute("task").await })
+}).await;
+
+// Write access (modify config, register callbacks, etc.)
+handle.write(|a| { a.add_callback(callback); }).await;
+```
+
+---
+
+## Task Subsystems
+
+Built on top of the unified runtime, echo-agent provides the following composable task subsystems:
 
 | Subsystem | Module | Description |
 |-----------|--------|-------------|
 | DAG Task Engine | `echo_orchestration::tasks` | Directed acyclic graph task orchestration with dependencies, parallelism, and retry |
 | Background Task Handle | `tasks::background_task` | `BackgroundTask<T>` + `TaskSpawner` for non-blocking task management |
-| Progress Tracking | `tasks::progress` | `PhasePlan` + `ProgressReporter` for real-time progress broadcasting |
-| Human Gate | `tasks::human_gate` | `HumanGate` to pause tasks awaiting human approval |
+| Progress Tracking | `tasks::progress` + `callbacks::ProgressBridge` | `PhasePlan` + `ProgressReporter` + Agent callback bridging |
+| Human Selection | `human_loop::Selection` | `HumanLoopProvider` Selection kind to pause tasks awaiting human choice |
 | Composite Execution | `tasks::composite` | `CompositePlan` for sequential/parallel execution of heterogeneous step chains |
 | Task Scheduler | `scheduler` | `CronTask` + `SchedulerRunner` for cron-based periodic triggering |
 
@@ -118,18 +177,47 @@ With the `tasks` feature, the following tools are auto-registered when `enable_t
 | `check_task_status` | Query the current status of a background task |
 | `list_background_tasks` | List all active background tasks |
 
+When called by the Agent in the ReAct loop, these tools create background tasks and return the task ID immediately without blocking the Agent's reasoning loop.
+
 ---
 
-## Progress Tracking (ProgressReporter)
+## Progress Tracking
 
-Provides real-time progress feedback for long-running tasks:
+### ProgressBridge — Agent Callback Bridging
+
+`ProgressBridge` translates `AgentCallback` events into `TaskEvent::Progress`, enabling real-time progress feedback during execution:
 
 ```
-PhasePlan → ProgressReporter → watch::Receiver<TaskProgress>  → SSE/WS/UI
-                             → TaskEvent::Progress → TaskEventBus → logging/persistence
+AgentCallback (on_iteration, on_tool_start, ...)
+    ↓ ProgressBridge
+TaskEvent::Progress → TaskEventBus → Frontend / Logging
 ```
 
-### Phase and PhasePlan
+When `max_iterations` is known, progress is calculated linearly. When unknown, a diminishing curve asymptotically approaches 95%, ensuring the task never reports "complete" before `on_final_answer` fires.
+
+```rust,ignore
+use echo_agent::agent::callbacks::ProgressBridge;
+
+let bridge = Arc::new(ProgressBridge::new(
+    task_id.clone(),
+    event_bus.clone(),
+    0,  // 0 = unlimited iterations, use diminishing curve
+));
+
+// Register as Agent callback
+agent.write(|a| { a.add_callback(bridge.clone()); }).await;
+
+// Execute task (ReactAgent internally serializes)
+let result = agent.read_async(|a| {
+    Box::pin(async move { a.execute(&prompt).await })
+}).await;
+
+// Cleanup
+bridge.disable();
+agent.write(|a| { a.remove_callbacks_by_type_name("ProgressBridge"); }).await;
+```
+
+### PhasePlan — Structured Progress
 
 `Phase` defines a single stage in a pipeline, with weight, retry, timeout, and human checkpoint support:
 
@@ -159,80 +247,57 @@ Watch-channel-based progress broadcaster with latest-value semantics:
 | `subscribe()` | Get a `watch::Receiver<TaskProgress>` |
 | `current()` | Get current snapshot |
 
-### TaskEvent::Progress
-
-Progress events can be emitted into `TaskEventBus`, unified with lifecycle events:
-
-```rust,ignore
-let mut reporter = ProgressReporter::new("task-42".into(), plan);
-let bus = TaskEventBus::new();
-
-reporter.enter_phase(0, Some("Searching...".into()));
-let progress = reporter.current();
-bus.emit(TaskEvent::Progress {
-    task_id: "task-42".into(),
-    progress,
-});
-```
-
 Runnable example: `cargo run --example demo67_progress`
 
 ---
 
-## Human Gate (HumanGate)
+## Human Selection Checkpoint
 
-Provides human-in-the-loop checkpoints for task pipelines. Running tasks can pause themselves and wait for human approval before continuing.
+Provides human-in-the-loop checkpoints for task pipelines. Running tasks can pause via `HumanLoopProvider`'s `Selection` kind and wait for human choice before continuing. This shares the same infrastructure as tool approval (Approval) and text input (Input).
 
 ### Core Types
 
 ```rust,ignore
-use echo_agent::tasks::{HumanGate, HumanRequest, HumanResponse};
+use echo_agent::human_loop::{HumanLoopProvider, HumanLoopRequest, HumanLoopResponse};
 
-pub struct HumanRequest {
-    pub prompt: String,             // Question shown to the user
-    pub context: serde_json::Value, // Arbitrary context
-    pub options: Vec<String>,       // Available responses ["Approve", "Revise", "Cancel"]
-    pub phase: String,              // Name of the phase waiting for input
-}
-
-pub struct HumanResponse {
-    pub selection: String,            // Selected option
-    pub instructions: Option<String>, // Optional free-text instructions
-}
+// Construct a selection request
+let request = HumanLoopRequest::selection(
+    "task-1",                                      // task ID
+    "Review the draft and choose an action",        // prompt
+    vec!["Approve".into(), "Revise".into(), "Cancel".into()], // options
+)
+.with_context(serde_json::json!({ "draft": "..." }))
+.with_phase("review");
 ```
 
 ### Usage
 
 ```rust,ignore
-use tokio_util::sync::CancellationToken;
+// Request selection via HumanLoopProvider (shared with approval/input)
+let response = provider.request(request).await?;
 
-let gate = HumanGate::new();
-let cancel = CancellationToken::new();
-
-// Task side: send request and block
-let response = gate.request("task-1", HumanRequest {
-    prompt: "Review the draft".into(),
-    context: serde_json::json!({ "draft": "..." }),
-    options: vec!["Approve".into(), "Revise".into(), "Cancel".into()],
-    phase: "review".into(),
-}, &cancel).await?;
-
-// Frontend side: check pending requests and respond
-let pending = gate.pending().await;
-gate.respond("task-1", HumanResponse {
-    selection: "Approve".into(),
-    instructions: None,
-}).await;
+match response {
+    HumanLoopResponse::Selection { selection, instructions } => {
+        if selection == "Cancel" {
+            return Err("Task cancelled by user".into());
+        }
+        if let Some(inst) = instructions {
+            // Handle free-text instructions from the user
+            phase_state.insert("human_feedback".into(), Value::String(inst));
+        }
+    }
+    _ => { /* handle other response types */ }
+}
 ```
 
-| HumanGate Method | Description |
-|------------------|-------------|
-| `request(task_id, req, cancel)` | Block until response or cancellation |
-| `respond(task_id, resp)` | Respond to a pending request |
-| `pending()` | List all pending requests |
-| `pending_count()` | Number of pending requests |
+### Integration with LongRunningTaskRunner
 
-Runnable example: `cargo run --example demo68_human_gate --features tasks,subagent`
+```rust,ignore
+let runner = LongRunningTaskRunner::new(task_id, plan, store, cancel)
+    .with_human_loop_provider(provider);  // connect HumanLoopProvider
+```
+
+Runnable example: `cargo run --example demo68_human_gate --features tasks,subagent,human-loop`
 
 ---
 
@@ -258,15 +323,6 @@ Cron expressions use the standard 5-field format: `min hour dom month dow`
 | `*/5 * * * *` | Every 5 minutes |
 | `0 9 * * 1` | Every Monday at 9:00 AM |
 
-### CronTaskStore
-
-Persistent storage with dual backend:
-
-| Backend | Creation |
-|---------|----------|
-| **Store trait** (recommended) | `CronTaskStore::with_store(store)` |
-| **File** (fallback) | `CronTaskStore::new()` |
-
 ### SchedulerRunner
 
 Background scheduler with 30-second tick interval, fires tasks when due:
@@ -286,15 +342,6 @@ runner.clone().spawn();               // Start background tick loop
 runner.run_once("daily").await?;      // Manual trigger
 runner.set_status("daily", CronTaskStatus::Disabled).await?;
 ```
-
-| Management Method | Description |
-|-------------------|-------------|
-| `add_task(task)` | Add and persist |
-| `remove_task(id)` | Remove by id prefix |
-| `set_status(id, status)` | Enable/disable |
-| `list_tasks()` | Return all tasks |
-| `run_once(id)` | Trigger immediately |
-| `reload()` | Reload from store |
 
 Runnable example: `cargo run --example demo70_scheduler`
 
@@ -317,18 +364,3 @@ let task = Task::new("r1", "Research task")
 // Typed access
 let params = task.get_metadata::<ResearchParams>().unwrap();
 ```
-
----
-
-## Integration Architecture
-
-```
-ReactAgent
-├── Standard path: ReAct loop (think → act → observe → repeat)
-│   └── Can call spawn_background_task (non-blocking)
-├── Planner path: Plan → to_task_dag() → TaskExecutor::execute_all() → final_answer
-│   └── Blocks until all DAG tasks complete (by design)
-└── BackgroundReviewer: fire-and-forget LLM call
-```
-
-`execute_all_async()` is available as a public API for external orchestrators that need to trigger DAG execution asynchronously outside the ReAct loop.

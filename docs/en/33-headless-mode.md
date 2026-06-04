@@ -321,4 +321,4 @@ This means callers can always rely on `exit_code()` and `format_output()` withou
 
 - [React Agent](01-react-agent.md) — the underlying agent loop
 - [Streaming Output](10-streaming.md) — real-time token delivery for interactive use
-- [Long-Running Tasks](29-long-running-tasks.md) — background task execution within a session
+- [Runtime & Task System](29-long-running-tasks.md) — unified runtime, execution serialization & background tasks
