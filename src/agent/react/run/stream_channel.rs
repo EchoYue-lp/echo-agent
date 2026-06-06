@@ -297,6 +297,12 @@ impl AgentSnapshot {
                 .as_ref()
                 .and_then(|u| u.completion_tokens)
                 .unwrap_or(0) as usize;
+
+            // Record usage in the token tracker for cumulative tracking
+            if let Some(ref u) = last_usage {
+                self.token_tracker.record_usage(u);
+            }
+
             if in_reasoning {
                 yield_event!(
                     tx,

@@ -54,11 +54,16 @@ impl ToolManager {
             }
         }
         // Version mismatch or cache empty — rebuild.
-        let definitions: Vec<ToolDefinition> = self
+        let mut definitions: Vec<ToolDefinition> = self
             .tools
             .iter()
             .map(|entry| ToolDefinition::from_tool(&**entry.value()))
             .collect();
+        // Sort by tool name to ensure deterministic order for prefix caching.
+        // This enables LLM provider-side prefix caching (OpenAI, DeepSeek, Anthropic)
+        // because consecutive requests with the same tool definitions share a stable
+        // cacheable prefix: system prompt → sorted tool definitions → conversation history.
+        definitions.sort_by(|a, b| a.function.name.cmp(&b.function.name));
         *self.cached_definitions.write() = Some((current_version, definitions.clone()));
         definitions
     }

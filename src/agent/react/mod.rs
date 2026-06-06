@@ -180,6 +180,11 @@ pub struct ReactAgent {
     /// full duration. This prevents concurrent access to the
     /// `ContextManager` and other internal mutable state.
     pub(crate) execution_mutex: Arc<tokio::sync::Mutex<()>>,
+
+    /// Thread-safe token usage tracker that accumulates prompt/completion
+    /// tokens across all LLM calls in this agent's lifetime.
+    /// Prefer reading real usage from API responses; falls back to estimation.
+    pub(crate) token_tracker: Arc<echo_core::tokenizer::TokenUsageTracker>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -233,6 +238,15 @@ impl ReactAgent {
         if config.token_budget_config.enabled {
             let budget = config.token_budget_config.build(config.token_limit);
             ctx_builder = ctx_builder.budget(budget);
+        }
+
+        // Set default compressor if token_limit is not unlimited
+        if config.token_limit < usize::MAX {
+            use crate::compression::compressor::SlidingWindowCompressor;
+            // Keep the most recent messages that fit within the token limit
+            // Use a conservative window: keep last 40 messages (roughly 20 turns)
+            let compressor = SlidingWindowCompressor::new(40);
+            ctx_builder = ctx_builder.compressor(compressor);
         }
 
         let context = Arc::new(tokio::sync::Mutex::new(ctx_builder.build()));
@@ -340,6 +354,8 @@ impl ReactAgent {
             tool_manager.register(Box::new(dispatch_tool));
         }
 
+        let model_name = config.model_name.clone();
+
         Self {
             config,
             tools: ToolExecutionSubsystem {
@@ -391,6 +407,7 @@ impl ReactAgent {
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
             execution_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            token_tracker: Arc::new(echo_core::tokenizer::TokenUsageTracker::new(model_name)),
         }
     }
 
@@ -410,7 +427,7 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
-        let prompt = if config.enable_tool && config.enable_cot {
+        let mut prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -595,6 +612,19 @@ impl ReactAgent {
     /// Get a read-only reference to the AgentConfig.
     pub fn config(&self) -> &AgentConfig {
         &self.config
+    }
+
+    /// Get the cumulative token usage summary for this agent.
+    ///
+    /// Tracks real token counts from API responses (OpenAI, Anthropic, Ollama, etc.).
+    /// Falls back to zero when the provider does not return usage information.
+    pub fn token_usage_summary(&self) -> echo_core::tokenizer::UsageSummary {
+        self.token_tracker.summary()
+    }
+
+    /// Get a reference to the token usage tracker for external recording.
+    pub fn token_tracker(&self) -> &Arc<echo_core::tokenizer::TokenUsageTracker> {
+        &self.token_tracker
     }
 
     /// Inject a custom long-term memory Store (replaces the injection channel only; does not re-register tools).
@@ -1108,6 +1138,7 @@ impl ReactAgent {
     }
 
     /// Finalize the current trace run (completed or failed).
+    #[allow(dead_code)]
     pub(crate) async fn finalize_trace_run(
         &self,
         status: crate::trace::RunStatus,

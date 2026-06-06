@@ -5,8 +5,8 @@
 
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::types::{
-    ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall, FunctionCall, Message,
-    MessageContent, Role, ToolCall,
+    ChatCompletionResponse, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
+    FunctionCall, Message, MessageContent, Role, ToolCall, Usage,
 };
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use echo_core::retry::{RetryPolicy, with_retry_if};
@@ -138,15 +138,33 @@ impl AnthropicClient {
             });
         }
 
+        // Build tools with cache_control on the last tool for prompt caching
         let tools: Option<Vec<AnthropicToolDef>> = request.tools.as_ref().map(|tools| {
+            let count = tools.len();
             tools
                 .iter()
-                .map(|t| AnthropicToolDef {
+                .enumerate()
+                .map(|(i, t)| AnthropicToolDef {
                     name: t.function.name.clone(),
                     description: Some(t.function.description.clone()),
                     input_schema: t.function.parameters.clone(),
+                    // Mark the last tool with cache_control for prefix caching
+                    cache_control: if i == count - 1 {
+                        Some(CacheControl::ephemeral())
+                    } else {
+                        None
+                    },
                 })
                 .collect()
+        });
+
+        // Convert system prompt to blocks format with cache_control on the last block
+        let system = system.map(|text| {
+            AnthropicSystem::Blocks(vec![SystemBlock {
+                block_type: "text".to_string(),
+                text,
+                cache_control: Some(CacheControl::ephemeral()),
+            }])
         });
 
         AnthropicRequest {
@@ -205,10 +223,28 @@ impl AnthropicClient {
             reasoning_content: None,
         };
 
+        // Extract token usage from Anthropic response
+        let usage = resp.usage.map(|u| {
+            let prompt = u.input_tokens;
+            let completion = u.output_tokens;
+            Usage {
+                prompt_tokens: Some(prompt),
+                completion_tokens: Some(completion),
+                total_tokens: Some(prompt + completion),
+            }
+        });
+
         ChatResponse {
             message,
             finish_reason,
-            raw: Default::default(),
+            raw: ChatCompletionResponse {
+                id: String::new(),
+                choices: Vec::new(),
+                created: None,
+                model: None,
+                usage,
+                extra: None,
+            },
         }
     }
 }
@@ -233,6 +269,7 @@ impl LlmClient for AnthropicClient {
                                 .post(&base_url)
                                 .header("x-api-key", &api_key)
                                 .header("anthropic-version", "2023-06-01")
+                                .header("anthropic-beta", "prompt-caching-2024-07-31")
                                 .header("content-type", "application/json")
                                 .json(body)
                                 .send()
@@ -317,6 +354,10 @@ impl LlmClient for AnthropicClient {
             let mut tool_call_args: std::collections::HashMap<usize, (String, String, String)> =
                 std::collections::HashMap::new();
 
+            // Track cumulative usage across streaming events
+            let mut stream_input_tokens: u32 = 0;
+            let mut stream_output_tokens: u32 = 0;
+
             let stream = async_stream::stream! {
                 let mut byte_stream = std::pin::pin!(byte_stream);
                 while let Some(chunk_result) = byte_stream.next().await {
@@ -351,6 +392,12 @@ impl LlmClient for AnthropicClient {
                             }
                             if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                                 match event {
+                                    AnthropicStreamEvent::MessageStart { message } => {
+                                        // Capture initial usage (input_tokens) from message_start
+                                        if let Some(u) = message.usage {
+                                            stream_input_tokens = u.input_tokens;
+                                        }
+                                    }
                                     AnthropicStreamEvent::ContentBlockStart {
                                         content_block:
                                             ContentBlockStartBody::ToolUse { id, name },
@@ -415,11 +462,25 @@ impl LlmClient for AnthropicClient {
                                             });
                                         }
                                     }
-                                    AnthropicStreamEvent::MessageDelta { delta, .. } => {
+                                    AnthropicStreamEvent::MessageDelta { delta, usage } => {
+                                        // Capture output_tokens from message_delta
+                                        if let Some(u) = usage {
+                                            stream_output_tokens = u.output_tokens;
+                                        }
                                         let finish = match delta.stop_reason.as_deref() {
                                             Some("end_turn") => Some("stop".to_string()),
                                             Some("tool_use") => Some("tool_calls".to_string()),
                                             other => other.map(String::from),
+                                        };
+                                        // Emit final chunk with accumulated usage
+                                        let usage = if stream_input_tokens > 0 || stream_output_tokens > 0 {
+                                            Some(Usage {
+                                                prompt_tokens: Some(stream_input_tokens),
+                                                completion_tokens: Some(stream_output_tokens),
+                                                total_tokens: Some(stream_input_tokens + stream_output_tokens),
+                                            })
+                                        } else {
+                                            None
                                         };
                                         yield Ok(ChatChunk {
                                             delta: DeltaMessage {
@@ -429,7 +490,7 @@ impl LlmClient for AnthropicClient {
                                                 tool_calls: None,
                                             },
                                             finish_reason: finish,
-                                            usage: None,
+                                            usage,
                                         });
                                     }
                                     _ => {}
@@ -453,12 +514,46 @@ impl LlmClient for AnthropicClient {
 
 // ── Anthropic API types ──────────────────────────────────────────────────────
 
+/// Cache control marker for Anthropic prompt caching
+#[derive(Serialize, Clone)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: String,
+}
+
+impl CacheControl {
+    fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral".to_string(),
+        }
+    }
+}
+
+/// System prompt block that can carry cache_control
+#[derive(Serialize)]
+struct SystemBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+/// Anthropic system field: either a plain string or array of content blocks
+#[derive(Serialize)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum AnthropicSystem {
+    Text(String),
+    Blocks(Vec<SystemBlock>),
+}
+
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<AnthropicSystem>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -536,17 +631,34 @@ struct AnthropicToolDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Deserialize)]
 struct AnthropicResponse {
     content: Vec<ContentBlock>,
     stop_reason: Option<String>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Deserialize, Clone)]
+#[allow(dead_code)]
+struct AnthropicUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum AnthropicStreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart { message: MessageStartBody },
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
         #[serde(rename = "index")]
@@ -558,9 +670,19 @@ enum AnthropicStreamEvent {
     #[serde(rename = "content_block_stop")]
     ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
-    MessageDelta { delta: MessageDeltaBody },
+    MessageDelta {
+        delta: MessageDeltaBody,
+        #[serde(default)]
+        usage: Option<AnthropicUsage>,
+    },
     #[serde(other)]
     Other,
+}
+
+#[derive(Deserialize)]
+struct MessageStartBody {
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Deserialize)]

@@ -135,6 +135,8 @@ pub struct AgentRunSnapshot {
     /// Permission service (human-in-the-loop).
     #[cfg(feature = "human-loop")]
     pub permission_service: Option<Arc<crate::human_loop::PermissionService>>,
+    /// Token usage tracker shared with the parent ReactAgent.
+    pub token_tracker: Arc<echo_core::tokenizer::TokenUsageTracker>,
 }
 
 impl AgentRunSnapshot {
@@ -153,6 +155,7 @@ impl AgentRunSnapshot {
             current_run_id: None, // set by run_stream_channel
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
+            token_tracker: Arc::clone(&agent.token_tracker),
         }
     }
 

@@ -19,6 +19,7 @@ impl ReactAgent {
     ///
     /// Handles both custom `llm_client` and raw HTTP paths, returning a
     /// normalized `(message, usage, finish_reason)` tuple.
+    #[allow(dead_code)]
     async fn call_llm_with_retry(
         &self,
         messages: &[Message],
@@ -153,6 +154,7 @@ impl ReactAgent {
     ///
     /// Before each call, `ContextManager::prepare` auto-compresses overflow history messages,
     /// then the compressed message list is passed to the LLM; the LLM response is appended back to context.
+    #[allow(dead_code)]
     #[tracing::instrument(skip(self), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
     pub(crate) async fn think(&self) -> Result<Vec<StepType>> {
         let agent = self.config.agent_name.clone();
@@ -344,6 +346,11 @@ impl ReactAgent {
             .and_then(|u| u.completion_tokens)
             .unwrap_or(0);
 
+        // Record usage in the token tracker for cumulative tracking
+        if let Some(ref u) = usage {
+            self.token_tracker.record_usage(u);
+        }
+
         // Record trace event
         self.record_trace_event(crate::trace::RunEvent::LlmCall {
             messages: messages.len(),
@@ -369,6 +376,7 @@ impl ReactAgent {
     /// Process steps produced by one think round:
     /// - Tool calls → execute in parallel (approval-required tools are serialized), return answer on `final_answer`
     /// - No tool calls → plain text response treated as final answer, returned directly
+    #[allow(dead_code)]
     #[tracing::instrument(skip(self, steps), fields(agent = %self.config.agent_name, tool_count = steps.iter().filter(|s| matches!(s, StepType::Call { .. })).count()))]
     pub(crate) async fn process_steps(&self, steps: Vec<StepType>) -> Result<Option<String>> {
         let agent = self.config.agent_name.clone();
@@ -499,7 +507,8 @@ impl ReactAgent {
                     self.apply_hook_messages(&function_name, &outcome.hook_messages)
                         .await;
                     batch_success_count += 1;
-                    outcome.output
+                    // Apply truncation to tool output for token budget management
+                    self.truncate_tool_output(outcome.output).await
                 }
                 Err(failure) => {
                     self.apply_hook_messages(&function_name, &failure.hook_messages)

@@ -4,7 +4,7 @@
 //! Streaming uses NDJSON (one JSON object per line, `done: true` terminates).
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::types::{DeltaMessage, FunctionCall, Message, ToolCall};
+use echo_core::llm::types::{ChatCompletionResponse, DeltaMessage, FunctionCall, Message, ToolCall, Usage};
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::StreamExt;
@@ -144,10 +144,30 @@ impl OllamaClient {
             reasoning_content: None,
         };
 
+        // Extract token usage from Ollama response
+        let usage = if resp.prompt_eval_count.is_some() || resp.eval_count.is_some() {
+            let prompt = resp.prompt_eval_count.unwrap_or(0);
+            let completion = resp.eval_count.unwrap_or(0);
+            Some(Usage {
+                prompt_tokens: Some(prompt),
+                completion_tokens: Some(completion),
+                total_tokens: Some(prompt + completion),
+            })
+        } else {
+            None
+        };
+
         ChatResponse {
             message,
             finish_reason,
-            raw: Default::default(),
+            raw: ChatCompletionResponse {
+                id: String::new(),
+                choices: Vec::new(),
+                created: None,
+                model: None,
+                usage,
+                extra: None,
+            },
         }
     }
 }
@@ -287,6 +307,21 @@ impl LlmClient for OllamaClient {
                                         Some(resp.message.content)
                                     };
 
+                                    // Extract usage from final chunk (done=true)
+                                    let usage = if resp.done
+                                        && (resp.prompt_eval_count.is_some() || resp.eval_count.is_some())
+                                    {
+                                        let prompt = resp.prompt_eval_count.unwrap_or(0);
+                                        let completion = resp.eval_count.unwrap_or(0);
+                                        Some(Usage {
+                                            prompt_tokens: Some(prompt),
+                                            completion_tokens: Some(completion),
+                                            total_tokens: Some(prompt + completion),
+                                        })
+                                    } else {
+                                        None
+                                    };
+
                                     yield Ok(ChatChunk {
                                         delta: DeltaMessage {
                                             role: Some(resp.message.role.as_str().to_string()),
@@ -295,7 +330,7 @@ impl LlmClient for OllamaClient {
                                             tool_calls: None,
                                         },
                                         finish_reason: finish,
-                                        usage: None,
+                                        usage,
                                     });
 
                                     if resp.done {
@@ -377,4 +412,10 @@ struct OllamaResponse {
     message: OllamaMessage,
     #[serde(default)]
     done: bool,
+    /// Number of tokens in the prompt
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
+    /// Number of tokens in the completion
+    #[serde(default)]
+    eval_count: Option<u32>,
 }
