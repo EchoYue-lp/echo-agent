@@ -258,76 +258,6 @@ impl TokenBudgetConfig {
     }
 }
 
-// ── Hardcoded model context windows (fallback when not configured) ────────────
-
-/// Return the known context window size for a model identifier.
-///
-/// Falls back to 128000 if the model is not recognized.
-pub fn context_window_for_model(model: &str) -> usize {
-    let lower = model.to_lowercase();
-    // Match on model family prefixes
-    if lower.contains("claude-sonnet-4") || lower.contains("claude-opus-4") {
-        200_000
-    } else if lower.contains("claude") {
-        200_000
-    } else if lower.contains("gpt-4o") || lower.contains("gpt-4.1") {
-        128_000
-    } else if lower.contains("gpt-4") {
-        8_192
-    } else if lower.contains("gpt-3.5") {
-        16_384
-    } else if lower.contains("deepseek-v3") || lower.contains("deepseek-r1") {
-        64_000
-    } else if lower.contains("deepseek") {
-        128_000
-    } else if lower.contains("qwen3") || lower.contains("qwen-max") {
-        128_000
-    } else if lower.contains("qwen") {
-        32_768
-    } else if lower.contains("gemini-2") || lower.contains("gemini-1.5-pro") {
-        2_097_152 // Gemini's long-context
-    } else if lower.contains("gemini") {
-        32_768
-    } else if lower.contains("llama-4") {
-        128_000
-    } else if lower.contains("llama-3") {
-        8_192
-    } else if lower.contains("mixtral") || lower.contains("mistral") {
-        32_768
-    } else {
-        128_000 // Default: assume 128K
-    }
-}
-
-/// Dynamic model context-window registry.
-///
-/// Entries registered here take priority over the built-in
-/// [`context_window_for_model`] heuristic.  Call
-/// [`register_model_window`] at startup to override or extend the
-/// defaults for custom or newly-released models.
-static MODEL_WINDOW_REGISTRY: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, usize>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-/// Register a model name → context window size mapping.
-/// Takes priority over the heuristics in [`context_window_for_model`].
-pub fn register_model_window(model: &str, window_size: usize) {
-    if let Ok(mut reg) = MODEL_WINDOW_REGISTRY.lock() {
-        reg.insert(model.to_lowercase(), window_size);
-    }
-}
-
-/// Resolve the context-window size for a model, checking the dynamic
-/// registry before falling back to the built-in heuristic.
-pub fn resolve_model_window(model: &str) -> usize {
-    if let Ok(reg) = MODEL_WINDOW_REGISTRY.lock() {
-        if let Some(&size) = reg.get(&model.to_lowercase()) {
-            return size;
-        }
-    }
-    context_window_for_model(model)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,14 +300,5 @@ mod tests {
     fn test_disabled_config() {
         let config = TokenBudgetConfig::disabled();
         assert!(!config.enabled);
-    }
-
-    #[test]
-    fn test_context_window_for_model() {
-        assert_eq!(context_window_for_model("claude-sonnet-4-6"), 200_000);
-        assert_eq!(context_window_for_model("gpt-4o"), 128_000);
-        assert_eq!(context_window_for_model("deepseek-v3"), 64_000);
-        assert_eq!(context_window_for_model("qwen3-max"), 128_000);
-        assert_eq!(context_window_for_model("unknown-model"), 128_000);
     }
 }

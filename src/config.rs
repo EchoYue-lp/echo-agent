@@ -297,6 +297,12 @@ pub struct FeishuChannelConfig {
     pub app_secret: String,
     /// Connection mode: "long_poll" or "webhook".
     pub mode: String,
+    /// Webhook bind address (only used when mode = "webhook").
+    pub webhook_bind: String,
+    /// Webhook path (only used when mode = "webhook").
+    pub webhook_path: String,
+    /// Webhook verification token (optional, only used when mode = "webhook").
+    pub webhook_verification_token: Option<String>,
 }
 
 impl Default for FeishuChannelConfig {
@@ -306,6 +312,9 @@ impl Default for FeishuChannelConfig {
             app_id: String::new(),
             app_secret: String::new(),
             mode: "long_poll".to_string(),
+            webhook_bind: "0.0.0.0:9000".to_string(),
+            webhook_path: "/webhook/feishu".to_string(),
+            webhook_verification_token: None,
         }
     }
 }

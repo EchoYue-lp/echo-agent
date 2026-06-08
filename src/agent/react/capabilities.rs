@@ -311,7 +311,7 @@ impl ReactAgent {
     /// after a task completes.
     pub fn remove_callbacks_by_type_name(&mut self, type_name: &str) {
         self.config.callbacks.retain(|cb| {
-            let name = format!("{}", std::any::type_name_of_val(cb.as_ref()));
+            let name = std::any::type_name_of_val(cb.as_ref()).to_string();
             !name.contains(type_name)
         });
     }

@@ -708,7 +708,7 @@ impl ReactAgentBuilder {
             agent.set_llm_config(llm_config);
         }
 
-        // Register custom tools
+        // Register all custom tools
         for tool in self.tools {
             agent.add_tool(tool);
         }

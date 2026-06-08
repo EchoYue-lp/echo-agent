@@ -33,6 +33,7 @@ impl ReactAgent {
     }
 
     /// Automatically capture a state snapshot according to the snapshot policy
+    #[allow(dead_code)]
     pub(crate) async fn auto_snapshot(&self, iteration: usize) {
         let should = self
             .memory
@@ -62,6 +63,7 @@ impl ReactAgent {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn log_user_input_audit(&self, content: &str) {
         if let Some(al) = &self.guard.audit_logger {
             let event = crate::audit::AuditEvent::now(
@@ -99,6 +101,7 @@ impl ReactAgent {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn log_final_answer_audit(&self, content: &str) {
         if let Some(al) = &self.guard.audit_logger {
             let event = crate::audit::AuditEvent::now(

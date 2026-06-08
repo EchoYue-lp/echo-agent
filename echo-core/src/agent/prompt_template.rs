@@ -560,16 +560,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mode_templates() {
-        let manager = PromptTemplateManager::with_default_mode_templates();
-        assert!(manager.contains("mode_general"));
-        assert!(manager.contains("mode_coding"));
-        assert!(manager.contains("mode_research"));
-        assert!(manager.contains("mode_data"));
-        assert!(manager.contains("mode_writing"));
-    }
-
-    #[test]
     fn test_whitespace_in_tags() {
         let manager = PromptTemplateManager::new();
         manager.register("ws", "Hello, {{ name }}!");

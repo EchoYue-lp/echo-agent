@@ -876,6 +876,7 @@ impl ReactAgent {
     ///
     /// The `final_answer` tool always preserves original error semantics and is never softened.
     /// Tool output goes through `truncate_tool_output` for token budget truncation.
+    #[allow(dead_code)]
     pub(crate) async fn execute_tool_feedback(
         &self,
         tool_name: &str,

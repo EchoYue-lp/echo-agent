@@ -200,11 +200,14 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
     #[cfg(feature = "research")]
     {
         use crate::research::{
-            ArxivSearchTool, BibtexGenerateTool, PdfFetchTool, ResearchRecallTool,
-            ResearchRememberTool, SemanticScholarSearchTool,
+            ArxivSearchTool, BibtexGenerateTool, ClinicalTrialsSearchTool, PdfFetchTool,
+            PubMedSearchTool, ResearchRecallTool, ResearchRememberTool,
+            SemanticScholarSearchTool,
         };
         tool_manager.register(Box::new(ArxivSearchTool));
         tool_manager.register(Box::new(SemanticScholarSearchTool));
+        tool_manager.register(Box::new(PubMedSearchTool));
+        tool_manager.register(Box::new(ClinicalTrialsSearchTool));
         tool_manager.register(Box::new(PdfFetchTool));
         tool_manager.register(Box::new(BibtexGenerateTool));
         tool_manager.register(Box::new(ResearchRememberTool));
