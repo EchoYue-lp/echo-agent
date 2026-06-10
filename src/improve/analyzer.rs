@@ -148,6 +148,7 @@ impl Analyzer {
                             id: format!("eval_{tool}"),
                             name: format!("Tool error: {tool}"),
                             description: message.clone(),
+                            domain: None,
                             task: format!("Use {tool} correctly"),
                             project_fixture: None,
                             success_criteria: crate::eval::SuccessCriteria::ToolUsed {

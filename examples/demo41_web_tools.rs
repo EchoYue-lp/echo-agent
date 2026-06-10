@@ -224,7 +224,7 @@ async fn demo_agent_web_task() -> echo_agent::error::Result<()> {
     println!("Part 7: Agent 集成 Web 工具\n");
 
     let mut agent = ReactAgentBuilder::new()
-        .model("deepseek-chat")
+        .model("deepseek-v4-flash")
         .name("web-agent")
         .system_prompt(
             "你是一个信息搜索助手。\

@@ -179,8 +179,9 @@ languages:
             println!("  Tool: {}", tool.name());
             let desc = tool.description();
             // Show first 80 chars of description
-            let short_desc = if desc.len() > 80 {
-                format!("{}...", &desc[..80])
+            let short_desc = if desc.chars().count() > 80 {
+                let truncated: String = desc.chars().take(80).collect();
+                format!("{truncated}...")
             } else {
                 desc.to_string()
             };

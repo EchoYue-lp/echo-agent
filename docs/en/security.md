@@ -74,7 +74,7 @@ let category = ToolRiskClassifier::classify("read_file");  // ReadOnly, level 0
 | `DontAsk` | ❌ | ❌ | ❌ | CI/CD unattended |
 
 ```rust
-let config = AgentConfig::new("qwen-max", "agent", "system prompt")
+let config = AgentConfig::new("qwen3.7-max", "agent", "system prompt")
     .permission_mode(PermissionMode::Plan);
 ```
 
@@ -189,7 +189,7 @@ check(tool, input) → check_with_permissions(tool, input, permissions):
 
 ```rust
 let agent = ReactAgentBuilder::new()
-    .model("qwen-plus")
+    .model("qwen3.6-plus")
     .permission_service(Arc::new(service))
     .build()?;
 ```
@@ -197,7 +197,7 @@ let agent = ReactAgentBuilder::new()
 `force_read_before_edit: true` requires reading a file before modifying:
 
 ```rust
-let config = AgentConfig::new("qwen-plus", "agent", "...")
+let config = AgentConfig::new("qwen3.6-plus", "agent", "...")
     .force_read_before_edit(true);
 ```
 
@@ -295,7 +295,7 @@ let logs = state.get_audit_logs().await;
 ### CI/CD (strict)
 
 ```rust
-let config = AgentConfig::new("qwen-max", "agent", "...")
+let config = AgentConfig::new("qwen3.7-max", "agent", "...")
     .permission_mode(PermissionMode::DontAsk);
 
 let mut registry = RuleRegistry::new();

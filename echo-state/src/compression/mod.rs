@@ -8,6 +8,7 @@
 //! - [`compressor::HybridCompressor`]: Multi-strategy pipeline chaining
 
 pub mod compressor;
+pub mod horizon;
 pub mod levels;
 
 // Re-export from echo_core for backward compatibility
@@ -19,6 +20,23 @@ use echo_core::error::Result;
 use echo_core::llm::types::{Message, MessageContent, Role};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
+
+/// Callback trait for promoting evicted messages to long-term memory.
+///
+/// When compression evicts messages from the context, this trait allows
+/// extracting key facts and writing them to a memory Store for later recall.
+/// This is the "L3 Memory Promotion" mechanism.
+pub trait MemoryPromoter: Send + Sync {
+    /// Process evicted messages and promote key facts to memory.
+    fn promote(&self, evicted: &[Message]) -> futures::future::BoxFuture<'_, ()>;
+}
+
+/// Blanket implementation for `Arc<dyn MemoryPromoter>`.
+impl MemoryPromoter for Arc<dyn MemoryPromoter> {
+    fn promote(&self, evicted: &[Message]) -> futures::future::BoxFuture<'_, ()> {
+        (**self).promote(evicted)
+    }
+}
 
 /// Metadata needed to restore protected messages near their original positions.
 struct ProtectedMessage {
@@ -190,6 +208,13 @@ pub struct ContextManager {
     budget: Option<TokenBudget>,
     /// Cumulative compression metrics for observability.
     metrics: CompressionMetrics,
+    /// Optional visibility horizon compressor.
+    /// When set, `prepare()` runs horizon compaction as a pre-processing pass
+    /// before the main compressor, compacting tool traces beyond the active window.
+    visibility_horizon: Option<horizon::VisibilityHorizonCompressor>,
+    /// Optional callback for promoting evicted messages to long-term memory.
+    /// When set, called with evicted messages after each compression pass.
+    memory_promoter: Option<Arc<dyn MemoryPromoter>>,
 }
 
 impl ContextManager {
@@ -201,6 +226,8 @@ impl ContextManager {
             tokenizer: None,
             max_messages: None,
             budget: None,
+            visibility_horizon: None,
+            memory_promoter: None,
         }
     }
 
@@ -399,6 +426,33 @@ impl ContextManager {
         self.compressor = Some(Box::new(compressor));
     }
 
+    /// Set or replace the visibility horizon compressor.
+    ///
+    /// When configured, `prepare()` runs horizon compaction as a pre-processing
+    /// pass before the main compressor, compacting tool traces beyond the
+    /// active plan window.
+    pub fn set_visibility_horizon(&mut self, compressor: horizon::VisibilityHorizonCompressor) {
+        self.visibility_horizon = Some(compressor);
+    }
+
+    /// Remove the visibility horizon compressor.
+    pub fn remove_visibility_horizon(&mut self) {
+        self.visibility_horizon = None;
+    }
+
+    /// Set or replace the memory promoter.
+    ///
+    /// When set, the promoter receives evicted messages after each
+    /// compression pass, enabling L3 memory promotion.
+    pub fn set_memory_promoter(&mut self, promoter: Arc<dyn MemoryPromoter>) {
+        self.memory_promoter = Some(promoter);
+    }
+
+    /// Remove the memory promoter.
+    pub fn remove_memory_promoter(&mut self) {
+        self.memory_promoter = None;
+    }
+
     /// Remove the compressor, reverting to unlimited mode
     pub fn remove_compressor(&mut self) {
         self.compressor = None;
@@ -529,6 +583,47 @@ impl ContextManager {
     /// Returns a [`PrepareResult`] containing the prepared messages and optional
     /// compression stats (populated only when auto-compression was triggered).
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<PrepareResult> {
+        // ── Pre-compression: Visibility Horizon pass ──────────────────
+        // Compact tool traces beyond the active window before the main
+        // compressor runs. This reduces the token count so the main
+        // compressor may not need to fire at all.
+        if let Some(ref horizon_compressor) = self.visibility_horizon {
+            let before = self.messages.len();
+            let horizon_input = CompressionInput {
+                messages: std::mem::take(&mut self.messages),
+                token_limit: self.token_limit,
+                current_query: current_query.map(String::from),
+            };
+            match horizon_compressor.compress(horizon_input).await {
+                Ok(output) => {
+                    let compacted = before.saturating_sub(output.messages.len());
+                    if compacted > 0 {
+                        tracing::debug!(
+                            before_messages = before,
+                            after_messages = output.messages.len(),
+                            evicted = output.evicted.len(),
+                            "VisibilityHorizon pre-compaction applied"
+                        );
+                        self.metrics.record(
+                            &ForceCompressStats {
+                                before_count: before,
+                                after_count: output.messages.len(),
+                                evicted: output.evicted.len(),
+                                before_tokens: 0,
+                                after_tokens: 0,
+                            },
+                            "VisibilityHorizon",
+                        );
+                    }
+                    self.messages = output.messages;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "VisibilityHorizon pre-compaction failed, continuing with original messages");
+                    // Don't fail prepare — horizon is best-effort
+                }
+            }
+        }
+
         let estimated_tokens = Self::estimate_tokens(&self.messages, &*self.tokenizer);
 
         let needs_compression = if let Some(ref budget) = self.budget {
@@ -579,8 +674,18 @@ impl ContextManager {
 
             match compress_result {
                 Ok(output) => {
-                    let evicted = output.evicted.len();
+                    let evicted_messages = output.evicted;
+                    let evicted = evicted_messages.len();
                     self.messages = Self::merge_protected(output.messages, protected);
+
+                    // ── L3 Memory Promotion ──
+                    // If a memory promoter is configured, pass evicted messages
+                    // so key facts can be extracted and stored for later recall.
+                    if let Some(ref promoter) = self.memory_promoter {
+                        if !evicted_messages.is_empty() {
+                            promoter.promote(&evicted_messages).await;
+                        }
+                    }
 
                     let stats = ForceCompressStats {
                         before_count,
@@ -617,8 +722,13 @@ impl ContextManager {
             None
         };
 
+        // Always sanitize tool_calls → tool_result pairing before sending to LLM.
+        // Even without compression, session resume or manual manipulation can
+        // produce invalid sequences.
+        let messages = sanitize_tool_call_pairing(&self.messages);
+
         Ok(PrepareResult {
-            messages: self.messages.clone(),
+            messages,
             compressed,
         })
     }
@@ -632,6 +742,143 @@ impl ContextManager {
     }
 }
 
+/// Sanitize message sequence to ensure valid `tool_calls → tool_result` pairing.
+///
+/// OpenAI-compatible APIs require that:
+/// - Every `assistant` message with `tool_calls` must be followed by `tool` messages
+///   for each `tool_call_id`
+/// - Every `tool` message must have a preceding `assistant` message with matching
+///   `tool_call_id`
+///
+/// Compression, session resume, or manual manipulation can violate these constraints.
+/// This function repairs the sequence by:
+/// 1. Adding placeholder `tool` results for orphaned `tool_calls`
+/// 2. Removing orphaned `tool` messages without matching `tool_calls`
+fn sanitize_tool_call_pairing(messages: &[Message]) -> Vec<Message> {
+    use std::collections::{HashMap, HashSet};
+
+    if messages.is_empty() {
+        return vec![];
+    }
+
+    // Pass 1: Count tool_call_ids per assistant message and collect all available results
+    // Key: assistant message index, Value: set of tool_call_ids in that message
+    let mut assistant_tool_calls: HashMap<usize, HashSet<String>> = HashMap::new();
+    // All tool_call_ids that have corresponding tool result messages
+    let mut available_results: HashSet<String> = HashSet::new();
+
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.role == Role::Assistant {
+            if let Some(ref tcs) = msg.tool_calls {
+                let ids: HashSet<String> = tcs.iter().map(|tc| tc.id.clone()).collect();
+                assistant_tool_calls.insert(i, ids);
+            }
+        } else if msg.role == Role::Tool {
+            if let Some(ref id) = msg.tool_call_id {
+                available_results.insert(id.clone());
+            }
+        }
+    }
+
+    // If no tool_calls at all, return as-is
+    if assistant_tool_calls.is_empty() && available_results.is_empty() {
+        return messages.to_vec();
+    }
+
+    // Build the set of all referenced tool_call_ids (from assistant messages)
+    let all_referenced: HashSet<String> = assistant_tool_calls
+        .values()
+        .flat_map(|ids| ids.iter().cloned())
+        .collect();
+
+    // Pass 2: Build sanitized sequence
+    let mut result = Vec::with_capacity(messages.len());
+    let mut inserted_placeholders: HashSet<String> = HashSet::new();
+    // Track which assistant message's placeholders are pending (inserted after
+    // all its original tool results have been seen)
+    let mut pending_placeholders: Vec<Vec<String>> = Vec::new();
+
+    for (i, msg) in messages.iter().enumerate() {
+        // Before processing the current message, check if any pending placeholder
+        // groups should be flushed. We flush when we encounter a non-tool message
+        // (meaning the tool result sequence for the previous assistant has ended).
+        if msg.role != Role::Tool && !pending_placeholders.is_empty() {
+            for ids in pending_placeholders.drain(..) {
+                for id in ids {
+                    if !inserted_placeholders.contains(&id) {
+                        result.push(Message::tool_result(
+                            id.clone(),
+                            "unknown".to_string(),
+                            "[Result unavailable — tool result was removed during context compression]".to_string(),
+                        ));
+                        inserted_placeholders.insert(id);
+                    }
+                }
+            }
+        }
+
+        if msg.role == Role::Assistant {
+            if let Some(tc_ids) = assistant_tool_calls.get(&i) {
+                // Check if ALL tool_call_ids in this message are orphaned
+                let all_orphaned = tc_ids.iter().all(|id| !available_results.contains(id));
+
+                if all_orphaned {
+                    // Remove tool_calls field — treat as regular assistant message
+                    let mut cleaned = msg.clone();
+                    cleaned.tool_calls = None;
+                    result.push(cleaned);
+                } else {
+                    result.push(msg.clone());
+                    // Track which IDs need placeholders (will be inserted after
+                    // all original tool results for this assistant message)
+                    let missing: Vec<String> = tc_ids
+                        .iter()
+                        .filter(|id| !available_results.contains(*id))
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        pending_placeholders.push(missing);
+                    }
+                }
+            } else {
+                result.push(msg.clone());
+            }
+        } else if msg.role == Role::Tool {
+            // Only include if the tool_call_id is referenced by an assistant message
+            let is_orphaned = match &msg.tool_call_id {
+                Some(id) => !all_referenced.contains(id),
+                None => true, // Tool message without tool_call_id is always orphaned
+            };
+
+            if !is_orphaned {
+                result.push(msg.clone());
+            } else {
+                tracing::debug!(
+                    tool_call_id = msg.tool_call_id.as_deref().unwrap_or("<none>"),
+                    "Removed orphaned tool result message"
+                );
+            }
+        } else {
+            result.push(msg.clone());
+        }
+    }
+
+    // Flush any remaining pending placeholders (end of message list)
+    for ids in pending_placeholders {
+        for id in ids {
+            if !inserted_placeholders.contains(&id) {
+                result.push(Message::tool_result(
+                    id,
+                    "unknown".to_string(),
+                    "[Result unavailable — tool result was removed during context compression]".to_string(),
+                ));
+            }
+        }
+    }
+
+    result
+}
+
 /// Builder for `ContextManager`
 pub struct ContextManagerBuilder {
     token_limit: usize,
@@ -640,6 +887,8 @@ pub struct ContextManagerBuilder {
     tokenizer: Option<Arc<dyn Tokenizer>>,
     max_messages: Option<usize>,
     budget: Option<TokenBudget>,
+    visibility_horizon: Option<horizon::VisibilityHorizonCompressor>,
+    memory_promoter: Option<Arc<dyn MemoryPromoter>>,
 }
 
 impl ContextManagerBuilder {
@@ -693,6 +942,40 @@ impl ContextManagerBuilder {
         self
     }
 
+    /// Set a visibility horizon for proactive tool trace compaction.
+    ///
+    /// When set, `prepare()` runs a horizon compaction pass **before** the
+    /// main compressor. Tool call/result groups beyond the active window
+    /// are replaced with compact symbolic summaries, keeping the context
+    /// focused on recent work.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use echo_state::compression::{ContextManager, horizon::VisibilityHorizonConfig};
+    ///
+    /// let ctx = ContextManager::builder(128_000)
+    ///     .visibility_horizon(VisibilityHorizonConfig {
+    ///         active_window_turns: 5,
+    ///         ..Default::default()
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn visibility_horizon(mut self, config: horizon::VisibilityHorizonConfig) -> Self {
+        self.visibility_horizon = Some(horizon::VisibilityHorizonCompressor::new(config));
+        self
+    }
+
+    /// Set a memory promoter callback.
+    ///
+    /// When compression evicts messages, the promoter is called with the
+    /// evicted messages so key facts can be extracted and written to a
+    /// long-term memory Store (L3 memory promotion).
+    pub fn memory_promoter(mut self, promoter: Arc<dyn MemoryPromoter>) -> Self {
+        self.memory_promoter = Some(promoter);
+        self
+    }
+
     pub fn build(self) -> ContextManager {
         ContextManager {
             messages: self.initial_messages,
@@ -705,6 +988,8 @@ impl ContextManagerBuilder {
             max_messages: self.max_messages.unwrap_or(200),
             budget: self.budget,
             metrics: CompressionMetrics::new(),
+            visibility_horizon: self.visibility_horizon,
+            memory_promoter: self.memory_promoter,
         }
     }
 }
@@ -781,6 +1066,243 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_sanitize_tool_call_pairing_no_tools() {
+        let messages = vec![
+            Message::system("sys".to_string()),
+            Message::user("hello".to_string()),
+            Message::assistant("hi".to_string()),
+        ];
+        let result = sanitize_tool_call_pairing(&messages);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_sanitize_tool_call_pairing_valid() {
+        use echo_core::llm::types::ToolCall;
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: echo_core::llm::types::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let messages = vec![
+            Message::user("read file".to_string()),
+            Message::assistant_with_tools(vec![tc]),
+            Message::tool_result("call_1".to_string(), "read_file".to_string(), "content".to_string()),
+        ];
+        let result = sanitize_tool_call_pairing(&messages);
+        assert_eq!(result.len(), 3);
+        assert!(result[1].tool_calls.is_some());
+    }
+
+    #[test]
+    fn test_sanitize_tool_call_pairing_orphaned_tool() {
+        // tool result without preceding assistant tool_calls
+        let messages = vec![
+            Message::user("hello".to_string()),
+            Message::tool_result("orphan_1".to_string(), "some_tool".to_string(), "result".to_string()),
+            Message::assistant("hi".to_string()),
+        ];
+        let result = sanitize_tool_call_pairing(&messages);
+        // orphaned tool message should be removed
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, Role::User);
+        assert_eq!(result[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_sanitize_tool_call_pairing_dangling_calls() {
+        use echo_core::llm::types::ToolCall;
+        // assistant has tool_calls but no tool results (compression removed them)
+        // When ALL tool_calls are orphaned, we null out the tool_calls field
+        // rather than adding placeholder results.
+        let tc = ToolCall {
+            id: "call_missing".to_string(),
+            call_type: "function".to_string(),
+            function: echo_core::llm::types::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let messages = vec![
+            Message::user("read file".to_string()),
+            Message::assistant_with_tools(vec![tc]),
+            Message::user("next question".to_string()),
+        ];
+        let result = sanitize_tool_call_pairing(&messages);
+        // assistant's tool_calls should be nulled out → 3 messages (no placeholder)
+        assert_eq!(result.len(), 3);
+        assert!(result[1].tool_calls.is_none(), "orphaned tool_calls should be removed");
+    }
+
+    #[test]
+    fn test_sanitize_tool_call_pairing_mixed() {
+        use echo_core::llm::types::ToolCall;
+        // assistant has 2 tool_calls, but only 1 result exists
+        let tc1 = ToolCall {
+            id: "call_present".to_string(),
+            call_type: "function".to_string(),
+            function: echo_core::llm::types::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let tc2 = ToolCall {
+            id: "call_missing".to_string(),
+            call_type: "function".to_string(),
+            function: echo_core::llm::types::FunctionCall {
+                name: "write_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let messages = vec![
+            Message::user("do stuff".to_string()),
+            Message::assistant_with_tools(vec![tc1, tc2]),
+            Message::tool_result("call_present".to_string(), "read_file".to_string(), "content".to_string()),
+            // call_missing result was removed by compression
+            Message::user("next".to_string()),
+        ];
+        let result = sanitize_tool_call_pairing(&messages);
+        // Should have: user, assistant, tool(present), tool(placeholder), user
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[2].tool_call_id.as_deref(), Some("call_present"));
+        assert_eq!(result[3].role, Role::Tool);
+        assert_eq!(result[3].tool_call_id.as_deref(), Some("call_missing"));
+        assert!(result[3].content.as_text_ref().unwrap().contains("unavailable"));
+    }
+
+    // ── L3 Memory Promotion tests ────────────────────────────────────
+
+    /// A test promoter that records how many times it was called and
+    /// how many evicted messages it received.
+    struct TestPromoter {
+        call_count: Arc<std::sync::atomic::AtomicUsize>,
+        total_evicted: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl TestPromoter {
+        fn new() -> (Self, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>) {
+            let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let total_evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    call_count: call_count.clone(),
+                    total_evicted: total_evicted.clone(),
+                },
+                call_count,
+                total_evicted,
+            )
+        }
+    }
+
+    impl MemoryPromoter for TestPromoter {
+        fn promote(&self, evicted: &[Message]) -> futures::future::BoxFuture<'_, ()> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.total_evicted
+                .fetch_add(evicted.len(), std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async {})
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_promoter_called_on_compression() -> Result<()> {
+        let (promoter, call_count, total_evicted) = TestPromoter::new();
+
+        let mut ctx = ContextManager::builder(100) // Very low token limit to trigger compression
+            .compressor(SlidingWindowCompressor::new(4))
+            .memory_promoter(Arc::new(promoter))
+            .build();
+
+        // Push enough messages to trigger compression
+        ctx.push(Message::system("You are a helper.".to_string()));
+        for i in 1..=10 {
+            ctx.push(Message::user(format!("Question number {} about various topics", i)));
+            ctx.push(Message::assistant(format!(
+                "Here is a detailed answer to question {} with some explanation",
+                i
+            )));
+        }
+
+        let _result = ctx.prepare(None).await?;
+
+        let calls = call_count.load(std::sync::atomic::Ordering::Relaxed);
+        let evicted = total_evicted.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert!(calls > 0, "Memory promoter should have been called at least once");
+        assert!(
+            evicted > 0,
+            "Promoter should have received evicted messages, got {}",
+            evicted
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compression_reduces_tokens_by_30_percent() -> Result<()> {
+        let mut ctx = ContextManager::builder(200)
+            .compressor(SlidingWindowCompressor::new(6))
+            .build();
+
+        ctx.push(Message::system("You are a helpful assistant.".to_string()));
+
+        // Build a conversation with large tool outputs
+        for i in 1..=20 {
+            ctx.push(Message::user(format!("Question {}", i)));
+            ctx.push(Message::assistant(format!(
+                "Let me help you with question {}. I'll use some tools.",
+                i
+            )));
+            // Simulate large tool output
+            ctx.push(Message::user(format!(
+                "[Tool result: {}]",
+                "x".repeat(500)
+            )));
+        }
+
+        let tokens_before = ctx.token_estimate();
+        let _result = ctx.prepare(None).await?;
+        let tokens_after = ctx.token_estimate();
+
+        if tokens_before > 200 {
+            // Only assert if we actually had enough tokens to compress
+            let reduction = 1.0 - (tokens_after as f64 / tokens_before as f64);
+            assert!(
+                reduction > 0.3,
+                "Token reduction should be >30%: before={}, after={}, reduction={:.1}%",
+                tokens_before,
+                tokens_after,
+                reduction * 100.0
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_memory_promoter_not_called_without_compression() -> Result<()> {
+        let (promoter, call_count, _) = TestPromoter::new();
+
+        let mut ctx = ContextManager::builder(1_000_000) // Very high limit — no compression
+            .memory_promoter(Arc::new(promoter))
+            .build();
+
+        ctx.push(Message::system("sys".to_string()));
+        ctx.push(Message::user("hello".to_string()));
+        ctx.push(Message::assistant("hi".to_string()));
+
+        let _result = ctx.prepare(None).await?;
+
+        let calls = call_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            calls, 0,
+            "Promoter should NOT be called when no compression occurs"
+        );
         Ok(())
     }
 }

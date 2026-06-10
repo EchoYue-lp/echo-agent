@@ -173,8 +173,8 @@ fn extract_pdf_text_from_doc(
     }
 
     // Truncate to max_chars
-    if all_text.len() > max_chars {
-        all_text.truncate(max_chars);
+    if all_text.chars().count() > max_chars {
+        all_text = all_text.chars().take(max_chars).collect();
         all_text.push_str("\n... [truncated]");
     }
 

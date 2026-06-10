@@ -20,9 +20,11 @@ pub mod headless;
 #[cfg(feature = "improve")]
 #[cfg_attr(docsrs, doc(cfg(feature = "improve")))]
 pub mod improve;
+pub mod intent;
 pub mod layered_compress;
 pub mod llm;
 pub mod memory;
+pub mod memory_promoter;
 pub mod notebook;
 pub mod plugin;
 pub mod retry;
@@ -30,6 +32,7 @@ pub mod sandbox;
 pub mod scheduler;
 pub mod security;
 pub mod skills;
+pub mod state;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tokenizer;
@@ -58,9 +61,6 @@ pub mod human_loop;
 
 /// Unified hook bridge — connects task/subagent hooks to the central HookRegistry
 pub mod hooks_bridge;
-
-/// Agent types re-exported from echo-agents crate
-pub use echo_agents;
 
 #[cfg(feature = "mcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
@@ -159,6 +159,7 @@ pub mod prelude {
     pub use crate::compression::compressor::{
         HybridCompressor, SlidingWindowCompressor, SummaryCompressor, default_summary_prompt,
     };
+    pub use crate::compression::horizon::{VisibilityHorizonCompressor, VisibilityHorizonConfig};
     pub use crate::compression::{
         CompressionInput, CompressionOutput, ContextCompressor, ContextManager, ForceCompressStats,
         PrepareResult,

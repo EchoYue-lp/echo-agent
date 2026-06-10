@@ -127,6 +127,13 @@ pub struct AgentConfig {
     /// from the last checkpointed iteration because the conversation history
     /// (including all tool calls and results) is preserved.
     pub(crate) react_checkpoint_interval: usize,
+
+    /// Whether the verifier (Critic) is enabled for final_answer validation.
+    pub(crate) verifier_enabled: bool,
+    /// Minimum score (0.0-10.0) required for the verifier to pass.
+    pub(crate) verifier_min_score: f64,
+    /// Maximum number of verifier retry attempts before accepting the answer.
+    pub(crate) verifier_max_retries: usize,
 }
 
 impl AgentConfig {
@@ -179,6 +186,9 @@ impl AgentConfig {
             loop_detector_config: LoopDetectorConfig::default(),
             permission_mode: "default".to_string(),
             react_checkpoint_interval: 0,
+            verifier_enabled: false,
+            verifier_min_score: 7.0,
+            verifier_max_retries: 2,
         }
     }
 
@@ -643,6 +653,24 @@ impl AgentConfig {
     /// Default: 0 (only checkpoint at end of execution).
     pub fn react_checkpoint_interval(mut self, interval: usize) -> Self {
         self.react_checkpoint_interval = interval;
+        self
+    }
+
+    /// Enable or disable the verifier (Critic) for final_answer validation.
+    pub fn verifier_enabled(mut self, enabled: bool) -> Self {
+        self.verifier_enabled = enabled;
+        self
+    }
+
+    /// Set the minimum score (0.0-10.0) required for the verifier to pass.
+    pub fn verifier_min_score(mut self, score: f64) -> Self {
+        self.verifier_min_score = score;
+        self
+    }
+
+    /// Set the maximum number of verifier retry attempts.
+    pub fn verifier_max_retries(mut self, retries: usize) -> Self {
+        self.verifier_max_retries = retries;
         self
     }
 

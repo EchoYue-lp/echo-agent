@@ -76,7 +76,7 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
     println!("{}", "─".repeat(55));
     println!("Part 2: Agent 集成浏览器自动化（显示思考过程和工具返回）\n");
 
-    let model_name = require_configured_model(Some("deepseek-chat"))?;
+    let model_name = require_configured_model(Some("deepseek-v4-flash"))?;
     let mut agent = ReactAgentBuilder::new()
         .model(&model_name)
         .name("browser-agent")

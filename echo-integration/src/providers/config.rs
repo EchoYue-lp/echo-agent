@@ -10,15 +10,15 @@
 //!
 //! ```yaml
 //! models:
-//!   qwen3-max:
+//!   qwen3.7-max:
 //!     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
 //!     api_key: sk-xxx
 //!
-//!   deepseek-chat:
+//!   deepseek-v4-flash:
 //!     base_url: https://api.deepseek.com/chat/completions
 //!     api_key: ${DS_API_KEY}   # 支持引用环境变量
 //!
-//!   gpt-4o:
+//!   gpt-5.5:
 //!     provider: openai          # 内置 Provider 快捷方式
 //!     api_key: ${OPENAI_API_KEY}
 //! ```
@@ -72,11 +72,11 @@ pub enum LlmProvider {
 /// let config = LlmConfig::new(
 ///     "https://api.openai.com/v1/chat/completions",
 ///     "sk-...",
-///     "gpt-4o",
+///     "gpt-5.5",
 /// );
 ///
 /// // 方式二：使用 Provider 快捷方式
-/// let config = LlmConfig::openai("sk-...", "gpt-4o");
+/// let config = LlmConfig::openai("sk-...", "gpt-5.5");
 ///
 /// // 方式三：Anthropic
 /// let config = LlmConfig::anthropic("sk-ant-...", "claude-sonnet-4-6");
@@ -280,7 +280,7 @@ impl LlmConfig {
 ///
 /// 支持三种配置方式：
 ///
-/// 1. **模型名称**：从内置 provider/env 规则或配置文件加载（如 `"qwen-plus"`）
+/// 1. **模型名称**：从内置 provider/env 规则或配置文件加载（如 `"qwen3.6-plus"`）
 /// 2. **Provider:Model 格式**：自动匹配内置 Provider（如 `"anthropic:claude-sonnet-4-6"`、`"ollama:llama3"`）
 /// 3. **完整 LlmConfig**：手动构造配置后调用 `from_config()`
 ///
@@ -292,12 +292,12 @@ impl LlmConfig {
 ///
 /// # fn example() -> Result<()> {
 /// // 方式一：使用内置 provider/env 规则或模型配置文件
-/// let client = ProviderFactory::create("qwen-plus")?;
+/// let client = ProviderFactory::create("qwen3.6-plus")?;
 ///
 /// // 方式二：Provider:Model 简写
 /// let client = ProviderFactory::create("anthropic:claude-sonnet-4-6")?;
 /// let client = ProviderFactory::create("ollama:llama3")?;
-/// let client = ProviderFactory::create("deepseek:deepseek-chat")?;
+/// let client = ProviderFactory::create("deepseek:deepseek-v4-flash")?;
 ///
 /// // 方式三：从已有配置构建
 /// use echo_integration::providers::LlmConfig;
@@ -851,6 +851,48 @@ impl Config {
             return Ok(config);
         }
 
+        // Check if this is a recognized builtin model whose env var is missing.
+        // If so, give a specific error about the missing env var rather than
+        // falling through to "未找到模型配置文件".
+        if let Some((provider, _)) = infer_builtin_provider(model) {
+            let env_vars = match provider {
+                "openai" => "OPENAI_API_KEY",
+                "anthropic" => "ANTHROPIC_API_KEY",
+                "deepseek" => "DEEPSEEK_API_KEY",
+                "qwen" | "dashscope" | "aliyun" => "DASHSCOPE_API_KEY",
+                "moonshot" | "kimi" => "MOONSHOT_API_KEY",
+                "zhipu" | "glm" => "ZHIPU_API_KEY",
+                "ollama" => "", // ollama doesn't need a key
+                _ => "",
+            };
+            if !env_vars.is_empty() {
+                // The model is recognized but the env var is missing/empty.
+                // Still try YAML as fallback, but if that also fails, give
+                // a provider-specific error.
+                match Self::load_cached() {
+                    Ok(config) => {
+                        if let Some(err) = config.invalid_models.get(model) {
+                            return Err(ConfigError::ConfigFileError(err.clone()).into());
+                        }
+                        if let Some(mc) = config.models.get(model) {
+                            return Ok(mc.clone());
+                        }
+                        // Not in YAML either — give a specific error
+                        return Err(ConfigError::ConfigFileError(format!(
+                            "模型 '{}' 需要设置环境变量 {}（当前为空）。请在 echo-agent.yaml 中设置 model.auth_token，或在 echo-agent-models.yaml 中配置该模型。",
+                            model, env_vars
+                        )).into());
+                    }
+                    Err(_) => {
+                        return Err(ConfigError::ConfigFileError(format!(
+                            "模型 '{}' 需要设置环境变量 {}（当前为空）。请在 echo-agent.yaml 中设置 model.auth_token，或设置 {} 环境变量，或创建 echo-agent-models.yaml 配置文件。",
+                            model, env_vars, env_vars
+                        )).into());
+                    }
+                }
+            }
+        }
+
         let config = Self::load_cached()?;
         if let Some(err) = config.invalid_models.get(model) {
             return Err(ConfigError::ConfigFileError(err.clone()).into());
@@ -971,7 +1013,7 @@ fn infer_builtin_provider(model: &str) -> Option<(&'static str, String)> {
         let provider = if lower.starts_with("qwen-") || lower.starts_with("qwen3") {
             "qwen"
         } else if lower.starts_with("gpt-")
-            || lower.starts_with("o1")
+            || lower.starts_with("gpt-5.5")
             || lower.starts_with("o3")
             || lower.starts_with("o4")
         {
@@ -996,7 +1038,8 @@ fn builtin_available_models() -> Vec<String> {
     if ProviderFactory::env_api_key("qwen").trim().is_empty() {
         return models;
     }
-    models.push("qwen-plus".to_string());
+    models.push("qwen3.7-max".to_string());
+    models.push("qwen3.6-plus".to_string());
     models
 }
 
@@ -1180,24 +1223,24 @@ mod tests {
 
     #[test]
     fn test_llm_config_new() {
-        let config = LlmConfig::new("https://example.com", "sk-test", "gpt-4o");
+        let config = LlmConfig::new("https://example.com", "sk-test", "gpt-5.5");
         assert_eq!(config.base_url, "https://example.com");
         assert_eq!(config.api_key, "sk-test");
-        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.model, "gpt-5.5");
     }
 
     #[test]
     fn test_llm_config_openai() {
-        let config = LlmConfig::openai("sk-test", "gpt-4o");
+        let config = LlmConfig::openai("sk-test", "gpt-5.5");
         assert!(config.base_url.contains("openai.com"));
-        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.model, "gpt-5.5");
     }
 
     #[test]
     fn test_llm_config_deepseek() {
-        let config = LlmConfig::deepseek("sk-test", "deepseek-chat");
+        let config = LlmConfig::deepseek("sk-test", "deepseek-v4-flash");
         assert!(config.base_url.contains("deepseek.com"));
-        assert_eq!(config.model, "deepseek-chat");
+        assert_eq!(config.model, "deepseek-v4-flash");
     }
 
     #[test]
@@ -1293,8 +1336,8 @@ mod tests {
             std::env::remove_var("ECHO_AGENT_CONFIG");
         }
         let _guard = EnvGuard::set("QWEN_API_KEY", "qwen-builtin-key");
-        let config = Config::get_model("qwen-plus").unwrap();
-        assert_eq!(config.model, "qwen-plus");
+        let config = Config::get_model("qwen3.6-plus").unwrap();
+        assert_eq!(config.model, "qwen3.6-plus");
         assert_eq!(config.apikey, "qwen-builtin-key");
         assert!(config.baseurl.contains("dashscope.aliyuncs.com"));
     }
@@ -1308,8 +1351,8 @@ mod tests {
             std::env::remove_var("ECHO_AGENT_CONFIG");
         }
         let _guard = EnvGuard::set("OPENAI_API_KEY", "openai-builtin-key");
-        let config = Config::get_model("openai:gpt-4o-mini").unwrap();
-        assert_eq!(config.model, "gpt-4o-mini");
+        let config = Config::get_model("openai:gpt-5.5").unwrap();
+        assert_eq!(config.model, "gpt-5.5");
         assert_eq!(config.apikey, "openai-builtin-key");
         assert!(config.baseurl.contains("api.openai.com"));
     }
@@ -1318,7 +1361,7 @@ mod tests {
     fn test_has_models_section_skips_app_config() {
         let app_yaml = r#"
 model:
-  name: qwen-plus
+  name: qwen3.6-plus
 agent:
   name: echo-assistant
 "#;
@@ -1329,7 +1372,7 @@ agent:
     fn test_has_models_section_accepts_model_config() {
         let model_yaml = r#"
 models:
-  qwen-plus:
+  qwen3.6-plus:
     provider: qwen
     api_key: ${DASHSCOPE_API_KEY}
 "#;
@@ -1346,7 +1389,7 @@ models:
   alias-model:
     provider: openai
     api_key: sk-alias
-    model: gpt-4o-mini
+    model: gpt-5.5
 "#;
         let file: ConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(file.models.len(), 2);
@@ -1355,7 +1398,7 @@ models:
 
         let entry = &file.models["alias-model"];
         assert_eq!(entry.provider.as_deref(), Some("openai"));
-        assert_eq!(entry.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(entry.model.as_deref(), Some("gpt-5.5"));
     }
 
     #[test]

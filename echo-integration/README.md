@@ -20,7 +20,7 @@ use echo_integration::mcp::McpManager;
 use echo_integration::channels::ChannelManager;
 
 // Create an LLM provider
-let provider = ProviderFactory::create_openai("gpt-4o", std::env::var("OPENAI_API_KEY")?)?;
+let provider = ProviderFactory::create_openai("gpt-5.5", std::env::var("OPENAI_API_KEY")?)?;
 
 // Connect to an MCP server
 let mut mcp = McpManager::new();

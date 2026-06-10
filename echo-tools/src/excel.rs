@@ -46,6 +46,10 @@ impl Tool for ExcelReadTool {
                 "preview_rows": {
                     "type": "integer",
                     "description": "Number of preview rows (default 10)"
+                },
+                "skip_rows": {
+                    "type": "integer",
+                    "description": "Number of rows to skip from the top (default 0). Use this when the file has title/metadata rows before the actual header row."
                 }
             },
             "required": ["file_path"]
@@ -66,6 +70,11 @@ impl Tool for ExcelReadTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as usize;
 
+            let skip_rows = parameters
+                .get("skip_rows")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+
             let security = SecurityConfig::global();
             let path = security.validate_file(file_path)?;
 
@@ -80,24 +89,28 @@ impl Tool for ExcelReadTool {
                     file_path,
                     sheet_name,
                     effective_preview_rows,
+                    skip_rows,
                     &security.limits,
                 )?,
                 "xls" => read_excel_xls(
                     file_path,
                     sheet_name,
                     effective_preview_rows,
+                    skip_rows,
                     &security.limits,
                 )?,
                 "xlsb" => read_excel_xlsb(
                     file_path,
                     sheet_name,
                     effective_preview_rows,
+                    skip_rows,
                     &security.limits,
                 )?,
                 "ods" => read_excel_ods(
                     file_path,
                     sheet_name,
                     effective_preview_rows,
+                    skip_rows,
                     &security.limits,
                 )?,
                 _ => {
@@ -106,6 +119,7 @@ impl Tool for ExcelReadTool {
                         file_path,
                         sheet_name,
                         effective_preview_rows,
+                        skip_rows,
                         &security.limits,
                     )?
                 }
@@ -155,13 +169,7 @@ impl Tool for ExcelInfoTool {
             let security = SecurityConfig::global();
             let _path = security.validate_file(file_path)?;
 
-            use calamine::{Reader, Xlsx, open_workbook};
-
-            let mut workbook: Xlsx<_> =
-                open_workbook(file_path).map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to open Excel file: {}", e),
-                })?;
+            let mut workbook = open_excel_auto(file_path)?;
 
             let mut info = Vec::new();
             info.push(format!("File: {}", file_path));
@@ -206,7 +214,51 @@ impl Tool for ExcelInfoTool {
                         .filter(|s| !s.is_empty())
                         .collect();
                     if !non_empty.is_empty() {
-                        info.push(format!("    Headers: {}", non_empty.join(" | ")));
+                        info.push(format!("    Row 1: {}", non_empty.join(" | ")));
+                    }
+
+                    // Show row 2 if it looks different from row 1 (hint: might be the real header)
+                    if height > 1 {
+                        let row2: Vec<String> = (0..width)
+                            .map(|col| {
+                                range
+                                    .get_value((1, col as u32))
+                                    .map(format_cell_value)
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        let row2_non_empty: Vec<&str> = row2.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                        if !row2_non_empty.is_empty() && row2 != headers {
+                            info.push(format!("    Row 2: {}", row2_non_empty.join(" | ")));
+                        }
+                    }
+                }
+
+                // Detect formula cells using worksheet_formula
+                if let Ok(formula_range) = workbook.worksheet_formula(sheet_name) {
+                    let mut formula_count = 0usize;
+                    let mut sample_formulas: Vec<String> = Vec::new();
+                    let (fh, fw) = formula_range.get_size();
+                    for row in 0..fh {
+                        for col in 0..fw {
+                            if let Some(formula_str) = formula_range.get_value((row as u32, col as u32)) {
+                                if !formula_str.is_empty() {
+                                    formula_count += 1;
+                                    if sample_formulas.len() < 5 {
+                                        // Get the cell reference (e.g. "A10")
+                                        let col_letter = col_to_letter(col);
+                                        sample_formulas.push(format!("{}{}={}", col_letter, row + 1, formula_str));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if formula_count > 0 {
+                        info.push(format!("    Formulas: {} cells", formula_count));
+                        if !sample_formulas.is_empty() {
+                            info.push(format!("    Sample: {}", sample_formulas.join(", ")));
+                        }
+                        info.push("    Note: Formula cells return cached results. The formulas themselves are preserved in the original file.".to_string());
                     }
                 }
             }
@@ -246,7 +298,7 @@ impl Tool for ExcelToCsvTool {
                 },
                 "sheet": {
                     "type": "string",
-                    "description": "Worksheet name (defaults to first sheet)"
+                    "description": "Worksheet name or index (e.g. 'Sheet1' or '0', defaults to first sheet)"
                 }
             },
             "required": ["input_file", "output_file"]
@@ -270,24 +322,11 @@ impl Tool for ExcelToCsvTool {
             let security = SecurityConfig::global();
             let _path = security.validate_file(input_file)?;
 
-            use calamine::{Reader, Xlsx, open_workbook};
-
-            let mut workbook: Xlsx<_> =
-                open_workbook(input_file).map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to open Excel file: {}", e),
-                })?;
+            let mut workbook = open_excel_auto(input_file)?;
 
             // Get sheet name
-            let sheet = if let Some(name) = sheet_name {
-                name.to_string()
-            } else {
-                workbook
-                    .sheet_names()
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Sheet1".to_string())
-            };
+            let sheets = workbook.sheet_names();
+            let sheet = resolve_sheet_name(&sheets, sheet_name);
 
             let range =
                 workbook
@@ -335,7 +374,10 @@ impl Tool for ExcelToCsvTool {
                 csv_content.push(row_data.join(","));
             }
 
-            tokio::fs::write(output_path, csv_content.join("\n"))
+            // Prepend UTF-8 BOM so Excel correctly detects encoding for non-ASCII content
+            let bom = "\xEF\xBB\xBF";
+            let csv_output = format!("{}{}", bom, csv_content.join("\n"));
+            tokio::fs::write(output_path, csv_output)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
@@ -365,6 +407,7 @@ fn read_excel_xlsx(
     file_path: &str,
     sheet_name: Option<&str>,
     preview_rows: usize,
+    skip_rows: usize,
     limits: &ResourceLimits,
 ) -> Result<String> {
     use calamine::{Xlsx, open_workbook};
@@ -375,7 +418,7 @@ fn read_excel_xlsx(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, limits)
+    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
 }
 
 /// Read xls file
@@ -383,6 +426,7 @@ fn read_excel_xls(
     file_path: &str,
     sheet_name: Option<&str>,
     preview_rows: usize,
+    skip_rows: usize,
     limits: &ResourceLimits,
 ) -> Result<String> {
     use calamine::{Xls, open_workbook};
@@ -393,7 +437,7 @@ fn read_excel_xls(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, limits)
+    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
 }
 
 /// Read xlsb file
@@ -401,6 +445,7 @@ fn read_excel_xlsb(
     file_path: &str,
     sheet_name: Option<&str>,
     preview_rows: usize,
+    skip_rows: usize,
     limits: &ResourceLimits,
 ) -> Result<String> {
     use calamine::{Xlsb, open_workbook};
@@ -411,7 +456,7 @@ fn read_excel_xlsb(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, limits)
+    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
 }
 
 /// Read ods file
@@ -419,6 +464,7 @@ fn read_excel_ods(
     file_path: &str,
     sheet_name: Option<&str>,
     preview_rows: usize,
+    skip_rows: usize,
     limits: &ResourceLimits,
 ) -> Result<String> {
     use calamine::{Ods, open_workbook};
@@ -429,7 +475,7 @@ fn read_excel_ods(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, limits)
+    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
 }
 
 /// Generic Excel data reader
@@ -438,18 +484,12 @@ fn read_excel_data<R: calamine::Reader<std::io::BufReader<std::fs::File>>>(
     file_path: &str,
     sheet_name: Option<&str>,
     preview_rows: usize,
+    skip_rows: usize,
     limits: &ResourceLimits,
 ) -> Result<String> {
     // Get sheet name
     let sheets = workbook.sheet_names();
-    let target_sheet = if let Some(name) = sheet_name {
-        name.to_string()
-    } else {
-        sheets
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "Sheet1".to_string())
-    };
+    let target_sheet = resolve_sheet_name(&sheets, sheet_name);
 
     // Read sheet data
     let range =
@@ -462,8 +502,12 @@ fn read_excel_data<R: calamine::Reader<std::io::BufReader<std::fs::File>>>(
 
     let (height, width) = range.get_size();
 
+    // Apply skip_rows offset
+    let skip = skip_rows.min(height.saturating_sub(1));
+    let available_rows = height - skip;
+
     // Limit preview rows to max allowed
-    let display_rows = preview_rows.min(height).min(limits.max_preview_rows);
+    let display_rows = preview_rows.min(available_rows).min(limits.max_preview_rows);
 
     // Format output
     let mut result = Vec::new();
@@ -471,16 +515,19 @@ fn read_excel_data<R: calamine::Reader<std::io::BufReader<std::fs::File>>>(
     result.push(format!("Sheet: {}", target_sheet));
     result.push(format!("Total rows: {}", height));
     result.push(format!("Total cols: {}", width));
+    if skip > 0 {
+        result.push(format!("Skipped rows: {} (starting from row {})", skip, skip + 1));
+    }
     result.push(String::new());
-    result.push(format!("Data preview (first {} rows):", display_rows));
+    result.push(format!("Data preview ({} rows from row {}):", display_rows, skip + 1));
     result.push(String::new());
 
-    // Headers and data
+    // Headers and data (with skip offset)
     for row in 0..display_rows {
         let mut row_data = Vec::new();
         for col in 0..width {
             let cell_value = range
-                .get_value((row as u32, col as u32))
+                .get_value(((row + skip) as u32, col as u32))
                 .map(format_cell_value)
                 .unwrap_or_default();
             row_data.push(cell_value);
@@ -488,27 +535,105 @@ fn read_excel_data<R: calamine::Reader<std::io::BufReader<std::fs::File>>>(
         result.push(row_data.join("\t"));
     }
 
-    if height > display_rows {
-        result.push(format!("... ({} total rows)", height));
+    if available_rows > display_rows {
+        result.push(format!("... ({} total rows after skip)", available_rows));
     }
 
     Ok(result.join("\n"))
 }
 
-/// Format cell value
+/// Format cell value with proper type handling
 fn format_cell_value(value: &calamine::Data) -> String {
     use calamine::Data;
     match value {
         Data::Empty => String::new(),
         Data::String(s) => s.clone(),
-        Data::Float(f) => format!("{:.2}", f),
+        Data::Float(f) => format_smart_float(*f),
         Data::Int(i) => i.to_string(),
         Data::Bool(b) => b.to_string(),
-        Data::DateTime(dt) => format!("{:?}", dt),
+        Data::DateTime(dt) => {
+            // Convert Excel serial date to human-readable format
+            match dt.as_datetime() {
+                Some(ndt) => {
+                    // If time component is midnight, show date only
+                    if ndt.time() == chrono::NaiveTime::MIN {
+                        ndt.format("%Y-%m-%d").to_string()
+                    } else {
+                        ndt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    }
+                }
+                None => format!("{}", dt),
+            }
+        }
         Data::Error(e) => format!("Error: {:?}", e),
         Data::DateTimeIso(dt) => dt.clone(),
         Data::DurationIso(d) => d.clone(),
     }
+}
+
+/// Smart float formatting: preserve precision (up to 6 decimals), strip trailing zeros.
+fn format_smart_float(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+    }
+    // Use up to 6 decimal places, then strip trailing zeros
+    let formatted = format!("{:.6}", f);
+    if formatted.contains('.') {
+        let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+        trimmed.to_string()
+    } else {
+        formatted
+    }
+}
+
+/// Open any Excel format (.xlsx/.xls/.xlsb/.ods) using auto-detection.
+fn open_excel_auto(file_path: &str) -> Result<calamine::Sheets<std::io::BufReader<std::fs::File>>> {
+    calamine::open_workbook_auto(file_path).map_err(|e| ToolError::ExecutionFailed {
+        tool: TOOL_NAME.to_string(),
+        message: format!("Failed to open Excel file '{}': {}", file_path, e),
+    })
+}
+
+/// Resolve a sheet name or numeric index to an actual sheet name.
+/// If `sheet_name` is a numeric string like "0", "1", etc., return the corresponding sheet name.
+fn resolve_sheet_name(
+    sheets: &[String],
+    sheet_name: Option<&str>,
+) -> String {
+    match sheet_name {
+        Some(name) => {
+            // Try parsing as index
+            if let Ok(idx) = name.parse::<usize>() {
+                if idx < sheets.len() {
+                    return sheets[idx].clone();
+                }
+            }
+            // Otherwise treat as literal name
+            name.to_string()
+        }
+        None => sheets
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Sheet1".to_string()),
+    }
+}
+
+/// Convert 0-based column index to Excel column letter (0→A, 1→B, ..., 25→Z, 26→AA, ...)
+fn col_to_letter(col: usize) -> String {
+    let mut result = String::new();
+    let mut c = col;
+    loop {
+        let r = c % 26;
+        result.insert(0, (b'A' + r as u8) as char);
+        if c < 26 {
+            break;
+        }
+        c = c / 26 - 1;
+    }
+    result
 }
 
 // ── ExcelProfileTool ───────────────────────────────────────────────
@@ -540,7 +665,7 @@ impl Tool for ExcelProfileTool {
                 },
                 "sheet": {
                     "type": "string",
-                    "description": "Worksheet name (defaults to first sheet)"
+                    "description": "Worksheet name or index (e.g. 'Sheet1' or '0', defaults to first sheet)"
                 },
                 "max_rows": {
                     "type": "integer",
@@ -567,23 +692,10 @@ impl Tool for ExcelProfileTool {
             let security = SecurityConfig::global();
             let _path = security.validate_file(file_path)?;
 
-            use calamine::{Reader, Xlsx, open_workbook};
-
-            let mut workbook: Xlsx<_> =
-                open_workbook(file_path).map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to open Excel file: {}", e),
-                })?;
+            let mut workbook = open_excel_auto(file_path)?;
 
             let sheets = workbook.sheet_names();
-            let target_sheet = if let Some(name) = sheet_name {
-                name.to_string()
-            } else {
-                sheets
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Sheet1".to_string())
-            };
+            let target_sheet = resolve_sheet_name(&sheets, sheet_name);
 
             let range = workbook.worksheet_range(&target_sheet).map_err(|e| {
                 ToolError::ExecutionFailed {
@@ -879,9 +991,15 @@ impl Tool for ExcelLoadTool {
     }
 
     fn description(&self) -> &str {
-        "Load Excel sheet into a Polars DataFrame and save as Parquet/CSV. \
+        "Load Excel sheet(s) into Polars DataFrame(s) and save as Parquet/CSV. \
          This bridges Excel data into the data processing pipeline — \
-         after loading, use data_filter, data_aggregate, data_stats, data_transform, etc."
+         after loading, use filter_data, aggregate_data, data_stats, transform_data, etc.\n\n\
+         Supports:\n\
+         - Single sheet: sheet='Sheet1' or sheet='0'\n\
+         - Multiple sheets: sheets='Sheet1,Sheet2' or sheets='0,1,2'\n\
+         - All sheets: sheets='all'\n\
+         - Custom header row: header_row=2 means row index 2 (0-based) is the header (default 0)\n\
+         - Skip rows: skip_rows=2 to ignore the first 2 rows entirely"
     }
 
     fn parameters(&self) -> Value {
@@ -894,23 +1012,27 @@ impl Tool for ExcelLoadTool {
                 },
                 "sheet": {
                     "type": "string",
-                    "description": "Worksheet name (defaults to first sheet)"
+                    "description": "Single worksheet name or index (e.g. 'Sheet1' or '0'). Use 'sheets' for multiple."
+                },
+                "sheets": {
+                    "type": "string",
+                    "description": "Multiple worksheets: comma-separated names/indices (e.g. 'Sheet1,Sheet2') or 'all' for all sheets. Overrides 'sheet'."
                 },
                 "output_file": {
                     "type": "string",
-                    "description": "Output file path (default: same name with .parquet extension)"
+                    "description": "Output file path (default: same name with .parquet extension). For multiple sheets, a suffix is added."
                 },
                 "format": {
                     "type": "string",
                     "description": "Output format: 'parquet' (default) or 'csv'"
                 },
                 "header_row": {
-                    "type": "boolean",
-                    "description": "Whether first row is headers (default: true)"
+                    "type": "integer",
+                    "description": "0-based row index of the header row (default 0). Use 1 if row 2 is the actual header, 2 if row 3, etc. Rows before the header are skipped."
                 },
                 "max_rows": {
                     "type": "integer",
-                    "description": "Maximum rows to load (default: all)"
+                    "description": "Maximum rows to load per sheet (default: all)"
                 }
             },
             "required": ["file_path"]
@@ -925,15 +1047,17 @@ impl Tool for ExcelLoadTool {
                 .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
 
             let sheet_name = parameters.get("sheet").and_then(|v| v.as_str());
+            let sheets_param = parameters.get("sheets").and_then(|v| v.as_str());
             let output_file = parameters.get("output_file").and_then(|v| v.as_str());
             let format = parameters
                 .get("format")
                 .and_then(|v| v.as_str())
                 .unwrap_or("parquet");
-            let has_header = parameters
+            // header_row: integer (0-based row index of header). Default 0.
+            let header_row_idx = parameters
                 .get("header_row")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
             let max_rows = parameters
                 .get("max_rows")
                 .and_then(|v| v.as_u64())
@@ -942,253 +1066,304 @@ impl Tool for ExcelLoadTool {
             let security = SecurityConfig::global();
             let _path = security.validate_file(file_path)?;
 
-            // Determine output path
-            let out_path = if let Some(out) = output_file {
-                security.validate_output_file(out)?
+            // Read Excel
+            let mut workbook = open_excel_auto(file_path)?;
+            let all_sheets = workbook.sheet_names();
+
+            // Determine which sheets to load
+            let sheets_to_load: Vec<String> = if let Some(sheets_str) = sheets_param {
+                if sheets_str.trim().to_lowercase() == "all" {
+                    all_sheets.clone()
+                } else {
+                    sheets_str
+                        .split(',')
+                        .map(|s| s.trim())
+                        .map(|s| resolve_sheet_name(&all_sheets, Some(s)))
+                        .collect()
+                }
             } else {
-                let ext = match format {
-                    "csv" => ".csv",
-                    _ => ".parquet",
-                };
-                let input = std::path::Path::new(file_path);
-                let stem = input.file_stem().unwrap_or_default();
-                let parent = input.parent().unwrap_or(std::path::Path::new("."));
-                let out_name = format!("{}{}", stem.to_string_lossy(), ext);
-                parent.join(out_name)
+                vec![resolve_sheet_name(&all_sheets, sheet_name)]
             };
 
-            // Read Excel
-            use calamine::{Reader, Xlsx, open_workbook};
-            let mut workbook: Xlsx<_> =
-                open_workbook(file_path).map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to open Excel file: {}", e),
+            let input = std::path::Path::new(file_path);
+            let stem = input.file_stem().unwrap_or_default();
+            let parent = input.parent().unwrap_or(std::path::Path::new("."));
+
+            let mut all_results = Vec::new();
+            let is_multi = sheets_to_load.len() > 1;
+
+            for sheet_name_str in &sheets_to_load {
+                let range = workbook.worksheet_range(sheet_name_str).map_err(|e| {
+                    ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("Failed to read sheet '{}': {:?}", sheet_name_str, e),
+                    }
                 })?;
 
-            let sheets = workbook.sheet_names();
-            let target_sheet = if let Some(name) = sheet_name {
-                name.to_string()
-            } else {
-                sheets
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "Sheet1".to_string())
-            };
-
-            let range = workbook.worksheet_range(&target_sheet).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to read sheet '{}': {:?}", target_sheet, e),
+                let (height, width) = range.get_size();
+                if height == 0 || width == 0 {
+                    all_results.push(format!("Sheet '{}' is empty, skipped.", sheet_name_str));
+                    continue;
                 }
-            })?;
 
-            let (height, width) = range.get_size();
-            if height == 0 || width == 0 {
-                return Ok(ToolResult::success(
-                    "Sheet is empty, nothing to load.".to_string(),
-                ));
-            }
+                // header_row_idx is the 0-based row index of the header.
+                // All rows before it are skipped (title rows, metadata, etc.)
+                let data_start_row = header_row_idx + 1;
+                if data_start_row >= height {
+                    all_results.push(format!("Sheet '{}': header_row={} but only {} rows, skipped.", sheet_name_str, header_row_idx, height));
+                    continue;
+                }
+                let data_rows = height - data_start_row;
+                let load_rows = max_rows.unwrap_or(data_rows).min(data_rows);
 
-            let data_start_row = if has_header { 1 } else { 0 };
-            let data_rows = if has_header { height - 1 } else { height };
-            let load_rows = max_rows.unwrap_or(data_rows).min(data_rows);
-
-            // Extract headers
-            let headers: Vec<String> = if has_header {
-                (0..width)
+                // Extract headers from the header row
+                let headers: Vec<String> = (0..width)
                     .map(|col| {
                         range
-                            .get_value((0, col as u32))
+                            .get_value((header_row_idx as u32, col as u32))
                             .map(format_cell_value)
                             .unwrap_or_else(|| format!("Column_{}", col + 1))
                     })
-                    .collect()
-            } else {
-                (0..width)
-                    .map(|col| format!("Column_{}", col + 1))
-                    .collect()
-            };
+                    .map(|h| {
+                        let trimmed = h.trim().to_string();
+                        if trimmed.is_empty() {
+                            "unnamed".to_string()
+                        } else {
+                            trimmed
+                        }
+                    })
+                    .collect();
 
-            // Detect column types by scanning all data rows
-            let mut col_is_numeric: Vec<bool> = vec![true; width];
-            let mut col_has_float: Vec<bool> = vec![false; width];
-            let mut col_is_bool: Vec<bool> = vec![true; width];
+                // Detect column types by scanning all data rows
+                let mut col_is_numeric: Vec<bool> = vec![true; width];
+                let mut col_has_float: Vec<bool> = vec![false; width];
+                let mut col_is_bool: Vec<bool> = vec![true; width];
+                let mut col_is_datetime: Vec<bool> = vec![true; width];
+                let mut col_has_data: Vec<bool> = vec![false; width];
 
-            for row_idx in data_start_row..(data_start_row + load_rows) {
-                for col in 0..width {
-                    match range.get_value((row_idx as u32, col as u32)) {
-                        Some(calamine::Data::Float(_)) => {
-                            col_has_float[col] = true;
-                            col_is_bool[col] = false;
-                        }
-                        Some(calamine::Data::Int(_)) => {
-                            col_is_bool[col] = false;
-                        }
-                        Some(calamine::Data::Bool(_)) => {
-                            // keep is_bool true
-                        }
-                        Some(calamine::Data::Empty) | None => {}
-                        _ => {
-                            col_is_numeric[col] = false;
-                            col_is_bool[col] = false;
+                for row_idx in data_start_row..(data_start_row + load_rows) {
+                    for col in 0..width {
+                        match range.get_value((row_idx as u32, col as u32)) {
+                            Some(calamine::Data::Float(_)) => {
+                                col_has_float[col] = true;
+                                col_is_bool[col] = false;
+                                col_is_datetime[col] = false;
+                                col_has_data[col] = true;
+                            }
+                            Some(calamine::Data::Int(_)) => {
+                                col_is_bool[col] = false;
+                                col_is_datetime[col] = false;
+                                col_has_data[col] = true;
+                            }
+                            Some(calamine::Data::Bool(_)) => {
+                                col_is_numeric[col] = false;
+                                col_is_datetime[col] = false;
+                                col_has_data[col] = true;
+                            }
+                            Some(calamine::Data::DateTime(_)) | Some(calamine::Data::DateTimeIso(_)) => {
+                                col_is_numeric[col] = false;
+                                col_is_bool[col] = false;
+                                col_has_data[col] = true;
+                            }
+                            Some(calamine::Data::DurationIso(_)) => {
+                                col_is_numeric[col] = false;
+                                col_is_bool[col] = false;
+                                col_is_datetime[col] = false;
+                                col_has_data[col] = true;
+                            }
+                            Some(calamine::Data::String(_)) => {
+                                col_is_numeric[col] = false;
+                                col_is_bool[col] = false;
+                                col_is_datetime[col] = false;
+                                col_has_data[col] = true;
+                            }
+                            Some(calamine::Data::Error(_)) => {
+                                col_is_numeric[col] = false;
+                                col_is_bool[col] = false;
+                                col_is_datetime[col] = false;
+                                col_has_data[col] = true;
+                            }
+                            Some(calamine::Data::Empty) | None => {}
                         }
                     }
                 }
-            }
 
-            // Build Polars Series for each column
-            use polars::prelude::*;
-            let mut series_list: Vec<Series> = Vec::with_capacity(width);
+                // Build Polars Series for each column
+                use polars::prelude::*;
+                let mut series_list: Vec<Series> = Vec::with_capacity(width);
 
-            for col in 0..width {
-                let col_name = PlSmallStr::from_str(&headers[col]);
+                for col in 0..width {
+                    let col_name = PlSmallStr::from_str(&headers[col]);
 
-                if col_is_bool[col] {
-                    // Boolean column
-                    let vals: Vec<Option<bool>> = (data_start_row..(data_start_row + load_rows))
-                        .map(
-                            |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                    if !col_has_data[col] {
+                        let vals: Vec<Option<String>> = vec![None; load_rows];
+                        series_list.push(Series::new(col_name, vals));
+                    } else if col_is_bool[col] {
+                        let vals: Vec<Option<bool>> = (data_start_row..(data_start_row + load_rows))
+                            .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
                                 Some(calamine::Data::Bool(b)) => Some(*b),
                                 _ => None,
-                            },
-                        )
-                        .collect();
-                    series_list.push(Series::new(col_name, vals));
-                } else if col_is_numeric[col] {
-                    if col_has_float[col] {
-                        // Float column
-                        let vals: Vec<Option<f64>> = (data_start_row..(data_start_row + load_rows))
-                            .map(
-                                |row_idx| match range.get_value((row_idx as u32, col as u32)) {
-                                    Some(calamine::Data::Float(f)) => Some(*f),
-                                    Some(calamine::Data::Int(i)) => Some(*i as f64),
-                                    _ => None,
-                                },
-                            )
+                            })
                             .collect();
                         series_list.push(Series::new(col_name, vals));
-                    } else {
-                        // Integer column
-                        let vals: Vec<Option<i64>> = (data_start_row..(data_start_row + load_rows))
-                            .map(
-                                |row_idx| match range.get_value((row_idx as u32, col as u32)) {
-                                    Some(calamine::Data::Int(i)) => Some(*i),
-                                    Some(calamine::Data::Float(f)) => Some(*f as i64),
-                                    _ => None,
-                                },
-                            )
-                            .collect();
-                        series_list.push(Series::new(col_name, vals));
-                    }
-                } else {
-                    // String column
-                    let vals: Vec<Option<String>> = (data_start_row..(data_start_row + load_rows))
-                        .map(
-                            |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                    } else if col_is_datetime[col] {
+                        let vals: Vec<Option<String>> = (data_start_row..(data_start_row + load_rows))
+                            .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
                                 Some(calamine::Data::Empty) | None => None,
                                 Some(v) => {
                                     let s = format_cell_value(v);
                                     if s.is_empty() { None } else { Some(s) }
                                 }
-                            },
-                        )
-                        .collect();
-                    series_list.push(Series::new(col_name, vals));
-                }
-            }
-
-            // Build DataFrame
-            let columns: Vec<polars::prelude::Column> =
-                series_list.into_iter().map(|s| s.into_column()).collect();
-            let col_count = columns.len();
-            let mut df =
-                DataFrame::new(col_count, columns).map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to create DataFrame: {}", e),
-                })?;
-
-            // Create parent directory if needed
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to create output directory: {}", e),
-                })?;
-            }
-
-            // Write output
-            match format {
-                "csv" => {
-                    let mut file = std::fs::File::create(&out_path).map_err(|e| {
-                        ToolError::ExecutionFailed {
-                            tool: TOOL_NAME.to_string(),
-                            message: format!("Failed to create CSV file: {}", e),
+                            })
+                            .collect();
+                        series_list.push(Series::new(col_name, vals));
+                    } else if col_is_numeric[col] {
+                        if col_has_float[col] {
+                            let vals: Vec<Option<f64>> = (data_start_row..(data_start_row + load_rows))
+                                .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                    Some(calamine::Data::Float(f)) => Some(*f),
+                                    Some(calamine::Data::Int(i)) => Some(*i as f64),
+                                    _ => None,
+                                })
+                                .collect();
+                            series_list.push(Series::new(col_name, vals));
+                        } else {
+                            let vals: Vec<Option<i64>> = (data_start_row..(data_start_row + load_rows))
+                                .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                    Some(calamine::Data::Int(i)) => Some(*i),
+                                    Some(calamine::Data::Float(f)) => Some(*f as i64),
+                                    _ => None,
+                                })
+                                .collect();
+                            series_list.push(Series::new(col_name, vals));
                         }
-                    })?;
-                    polars::prelude::CsvWriter::new(&mut file)
-                        .finish(&mut df)
-                        .map_err(|e| ToolError::ExecutionFailed {
-                            tool: TOOL_NAME.to_string(),
-                            message: format!("Failed to write CSV: {}", e),
-                        })?;
+                    } else {
+                        let vals: Vec<Option<String>> = (data_start_row..(data_start_row + load_rows))
+                            .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                Some(calamine::Data::Empty) | None => None,
+                                Some(v) => {
+                                    let s = format_cell_value(v);
+                                    if s.is_empty() { None } else { Some(s) }
+                                }
+                            })
+                            .collect();
+                        series_list.push(Series::new(col_name, vals));
+                    }
                 }
-                _ => {
-                    let file = std::fs::File::create(&out_path).map_err(|e| {
-                        ToolError::ExecutionFailed {
-                            tool: TOOL_NAME.to_string(),
-                            message: format!("Failed to create Parquet file: {}", e),
-                        }
-                    })?;
-                    polars::prelude::ParquetWriter::new(file)
-                        .finish(&mut df)
-                        .map_err(|e| ToolError::ExecutionFailed {
-                            tool: TOOL_NAME.to_string(),
-                            message: format!("Failed to write Parquet: {}", e),
-                        })?;
-                }
-            }
 
-            // Build result summary
-            let shape = df.shape();
-            let col_names: Vec<String> = df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            let dtypes: Vec<String> = col_names
-                .iter()
-                .map(|name| {
-                    let dtype = df
-                        .column(name)
-                        .map(|c| c.dtype().clone())
-                        .unwrap_or_default();
+                // Build DataFrame
+                let columns: Vec<polars::prelude::Column> =
+                    series_list.into_iter().map(|s| s.into_column()).collect();
+                let col_count = columns.len();
+                let mut df =
+                    DataFrame::new(col_count, columns).map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("Failed to create DataFrame for sheet '{}': {}", sheet_name_str, e),
+                    })?;
+
+                // Determine output path (with sheet suffix for multi-sheet)
+                let out_path = if let Some(out) = output_file {
+                    if is_multi {
+                        let ext = std::path::Path::new(out)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or(format.as_str());
+                        let stem_out = std::path::Path::new(out).file_stem().unwrap_or_default();
+                        let parent_out = std::path::Path::new(out).parent().unwrap_or(std::path::Path::new("."));
+                        parent_out.join(format!("{}_{}.{}", stem_out.to_string_lossy(), sheet_name_str, ext))
+                    } else {
+                        security.validate_output_file(out)?
+                    }
+                } else {
+                    let ext = match format {
+                        "csv" => ".csv",
+                        _ => ".parquet",
+                    };
+                    let suffix = if is_multi {
+                        format!("_{}", sheet_name_str)
+                    } else {
+                        String::new()
+                    };
+                    let out_name = format!("{}{}{}", stem.to_string_lossy(), suffix, ext);
+                    parent.join(out_name)
+                };
+
+                // Create parent directory if needed
+                if let Some(p) = out_path.parent() {
+                    std::fs::create_dir_all(p).map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("Failed to create output directory: {}", e),
+                    })?;
+                }
+
+                // Write output
+                match format {
+                    "csv" => {
+                        let mut file = std::fs::File::create(&out_path).map_err(|e| {
+                            ToolError::ExecutionFailed {
+                                tool: TOOL_NAME.to_string(),
+                                message: format!("Failed to create CSV file: {}", e),
+                            }
+                        })?;
+                        polars::prelude::CsvWriter::new(&mut file)
+                            .finish(&mut df)
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                tool: TOOL_NAME.to_string(),
+                                message: format!("Failed to write CSV: {}", e),
+                            })?;
+                    }
+                    _ => {
+                        let file = std::fs::File::create(&out_path).map_err(|e| {
+                            ToolError::ExecutionFailed {
+                                tool: TOOL_NAME.to_string(),
+                                message: format!("Failed to create Parquet file: {}", e),
+                            }
+                        })?;
+                        polars::prelude::ParquetWriter::new(file)
+                            .finish(&mut df)
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                tool: TOOL_NAME.to_string(),
+                                message: format!("Failed to write Parquet: {}", e),
+                            })?;
+                    }
+                }
+
+                // Build result summary for this sheet
+                let shape = df.shape();
+                let col_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+                let dtypes: Vec<String> = col_names.iter().map(|name| {
+                    let dtype = df.column(name).map(|c| c.dtype().clone()).unwrap_or_default();
                     format!("{}: {:?}", name, dtype)
-                })
-                .collect();
+                }).collect();
 
-            // Preview: first 10 rows
-            let preview_height = 10.min(shape.0);
-            let preview = df.head(Some(preview_height));
+                let mut sheet_result = Vec::new();
+                if is_multi {
+                    sheet_result.push(format!("[Sheet: {}]", sheet_name_str));
+                }
+                sheet_result.push(format!("  Loaded → {} ({})", out_path.display(), format));
+                sheet_result.push(format!("  Shape: {} rows x {} columns", shape.0, shape.1));
+                if header_row_idx > 0 {
+                    sheet_result.push(format!("  Header row: {} (skipped {} rows above)", header_row_idx, header_row_idx));
+                }
+                sheet_result.push("  Columns:".to_string());
+                for d in &dtypes {
+                    sheet_result.push(format!("    {}", d));
+                }
+                all_results.push(sheet_result.join("\n"));
+            }
 
+            // Final summary
             let mut result = Vec::new();
             result.push(format!(
-                "Loaded Excel → {} ({})",
-                out_path.display(),
+                "Loaded {} sheet(s) from '{}' → {}",
+                sheets_to_load.len(),
+                file_path,
                 format
             ));
-            result.push(format!("Shape: {} rows x {} columns", shape.0, shape.1));
             result.push(String::new());
-            result.push("Columns:".to_string());
-            for d in &dtypes {
-                result.push(format!("  {}", d));
-            }
+            result.push(all_results.join("\n\n"));
             result.push(String::new());
-            result.push(format!("Preview (first {} rows):", preview_height));
-            result.push(format!("{:?}", preview));
-
-            result.push(String::new());
-            result.push(format!(
-                "Use this file with data tools: data_filter, data_aggregate, data_stats, data_transform, etc."
-            ));
+            result.push("Use these files with data tools: filter_data, aggregate_data, data_stats, transform_data, etc.".to_string());
 
             Ok(ToolResult::success(result.join("\n")))
         })

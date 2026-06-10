@@ -19,7 +19,7 @@ research = ["dep:quick-xml", "dep:lopdf"]
 shell = []
 files = []
 web = ["dep:scraper", "dep:html2text", "dep:url", "dep:async-trait"]
-media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "dep:rust_xlsxwriter"]
+media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "dep:rust_xlsxwriter", "dep:chrono"]
 chart = []
 data = ["dep:polars"]
 statistics = ["data"]
@@ -50,7 +50,8 @@ html2text = { version = "0.14", optional = true }
 url = { version = "2", optional = true }
 pdf-extract = { version = "0.7", optional = true }
 lopdf = { version = "0.34", optional = true }
-calamine = { version = "0.26", optional = true }
+calamine = { version = "0.26", features = ["dates"], optional = true }
+chrono = { version = "0.4", optional = true }
 rust_xlsxwriter = { version = "0.82", optional = true }
 docx-rs = { version = "0.4", optional = true }
 encoding_rs = { version = "0.8", optional = true }

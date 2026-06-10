@@ -133,6 +133,40 @@ impl ReactAgent {
     pub(crate) async fn restore_thread_context(&self) {
         let agent = self.config.agent_name.clone();
         let session_matcher;
+
+        // Try rich checkpoint first (RuntimeStateStore: messages + plan + skills)
+        if self.state_store.is_some() {
+            match self.resume_from_state_store().await {
+                Ok(Some(_cp)) => {
+                    info!(agent = %agent, "🔄 Restored from RuntimeStateStore checkpoint");
+                    session_matcher = "resume";
+                    // Fall through to fire SessionStart hook
+                }
+                Ok(None) => {
+                    // No checkpoint in state store — fall through to legacy checkpointer
+                    return self.restore_from_legacy_checkpointer(agent).await;
+                }
+                Err(e) => {
+                    warn!(agent = %agent, error = %e, "⚠️ Failed to load RuntimeStateStore checkpoint, trying legacy checkpointer");
+                    return self.restore_from_legacy_checkpointer(agent).await;
+                }
+            }
+        } else {
+            return self.restore_from_legacy_checkpointer(agent).await;
+        }
+
+        // Fire SessionStart hook with appropriate matcher
+        let start_result = self
+            .fire_lifecycle_hook(HookEvent::SessionStart, Some(session_matcher))
+            .await;
+        if start_result.block {
+            warn!(agent = %self.config.agent_name, reason = ?start_result.block_reason, "SessionStart hook blocked session restore");
+        }
+    }
+
+    /// Restore from the legacy Checkpointer (messages only, no plan/skills).
+    async fn restore_from_legacy_checkpointer(&self, agent: String) {
+        let session_matcher;
         if let (Some(cp), Some(tid)) = (&self.memory.checkpointer, &self.config.session_id) {
             match cp.get_state(tid).await {
                 Ok(Some(state)) => {
@@ -147,7 +181,7 @@ impl ReactAgent {
                 Ok(None) => {
                     debug!(agent = %agent, session_id = %tid, "New session, starting from empty context");
                     self.reset_messages().await;
-                    return; // reset_messages already fires SessionStart("clear")
+                    return;
                 }
                 Err(e) => {
                     warn!(agent = %agent, error = %e, "⚠️ Failed to load thread state, starting from empty context");
@@ -159,7 +193,6 @@ impl ReactAgent {
             self.reset_messages().await;
             return;
         }
-        // Fire SessionStart hook with appropriate matcher
         let start_result = self
             .fire_lifecycle_hook(HookEvent::SessionStart, Some(session_matcher))
             .await;
@@ -494,11 +527,5 @@ impl ReactAgent {
         // Push multimodal user message
         self.memory.context.lock().await.push(message.clone());
         recalled
-    }
-
-    /// Save checkpoint (for chat mode)
-    #[allow(dead_code)]
-    pub(crate) async fn save_checkpoint(&self) {
-        self.persist_runtime_state().await;
     }
 }

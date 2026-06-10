@@ -308,8 +308,9 @@ impl TopologyTracker {
         if let Ok(edges) = self.edges.read() {
             for edge in edges.values() {
                 let label = if let Some(l) = &edge.label {
-                    let truncated = if l.len() > 30 {
-                        format!("{}...", &l[..30])
+                    let truncated = if l.chars().count() > 30 {
+                        let t: String = l.chars().take(30).collect();
+                        format!("{t}...")
                     } else {
                         l.clone()
                     };
@@ -360,8 +361,9 @@ impl TopologyTracker {
         if let Ok(edges) = self.edges.read() {
             for edge in edges.values() {
                 let label = if let Some(l) = &edge.label {
-                    let truncated = if l.len() > 30 {
-                        format!("{}...", &l[..30])
+                    let truncated = if l.chars().count() > 30 {
+                        let t: String = l.chars().take(30).collect();
+                        format!("{t}...")
                     } else {
                         l.clone()
                     };

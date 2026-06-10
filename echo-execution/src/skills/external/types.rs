@@ -5,6 +5,63 @@ use std::path::PathBuf;
 use glob;
 use serde::{Deserialize, Serialize};
 
+use echo_core::sandbox::IsolationLevel;
+
+// -- Sandbox policy for skills --
+
+/// Per-skill sandbox isolation policy declared in SKILL.md frontmatter.
+///
+/// When a skill declares a sandbox policy, the framework enforces the specified
+/// isolation level on script execution within that skill's context.
+///
+/// ```yaml
+/// sandbox:
+///   isolation: container
+///   network: false
+///   timeout: 300
+///   allowed_paths: [/tmp/analysis]
+///   denied_paths: [/etc, ~/.ssh]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillSandboxPolicy {
+    /// Required isolation level. `None` means no enforcement (default behavior).
+    ///
+    /// Values: `none`, `process`, `os-sandbox`, `container`, `orchestrated`
+    pub isolation: Option<IsolationLevel>,
+
+    /// Whether network access is permitted within the sandbox.
+    /// Defaults to `false` (deny) when isolation is specified.
+    pub network: Option<bool>,
+
+    /// Execution timeout in seconds. `None` means no additional timeout.
+    #[serde(alias = "timeout")]
+    pub timeout_secs: Option<u64>,
+
+    /// Paths the sandbox permits for file access.
+    #[serde(default)]
+    pub allowed_paths: Vec<PathBuf>,
+
+    /// Paths the sandbox denies for file access.
+    #[serde(default)]
+    pub denied_paths: Vec<PathBuf>,
+}
+
+impl SkillSandboxPolicy {
+    /// Whether this policy actually constrains execution.
+    pub fn is_constraining(&self) -> bool {
+        self.isolation.is_some()
+            || self.network.is_some()
+            || self.timeout_secs.is_some()
+            || !self.allowed_paths.is_empty()
+            || !self.denied_paths.is_empty()
+    }
+
+    /// Whether network access is permitted. Defaults to `false` when isolation is set.
+    pub fn network_allowed(&self) -> bool {
+        self.network.unwrap_or(false)
+    }
+}
+
 // -- Tier 1: SkillDescriptor (catalog metadata, ~50-100 tokens per skill) --
 
 /// Lightweight skill metadata loaded at discovery time (Tier 1).
@@ -68,6 +125,18 @@ pub struct SkillDescriptor {
     /// Hooks for intercepting agent lifecycle events.
     #[serde(skip)]
     pub hooks: Option<crate::skills::hooks::HooksDefinition>,
+
+    /// Per-skill sandbox isolation policy.
+    /// When set, tool execution within this skill's context is constrained
+    /// according to the policy (isolation level, network, paths, timeout).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SkillSandboxPolicy>,
+
+    /// Other skills that must be activated before this one.
+    /// The framework auto-activates dependencies during `activate_skill`.
+    /// Circular dependencies are detected at discovery time and logged as warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 impl SkillDescriptor {
@@ -83,6 +152,9 @@ impl SkillDescriptor {
         }
         if !self.triggers.is_empty() {
             annotations.push(format!("triggers: {}", self.triggers.join(", ")));
+        }
+        if !self.depends_on.is_empty() {
+            annotations.push(format!("depends: {}", self.depends_on.join(", ")));
         }
 
         if !annotations.is_empty() {
@@ -213,7 +285,14 @@ impl SkillDescriptor {
     }
 }
 
-fn tool_matcher(matcher: &str, tool_name: &str) -> bool {
+/// Match a tool name against a matcher pattern.
+///
+/// Supports:
+/// - Exact match: `"Read"` matches `"Read"`
+/// - Wildcard: `"*"` matches everything
+/// - Glob patterns: `"Bash(*)"` matches `"Bash(git:status)"`
+/// - Prefix: `"Bash"` matches `"Bash(git:status)"`
+pub fn tool_matcher(matcher: &str, tool_name: &str) -> bool {
     if matcher == "*" || matcher == tool_name {
         return true;
     }
@@ -362,6 +441,14 @@ pub(crate) struct RawFrontmatter {
     #[serde(default)]
     pub hooks: Option<crate::skills::hooks::HooksDefinition>,
 
+    /// Per-skill sandbox isolation policy
+    #[serde(default)]
+    pub sandbox: Option<SkillSandboxPolicy>,
+
+    /// Skill dependencies (auto-activated before this skill)
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+
     // Legacy echo-agent extensions (auto-detected, emit deprecation warning)
     #[serde(default)]
     pub version: Option<String>,
@@ -425,6 +512,8 @@ impl RawFrontmatter {
             paths: self.paths.unwrap_or_default(),
             triggers: self.triggers.unwrap_or_default(),
             hooks: self.hooks,
+            sandbox: self.sandbox,
+            depends_on: self.depends_on.unwrap_or_default(),
         }
     }
 
@@ -467,6 +556,8 @@ mod tests {
             paths: vec![],
             triggers: vec![],
             hooks: None,
+            sandbox: None,
+            depends_on: vec![],
         };
         assert!(d.validate_name().is_empty());
     }
@@ -493,6 +584,8 @@ mod tests {
                 paths: vec![],
                 triggers: vec![],
                 hooks: None,
+                sandbox: None,
+                depends_on: vec![],
             };
             assert!(
                 !d.validate_name().is_empty(),
@@ -517,6 +610,8 @@ mod tests {
             paths: vec![],
             triggers: vec![],
             hooks: None,
+            sandbox: None,
+            depends_on: vec![],
         };
         assert_eq!(
             d.catalog_line(),
@@ -539,6 +634,8 @@ mod tests {
                 paths: vec![],
                 triggers: vec![],
                 hooks: None,
+                sandbox: None,
+                depends_on: vec![],
             },
             instructions: "# Instructions\n\nDo the thing.".into(),
             resources: vec![
@@ -579,7 +676,10 @@ mod tests {
             allowed_tools: Some(AllowedToolsValue::String("Bash(git:*) Read".into())),
             shell: Some("bash".into()),
             paths: Some(vec!["*.py".into()]),
+            triggers: None,
             hooks: None,
+            sandbox: None,
+            depends_on: None,
             version: Some("1.0.0".into()),
             author: Some("team".into()),
             tags: Some(vec!["code".into(), "review".into()]),
@@ -609,7 +709,10 @@ mod tests {
             allowed_tools: None,
             shell: None,
             paths: None,
+            triggers: None,
             hooks: None,
+            sandbox: None,
+            depends_on: None,
             version: None,
             author: None,
             tags: None,
@@ -650,6 +753,8 @@ mod tests {
             paths: paths.into_iter().map(String::from).collect(),
             triggers: vec![],
             hooks: None,
+            sandbox: None,
+            depends_on: vec![],
         }
     }
 

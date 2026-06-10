@@ -91,8 +91,9 @@ impl SubagentHooks for LoggingSubagentHooks {
     }
 
     async fn after_dispatch(&self, ctx: &SubagentHookContext, result: &SubagentResult) {
-        let preview = if result.output.len() > 100 {
-            format!("{}...", &result.output[..100])
+        let preview = if result.output.chars().count() > 100 {
+            let truncated: String = result.output.chars().take(100).collect();
+            format!("{truncated}...")
         } else {
             result.output.clone()
         };

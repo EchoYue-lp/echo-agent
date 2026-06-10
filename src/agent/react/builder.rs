@@ -3,7 +3,6 @@
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
 use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole, InterventionCallback};
 use crate::audit::AuditLogger;
-use crate::context::ContextAssembler;
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
@@ -42,6 +41,8 @@ pub struct ReactAgentBuilder {
     tool_execution: ToolExecutionConfig,
     max_iterations: usize,
     token_limit: usize,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
     callbacks: Vec<Arc<dyn AgentCallback>>,
     store: Option<Arc<dyn Store>>,
     checkpointer: Option<Arc<dyn Checkpointer>>,
@@ -61,7 +62,6 @@ pub struct ReactAgentBuilder {
     sandbox_manager: Option<Arc<SandboxManager>>,
     run_store: Option<Arc<dyn RunStore>>,
     tool_execution_pipeline: Option<Arc<ToolExecutionPipeline>>,
-    context_assembler: Option<ContextAssembler>,
     /// Prompt template engine for variable substitution in system prompts
     prompt_template_engine: Option<Arc<PromptTemplateManager>>,
     /// Intervention callbacks that can influence agent behavior
@@ -69,6 +69,12 @@ pub struct ReactAgentBuilder {
     intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,
     /// React loop checkpoint interval (0 = only at end, N = every N iterations).
     react_checkpoint_interval: usize,
+    /// Optional intent router for pre-ReAct classification and routing.
+    intent_router: Option<crate::intent::IntentRouter>,
+    /// Optional runtime state store for checkpointing.
+    state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
+    /// Optional visibility horizon config for proactive tool trace compaction.
+    visibility_horizon: Option<echo_state::compression::horizon::VisibilityHorizonConfig>,
 }
 
 impl Default for ReactAgentBuilder {
@@ -98,6 +104,8 @@ impl ReactAgentBuilder {
             tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
             token_limit: usize::MAX,
+            max_tokens: None,
+            temperature: None,
             callbacks: Vec::new(),
             store: None,
             checkpointer: None,
@@ -117,10 +125,12 @@ impl ReactAgentBuilder {
             sandbox_manager: None,
             run_store: None,
             tool_execution_pipeline: None,
-            context_assembler: None,
             prompt_template_engine: None,
             intervention_callbacks: Vec::new(),
             react_checkpoint_interval: 0,
+            intent_router: None,
+            state_store: None,
+            visibility_horizon: None,
         }
     }
 
@@ -354,6 +364,18 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Set max output tokens for LLM generation (None = API default).
+    pub fn max_tokens(mut self, max: Option<u32>) -> Self {
+        self.max_tokens = max;
+        self
+    }
+
+    /// Set sampling temperature for LLM generation (None = API default).
+    pub fn temperature(mut self, temp: Option<f32>) -> Self {
+        self.temperature = temp;
+        self
+    }
+
     /// Set maximum token count for a single tool output
     ///
     /// Tool output exceeding this limit is automatically truncated, with `[Output truncated, N tokens total]` appended.
@@ -419,6 +441,54 @@ impl ReactAgentBuilder {
     /// ```
     pub fn intervention_callback(mut self, callback: Arc<dyn InterventionCallback>) -> Self {
         self.intervention_callbacks.push(callback);
+        self
+    }
+
+    /// Set an intent router for pre-ReAct classification and routing.
+    ///
+    /// When set, the agent will classify each user input before entering the
+    /// ReAct loop, potentially shortcutting to a direct answer or activating
+    /// a specific skill.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use echo_agent::prelude::*;
+    /// use echo_agent::intent::{IntentRouter, IntentRouterConfig};
+    ///
+    /// # fn main() -> echo_agent::error::Result<()> {
+    /// let router = IntentRouter::new(
+    ///     Box::new(echo_agent::intent::KeywordClassifier::default()),
+    ///     IntentRouterConfig::default(),
+    /// );
+    /// let agent = ReactAgentBuilder::new()
+    ///     .model("qwen3-max")
+    ///     .intent_router(router)
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn intent_router(mut self, router: crate::intent::IntentRouter) -> Self {
+        self.intent_router = Some(router);
+        self
+    }
+
+    /// Set a runtime state store for checkpointing agent execution state.
+    pub fn state_store(mut self, store: Arc<dyn crate::state::RuntimeStateStore>) -> Self {
+        self.state_store = Some(store);
+        self
+    }
+
+    /// Set a visibility horizon for proactive tool trace compaction.
+    ///
+    /// When configured, tool call/result pairs beyond the active window
+    /// are automatically compacted into symbolic summaries during each
+    /// `prepare()` call, before the main compressor runs.
+    pub fn visibility_horizon(
+        mut self,
+        config: echo_state::compression::horizon::VisibilityHorizonConfig,
+    ) -> Self {
+        self.visibility_horizon = Some(config);
         self
     }
 
@@ -589,16 +659,6 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Attach a [`ContextAssembler`] for centralized message list construction.
-    ///
-    /// When set, `run_react_loop` delegates context assembly to the assembler
-    /// instead of pushing messages individually. When `None` (default), the
-    /// built-in scattered push logic is used.
-    pub fn with_context_assembler(mut self, assembler: ContextAssembler) -> Self {
-        self.context_assembler = Some(assembler);
-        self
-    }
-
     /// Set sandbox manager, providing secure isolation for skill script execution
     pub fn sandbox_manager(mut self, manager: Arc<SandboxManager>) -> Self {
         self.sandbox_manager = Some(manager);
@@ -666,7 +726,9 @@ impl ReactAgentBuilder {
             .tool_error_feedback(self.tool_error_feedback)
             .tool_execution(self.tool_execution)
             .max_iterations(self.max_iterations)
-            .token_limit(self.token_limit);
+            .token_limit(self.token_limit)
+            .max_tokens(self.max_tokens)
+            .temperature(self.temperature);
 
         if let Some(fmt) = self.response_format {
             config = config.response_format(fmt);
@@ -768,14 +830,42 @@ impl ReactAgentBuilder {
             agent.tool_execution_pipeline = Some(pipeline);
         }
 
-        // Set context assembler
-        if let Some(assembler) = self.context_assembler {
-            agent.context_assembler = Some(assembler);
-        }
-
         // Set prompt template engine
         if let Some(engine) = self.prompt_template_engine {
             agent.set_prompt_template_engine(engine);
+        }
+
+        // Set intent router
+        if let Some(router) = self.intent_router {
+            agent.intent_router = Some(router);
+        }
+
+        // Set runtime state store
+        if let Some(store) = self.state_store {
+            agent.state_store = Some(store);
+        }
+
+        // Replace plain PlanTool with stateful PlanToolWithState so that
+        // save_runtime_checkpoint can capture the current plan text.
+        #[cfg(feature = "tasks")]
+        if self.enable_task {
+            use crate::tools::builtin::plan::PlanToolWithState;
+            agent
+                .tools
+                .tool_manager
+                .register(Box::new(PlanToolWithState::new(agent.plan_state.clone())));
+        }
+
+        // Set visibility horizon on the ContextManager
+        if let Some(horizon_config) = self.visibility_horizon {
+            let horizon_compressor =
+                echo_state::compression::horizon::VisibilityHorizonCompressor::new(horizon_config);
+            // Agent was just created — no other task holds the lock
+            if let Ok(mut ctx) = agent.memory.context.try_lock() {
+                ctx.set_visibility_horizon(horizon_compressor);
+            } else {
+                tracing::warn!("Could not acquire ContextManager lock to set visibility horizon");
+            }
         }
 
         // Set intervention callbacks
@@ -892,15 +982,15 @@ mod tests {
     #[test]
     fn test_builder_llm_config_syncs_runtime_model_name() {
         let agent = ReactAgentBuilder::new()
-            .llm_config(LlmConfig::openai("sk-demo", "gpt-4o"))
+            .llm_config(LlmConfig::openai("sk-demo", "gpt-5.5"))
             .system_prompt("Test")
             .build()
             .unwrap();
 
-        assert_eq!(agent.config().get_model_name(), "gpt-4o");
+        assert_eq!(agent.config().get_model_name(), "gpt-5.5");
         assert_eq!(
             agent.llm_config().map(|cfg| cfg.model.as_str()),
-            Some("gpt-4o")
+            Some("gpt-5.5")
         );
     }
 

@@ -1,4 +1,4 @@
-//! Token estimation trait, usage tracking, and cost estimation
+//! Token estimation trait and usage tracking.
 //!
 //! Provides a pluggable token counting capability for [`ContextManager`], replacing the
 //! fixed `chars / 4` heuristic.
@@ -12,8 +12,8 @@
 //!
 //! # Usage Tracking
 //!
-//! [`TokenUsageTracker`] provides cross-request token accumulation statistics and cost
-//! estimation, comparable to the token usage display capabilities of Claude Code / ChatGPT.
+//! [`TokenUsageTracker`] provides cross-request token accumulation statistics,
+//! comparable to the token usage display capabilities of Claude Code / ChatGPT.
 //!
 //! # Extension
 //!
@@ -200,147 +200,7 @@ impl std::fmt::Debug for CalibratedTokenizer {
 
 // ── Token Usage Tracking ─────────────────────────────────────────────────────────
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Token usage snapshot for a single LLM request
-#[derive(Debug, Clone, Default)]
-pub struct TokenUsageSnapshot {
-    /// Prompt token count
-    pub prompt_tokens: u32,
-    /// Completion token count
-    pub completion_tokens: u32,
-    /// Total token count
-    pub total_tokens: u32,
-}
-
-impl TokenUsageSnapshot {
-    /// Construct from API usage response (auto-sum when total is None)
-    pub fn new(prompt: u32, completion: u32, total: Option<u32>) -> Self {
-        Self {
-            prompt_tokens: prompt,
-            completion_tokens: completion,
-            total_tokens: total.unwrap_or(prompt + completion),
-        }
-    }
-}
-
-/// Model pricing (per million tokens, USD)
-#[derive(Debug, Clone)]
-pub struct ModelPricing {
-    /// Model name match pattern (prefix match)
-    pub model_pattern: String,
-    /// Input price $/1M tokens
-    pub input_price_per_mtok: f64,
-    /// Output price $/1M tokens
-    pub output_price_per_mtok: f64,
-}
-
-impl ModelPricing {
-    /// Compute the estimated cost for a single request.
-    pub fn estimate_cost(&self, usage: &TokenUsageSnapshot) -> f64 {
-        let input_cost = (usage.prompt_tokens as f64 / 1_000_000.0) * self.input_price_per_mtok;
-        let output_cost =
-            (usage.completion_tokens as f64 / 1_000_000.0) * self.output_price_per_mtok;
-        input_cost + output_cost
-    }
-}
-
-/// Common model pricing table
-static DEFAULT_PRICING: std::sync::LazyLock<Vec<ModelPricing>> = std::sync::LazyLock::new(|| {
-    vec![
-        // OpenAI
-        ModelPricing {
-            model_pattern: "gpt-4.5".into(),
-            input_price_per_mtok: 75.0,
-            output_price_per_mtok: 150.0,
-        },
-        ModelPricing {
-            model_pattern: "gpt-4o".into(),
-            input_price_per_mtok: 2.5,
-            output_price_per_mtok: 10.0,
-        },
-        ModelPricing {
-            model_pattern: "gpt-4-turbo".into(),
-            input_price_per_mtok: 10.0,
-            output_price_per_mtok: 30.0,
-        },
-        ModelPricing {
-            model_pattern: "gpt-4".into(),
-            input_price_per_mtok: 30.0,
-            output_price_per_mtok: 60.0,
-        },
-        ModelPricing {
-            model_pattern: "gpt-3.5".into(),
-            input_price_per_mtok: 0.5,
-            output_price_per_mtok: 1.5,
-        },
-        ModelPricing {
-            model_pattern: "o3".into(),
-            input_price_per_mtok: 10.0,
-            output_price_per_mtok: 40.0,
-        },
-        ModelPricing {
-            model_pattern: "o4-mini".into(),
-            input_price_per_mtok: 1.1,
-            output_price_per_mtok: 4.4,
-        },
-        // Anthropic
-        ModelPricing {
-            model_pattern: "claude-opus-4".into(),
-            input_price_per_mtok: 15.0,
-            output_price_per_mtok: 75.0,
-        },
-        ModelPricing {
-            model_pattern: "claude-sonnet-4".into(),
-            input_price_per_mtok: 3.0,
-            output_price_per_mtok: 15.0,
-        },
-        ModelPricing {
-            model_pattern: "claude-haiku-4".into(),
-            input_price_per_mtok: 0.8,
-            output_price_per_mtok: 4.0,
-        },
-        ModelPricing {
-            model_pattern: "claude-3.5".into(),
-            input_price_per_mtok: 3.0,
-            output_price_per_mtok: 15.0,
-        },
-        // DeepSeek
-        ModelPricing {
-            model_pattern: "deepseek-chat".into(),
-            input_price_per_mtok: 0.27,
-            output_price_per_mtok: 1.1,
-        },
-        ModelPricing {
-            model_pattern: "deepseek-reasoner".into(),
-            input_price_per_mtok: 0.55,
-            output_price_per_mtok: 2.19,
-        },
-        // Qwen (Tongyi Qianwen)
-        ModelPricing {
-            model_pattern: "qwen-max".into(),
-            input_price_per_mtok: 2.0,
-            output_price_per_mtok: 6.0,
-        },
-        ModelPricing {
-            model_pattern: "qwen-plus".into(),
-            input_price_per_mtok: 0.4,
-            output_price_per_mtok: 1.2,
-        },
-        ModelPricing {
-            model_pattern: "qwen-turbo".into(),
-            input_price_per_mtok: 0.12,
-            output_price_per_mtok: 0.36,
-        },
-        // Fallback — placed last
-        ModelPricing {
-            model_pattern: "default".into(),
-            input_price_per_mtok: 1.0,
-            output_price_per_mtok: 3.0,
-        },
-    ]
-});
 
 /// Thread-safe token usage tracker.
 ///
@@ -349,7 +209,7 @@ static DEFAULT_PRICING: std::sync::LazyLock<Vec<ModelPricing>> = std::sync::Lazy
 /// ```rust
 /// use echo_core::tokenizer::TokenUsageTracker;
 ///
-/// let tracker = TokenUsageTracker::new("gpt-4o");
+/// let tracker = TokenUsageTracker::new("gpt-5.5");
 /// tracker.record(1500, 800, Some(2300));
 ///
 /// let stats = tracker.summary();
@@ -361,7 +221,6 @@ pub struct TokenUsageTracker {
     total_completion_tokens: AtomicU64,
     total_tokens: AtomicU64,
     request_count: AtomicU64,
-    custom_pricing: Mutex<Option<Vec<ModelPricing>>>,
 }
 
 impl TokenUsageTracker {
@@ -372,7 +231,6 @@ impl TokenUsageTracker {
             total_completion_tokens: AtomicU64::new(0),
             total_tokens: AtomicU64::new(0),
             request_count: AtomicU64::new(0),
-            custom_pricing: Mutex::new(None),
         }
     }
 
@@ -394,43 +252,6 @@ impl TokenUsageTracker {
         self.record(prompt, completion, usage.total_tokens);
     }
 
-    /// Set custom pricing (overrides the built-in pricing table).
-    pub fn set_custom_pricing(&self, pricing: Vec<ModelPricing>) {
-        if let Ok(mut guard) = self.custom_pricing.lock() {
-            *guard = Some(pricing);
-        }
-    }
-
-    /// Find pricing matching the current model.
-    fn find_pricing(&self) -> Option<ModelPricing> {
-        let custom = self.custom_pricing.lock().ok()?;
-        let pricing_list = match custom.as_ref() {
-            Some(p) => p,
-            None => &DEFAULT_PRICING,
-        };
-
-        let model_lower = self.model_name.to_lowercase();
-        pricing_list
-            .iter()
-            .find(|p| {
-                p.model_pattern != "default"
-                    && model_lower.starts_with(&p.model_pattern.to_lowercase())
-            })
-            .or_else(|| pricing_list.iter().find(|p| p.model_pattern == "default"))
-            .cloned()
-    }
-
-    /// Estimate total cost (USD).
-    pub fn estimate_total_cost(&self) -> Option<f64> {
-        let pricing = self.find_pricing()?;
-        let prompt = self.total_prompt_tokens.load(Ordering::Relaxed) as f64;
-        let completion = self.total_completion_tokens.load(Ordering::Relaxed) as f64;
-        Some(
-            (prompt / 1_000_000.0) * pricing.input_price_per_mtok
-                + (completion / 1_000_000.0) * pricing.output_price_per_mtok,
-        )
-    }
-
     /// Get usage summary.
     pub fn summary(&self) -> UsageSummary {
         let total_prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
@@ -444,7 +265,6 @@ impl TokenUsageTracker {
             total_completion_tokens: total_completion,
             total_tokens: total,
             request_count: requests,
-            estimated_cost_usd: self.estimate_total_cost(),
         }
     }
 
@@ -465,7 +285,6 @@ pub struct UsageSummary {
     pub total_completion_tokens: u64,
     pub total_tokens: u64,
     pub request_count: u64,
-    pub estimated_cost_usd: Option<f64>,
 }
 
 impl std::fmt::Display for UsageSummary {
@@ -474,21 +293,14 @@ impl std::fmt::Display for UsageSummary {
             f,
             "Token Usage [{model}]:
   Requests:   {requests}
-  Input tokens:  {prompt} (est. ${input_cost:.4})
-  Output tokens: {completion} (est. ${output_cost:.4})
-  Total tokens:  {total} (est. ${total_cost:.4})",
+  Input tokens:  {prompt}
+  Output tokens: {completion}
+  Total tokens:  {total}",
             model = self.model_name,
             requests = self.request_count,
             prompt = self.total_prompt_tokens,
             completion = self.total_completion_tokens,
             total = self.total_tokens,
-            input_cost = self.estimated_cost_usd.unwrap_or(0.0)
-                * (self.total_prompt_tokens as f64
-                    / (self.total_prompt_tokens + self.total_completion_tokens).max(1) as f64),
-            output_cost = self.estimated_cost_usd.unwrap_or(0.0)
-                * (self.total_completion_tokens as f64
-                    / (self.total_prompt_tokens + self.total_completion_tokens).max(1) as f64),
-            total_cost = self.estimated_cost_usd.unwrap_or(0.0),
         )
     }
 }

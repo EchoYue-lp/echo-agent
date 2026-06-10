@@ -373,7 +373,7 @@ async fn demo_multimodal_support() -> Result<()> {
     println!("    回复: {}...\n", preview);
 
     println!("  注意: 实际图片分析需要在 echo-agent.yaml 中把 model.name 设为视觉模型");
-    println!("    例如 `qwen-vl-max` 或 `gpt-4o`，并确保它已在 models 中声明\n");
+    println!("    例如 `qwen3.7-plus` 或 `gpt-5.5`，并确保它已在 models 中声明\n");
 
     Ok(())
 }

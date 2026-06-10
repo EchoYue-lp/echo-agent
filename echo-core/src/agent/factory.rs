@@ -31,7 +31,7 @@ use crate::tools::Tool;
 /// `Box<dyn Tool>` instances which are not clonable. The factory consumes
 /// the config entirely via [`AgentFactoryConfig::into_tools`].
 pub struct AgentFactoryConfig {
-    /// LLM model identifier (e.g., "qwen3-max", "gpt-4o").
+    /// LLM model identifier (e.g., "qwen3-max", "gpt-5.5").
     model: String,
     /// Human-readable agent name used in logs and orchestration.
     name: String,

@@ -69,6 +69,9 @@ impl ImprovementLoop {
             SuccessCriteria::AnyOf(_) => "any_of",
             SuccessCriteria::LlmGraded { .. } => "llm_graded",
             SuccessCriteria::SweBench { .. } => "swe_bench",
+            SuccessCriteria::SafetyCheck { .. } => "safety_check",
+            SuccessCriteria::CitationValid { .. } => "citation_valid",
+            SuccessCriteria::ValueMatch { .. } => "value_match",
         }
     }
 

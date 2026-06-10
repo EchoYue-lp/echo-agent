@@ -86,6 +86,7 @@ async fn demo_eval_cases() {
         id: "output_check_001".into(),
         name: "输出检查".into(),
         description: "Agent 应输出包含 'hello' 的内容".into(),
+        domain: Some("general".into()),
         task: "Say hello world".into(),
         project_fixture: None,
         success_criteria: SuccessCriteria::OutputContains {
@@ -100,6 +101,7 @@ async fn demo_eval_cases() {
         id: "compound_001".into(),
         name: "复合条件".into(),
         description: "Agent 应使用 read_file 且输出包含特定内容".into(),
+        domain: Some("coding".into()),
         task: "读取文件并总结内容".into(),
         project_fixture: None,
         success_criteria: SuccessCriteria::AllOf(vec![
@@ -126,6 +128,7 @@ async fn demo_eval_cases() {
         id: "test_pass_001".into(),
         name: "测试通过".into(),
         description: "Agent 修改代码后测试应通过".into(),
+        domain: Some("coding".into()),
         task: "修复 bug 并确保测试通过".into(),
         project_fixture: None,
         success_criteria: SuccessCriteria::TestPass {

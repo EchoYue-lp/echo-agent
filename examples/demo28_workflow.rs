@@ -44,7 +44,7 @@ async fn main() -> echo_agent::error::Result<()> {
                 i + 1,
                 s.agent_name,
                 s.elapsed,
-                &s.output[..s.output.len().min(120)]
+                s.output.chars().take(120).collect::<String>()
             );
         }
     }

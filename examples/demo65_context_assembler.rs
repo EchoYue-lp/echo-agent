@@ -56,8 +56,9 @@ fn basic_usage() -> Result<(), Box<dyn std::error::Error>> {
     println!("组装了 {} 条消息:", messages.len());
     for (i, msg) in messages.iter().enumerate() {
         let content = msg.content.as_text_ref().unwrap_or("");
-        let preview = if content.len() > 60 {
-            format!("{}...", &content[..60])
+        let preview = if content.chars().count() > 60 {
+            let truncated: String = content.chars().take(60).collect();
+            format!("{truncated}...")
         } else {
             content.to_string()
         };
@@ -158,8 +159,9 @@ fn priority_ordering() -> Result<(), Box<dyn std::error::Error>> {
     println!("消息按优先级排序:");
     for (i, msg) in messages.iter().enumerate() {
         let content = msg.content.as_text_ref().unwrap_or("");
-        let preview = if content.len() > 50 {
-            format!("{}...", &content[..50])
+        let preview = if content.chars().count() > 50 {
+            let truncated: String = content.chars().take(50).collect();
+            format!("{truncated}...")
         } else {
             content.to_string()
         };

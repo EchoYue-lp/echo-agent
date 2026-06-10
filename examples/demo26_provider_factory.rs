@@ -66,8 +66,8 @@ fn demo_provider_model_shorthand() -> echo_agent::error::Result<()> {
     // 演示各种 provider:model 组合（仅构造，不实际发请求）
     let configs = [
         ("ollama:llama3", "Ollama 本地推理"),
-        ("deepseek:deepseek-chat", "DeepSeek（OpenAI 兼容）"),
-        ("dashscope:qwen3-max", "通义千问（OpenAI 兼容）"),
+        ("deepseek:deepseek-v4-flash", "DeepSeek（OpenAI 兼容）"),
+        ("dashscope:qwen3.7-max", "通义千问（OpenAI 兼容）"),
     ];
 
     for (config_str, desc) in &configs {
@@ -122,7 +122,7 @@ fn demo_from_llm_config() -> echo_agent::error::Result<()> {
     // 各种 LlmConfig 快捷构造器
     let configs = [
         (
-            LlmConfig::openai("sk-demo-key", "gpt-4o"),
+            LlmConfig::openai("sk-demo-key", "gpt-5.5"),
             "LlmConfig::openai()",
         ),
         (
@@ -131,7 +131,7 @@ fn demo_from_llm_config() -> echo_agent::error::Result<()> {
         ),
         (LlmConfig::ollama("llama3"), "LlmConfig::ollama()"),
         (
-            LlmConfig::deepseek("sk-ds-demo", "deepseek-chat"),
+            LlmConfig::deepseek("sk-ds-demo", "deepseek-v4-flash"),
             "LlmConfig::deepseek()",
         ),
         (

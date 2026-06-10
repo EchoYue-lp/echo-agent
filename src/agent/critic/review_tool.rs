@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// ```rust,ignore
 /// use echo_agent::agent::critic::{LlmCritic, ReviewTool};
 ///
-/// let critic = LlmCritic::new("qwen-max").with_pass_threshold(8.0);
+/// let critic = LlmCritic::new("qwen3.7-max").with_pass_threshold(8.0);
 /// let review_tool = ReviewTool::new(Arc::new(critic));
 ///
 /// // Agent 在 ReAct 循环中可以调用：

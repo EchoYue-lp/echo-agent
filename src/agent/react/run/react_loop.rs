@@ -19,7 +19,6 @@ impl ReactAgent {
     ///
     /// Handles both custom `llm_client` and raw HTTP paths, returning a
     /// normalized `(message, usage, finish_reason)` tuple.
-    #[allow(dead_code)]
     async fn call_llm_with_retry(
         &self,
         messages: &[Message],
@@ -720,6 +719,65 @@ impl ReactAgent {
             }
         };
 
+        // ★ NEW: Intent routing
+        if let Some(ref router) = self.intent_router {
+            let messages = self.memory.context.lock().await.messages().to_vec();
+            let intent = router.classify(message, &messages).await;
+            match intent {
+                crate::intent::Intent::DirectAnswer { confidence } => {
+                    tracing::info!(
+                        agent = %self.config.agent_name,
+                        confidence = confidence,
+                        "🎯 IntentRouter: DirectAnswer shortcut"
+                    );
+                    return self.direct_answer(message).await;
+                }
+                crate::intent::Intent::SkillRequired {
+                    skill_name,
+                    confidence,
+                } => {
+                    tracing::info!(
+                        agent = %self.config.agent_name,
+                        skill = %skill_name,
+                        confidence = confidence,
+                        "🎯 IntentRouter: activating skill"
+                    );
+                    // Activate skill via the SkillRegistry
+                    if self.tools.skill_registry.is_installed(&skill_name)
+                        && !self.tools.skill_registry.is_activated(&skill_name)
+                    {
+                        match self.tools.skill_registry.activate(&skill_name).await {
+                            Ok(content) => {
+                                self.memory
+                                    .context
+                                    .lock()
+                                    .await
+                                    .push(crate::llm::types::Message::system(content.instructions));
+                            }
+                            Err(e) => {
+                                tracing::warn!(skill = %skill_name, error = %e, "IntentRouter: failed to activate skill");
+                            }
+                        }
+                    }
+                }
+                crate::intent::Intent::WorkflowRequired {
+                    workflow_name,
+                    confidence,
+                } => {
+                    tracing::info!(
+                        agent = %self.config.agent_name,
+                        workflow = %workflow_name,
+                        confidence = confidence,
+                        "🎯 IntentRouter: WorkflowRequired (fallback to ReAct for now)"
+                    );
+                    // TODO: execute workflow before entering ReAct
+                }
+                crate::intent::Intent::Fallback => {
+                    tracing::debug!(agent = %self.config.agent_name, "IntentRouter: Fallback to ReAct");
+                }
+            }
+        }
+
         // Create channel + snapshot
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(self.config.stream_buffer_size);
         let mut snap = AgentRunSnapshot::from_agent(self);
@@ -771,5 +829,37 @@ impl ReactAgent {
         }
 
         Ok(answer)
+    }
+
+    /// Direct answer: bypass ReAct loop and call LLM directly.
+    /// Used by IntentRouter for simple intents (greetings, weather, etc.).
+    async fn direct_answer(&self, message: &str) -> Result<String> {
+        let system_prompt = self.config.system_prompt.clone();
+        let messages = vec![
+            crate::llm::types::Message::system(system_prompt),
+            crate::llm::types::Message::user(message.to_string()),
+        ];
+
+        let (response, _usage, _finish_reason) =
+            self.call_llm_with_retry(&messages, vec![]).await?;
+        let content = response.content.as_text().unwrap_or_default().to_string();
+
+        // Record trace
+        self.record_trace_event(crate::trace::RunEvent::LlmCall {
+            messages: messages.len(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            duration_ms: 0,
+        })
+        .await;
+
+        // Push to context so the agent remembers this turn
+        self.memory
+            .context
+            .lock()
+            .await
+            .push(crate::llm::types::Message::assistant(content.clone()));
+
+        Ok(content)
     }
 }

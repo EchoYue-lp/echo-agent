@@ -26,6 +26,24 @@ const DEFAULT_PROTECTED_PATTERNS: &[&str] = &[
     "authorized_keys",
     "id_rsa",
     "id_ed25519",
+    // ── Private keys & certificates ──
+    ".pem",
+    ".key",
+    ".pfx",
+    ".p12",
+    ".jks",
+    // ── Cloud credentials ──
+    ".aws/credentials",
+    ".aws/config",
+    // ── Git credentials ──
+    ".git-credentials",
+    // ── Docker auth ──
+    ".docker/config.json",
+    // ── GPG keys ──
+    ".gnupg",
+    // ── Database passwords ──
+    ".pgpass",
+    ".my.cnf",
 ];
 
 /// 受保护路径检查结果
@@ -118,6 +136,10 @@ impl ProtectedPathChecker {
             if suffix_start == 0 || p_lower.as_bytes()[suffix_start - 1] == b'/' {
                 return true;
             }
+        }
+        // 文件扩展名匹配（如 ".pem" 匹配 "cert.pem"、"server.pem"）
+        if pat_lower.starts_with('.') && p_lower.ends_with(&pat_lower) {
+            return true;
         }
         // 路径段匹配（如 ".git" 匹配 "/path/to/.git" 和 "/path/to/.git/config"）
         if p_lower.contains(&pat_lower) {
@@ -455,5 +477,76 @@ mod tests {
         // rm $HOME/.ssh/id_rsa 环境变量展开
         let result = checker.check("Bash", &json!({"command": "rm $HOME/.ssh/id_rsa"}));
         assert!(matches!(result, ProtectedPathResult::Protected { .. }));
+    }
+
+    #[test]
+    fn test_private_key_files() {
+        let checker = ProtectedPathChecker::new();
+        // .pem, .key, .pfx, .p12 files should be protected
+        for path in &[
+            "/etc/ssl/cert.pem",
+            "/home/user/private.key",
+            "/opt/certs/server.pfx",
+            "/keystore/app.p12",
+            "/secrets/keystore.jks",
+        ] {
+            let result = checker.check("Read", &json!({"path": path}));
+            assert!(
+                matches!(result, ProtectedPathResult::Protected { .. }),
+                "Path '{}' should be protected",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_cloud_credentials() {
+        let checker = ProtectedPathChecker::new();
+        // AWS credentials and config
+        for path in &[
+            "/home/user/.aws/credentials",
+            "/home/user/.aws/config",
+            "/root/.git-credentials",
+        ] {
+            let result = checker.check("Read", &json!({"path": path}));
+            assert!(
+                matches!(result, ProtectedPathResult::Protected { .. }),
+                "Path '{}' should be protected",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_docker_and_gpg() {
+        let checker = ProtectedPathChecker::new();
+        for path in &[
+            "/home/user/.docker/config.json",
+            "/home/user/.gnupg/secring.gpg",
+            "/home/user/.gnupg/private-keys-v1.d/key.key",
+        ] {
+            let result = checker.check("Read", &json!({"path": path}));
+            assert!(
+                matches!(result, ProtectedPathResult::Protected { .. }),
+                "Path '{}' should be protected",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_database_passwords() {
+        let checker = ProtectedPathChecker::new();
+        for path in &[
+            "/home/user/.pgpass",
+            "/home/user/.my.cnf",
+        ] {
+            let result = checker.check("Read", &json!({"path": path}));
+            assert!(
+                matches!(result, ProtectedPathResult::Protected { .. }),
+                "Path '{}' should be protected",
+                path
+            );
+        }
     }
 }

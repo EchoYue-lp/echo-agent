@@ -267,8 +267,10 @@ fn find_nearby_match(old_content: &str, original: &str) -> Option<String> {
         return None;
     }
 
-    let search_term = if first_line.len() > 30 {
-        &first_line[..30]
+    let truncated_line: String;
+    let search_term = if first_line.chars().count() > 30 {
+        truncated_line = first_line.chars().take(30).collect();
+        &truncated_line
     } else {
         first_line
     };

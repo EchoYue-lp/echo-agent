@@ -143,10 +143,11 @@ pub(super) async fn connect_to_gateway(
             Some(Ok(Message::Text(text))) => {
                 debug!(
                     "QQ Gateway: received message: {}",
-                    if text.len() > 200 {
-                        &text[..200]
+                    if text.chars().count() > 200 {
+                        let truncated: String = text.chars().take(200).collect();
+                        truncated
                     } else {
-                        &text
+                        text.clone()
                     }
                 );
 

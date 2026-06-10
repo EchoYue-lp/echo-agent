@@ -365,7 +365,8 @@ async fn read_pipe_output<R: AsyncReadExt + Unpin>(
     }
     let mut s = String::from_utf8_lossy(&buf).to_string();
     if s.len() > max_bytes {
-        s.truncate(max_bytes);
+        let safe_end = s.floor_char_boundary(max_bytes);
+        s.truncate(safe_end);
         s.push_str("\n... [output truncated]");
     }
     s

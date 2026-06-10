@@ -51,7 +51,7 @@ use echo_agent::llm::DefaultLlmClient;
 use reqwest::Client;
 use std::sync::Arc;
 
-let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen-turbo"));
+let llm = Arc::new(DefaultLlmClient::new(Arc::new(Client::new()), "qwen3.6-plus"));
 
 // Built-in summary prompt
 SummaryCompressor::new(llm.clone(), 6)

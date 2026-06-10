@@ -41,6 +41,9 @@ pub enum ReactError {
     /// Sandbox error
     #[error("Sandbox Error: {0}")]
     Sandbox(Box<SandboxError>),
+    /// Runtime state error
+    #[error("Runtime State Error: {0}")]
+    RuntimeState(Box<RuntimeStateError>),
     /// Channel / IM integration error
     #[cfg(feature = "channels")]
     #[error("Channel Error: {0}")]
@@ -404,3 +407,23 @@ impl From<reqwest::Error> for ReactError {
 
 /// Convenience Result alias
 pub type Result<T> = std::result::Result<T, ReactError>;
+
+/// Runtime state error
+#[derive(Debug, Error)]
+pub enum RuntimeStateError {
+    /// I/O error
+    #[error("IO error: {0}")]
+    Io(String),
+    /// Serialization error
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+    /// State not found
+    #[error("State not found: {0}")]
+    NotFound(String),
+}
+
+impl From<RuntimeStateError> for ReactError {
+    fn from(err: RuntimeStateError) -> Self {
+        ReactError::RuntimeState(Box::new(err))
+    }
+}

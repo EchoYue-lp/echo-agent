@@ -53,7 +53,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let agent = ReactAgentBuilder::simple("deepseek-chat", "You are a helpful assistant")?;
+    let agent = ReactAgentBuilder::simple("deepseek-v4-flash", "You are a helpful assistant")?;
 
     let answer = agent.execute("What is Rust's ownership model?").await?;
     println!("{answer}");
@@ -92,7 +92,7 @@ async fn multiply(a: f64, b: f64) -> Result<ToolResult> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let agent = agent! {
-        model: "deepseek-chat",
+        model: "deepseek-v4-flash",
         system_prompt: "You are a math assistant. Use tools to calculate.",
         tools: [AddTool, MultiplyTool],
     }?;
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(InMemoryStore::new());
 
     let agent = ReactAgentBuilder::new()
-        .model("deepseek-chat")
+        .model("deepseek-v4-flash")
         .system_prompt("You are an assistant that can remember information the user tells you.")
         .with_memory_tools(store)  // registers remember / recall / forget tools
         .build()?;
@@ -171,7 +171,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("deepseek-chat")
+        .model("deepseek-v4-flash")
         .system_prompt("You are a helpful assistant")
         .build()?;
 

@@ -15,6 +15,7 @@
 //!     id: "test_001".into(),
 //!     name: "Basic tool use".into(),
 //!     description: "Agent should use read_file when asked to read".into(),
+//!     domain: Some("coding".into()),
 //!     task: "Read the file src/main.rs".into(),
 //!     project_fixture: None,
 //!     success_criteria: SuccessCriteria::ToolUsed {
@@ -48,6 +49,18 @@ pub use trigger::TriggerAccuracy;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn default_min_citations() -> usize {
+    1
+}
+
+fn default_citation_format() -> String {
+    "any".to_string()
+}
+
+fn default_tolerance() -> f64 {
+    0.05
+}
+
 // ── EvalCase ─────────────────────────────────────────────────────────
 
 /// A single eval test case — what to test and how to judge success.
@@ -60,6 +73,9 @@ pub struct EvalCase {
     /// Description of what this case tests.
     #[serde(default)]
     pub description: String,
+    /// Domain this case belongs to (coding, data, research, medical, general, skill-trigger).
+    #[serde(default)]
+    pub domain: Option<String>,
     /// The task/question to give the agent.
     pub task: String,
     /// Optional project fixture directory to set up before the test.
@@ -106,6 +122,34 @@ pub enum SuccessCriteria {
         test_patch: String,
         /// Command to run after applying the test patch.
         test_command: String,
+    },
+    /// Safety check: forbidden patterns must NOT appear, required patterns MUST appear.
+    /// Used for medical/red-line evaluation where certain outputs are unacceptable.
+    SafetyCheck {
+        /// Patterns that must NOT appear in the output (e.g. "建议你服用").
+        forbidden_patterns: Vec<String>,
+        /// Patterns that MUST appear in the output (e.g. "咨询医生").
+        required_patterns: Vec<String>,
+    },
+    /// Citation validity: agent's citations must come from tool results, not fabricated.
+    /// Checks that the output contains citation markers (PMID, DOI, URLs) and optionally
+    /// that a minimum number of citations are present.
+    CitationValid {
+        /// Minimum number of citations required in the output.
+        #[serde(default = "default_min_citations")]
+        min_citations: usize,
+        /// Citation format to check for: "pmid", "doi", "url", "any".
+        #[serde(default = "default_citation_format")]
+        format: String,
+    },
+    /// Value matching: agent's numeric outputs must match expected values within tolerance.
+    /// Used for data analysis evaluation where statistical results must be accurate.
+    ValueMatch {
+        /// Expected key-value pairs (key = metric name, value = expected number).
+        expected: std::collections::HashMap<String, f64>,
+        /// Allowed tolerance for each value (e.g. 0.01 = 1%).
+        #[serde(default = "default_tolerance")]
+        tolerance: f64,
     },
 }
 

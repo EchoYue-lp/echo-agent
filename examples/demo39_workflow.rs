@@ -417,8 +417,9 @@ async fn demo_snapshot() -> echo_agent::error::Result<()> {
     println!("  Snapshot taken ({} bytes):", snapshot.len());
     println!(
         "  {}",
-        if snapshot.len() > 200 {
-            format!("{}...", &snapshot[..200])
+        if snapshot.chars().count() > 200 {
+            let truncated: String = snapshot.chars().take(200).collect();
+            format!("{truncated}...")
         } else {
             snapshot.clone()
         }

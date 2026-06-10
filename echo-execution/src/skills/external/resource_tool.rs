@@ -249,7 +249,10 @@ mod tests {
             allowed_tools: vec!["run_skill_script".into()],
             shell: None,
             paths: vec![],
+            triggers: vec![],
             hooks: None,
+            sandbox: None,
+            depends_on: vec![],
         });
         registry.mark_activated("locked-skill");
 

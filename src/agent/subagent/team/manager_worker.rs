@@ -158,8 +158,8 @@ impl ManagerWorkerOrchestrator {
             results_text.push_str(&format!("Sub-task {}: {}\n", i + 1, sub_task));
             match result {
                 Ok(output) => {
-                    results_text
-                        .push_str(&format!("Result: {}\n\n", &output[..output.len().min(500)]));
+                    let truncated: String = output.chars().take(500).collect();
+                    results_text.push_str(&format!("Result: {truncated}\n\n"));
                 }
                 Err(e) => {
                     results_text.push_str(&format!("Error: {e}\n\n"));

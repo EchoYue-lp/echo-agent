@@ -643,7 +643,10 @@ mod tests {
             allowed_tools: vec!["read_skill_resource".into()],
             shell: None,
             paths: vec![],
+            triggers: vec![],
             hooks: None,
+            sandbox: None,
+            depends_on: vec![],
         });
         registry.mark_activated("locked-skill");
 

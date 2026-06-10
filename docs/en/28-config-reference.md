@@ -294,7 +294,7 @@ With defaults, conversation history gets **65%** of the context window.
 
 Auto-detected model window sizes:
 - `claude` → 200K
-- `gpt-4o` → 128K
+- `gpt-5.5` → 128K
 - `qwen3` → 128K
 - default → 128K
 
@@ -361,7 +361,7 @@ echo-agent supports declarative configuration via `echo-agent.yaml`.
 
 ```yaml
 model:
-  name: "qwen-plus"
+  name: "qwen3.6-plus"
   temperature: 0.7
   max_tokens: 4096
 

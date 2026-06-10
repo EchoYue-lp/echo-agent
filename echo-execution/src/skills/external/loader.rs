@@ -13,7 +13,7 @@
 //!
 //! Project-level skills override user-level skills when names collide.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, warn};
@@ -117,6 +117,10 @@ impl SkillLoader {
         }
 
         info!("Skill discovery complete: {} skills found", results.len());
+
+        // Validate dependencies and topological sort
+        validate_and_sort_dependencies(&results);
+
         Ok(results)
     }
 
@@ -371,6 +375,74 @@ pub fn extract_instructions(content: &str) -> String {
     } else {
         content.to_string()
     }
+}
+
+// -- Dependency validation --
+
+/// Validate skill dependencies and log warnings for issues.
+///
+/// Performs DFS-based cycle detection across all discovered skills.
+/// Circular dependencies and missing dependencies are logged as warnings
+/// but do not prevent skill loading (they are handled at activation time).
+fn validate_and_sort_dependencies(skills: &[SkillDescriptor]) {
+    let name_set: HashSet<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+
+    // Check for missing dependencies
+    for skill in skills {
+        for dep in &skill.depends_on {
+            if !name_set.contains(dep.as_str()) {
+                warn!(
+                    "Skill '{}' depends on '{}' which is not available",
+                    skill.name, dep
+                );
+            }
+        }
+    }
+
+    // Detect circular dependencies via DFS
+    let skill_deps: HashMap<&str, &[String]> = skills
+        .iter()
+        .map(|s| (s.name.as_str(), s.depends_on.as_slice()))
+        .collect();
+
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut temp_visited: HashSet<&str> = HashSet::new();
+
+    for skill in skills {
+        detect_cycle(
+            skill.name.as_str(),
+            &skill_deps,
+            &mut visited,
+            &mut temp_visited,
+        );
+    }
+}
+
+/// DFS cycle detection. Logs a warning and skips the cycle edge if detected.
+fn detect_cycle<'a>(
+    name: &'a str,
+    deps: &HashMap<&'a str, &'a [String]>,
+    visited: &mut HashSet<&'a str>,
+    temp_visited: &mut HashSet<&'a str>,
+) {
+    if visited.contains(name) {
+        return;
+    }
+    if temp_visited.contains(name) {
+        warn!("Circular dependency detected involving skill: {}", name);
+        return;
+    }
+
+    temp_visited.insert(name);
+
+    if let Some(skill_deps) = deps.get(name) {
+        for dep in *skill_deps {
+            detect_cycle(dep.as_str(), deps, visited, temp_visited);
+        }
+    }
+
+    temp_visited.remove(name);
+    visited.insert(name);
 }
 
 // -- Scope resolution --

@@ -33,6 +33,7 @@ use std::sync::Arc;
 ///
 /// Each `run()` creates a brand-new Agent instance,
 /// retaining no state. Suitable for serverless functions, API handlers, etc.
+#[deprecated(since = "0.3.0", note = "Use `ReactAgentBuilder` directly")]
 pub struct Runner;
 
 impl Runner {
@@ -51,6 +52,7 @@ impl Runner {
 }
 
 /// Builder for Runner, supports chained configuration before execution
+#[deprecated(since = "0.3.0", note = "Use `ReactAgentBuilder` directly")]
 pub struct RunnerBuilder {
     inner: ReactAgentBuilder,
 }

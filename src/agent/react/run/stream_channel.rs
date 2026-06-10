@@ -38,6 +38,18 @@ macro_rules! yield_event {
         }
     };
 }
+
+/// Like `yield_event!` but uses blocking `send().await` — MUST be used for
+/// terminal events (FinalAnswer) that the consumer needs to reset UI state.
+/// Dropping a FinalAnswer would leave the UI stuck in "Thinking..." forever.
+macro_rules! yield_final_event {
+    ($tx:expr, $event:expr) => {
+        if $tx.send(Ok($event)).await.is_err() {
+            // Receiver dropped — consumer is gone, exit gracefully.
+            return Ok(());
+        }
+    };
+}
 macro_rules! try_send {
     ($tx:expr, $fallible:expr) => {
         match $fallible {
@@ -170,7 +182,7 @@ impl AgentSnapshot {
             let registry = self.tools.hook_registry.read().await.clone();
             let result = registry.run_lifecycle_hooks(&hook_ctx).await;
             if result.block {
-                yield_event!(
+                yield_final_event!(
                     tx,
                     AgentEvent::FinalAnswer(format!(
                         "Blocked by UserPromptSubmit hook: {}",
@@ -190,6 +202,10 @@ impl AgentSnapshot {
         }
 
         let mut stop_hook_continued = false;
+        let mut verifier_retry_count = 0usize;
+
+        // Create TaskNode for this execution turn (DAG tracking)
+        let task_node_id = self.create_execution_node(&text).await;
 
         for iteration in 0..self.config.max_iterations {
             for cb in &callbacks {
@@ -199,6 +215,8 @@ impl AgentSnapshot {
 
             self.fire_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
                 .await;
+            // Save checkpoint before compression (preserves full context)
+            self.save_runtime_checkpoint(&context, None).await;
             let prepare_result = try_send!(tx, context.lock().await.prepare(None).await);
 
             if let Some(ref stats) = prepare_result.compressed {
@@ -245,6 +263,10 @@ impl AgentSnapshot {
             for intervention in &self.tools.intervention_callbacks {
                 let result = intervention.on_think_start(&agent, &messages).await;
                 if result.cancel {
+                    if let Some(ref node_id) = task_node_id {
+                        self.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
+                            .await;
+                    }
                     let _ = tx.try_send(Err(ReactError::Other(
                         "Agent execution cancelled by intervention at think".into(),
                     )));
@@ -254,6 +276,15 @@ impl AgentSnapshot {
                     let reason = result
                         .block_reason
                         .unwrap_or_else(|| "blocked by intervention at think".into());
+                    if let Some(ref node_id) = task_node_id {
+                        self.update_node_status(
+                            node_id,
+                            crate::state::TaskNodeStatus::Blocked {
+                                reason: reason.clone(),
+                            },
+                        )
+                        .await;
+                    }
                     let _ = tx.try_send(Err(ReactError::Other(format!(
                         "Think blocked by intervention: {}",
                         reason
@@ -419,18 +450,27 @@ impl AgentSnapshot {
                                     output.clone(),
                                 ));
                                 if fname == TOOL_FINAL_ANSWER {
-                                    return self
-                                        .finish(
-                                            context,
-                                            agent,
-                                            callbacks,
-                                            label,
-                                            &output,
-                                            iteration,
-                                            stop_hook_continued,
-                                            tx,
-                                        )
-                                        .await;
+                                    // Verify answer before accepting
+                                    if self
+                                        .verify_answer(&context, &output, verifier_retry_count)
+                                        .await
+                                    {
+                                        return self
+                                            .finish(
+                                                context,
+                                                agent,
+                                                callbacks,
+                                                label,
+                                                &output,
+                                                iteration,
+                                                stop_hook_continued,
+                                                tx,
+                                                task_node_id.clone(),
+                                            )
+                                            .await;
+                                    }
+                                    // Verifier failed — continue loop for self-correction
+                                    verifier_retry_count += 1;
                                 }
                             }
                             Err(error) => {
@@ -446,6 +486,12 @@ impl AgentSnapshot {
                                     fname.clone(),
                                     format!("[Error] {error}"),
                                 ));
+                                // Checkpoint on tool error for recovery
+                                self.save_runtime_checkpoint(
+                                    &context,
+                                    Some(format!("Tool error: {fname}")),
+                                )
+                                .await;
                             }
                         }
                     }
@@ -472,18 +518,27 @@ impl AgentSnapshot {
                                 truncated.clone(),
                             ));
                             if fname == TOOL_FINAL_ANSWER {
-                                return self
-                                    .finish(
-                                        context,
-                                        agent,
-                                        callbacks,
-                                        label,
-                                        &truncated,
-                                        iteration,
-                                        stop_hook_continued,
-                                        tx,
-                                    )
-                                    .await;
+                                // Verify answer before accepting
+                                if self
+                                    .verify_answer(&context, &truncated, verifier_retry_count)
+                                    .await
+                                {
+                                    return self
+                                        .finish(
+                                            context,
+                                            agent,
+                                            callbacks,
+                                            label,
+                                            &truncated,
+                                            iteration,
+                                            stop_hook_continued,
+                                            tx,
+                                            task_node_id.clone(),
+                                        )
+                                        .await;
+                                }
+                                // Verifier failed — continue loop for self-correction
+                                verifier_retry_count += 1;
                             }
                         }
                         Err(error) => {
@@ -499,11 +554,37 @@ impl AgentSnapshot {
                                 fname.clone(),
                                 format!("[Error] {error}"),
                             ));
+                            // Checkpoint on tool error for recovery
+                            self.save_runtime_checkpoint(
+                                &context,
+                                Some(format!("Tool error: {fname}")),
+                            )
+                            .await;
                         }
                     }
                 }
                 self.auto_snapshot(&context, iteration).await;
+
+                // Periodic runtime checkpoint based on configured interval
+                let interval = self.config.react_checkpoint_interval;
+                if interval > 0 && (iteration + 1) % interval == 0 {
+                    self.save_runtime_checkpoint(&context, None).await;
+                }
             } else if !content_buffer.is_empty() {
+                // Verify text-only answer before accepting
+                if !self
+                    .verify_answer(&context, &content_buffer, verifier_retry_count)
+                    .await
+                {
+                    // Push the LLM's answer to context so it can see its own attempt
+                    context
+                        .lock()
+                        .await
+                        .push(Message::assistant(content_buffer.clone()));
+                    verifier_retry_count += 1;
+                    continue; // Continue loop for self-correction
+                }
+
                 let ts = vec![StepType::Thought(content_buffer.clone())];
                 for cb in &callbacks {
                     cb.on_think_end(&agent, &ts, pt, ct).await;
@@ -524,7 +605,13 @@ impl AgentSnapshot {
                     );
                     let _ = al.log(ev).await;
                 }
-                self.save_checkpoint(&context).await;
+                // Rich runtime checkpoint (messages + plan + skills + blocked reason)
+                self.save_runtime_checkpoint(&context, None).await;
+                // Update TaskNode to Success
+                if let Some(ref node_id) = task_node_id {
+                    self.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
+                        .await;
+                }
                 // Finalize trace before moving content_buffer into the event
                 self.finalize_run(
                     crate::trace::RunStatus::Completed,
@@ -532,7 +619,7 @@ impl AgentSnapshot {
                     None,
                 )
                 .await;
-                yield_event!(tx, AgentEvent::FinalAnswer(content_buffer));
+                yield_final_event!(tx, AgentEvent::FinalAnswer(content_buffer));
                 let hc = crate::skills::hooks::HookContext::for_stop(
                     None,
                     self.config.session_id.as_deref().unwrap_or(""),
@@ -564,6 +651,10 @@ impl AgentSnapshot {
                     Some("No response from LLM"),
                 )
                 .await;
+                if let Some(ref node_id) = task_node_id {
+                    self.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
+                        .await;
+                }
                 let _ = tx.try_send(Err(ReactError::Agent(Box::new(AgentError::NoResponse {
                     model: self.config.model_name.clone(),
                     agent: self.config.agent_name.clone(),
@@ -582,6 +673,14 @@ impl AgentSnapshot {
             Some("max_iterations"),
         )
         .await;
+        // Save runtime checkpoint with blocked reason before failing
+        self.save_runtime_checkpoint(&context, Some("Max iterations exceeded".to_string()))
+            .await;
+        // Update TaskNode to Failed
+        if let Some(ref node_id) = task_node_id {
+            self.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
+                .await;
+        }
         self.finalize_run(
             crate::trace::RunStatus::Failed,
             None,
@@ -706,22 +805,6 @@ impl AgentSnapshot {
         }
     }
 
-    async fn save_checkpoint(
-        &self,
-        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
-    ) {
-        if let (Some(cp), Some(sid)) = (&self.checkpointer, &self.config.session_id) {
-            let ctx = context.lock().await;
-            let state = crate::memory::ThreadState {
-                messages: ctx.messages().to_vec(),
-                summary: None,
-                metadata: None,
-            };
-            drop(ctx);
-            let _ = cp.put_state(sid, state).await;
-        }
-    }
-
     #[cfg(feature = "human-loop")]
     async fn tool_needs_approval(&self, tool_name: &str) -> bool {
         use crate::tools::permission::{PermissionDecision, PermissionMode};
@@ -753,6 +836,83 @@ impl AgentSnapshot {
         false
     }
 
+    /// Verify a final answer with the configured Critic.
+    ///
+    /// Returns `true` if the answer passes verification (or verification is disabled).
+    /// Returns `false` if the answer fails and feedback has been injected into
+    /// the context for self-correction.
+    async fn verify_answer(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        answer: &str,
+        retry_count: usize,
+    ) -> bool {
+        // Skip if verifier is disabled or no critic is configured
+        if !self.config.verifier_enabled {
+            return true;
+        }
+        let Some(ref critic) = self.critic else {
+            return true;
+        };
+        // Don't retry beyond max (but always allow the first check)
+        if retry_count > 0 && retry_count >= self.config.verifier_max_retries {
+            tracing::info!(
+                retries = retry_count,
+                "Verifier max retries reached, accepting answer"
+            );
+            return true;
+        }
+
+        let task_description = {
+            let ctx = context.lock().await;
+            // Use the last user message as the task description
+            ctx.messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == echo_core::llm::types::Role::User)
+                .map(|m| {
+                    m.content
+                        .as_text()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+        };
+
+        match critic.critique(&task_description, answer, "").await {
+            Ok(critique) => {
+                if critique.passed || critique.score >= self.config.verifier_min_score {
+                    tracing::debug!(score = critique.score, "Verifier passed, accepting answer");
+                    true
+                } else {
+                    let feedback = format!(
+                        "[Verifier feedback] Score: {}/10 (min: {}). {}\nSuggestions: {}",
+                        critique.score,
+                        self.config.verifier_min_score,
+                        critique.feedback,
+                        if critique.suggestions.is_empty() {
+                            "N/A".to_string()
+                        } else {
+                            critique.suggestions.join(", ")
+                        },
+                    );
+                    tracing::info!(
+                        score = critique.score,
+                        retry = retry_count + 1,
+                        max = self.config.verifier_max_retries,
+                        "Verifier rejected answer, injecting feedback for self-correction"
+                    );
+                    context.lock().await.push(Message::system(feedback));
+                    false
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Verifier critique failed, accepting answer");
+                true // Fail-open: accept answer if critique itself errors
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn finish(
         &self,
@@ -764,6 +924,7 @@ impl AgentSnapshot {
         _iteration: usize,
         stop_hook_continued: bool,
         tx: mpsc::Sender<Result<AgentEvent>>,
+        task_node_id: Option<String>,
     ) -> Result<()> {
         for cb in &callbacks {
             cb.on_final_answer(&agent, output).await;
@@ -803,8 +964,14 @@ impl AgentSnapshot {
             );
             let _ = al.log(ev).await;
         }
-        self.save_checkpoint(&context).await;
-        yield_event!(tx, AgentEvent::FinalAnswer(output.to_string()));
+        // Rich runtime checkpoint
+        self.save_runtime_checkpoint(&context, None).await;
+        // Update TaskNode to Success
+        if let Some(ref node_id) = task_node_id {
+            self.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
+                .await;
+        }
+        yield_final_event!(tx, AgentEvent::FinalAnswer(output.to_string()));
         let hc = crate::skills::hooks::HookContext::for_stop(
             None,
             self.config.session_id.as_deref().unwrap_or(""),
@@ -913,6 +1080,25 @@ impl AgentSnapshot {
             }
 
             self.validate_read_before_edit(tool_name, &effective_params)?;
+
+            // ── Skill permission check ──
+            // If a skill is activated and declares allowed_tools, verify
+            // the current tool is permitted by the whitelist.
+            if let Some(ref allowed) = self.tools.skill_allowed_tools {
+                let permitted = allowed.iter().any(|matcher| {
+                    echo_execution::skills::external::types::tool_matcher(matcher, tool_name)
+                });
+                if !permitted {
+                    let msg = format!(
+                        "Tool '{}' is not permitted by the active skill's allowed-tools whitelist: [{}]",
+                        tool_name,
+                        allowed.iter().cloned().collect::<Vec<_>>().join(", ")
+                    );
+                    tracing::warn!(tool = tool_name, "{}", msg);
+                    return Ok(msg);
+                }
+            }
+
             // ── Business audit: tool start ──
             if let Some(al) = &self.guard.audit_logger {
                 let ev = crate::audit::AuditEvent::now(

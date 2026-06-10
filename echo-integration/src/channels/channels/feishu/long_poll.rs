@@ -558,10 +558,11 @@ impl WsClient {
             "[V3] Feishu WebSocket: processing message from {} in {}: {}",
             sender_id,
             chat_id,
-            if text.len() > 100 {
-                &text[..100]
+            if text.chars().count() > 100 {
+                let truncated: String = text.chars().take(100).collect();
+                truncated
             } else {
-                &text
+                text.clone()
             }
         );
 

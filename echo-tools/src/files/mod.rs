@@ -95,6 +95,12 @@ fn resolve_path(tool: &str, path_str: &str, base_dir: &Option<PathBuf>) -> Resul
         }
     } else {
         let normalized = normalize_path(requested);
+        // normalize_path strips "." to an empty path — use CWD as fallback
+        let normalized = if normalized.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            normalized
+        };
         // Best-effort canonicalization when no base_dir constraint
         std::fs::canonicalize(&normalized).unwrap_or(normalized)
     };

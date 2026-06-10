@@ -362,6 +362,18 @@ impl TaskExecutor {
         self
     }
 
+    /// Register a `TaskHooks` implementation for task lifecycle callbacks.
+    ///
+    /// Use this to wire `BridgedTaskHooks` so YAML-configured hooks see
+    /// task events (TaskCreated, TaskCompleted, etc.).
+    pub fn with_task_hook(mut self, hook: Arc<dyn super::hooks::TaskHooks>) -> Self {
+        // Safe: we own the only reference during builder phase
+        if let Some(registry) = Arc::get_mut(&mut self.hooks) {
+            registry.register(hook);
+        }
+        self
+    }
+
     /// Set checkpoint store for periodic saving during execute_all
     pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
         self.checkpoint_store = Some(store);

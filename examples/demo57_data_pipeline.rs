@@ -108,8 +108,9 @@ async fn main() -> Result<()> {
 
     for (key, label) in &keys {
         let value: String = result.state.get(key).unwrap_or_default();
-        let preview = if value.len() > 120 {
-            format!("{}…", &value[..120])
+        let preview = if value.chars().count() > 120 {
+            let truncated: String = value.chars().take(120).collect();
+            format!("{truncated}…")
         } else {
             value.clone()
         };

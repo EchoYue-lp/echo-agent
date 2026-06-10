@@ -95,7 +95,7 @@ fn demo_text_output() {
     let result = HeadlessResult {
         output: "Found 42 Rust files:\n  src/main.rs\n  src/lib.rs\n  ...".into(),
         success: true,
-        model: "deepseek-chat".into(),
+        model: "deepseek-v4-flash".into(),
         format: "text".into(),
     };
 
@@ -198,7 +198,7 @@ fn demo_cicd_pattern() {
     println!();
     println!("  let result = run_headless(config, |builder| {{");
     println!("      builder");
-    println!("          .model(\"deepseek-chat\")");
+    println!("          .model(\"deepseek-v4-flash\")");
     println!("          .system_prompt(\"You are a security reviewer.\")");
     println!("  }}).await;");
     println!();
@@ -210,7 +210,7 @@ fn demo_cicd_pattern() {
     let simulated = HeadlessResult {
         output: "Found 2 potential XSS vulnerabilities in handlers.rs".into(),
         success: true,
-        model: "deepseek-chat".into(),
+        model: "deepseek-v4-flash".into(),
         format: "json".into(),
     };
     println!("  Simulated CI output:");

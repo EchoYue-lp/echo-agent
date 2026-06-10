@@ -19,7 +19,7 @@ use crate::sandbox::SandboxManager;
 use crate::skills::SkillInfo;
 use crate::skills::external::prompt_exec::{PromptContext, SkillSource, process_skill_content};
 use crate::skills::external::types::{
-    SkillContent, SkillDescriptor, SkillResourceEntry, SkillResourceKind,
+    SkillContent, SkillDescriptor, SkillResourceEntry, SkillResourceKind, SkillSandboxPolicy,
 };
 
 // -- SkillRegistry --
@@ -41,7 +41,7 @@ pub struct SkillRegistry {
     legacy_instructions: HashMap<String, String>,
 
     /// Skills activated in the current session (dedup set)
-    activated: HashSet<String>,
+    activated: std::sync::Mutex<HashSet<String>>,
 
     /// Code-based skills: name -> info (registered via `add_skill`)
     code_skills: HashMap<String, SkillInfo>,
@@ -51,6 +51,10 @@ pub struct SkillRegistry {
 
     /// Optional sandbox manager used when activating local skills with inline commands.
     sandbox: Option<Arc<SandboxManager>>,
+
+    /// Active sandbox policies for activated skills: name -> policy.
+    /// Populated during activation when a skill declares a sandbox policy.
+    active_sandbox_policies: std::sync::Mutex<HashMap<String, SkillSandboxPolicy>>,
 }
 
 impl SkillRegistry {
@@ -60,9 +64,10 @@ impl SkillRegistry {
             session_id,
             descriptors: HashMap::new(),
             legacy_instructions: HashMap::new(),
-            activated: HashSet::new(),
+            activated: std::sync::Mutex::new(HashSet::new()),
             code_skills: HashMap::new(),
             sandbox: None,
+            active_sandbox_policies: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -153,18 +158,58 @@ impl SkillRegistry {
     // -- Activation tracking --
 
     /// Mark a skill as activated. Returns `false` if already activated (dedup).
-    pub fn mark_activated(&mut self, name: &str) -> bool {
-        self.activated.insert(name.to_string())
+    pub fn mark_activated(&self, name: &str) -> bool {
+        let mut guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(name.to_string())
     }
 
     /// Check whether a skill has been activated in this session.
     pub fn is_activated(&self, name: &str) -> bool {
-        self.activated.contains(name)
+        let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        guard.contains(name)
+    }
+
+    /// Collect the union of `allowed_tools` from all currently activated skills.
+    ///
+    /// Returns `None` if no activated skill restricts tools (empty = unrestricted),
+    /// meaning the agent may use any tool. Returns `Some(set)` when at least one
+    /// activated skill declares an `allowed-tools` whitelist — in that case,
+    /// only tools matching an entry in the returned set are permitted.
+    pub fn active_skill_allowed_tools(&self) -> Option<HashSet<String>> {
+        let activated = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        let mut allowed = HashSet::new();
+        let mut any_restricted = false;
+
+        for name in activated.iter() {
+            if let Some(desc) = self.descriptors.get(name) {
+                if !desc.allowed_tools.is_empty() {
+                    any_restricted = true;
+                    for tool in &desc.allowed_tools {
+                        allowed.insert(tool.clone());
+                    }
+                }
+            }
+        }
+
+        if any_restricted {
+            Some(allowed)
+        } else {
+            None // No activated skill restricts tools → unrestricted
+        }
     }
 
     /// Number of activated skills.
     pub fn activated_count(&self) -> usize {
-        self.activated.len()
+        let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        guard.len()
+    }
+
+    /// Return all activated skill names as a sorted Vec.
+    pub fn activated_names(&self) -> Vec<String> {
+        let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        let mut names: Vec<String> = guard.iter().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Activate a skill: read its full content from disk, execute inline
@@ -172,26 +217,31 @@ impl SkillRegistry {
     ///
     /// Returns the structured `SkillContent` or an error.
     /// Automatically marks the skill as activated.
-    pub async fn activate(&mut self, name: &str) -> echo_core::error::Result<SkillContent> {
+    pub async fn activate(&self, name: &str) -> echo_core::error::Result<SkillContent> {
         self.activate_with_args(name, &[], SkillSource::Local).await
     }
 
     /// Activate a skill with user-provided arguments and source context.
     ///
     /// This is the full activation path that:
-    /// 1. Reads the `SKILL.md` body
-    /// 2. Falls back to legacy frontmatter `instructions` if body is empty
-    /// 3. Substitutes variables (`${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}`, etc.)
-    /// 4. Executes inline commands (`` !`cmd` `` and `` ```! cmd ``` ``),
+    /// 1. Recursively activates dependencies first (if any)
+    /// 2. Reads the `SKILL.md` body
+    /// 3. Falls back to legacy frontmatter `instructions` if body is empty
+    /// 4. Substitutes variables (`${SKILL_DIR}`, `${SESSION_ID}`, `${ARGUMENTS}`, etc.)
+    /// 5. Executes inline commands (`` !`cmd` `` and `` ```! cmd ``` ``),
     ///    using the configured sandbox path when available, or the direct fallback
     ///    with minimal env + best-effort timeout termination otherwise
-    /// 5. Enumerates bundled resources
+    /// 6. Enumerates bundled resources
+    /// 7. Stores sandbox policy if declared
     pub async fn activate_with_args(
-        &mut self,
+        &self,
         name: &str,
         args: &[String],
         source: SkillSource,
     ) -> echo_core::error::Result<SkillContent> {
+        // 1. Recursively activate dependencies first
+        let deps_activated = self.activate_dependencies(name, source).await?;
+
         let descriptor = self.descriptors.get(name).ok_or_else(|| {
             echo_core::error::ReactError::Other(format!("Skill '{}' not found in catalog", name))
         })?;
@@ -240,13 +290,118 @@ impl SkillRegistry {
 
         let resources = enumerate_resources(skill_dir).await;
 
-        self.activated.insert(name.to_string());
+        // Store sandbox policy if declared
+        if let Some(ref policy) = descriptor.sandbox {
+            if policy.is_constraining() {
+                let mut guard = self.active_sandbox_policies.lock().unwrap_or_else(|e| e.into_inner());
+                guard.insert(name.to_string(), policy.clone());
+            }
+        }
+
+        {
+            let mut guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(name.to_string());
+        }
+
+        // Augment instructions with dependency info if any were activated
+        let instructions = if !deps_activated.is_empty() {
+            format!(
+                "<skill-dependencies>\nActivated dependencies: {}\n</skill-dependencies>\n\n{}",
+                deps_activated.join(", "),
+                instructions
+            )
+        } else {
+            instructions
+        };
 
         Ok(SkillContent {
             descriptor: descriptor.clone(),
             instructions,
             resources,
         })
+    }
+
+    /// Recursively activate unmet dependencies for a skill.
+    ///
+    /// Returns the list of dependency names that were newly activated.
+    /// Missing dependencies are logged as warnings but don't block activation.
+    async fn activate_dependencies(
+        &self,
+        name: &str,
+        source: SkillSource,
+    ) -> echo_core::error::Result<Vec<String>> {
+        let deps = self
+            .descriptors
+            .get(name)
+            .map(|d| d.depends_on.clone())
+            .unwrap_or_default();
+
+        if deps.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut activated = Vec::new();
+        for dep in &deps {
+            {
+                let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.contains(dep) {
+                    continue;
+                }
+            }
+            if !self.descriptors.contains_key(dep) {
+                warn!(
+                    "Skill '{}' depends on '{}' which is not available; skipping",
+                    name, dep
+                );
+                continue;
+            }
+            // Recursive activation (deps of deps)
+            match Box::pin(self.activate_with_args(dep, &[], source)).await {
+                Ok(_) => activated.push(dep.clone()),
+                Err(e) => {
+                    warn!(
+                        "Failed to activate dependency '{}' of '{}': {}",
+                        dep, name, e
+                    );
+                }
+            }
+        }
+        Ok(activated)
+    }
+
+    /// Get the active sandbox policy for an activated skill.
+    pub fn get_active_sandbox_policy(&self, skill_name: &str) -> Option<SkillSandboxPolicy> {
+        let guard = self.active_sandbox_policies.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(skill_name).cloned()
+    }
+
+    /// Get the full dependency tree for a skill (recursive, depth-first).
+    pub fn get_dependency_tree(&self, name: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut visited = HashSet::new();
+        self.collect_dependencies(name, &mut result, &mut visited);
+        result
+    }
+
+    fn collect_dependencies(
+        &self,
+        name: &str,
+        result: &mut Vec<String>,
+        visited: &mut HashSet<String>,
+    ) {
+        if visited.contains(name) {
+            return;
+        }
+        visited.insert(name.to_string());
+
+        if let Some(descriptor) = self.descriptors.get(name) {
+            for dep in &descriptor.depends_on {
+                self.collect_dependencies(dep, result, visited);
+                if !result.contains(dep) {
+                    result.push(dep.clone());
+                }
+            }
+        }
     }
 
     // -- Code-based skills --
@@ -414,7 +569,10 @@ mod tests {
             allowed_tools: vec![],
             shell: None,
             paths: vec![],
+            triggers: vec![],
             hooks: None,
+            sandbox: None,
+            depends_on: vec![],
         }
     }
 
@@ -478,7 +636,10 @@ mod tests {
                 allowed_tools: vec![],
                 shell: None,
                 paths: vec![],
+                triggers: vec![],
                 hooks: None,
+                sandbox: None,
+                depends_on: vec![],
             },
             Some("Use the legacy body".to_string()),
         );
@@ -577,5 +738,138 @@ mod tests {
         assert!(reg.is_installed("file-skill"));
         assert!(reg.is_installed("code-skill"));
         assert!(!reg.is_installed("missing"));
+    }
+
+    fn make_descriptor_with_tools(name: &str, allowed: Vec<&str>) -> SkillDescriptor {
+        let mut desc = make_descriptor(name, &format!("{} skill", name));
+        desc.allowed_tools = allowed.into_iter().map(String::from).collect();
+        desc
+    }
+
+    #[test]
+    fn test_active_skill_allowed_tools_empty_when_no_skills_activated() {
+        let reg = SkillRegistry::new();
+        assert!(
+            reg.active_skill_allowed_tools().is_none(),
+            "No activated skills → unrestricted"
+        );
+    }
+
+    #[test]
+    fn test_active_skill_allowed_tools_empty_when_no_restrictions() {
+        let mut reg = SkillRegistry::new();
+        reg.register_descriptor(make_descriptor("open-skill", "No tool restrictions"));
+        reg.mark_activated("open-skill");
+
+        assert!(
+            reg.active_skill_allowed_tools().is_none(),
+            "Activated skill with empty allowed_tools → unrestricted"
+        );
+    }
+
+    #[test]
+    fn test_active_skill_allowed_tools_returns_whitelist() {
+        let mut reg = SkillRegistry::new();
+
+        // Medical skill: only research tools, no shell
+        reg.register_descriptor(make_descriptor_with_tools(
+            "evidence-medicine",
+            vec!["Read", "Write", "Edit", "WebSearch", "PubMedSearch"],
+        ));
+        reg.mark_activated("evidence-medicine");
+
+        let allowed = reg
+            .active_skill_allowed_tools()
+            .expect("Should return Some when skill restricts tools");
+
+        assert!(allowed.contains("Read"));
+        assert!(allowed.contains("PubMedSearch"));
+        assert!(!allowed.contains("Bash"));
+        assert!(!allowed.contains("Shell"));
+    }
+
+    #[test]
+    fn test_active_skill_allowed_tools_union_of_multiple_skills() {
+        let mut reg = SkillRegistry::new();
+
+        reg.register_descriptor(make_descriptor_with_tools(
+            "coding",
+            vec!["Bash(*)", "Read", "Write", "Edit", "Glob", "Grep"],
+        ));
+        reg.register_descriptor(make_descriptor_with_tools(
+            "git-workflow",
+            vec!["Bash(git:*)", "Read", "Glob"],
+        ));
+
+        // Activate both skills
+        reg.mark_activated("coding");
+        reg.mark_activated("git-workflow");
+
+        let allowed = reg
+            .active_skill_allowed_tools()
+            .expect("Should return union of allowed tools");
+
+        // Should contain tools from both skills
+        assert!(allowed.contains("Bash(*)"));
+        assert!(allowed.contains("Bash(git:*)"));
+        assert!(allowed.contains("Read"));
+        assert!(allowed.contains("Grep"));
+    }
+
+    #[test]
+    fn test_tool_matcher_rejects_disallowed_tool() {
+        // Simulate the permission check that happens in stream_channel.rs
+        let allowed: HashSet<String> = ["Read", "Write", "Edit", "WebSearch", "PubMedSearch"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let tool_name = "Bash";
+        let permitted = allowed.iter().any(|matcher| {
+            crate::skills::external::types::tool_matcher(matcher, tool_name)
+        });
+
+        assert!(
+            !permitted,
+            "Bash should NOT be permitted by evidence-medicine's allowed-tools"
+        );
+    }
+
+    #[test]
+    fn test_tool_matcher_accepts_allowed_tool() {
+        let allowed: HashSet<String> = ["Read", "Write", "Edit", "WebSearch", "PubMedSearch"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let tool_name = "PubMedSearch";
+        let permitted = allowed.iter().any(|matcher| {
+            crate::skills::external::types::tool_matcher(matcher, tool_name)
+        });
+
+        assert!(
+            permitted,
+            "PubMedSearch should be permitted by evidence-medicine's allowed-tools"
+        );
+    }
+
+    #[test]
+    fn test_tool_matcher_glob_pattern() {
+        let allowed: HashSet<String> = ["Bash(*)", "Read"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Bash(*) should match Bash(git:status)
+        let permitted = allowed.iter().any(|matcher| {
+            crate::skills::external::types::tool_matcher(matcher, "Bash(git:status)")
+        });
+        assert!(permitted, "Bash(*) should match Bash(git:status)");
+
+        // Bash(*) should NOT match Read
+        let is_read = allowed.iter().any(|matcher| {
+            crate::skills::external::types::tool_matcher(matcher, "Read")
+        });
+        assert!(is_read, "Read should be directly permitted");
     }
 }

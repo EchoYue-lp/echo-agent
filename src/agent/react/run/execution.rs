@@ -1,10 +1,14 @@
 //! Tool execution (invocation, guards, truncation)
+//!
+//! All tool calls flow through the [`ToolExecutionPipeline`] (13-stage middleware).
+//! When no custom pipeline is configured, a default pipeline is created automatically.
 
 use super::super::{ReactAgent, TOOL_FINAL_ANSWER};
 use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result, ToolError};
 use crate::guard::GuardDirection;
-use crate::tools::{ToolParameters, ToolStreamEvent, is_read_tool, is_write_tool};
+use crate::llm::{ChatRequest, Message};
+use crate::tools::ToolParameters;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -32,517 +36,22 @@ impl ReactAgent {
         soften_errors: bool,
     ) -> BoxFuture<'a, std::result::Result<ToolExecutionOutcome, ToolExecutionFailure>> {
         Box::pin(async move {
-            // If a custom pipeline is configured, delegate to it
-            if let Some(ref pipeline) = self.tool_execution_pipeline {
-                return self
-                    .execute_with_pipeline(tool_name, input, soften_errors, pipeline)
-                    .await;
-            }
-
-            // ── Inline implementation (fallback when no pipeline configured) ──
-            let agent = self.config.agent_name.clone();
-            let callbacks = self.config.callbacks.clone();
-            let params: ToolParameters = if let Value::Object(map) = input {
-                map.clone().into_iter().collect()
-            } else {
-                HashMap::new()
-            };
-            let mut hook_messages = HookMessageBatches::default();
-
-            for cb in &callbacks {
-                cb.on_tool_start(&agent, tool_name, input).await;
-            }
-
-            // ── Intervention callbacks (highest-priority decision point) ──
-            // Check interventions before hooks and approval, allowing
-            // external observers to block/redirect/modify/cancel the tool call.
-            for intervention in &self.tools.intervention_callbacks {
-                let result = intervention
-                    .on_tool_call(&self.config.agent_name, tool_name, input)
-                    .await;
-                if result.cancel {
-                    return Err(ToolExecutionFailure {
-                        error: ReactError::Other(format!(
-                            "Agent execution cancelled by intervention: tool {}",
-                            tool_name
-                        )),
-                        hook_messages,
-                    });
-                }
-                if result.block {
-                    let reason = result
-                        .block_reason
-                        .unwrap_or_else(|| "blocked by intervention callback".into());
-                    info!(agent = %agent, tool = %tool_name, reason = %reason, "Intervention blocked tool");
-                    return Ok(ToolExecutionOutcome {
-                        tool_result: None,
-                        output: format!("Tool {} blocked by intervention: {}", tool_name, reason),
-                        hook_messages,
-                    });
-                }
-                // If the intervention redirects to a different tool, we recursively
-                // call execute_tool_feedback_raw with the new tool name and (possibly) modified args.
-                if let Some(redirect) = result.redirect_to {
-                    let redirect_args = result.modified_args.unwrap_or_else(|| input.clone());
-                    info!(agent = %agent, from = %tool_name, to = %redirect, "Intervention redirected tool");
-                    return self
-                        .execute_tool_feedback_raw(&redirect, &redirect_args, soften_errors)
-                        .await;
-                }
-                // If the intervention modifies args without redirect, update the input
-                // and continue with the rest of the pipeline using modified args.
-                if let Some(modified) = result.modified_args {
-                    // We'll apply the modified args below by overwriting effective_params
-                    // after the hook phase. For now, update the input that hooks see.
-                    // Since we haven't entered the hook phase yet, just update input directly.
-                    return self
-                        .execute_tool_feedback_raw(tool_name, &modified, soften_errors)
-                        .await;
-                }
-                // If the intervention injects context, add it to the hook_messages
-                // so it gets fed back into the agent's reasoning after this tool call.
-                if let Some(context) = result.injected_context {
-                    hook_messages.pre.push(context);
-                }
-            }
-
-            info!(agent = %agent, tool = %tool_name, "🔧 Starting tool execution");
-            debug!(agent = %agent, tool = %tool_name, params = %input, "Tool parameter details");
-
-            // ── PreToolUse hooks (execute before approval, allow hook to intercept or modify params) ──
-            let mut effective_params = params;
-            let mut hook_modified_input = input.clone();
-            let has_hooks = {
-                let hook_reg = self.tools.hook_registry.read().await;
-                !hook_reg.is_empty()
-            };
-            if has_hooks {
-                // Clone registry to release lock BEFORE awaiting hooks.
-                // Prevents deadlock when hook triggers nested tool calls
-                // that re-enter execute_tool and try to acquire the same RwLock.
-                let hook_reg = {
-                    let guard = self.tools.hook_registry.read().await;
-                    guard.clone()
-                };
-                let hook_result = hook_reg
-                    .run_pre_tool_use(tool_name, input, self.config.get_session_id().unwrap_or(""))
-                    .await;
-                hook_messages.pre = hook_result.messages.clone();
-
-                if hook_result.block {
-                    let reason = hook_result
-                        .block_reason
-                        .unwrap_or_else(|| "blocked by skill hook".into());
-                    info!(agent = %agent, tool = %tool_name, reason = %reason, "Hook blocked tool");
-                    return Ok(ToolExecutionOutcome {
-                        tool_result: None,
-                        output: format!("Tool {} blocked by hook: {}", tool_name, reason),
-                        hook_messages,
-                    });
-                }
-
-                if let Some(updated) = hook_result.updated_input {
-                    hook_modified_input = updated.clone();
-                    if let Value::Object(map) = &updated {
-                        effective_params =
-                            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    }
-                }
-            }
-
-            // ── Unified approval check ──
-            // PermissionService
-            // Returns the user-modified parameters during approval (if any)
-            let approval_modified_args = self
-                .check_tool_approval(tool_name, &hook_modified_input)
-                .await
-                .map_err(|error| ToolExecutionFailure {
-                    error,
-                    hook_messages: hook_messages.clone(),
-                })?;
-
-            // If the user modified parameters during approval, override actual execution parameters
-            if let Some(modified) = approval_modified_args
-                && let Value::Object(map) = &modified
-            {
-                effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            }
-
-            // ── Safety notice for destructive tools ──
-            if is_write_tool(tool_name) || tool_name == "shell" || tool_name == "delete_file" {
-                let risk = match tool_name {
-                    "shell" => "Command execution",
-                    "delete_file" => "File deletion",
-                    _ => "File modification",
-                };
-                let path = extract_path_param(tool_name, &effective_params)
-                    .unwrap_or_else(|| "unknown".into());
-                info!(
-                    agent = %agent,
-                    tool = %tool_name,
-                    path = %path,
-                    risk = %risk,
-                    "Safety: {tool_name} will {risk} at {path}"
-                );
-                self.record_trace_event(crate::trace::RunEvent::PermissionDecision {
-                    tool: tool_name.to_string(),
-                    decision: "allow".into(),
-                    reason: format!("{risk} at {path}"),
-                })
-                .await;
-            }
-
-            // ── Read-before-edit enforcement ──
-            if self.config.force_read_before_edit
-                && is_write_tool(tool_name)
-                && let Some(path) = extract_path_param(tool_name, &effective_params)
-            {
-                let canonical = std::fs::canonicalize(&path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.clone());
-                if !self.was_file_read(&canonical) {
-                    let msg = format!(
-                        "Read-before-edit is enabled. File '{}' has not been read in this conversation turn. \
-                         Use read_file to read it first, then retry this operation.",
-                        path
-                    );
-                    warn!(agent = %agent, tool = %tool_name, path = %path, "Read-before-edit rejected");
-                    return Ok(ToolExecutionOutcome {
-                        tool_result: None,
-                        output: msg,
-                        hook_messages,
-                    });
-                }
-            }
-
-            let execution_start = std::time::Instant::now();
-
-            let call_id = format!("call_{}", uuid::Uuid::new_v4());
-            // Record ToolCall trace event (redaction handled by new_tool_call)
-            self.record_trace_event(crate::trace::RunEvent::new_tool_call(
-                call_id.clone(),
-                tool_name.to_string(),
-                Some(input.clone()),
-                None,
-                0,
-            ))
-            .await;
-
-            // ── Execute tool (streaming or standard path) ──
-            let result = if self.tools.tool_manager.supports_streaming(tool_name) {
-                // Streaming path: call execute_tool_stream_collect and process
-                // intermediate events, then extract the final ToolResult from
-                // the Complete event.
-                info!(agent = %agent, tool = %tool_name, "Streaming tool execution");
-                let stream_events = match self
-                    .tools
-                    .tool_manager
-                    .execute_tool_stream_collect(tool_name, effective_params.clone())
-                    .await
-                {
-                    Ok(events) => events,
-                    Err(error) => {
-                        let error_msg = error.to_string();
-                        warn!(agent = %agent, tool = %tool_name, error = %error_msg, "Streaming tool execution failed");
-
-                        self.record_trace_event(crate::trace::RunEvent::ToolError {
-                            call_id: call_id.clone(),
-                            name: tool_name.to_string(),
-                            message: error_msg.clone(),
-                        })
-                        .await;
-
-                        for cb in &callbacks {
-                            cb.on_tool_error(&agent, tool_name, &error).await;
-                        }
-                        self.log_tool_call_audit(tool_name, input, &error_msg, false, 0)
-                            .await;
-
-                        self.run_post_failure_hook(
-                            &agent,
-                            tool_name,
-                            input,
-                            &error_msg,
-                            &mut hook_messages,
-                        )
-                        .await?;
-
-                        if soften_errors && tool_name != TOOL_FINAL_ANSWER {
-                            warn!(
-                                agent = %agent,
-                                tool = %tool_name,
-                                error = %error,
-                                "Streaming tool error converted to observation"
-                            );
-                            return Ok(ToolExecutionOutcome {
-                                tool_result: None,
-                                output: format!(
-                                    "[Tool execution failed] {error}\nTip: adjust parameters based on the error and retry, or try other tools."
-                                ),
-                                hook_messages,
-                            });
-                        } else {
-                            return Err(ToolExecutionFailure {
-                                error,
-                                hook_messages,
-                            });
-                        }
-                    }
-                };
-
-                // Process intermediate stream events (Progress / PartialOutput)
-                // and extract the final ToolResult from the Complete event.
-                let mut final_result: Option<crate::tools::ToolResult> = None;
-                for event in &stream_events {
-                    match event {
-                        ToolStreamEvent::Progress { message, percent } => {
-                            debug!(
-                                agent = %agent,
-                                tool = %tool_name,
-                                message = %message,
-                                percent = ?percent,
-                                "Streaming tool progress"
-                            );
-                        }
-                        ToolStreamEvent::PartialOutput { chunk } => {
-                            debug!(
-                                agent = %agent,
-                                tool = %tool_name,
-                                chunk_len = chunk.len(),
-                                "Streaming tool partial output"
-                            );
-                        }
-                        ToolStreamEvent::Complete(r) => {
-                            final_result = Some(r.clone());
-                        }
-                    }
-                }
-
-                // If no Complete event was received, treat it as an execution failure
-                match final_result {
-                    Some(r) => r,
-                    None => {
-                        let msg = format!(
-                            "Streaming tool '{}' completed without a final result event",
-                            tool_name
-                        );
-                        let error = ReactError::from(ToolError::ExecutionFailed {
-                            tool: tool_name.to_string(),
-                            message: msg.clone(),
-                        });
-                        return Err(ToolExecutionFailure {
-                            error,
-                            hook_messages,
-                        });
-                    }
-                }
-            } else {
-                // Standard (non-streaming) path
-                match self
-                    .tools
-                    .tool_manager
-                    .execute_tool(tool_name, effective_params.clone())
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        // Apply softening logic for tool execution errors (connection failures etc.)
-                        // so transient MCP/network errors don't terminate the agent stream.
-                        let error_msg = error.to_string();
-                        warn!(agent = %agent, tool = %tool_name, error = %error_msg, "Tool execution failed");
-
-                        // Record ToolError trace event
-                        self.record_trace_event(crate::trace::RunEvent::ToolError {
-                            call_id: call_id.clone(),
-                            name: tool_name.to_string(),
-                            message: error_msg.clone(),
-                        })
-                        .await;
-
-                        for cb in &callbacks {
-                            cb.on_tool_error(&agent, tool_name, &error).await;
-                        }
-                        self.log_tool_call_audit(tool_name, input, &error_msg, false, 0)
-                            .await;
-
-                        // ── PostToolUseFailure hook ──
-                        self.run_post_failure_hook(
-                            &agent,
-                            tool_name,
-                            input,
-                            &error_msg,
-                            &mut hook_messages,
-                        )
-                        .await?;
-
-                        if soften_errors && tool_name != TOOL_FINAL_ANSWER {
-                            warn!(
-                                agent = %agent,
-                                tool = %tool_name,
-                                error = %error,
-                                "Tool error converted to observation and sent back to LLM"
-                            );
-                            return Ok(ToolExecutionOutcome {
-                                tool_result: None,
-                                output: format!(
-                                    "[Tool execution failed] {error}\nTip: adjust parameters based on the error and retry, or try other tools."
-                                ),
-                                hook_messages,
-                            });
-                        } else {
-                            return Err(ToolExecutionFailure {
-                                error,
-                                hook_messages,
-                            });
-                        }
-                    }
-                }
-            };
-            let duration_ms = execution_start.elapsed().as_millis() as u64;
-
-            // Record ToolResult trace event
-            self.record_trace_event(crate::trace::RunEvent::ToolResult {
-                call_id: call_id.clone(),
-                name: tool_name.to_string(),
-                success: true,
-                output_preview: Some(result.output.chars().take(200).collect()),
-                output_truncated: false,
-                duration_ms,
-            })
-            .await;
-
-            // ── Record file reads for read-before-edit enforcement ──
-            if result.success
-                && is_read_tool(tool_name)
-                && let Some(path) = extract_path_param(tool_name, &effective_params)
-            {
-                let canonical = std::fs::canonicalize(&path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.clone());
-                self.record_file_read(&canonical);
-            }
-
-            // Record FileEdit trace event for write tools
-            if result.success
-                && is_write_tool(tool_name)
-                && let Some(path) = extract_path_param(tool_name, &effective_params)
-            {
-                self.record_trace_event(crate::trace::RunEvent::FileEdit {
-                    tool: tool_name.to_string(),
-                    path,
-                })
-                .await;
-            }
-
-            // ── PostToolUse hooks ──
-            let is_hook_post = {
-                let hook_reg = self.tools.hook_registry.read().await;
-                !hook_reg.is_empty()
-            };
-            if is_hook_post {
-                // Clone registry to release lock BEFORE awaiting hooks (prevent deadlock).
-                let hook_reg = {
-                    let guard = self.tools.hook_registry.read().await;
-                    guard.clone()
-                };
-                let post_result = hook_reg
-                    .run_post_tool_use(
-                        tool_name,
-                        input,
-                        &result.output,
-                        self.config.get_session_id().unwrap_or(""),
-                    )
-                    .await;
-                hook_messages.post = post_result.messages;
-                if post_result.block {
-                    info!(agent = %agent, tool = %tool_name, reason = ?post_result.block_reason, "PostToolUse hook blocked tool output");
-                    let blocked_output = post_result
-                        .block_reason
-                        .unwrap_or_else(|| format!("Tool {} output blocked by hook", tool_name));
-                    return Ok(ToolExecutionOutcome {
-                        tool_result: None,
-                        output: blocked_output,
-                        hook_messages,
-                    });
-                }
-            }
-
-            if result.success {
-                info!(agent = %agent, tool = %tool_name, "📤 Tool executed successfully");
-                debug!(agent = %agent, tool = %tool_name, output = %result.output, "Tool output details");
-
-                // Run output guard checks to prevent malicious content injection
-                if let Some(guard_output) = self.check_tool_output_guard(&result.output).await {
-                    debug!(agent = %agent, tool = %tool_name, "🛡️ Tool output filtered by guard");
-                    for cb in callbacks.iter() {
-                        cb.on_tool_end(&agent, tool_name, &guard_output).await;
-                    }
-                    self.log_tool_call_audit(tool_name, input, &guard_output, true, duration_ms)
-                        .await;
-                    return Ok(ToolExecutionOutcome {
-                        tool_result: None,
-                        output: guard_output,
-                        hook_messages,
-                    });
-                }
-
-                for cb in callbacks.iter() {
-                    cb.on_tool_end(&agent, tool_name, &result.output).await;
-                }
-                self.log_tool_call_audit(tool_name, input, &result.output, true, duration_ms)
-                    .await;
-                Ok(ToolExecutionOutcome {
-                    tool_result: None,
-                    output: result.output,
-                    hook_messages,
-                })
-            } else {
-                let error_msg = result
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| result.output.clone());
-                warn!(agent = %agent, tool = %tool_name, error = %error_msg, "💥 Tool execution failed");
-                let err = ReactError::from(ToolError::ExecutionFailed {
-                    tool: tool_name.to_string(),
-                    message: error_msg.clone(),
-                });
-                for cb in &callbacks {
-                    cb.on_tool_error(&agent, tool_name, &err).await;
-                }
-                self.log_tool_call_audit(tool_name, input, &error_msg, false, duration_ms)
-                    .await;
-
-                // ── PostToolUseFailure hook ──
-                self.run_post_failure_hook(
-                    &agent,
-                    tool_name,
-                    input,
-                    &error_msg,
-                    &mut hook_messages,
-                )
-                .await?;
-
-                if soften_errors && tool_name != TOOL_FINAL_ANSWER {
-                    warn!(
-                        agent = %agent,
-                        tool = %tool_name,
-                        error = %err,
-                        "⚠️ Tool error converted to observation and sent back to LLM"
-                    );
-                    Ok(ToolExecutionOutcome {
-                        tool_result: None,
-                        output: format!(
-                            "[Tool execution failed] {err}\nTip: adjust parameters based on the error and retry, or try other tools."
-                        ),
-                        hook_messages,
-                    })
+            // Always use the pipeline path. If no custom pipeline is configured,
+            // create a default one (13-stage middleware with sensible defaults).
+            // This unifies the execution path and eliminates the inline fallback.
+            let default_pipeline;
+            let pipeline: &Arc<crate::agent::react::run::pipeline::ToolExecutionPipeline> =
+                if let Some(ref p) = self.tool_execution_pipeline {
+                    p
                 } else {
-                    Err(ToolExecutionFailure {
-                        error: err,
-                        hook_messages,
-                    })
-                }
-            }
+                    default_pipeline = Arc::new(
+                        crate::agent::react::run::pipeline::ToolExecutionPipeline::default_pipeline(
+                        ),
+                    );
+                    &default_pipeline
+                };
+            self.execute_with_pipeline(tool_name, input, soften_errors, pipeline)
+                .await
         })
     }
 
@@ -625,9 +134,14 @@ impl ReactAgent {
         }
         drop(ctx);
 
-        // Event-level summary: for long tool outputs (>2000 chars), generate a structured summary
+        // Event-level summary: for long tool outputs (>2000 chars), generate LLM summary
         const SUMMARY_THRESHOLD: usize = 2000;
         if output.len() > SUMMARY_THRESHOLD {
+            // Try LLM summary first
+            if let Some(summary) = self.summarize_tool_output(&output).await {
+                return summary;
+            }
+            // Fallback: structured summary
             let line_count = output.lines().count();
             let char_count = output.len();
             let first_line = output.lines().next().unwrap_or("");
@@ -741,6 +255,40 @@ impl ReactAgent {
 
         drop(ctx);
         format!("{head}{notice}{tail}")
+    }
+
+    /// Use LLM to generate a concise summary of tool output.
+    ///
+    /// Returns `None` if LLM is unavailable or summarization fails.
+    async fn summarize_tool_output(&self, output: &str) -> Option<String> {
+        let llm_client = self.llm_client.as_ref()?;
+        let prompt = format!(
+            "Summarize the following tool output in 1-2 sentences. Focus on key results, errors, or actionable findings:\n\n{}",
+            &output[..output.len().min(4000)]
+        );
+        let request = ChatRequest {
+            messages: vec![Message::user(prompt)],
+            temperature: Some(0.0),
+            max_tokens: Some(100),
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            cancel_token: None,
+        };
+        match llm_client.chat(request).await {
+            Ok(response) => {
+                let summary = response.content().unwrap_or_default();
+                if summary.is_empty() {
+                    None
+                } else {
+                    Some(format!("[Tool output summary: {}]", summary))
+                }
+            }
+            Err(e) => {
+                debug!("Tool output summarization failed: {}", e);
+                None
+            }
+        }
     }
 
     /// Perform guard check on tool output to prevent malicious content injection
@@ -924,16 +472,4 @@ fn newline_boundary_rev(chars: &[char], target: usize) -> usize {
         }
     }
     t
-}
-
-// ── Read-before-edit helpers ─────────────────────────────────────────────────
-
-/// Extract the target file path from the tool parameters.
-/// Looks for `path` or `file_path` keys common across file tools.
-fn extract_path_param(_tool_name: &str, params: &ToolParameters) -> Option<String> {
-    params
-        .get("path")
-        .or_else(|| params.get("file_path"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
 }

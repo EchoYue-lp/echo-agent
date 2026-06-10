@@ -118,8 +118,9 @@ impl TaskEventListener for LoggingListener {
                 );
             }
             TaskEvent::Completed { task_id, result } => {
-                let result_preview = if result.len() > 100 {
-                    format!("{}...", &result[..100])
+                let result_preview = if result.chars().count() > 100 {
+                    let truncated: String = result.chars().take(100).collect();
+                    format!("{truncated}...")
                 } else {
                     result.clone()
                 };

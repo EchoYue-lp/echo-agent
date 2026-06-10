@@ -323,6 +323,16 @@ impl PermissionService {
         self.config.write().await.mode = mode;
     }
 
+    /// 同步设置权限模式（用于非 async 上下文，如 slash 命令回调）。
+    ///
+    /// 使用 `try_write()` 避免阻塞 — 在 agent 锁内调用时 PermissionService
+    /// 不会有并发写入竞争，因此 `try_write` 几乎不会失败。
+    pub fn set_mode_sync(&self, mode: PermissionMode) {
+        if let Ok(mut cfg) = self.config.try_write() {
+            cfg.mode = mode;
+        }
+    }
+
     /// 获取当前权限模式
     pub async fn mode(&self) -> PermissionMode {
         self.config.read().await.mode

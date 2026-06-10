@@ -77,7 +77,11 @@ async fn main() -> echo_agent::error::Result<()> {
     let results = store.search(ns, "主题偏好", 5).await?;
     println!("[3] store.search('主题偏好') 返回 {} 条结果", results.len());
     for item in &results {
-        println!("    ID: {} → {}", &item.key[..8], item.value);
+        println!(
+            "    ID: {} → {}",
+            item.key.chars().take(8).collect::<String>(),
+            item.value
+        );
     }
 
     // ── 4. set_memory_store 也同样注册所有记忆工具 ─────────────────────────

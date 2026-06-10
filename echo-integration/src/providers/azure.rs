@@ -39,7 +39,7 @@ impl AzureOpenAiClient {
     ///
     /// Expected config:
     /// - `base_url`: `https://{resource}.openai.azure.com`
-    /// - `model`: deployment name (e.g., `gpt-4o`)
+    /// - `model`: deployment name (e.g., `gpt-5.5`)
     /// - `api_key`: Azure API key
     pub fn new(config: LlmConfig) -> Result<Self> {
         let model_config = config.to_model_config();

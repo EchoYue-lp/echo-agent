@@ -315,16 +315,25 @@ impl ConversationStore for SqliteConversationStore {
         Box::pin(async move {
             let conn = self.conn.lock().await;
 
+            // Wrap DELETE + INSERT + UPDATE in a transaction to prevent data loss
+            // if a crash occurs between operations.
+            conn.execute("BEGIN IMMEDIATE TRANSACTION", [])
+                .map_err(|e| memory_io_error("failed to begin transaction", e))?;
+
             // Delete existing messages (upsert pattern: replace all)
-            conn.execute(
+            let delete_result = conn.execute(
                 "DELETE FROM message WHERE conversation_id = ?1",
                 params![conversation_id],
-            )
-            .map_err(|e| memory_io_error("failed to clear old messages", e))?;
+            );
+
+            if let Err(e) = delete_result {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(memory_io_error("failed to clear old messages", e).into());
+            }
 
             // Insert new messages
             for msg in messages {
-                conn.execute(
+                let insert_result = conn.execute(
                     "INSERT INTO message (conversation_id, role, content, attachments_json, tool_calls_json, tool_result_json, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
@@ -336,16 +345,27 @@ impl ConversationStore for SqliteConversationStore {
                         msg.tool_result_json,
                         msg.created_at,
                     ],
-                )
-                .map_err(|e| memory_io_error("failed to insert message", e))?;
+                );
+
+                if let Err(e) = insert_result {
+                    let _ = conn.execute("ROLLBACK", []);
+                    return Err(memory_io_error("failed to insert message", e).into());
+                }
             }
 
             // Update conversation timestamp
-            conn.execute(
+            let update_result = conn.execute(
                 "UPDATE conversation SET updated_at = datetime('now') WHERE conversation_id = ?1",
                 params![conversation_id],
-            )
-            .map_err(|e| memory_io_error("failed to update conversation timestamp", e))?;
+            );
+
+            if let Err(e) = update_result {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(memory_io_error("failed to update conversation timestamp", e).into());
+            }
+
+            conn.execute("COMMIT", [])
+                .map_err(|e| memory_io_error("failed to commit transaction", e))?;
 
             Ok(())
         })

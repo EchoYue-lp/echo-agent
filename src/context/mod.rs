@@ -94,9 +94,17 @@ pub struct ContextSources {
 /// Centralized context assembler.
 ///
 /// Collects all context sources and produces a canonical ordered message list
-/// for the LLM call. When attached to a [`ReactAgent`](crate::agent::ReactAgent)
-/// via the builder, `run_react_loop` delegates assembly here instead of pushing
-/// messages individually.
+/// for the LLM call.
+///
+/// # Usage
+///
+/// This is a **framework-level building block** for custom agent implementations.
+/// The default `ReactAgent` streaming path (`run_core_loop` / `stream_channel`)
+/// does NOT use `ContextAssembler` — it manages context directly via
+/// `ContextManager`. Use `ContextAssembler` when building custom execution
+/// loops that need structured context assembly from multiple sources.
+///
+/// See `examples/demo65_context_assembler.rs` for a complete example.
 pub struct ContextAssembler {
     /// Optional token budget. When set, assembly respects per-source limits.
     pub budget: Option<ContextBudget>,

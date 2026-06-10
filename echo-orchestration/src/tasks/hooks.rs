@@ -134,8 +134,9 @@ impl TaskHooks for LoggingHooks {
     }
 
     async fn after_execute(&self, ctx: &TaskHookContext, result: &str) {
-        let preview = if result.len() > 100 {
-            format!("{}...", &result[..100])
+        let preview = if result.chars().count() > 100 {
+            let truncated: String = result.chars().take(100).collect();
+            format!("{truncated}...")
         } else {
             result.to_string()
         };

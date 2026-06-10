@@ -53,7 +53,7 @@ use echo_agent::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let agent = ReactAgentBuilder::simple("deepseek-chat", "你是一个有帮助的助手")?;
+    let agent = ReactAgentBuilder::simple("deepseek-v4-flash", "你是一个有帮助的助手")?;
 
     let answer = agent.execute("Rust 的所有权机制是什么？").await?;
     println!("{answer}");
@@ -92,7 +92,7 @@ async fn multiply(a: f64, b: f64) -> Result<ToolResult> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let agent = agent! {
-        model: "deepseek-chat",
+        model: "deepseek-v4-flash",
         system_prompt: "你是一个数学助手，使用工具进行计算。",
         tools: [AddTool, MultiplyTool],
     }?;
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(InMemoryStore::new());
 
     let agent = ReactAgentBuilder::new()
-        .model("deepseek-chat")
+        .model("deepseek-v4-flash")
         .system_prompt("你是一个助手，可以记住用户告诉你的信息。")
         .with_memory_tools(store)  // 自动注册 remember / recall / forget 工具
         .build()?;
@@ -171,7 +171,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("deepseek-chat")
+        .model("deepseek-v4-flash")
         .system_prompt("你是一个有帮助的助手")
         .build()?;
 

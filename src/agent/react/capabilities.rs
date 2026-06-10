@@ -415,7 +415,7 @@ impl ReactAgent {
         let mut names = Vec::new();
 
         // Build a shared registry for the progressive disclosure tools.
-        // This is separate from `self.tools.skill_registry` (which tracks code-based skills).
+        // This is separate from `self.tools.skill_registry.lock().unwrap()` (which tracks code-based skills).
         // The shared registry holds descriptors + activation state, accessed by
         // both ActivateSkillTool and ReadSkillResourceTool during async execution.
         let shared = if let Some(existing) = &self.tools.progressive_skill_registry {
@@ -579,8 +579,13 @@ impl ReactAgent {
     }
 
     /// List all installed code-based skills.
-    pub fn list_skills(&self) -> Vec<&SkillInfo> {
-        self.tools.skill_registry.list()
+    pub fn list_skills(&self) -> Vec<SkillInfo> {
+        self.tools
+            .skill_registry
+            .list()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Check if a skill (code or file-based) is installed.
@@ -598,9 +603,49 @@ impl ReactAgent {
         &self.tools.skill_registry
     }
 
+    /// Get a mutable reference to the skill registry (for registering descriptors).
+    pub fn skill_registry_mut(&mut self) -> &mut crate::skills::SkillRegistry {
+        &mut self.tools.skill_registry
+    }
+
     /// Get the shared hook registry handle.
     pub fn hook_registry(&self) -> &Arc<tokio::sync::RwLock<crate::skills::hooks::HookRegistry>> {
         &self.tools.hook_registry
+    }
+
+    /// Get the shared tool manager handle.
+    pub fn tool_manager(&self) -> &Arc<echo_execution::tools::ToolManager> {
+        &self.tools.tool_manager
+    }
+
+    /// Get the sandbox manager, if configured.
+    pub fn sandbox_manager(&self) -> Option<&Arc<crate::sandbox::SandboxManager>> {
+        self.tools.sandbox_manager.as_ref()
+    }
+
+    /// Get the tool execution pipeline, if configured.
+    pub fn tool_execution_pipeline(
+        &self,
+    ) -> &Option<Arc<crate::agent::react::run::pipeline::ToolExecutionPipeline>> {
+        &self.tool_execution_pipeline
+    }
+
+    /// Get the runtime state store, if configured.
+    pub fn state_store(&self) -> &Option<Arc<dyn crate::state::RuntimeStateStore>> {
+        &self.state_store
+    }
+
+    /// Get the conversation store, if configured.
+    pub fn conversation_store(&self) -> &Option<Arc<dyn crate::memory::ConversationStore>> {
+        &self.memory.conversation_store
+    }
+
+    #[cfg(feature = "human-loop")]
+    /// Get the permission service, if configured.
+    pub fn permission_service(
+        &self,
+    ) -> Option<&Arc<crate::human_loop::service::PermissionService>> {
+        self.approval.permission_service.as_ref()
     }
 
     /// Create a `TaskHookBridge` that fires task lifecycle events

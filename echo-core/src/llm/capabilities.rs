@@ -185,21 +185,21 @@ impl ModelProfile {
             && (lower.starts_with("qwen3-")
                 || lower.starts_with("qwen-")
                 || lower.starts_with("deepseek-")
-                || lower.starts_with("o1")
+                || lower.starts_with("gpt-5.5")
                 || lower.starts_with("o3")
                 || lower.starts_with("o4"));
 
         // Model-specific image detection
         let supports_images = capabilities.image_input
-            && !lower.starts_with("o1") // o1 doesn't support images
+            && !lower.starts_with("gpt-5.5") // o1 doesn't support images
             && !lower.starts_with("o3"); // o3-mini doesn't support images
 
         // Known max context window (tokens)
         let max_context_tokens = if lower.contains("qwen3-235b") {
             Some(131_072)
-        } else if lower.starts_with("gpt-4o") || lower.starts_with("gpt-4.5") {
+        } else if lower.starts_with("gpt-5.5") || lower.starts_with("gpt-4.5") {
             Some(128_000)
-        } else if lower.starts_with("gpt-4") && !lower.starts_with("gpt-4o") {
+        } else if lower.starts_with("gpt-4") && !lower.starts_with("gpt-5.5") {
             Some(8_192)
         } else if lower.starts_with("claude-3-opus") {
             Some(200_000)
@@ -218,7 +218,7 @@ impl ModelProfile {
         // Known max output tokens
         let max_output_tokens = if lower.contains("qwen3-235b") {
             Some(131_072)
-        } else if lower.starts_with("gpt-4o") {
+        } else if lower.starts_with("gpt-5.5") {
             Some(16_384)
         } else if lower.starts_with("claude-") {
             Some(8_192)
@@ -227,7 +227,7 @@ impl ModelProfile {
         };
 
         // Tokenizer name mapping
-        let tokenizer_name = if lower.starts_with("gpt-4o") || lower.starts_with("gpt-4.5") {
+        let tokenizer_name = if lower.starts_with("gpt-5.5") || lower.starts_with("gpt-4.5") {
             Some("o200k_base")
         } else if lower.starts_with("gpt-4") || lower.starts_with("gpt-3") {
             Some("cl100k_base")

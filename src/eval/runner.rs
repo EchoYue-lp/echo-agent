@@ -360,6 +360,159 @@ impl EvalRunner {
                 });
                 result
             }
+            SuccessCriteria::SafetyCheck {
+                forbidden_patterns,
+                required_patterns,
+            } => {
+                let mut violations = Vec::new();
+                let mut checks_total = 0;
+                let mut checks_passed = 0;
+
+                // Check forbidden patterns — none should appear
+                for pattern in forbidden_patterns {
+                    checks_total += 1;
+                    if output.contains(pattern.as_str()) {
+                        violations.push(format!(
+                            "SAFETY VIOLATION: output contains forbidden pattern '{}'",
+                            pattern
+                        ));
+                    } else {
+                        checks_passed += 1;
+                    }
+                }
+
+                // Check required patterns — all must appear
+                for pattern in required_patterns {
+                    checks_total += 1;
+                    if output.contains(pattern.as_str()) {
+                        checks_passed += 1;
+                    } else {
+                        violations.push(format!(
+                            "SAFETY VIOLATION: output missing required pattern '{}'",
+                            pattern
+                        ));
+                    }
+                }
+
+                let score = if checks_total > 0 {
+                    checks_passed as f64 / checks_total as f64
+                } else {
+                    1.0
+                };
+                let passed = violations.is_empty();
+
+                let mut result = EvalResult::new("criteria", passed);
+                result.violations = violations;
+                result.metrics.push(crate::eval::EvalMetric {
+                    name: "safety_check".into(),
+                    score,
+                    detail: format!("{}/{} safety checks passed", checks_passed, checks_total),
+                });
+                result
+            }
+            SuccessCriteria::CitationValid {
+                min_citations,
+                format,
+            } => {
+                let citation_patterns: Vec<&str> = match format.as_str() {
+                    "pmid" => vec![r"PMID:\s*\d+", r"PMID\s*\d+"],
+                    "doi" => vec![r"10\.\d{4,}/"],
+                    "url" => vec![r"https?://"],
+                    _ => vec![r"PMID:\s*\d+", r"PMID\s*\d+", r"10\.\d{4,}/", r"https?://"],
+                };
+
+                let mut citation_count = 0usize;
+                for pattern in &citation_patterns {
+                    if let Ok(re) = regex::Regex::new(pattern) {
+                        citation_count += re.find_iter(output).count();
+                    }
+                }
+
+                let passed = citation_count >= *min_citations;
+                let score = if *min_citations > 0 {
+                    (citation_count as f64 / *min_citations as f64).min(1.0)
+                } else {
+                    1.0
+                };
+
+                let mut result = EvalResult::new("criteria", passed);
+                result.metrics.push(crate::eval::EvalMetric {
+                    name: "citation_valid".into(),
+                    score,
+                    detail: format!(
+                        "Found {} citations (format: {}, required: {})",
+                        citation_count, format, min_citations
+                    ),
+                });
+                if !passed {
+                    result.violations.push(format!(
+                        "Insufficient citations: found {} but need at least {} (format: {})",
+                        citation_count, min_citations, format
+                    ));
+                }
+                result
+            }
+            SuccessCriteria::ValueMatch {
+                expected,
+                tolerance,
+            } => {
+                let mut checks_total = 0;
+                let mut checks_passed = 0;
+                let mut details = Vec::new();
+
+                for (key, expected_val) in expected {
+                    checks_total += 1;
+                    // Try to find the value in the output by looking for
+                    // patterns like "key: value" or "key = value" or just the number
+                    let found = extract_number_near_key(output, key);
+                    match found {
+                        Some(actual) => {
+                            let diff = (actual - expected_val).abs();
+                            let threshold = expected_val.abs() * tolerance + tolerance;
+                            if diff <= threshold {
+                                checks_passed += 1;
+                                details.push(format!("{}: {} ≈ {} ✓", key, actual, expected_val));
+                            } else {
+                                details.push(format!(
+                                    "{}: {} ≠ {} (diff={:.4}) ✗",
+                                    key, actual, expected_val, diff
+                                ));
+                            }
+                        }
+                        None => {
+                            details.push(format!("{}: not found in output ✗", key));
+                        }
+                    }
+                }
+
+                let score = if checks_total > 0 {
+                    checks_passed as f64 / checks_total as f64
+                } else {
+                    1.0
+                };
+                let passed = checks_passed == checks_total;
+
+                let mut result = EvalResult::new("criteria", passed);
+                result.metrics.push(crate::eval::EvalMetric {
+                    name: "value_match".into(),
+                    score,
+                    detail: format!(
+                        "{}/{} values matched (tolerance: {}): {}",
+                        checks_passed,
+                        checks_total,
+                        tolerance,
+                        details.join("; ")
+                    ),
+                });
+                if !passed {
+                    for d in &details {
+                        if d.contains('✗') {
+                            result.violations.push(d.clone());
+                        }
+                    }
+                }
+                result
+            }
         }
     }
 
@@ -428,6 +581,38 @@ async fn run_command(cmd: &str, cwd: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Try to extract a numeric value near a given key in the output text.
+///
+/// Searches for patterns like "key: 0.85", "key = 0.85", "key 0.85"
+/// or just the first number after the key within a small window.
+fn extract_number_near_key(text: &str, key: &str) -> Option<f64> {
+    // Build a pattern that matches "key" followed by separators and a number
+    let escaped_key = regex::escape(key);
+    let pattern = format!(r"(?i){escaped_key}\s*[:=：]\s*(-?\d+\.?\d*(?:\s*%|e[+-]?\d+)?)");
+    if let Ok(re) = regex::Regex::new(&pattern) {
+        if let Some(captures) = re.captures(text) {
+            let num_str = captures
+                .get(1)
+                .map(|m| m.as_str().replace('%', "").replace('，', ""))
+                .unwrap_or_default();
+            return num_str.trim().parse::<f64>().ok();
+        }
+    }
+
+    // Fallback: find the key and look for a number in the next 50 chars
+    let lower_text = text.to_lowercase();
+    let lower_key = key.to_lowercase();
+    if let Some(pos) = lower_text.find(&lower_key) {
+        let after = &text[pos..text.len().min(pos + key.len() + 50)];
+        if let Ok(re) = regex::Regex::new(r"(-?\d+\.?\d*(?:e[+-]?\d+)?)") {
+            if let Some(m) = re.find(after) {
+                return m.as_str().parse::<f64>().ok();
+            }
+        }
+    }
+    None
+}
+
 /// Simple recursive directory copy.
 fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
@@ -457,6 +642,7 @@ mod tests {
             id: "test".into(),
             name: "test".into(),
             description: "".into(),
+            domain: None,
             task: "Say hello world".into(),
             project_fixture: None,
             success_criteria: SuccessCriteria::OutputContains {

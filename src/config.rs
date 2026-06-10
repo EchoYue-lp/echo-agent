@@ -146,7 +146,7 @@ impl AppConfig {
 pub struct ModelConfig {
     /// Model provider (e.g. "deepseek", "openai", "anthropic", "qwen").
     pub provider: String,
-    /// Model name (e.g. "deepseek-v4-flash", "gpt-4o", "claude-3.5-sonnet").
+    /// Model name (e.g. "deepseek-v4-flash", "gpt-5.5", "claude-3.5-sonnet").
     pub name: String,
     /// API authentication token (optional, can be set via ECHOCOWORK_AUTH_TOKEN env var).
     pub auth_token: Option<String>,
@@ -614,7 +614,7 @@ mod tests {
             &temp_path,
             r#"
 model:
-  name: qwen-vl-max
+  name: qwen3.7-plus
 "#,
         )
         .unwrap();
@@ -624,7 +624,7 @@ model:
         drop(_guard);
         std::fs::remove_file(&temp_path).unwrap();
 
-        assert_eq!(config.model.name, "qwen-vl-max");
+        assert_eq!(config.model.name, "qwen3.7-plus");
     }
 
     fn uuid() -> u128 {

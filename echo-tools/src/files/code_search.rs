@@ -387,7 +387,8 @@ async fn try_ripgrep_search(
 
     // Truncate to prevent token overflow
     if output.len() > MAX_OUTPUT_BYTES {
-        output.truncate(MAX_OUTPUT_BYTES);
+        let safe_end = output.floor_char_boundary(MAX_OUTPUT_BYTES);
+        output.truncate(safe_end);
         output.push_str("\n\n... [output truncated to prevent overflow]");
     }
 

@@ -44,7 +44,7 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut agent = agent! {
-        model: "qwen3-max",
+        model: "qwen3.7-max",
         system_prompt: "You are a helpful math assistant",
         tools: [AddTool],
     }?;
@@ -308,11 +308,11 @@ Create `echo-agent.yaml` in your project root:
 ```yaml
 # Provider / model registry (used by ProviderFactory and config-backed clients)
 models:
-  qwen3-max:
+  qwen3.7-max:
     provider: dashscope
     api_key: ${DASHSCOPE_API_KEY}
 
-  deepseek-chat:
+  deepseek-v4-flash:
     provider: deepseek
     api_key: ${DEEPSEEK_API_KEY}
 
@@ -325,7 +325,7 @@ embedding:
 
 # Runtime app config (used by examples such as IM channels)
 model:
-  name: qwen3-max
+  name: qwen3.7-max
   max_tokens: 4096
   temperature: 0.7
 
@@ -411,7 +411,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .system_prompt("You are a helpful assistant")
         .build()?;
     let answer = agent.execute("What is 42 * 1337?").await?;
@@ -427,13 +427,13 @@ use echo_agent::prelude::*;
 
 fn main() -> echo_agent::error::Result<()> {
     // Minimal — no tools, no memory, just chat
-    let _agent = ReactAgentBuilder::simple("qwen3-max", "Be helpful")?;
+    let _agent = ReactAgentBuilder::simple("qwen3.7-max", "Be helpful")?;
 
     // Standard — tools + CoT enabled
-    let _agent = ReactAgentBuilder::standard("qwen3-max", "assistant", "Be helpful")?;
+    let _agent = ReactAgentBuilder::standard("qwen3.7-max", "assistant", "Be helpful")?;
 
     // Full-featured — tools + memory + tasks + CoT
-    let _agent = ReactAgentBuilder::full_featured("qwen3-max", "assistant", "Be helpful")?;
+    let _agent = ReactAgentBuilder::full_featured("qwen3.7-max", "assistant", "Be helpful")?;
     Ok(())
 }
 ```
@@ -471,7 +471,7 @@ use std::sync::Arc;
 fn main() -> echo_agent::error::Result<()> {
     let store = Arc::new(InMemoryStore::new());
     let _agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .with_memory_tools(store)  // registers remember + recall + search_memory + forget
         .build()?;
     Ok(())
@@ -505,7 +505,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
     agent.set_compressor(SlidingWindowCompressor::new(4096)).await;
     Ok(())
@@ -529,7 +529,7 @@ fn main() {
 
     // For cost tracking across requests:
     use echo_agent::tokenizer::TokenUsageTracker;
-    let tracker = TokenUsageTracker::new("gpt-4o");
+    let tracker = TokenUsageTracker::new("gpt-5.5");
     tracker.record(1500, 800, Some(2300));
     println!("{}", tracker.summary());
 }
@@ -569,7 +569,7 @@ async fn search_web(query: String) -> Result<ToolResult> {
 
 fn main() -> echo_agent::error::Result<()> {
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
     agent.add_tool(Box::new(SearchWebTool));
     agent.remove_tool("search_web");
@@ -590,7 +590,7 @@ use std::sync::Arc;
 
 fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
     let approval: Arc<ConsoleHumanLoopProvider> = Arc::new(ConsoleHumanLoopProvider);
     agent.set_human_loop_provider(approval);
@@ -648,13 +648,13 @@ use echo_agent::prelude::*;
 
 fn main() -> echo_agent::error::Result<()> {
     let math_agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .name("math_expert")
         .system_prompt("You solve math problems.")
         .build()?;
 
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .enable_subagent()
         .build()?;
 
@@ -673,7 +673,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
 
     // Discover and activate file-based skills (SKILL.md packs):
@@ -701,7 +701,7 @@ async fn main() -> echo_agent::error::Result<()> {
     )).await?;
 
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
     agent.add_tools(tools);
     Ok(())
@@ -722,7 +722,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .system_prompt("You are a research assistant.")
         .enable_tools()
         .enable_planning()  // Enable plan, create_task, update_task tools
@@ -746,7 +746,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
     let mut stream = agent.execute_stream("Explain quantum entanglement").await?;
     while let Some(event) = stream.next().await {
@@ -776,7 +776,7 @@ struct Contact { name: String, email: String, phone: String }
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .system_prompt("You are an extraction assistant")
         .build()?;
     let contacts: Vec<Contact> = agent.extract(
@@ -808,13 +808,13 @@ name: research_pipeline
 nodes:
   - name: researcher
     type: agent
-    model: qwen3-max
+    model: qwen3.7-max
     system_prompt: "You are a research assistant"
     input_key: task
     output_key: research
   - name: writer
     type: agent
-    model: qwen3-max
+    model: qwen3.7-max
     system_prompt: "You are a writing assistant"
     input_key: research
     output_key: result
@@ -950,7 +950,7 @@ use echo_agent::tools::web::{WebSearchTool, WebFetchTool};
 
 fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
 
     // Auto-select best provider: Tavily > Brave > DuckDuckGo
@@ -976,11 +976,11 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
-    let critic = Arc::new(LlmCritic::new("qwen3-max"));
+    let critic = Arc::new(LlmCritic::new("qwen3.7-max"));
     let review_tool = ReviewTool::new(critic);
 
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .system_prompt("You are a technical writer. Use the review tool to self-critique your work.")
         .enable_tools()
         .tool(Box::new(review_tool))
@@ -1001,7 +1001,7 @@ use echo_agent::prelude::*;
 #[tokio::main]
 async fn main() -> echo_agent::error::Result<()> {
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .snapshot_policy(SnapshotPolicy::default())
         .build()?;
     let snapshot_id = agent.snapshot().await;  // Option<String>
@@ -1022,7 +1022,7 @@ use std::time::Duration;
 
 fn main() -> echo_agent::error::Result<()> {
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .model("qwen3.7-max")
         .build()?;
     let cb_config = CircuitBreakerConfig {
         failure_threshold: 5,

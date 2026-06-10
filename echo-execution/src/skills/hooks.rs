@@ -4,6 +4,23 @@
 //! injecting prompts, making HTTP calls, or invoking MCP tools at specific points
 //! in the agent lifecycle.
 //!
+//! ## Architecture role
+//!
+//! This module provides the **tool execution security layer** (Phase 3 "Hook 拦截与安全增强").
+//! It serves as the functional equivalent of a `ToolExecutionEngine` with `ToolHook` trait:
+//!
+//! | Design concept | Implementation in this module |
+//! |---------------|-------------------------------|
+//! | `ToolExecutionEngine` | [`HookRegistry`] — central dispatch for all hook events |
+//! | `ToolHook` trait | [`HookAction`] enum — Command, Prompt, Permission, Http, McpTool, Agent |
+//! | `HookDecision` (Allow/Deny/Modify) | [`HookResult`] — `block`, `updated_input`, `permission_decision` |
+//! | `ToolPolicy` | [`HooksDefinition`] + [`HookRule`] — matcher → actions mapping (YAML-configurable) |
+//!
+//! The hook system is wired into the tool execution pipeline at three code paths:
+//! - [`PreToolUseHookStage`](crate::tools::pipeline::PreToolUseHookStage) (stage 4 of 13)
+//! - [`PostToolUseHookStage`](crate::tools::pipeline::PostToolUseHookStage) (stage 10 of 13)
+//! - Direct calls in `execution.rs` and `stream_channel.rs` for non-pipeline paths
+//!
 //! ## Hook events
 //!
 //! | Event | When | Can modify |

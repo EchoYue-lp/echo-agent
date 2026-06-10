@@ -1,4 +1,5 @@
 use futures::future::BoxFuture;
+use std::sync::Arc;
 
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
@@ -57,6 +58,50 @@ impl Tool for PlanTool {
             info!("Task plan:{}", plan);
 
             Ok(ToolResult::success(plan))
+        })
+    }
+}
+
+/// A wrapper around PlanTool that captures the plan text into a shared state.
+///
+/// Registered by the builder instead of the plain PlanTool so that
+/// `save_runtime_checkpoint` can capture the current plan for persistence.
+pub struct PlanToolWithState {
+    plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
+}
+
+impl PlanToolWithState {
+    pub fn new(plan_state: Arc<tokio::sync::RwLock<Option<String>>>) -> Self {
+        Self { plan_state }
+    }
+}
+
+impl Tool for PlanToolWithState {
+    fn name(&self) -> &str {
+        "plan"
+    }
+
+    fn description(&self) -> &str {
+        PlanTool.description()
+    }
+
+    fn parameters(&self) -> Value {
+        PlanTool.parameters()
+    }
+
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        let plan_state = self.plan_state.clone();
+        Box::pin(async move {
+            let result = PlanTool.execute(parameters).await?;
+
+            // Capture plan text into shared state for checkpointing
+            let plan_text = result.output.clone();
+            *plan_state.write().await = Some(plan_text);
+
+            Ok(result)
         })
     }
 }

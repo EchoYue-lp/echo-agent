@@ -19,11 +19,11 @@
 
 models:
   # ── 阿里云百炼（DashScope）──────────────────────────────────────────────
-  qwen3-max:
+  qwen3.7-max:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
     api_key: ${DASHSCOPE_API_KEY}
 
-  qwen-vl-max:
+  qwen3.7-plus:
     provider: dashscope
     api_key: ${DASHSCOPE_API_KEY}
 
@@ -33,40 +33,36 @@ models:
     api_key: ${DASHSCOPE_API_KEY}
 
   # ── DeepSeek ────────────────────────────────────────────────────────────
-  deepseek-chat:
+  deepseek-v4-flash:
     provider: deepseek
     api_key: ${DEEPSEEK_API_KEY}
 
-  # deepseek-reasoner:
+  # deepseek-v4-pro:
   #   provider: deepseek
   #   api_key: ${DEEPSEEK_API_KEY}
 
   # ── OpenAI ──────────────────────────────────────────────────────────────
-  # gpt-4o:
-  #   provider: openai
-  #   api_key: ${OPENAI_API_KEY}
-
-  # gpt-4o-mini:
+  # gpt-5.5:
   #   provider: openai
   #   api_key: ${OPENAI_API_KEY}
 
   # ── Anthropic ───────────────────────────────────────────────────────────
-  # claude-sonnet-4-6-20250514:
+  # claude-opus-4-8:
   #   provider: anthropic
   #   api_key: ${ANTHROPIC_API_KEY}
 
   # ── Moonshot / Kimi ─────────────────────────────────────────────────────
-  # moonshot-v1-auto:
+  # kimi-k2.6:
   #   provider: moonshot
   #   api_key: ${MOONSHOT_API_KEY}
 
   # ── 智谱 GLM ────────────────────────────────────────────────────────────
-  # glm-4-plus:
+  # glm-5.1:
   #   provider: zhipu
   #   api_key: ${ZHIPU_API_KEY}
 
   # ── Ollama（本地）───────────────────────────────────────────────────────
-  # qwen3:
+  # llama3.1:
   #   provider: ollama
   #   api_key: ollama
 
@@ -74,7 +70,7 @@ models:
   # my-custom-model:
   #   base_url: https://my-proxy.example.com/v1/chat/completions
   #   api_key: ${MY_API_KEY}
-  #   model: gpt-4o          # 实际发送给 API 的模型名（默认使用 key）
+  #   model: gpt-5.5          # 实际发送给 API 的模型名（默认使用 key）
 
 # ── Embedding（供语义检索 / 向量记忆使用）────────────────────────────────────
 embedding:
@@ -89,7 +85,7 @@ embedding:
 
 # ── Runtime 配置（供 echo_agent::config 使用）───────────────────────────────
 model:
-  name: qwen-vl-max
+  name: qwen3.7-plus
   max_tokens: 4096
   temperature: 0.7
 

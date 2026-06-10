@@ -44,7 +44,7 @@ async fn add(a: f64, b: f64) -> Result<ToolResult> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut agent = agent! {
-        model: "qwen3-max",
+        model: "qwen3.7-max",
         system_prompt: "你是一个计算助手",
         tools: [AddTool],
     }?;
@@ -268,7 +268,7 @@ echo-agent/
 
 ```yaml
 model:
-  name: qwen-plus
+  name: qwen3.6-plus
   max_tokens: 4096
   temperature: 0.7
 
@@ -309,11 +309,11 @@ logging:
 
 ```yaml
 models:
-  qwen3-max:
+  qwen3.7-max:
     provider: dashscope
     api_key: ${DASHSCOPE_API_KEY}
 
-  deepseek-chat:
+  deepseek-v4-flash:
     provider: deepseek
     api_key: ${DEEPSEEK_API_KEY}
 
@@ -329,7 +329,7 @@ embedding:
 - `echo-agent.yaml` 中的 `model:` / `agent:` / `channels:` / `mcp:` / `server:` / `logging:` 是 `echo_agent::config` 加载的应用运行时配置。
 - `echo-agent-models.yaml` 中的 `models:` 用于 `ProviderFactory`、`LlmConfig::from_model()` 以及基于配置的 LLM 客户端。
 - `embedding:` 用于语义记忆 / 向量检索相关示例。
-- 内置 provider/model 规则可直接使用 `qwen-plus`、`openai:gpt-4o-mini` 等，不一定需要 `models:` 文件。
+- 内置 provider/model 规则可直接使用 `qwen3.6-plus`、`openai:gpt-5.5` 等，不一定需要 `models:` 文件。
 
 通过环境变量设置密钥：
 
@@ -370,7 +370,7 @@ echo-agent 的基础是 ReAct（Reasoning + Acting）模式，内置 Chain-of-Th
 
 ```rust
 let agent = ReactAgentBuilder::new()
-    .model("qwen3-max")
+    .model("qwen3.7-max")
     .system_prompt("你是一个有帮助的助手")
     .build()?;
 let answer = agent.execute("42 * 1337 等于多少？").await?;
@@ -380,13 +380,13 @@ let answer = agent.execute("42 * 1337 等于多少？").await?;
 
 ```rust
 // 最小化 — 无工具、无记忆，纯对话
-let agent = ReactAgentBuilder::simple("qwen3-max", "帮助用户")?;
+let agent = ReactAgentBuilder::simple("qwen3.7-max", "帮助用户")?;
 
 // 标准版 — 工具 + CoT 启用
-let agent = ReactAgentBuilder::standard("qwen3-max", "assistant", "帮助用户")?;
+let agent = ReactAgentBuilder::standard("qwen3.7-max", "assistant", "帮助用户")?;
 
 // 全功能 — 工具 + 记忆 + 任务 + CoT
-let agent = ReactAgentBuilder::full_featured("qwen3-max", "assistant", "帮助用户")?;
+let agent = ReactAgentBuilder::full_featured("qwen3.7-max", "assistant", "帮助用户")?;
 ```
 
 ### 2. 工具系统 — `#[tool]` 宏 + 自动 JSON Schema
@@ -418,7 +418,7 @@ async fn weather(city: String) -> Result<ToolResult> {
 ```rust
 let store = Arc::new(InMemoryStore::new());
 let agent = ReactAgentBuilder::new()
-    .model("qwen3-max")
+    .model("qwen3.7-max")
     .with_memory_tools(store)  // 注册 remember + recall + search_memory + forget
     .build()?;
 ```
@@ -538,7 +538,7 @@ ReactAgent 包含三阶段规划工作流：Plan → Execute → Summarize。无
 
 ```rust,ignore
 let agent = ReactAgentBuilder::new()
-    .model("qwen3-max")
+    .model("qwen3.7-max")
     .enable_planning()  // 启用 plan、create_task、update_task 工具
     .build()?;
 
@@ -580,13 +580,13 @@ name: research_pipeline
 nodes:
   - name: researcher
     type: agent
-    model: qwen3-max
+    model: qwen3.7-max
     system_prompt: "你是研究助手"
     input_key: task
     output_key: research
   - name: writer
     type: agent
-    model: qwen3-max
+    model: qwen3.7-max
     system_prompt: "你是写作助手"
     input_key: research
     output_key: result
@@ -707,11 +707,11 @@ agent.add_tool(Box::new(WebFetchTool::new()));
 使用 ReviewTool 让 Agent 评估和优化自己的输出。这遵循业界最佳实践（Hermes、Claude Code），反思是工具能力而非独立的 Agent 类型。
 
 ```rust,ignore
-let critic = Arc::new(LlmCritic::new("qwen3-max"));
+let critic = Arc::new(LlmCritic::new("qwen3.7-max"));
 let review_tool = ReviewTool::new(critic);
 
 let agent = ReactAgentBuilder::new()
-    .model("qwen3-max")
+    .model("qwen3.7-max")
     .system_prompt("你是技术写手。使用 review 工具自我审查你的作品。")
     .enable_tools()
     .tool(Box::new(review_tool))

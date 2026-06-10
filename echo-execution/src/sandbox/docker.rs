@@ -511,11 +511,13 @@ impl SandboxExecutor for DockerSandbox {
                     if let Some(max) = limits.max_output_bytes {
                         let max = max as usize;
                         if stdout.len() > max {
-                            stdout.truncate(max);
+                            let safe_end = stdout.floor_char_boundary(max);
+                            stdout.truncate(safe_end);
                             stdout.push_str("\n... [output truncated]");
                         }
                         if stderr.len() > max {
-                            stderr.truncate(max);
+                            let safe_end = stderr.floor_char_boundary(max);
+                            stderr.truncate(safe_end);
                             stderr.push_str("\n... [output truncated]");
                         }
                     }

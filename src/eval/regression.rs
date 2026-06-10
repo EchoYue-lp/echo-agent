@@ -78,11 +78,15 @@ impl RegressionSuite {
 
         EvalCase {
             id: format!("regression_{}", &run.run_id[..12.min(run.run_id.len())]),
-            name: format!("Regression: {}", &run.input[..60.min(run.input.len())]),
+            name: format!(
+                "Regression: {}",
+                run.input.chars().take(60).collect::<String>()
+            ),
             description: format!(
                 "Auto-generated from run {}. Used {} tool(s).",
                 run.run_id, tool_count
             ),
+            domain: None,
             task: run.input.clone(),
             project_fixture: None,
             success_criteria,

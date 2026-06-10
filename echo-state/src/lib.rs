@@ -9,6 +9,8 @@
 //! | [`memory`] | Dual-layer memory: `Store` (long-term KV) + `Checkpointer` (session persistence) |
 //! | [`compression`] | Context compression: SlidingWindow, LLM Summary, and Hybrid strategies |
 //! | [`audit`] | Structured audit logging with pluggable backends (in-memory, file) |
+//! | [`skill_telemetry`] | Skill execution telemetry: activation tracking, success/failure metrics |
+//! | [`profiles`] | Agent capability profile + User preference profile with prompt injection |
 //!
 //! ## Feature Flags
 //!
@@ -20,4 +22,6 @@
 pub mod audit;
 pub mod compression;
 pub mod memory;
+pub mod profiles;
+pub mod skill_telemetry;
 mod util;

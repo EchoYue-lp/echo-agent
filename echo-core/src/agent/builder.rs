@@ -24,7 +24,7 @@ pub trait AgentBuilder: Sized {
     /// The concrete agent type this builder constructs.
     type Agent: Agent;
 
-    /// Set the model name (e.g., "qwen3-max", "gpt-4o").
+    /// Set the model name (e.g., "qwen3-max", "gpt-5.5").
     fn model(self, model: impl Into<String>) -> Self;
 
     /// Set the system prompt that seeds the agent's behavior.

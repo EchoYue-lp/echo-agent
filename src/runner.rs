@@ -24,11 +24,7 @@
 //! - **Trace** → [`RunStore`]
 
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
-use crate::agent::subagent::team::TeamAgent;
 use crate::agent::ReactAgent;
-use crate::context::ContextAssembler;
-#[cfg(feature = "eval")]
-use crate::eval::EvalRunner;
 use crate::prelude::ReactAgentBuilder;
 use crate::trace::RunStore;
 use std::sync::Arc;
@@ -37,15 +33,12 @@ use std::sync::Arc;
 ///
 /// Uses architecture-aligned naming (context_engine, tool_pipeline, orchestrator,
 /// eval_recorder) rather than internal builder method names.
+#[deprecated(since = "0.3.0", note = "Use `ReactAgentBuilder` directly for full feature access")]
 pub struct AgentRunner {
     model: String,
     system_prompt: String,
     agent_name: String,
-    context_engine: Option<ContextAssembler>,
     tool_pipeline: Option<ToolExecutionPipeline>,
-    orchestrator: Option<TeamAgent>,
-    #[cfg(feature = "eval")]
-    eval_recorder: Option<EvalRunner>,
     run_store: Option<Arc<dyn RunStore>>,
     max_iterations: usize,
     enable_tools: bool,
@@ -64,11 +57,7 @@ impl AgentRunner {
             model: String::new(),
             system_prompt: "You are a helpful assistant".into(),
             agent_name: "echo-agent".into(),
-            context_engine: None,
             tool_pipeline: None,
-            orchestrator: None,
-            #[cfg(feature = "eval")]
-            eval_recorder: None,
             run_store: None,
             max_iterations: 10,
             enable_tools: true,
@@ -105,43 +94,11 @@ impl AgentRunner {
         self
     }
 
-    /// Attach a [`ContextAssembler`] for centralized message list construction.
-    ///
-    /// Maps to: `ReactAgentBuilder::with_context_assembler()`
-    pub fn with_context_engine(mut self, assembler: ContextAssembler) -> Self {
-        self.context_engine = Some(assembler);
-        self
-    }
-
     /// Attach a [`ToolExecutionPipeline`] for configurable tool processing.
     ///
     /// Maps to: `ReactAgentBuilder::tool_execution_pipeline()`
     pub fn with_tool_pipeline(mut self, pipeline: ToolExecutionPipeline) -> Self {
         self.tool_pipeline = Some(pipeline);
-        self
-    }
-
-    /// Attach a [`TeamAgent`] for multi-agent orchestration.
-    ///
-    /// **Status: stored but not yet executed automatically.**
-    /// The team must be invoked manually via `TeamAgent::execute()` after `build()`.
-    /// Future integration will auto-register team agents with `AgentDispatchTool`.
-    pub fn with_orchestrator(mut self, team: TeamAgent) -> Self {
-        self.orchestrator = Some(team);
-        self
-    }
-
-    /// Attach an [`EvalRunner`] for automatic evaluation.
-    ///
-    /// **Status: stored but not yet executed automatically.**
-    /// Use `runner.run(&case, agent)` manually after `build()`.
-    /// Future integration will auto-evaluate runs against configured cases.
-    ///
-    /// Requires feature: `eval`
-    #[cfg(feature = "eval")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "eval")))]
-    pub fn with_eval_recorder(mut self, runner: EvalRunner) -> Self {
-        self.eval_recorder = Some(runner);
         self
     }
 
@@ -168,10 +125,6 @@ impl AgentRunner {
         }
 
         // Wire subsystems
-        if let Some(assembler) = self.context_engine {
-            builder = builder.with_context_assembler(assembler);
-        }
-
         if let Some(pipeline) = self.tool_pipeline {
             builder = builder.tool_execution_pipeline(pipeline);
         }

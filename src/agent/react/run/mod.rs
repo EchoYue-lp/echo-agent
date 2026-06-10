@@ -15,7 +15,8 @@ pub(crate) mod approval;
 pub(crate) mod context;
 pub(crate) mod direct;
 pub(crate) mod execution;
-pub(crate) mod pipeline;
+/// Tool execution pipeline — composable 13-stage middleware for tool calls.
+pub mod pipeline;
 pub(crate) mod processor;
 pub(crate) mod react_loop;
 pub(crate) mod retry;

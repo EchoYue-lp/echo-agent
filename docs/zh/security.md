@@ -87,7 +87,7 @@ let notice = ToolRiskClassifier::safety_notice("shell", &params);
 | `DontAsk` | ❌ | ❌ | ❌ | CI/CD 无人值守 |
 
 ```rust
-let config = AgentConfig::new("qwen-max", "agent", "system prompt")
+let config = AgentConfig::new("qwen3.7-max", "agent", "system prompt")
     .permission_mode(PermissionMode::Plan);       // 只读
     // .permission_mode(PermissionMode::DontAsk);  // CI/CD
     // .permission_mode(PermissionMode::AcceptEdits); // 自动接受编辑
@@ -218,7 +218,7 @@ check(tool, input) → check_with_permissions(tool, input, permissions):
 
 ```rust
 let agent = ReactAgentBuilder::new()
-    .model("qwen-plus")
+    .model("qwen3.6-plus")
     .permission_service(Arc::new(service))
     .build()?;
 ```
@@ -226,7 +226,7 @@ let agent = ReactAgentBuilder::new()
 `force_read_before_edit: true` 要求模型在修改文件前必须先读取：
 
 ```rust
-let config = AgentConfig::new("qwen-plus", "agent", "system prompt")
+let config = AgentConfig::new("qwen3.6-plus", "agent", "system prompt")
     .force_read_before_edit(true);
 ```
 
@@ -356,7 +356,7 @@ export ECHO_AUDIT_MAX_ENTRIES=20000  # 默认 10000
 ### 开发模式（宽松）
 
 ```rust
-let config = AgentConfig::new("qwen-max", "agent", "...")
+let config = AgentConfig::new("qwen3.7-max", "agent", "...")
     .permission_mode(PermissionMode::AcceptEdits);
 
 let policy = DefaultPermissionPolicy::new()
@@ -369,7 +369,7 @@ let policy = DefaultPermissionPolicy::new()
 ### CI/CD 模式（严格）
 
 ```rust
-let config = AgentConfig::new("qwen-max", "agent", "...")
+let config = AgentConfig::new("qwen3.7-max", "agent", "...")
     .permission_mode(PermissionMode::DontAsk);
 
 let mut registry = RuleRegistry::new();

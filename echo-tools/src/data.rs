@@ -2247,11 +2247,27 @@ fn format_value(value: &AnyValue) -> String {
         AnyValue::UInt16(i) => i.to_string(),
         AnyValue::UInt32(i) => i.to_string(),
         AnyValue::UInt64(i) => i.to_string(),
-        AnyValue::Float32(f) => format!("{:.2}", f),
-        AnyValue::Float64(f) => format!("{:.2}", f),
+        AnyValue::Float32(f) => format_smart_float(*f as f64),
+        AnyValue::Float64(f) => format_smart_float(*f),
         AnyValue::String(s) => s.to_string(),
         AnyValue::StringOwned(s) => s.to_string(),
         _ => value.to_string(),
+    }
+}
+
+/// Smart float formatting: preserve precision (up to 6 decimals), strip trailing zeros.
+fn format_smart_float(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+    }
+    let formatted = format!("{:.6}", f);
+    if formatted.contains('.') {
+        formatted.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        formatted
     }
 }
 
@@ -2731,19 +2747,13 @@ fn any_value_to_json(value: &AnyValue) -> Value {
 
 /// Parse filter expression (extended: supports AND/OR, contains, starts_with, ends_with, in)
 fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
-    // Try splitting by AND / OR first
+    // Try splitting by AND / OR first (respecting quoted strings)
     for separator in [" AND ", " and ", " OR ", " or "] {
-        let parts: Vec<&str> = if let Some(pos) = expr_str.find(separator) {
+        if let Some(pos) = find_separator_outside_quotes(expr_str, separator) {
             let left = &expr_str[..pos];
             let right = &expr_str[pos + separator.len()..];
-            vec![left, right]
-        } else {
-            vec![]
-        };
-
-        if parts.len() == 2 {
-            let left_expr = parse_filter_expression(parts[0])?;
-            let right_expr = parse_filter_expression(parts[1])?;
+            let left_expr = parse_filter_expression(left)?;
+            let right_expr = parse_filter_expression(right)?;
             return if separator.trim().to_lowercase() == "and" {
                 Ok(left_expr.and(right_expr))
             } else {
@@ -2754,113 +2764,155 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
 
     let s = expr_str.trim();
 
-    // Numeric comparison
-    if let Ok(re) = regex::Regex::new(r"^(\w+)\s*>=\s*([\d.]+)$")
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val: f64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-        return Ok(col(col_name).gt_eq(lit(val)));
+    // Column name pattern: either quoted "Column Name" or unquoted word_chars
+    // Capture group 1 = quoted col, capture group 2 = unquoted col
+    let col_pat = r#"(?:"([^"]+)"|(\w[\w\s]*\w|\w+))"#;
+
+    // Helper to extract column name from capture groups
+    let extract_col = |cap: &regex::Captures| -> String {
+        cap.get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default()
+    };
+
+    // Helper to parse numeric value with proper error handling
+    let parse_num = |s: &str, expr: &str| -> Result<f64> {
+        s.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
+            name: "filter".to_string(),
+            message: format!(
+                "Invalid number '{}' in filter expression: '{}'",
+                s, expr
+            ),
+        }.into())
+    };
+
+    // Numeric comparisons (supports negative numbers: -?[\d.]+)
+    // >=
+    let re = regex::Regex::new(&format!(r#"^{}\s*>=\s*(-?[\d.]+)$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
+        return Ok(col(col_name.as_str()).gt_eq(lit(val)));
     }
-    if let Ok(re) = regex::Regex::new(r"^(\w+)\s*<=\s*([\d.]+)$")
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val: f64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-        return Ok(col(col_name).lt_eq(lit(val)));
+    // <=
+    let re = regex::Regex::new(&format!(r#"^{}\s*<=\s*(-?[\d.]+)$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
+        return Ok(col(col_name.as_str()).lt_eq(lit(val)));
     }
-    if let Ok(re) = regex::Regex::new(r"^(\w+)\s*!=\s*([\d.]+)$")
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val: f64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-        return Ok(col(col_name).neq(lit(val)));
+    // !=
+    let re = regex::Regex::new(&format!(r#"^{}\s*!=\s*(-?[\d.]+)$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
+        return Ok(col(col_name.as_str()).neq(lit(val)));
     }
-    if let Ok(re) = regex::Regex::new(r"^(\w+)\s*==\s*([\d.]+)$")
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val: f64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-        return Ok(col(col_name).eq(lit(val)));
+    // == (numeric)
+    let re = regex::Regex::new(&format!(r#"^{}\s*==\s*(-?[\d.]+)$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
+        return Ok(col(col_name.as_str()).eq(lit(val)));
     }
-    if let Ok(re) = regex::Regex::new(r"^(\w+)\s*>\s*([\d.]+)$")
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val: f64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-        return Ok(col(col_name).gt(lit(val)));
+    // >
+    let re = regex::Regex::new(&format!(r#"^{}\s*>\s*(-?[\d.]+)$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
+        return Ok(col(col_name.as_str()).gt(lit(val)));
     }
-    if let Ok(re) = regex::Regex::new(r"^(\w+)\s*<\s*([\d.]+)$")
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val: f64 = cap.get(2).unwrap().as_str().parse().unwrap_or(0.0);
-        return Ok(col(col_name).lt(lit(val)));
+    // <
+    let re = regex::Regex::new(&format!(r#"^{}\s*<\s*(-?[\d.]+)$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
+        return Ok(col(col_name.as_str()).lt(lit(val)));
     }
 
-    // String comparison
-    if let Ok(re) = regex::Regex::new(r#"^(\w+)\s*==\s*"([^"]+)"$"#)
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val = cap.get(2).unwrap().as_str();
-        return Ok(col(col_name).eq(lit(val)));
+    // String comparison: col == "value" or col != "value"
+    let re = regex::Regex::new(&format!(r#"^{}\s*==\s*"([^"]+)"$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = cap.get(3).unwrap().as_str();
+        return Ok(col(col_name.as_str()).eq(lit(val)));
     }
-    if let Ok(re) = regex::Regex::new(r#"^(\w+)\s*!=\s*"([^"]+)"$"#)
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val = cap.get(2).unwrap().as_str();
-        return Ok(col(col_name).neq(lit(val)));
+    let re = regex::Regex::new(&format!(r#"^{}\s*!=\s*"([^"]+)"$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = cap.get(3).unwrap().as_str();
+        return Ok(col(col_name.as_str()).neq(lit(val)));
     }
 
-    // String contains/starts_with/ends_with matching
-    if let Ok(re) = regex::Regex::new(r#"^(\w+)\s+contains\s+"([^"]+)"$"#)
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val = cap.get(2).unwrap().as_str();
-        return Ok(col(col_name).str().contains(lit(val), false));
+    // String contains/starts_with/ends_with
+    let re = regex::Regex::new(&format!(r#"^{}\s+contains\s+"([^"]+)"$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = cap.get(3).unwrap().as_str();
+        return Ok(col(col_name.as_str()).str().contains(lit(val), false));
     }
-    if let Ok(re) = regex::Regex::new(r#"^(\w+)\s+starts_with\s+"([^"]+)"$"#)
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val = cap.get(2).unwrap().as_str();
-        return Ok(col(col_name).str().starts_with(lit(val)));
+    let re = regex::Regex::new(&format!(r#"^{}\s+starts_with\s+"([^"]+)"$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = cap.get(3).unwrap().as_str();
+        return Ok(col(col_name.as_str()).str().starts_with(lit(val)));
     }
-    if let Ok(re) = regex::Regex::new(r#"^(\w+)\s+ends_with\s+"([^"]+)"$"#)
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let val = cap.get(2).unwrap().as_str();
-        return Ok(col(col_name).str().ends_with(lit(val)));
+    let re = regex::Regex::new(&format!(r#"^{}\s+ends_with\s+"([^"]+)"$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let val = cap.get(3).unwrap().as_str();
+        return Ok(col(col_name.as_str()).str().ends_with(lit(val)));
     }
 
-    // IN expression
-    if let Ok(re) = regex::Regex::new(r#"(?s)^(\w+)\s+in\s*\((.+)\)$"#)
-        && let Some(cap) = re.captures(s)
-    {
-        let col_name = cap.get(1).unwrap().as_str();
-        let vals_str = cap.get(2).unwrap().as_str();
+    // IN expression: col in ("a", "b", "c")
+    let re = regex::Regex::new(&format!(r#"(?s)^{}\s+in\s*\((.+)\)$"#, col_pat)).unwrap();
+    if let Some(cap) = re.captures(s) {
+        let col_name = extract_col(&cap);
+        let vals_str = cap.get(3).unwrap().as_str();
         let vals: Vec<String> = vals_str
             .split(',')
             .map(|v| v.trim().trim_matches('"').to_string())
             .collect();
         if !vals.is_empty() {
             let series = Series::new(PlSmallStr::EMPTY, vals);
-            return Ok(col(col_name).is_in(lit(series), false));
+            return Ok(col(col_name.as_str()).is_in(lit(series), false));
         }
     }
 
     Err(ToolError::InvalidParameter {
         name: "filter".to_string(),
         message: format!(
-            "Cannot parse filter expression: '{}'. Supported formats: col > 10, col == \"val\", col contains \"sub\", col starts_with \"pre\", col in (\"a\",\"b\"), A > 10 AND B < 5",
+            "Cannot parse filter expression: '{}'. Supported formats:\n\
+             - Numeric: col > 10, col <= 100, col == 42 (supports negative numbers)\n\
+             - Quoted columns: \"Total Revenue\" > 1000\n\
+             - String: col == \"val\", col != \"val\"\n\
+             - Pattern: col contains \"sub\", col starts_with \"pre\", col ends_with \"suf\"\n\
+             - Set: col in (\"a\", \"b\", \"c\")\n\
+             - Combined: A > 10 AND B < 5, A > 0 OR B > 0",
             expr_str
         ),
     }
     .into())
+}
+
+/// Find separator position outside of quoted strings
+fn find_separator_outside_quotes(expr: &str, separator: &str) -> Option<usize> {
+    let mut in_quotes = false;
+    let bytes = expr.as_bytes();
+    let sep_bytes = separator.as_bytes();
+
+    for i in 0..expr.len() {
+        if bytes[i] == b'"' {
+            in_quotes = !in_quotes;
+        }
+        if !in_quotes && i + separator.len() <= expr.len() {
+            if &bytes[i..i + separator.len()] == sep_bytes {
+                return Some(i);
+            }
+        }
+    }
+    None
 }
 
 /// Parse aggregation expression (extended: supports more operations)
@@ -2982,6 +3034,66 @@ fn compute_covariance(s1: &Series, s2: &Series) -> f64 {
     }
 }
 
+/// Compute Pearson correlation between two f64 Series
+fn compute_pearson(s1: &Series, s2: &Series) -> f64 {
+    let cov = compute_covariance(s1, s2);
+    let std1 = s1.std(1).unwrap_or(f64::NAN);
+    let std2 = s2.std(1).unwrap_or(f64::NAN);
+    if std1 == 0.0 || std2 == 0.0 || std1.is_nan() || std2.is_nan() {
+        f64::NAN
+    } else {
+        cov / (std1 * std2)
+    }
+}
+
+/// Convert a Series to ranks (average rank for ties) for Spearman correlation.
+fn compute_ranks(s: &Series) -> Vec<f64> {
+    let n = s.len();
+    let mut indexed: Vec<(usize, f64)> = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let val = match s.get(i) {
+            Ok(v) => v.try_extract::<f64>().unwrap_or(f64::NAN),
+            Err(_) => f64::NAN,
+        };
+        indexed.push((i, val));
+    }
+
+    // Sort by value (NaN goes to end)
+    indexed.sort_by(|a, b| {
+        if a.1.is_nan() && b.1.is_nan() {
+            std::cmp::Ordering::Equal
+        } else if a.1.is_nan() {
+            std::cmp::Ordering::Greater
+        } else if b.1.is_nan() {
+            std::cmp::Ordering::Less
+        } else {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+
+    let mut ranks = vec![f64::NAN; n];
+    let mut i = 0;
+    while i < n {
+        if indexed[i].1.is_nan() {
+            i += 1;
+            continue;
+        }
+        // Find all ties (same value)
+        let mut j = i;
+        while j < n && (indexed[j].1 - indexed[i].1).abs() < f64::EPSILON {
+            j += 1;
+        }
+        // Average rank for ties (1-based)
+        let avg_rank = (i as f64 + j as f64 + 1.0) / 2.0;
+        for k in i..j {
+            ranks[indexed[k].0] = avg_rank;
+        }
+        i = j;
+    }
+    ranks
+}
+
 // ── CorrelateTool ────────────────────────────────────────────────────────────
 
 /// Compute correlation matrix between numeric columns
@@ -3057,31 +3169,36 @@ impl Tool for CorrelateTool {
                 ));
             }
 
+            // Precompute ranks if Spearman
+            let all_ranks: Option<Vec<Vec<f64>>> = if method == "spearman" {
+                Some(numeric_cols.iter().map(|c| {
+                    let s = df.column(c).unwrap().as_materialized_series();
+                    let s_f64 = s.cast(&DataType::Float64).unwrap();
+                    compute_ranks(&s_f64)
+                }).collect())
+            } else {
+                None
+            };
+
             // Compute correlation matrix
             let mut matrix = Vec::new();
-            for col1 in &numeric_cols {
+            for (ci, col1) in numeric_cols.iter().enumerate() {
                 let mut row = Vec::new();
-                for col2 in &numeric_cols {
+                for (cj, col2) in numeric_cols.iter().enumerate() {
                     let corr = if col1 == col2 {
                         1.0
+                    } else if let Some(ref ranks) = all_ranks {
+                        // Spearman: Pearson correlation on ranks
+                        let r1 = Series::new(PlSmallStr::EMPTY, &ranks[ci]);
+                        let r2 = Series::new(PlSmallStr::EMPTY, &ranks[cj]);
+                        compute_pearson(&r1, &r2)
                     } else {
+                        // Pearson
                         let s1 = df.column(col1).unwrap().as_materialized_series();
                         let s2 = df.column(col2).unwrap().as_materialized_series();
-
-                        // Convert to f64 for correlation
                         let s1_f64 = s1.cast(&DataType::Float64).unwrap();
                         let s2_f64 = s2.cast(&DataType::Float64).unwrap();
-
-                        // Compute Pearson correlation manually: corr(X,Y) = cov(X,Y) / (std(X) * std(Y))
-                        let cov = compute_covariance(&s1_f64, &s2_f64);
-                        let std1 = s1_f64.std(1).unwrap_or(f64::NAN);
-                        let std2 = s2_f64.std(1).unwrap_or(f64::NAN);
-
-                        if std1 == 0.0 || std2 == 0.0 {
-                            f64::NAN
-                        } else {
-                            cov / (std1 * std2)
-                        }
+                        compute_pearson(&s1_f64, &s2_f64)
                     };
                     row.push(corr);
                 }
@@ -3092,12 +3209,14 @@ impl Tool for CorrelateTool {
             let mut output = format!("Correlation matrix ({} method):\n\n", method);
             output.push_str(&format!("{:>15}", ""));
             for col in &numeric_cols {
-                output.push_str(&format!("{:>12}", &col[..col.len().min(10)]));
+                let truncated: String = col.chars().take(10).collect();
+                output.push_str(&format!("{:>12}", truncated));
             }
             output.push('\n');
 
             for (i, col1) in numeric_cols.iter().enumerate() {
-                output.push_str(&format!("{:>15}", &col1[..col1.len().min(13)]));
+                let truncated: String = col1.chars().take(13).collect();
+                output.push_str(&format!("{:>15}", truncated));
                 for val in &matrix[i] {
                     if val.is_nan() {
                         output.push_str(&format!("{:>12}", "N/A"));
@@ -3218,7 +3337,21 @@ impl Tool for PivotTool {
                 .into());
             }
 
-            // Perform pivot operation using group_by and aggregation
+            // ── Real pivot: spread `columns` values into new columns ──
+            //
+            // Example: index=["Region"], columns="Product", values="Revenue", agg="sum"
+            //   Input:  Region | Product | Revenue
+            //           North  | A       | 100
+            //           North  | B       | 200
+            //           South  | A       | 300
+            //   Output: Region | A   | B
+            //           North  | 100 | 200
+            //           South  | 300 | null
+
+            // Step 1: group by (index_cols + columns_col) and aggregate values
+            let mut group_cols: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+            group_cols.push(col(columns_str));
+
             let mut agg_exprs = Vec::new();
             for val_col in &value_cols {
                 let expr = match agg_function {
@@ -3230,20 +3363,99 @@ impl Tool for PivotTool {
                     "last" => col(val_col).last(),
                     _ => col(val_col).sum(),
                 };
-                agg_exprs.push(expr.alias(format!("{}_{}", val_col, agg_function)));
+                agg_exprs.push(expr.alias(val_col));
             }
 
-            let index_exprs: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
-
-            let result = df
+            let grouped = df
+                .clone()
                 .lazy()
-                .group_by(index_exprs)
+                .group_by(group_cols)
                 .agg(agg_exprs)
                 .collect()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "pivot_data".to_string(),
-                    message: format!("Pivot operation failed: {}", e),
+                    message: format!("Group-by step failed: {}", e),
                 })?;
+
+            // Step 2: Get unique values of the pivot column
+            let pivot_col_series = grouped.column(columns_str)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "pivot_data".to_string(),
+                    message: format!("Pivot column '{}' not found: {}", columns_str, e),
+                })?
+                .as_materialized_series()
+                .clone();
+
+            let unique_vals = pivot_col_series.unique().map_err(|e| ToolError::ExecutionFailed {
+                tool: "pivot_data".to_string(),
+                message: format!("Failed to get unique pivot values: {}", e),
+            })?;
+
+            let pivot_values: Vec<String> = (0..unique_vals.len())
+                .map(|i| {
+                    match unique_vals.get(i) {
+                        Ok(v) => format!("{}", v),
+                        Err(_) => "null".to_string(),
+                    }
+                })
+                .collect();
+
+            // Step 3: For each pivot value, filter + rename value columns, then join
+            let index_exprs: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+
+            // Start with the unique index rows
+            let mut result = grouped
+                .clone()
+                .lazy()
+                .select(index_exprs.clone())
+                .unique(Some(index_cols.iter().map(|s| s.as_str()).collect()), UniqueKeepStrategy::First)
+                .collect()
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "pivot_data".to_string(),
+                    message: format!("Failed to get unique index rows: {}", e),
+                })?;
+
+            for pval in &pivot_values {
+                for val_col in &value_cols {
+                    // Filter grouped data for this pivot value
+                    let filter_expr = col(columns_str).eq(lit(pval.as_str()));
+                    let new_col_name = if value_cols.len() == 1 {
+                        pval.clone()
+                    } else {
+                        format!("{}_{}", pval, val_col)
+                    };
+
+                    let filtered = grouped
+                        .clone()
+                        .lazy()
+                        .filter(filter_expr)
+                        .select(
+                            index_cols.iter().map(|c| col(c))
+                                .chain(std::iter::once(col(val_col).alias(new_col_name.as_str())))
+                                .collect::<Vec<_>>()
+                        )
+                        .collect()
+                        .map_err(|e| ToolError::ExecutionFailed {
+                            tool: "pivot_data".to_string(),
+                            message: format!("Failed to filter for pivot value '{}': {}", pval, e),
+                        })?;
+
+                    // Left join with result
+                    result = result
+                        .lazy()
+                        .join(
+                            filtered.lazy(),
+                            [index_cols.iter().map(|c| col(c)).collect::<Vec<_>>()],
+                            [index_cols.iter().map(|c| col(c)).collect::<Vec<_>>()],
+                            JoinArgs::new(JoinType::Left),
+                        )
+                        .collect()
+                        .map_err(|e| ToolError::ExecutionFailed {
+                            tool: "pivot_data".to_string(),
+                            message: format!("Failed to join pivot column '{}': {}", new_col_name, e),
+                        })?;
+                }
+            }
 
             // Convert to JSON for output
             let json_value = df_to_json(&result)?;
@@ -3251,7 +3463,8 @@ impl Tool for PivotTool {
             Ok(ToolResult::success_json(serde_json::json!({
                 "pivot_result": {
                     "index": index_cols,
-                    "columns": columns,
+                    "columns": columns_str,
+                    "pivot_values": pivot_values,
                     "values": value_cols,
                     "agg_function": agg_function,
                     "shape": [result.height(), result.width()],

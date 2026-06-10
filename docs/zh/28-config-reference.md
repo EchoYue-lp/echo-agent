@@ -294,7 +294,7 @@ pub struct TokenBudgetConfig {
 
 自动检测的模型窗口大小：
 - `claude` → 200K
-- `gpt-4o` → 128K
+- `gpt-5.5` → 128K
 - `qwen3` → 128K
 - 默认 → 128K
 
@@ -361,7 +361,7 @@ echo-agent 支持通过 `echo-agent.yaml` 进行声明式配置。
 
 ```yaml
 model:
-  name: "qwen-plus"
+  name: "qwen3.6-plus"
   temperature: 0.7
   max_tokens: 4096
 

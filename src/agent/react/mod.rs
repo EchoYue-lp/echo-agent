@@ -71,7 +71,7 @@ mod extract;
 pub mod loop_detector;
 #[cfg(feature = "tasks")]
 mod planning;
-mod run;
+pub mod run;
 pub mod structured;
 pub(crate) mod subsystems;
 #[cfg(test)]
@@ -154,9 +154,6 @@ pub struct ReactAgent {
     /// delegates to this pipeline instead of the inline implementation.
     pub(crate) tool_execution_pipeline: Option<Arc<run::pipeline::ToolExecutionPipeline>>,
 
-    /// Optional context assembler for centralized message list construction.
-    pub(crate) context_assembler: Option<crate::context::ContextAssembler>,
-
     /// Optional prompt template engine for variable substitution.
     /// When set, system prompts can use template syntax (`{{variable}}`)
     /// and the engine resolves them dynamically.
@@ -185,6 +182,18 @@ pub struct ReactAgent {
     /// tokens across all LLM calls in this agent's lifetime.
     /// Prefer reading real usage from API responses; falls back to estimation.
     pub(crate) token_tracker: Arc<echo_core::tokenizer::TokenUsageTracker>,
+
+    /// Optional intent router for pre-ReAct classification and routing.
+    pub(crate) intent_router: Option<crate::intent::IntentRouter>,
+
+    /// Optional runtime state store for task checkpointing.
+    pub(crate) state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
+
+    /// Current plan text (set by PlanTool, captured in checkpoints).
+    pub(crate) plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
+
+    /// Optional Critic for final_answer verification.
+    pub(crate) critic: Option<Arc<dyn echo_core::agent::Critic>>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -401,13 +410,16 @@ impl ReactAgent {
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
-            context_assembler: None,
             prompt_template_engine: None,
             current_turn: std::sync::Mutex::new(None),
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
             execution_mutex: Arc::new(tokio::sync::Mutex::new(())),
             token_tracker: Arc::new(echo_core::tokenizer::TokenUsageTracker::new(model_name)),
+            intent_router: None,
+            state_store: None,
+            plan_state: Arc::new(tokio::sync::RwLock::new(None)),
+            critic: None,
         }
     }
 
@@ -666,7 +678,17 @@ impl ReactAgent {
         self.tools
             .tool_manager
             .register(Box::new(ForgetTool::new(store.clone(), ns)));
-        self.memory.store = Some(store);
+        self.memory.store = Some(store.clone());
+
+        // ── L3 Memory Promotion ──
+        // Wire a StoreMemoryPromoter into the ContextManager so that
+        // messages evicted during compression are promoted to long-term memory.
+        if let Ok(mut ctx) = self.memory.context.try_lock() {
+            let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
+            ctx.set_memory_promoter(promoter);
+        } else {
+            tracing::warn!("Could not acquire ContextManager lock to set memory promoter");
+        }
     }
 
     /// Get a read-only reference to the current long-term memory Store.
@@ -716,12 +738,27 @@ impl ReactAgent {
     }
 
     /// Get the list of registered Skill names.
-    pub fn skill_names(&self) -> Vec<&str> {
+    pub fn skill_names(&self) -> Vec<String> {
         self.tools
             .skill_registry
             .list()
             .iter()
-            .map(|s| s.name.as_str())
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    /// Get all registered file-based skill descriptors.
+    ///
+    /// Returns the full [`SkillDescriptor`] list including triggers,
+    /// allowed-tools, and other frontmatter metadata.
+    pub fn skill_descriptors(
+        &self,
+    ) -> Vec<echo_execution::skills::external::types::SkillDescriptor> {
+        self.tools
+            .skill_registry
+            .list_descriptors()
+            .into_iter()
+            .cloned()
             .collect()
     }
 
@@ -866,6 +903,67 @@ impl ReactAgent {
         *guard = Some(manager);
     }
 
+    // ── Pool resource injection setters ─────────────────────────────────────
+    //
+    // These setters allow the product layer to replace internally-created
+    // resources with shared (Arc-cloned) instances from an AgentPool.
+
+    /// Replace the tool manager with a shared instance (for AgentPool).
+    pub fn set_tool_manager(&mut self, tm: Arc<echo_execution::tools::ToolManager>) {
+        self.tools.tool_manager = tm;
+    }
+
+    /// Replace the hook registry with a shared instance (for AgentPool).
+    pub fn set_hook_registry(
+        &mut self,
+        hr: Arc<tokio::sync::RwLock<crate::skills::hooks::HookRegistry>>,
+    ) {
+        self.tools.hook_registry = hr;
+    }
+
+    /// Replace the token usage tracker with a shared instance (for AgentPool).
+    pub fn set_token_tracker(&mut self, tt: Arc<echo_core::tokenizer::TokenUsageTracker>) {
+        self.token_tracker = tt;
+    }
+
+    /// Replace the tool execution pipeline with a shared instance (for AgentPool).
+    pub fn set_tool_execution_pipeline(
+        &mut self,
+        pipeline: Arc<run::pipeline::ToolExecutionPipeline>,
+    ) {
+        self.tool_execution_pipeline = Some(pipeline);
+    }
+
+    /// Replace the runtime state store with a shared instance (for AgentPool).
+    pub fn set_state_store(&mut self, store: Arc<dyn crate::state::RuntimeStateStore>) {
+        self.state_store = Some(store);
+    }
+
+    /// Replace the run store with a shared instance (for AgentPool).
+    pub fn set_run_store(&mut self, store: Arc<dyn crate::trace::RunStore>) {
+        self.run_store = Some(store);
+    }
+
+    /// Get the run store, if configured.
+    pub fn run_store(&self) -> Option<&Arc<dyn crate::trace::RunStore>> {
+        self.run_store.as_ref()
+    }
+
+    /// Set the intent router for pre-ReAct intent classification.
+    pub fn set_intent_router(&mut self, router: crate::intent::IntentRouter) {
+        self.intent_router = Some(router);
+    }
+
+    /// Set the Critic for final_answer verification.
+    ///
+    /// When set and `config.verifier_enabled` is true, the agent will evaluate
+    /// each final_answer with the Critic before accepting it. If the score is
+    /// below `config.verifier_min_score`, the feedback is injected as a system
+    /// message and the agent continues iterating to self-correct.
+    pub fn set_critic(&mut self, critic: Arc<dyn echo_core::agent::Critic>) {
+        self.critic = Some(critic);
+    }
+
     /// Manually capture a snapshot of the current conversation state, returning the snapshot ID.
     pub async fn snapshot(&self) -> Option<String> {
         let ctx = self.memory.context.lock().await;
@@ -999,6 +1097,94 @@ impl ReactAgent {
     /// prompt as the first entry if needed.
     pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) {
         self.memory.context.lock().await.set_messages(messages);
+    }
+
+    /// Resume agent state from a [`RuntimeStateStore`](crate::state::RuntimeStateStore) checkpoint.
+    ///
+    /// Loads the most recent [`AgentCheckpoint`](crate::state::AgentCheckpoint) for
+    /// the configured `conversation_id`, deserializes the saved messages, and
+    /// restores them into the context manager.
+    ///
+    /// Returns the checkpoint metadata (plan, skills, blocked_reason) if a
+    /// checkpoint was found and restored, or `None` if no state store is
+    /// configured or no checkpoint exists.
+    pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
+        let Some(ref store) = self.state_store else {
+            return Ok(None);
+        };
+        let Some(ref conv_id) = self.config.conversation_id else {
+            tracing::debug!("resume_from_state_store: no conversation_id configured");
+            return Ok(None);
+        };
+
+        let checkpoint = store.get_checkpoint(conv_id).await?;
+        if let Some(ref cp) = checkpoint {
+            let messages: Vec<crate::llm::types::Message> = serde_json::from_str(&cp.messages_json)
+                .map_err(|e| {
+                    crate::error::ReactError::RuntimeState(Box::new(
+                        echo_core::error::RuntimeStateError::SerializationError(format!(
+                            "Failed to deserialize checkpoint messages: {}",
+                            e
+                        )),
+                    ))
+                })?;
+
+            let msg_count = messages.len();
+            self.memory.context.lock().await.set_messages(messages);
+
+            // Restore plan state
+            if let Some(ref plan) = cp.current_plan {
+                *self.plan_state.write().await = Some(plan.clone());
+                tracing::debug!(plan_len = plan.len(), "Restored plan state from checkpoint");
+            }
+
+            // Re-activate skills
+            for skill_name in &cp.active_skills {
+                self.tools.skill_registry.mark_activated(skill_name);
+            }
+            if !cp.active_skills.is_empty() {
+                tracing::debug!(
+                    skills = ?cp.active_skills,
+                    "Re-activated skills from checkpoint"
+                );
+            }
+
+            // Hydrate any Running TaskNodes (mark them as Hydrated for resume)
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+            snapshot.hydrate_running_nodes().await;
+
+            // Log blocked reason if any
+            if let Some(ref reason) = cp.blocked_reason {
+                tracing::info!(
+                    reason = %reason,
+                    "Resumed with blocked state from checkpoint"
+                );
+            }
+
+            tracing::info!(
+                conversation_id = conv_id.as_str(),
+                message_count = msg_count,
+                blocked_reason = ?cp.blocked_reason,
+                "Resumed from RuntimeStateStore checkpoint"
+            );
+        } else {
+            tracing::debug!(
+                conversation_id = conv_id.as_str(),
+                "No checkpoint found in RuntimeStateStore"
+            );
+        }
+        Ok(checkpoint)
+    }
+
+    /// Force-save a runtime checkpoint immediately.
+    ///
+    /// Useful for user-initiated checkpoint saves (e.g., `/checkpoint` command).
+    /// Silently no-ops if no state store or conversation_id is configured.
+    pub async fn force_checkpoint(&self) {
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        snapshot
+            .save_runtime_checkpoint(&self.memory.context, None)
+            .await;
     }
 
     const MAX_READ_FILES: usize = 1024;
@@ -1209,10 +1395,26 @@ impl ReactAgent {
     ///
     /// Accepted values: "default", "plan", "auto-edit", "full-auto", "auto", "dontask".
     /// When "plan" is set, write operations are rejected (equivalent to plan_mode).
+    /// Also propagates to `PermissionService` if wired (sync, non-blocking).
     pub fn set_permission_mode(&mut self, mode: &str) {
         self.config.permission_mode = mode.to_string();
         // Sync plan_mode flag for consistency
         self.config.plan_mode = mode == "plan";
+
+        // Propagate to PermissionService (if wired)
+        #[cfg(feature = "human-loop")]
+        if let Some(ref service) = self.approval.permission_service {
+            use echo_core::tools::permission::PermissionMode;
+            let pm = match mode {
+                "full-auto" => PermissionMode::BypassPermissions,
+                "plan" => PermissionMode::Plan,
+                "auto-edit" | "accept-edits" => PermissionMode::AcceptEdits,
+                "auto" => PermissionMode::Auto,
+                "dontask" | "dont-ask" => PermissionMode::DontAsk,
+                _ => PermissionMode::Default,
+            };
+            service.set_mode_sync(pm);
+        }
     }
 
     /// Get the current permission mode.
@@ -1221,8 +1423,7 @@ impl ReactAgent {
     }
 
     pub fn set_max_iterations(&mut self, max: usize) {
-        assert!(max > 0, "max_iterations must be > 0");
-        self.config.max_iterations = max;
+        self.config.max_iterations = max.max(1);
     }
 
     /// Delegate a task to a subagent by name.
