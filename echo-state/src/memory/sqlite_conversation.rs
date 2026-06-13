@@ -421,4 +421,48 @@ impl ConversationStore for SqliteConversationStore {
             Ok(count as usize)
         })
     }
+
+    fn search_conversations<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<ConversationMeta>>> {
+        Box::pin(async move {
+            let conn = self.conn.lock().await;
+            let pattern = format!("%{}%", query);
+
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT c.id, c.conversation_id, c.user_id, c.title,
+                            c.created_at, c.updated_at,
+                            (SELECT COUNT(*) FROM message WHERE conversation_id = c.conversation_id) AS msg_count
+                     FROM conversation c
+                     LEFT JOIN message m ON c.conversation_id = m.conversation_id
+                     WHERE c.title LIKE ?1 OR m.content LIKE ?1
+                     ORDER BY c.updated_at DESC
+                     LIMIT ?2",
+                )
+                .map_err(|e| memory_io_error("failed to prepare search query", e))?;
+
+            let rows = stmt
+                .query_map(params![pattern, limit as i64], |row| {
+                    Ok(ConversationMeta {
+                        id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        user_id: row.get(2)?,
+                        title: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        message_count: row.get::<_, i64>(6).unwrap_or(0) as usize,
+                    })
+                })
+                .map_err(|e| memory_io_error("failed to search conversations", e))?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| memory_io_error("failed to read search row", e))?);
+            }
+            Ok(result)
+        })
+    }
 }

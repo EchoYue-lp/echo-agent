@@ -43,8 +43,6 @@ use crate::tools::builtin::check_task::{CheckTaskStatusTool, ListBackgroundTasks
 use crate::tools::builtin::human_in_loop::HumanInLoop;
 use crate::tools::builtin::memory::{ForgetTool, RecallTool, RememberTool, SearchMemoryTool};
 #[cfg(feature = "tasks")]
-use crate::tools::builtin::plan::PlanTool;
-#[cfg(feature = "tasks")]
 use crate::tools::builtin::spawn_task::SpawnBackgroundTaskTool;
 #[cfg(feature = "tasks")]
 use crate::tools::builtin::task::{
@@ -317,7 +315,6 @@ impl ReactAgent {
         #[cfg(feature = "tasks")]
         if config.enable_task {
             // DAG planning tools
-            tool_manager.register(Box::new(PlanTool));
             tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
             tool_manager.register(Box::new(UpdateTaskTool::new(task_manager.clone())));
             tool_manager.register(Box::new(ListTasksTool::new(task_manager.clone())));
@@ -580,8 +577,7 @@ impl ReactAgent {
     /// ).with_llm_config(llm_config);
     /// ```
     pub fn with_llm_config(mut self, config: LlmConfig) -> Self {
-        self.config.model_name = config.model.clone();
-        self.llm_config = Some(config);
+        self.set_llm_config(config);
         self
     }
 
@@ -593,8 +589,32 @@ impl ReactAgent {
     }
 
     /// Set the LLM configuration.
+    ///
+    /// Builds an LLM client from the config and sets it so that subsequent API
+    /// calls use the provided credentials instead of falling back to environment
+    /// variables or YAML model configuration files.
     pub fn set_llm_config(&mut self, config: LlmConfig) {
         self.config.model_name = config.model.clone();
+        // Try to build a client from the config. If it succeeds, set it so the
+        // runtime uses these credentials. If it fails (e.g. invalid API key),
+        // leave llm_client as None so the runtime falls back to env vars /
+        // echo-agent-models.yaml.
+        match config.build_client() {
+            Ok(client) => {
+                tracing::info!(
+                    model = %config.model,
+                    "LLM client built from LlmConfig, credential injection active"
+                );
+                self.llm_client = Some(Arc::from(client));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    model = %config.model,
+                    error = %e,
+                    "Failed to build LLM client from LlmConfig, will fall back to env vars / models.yaml"
+                );
+            }
+        }
         self.llm_config = Some(config);
     }
 
@@ -1597,17 +1617,44 @@ impl Agent for ReactAgent {
     }
 
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
-        let agent = self.config.agent_name.clone();
+        let agent_name = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
+        let agent_name_for_span = agent_name.clone();
+        let model_for_span = model.clone();
         Box::pin(
             async move {
+                // Check planning policy to determine execution mode
                 #[cfg(feature = "tasks")]
                 if self.has_planning_tools() {
-                    return self.execute_with_planning(task).await;
+                    use echo_orchestration::planning::{PlanningContext, ExecutionMode};
+
+                    // Create planning context and analyze the task
+                    let mut planning_context = PlanningContext::new(task);
+                    planning_context.analyze_goal();
+
+                    // Note: Context pressure estimation requires access to ContextManager internals
+                    // which are not exposed. For now, we skip this check and rely on other rules.
+                    // Future improvement: expose token_limit and token_estimate methods.
+
+                    // Check if policy recommends planning
+                    let decision = self.config.planning_policy.should_plan(&planning_context);
+                    match decision {
+                        ExecutionMode::Plan { reason } => {
+                            tracing::info!(
+                                agent = %agent_name,
+                                reason = %reason,
+                                "Planning policy triggered planning mode"
+                            );
+                            return self.execute_with_planning(task).await;
+                        }
+                        ExecutionMode::DirectExecute => {
+                            // Fall through to normal execution
+                        }
+                    }
                 }
                 self.run_direct(task).await
             }
-            .instrument(info_span!("agent_execute", agent.name = %agent, agent.model = %model)),
+            .instrument(info_span!("agent_execute", agent.name = %agent_name_for_span, agent.model = %model_for_span)),
         )
     }
 

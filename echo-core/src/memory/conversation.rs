@@ -156,4 +156,50 @@ pub trait ConversationStore: Send + Sync {
             }
         })
     }
+
+    /// Search conversations by query matching title and message content.
+    ///
+    /// Default implementation scans all conversations and their messages (naive).
+    /// Backends with full-text search (e.g. SQLite) should override.
+    fn search_conversations<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<ConversationMeta>>> {
+        Box::pin(async move {
+            let all = self
+                .list_conversations(ConversationFilter {
+                    limit: Some(100),
+                    ..Default::default()
+                })
+                .await?;
+            let query_lower = query.to_lowercase();
+            let mut results = Vec::new();
+            for meta in all {
+                // Match title
+                let title_match = meta
+                    .title
+                    .as_ref()
+                    .is_some_and(|t| t.to_lowercase().contains(&query_lower));
+                // Match message content
+                let content_match = if title_match {
+                    true
+                } else {
+                    let messages = self.get_messages(&meta.conversation_id).await?;
+                    messages.iter().any(|m| {
+                        m.content
+                            .as_ref()
+                            .is_some_and(|c| c.to_lowercase().contains(&query_lower))
+                    })
+                };
+                if title_match || content_match {
+                    results.push(meta);
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            Ok(results)
+        })
+    }
 }
