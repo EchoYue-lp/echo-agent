@@ -93,7 +93,11 @@ impl PluginRegistry {
     }
 
     /// Create a registry with custom paths (useful for testing).
-    pub fn with_paths(state_file: PathBuf, data_dir: PathBuf, project_root: Option<PathBuf>) -> Self {
+    pub fn with_paths(
+        state_file: PathBuf,
+        data_dir: PathBuf,
+        project_root: Option<PathBuf>,
+    ) -> Self {
         Self {
             plugins: HashMap::new(),
             state_file,
@@ -206,7 +210,11 @@ impl PluginRegistry {
         if !errors.is_empty() {
             return Err(format!(
                 "Manifest validation failed: {}",
-                errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
 
@@ -214,12 +222,14 @@ impl PluginRegistry {
         let dest = target_dir.join(&plugin_id);
 
         if dest.exists() {
-            return Err(format!("Plugin '{plugin_id}' is already installed at {}", dest.display()));
+            return Err(format!(
+                "Plugin '{plugin_id}' is already installed at {}",
+                dest.display()
+            ));
         }
 
         // Copy directory recursively
-        copy_dir_recursive(src, &dest)
-            .map_err(|e| format!("Failed to copy plugin: {e}"))?;
+        copy_dir_recursive(src, &dest).map_err(|e| format!("Failed to copy plugin: {e}"))?;
 
         let entry = PluginEntry {
             manifest,
@@ -393,7 +403,10 @@ impl PluginRegistry {
             .filter(|e| {
                 e.manifest.name.to_lowercase().contains(&q)
                     || e.manifest.description.to_lowercase().contains(&q)
-                    || e.manifest.keywords.iter().any(|k| k.to_lowercase().contains(&q))
+                    || e.manifest
+                        .keywords
+                        .iter()
+                        .any(|k| k.to_lowercase().contains(&q))
             })
             .collect()
     }
@@ -724,9 +737,8 @@ mod tests {
         let manifest_dir = plugin_dir.join(".echo-plugin");
         std::fs::create_dir_all(&manifest_dir).unwrap();
 
-        let manifest = format!(
-            "name: {name}\nversion: \"1.0.0\"\ndescription: \"Test plugin {name}\""
-        );
+        let manifest =
+            format!("name: {name}\nversion: \"1.0.0\"\ndescription: \"Test plugin {name}\"");
         std::fs::write(manifest_dir.join("manifest.yaml"), manifest).unwrap();
 
         // Create a skills directory
@@ -762,11 +774,7 @@ mod tests {
 
         // We need to override HOME for the test
         // Instead, use with_paths directly
-        let mut reg = PluginRegistry::with_paths(
-            tmp.join("registry.json"),
-            tmp.join("data"),
-            None,
-        );
+        let mut reg = PluginRegistry::with_paths(tmp.join("registry.json"), tmp.join("data"), None);
 
         // Manually scan the directory
         let count = reg.scan_scope_dir(PluginScope::User, &user_dir).unwrap();
@@ -855,10 +863,15 @@ mod tests {
 
         // Create plugins with dependencies: A depends on B, B depends on C
         let yaml_c = "name: plugin-c\nversion: \"1.0.0\"\ndescription: \"C\"";
-        let yaml_b = "name: plugin-b\nversion: \"1.0.0\"\ndescription: \"B\"\ndependencies:\n  - plugin-c";
+        let yaml_b =
+            "name: plugin-b\nversion: \"1.0.0\"\ndescription: \"B\"\ndependencies:\n  - plugin-c";
         let yaml_a = "name: plugin-a\nversion: \"1.0.0\"\ndescription: \"A\"\ndependencies:\n  - name: plugin-b\n    version: \">=1.0.0\"";
 
-        for (name, yaml) in [("plugin-c", yaml_c), ("plugin-b", yaml_b), ("plugin-a", yaml_a)] {
+        for (name, yaml) in [
+            ("plugin-c", yaml_c),
+            ("plugin-b", yaml_b),
+            ("plugin-a", yaml_a),
+        ] {
             let manifest: PluginManifest = PluginManifest::from_yaml(yaml).unwrap();
             reg.plugins.insert(
                 name.to_string(),

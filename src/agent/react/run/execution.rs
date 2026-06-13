@@ -346,6 +346,9 @@ impl ReactAgent {
             HashMap::new()
         };
 
+        // Create a snapshot for the pipeline
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+
         let mut ctx = crate::agent::react::run::pipeline::ToolExecutionContext {
             call_id: format!("call_{}", uuid::Uuid::new_v4()),
             tool_name: tool_name.to_string(),
@@ -360,7 +363,7 @@ impl ReactAgent {
             plan_mode: self.config.plan_mode,
         };
 
-        match pipeline.run(&mut ctx, self).await {
+        match pipeline.run(&mut ctx, &snapshot).await {
             Ok(()) => {
                 if ctx.blocked {
                     return Ok(ToolExecutionOutcome {

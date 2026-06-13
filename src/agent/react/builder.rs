@@ -1,5 +1,6 @@
 //! Agent builder
 
+use crate::agent::config::DEFAULT_TOKEN_LIMIT;
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
 use crate::agent::{Agent, AgentCallback, AgentConfig, AgentRole, InterventionCallback};
 use crate::audit::AuditLogger;
@@ -8,7 +9,6 @@ use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
 use crate::llm::{LlmClient, LlmConfig, OpenAiClient, ResponseFormat};
-use crate::memory::checkpointer::Checkpointer;
 use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
 use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
@@ -45,7 +45,6 @@ pub struct ReactAgentBuilder {
     temperature: Option<f32>,
     callbacks: Vec<Arc<dyn AgentCallback>>,
     store: Option<Arc<dyn Store>>,
-    checkpointer: Option<Arc<dyn Checkpointer>>,
     session_id: Option<String>,
     conversation_id: Option<String>,
     #[cfg(feature = "human-loop")]
@@ -103,12 +102,11 @@ impl ReactAgentBuilder {
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
-            token_limit: usize::MAX,
+            token_limit: DEFAULT_TOKEN_LIMIT,
             max_tokens: None,
             temperature: None,
             callbacks: Vec::new(),
             store: None,
-            checkpointer: None,
             session_id: None,
             conversation_id: None,
             #[cfg(feature = "human-loop")]
@@ -525,24 +523,6 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Set Checkpointer (also sets session_id)
-    pub fn checkpointer(
-        mut self,
-        checkpointer: Arc<dyn Checkpointer>,
-        session_id: impl Into<String>,
-    ) -> Self {
-        self.checkpointer = Some(checkpointer);
-        self.session_id = Some(session_id.into());
-        self
-    }
-
-    /// Set Checkpointer (using the already-set session_id)
-    /// Must call session_id() first to set the thread identifier
-    pub fn checkpointer_only(mut self, checkpointer: Arc<dyn Checkpointer>) -> Self {
-        self.checkpointer = Some(checkpointer);
-        self
-    }
-
     /// Set session_id (thread identifier)
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
@@ -780,11 +760,6 @@ impl ReactAgentBuilder {
             agent.set_memory_store(store);
         }
 
-        // Set Checkpointer
-        if let (Some(checkpointer), Some(session_id)) = (self.checkpointer, self.session_id) {
-            agent.set_checkpointer(checkpointer, session_id);
-        }
-
         #[cfg(feature = "human-loop")]
         if let Some(provider) = self.approval_provider {
             agent.set_approval_provider(provider);
@@ -842,18 +817,7 @@ impl ReactAgentBuilder {
 
         // Set runtime state store
         if let Some(store) = self.state_store {
-            agent.state_store = Some(store);
-        }
-
-        // Replace plain PlanTool with stateful PlanToolWithState so that
-        // save_runtime_checkpoint can capture the current plan text.
-        #[cfg(feature = "tasks")]
-        if self.enable_task {
-            use crate::tools::builtin::plan::PlanToolWithState;
-            agent
-                .tools
-                .tool_manager
-                .register(Box::new(PlanToolWithState::new(agent.plan_state.clone())));
+            agent.memory.state_store = Some(store);
         }
 
         // Set visibility horizon on the ContextManager

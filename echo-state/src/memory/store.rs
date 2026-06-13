@@ -153,6 +153,53 @@ impl Store for InMemoryStore {
                 .unwrap_or_default())
         })
     }
+
+    fn prune_expired<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
+        let ns_key = namespace.join("/");
+        Box::pin(async move {
+            let mut data = self.data.write().await;
+            let Some(bucket) = data.get_mut(&ns_key) else {
+                return Ok(0);
+            };
+            let before = bucket.len();
+            let now = now_secs();
+            bucket.retain(|_k, item| is_item_valid(item, now));
+            Ok((before - bucket.len()) as u64)
+        })
+    }
+
+    fn dedup_by_content<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
+        let ns_key = namespace.join("/");
+        Box::pin(async move {
+            let mut data = self.data.write().await;
+            let Some(bucket) = data.get_mut(&ns_key) else {
+                return Ok(0);
+            };
+            let before = bucket.len();
+            let mut seen: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+            let mut to_remove: Vec<String> = Vec::new();
+            for (key, item) in bucket.iter() {
+                let hash = content_hash(&item.value);
+                if let Some(existing_key) = seen.get(&hash) {
+                    // Keep the newer one
+                    let existing_updated =
+                        bucket.get(existing_key).map(|i| i.updated_at).unwrap_or(0);
+                    if item.updated_at > existing_updated {
+                        to_remove.push(existing_key.clone());
+                        seen.insert(hash, key.clone());
+                    } else {
+                        to_remove.push(key.clone());
+                    }
+                } else {
+                    seen.insert(hash, key.clone());
+                }
+            }
+            for key in &to_remove {
+                bucket.remove(key);
+            }
+            Ok((before - bucket.len()) as u64)
+        })
+    }
 }
 
 // ── FileStore ─────────────────────────────────────────────────────────────────
@@ -197,12 +244,23 @@ impl FileStore {
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
         let tmp = format!("{}.tmp", self.path.display());
-        tokio::fs::write(&tmp, &json)
-            .await
-            .map_err(|e| MemoryError::IoError(e.to_string()))?;
-        tokio::fs::rename(&tmp, &self.path)
-            .await
-            .map_err(|e| MemoryError::IoError(e.to_string()))?;
+        // Atomic write: write to tmp, sync, then rename — matches FileCheckpointer pattern
+        {
+            let mut file = tokio::fs::File::create(&tmp)
+                .await
+                .map_err(|e| MemoryError::IoError(e.to_string()))?;
+            use tokio::io::AsyncWriteExt;
+            file.write_all(json.as_bytes())
+                .await
+                .map_err(|e| MemoryError::IoError(e.to_string()))?;
+            file.sync_all()
+                .await
+                .map_err(|e| MemoryError::IoError(e.to_string()))?;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &self.path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(MemoryError::IoError(e.to_string()).into());
+        }
         debug!(path = %self.path.display(), "Store persisted");
         Ok(())
     }
@@ -356,9 +414,86 @@ impl Store for FileStore {
                 .unwrap_or_default())
         })
     }
+
+    fn prune_expired<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
+        let ns_key = namespace.join("/");
+        Box::pin(async move {
+            let mut data = self.data.write().await;
+            let Some(bucket) = data.get_mut(&ns_key) else {
+                return Ok(0);
+            };
+            let before = bucket.len();
+            let now = now_secs();
+            bucket.retain(|_k, item| is_item_valid(item, now));
+            let removed = (before - bucket.len()) as u64;
+            if removed > 0 {
+                let _ = self.flush().await;
+            }
+            Ok(removed)
+        })
+    }
+
+    fn dedup_by_content<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
+        let ns_key = namespace.join("/");
+        Box::pin(async move {
+            let mut data = self.data.write().await;
+            let Some(bucket) = data.get_mut(&ns_key) else {
+                return Ok(0);
+            };
+            let before = bucket.len();
+            let mut seen: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+            let mut to_remove: Vec<String> = Vec::new();
+            for (key, item) in bucket.iter() {
+                let hash = content_hash(&item.value);
+                if let Some(existing_key) = seen.get(&hash) {
+                    let existing_updated =
+                        bucket.get(existing_key).map(|i| i.updated_at).unwrap_or(0);
+                    if item.updated_at > existing_updated {
+                        to_remove.push(existing_key.clone());
+                        seen.insert(hash, key.clone());
+                    } else {
+                        to_remove.push(key.clone());
+                    }
+                } else {
+                    seen.insert(hash, key.clone());
+                }
+            }
+            for key in &to_remove {
+                bucket.remove(key);
+            }
+            let removed = (before - bucket.len()) as u64;
+            if removed > 0 {
+                let _ = self.flush().await;
+            }
+            Ok(removed)
+        })
+    }
 }
 
 // ── Private utility functions ───────────────────────────────────────────────────
+
+/// Compute a simple content hash for deduplication.
+fn content_hash(value: &serde_json::Value) -> u64 {
+    echo_core::utils::hash::fnv1a_64(value.to_string().as_bytes())
+}
+
+/// Check if a StoreItem is still valid (not expired).
+/// Checks both `item.expires_at` (metadata) and `item.value["expires_at"]` (JSON).
+fn is_item_valid(item: &StoreItem, now: u64) -> bool {
+    // Check metadata field first
+    if let Some(exp) = item.expires_at {
+        if exp <= now {
+            return false;
+        }
+    }
+    // Also check JSON value for embedded expiry (used by MemoryPromoter)
+    if let Some(exp) = item.value.get("expires_at").and_then(|v| v.as_u64()) {
+        if exp <= now {
+            return false;
+        }
+    }
+    true
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()

@@ -14,8 +14,8 @@ use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 
 use crate::git_worktree::{
-    create_worktree, list_worktrees, merge_worktree, remove_worktree, ManagedWorktree,
-    WorktreeConfig,
+    ManagedWorktree, WorktreeConfig, create_worktree, list_worktrees, merge_worktree,
+    remove_worktree,
 };
 
 // ── Enter Worktree ──────────────────────────────────────────────────────────
@@ -174,9 +174,7 @@ impl Tool for ExitWorktreeTool {
                 .get("worktree_path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("worktree_path".to_string()))?;
-            let merge_to = parameters
-                .get("merge_to")
-                .and_then(|v| v.as_str());
+            let merge_to = parameters.get("merge_to").and_then(|v| v.as_str());
             let repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
@@ -184,12 +182,11 @@ impl Tool for ExitWorktreeTool {
 
             // Determine the branch name from the worktree path.
             // We look up the worktree in the list to get its branch.
-            let worktrees = list_worktrees(Path::new(repo_path)).map_err(|e| {
-                ToolError::ExecutionFailed {
+            let worktrees =
+                list_worktrees(Path::new(repo_path)).map_err(|e| ToolError::ExecutionFailed {
                     tool: "exit_worktree".to_string(),
                     message: e,
-                }
-            })?;
+                })?;
 
             let wt = worktrees
                 .iter()
@@ -222,11 +219,9 @@ impl Tool for ExitWorktreeTool {
             };
 
             // Remove the worktree
-            remove_worktree(Path::new(repo_path), &wt).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: "exit_worktree".to_string(),
-                    message: e,
-                }
+            remove_worktree(Path::new(repo_path), &wt).map_err(|e| ToolError::ExecutionFailed {
+                tool: "exit_worktree".to_string(),
+                message: e,
             })?;
 
             let msg = match merge_msg {
@@ -283,12 +278,11 @@ impl Tool for ListWorktreesTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
 
-            let worktrees = list_worktrees(Path::new(repo_path)).map_err(|e| {
-                ToolError::ExecutionFailed {
+            let worktrees =
+                list_worktrees(Path::new(repo_path)).map_err(|e| ToolError::ExecutionFailed {
                     tool: "list_worktrees".to_string(),
                     message: e,
-                }
-            })?;
+                })?;
 
             if worktrees.is_empty() {
                 return Ok(ToolResult::success(

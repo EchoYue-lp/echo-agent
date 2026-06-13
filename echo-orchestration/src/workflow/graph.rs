@@ -601,9 +601,10 @@ impl Graph {
             // Check cancellation at each node boundary
             if self.is_cancelled() {
                 warn!(graph = %self.name, steps = step_count, "Graph execution cancelled");
-                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                    format!("Graph '{}' cancelled after {} steps", self.name, step_count),
-                ))));
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                    "Graph '{}' cancelled after {} steps",
+                    self.name, step_count
+                )))));
             }
 
             // Prevent infinite loop
@@ -743,9 +744,10 @@ impl Graph {
             // Check cancellation at each node boundary
             if self.is_cancelled() {
                 warn!(graph = %self.name, steps = step_count, "Graph execution (with interrupt) cancelled");
-                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                    format!("Graph '{}' cancelled after {} steps", self.name, step_count),
-                ))));
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                    "Graph '{}' cancelled after {} steps",
+                    self.name, step_count
+                )))));
             }
 
             // Prevent infinite loop
@@ -959,9 +961,10 @@ impl Graph {
             // Check cancellation at each node boundary
             if self.is_cancelled() {
                 warn!(graph = %self.name, steps = step_count, "Graph resume cancelled");
-                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                    format!("Graph '{}' resume cancelled after {} steps", self.name, step_count),
-                ))));
+                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                    "Graph '{}' resume cancelled after {} steps",
+                    self.name, step_count
+                )))));
             }
 
             if step_count >= self.max_steps {

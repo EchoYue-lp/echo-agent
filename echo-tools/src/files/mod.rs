@@ -68,10 +68,8 @@ fn resolve_path(tool: &str, path_str: &str, base_dir: &Option<PathBuf>) -> Resul
                 if let Some(parent) = normalized.parent() {
                     if parent != Path::new("") {
                         if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
-                            let canonical_base =
-                                std::fs::canonicalize(&normalized_base).unwrap_or_else(|_| {
-                                    normalized_base.clone()
-                                });
+                            let canonical_base = std::fs::canonicalize(&normalized_base)
+                                .unwrap_or_else(|_| normalized_base.clone());
                             if !canonical_parent.starts_with(&canonical_base) {
                                 return Err(ToolError::ExecutionFailed {
                                     tool: tool.to_string(),
@@ -82,9 +80,7 @@ fn resolve_path(tool: &str, path_str: &str, base_dir: &Option<PathBuf>) -> Resul
                                 }
                                 .into());
                             }
-                            let filename = normalized
-                                .file_name()
-                                .unwrap_or_default();
+                            let filename = normalized.file_name().unwrap_or_default();
                             return Ok(canonical_parent.join(filename));
                         }
                     }

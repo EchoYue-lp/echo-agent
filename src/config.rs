@@ -115,15 +115,47 @@ impl AppConfig {
         let window = self.agent.compress_window.max(2);
         match self.agent.compress_strategy.as_str() {
             "sliding" | "" => {
+                // Warn if token_limit exceeds model context window
+                if let Some(llm) = agent.llm_client() {
+                    let caps = llm.capabilities();
+                    if let Some(max_ctx) = caps.max_context_tokens {
+                        if self.agent.token_limit as u32 > max_ctx {
+                            tracing::warn!(
+                                token_limit = self.agent.token_limit,
+                                max_context = max_ctx,
+                                "token_limit exceeds model context window; compression may never trigger. \
+                                 Consider setting token_limit <= max_context_tokens."
+                            );
+                        }
+                    }
+                }
                 agent
                     .set_compressor(SlidingWindowCompressor::new(window))
                     .await;
             }
+            "adaptive" => {
+                use crate::compression::levels::{
+                    AdaptiveCompressionConfig, AdaptiveCompressor, tune_for_model,
+                };
+                let mut config = AdaptiveCompressionConfig::default();
+                // Auto-tune thresholds from model profile if available
+                if let Some(llm) = agent.llm_client() {
+                    let caps = llm.capabilities();
+                    if let Some(max_ctx) = caps.max_context_tokens {
+                        tune_for_model(&mut config, max_ctx as usize);
+                        tracing::info!(
+                            max_context = max_ctx,
+                            "Tuned adaptive compression for model"
+                        );
+                    }
+                }
+                agent.set_compressor(AdaptiveCompressor::new(config)).await;
+            }
             other => {
                 tracing::warn!(
                     strategy = other,
-                    "Strategy requires LlmClient; falling back to sliding. \
-                     For summary/hybrid, call agent.set_compressor() manually."
+                    "Unknown strategy; falling back to sliding. \
+                     Supported: sliding, adaptive"
                 );
                 agent
                     .set_compressor(SlidingWindowCompressor::new(window))

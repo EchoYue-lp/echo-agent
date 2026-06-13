@@ -112,12 +112,15 @@ impl Tool for ClinicalTrialsSearchTool {
 
             let client = shared_client();
 
-            let response = client.get(&url).send().await.map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("ClinicalTrials.gov API request failed: {}", e),
-                }
-            })?;
+            let response =
+                client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("ClinicalTrials.gov API request failed: {}", e),
+                    })?;
 
             let status = response.status();
             if !status.is_success() {
@@ -129,17 +132,15 @@ impl Tool for ClinicalTrialsSearchTool {
                 .into());
             }
 
-            let json: Value = response.json().await.map_err(|e| {
-                ToolError::ExecutionFailed {
+            let json: Value = response
+                .json()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("Failed to parse ClinicalTrials.gov response: {}", e),
-                }
-            })?;
+                })?;
 
-            let total_count = json
-                .get("totalCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let total_count = json.get("totalCount").and_then(|v| v.as_u64()).unwrap_or(0);
 
             let studies = json
                 .get("studies")

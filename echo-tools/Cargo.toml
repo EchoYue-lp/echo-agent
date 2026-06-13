@@ -17,9 +17,9 @@ default = []
 full = ["web", "chart", "data", "database", "media", "git", "rag", "shell", "files", "research", "statistics"]
 research = ["dep:quick-xml", "dep:lopdf"]
 shell = []
-files = []
+files = ["dep:encoding_rs"]
 web = ["dep:scraper", "dep:html2text", "dep:url", "dep:async-trait"]
-media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "dep:rust_xlsxwriter", "dep:chrono"]
+media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "dep:rust_xlsxwriter", "dep:chrono", "dep:html2text"]
 chart = []
 data = ["dep:polars"]
 statistics = ["data"]
@@ -41,7 +41,7 @@ schemars = "0.8"
 tracing = "0.1"
 regex = "1"
 tokio = { version = "1", features = ["process", "time", "rt", "macros", "sync", "fs"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 async-trait = { version = "0.1", optional = true }
 
 # Feature-gated dependencies

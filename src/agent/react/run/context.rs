@@ -3,8 +3,7 @@
 use super::super::ReactAgent;
 use super::types::StreamMode;
 use crate::llm::types::Message;
-use crate::memory::conversation::project_messages;
-use crate::memory::{NewConversation, SearchQuery, ThreadState};
+use crate::memory::SearchQuery;
 use crate::skills::hooks::{HookContext, HookEvent};
 use tracing::{debug, info, warn};
 
@@ -132,67 +131,29 @@ impl ReactAgent {
 
     pub(crate) async fn restore_thread_context(&self) {
         let agent = self.config.agent_name.clone();
-        let session_matcher;
+        let mut session_matcher = "startup";
 
-        // Try rich checkpoint first (RuntimeStateStore: messages + plan + skills)
-        if self.state_store.is_some() {
+        // Try RuntimeStateStore checkpoint (messages + plan + skills)
+        if self.memory.state_store.is_some() {
             match self.resume_from_state_store().await {
                 Ok(Some(_cp)) => {
                     info!(agent = %agent, "🔄 Restored from RuntimeStateStore checkpoint");
                     session_matcher = "resume";
-                    // Fall through to fire SessionStart hook
                 }
                 Ok(None) => {
-                    // No checkpoint in state store — fall through to legacy checkpointer
-                    return self.restore_from_legacy_checkpointer(agent).await;
+                    debug!(agent = %agent, "New session, starting from empty context");
+                    self.reset_messages().await;
                 }
                 Err(e) => {
-                    warn!(agent = %agent, error = %e, "⚠️ Failed to load RuntimeStateStore checkpoint, trying legacy checkpointer");
-                    return self.restore_from_legacy_checkpointer(agent).await;
-                }
-            }
-        } else {
-            return self.restore_from_legacy_checkpointer(agent).await;
-        }
-
-        // Fire SessionStart hook with appropriate matcher
-        let start_result = self
-            .fire_lifecycle_hook(HookEvent::SessionStart, Some(session_matcher))
-            .await;
-        if start_result.block {
-            warn!(agent = %self.config.agent_name, reason = ?start_result.block_reason, "SessionStart hook blocked session restore");
-        }
-    }
-
-    /// Restore from the legacy Checkpointer (messages only, no plan/skills).
-    async fn restore_from_legacy_checkpointer(&self, agent: String) {
-        let session_matcher;
-        if let (Some(cp), Some(tid)) = (&self.memory.checkpointer, &self.config.session_id) {
-            match cp.get_state(tid).await {
-                Ok(Some(state)) => {
-                    info!(agent = %agent, session_id = %tid, "🔄 Restoring session from thread state");
-                    self.memory
-                        .context
-                        .lock()
-                        .await
-                        .set_messages(state.messages);
-                    session_matcher = "resume";
-                }
-                Ok(None) => {
-                    debug!(agent = %agent, session_id = %tid, "New session, starting from empty context");
+                    warn!(agent = %agent, error = %e, "⚠️ Failed to load RuntimeStateStore checkpoint, starting from empty context");
                     self.reset_messages().await;
-                    return;
-                }
-                Err(e) => {
-                    warn!(agent = %agent, error = %e, "⚠️ Failed to load thread state, starting from empty context");
-                    self.reset_messages().await;
-                    return;
                 }
             }
         } else {
             self.reset_messages().await;
-            return;
         }
+
+        // Fire SessionStart hook with appropriate matcher
         let start_result = self
             .fire_lifecycle_hook(HookEvent::SessionStart, Some(session_matcher))
             .await;
@@ -210,73 +171,39 @@ impl ReactAgent {
         };
         let agent_name = self.config.agent_name.clone();
         let ns = vec![agent_name.as_str(), "memories"];
-        match store.search_with(&ns, SearchQuery::hybrid(query, 5)).await {
-            Ok(items) => Ok(items),
+
+        // Search user memories
+        let mut results = match store.search_with(&ns, SearchQuery::hybrid(query, 5)).await {
+            Ok(items) => items,
             Err(err) if format!("{err}").contains("hybrid search") => {
-                store.search(&ns, query, 5).await
+                store.search(&ns, query, 5).await?
             }
-            Err(err) => Err(err),
-        }
-    }
-
-    pub(crate) async fn sync_conversation_projection(&self) {
-        let Some(store) = &self.memory.conversation_store else {
-            return;
-        };
-        let Some(conversation_id) = self.config.get_conversation_id() else {
-            warn!(
-                agent = %self.config.agent_name,
-                "⚠️ ConversationStore configured but conversation_id is missing, skipping history projection"
-            );
-            return;
+            Err(err) => return Err(err),
         };
 
-        let new_conversation = NewConversation {
-            conversation_id: conversation_id.to_string(),
-            user_id: "default".to_string(),
-            agent_type: Some("react".to_string()),
-            title: None,
-        };
-
-        let messages = {
-            let ctx = self.memory.context.lock().await;
-            ctx.messages().to_vec()
-        };
-
-        let result = async {
-            store.ensure_conversation(new_conversation).await?;
-            let projected = project_messages(conversation_id, &messages)?;
-            store.save_messages(conversation_id, &projected).await
-        }
-        .await;
-
-        if let Err(e) = result {
-            warn!(
-                agent = %self.config.agent_name,
-                conversation_id = %conversation_id,
-                error = %e,
-                "⚠️ Conversation history projection save failed"
-            );
-        }
-    }
-
-    pub(crate) async fn persist_runtime_state(&self) {
-        if let (Some(cp), Some(tid)) = (&self.memory.checkpointer, self.config.session_id.clone()) {
-            let messages = {
-                let ctx = self.memory.context.lock().await;
-                ctx.messages().to_vec()
-            };
-            let state = ThreadState::from_messages(messages);
-            match cp.put_state(&tid, state).await {
-                Ok(cid) => {
-                    debug!(agent = %self.config.agent_name, session_id = %tid, checkpoint_id = %cid, "🔖 Thread state saved")
-                }
-                Err(e) => {
-                    warn!(agent = %self.config.agent_name, error = %e, "⚠️ Thread state save failed")
+        // Also search L3 promoted facts (compression auto-promoted memories)
+        let l3_ns: &[&str] = &["l3_promoted"];
+        if let Ok(l3_items) = store.search(l3_ns, query, 3).await {
+            // Merge and deduplicate by key
+            let existing_keys: std::collections::HashSet<String> =
+                results.iter().map(|i| i.key.clone()).collect();
+            for item in l3_items {
+                if !existing_keys.contains(&item.key) {
+                    results.push(item);
                 }
             }
         }
-        self.sync_conversation_projection().await;
+
+        // Sort by score descending, limit to 5
+        results.sort_by(|a, b| {
+            b.score
+                .unwrap_or_default()
+                .partial_cmp(&a.score.unwrap_or_default())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(5);
+
+        Ok(results)
     }
 
     pub(crate) async fn inject_hook_messages(
@@ -455,7 +382,7 @@ impl ReactAgent {
             && !items.is_empty()
         {
             recalled = items.len();
-            let mut lines = vec!["[Relevant historical memories]".to_string()];
+            let mut lines = vec!["[memory_context] Relevant historical memories:".to_string()];
             for (i, item) in items.iter().enumerate() {
                 let content_str = item
                     .value
@@ -465,12 +392,19 @@ impl ReactAgent {
                     .unwrap_or_else(|| item.value.to_string());
                 lines.push(format!("{}. {}", i + 1, content_str));
             }
-            lines.push("[The above memories are for reference, please answer with the current question in mind]".to_string());
+            lines.push(
+                "[The above memories are for reference; answer the user's CURRENT question.]"
+                    .to_string(),
+            );
+            // Inject as a system message — long-term memories are background context,
+            // not new user input. Pushing them as `Message::user` produced two
+            // consecutive user turns and confused the model into treating the
+            // recalled memory as a fresh request.
             self.memory
                 .context
                 .lock()
                 .await
-                .push(Message::user(lines.join("\n")));
+                .push(Message::system(lines.join("\n")));
         }
 
         // Push user message
@@ -506,7 +440,7 @@ impl ReactAgent {
             && !items.is_empty()
         {
             recalled = items.len();
-            let mut lines = vec!["[Relevant historical memories]".to_string()];
+            let mut lines = vec!["[memory_context] Relevant historical memories:".to_string()];
             for (i, item) in items.iter().enumerate() {
                 let content_str = item
                     .value
@@ -516,12 +450,16 @@ impl ReactAgent {
                     .unwrap_or_else(|| item.value.to_string());
                 lines.push(format!("{}. {}", i + 1, content_str));
             }
-            lines.push("[The above memories are for reference, please answer with the current question in mind]".to_string());
+            lines.push(
+                "[The above memories are for reference; answer the user's CURRENT question.]"
+                    .to_string(),
+            );
+            // System role — see prepare_stream_context for rationale.
             self.memory
                 .context
                 .lock()
                 .await
-                .push(Message::user(lines.join("\n")));
+                .push(Message::system(lines.join("\n")));
         }
 
         // Push multimodal user message

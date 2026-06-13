@@ -469,7 +469,12 @@ impl HookContext {
     }
 
     /// Generic constructor for lifecycle events that don't have a dedicated factory.
-    pub fn for_lifecycle(event: HookEvent, matcher: &str, session_id: &str, agent_name: &str) -> Self {
+    pub fn for_lifecycle(
+        event: HookEvent,
+        matcher: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
         Self {
             event,
             session_id: session_id.to_string(),

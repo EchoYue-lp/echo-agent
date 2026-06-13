@@ -35,7 +35,11 @@ impl LspConfig {
 
     /// Get the configuration for a file extension.
     pub fn get_for_extension(&self, ext: &str) -> Option<(&str, &LspServerConfig)> {
-        let ext = if ext.starts_with('.') { ext } else { &format!(".{ext}") };
+        let ext = if ext.starts_with('.') {
+            ext
+        } else {
+            &format!(".{ext}")
+        };
         for (lang, config) in &self.servers {
             if config.extensions.iter().any(|e| e == ext) {
                 return Some((lang.as_str(), config));

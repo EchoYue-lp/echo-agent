@@ -29,11 +29,7 @@ pub struct PluginVariables {
 
 impl PluginVariables {
     /// Create a new set of variables for a plugin.
-    pub fn new(
-        plugin_name: &str,
-        plugin_root: PathBuf,
-        project_dir: PathBuf,
-    ) -> Self {
+    pub fn new(plugin_name: &str, plugin_root: PathBuf, project_dir: PathBuf) -> Self {
         let plugin_data = Self::data_dir_for(plugin_name);
         Self {
             plugin_root,
@@ -82,18 +78,9 @@ impl PluginVariables {
         let mut result = input.to_string();
 
         // Built-in variables
-        result = result.replace(
-            "${ECHO_PLUGIN_ROOT}",
-            &self.plugin_root.to_string_lossy(),
-        );
-        result = result.replace(
-            "${ECHO_PLUGIN_DATA}",
-            &self.plugin_data.to_string_lossy(),
-        );
-        result = result.replace(
-            "${ECHO_PROJECT_DIR}",
-            &self.project_dir.to_string_lossy(),
-        );
+        result = result.replace("${ECHO_PLUGIN_ROOT}", &self.plugin_root.to_string_lossy());
+        result = result.replace("${ECHO_PLUGIN_DATA}", &self.plugin_data.to_string_lossy());
+        result = result.replace("${ECHO_PROJECT_DIR}", &self.project_dir.to_string_lossy());
 
         // User config variables: ${user_config.KEY}
         for (key, value) in &self.user_config {
@@ -190,7 +177,9 @@ pub fn export_to_env(vars: &PluginVariables) {
         for (key, value) in &vars.user_config {
             let upper_key = key.to_uppercase();
             // Validate env var name: only allow [A-Z0-9_] to prevent injection
-            if !upper_key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            if !upper_key
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
             {
                 tracing::warn!(
                     "Skipping plugin env var with invalid characters in key: '{}'",
@@ -226,7 +215,10 @@ mod tests {
     #[test]
     fn test_substitute_user_config() {
         let mut config = HashMap::new();
-        config.insert("api_endpoint".to_string(), "http://localhost:9090".to_string());
+        config.insert(
+            "api_endpoint".to_string(),
+            "http://localhost:9090".to_string(),
+        );
 
         let vars = PluginVariables {
             plugin_root: PathBuf::from("/tmp/plugin"),

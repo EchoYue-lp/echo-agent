@@ -1,11 +1,21 @@
-//! Dual-layer memory system for persistent agent state.
+//! Layered memory system for persistent agent state.
 //!
-//! The memory system provides two complementary layers:
+//! The memory system provides three layers, each with its own purpose:
 //!
 //! - **Store** — Long-term key-value storage with namespace isolation.
 //!   Backed by [`InMemoryStore`], [`FileStore`], or [`SqliteStore`] (requires feature `sqlite`).
-//! - **Checkpointer** — Session history preservation across restarts.
-//!   Backed by [`InMemoryCheckpointer`] or [`FileCheckpointer`].
+//!   Used for L3 memory promotion (compression evicts → write here → recall later).
+//! - **ConversationStore** — User-visible transcript projection (one row per
+//!   message, `StoredMessage` shape). Drives the GUI/TUI history panes.
+//!   The framework persists this automatically at `run_core_loop` finalization.
+//! - **RuntimeStateStore** — Full runtime checkpoint (messages + plan +
+//!   active_skills + blocked_reason + TaskNode DAG) used to resume an
+//!   in-flight conversation across process restarts. See [`crate::state`].
+//!
+//! `Checkpointer` is **deprecated** — it predates `RuntimeStateStore` and
+//! its setters are now no-ops on `ReactAgent`. New code should use
+//! [`crate::state::RuntimeStateStore`] for crash recovery and
+//! `ConversationStore` for user-visible history.
 //!
 //! # Quick Start
 //!
@@ -28,7 +38,7 @@
 //! | Type | Description |
 //! |------|-------------|
 //! | [`Store`] | Trait for long-term memory backends |
-//! | [`Checkpointer`] | Trait for session persistence |
+//! | [`Checkpointer`] | Deprecated legacy session persistence trait |
 //! | [`InMemoryStore`] / [`FileStore`] | Built-in store implementations |
 //! | [`SqliteStore`] | SQLite-backed store (feature `sqlite`) |
 //! | [`SnapshotManager`] | Capture and restore agent state at any point |

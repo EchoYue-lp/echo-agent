@@ -106,7 +106,8 @@ impl SqliteStore {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA cache_size=10000;
-             PRAGMA temp_store=MEMORY;",
+             PRAGMA temp_store=MEMORY;
+             PRAGMA busy_timeout=5000;",
         )
         .map_err(|e| memory_io_error("SQLite PRAGMA settings failed", e))?;
         Ok(conn)
@@ -130,6 +131,22 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS idx_store_ns ON store_items(namespace);",
         )
         .map_err(|e| memory_io_error("failed to create main table", e))?;
+
+        // ── Schema migration: add importance/last_accessed/expires_at columns ──
+        // SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so ignore "duplicate column" errors only.
+        for col_sql in [
+            "ALTER TABLE store_items ADD COLUMN importance REAL NOT NULL DEFAULT 5.0",
+            "ALTER TABLE store_items ADD COLUMN last_accessed INTEGER",
+            "ALTER TABLE store_items ADD COLUMN expires_at INTEGER",
+        ] {
+            if let Err(e) = conn.execute_batch(col_sql) {
+                let msg = e.to_string();
+                // Only ignore "duplicate column" errors (column already exists)
+                if !msg.contains("duplicate column") {
+                    warn!(error = %e, sql = %col_sql, "Schema migration: unexpected error");
+                }
+            }
+        }
 
         // FTS5 full-text index (content= external content table mode is not suitable for this scenario; use independent table)
         conn.execute_batch(
@@ -259,7 +276,11 @@ impl SqliteStore {
                     score: default_score.or(Some(1.0 / (i as f32 + 1.0))),
                     importance: 5.0,
                     last_accessed: None,
+                    expires_at: None,
                 });
+                if let Some(last) = results.last_mut() {
+                    apply_json_metadata(last);
+                }
             }
         }
         Ok(results)
@@ -298,7 +319,11 @@ impl SqliteStore {
                     score: *score,
                     importance: 5.0,
                     last_accessed: None,
+                    expires_at: None,
                 });
+                if let Some(last) = results.last_mut() {
+                    apply_json_metadata(last);
+                }
             }
         }
         Ok(results)
@@ -387,7 +412,11 @@ impl SqliteStore {
                     score: Some(score),
                     importance: 5.0,
                     last_accessed: None,
+                    expires_at: None,
                 });
+                if let Some(last) = results.last_mut() {
+                    apply_json_metadata(last);
+                }
             }
         }
 
@@ -409,6 +438,27 @@ impl Store for SqliteStore {
             let search_text = Self::extract_searchable_text(&value);
             let now = now_secs() as i64;
 
+            // Compute the embedding BEFORE opening the transaction. `Connection`
+            // holds a `RefCell` cache, so a `Transaction<'_>` is `!Send` — keeping
+            // an `.await` (here, the embedder call) alive across it would make the
+            // whole future `!Send` and break tokio multi-thread executors.
+            let vector_bytes: Option<Vec<u8>> = if let Some(ref embedder) = self.embedder {
+                match embedder.embed(&search_text).await {
+                    Ok(vec) => {
+                        let dims = vec.len();
+                        let bytes = Self::vec_to_bytes(&vec);
+                        debug!(ns = %ns_key, key = %key, dims, "Vector embedding ready");
+                        Some(bytes)
+                    }
+                    Err(e) => {
+                        warn!(key = %key, error = %e, "Embedding calculation failed, item will not be added to vector index");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             {
                 let mut conn = self.open_connection()?;
 
@@ -418,14 +468,25 @@ impl Store for SqliteStore {
                     .transaction()
                     .map_err(|e| memory_io_error("failed to begin transaction", e))?;
 
-                // Upsert into main table
+                // Upsert into main table (extract metadata from JSON value for columns)
+                let importance: f64 = value
+                    .get("importance")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(5.0);
+                let expires_at: Option<i64> = value
+                    .get("expires_at")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as i64);
+
                 tx.execute(
-                    "INSERT INTO store_items (namespace, key, value, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?4)
+                    "INSERT INTO store_items (namespace, key, value, created_at, updated_at, importance, expires_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
                      ON CONFLICT(namespace, key) DO UPDATE SET
                         value = excluded.value,
-                        updated_at = excluded.updated_at",
-                    params![ns_key, key, value_json, now],
+                        updated_at = excluded.updated_at,
+                        importance = excluded.importance,
+                        expires_at = excluded.expires_at",
+                    params![ns_key, key, value_json, now, importance, expires_at],
                 )
                 .map_err(|e| memory_io_error("failed to write to main table", e))?;
 
@@ -442,29 +503,20 @@ impl Store for SqliteStore {
                 )
                 .map_err(|e| memory_io_error("failed to write FTS index", e))?;
 
+                // Vector index update (if embedding succeeded above) — included in the
+                // same transaction so a failure rolls back the FTS/main writes too.
+                if let Some(bytes) = vector_bytes {
+                    tx.execute(
+                        "INSERT INTO store_vectors (namespace, key, vector)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(namespace, key) DO UPDATE SET vector = excluded.vector",
+                        params![ns_key, key, bytes],
+                    )
+                    .map_err(|e| memory_io_error("failed to write to vector table", e))?;
+                }
+
                 tx.commit()
                     .map_err(|e| memory_io_error("failed to commit transaction", e))?;
-            }
-
-            // Vector index update (if embedder is available)
-            if let Some(ref embedder) = self.embedder {
-                match embedder.embed(&search_text).await {
-                    Ok(vec) => {
-                        let bytes = Self::vec_to_bytes(&vec);
-                        let conn = self.open_connection()?;
-                        conn.execute(
-                            "INSERT INTO store_vectors (namespace, key, vector)
-                             VALUES (?1, ?2, ?3)
-                             ON CONFLICT(namespace, key) DO UPDATE SET vector = excluded.vector",
-                            params![ns_key, key, bytes],
-                        )
-                        .map_err(|e| memory_io_error("failed to write to vector table", e))?;
-                        debug!(ns = %ns_key, key = %key, dims = vec.len(), "Vector index updated");
-                    }
-                    Err(e) => {
-                        warn!(key = %key, error = %e, "Embedding calculation failed, item will not be added to vector index");
-                    }
-                }
             }
 
             Ok(())
@@ -496,7 +548,7 @@ impl Store for SqliteStore {
                 Ok((value_str, created_at, updated_at)) => {
                     let value: Value = serde_json::from_str(&value_str)
                         .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
-                    Ok(Some(StoreItem {
+                    let mut item = StoreItem {
                         namespace: namespace.iter().map(|s| s.to_string()).collect(),
                         key: key.to_string(),
                         value,
@@ -505,7 +557,10 @@ impl Store for SqliteStore {
                         score: None,
                         importance: 5.0,
                         last_accessed: None,
-                    }))
+                        expires_at: None,
+                    };
+                    apply_json_metadata(&mut item);
+                    Ok(Some(item))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(memory_io_error("query failed", e).into()),
@@ -618,9 +673,14 @@ impl Store for SqliteStore {
     fn delete<'a>(&'a self, namespace: &'a [&'a str], key: &'a str) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
             let ns_key = namespace.join("/");
-            let conn = self.open_connection()?;
+            let mut conn = self.open_connection()?;
 
-            let affected = conn
+            // Wrap all three deletes in a transaction to prevent partial deletion
+            let tx = conn
+                .transaction()
+                .map_err(|e| memory_io_error("failed to begin delete transaction", e))?;
+
+            let affected = tx
                 .execute(
                     "DELETE FROM store_items WHERE namespace = ?1 AND key = ?2",
                     params![ns_key, key],
@@ -628,17 +688,20 @@ impl Store for SqliteStore {
                 .map_err(|e| memory_io_error("failed to delete from main table", e))?;
 
             // Clean up FTS index
-            conn.execute(
+            tx.execute(
                 "DELETE FROM store_fts WHERE namespace = ?1 AND key = ?2",
                 params![ns_key, key],
             )
             .map_err(|e| memory_io_error("failed to delete FTS index", e))?;
 
-            // Clean up vector index
-            let _ = conn.execute(
+            // Clean up vector index (ignore errors as vector table is optional)
+            let _ = tx.execute(
                 "DELETE FROM store_vectors WHERE namespace = ?1 AND key = ?2",
                 params![ns_key, key],
             );
+
+            tx.commit()
+                .map_err(|e| memory_io_error("failed to commit delete transaction", e))?;
 
             Ok(affected > 0)
         })
@@ -696,7 +759,7 @@ impl Store for SqliteStore {
                 .query_map(params![ns_key], |row| {
                     let ns_str: String = row.get(0)?;
                     let namespace: Vec<String> = ns_str.split('/').map(String::from).collect();
-                    Ok(StoreItem {
+                    let mut item = StoreItem {
                         namespace,
                         key: row.get(1)?,
                         value: serde_json::from_str(&row.get::<_, String>(2)?)
@@ -706,7 +769,10 @@ impl Store for SqliteStore {
                         score: None,
                         importance: 5.0,
                         last_accessed: None,
-                    })
+                        expires_at: None,
+                    };
+                    apply_json_metadata(&mut item);
+                    Ok(item)
                 })
                 .map_err(|e| memory_io_error("list items failed", e))?
                 .filter_map(|r| r.ok())
@@ -802,9 +868,44 @@ impl Store for SqliteStore {
             }
         })
     }
+
+    fn prune_expired<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
+        let ns_key = namespace.join("/");
+        Box::pin(async move {
+            let conn = self.open_connection()?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // Delete items where value contains an expired "expires_at" JSON field
+            let deleted = conn
+                .execute(
+                    "DELETE FROM store_items WHERE namespace = ?1
+                     AND json_extract(value, '$.expires_at') IS NOT NULL
+                     AND CAST(json_extract(value, '$.expires_at') AS INTEGER) < ?2",
+                    rusqlite::params![ns_key, now as i64],
+                )
+                .map_err(|e| memory_io_error("prune expired items failed", e))?;
+            Ok(deleted as u64)
+        })
+    }
 }
 
 // ── Utility functions ─────────────────────────────────────────────────────────
+
+/// Apply metadata from JSON value to a StoreItem after reading from SQL.
+/// Extracts `importance`, `expires_at`, and `last_accessed` if present in the JSON.
+fn apply_json_metadata(item: &mut StoreItem) {
+    if let Some(imp) = item.value.get("importance").and_then(|v| v.as_f64()) {
+        item.importance = imp as f32;
+    }
+    if let Some(exp) = item.value.get("expires_at").and_then(|v| v.as_u64()) {
+        item.expires_at = Some(exp);
+    }
+    if let Some(ts) = item.value.get("last_accessed").and_then(|v| v.as_u64()) {
+        item.last_accessed = Some(ts);
+    }
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()

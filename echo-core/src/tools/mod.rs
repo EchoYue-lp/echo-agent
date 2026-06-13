@@ -478,8 +478,9 @@ pub trait Tool: Send + Sync {
     ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>> {
         Box::pin(async move {
             let result = self.execute(params).await?;
-            let stream: Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> =
-                Box::pin(stream::once(async move { ToolStreamEvent::Complete(result) }));
+            let stream: Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> = Box::pin(
+                stream::once(async move { ToolStreamEvent::Complete(result) }),
+            );
             Ok(stream)
         })
     }

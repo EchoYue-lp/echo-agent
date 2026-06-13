@@ -82,9 +82,7 @@ pub struct CompositePlan {
 ///   of prior steps listed in its `input_from` field as `upstream_results`.
 /// - **Parallel**: All steps are spawned concurrently. `input_from` is
 ///   ignored (no upstream results are available at spawn time).
-pub async fn execute_composite(
-    plan: CompositePlan,
-) -> Result<Vec<(String, String)>> {
+pub async fn execute_composite(plan: CompositePlan) -> Result<Vec<(String, String)>> {
     match plan.strategy {
         CompositeStrategy::Sequential => execute_sequential(plan.steps).await,
         CompositeStrategy::Parallel => execute_parallel(plan.steps).await,
@@ -92,9 +90,7 @@ pub async fn execute_composite(
 }
 
 /// Sequential execution: run each step, collect results, pass upstream.
-async fn execute_sequential(
-    steps: Vec<CompositeStep>,
-) -> Result<Vec<(String, String)>> {
+async fn execute_sequential(steps: Vec<CompositeStep>) -> Result<Vec<(String, String)>> {
     let mut results: Vec<(String, String)> = Vec::with_capacity(steps.len());
 
     for step in &steps {
@@ -102,26 +98,14 @@ async fn execute_sequential(
         let upstream: Vec<(String, String)> = step
             .input_from
             .iter()
-            .filter_map(|dep_id| {
-                results
-                    .iter()
-                    .find(|(id, _)| id == dep_id)
-                    .cloned()
-            })
+            .filter_map(|dep_id| results.iter().find(|(id, _)| id == dep_id).cloned())
             .collect();
 
-        let ctx = TaskContext::with_upstream(
-            step.id.clone(),
-            step.name.clone(),
-            upstream,
-        );
+        let ctx = TaskContext::with_upstream(step.id.clone(), step.name.clone(), upstream);
 
-        let output = (step.execute_fn)(ctx).await.map_err(|e| {
-            ReactError::Other(format!(
-                "Composite step '{}' failed: {e}",
-                step.id
-            ))
-        })?;
+        let output = (step.execute_fn)(ctx)
+            .await
+            .map_err(|e| ReactError::Other(format!("Composite step '{}' failed: {e}", step.id)))?;
 
         results.push((step.id.clone(), output));
     }
@@ -130,9 +114,7 @@ async fn execute_sequential(
 }
 
 /// Parallel execution: spawn all steps concurrently, collect results.
-async fn execute_parallel(
-    steps: Vec<CompositeStep>,
-) -> Result<Vec<(String, String)>> {
+async fn execute_parallel(steps: Vec<CompositeStep>) -> Result<Vec<(String, String)>> {
     let mut handles = Vec::with_capacity(steps.len());
 
     for step in steps {
@@ -142,9 +124,7 @@ async fn execute_parallel(
 
         handles.push(tokio::spawn(async move {
             let output = execute_fn(ctx).await.map_err(|e| {
-                ReactError::Other(format!(
-                    "Composite step '{step_id}' failed: {e}"
-                ))
+                ReactError::Other(format!("Composite step '{step_id}' failed: {e}"))
             })?;
             Ok::<(String, String), ReactError>((step_id, output))
         }));
@@ -194,9 +174,7 @@ mod tests {
                     .map(|(k, v)| format!("{k}={v}"))
                     .collect::<Vec<_>>()
                     .join(",");
-                Box::pin(async move {
-                    Ok(format!("step_{id_owned} saw: [{upstream}]"))
-                })
+                Box::pin(async move { Ok(format!("step_{id_owned} saw: [{upstream}]")) })
             }),
             input_from,
         }
@@ -205,10 +183,7 @@ mod tests {
     #[tokio::test]
     async fn test_sequential_basic() {
         let plan = CompositePlan {
-            steps: vec![
-                make_step("a", "result_a"),
-                make_step("b", "result_b"),
-            ],
+            steps: vec![make_step("a", "result_a"), make_step("b", "result_b")],
             strategy: CompositeStrategy::Sequential,
         };
         let results = execute_composite(plan).await.unwrap();
@@ -233,10 +208,7 @@ mod tests {
     #[tokio::test]
     async fn test_parallel_basic() {
         let plan = CompositePlan {
-            steps: vec![
-                make_step("x", "result_x"),
-                make_step("y", "result_y"),
-            ],
+            steps: vec![make_step("x", "result_x"), make_step("y", "result_y")],
             strategy: CompositeStrategy::Parallel,
         };
         let results = execute_composite(plan).await.unwrap();

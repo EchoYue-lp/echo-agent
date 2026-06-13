@@ -23,7 +23,6 @@ use crate::human_loop::{HumanLoopProvider, PermissionService};
 use crate::llm::config::LlmConfig;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpManager;
-use crate::memory::checkpointer::{Checkpointer, FileCheckpointer};
 use crate::memory::snapshot::{SnapshotManager, StateSnapshot};
 use crate::memory::store::{FileStore, Store};
 use crate::sandbox::SandboxManager;
@@ -122,7 +121,7 @@ pub struct ReactAgent {
     pub(crate) tools: ToolExecutionSubsystem,
     /// Guard & safety subsystem: guards, permission policy, audit logging, circuit breaker
     pub(crate) guard: GuardSubsystem,
-    /// Memory & persistence subsystem: context management, long-term memory, snapshots, checkpointer
+    /// Memory & persistence subsystem: context management, long-term memory, snapshots, transcript projection
     pub(crate) memory: MemorySubsystem,
     /// Human-in-the-loop approval subsystem
     #[allow(dead_code)]
@@ -181,11 +180,13 @@ pub struct ReactAgent {
     /// Prefer reading real usage from API responses; falls back to estimation.
     pub(crate) token_tracker: Arc<echo_core::tokenizer::TokenUsageTracker>,
 
+    /// Self-calibrating tokenizer wrapper that improves estimation accuracy
+    /// using actual API token counts. Wrapped in Arc for shared access.
+    /// The calibration factor is updated after each LLM call using EMA smoothing.
+    pub(crate) calibrated_tokenizer: Arc<echo_core::tokenizer::CalibratedTokenizer>,
+
     /// Optional intent router for pre-ReAct classification and routing.
     pub(crate) intent_router: Option<crate::intent::IntentRouter>,
-
-    /// Optional runtime state store for task checkpointing.
-    pub(crate) state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
 
     /// Current plan text (set by PlanTool, captured in checkpoints).
     pub(crate) plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -238,8 +239,20 @@ impl ReactAgent {
     pub fn new(config: AgentConfig) -> Self {
         let system_prompt = Self::build_system_prompt(&config);
 
-        let mut ctx_builder =
-            ContextManager::builder(config.token_limit).with_system(system_prompt.clone());
+        let sp_for_canonical = system_prompt.clone();
+        #[cfg(feature = "subagent")]
+        let sp_for_subagent = system_prompt.clone();
+
+        // ── CalibratedTokenizer setup ──
+        // Wrap HeuristicTokenizer with CalibratedTokenizer for self-improving
+        // token estimation. The same Arc is shared with ReactAgent so that
+        // runtime calibration (from actual API usage) flows into ContextManager.
+        let calibrated_tokenizer = Arc::new(echo_core::tokenizer::CalibratedTokenizer::new(
+            Arc::new(echo_core::tokenizer::HeuristicTokenizer),
+        ));
+        let mut ctx_builder = ContextManager::builder(config.token_limit)
+            .with_system(system_prompt)
+            .tokenizer(calibrated_tokenizer.clone() as Arc<dyn echo_core::tokenizer::Tokenizer>);
 
         // Wire TokenBudget if configured
         if config.token_budget_config.enabled {
@@ -247,8 +260,9 @@ impl ReactAgent {
             ctx_builder = ctx_builder.budget(budget);
         }
 
-        // Set default compressor if token_limit is not unlimited
-        if config.token_limit < usize::MAX {
+        // Set default compressor when token_limit is configured or token budget is enabled.
+        // This ensures compression can actually be triggered when the budget check fires.
+        if config.token_limit < usize::MAX || config.token_budget_config.enabled {
             use crate::compression::compressor::SlidingWindowCompressor;
             // Keep the most recent messages that fit within the token limit
             // Use a conservative window: keep last 40 messages (roughly 20 turns)
@@ -256,7 +270,30 @@ impl ReactAgent {
             ctx_builder = ctx_builder.compressor(compressor);
         }
 
-        let context = Arc::new(tokio::sync::Mutex::new(ctx_builder.build()));
+        let mut ctx = ctx_builder.build();
+
+        // ── Canonical context auto-wiring ──
+        // Build canonical context so system prompt, rules, and skills survive compression
+        let canonical = crate::compression::CanonicalContext {
+            system_prompt: Some(sp_for_canonical),
+            project_rules: {
+                #[cfg(feature = "project-rules")]
+                {
+                    let wd = config
+                        .working_dir
+                        .clone()
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    echo_core::project_rules::rules_injection(&wd)
+                }
+                #[cfg(not(feature = "project-rules"))]
+                None
+            },
+            skill_injections: Vec::new(),
+            active_skill_names: Vec::new(),
+        };
+        ctx.set_canonical_context(canonical.clone());
+
+        let context = Arc::new(tokio::sync::Mutex::new(ctx));
 
         let mut tool_manager = ToolManager::new_with_config(config.tool_execution.clone());
         let client = reqwest::Client::builder()
@@ -333,9 +370,6 @@ impl ReactAgent {
         // ── Memory store ──────────────────────────────────────────
         let store = Self::setup_memory_store(&config, &mut tool_manager);
 
-        // ── Checkpointer ─────────────────────────────────────────
-        let checkpointer = Self::setup_checkpointer(&config);
-
         // Wrap tool_manager in Arc for sharing with subsystems and context factory
         let tool_manager = Arc::new(tool_manager);
 
@@ -345,7 +379,7 @@ impl ReactAgent {
         if config.enable_subagent {
             let factory = Arc::new(
                 crate::tools::builtin::agent_dispatch::ParentContextFactory {
-                    system_prompt: system_prompt.clone(),
+                    system_prompt: sp_for_subagent.clone(),
                     tool_manager: tool_manager.clone(),
                     context: context.clone(),
                     store: store.clone(),
@@ -388,9 +422,9 @@ impl ReactAgent {
             memory: MemorySubsystem {
                 context,
                 store,
-                checkpointer,
                 snapshot_manager: Arc::new(std::sync::RwLock::new(None)),
                 conversation_store: None,
+                state_store: None,
             },
             approval: ApprovalSubsystem {
                 #[cfg(feature = "human-loop")]
@@ -413,8 +447,10 @@ impl ReactAgent {
             mutable_system_prompt: std::sync::RwLock::new(None),
             execution_mutex: Arc::new(tokio::sync::Mutex::new(())),
             token_tracker: Arc::new(echo_core::tokenizer::TokenUsageTracker::new(model_name)),
+            calibrated_tokenizer: Arc::new(echo_core::tokenizer::CalibratedTokenizer::new(
+                Arc::new(echo_core::tokenizer::HeuristicTokenizer),
+            )),
             intent_router: None,
-            state_store: None,
             plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             critic: None,
         }
@@ -540,17 +576,6 @@ impl ReactAgent {
         }
     }
 
-    fn setup_checkpointer(config: &AgentConfig) -> Option<Arc<dyn Checkpointer>> {
-        config.session_id.as_ref()?;
-        match FileCheckpointer::new(&config.checkpointer_path) {
-            Ok(cp) => Some(Arc::new(cp)),
-            Err(e) => {
-                tracing::warn!("Checkpointer init failed, session resume disabled: {e}");
-                None
-            }
-        }
-    }
-
     // ── LLM config injection ──────────────────────────────────────────────────────
 
     /// Inject a custom LLM configuration (dependency injection pattern).
@@ -659,9 +684,43 @@ impl ReactAgent {
         &self.token_tracker
     }
 
+    /// Get a reference to the self-calibrating tokenizer.
+    ///
+    /// The calibration factor improves over time as actual API token counts
+    /// are fed back via `calibrate()`.
+    pub fn calibrated_tokenizer(&self) -> &Arc<echo_core::tokenizer::CalibratedTokenizer> {
+        &self.calibrated_tokenizer
+    }
+
     /// Inject a custom long-term memory Store (replaces the injection channel only; does not re-register tools).
+    ///
+    /// Also rewires L3 compression promotion to the same Store so evicted context
+    /// and future recall queries stay on one backing store. This synchronous
+    /// setter is best called during construction; if the context lock is held,
+    /// use [`Self::install_store`] from async code.
     pub fn set_store(&mut self, store: Arc<dyn Store>) {
-        self.memory.store = Some(store);
+        self.memory.store = Some(store.clone());
+        if let Ok(mut ctx) = self.memory.context.try_lock() {
+            let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
+            ctx.set_memory_promoter(promoter);
+        } else {
+            tracing::warn!(
+                "Could not acquire ContextManager lock to set memory promoter; \
+                 use install_store() from an async context if the agent is already running"
+            );
+        }
+    }
+
+    /// Async variant of [`Self::set_store`] that safely rewires L3 promotion
+    /// after the agent has started running.
+    pub async fn install_store(&mut self, store: Arc<dyn Store>) {
+        self.memory.store = Some(store.clone());
+        let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
+        self.memory
+            .context
+            .lock()
+            .await
+            .set_memory_promoter(promoter);
     }
 
     /// Replace the long-term memory Store and re-register `remember` / `recall` / `forget` tools.
@@ -703,38 +762,81 @@ impl ReactAgent {
         // ── L3 Memory Promotion ──
         // Wire a StoreMemoryPromoter into the ContextManager so that
         // messages evicted during compression are promoted to long-term memory.
+        //
+        // `try_lock` is correct here — this synchronous setter is meant to be
+        // called during build / before any task holds the context lock. If an
+        // agent has already started running, callers should use
+        // [`Self::install_memory_store`] instead, which awaits the lock.
         if let Ok(mut ctx) = self.memory.context.try_lock() {
             let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
             ctx.set_memory_promoter(promoter);
         } else {
-            tracing::warn!("Could not acquire ContextManager lock to set memory promoter");
+            tracing::warn!(
+                "Could not acquire ContextManager lock to set memory promoter; \
+                 use install_memory_store() from an async context if the agent is already running"
+            );
         }
+    }
+
+    /// Async variant of [`Self::set_memory_store`] safe to call after the
+    /// agent has started running (e.g. while another task is holding the
+    /// context lock). Awaits the `ContextManager` mutex instead of using
+    /// `try_lock`, so the `MemoryPromoter` and tool registrations always
+    /// take effect — no silent fallback.
+    pub async fn install_memory_store(&mut self, store: Arc<dyn Store>) {
+        let ns = vec![self.config.agent_name.clone(), "memories".to_string()];
+        self.tools
+            .tool_manager
+            .register(Box::new(RememberTool::new(store.clone(), ns.clone())));
+        self.tools
+            .tool_manager
+            .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
+        self.tools
+            .tool_manager
+            .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
+        self.tools
+            .tool_manager
+            .register(Box::new(ForgetTool::new(store.clone(), ns)));
+        self.memory.store = Some(store.clone());
+
+        let promoter = Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(store));
+        self.memory
+            .context
+            .lock()
+            .await
+            .set_memory_promoter(promoter);
+    }
+
+    /// Set canonical context sources for re-injection after compression.
+    ///
+    /// When set, system prompt, project rules, and skill injections are
+    /// automatically re-injected if compression evicts them from context.
+    ///
+    /// Synchronous — best called during build. If the agent is already
+    /// running, use [`Self::install_canonical_context`] from async code.
+    pub fn set_canonical_context(&self, context: crate::compression::CanonicalContext) {
+        if let Ok(mut ctx) = self.memory.context.try_lock() {
+            ctx.set_canonical_context(context);
+        } else {
+            tracing::warn!(
+                "Could not acquire ContextManager lock to set canonical context; \
+                 use install_canonical_context() from an async context"
+            );
+        }
+    }
+
+    /// Async variant of [`Self::set_canonical_context`].
+    pub async fn install_canonical_context(&self, context: crate::compression::CanonicalContext) {
+        self.memory
+            .context
+            .lock()
+            .await
+            .set_canonical_context(context);
     }
 
     /// Get a read-only reference to the current long-term memory Store.
     pub fn store(&self) -> Option<&Arc<dyn Store>> {
         self.memory.store.as_ref()
-    }
-
-    /// Inject a thread-state store and bind a session_id to enable cross-process thread recovery.
-    pub fn set_checkpointer(&mut self, checkpointer: Arc<dyn Checkpointer>, session_id: String) {
-        self.memory.checkpointer = Some(checkpointer);
-        self.config.session_id = Some(session_id);
-    }
-
-    /// Semantic alias for `set_checkpointer()`.
-    pub fn set_thread_store(&mut self, store: Arc<dyn Checkpointer>, session_id: String) {
-        self.set_checkpointer(store, session_id);
-    }
-
-    /// Get a read-only reference to the current thread-state store.
-    pub fn checkpointer(&self) -> Option<&Arc<dyn Checkpointer>> {
-        self.memory.checkpointer.as_ref()
-    }
-
-    /// Semantic alias for `checkpointer()`.
-    pub fn thread_store(&self) -> Option<&Arc<dyn Checkpointer>> {
-        self.memory.checkpointer.as_ref()
     }
 
     /// Set the conversation_id used for conversation history projection.
@@ -956,7 +1058,7 @@ impl ReactAgent {
 
     /// Replace the runtime state store with a shared instance (for AgentPool).
     pub fn set_state_store(&mut self, store: Arc<dyn crate::state::RuntimeStateStore>) {
-        self.state_store = Some(store);
+        self.memory.state_store = Some(store);
     }
 
     /// Replace the run store with a shared instance (for AgentPool).
@@ -1129,7 +1231,7 @@ impl ReactAgent {
     /// checkpoint was found and restored, or `None` if no state store is
     /// configured or no checkpoint exists.
     pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
-        let Some(ref store) = self.state_store else {
+        let Some(ref store) = self.memory.state_store else {
             return Ok(None);
         };
         let Some(ref conv_id) = self.config.conversation_id else {

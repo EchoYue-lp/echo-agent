@@ -114,9 +114,7 @@ impl WebSocketHumanLoopProvider {
         let token_bg = auth_token.clone();
 
         tokio::spawn(async move {
-            info!(
-                "WebSocket 人工介入服务器已启动: ws://127.0.0.1:{port} (auth token: {token_bg})"
-            );
+            info!("WebSocket 人工介入服务器已启动: ws://127.0.0.1:{port} (auth token: {token_bg})");
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
@@ -180,7 +178,9 @@ async fn handle_connection(
                 || token.chars().zip(auth_token.chars()).any(|(a, b)| a != b)
             {
                 warn!("WebSocket 认证失败 ({addr}): invalid token");
-                let _ = write.send(Message::Text("Authentication failed".into())).await;
+                let _ = write
+                    .send(Message::Text("Authentication failed".into()))
+                    .await;
                 let _ = write.send(Message::Close(None)).await;
                 return;
             }
@@ -302,12 +302,10 @@ impl HumanLoopProvider for WebSocketHumanLoopProvider {
                     HumanLoopKind::Input => {
                         Ok(HumanLoopResponse::Text(response.text.unwrap_or_default()))
                     }
-                    HumanLoopKind::Selection => {
-                        Ok(HumanLoopResponse::Selection {
-                            selection: response.text.unwrap_or_else(|| "cancel".to_string()),
-                            instructions: None,
-                        })
-                    }
+                    HumanLoopKind::Selection => Ok(HumanLoopResponse::Selection {
+                        selection: response.text.unwrap_or_else(|| "cancel".to_string()),
+                        instructions: None,
+                    }),
                 },
                 Ok(Err(_)) => {
                     self.pending.lock().await.remove(&request_id);

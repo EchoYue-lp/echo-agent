@@ -2,24 +2,31 @@
 //!
 //! Used by planning mode, supports parallel execution of mutually independent subtasks.
 
+pub mod background_state;
 mod dag;
 mod events;
 pub mod executor;
 pub mod hooks;
 mod manager;
+pub mod replanner;
+pub mod scheduler;
 pub mod store;
 mod task;
 mod time;
+pub mod verifier;
 
 pub mod background_task;
 pub mod composite;
 pub mod progress;
 
+pub use background_state::{
+    BackgroundTaskState, CheckpointStore as BackgroundCheckpointStore,
+    SqliteCheckpointStore as SqliteBackgroundCheckpointStore,
+};
 pub use background_task::{
     AnyBackgroundTask, BackgroundTask, BackgroundTaskStatus, TaskSpawner, TaskSpawnerConfig,
     TaskSummary,
 };
-pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use composite::{CompositePlan, CompositeStep, CompositeStrategy, execute_composite};
 pub use events::{
     AsyncTaskEventListener, LoggingListener, TaskEvent, TaskEventBus, TaskEventListener,
@@ -31,10 +38,24 @@ pub use hooks::{
     LoggingHooks, NoopHooks, RetryDecision, TaskHookContext, TaskHookRegistry, TaskHooks,
 };
 pub use manager::TaskManager;
+pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
+pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, RuleBasedReplanner};
+pub use scheduler::{
+    ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,
+};
 pub use store::{
     CheckpointStore, ExecutionCheckpoint, SqliteCheckpointStore, SqliteTaskStore, TaskStore,
 };
-pub use task::{Task, TaskStatus};
+pub use task::{
+    Artifact, ArtifactType, AttemptStatus, ChangeType, CheckpointPolicy, CommandRecord,
+    ContextScope, Evidence, EvidenceType, FallbackStrategy, FileChange, InputType, OutputType,
+    RiskLevel, Task, TaskAttempt, TaskInput, TaskOutput, TaskState, TaskStatus, TaskType,
+    VerificationResult, VerificationSpec, VerificationType,
+};
+pub use verifier::{
+    CommandVerifier, DiffCheckVerifier, FileExistsVerifier, HumanReviewVerifier, LlmReviewVerifier,
+    NoopVerifier, TestVerifier, Verifier, VerifierFactory,
+};
 
 #[cfg(test)]
 mod tests {
@@ -42,27 +63,11 @@ mod tests {
     use crate::tasks::{Task, TaskStatus};
 
     fn create_task(id: &str, description: &str, dependencies: Vec<&str>) -> Task {
-        Task {
-            id: id.to_string(),
-            description: description.to_string(),
-            subject: description.to_string(),
-            status: TaskStatus::Pending,
-            dependencies: dependencies.into_iter().map(String::from).collect(),
-            priority: 5,
-            result: None,
-            reasoning: None,
-            assigned_agent: None,
-            tags: Vec::new(),
-            parent_id: None,
-            created_at: 0,
-            updated_at: 0,
-            timeout_secs: 0,
-            max_retries: 0,
-            retry_count: 0,
-            execute_fn: None,
-            metadata_json: None,
-            metadata: None,
-        }
+        let mut task = Task::new(id, description)
+            .with_dependencies(dependencies.into_iter().map(String::from).collect());
+        task.created_at = 0;
+        task.updated_at = 0;
+        task
     }
 
     #[test]
@@ -301,49 +306,15 @@ mod tests {
     fn test_get_next_task_priority() {
         let manager = TaskManager::new();
 
-        manager.add_task(Task {
-            id: "task1".to_string(),
-            description: "Low priority".to_string(),
-            subject: "Low priority".to_string(),
-            status: TaskStatus::Pending,
-            dependencies: vec![],
-            priority: 3,
-            result: None,
-            reasoning: None,
-            assigned_agent: None,
-            tags: vec![],
-            parent_id: None,
-            created_at: 0,
-            updated_at: 0,
-            timeout_secs: 0,
-            max_retries: 0,
-            retry_count: 0,
-            execute_fn: None,
-            metadata_json: None,
-            metadata: None,
-        });
+        let mut task1 = Task::new("task1", "Low priority").with_priority(3);
+        task1.created_at = 0;
+        task1.updated_at = 0;
+        manager.add_task(task1);
 
-        manager.add_task(Task {
-            id: "task2".to_string(),
-            description: "High priority".to_string(),
-            subject: "High priority".to_string(),
-            status: TaskStatus::Pending,
-            dependencies: vec![],
-            priority: 8,
-            result: None,
-            reasoning: None,
-            assigned_agent: None,
-            tags: vec![],
-            parent_id: None,
-            created_at: 0,
-            updated_at: 0,
-            timeout_secs: 0,
-            max_retries: 0,
-            retry_count: 0,
-            execute_fn: None,
-            metadata_json: None,
-            metadata: None,
-        });
+        let mut task2 = Task::new("task2", "High priority").with_priority(8);
+        task2.created_at = 0;
+        task2.updated_at = 0;
+        manager.add_task(task2);
 
         let next = manager.get_next_task();
         assert!(next.is_some(), "should have a next task");

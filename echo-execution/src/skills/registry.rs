@@ -293,7 +293,10 @@ impl SkillRegistry {
         // Store sandbox policy if declared
         if let Some(ref policy) = descriptor.sandbox {
             if policy.is_constraining() {
-                let mut guard = self.active_sandbox_policies.lock().unwrap_or_else(|e| e.into_inner());
+                let mut guard = self
+                    .active_sandbox_policies
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 guard.insert(name.to_string(), policy.clone());
             }
         }
@@ -371,7 +374,10 @@ impl SkillRegistry {
 
     /// Get the active sandbox policy for an activated skill.
     pub fn get_active_sandbox_policy(&self, skill_name: &str) -> Option<SkillSandboxPolicy> {
-        let guard = self.active_sandbox_policies.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .active_sandbox_policies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.get(skill_name).cloned()
     }
 
@@ -825,9 +831,9 @@ mod tests {
             .collect();
 
         let tool_name = "Bash";
-        let permitted = allowed.iter().any(|matcher| {
-            crate::skills::external::types::tool_matcher(matcher, tool_name)
-        });
+        let permitted = allowed
+            .iter()
+            .any(|matcher| crate::skills::external::types::tool_matcher(matcher, tool_name));
 
         assert!(
             !permitted,
@@ -843,9 +849,9 @@ mod tests {
             .collect();
 
         let tool_name = "PubMedSearch";
-        let permitted = allowed.iter().any(|matcher| {
-            crate::skills::external::types::tool_matcher(matcher, tool_name)
-        });
+        let permitted = allowed
+            .iter()
+            .any(|matcher| crate::skills::external::types::tool_matcher(matcher, tool_name));
 
         assert!(
             permitted,
@@ -855,10 +861,7 @@ mod tests {
 
     #[test]
     fn test_tool_matcher_glob_pattern() {
-        let allowed: HashSet<String> = ["Bash(*)", "Read"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let allowed: HashSet<String> = ["Bash(*)", "Read"].iter().map(|s| s.to_string()).collect();
 
         // Bash(*) should match Bash(git:status)
         let permitted = allowed.iter().any(|matcher| {
@@ -867,9 +870,9 @@ mod tests {
         assert!(permitted, "Bash(*) should match Bash(git:status)");
 
         // Bash(*) should NOT match Read
-        let is_read = allowed.iter().any(|matcher| {
-            crate::skills::external::types::tool_matcher(matcher, "Read")
-        });
+        let is_read = allowed
+            .iter()
+            .any(|matcher| crate::skills::external::types::tool_matcher(matcher, "Read"));
         assert!(is_read, "Read should be directly permitted");
     }
 }

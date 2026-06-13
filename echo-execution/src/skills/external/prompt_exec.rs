@@ -33,29 +33,24 @@ use crate::skills::minimal_env;
 const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Pre-compiled regex for block command syntax: ```! ... ```
-static BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid block regex")
-});
+static BLOCK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid block regex"));
 
 /// Pre-compiled regex for inline command syntax: !`...`
-static INLINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid inline regex")
-});
+static INLINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid inline regex"));
 
 /// Pre-compiled regex for detecting block command markers.
-static BLOCK_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"```!\s*\n?").expect("valid block marker regex")
-});
+static BLOCK_MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"```!\s*\n?").expect("valid block marker regex"));
 
 /// Pre-compiled regex for detecting inline command markers.
-static INLINE_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|\s)!`[^`]*`").expect("valid inline marker regex")
-});
+static INLINE_MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)!`[^`]*`").expect("valid inline marker regex"));
 
 /// Pre-compiled regex for SOH-delimited placeholders.
-static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\x01CMD_OUT_\d+\x01").expect("valid placeholder regex")
-});
+static PLACEHOLDER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\x01CMD_OUT_\d+\x01").expect("valid placeholder regex"));
 
 /// Source of a skill (affects security policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

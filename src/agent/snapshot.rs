@@ -8,13 +8,49 @@
 use crate::agent::AgentCallback;
 use crate::agent::InterventionCallback;
 use crate::audit::AuditLogger;
-use crate::memory::checkpointer::Checkpointer;
 use crate::memory::snapshot::SnapshotManager;
 use crate::skills::hooks::HookRegistry;
 use crate::tools::{ToolExecutionConfig, ToolManager};
 use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
+use echo_core::llm::types::{Message, Role};
+use echo_core::tokenizer::Tokenizer;
 use std::sync::Arc;
+
+fn is_internal_transcript_message(message: &Message) -> bool {
+    let Some(text) = message.content.as_text() else {
+        return false;
+    };
+    let trimmed = text.trim_start();
+
+    match message.role {
+        Role::System => true,
+        Role::User => {
+            trimmed.starts_with("[Relevant historical memories]")
+                || trimmed.starts_with("[The above memories")
+                || trimmed.starts_with("[Verifier feedback]")
+                || trimmed.starts_with("[Hook:")
+                || trimmed.starts_with("[Memory")
+                || trimmed.starts_with("[Context")
+                || trimmed.starts_with("[Compact")
+                || trimmed.starts_with("[Compression")
+        }
+        Role::Tool => {
+            trimmed.starts_with("[placeholder]")
+                || trimmed.starts_with("[synthetic]")
+                || trimmed.contains("placeholder result")
+        }
+        Role::Assistant | Role::Custom(_) => false,
+    }
+}
+
+fn filter_user_visible_transcript(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter(|message| !is_internal_transcript_message(message))
+        .cloned()
+        .collect()
+}
 
 // ── RuntimeConfig ────────────────────────────────────────────────────
 
@@ -45,6 +81,8 @@ pub struct RuntimeConfig {
     pub verifier_min_score: f64,
     /// Maximum verifier retry attempts.
     pub verifier_max_retries: usize,
+    /// Whether plan mode is enabled (read-only tools only).
+    pub plan_mode: bool,
 }
 
 impl RuntimeConfig {
@@ -70,6 +108,7 @@ impl RuntimeConfig {
             verifier_enabled: config.verifier_enabled,
             verifier_min_score: config.verifier_min_score,
             verifier_max_retries: config.verifier_max_retries,
+            plan_mode: config.plan_mode,
         }
     }
 
@@ -114,6 +153,7 @@ impl ToolRuntime {
 /// Guard / safety state. Shared via `Arc`.
 #[derive(Clone)]
 pub struct GuardRuntime {
+    pub guard_manager: Option<Arc<crate::guard::GuardManager>>,
     pub audit_logger: Option<Arc<dyn AuditLogger>>,
     pub circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
@@ -121,6 +161,7 @@ pub struct GuardRuntime {
 impl GuardRuntime {
     pub fn from_agent(agent: &super::ReactAgent) -> Self {
         Self {
+            guard_manager: agent.guard.guard_manager.clone().map(Arc::new),
             audit_logger: agent.guard.audit_logger.clone(),
             circuit_breaker: agent.guard.circuit_breaker.clone(),
         }
@@ -141,8 +182,6 @@ pub struct AgentRunSnapshot {
     pub tools: Arc<ToolRuntime>,
     /// Guard / safety state.
     pub guard: Arc<GuardRuntime>,
-    /// Checkpointer (from memory subsystem).
-    pub checkpointer: Option<Arc<dyn Checkpointer>>,
     /// Snapshot manager (from memory subsystem).
     pub snapshot_manager: Arc<std::sync::RwLock<Option<SnapshotManager>>>,
     /// HTTP client.
@@ -163,8 +202,17 @@ pub struct AgentRunSnapshot {
     pub token_tracker: Arc<echo_core::tokenizer::TokenUsageTracker>,
     /// Runtime state store for rich checkpointing (messages + plan + skills).
     pub state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
+    /// Conversation store for user-visible transcript projection. When both
+    /// this and `config.conversation_id` are set, the run loop persists
+    /// projected messages at every finalization point so GUI/TUI history is
+    /// always in sync with the running context — without each entry point
+    /// having to re-implement the save logic.
+    pub conversation_store: Option<Arc<dyn crate::memory::ConversationStore>>,
     /// Optional Critic for final_answer verification.
     pub critic: Option<Arc<dyn echo_core::agent::Critic>>,
+    /// Optional tool execution pipeline (15-stage middleware).
+    pub tool_execution_pipeline:
+        Option<Arc<crate::agent::react::run::pipeline::ToolExecutionPipeline>>,
 }
 
 impl AgentRunSnapshot {
@@ -174,7 +222,6 @@ impl AgentRunSnapshot {
             config: Arc::new(RuntimeConfig::from_agent_config(&agent.config)),
             tools: Arc::new(ToolRuntime::from_agent(agent)),
             guard: Arc::new(GuardRuntime::from_agent(agent)),
-            checkpointer: agent.memory.checkpointer.clone(),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             client: agent.client().clone(),
             cancel_token: None,
@@ -184,8 +231,10 @@ impl AgentRunSnapshot {
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
             token_tracker: Arc::clone(&agent.token_tracker),
-            state_store: agent.state_store.clone(),
+            state_store: agent.memory.state_store.clone(),
+            conversation_store: agent.memory.conversation_store.clone(),
             critic: agent.critic.clone(),
+            tool_execution_pipeline: agent.tool_execution_pipeline.clone(),
         }
     }
 
@@ -218,8 +267,8 @@ impl AgentRunSnapshot {
 
     /// Save a rich checkpoint to the [`RuntimeStateStore`](crate::state::RuntimeStateStore).
     ///
-    /// Unlike the legacy [`Checkpointer`](crate::memory::Checkpointer) which only
-    /// persists message history, this saves the full [`AgentCheckpoint`] including
+    /// Unlike the legacy Checkpointer API, which only persisted message history,
+    /// this saves the full [`AgentCheckpoint`] including
     /// messages, active skills, current plan, and blocked reason.
     ///
     /// Silently no-ops if no state store or conversation_id is configured.
@@ -273,6 +322,91 @@ impl AgentRunSnapshot {
                 conversation_id = conv_id.as_str(),
                 message_count = messages.len(),
                 "Runtime checkpoint saved"
+            );
+        }
+    }
+
+    /// Save the user-visible transcript projection to the [`ConversationStore`](crate::memory::ConversationStore).
+    ///
+    /// Unlike `save_runtime_checkpoint` which serializes the full runtime
+    /// `Message` list (including internal/tool hand-offs) for resume, this
+    /// projects messages to [`StoredMessage`](crate::memory::StoredMessage) records and persists
+    /// them via `ConversationStore::save_messages` — the same shape that
+    /// the GUI/TUI history panes consume.
+    ///
+    /// This consolidates transcript persistence in the framework: previously,
+    /// every product entry point (Tauri commands, TUI loop) had to call
+    /// `save_messages` on its own. Now `run_core_loop` invokes this helper at
+    /// finalization, and the product layer only handles conversation
+    /// metadata (title / pinned / agent_type).
+    ///
+    /// Silently no-ops if no conversation store or `conversation_id` is configured.
+    pub async fn save_transcript_projection(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+    ) {
+        let Some(ref store) = self.conversation_store else {
+            return;
+        };
+        let Some(ref conv_id) = self.config.conversation_id else {
+            return;
+        };
+
+        let messages = {
+            let ctx = context.lock().await;
+            filter_user_visible_transcript(ctx.messages())
+        };
+
+        if messages.is_empty() {
+            tracing::debug!(
+                conversation_id = conv_id.as_str(),
+                "Transcript projection skipped: no user-visible messages"
+            );
+            return;
+        }
+
+        let projected = match crate::memory::project_messages(conv_id, &messages) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    conversation_id = conv_id.as_str(),
+                    "Failed to project messages for conversation store"
+                );
+                return;
+            }
+        };
+
+        // Ensure the conversation row exists. The default trait impl is a
+        // get-or-create, so this is cheap on the hot path.
+        let ensure = store
+            .ensure_conversation(crate::memory::NewConversation {
+                conversation_id: conv_id.clone(),
+                user_id: "default".to_string(),
+                agent_type: None,
+                title: None,
+            })
+            .await;
+        if let Err(e) = ensure {
+            tracing::warn!(
+                error = %e,
+                conversation_id = conv_id.as_str(),
+                "Failed to ensure conversation row before save_messages"
+            );
+            return;
+        }
+
+        if let Err(e) = store.save_messages(conv_id, &projected).await {
+            tracing::warn!(
+                error = %e,
+                conversation_id = conv_id.as_str(),
+                "Failed to save transcript projection to conversation store"
+            );
+        } else {
+            tracing::debug!(
+                conversation_id = conv_id.as_str(),
+                message_count = projected.len(),
+                "Transcript projection saved"
             );
         }
     }
@@ -350,5 +484,149 @@ impl AgentRunSnapshot {
                 }
             }
         }
+    }
+
+    // ── Tool execution helpers (delegated from Pipeline stages) ─────
+
+    /// Check tool approval via PermissionService.
+    /// Returns modified input if approval modified the tool call, None otherwise.
+    #[cfg(feature = "human-loop")]
+    pub async fn check_tool_approval(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
+        if let Some(ref service) = self.permission_service {
+            let decision = service.check(tool_name, input).await?;
+            match decision {
+                echo_core::tools::permission::PermissionDecision::Allow => Ok(None),
+                echo_core::tools::permission::PermissionDecision::Deny { reason } => {
+                    Err(echo_core::error::ReactError::Other(format!(
+                        "Permission denied for tool '{}': {}",
+                        tool_name, reason
+                    )))
+                }
+                echo_core::tools::permission::PermissionDecision::RequireApproval => {
+                    Err(echo_core::error::ReactError::Other(format!(
+                        "Tool '{}' requires user approval",
+                        tool_name
+                    )))
+                }
+                echo_core::tools::permission::PermissionDecision::Ask { suggestions } => {
+                    Err(echo_core::error::ReactError::Other(format!(
+                        "Tool '{}' requires user approval. Suggestions: {:?}",
+                        tool_name, suggestions
+                    )))
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Check tool approval via PermissionService (no-op when human-loop feature is disabled).
+    #[cfg(not(feature = "human-loop"))]
+    pub async fn check_tool_approval(
+        &self,
+        _tool_name: &str,
+        _input: &serde_json::Value,
+    ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
+        Ok(None)
+    }
+
+    /// Record a file read for read-before-edit enforcement.
+    pub fn record_file_read(&self, path: &str) {
+        let canonical = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string());
+        let mut files = self
+            .recently_read_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        files.insert(canonical, std::time::Instant::now());
+    }
+
+    /// Check tool output guard and return filtered output if modified.
+    pub async fn check_tool_output_guard(&self, output: &str) -> Option<String> {
+        // Secret scan: redact secrets from tool output before guard check
+        if crate::security::contains_secrets(output) {
+            let redacted = crate::security::redact_secrets(output);
+            tracing::warn!(agent = %self.config.agent_name, "Secret detected in tool output; redacted");
+            return Some(redacted);
+        }
+        let gm = self.guard.guard_manager.as_ref()?;
+        use crate::guard::GuardDirection;
+        let result = match gm.check_all(output, GuardDirection::Output).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(agent = %self.config.agent_name, error = %e, "Guard check failed, blocking output (fail-closed)");
+                return Some(format!("Output content blocked: guard check error ({e})"));
+            }
+        };
+        if let crate::guard::GuardResult::Block { reason } = &result {
+            tracing::info!(agent = %self.config.agent_name, reason = %reason, "🛡️ Tool output blocked by guard");
+            if let Some(al) = &self.guard.audit_logger {
+                let event = crate::audit::AuditEvent::now(
+                    self.config.session_id.clone(),
+                    self.config.agent_name.clone(),
+                    crate::audit::AuditEventType::GuardBlock {
+                        guard: "guard_manager".to_string(),
+                        direction: GuardDirection::Output,
+                        reason: reason.clone(),
+                    },
+                );
+                let _ = al.log(event).await;
+            }
+            Some(format!("Output content filtered by safety guard: {reason}"))
+        } else {
+            None
+        }
+    }
+
+    /// Truncate tool output based on token budget.
+    ///
+    /// Uses `HeuristicTokenizer` for accurate ASCII/CJK-aware token estimation,
+    /// matching the tokenizer used by `execution.rs` and `ContextManager`.
+    pub async fn truncate_tool_output(&self, output: String) -> String {
+        // Only apply truncation when a max token limit is configured
+        let Some(max_tokens) = self.config.max_tool_output_tokens else {
+            return output;
+        };
+
+        let tokenizer = echo_core::tokenizer::HeuristicTokenizer;
+        let estimated_tokens = tokenizer.count_tokens(&output);
+        if estimated_tokens <= max_tokens {
+            return output;
+        }
+
+        // Truncate with head + tail strategy
+        let head_chars = max_tokens * 2; // ~50% of budget for head
+        let tail_chars = max_tokens * 2; // ~50% of budget for tail
+
+        if output.len() <= head_chars + tail_chars {
+            return output;
+        }
+
+        // UTF-8 safe truncation: find char boundaries
+        let head_end = output
+            .char_indices()
+            .take_while(|(i, _)| *i < head_chars)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        let tail_start = output
+            .char_indices()
+            .rev()
+            .take_while(|(i, _)| *i >= output.len() - tail_chars)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(output.len());
+        let head = &output[..head_end];
+        let tail = &output[tail_start..];
+        let notice = format!(
+            "\n\n[... output truncated: ~{} tokens → {} tokens shown ...]\n\n",
+            estimated_tokens, max_tokens
+        );
+        format!("{}{}{}", head, notice, tail)
     }
 }

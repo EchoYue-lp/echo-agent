@@ -13,9 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Type alias for the fire function: takes a CronTask, returns a future with the result.
-pub type FireFn = Arc<
-    dyn Fn(CronTask) -> BoxFuture<'static, echo_core::error::Result<String>> + Send + Sync,
->;
+pub type FireFn =
+    Arc<dyn Fn(CronTask) -> BoxFuture<'static, echo_core::error::Result<String>> + Send + Sync>;
 
 /// Periodic scheduler that checks and fires cron tasks.
 ///
@@ -113,9 +112,7 @@ impl SchedulerRunner {
             }
             Err(e) => {
                 warn!(task = %task.name, error = %e, "Cron task failed");
-                let _ = self
-                    .store
-                    .update_last_run(&task.id, &format!("ERROR: {e}"));
+                let _ = self.store.update_last_run(&task.id, &format!("ERROR: {e}"));
             }
         }
     }

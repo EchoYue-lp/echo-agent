@@ -78,10 +78,7 @@ pub enum InstallSource {
     /// Install from a local directory path.
     Local(PathBuf),
     /// Install from a git repository URL, optionally a subdirectory.
-    Git {
-        url: String,
-        subdir: Option<String>,
-    },
+    Git { url: String, subdir: Option<String> },
 }
 
 impl InstallSource {

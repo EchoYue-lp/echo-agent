@@ -21,7 +21,6 @@ pub mod headless;
 #[cfg_attr(docsrs, doc(cfg(feature = "improve")))]
 pub mod improve;
 pub mod intent;
-pub mod layered_compress;
 pub mod llm;
 pub mod memory;
 pub mod memory_promoter;
@@ -173,9 +172,8 @@ pub mod prelude {
     #[cfg_attr(docsrs, doc(cfg(feature = "sqlite")))]
     pub use crate::memory::SqliteStore;
     pub use crate::memory::{
-        Checkpointer, Embedder, EmbeddingStore, FileCheckpointer, FileStore, HttpEmbedder,
-        InMemoryCheckpointer, InMemoryStore, SnapshotManager, SnapshotPolicy, StateSnapshot, Store,
-        StoreItem,
+        Embedder, EmbeddingStore, FileStore, HttpEmbedder, InMemoryStore, SnapshotManager,
+        SnapshotPolicy, StateSnapshot, Store, StoreItem,
     };
 
     // Skills

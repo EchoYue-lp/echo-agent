@@ -54,7 +54,11 @@ pub(crate) trait PipelineStage: Send + Sync {
     fn name(&self) -> &str;
 
     /// Execute this stage.
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()>;
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()>;
 }
 
 // ── Stage implementations ──────────────────────────────────────────
@@ -71,10 +75,14 @@ impl PipelineStage for InterventionStage {
         "intervention"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
-        for intervention in &agent.tools.intervention_callbacks {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        for intervention in &snapshot.tools.intervention_callbacks {
             let result = intervention
-                .on_tool_call(&agent.config.agent_name, &ctx.tool_name, &ctx.input)
+                .on_tool_call(&snapshot.config.agent_name, &ctx.tool_name, &ctx.input)
                 .await;
             if result.cancel {
                 return Err(ReactError::Other(format!(
@@ -120,12 +128,16 @@ impl PipelineStage for ParseValidateStage {
         "parse_validate"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, _agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        _snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         // Convert raw input to type-safe ToolCallParams
         let params = echo_core::tools::ToolCallParams::from_value(&ctx.input);
         // Validate common required parameters based on tool name
         match ctx.tool_name.as_str() {
-            "read_file" | "read_text" => {
+            "read_file" => {
                 if let Err(e) = params.validate_required("path", "string") {
                     ctx.blocked = true;
                     ctx.block_reason = Some(e);
@@ -158,9 +170,13 @@ impl PipelineStage for PreToolUseHookStage {
         "pre_tool_use_hook"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         let has_hooks = {
-            let hook_reg = agent.tools.hook_registry.read().await;
+            let hook_reg = snapshot.tools.hook_registry.read().await;
             !hook_reg.is_empty()
         };
         if !has_hooks {
@@ -168,14 +184,14 @@ impl PipelineStage for PreToolUseHookStage {
         }
 
         let hook_reg = {
-            let guard = agent.tools.hook_registry.read().await;
+            let guard = snapshot.tools.hook_registry.read().await;
             guard.clone()
         };
         let hook_result = hook_reg
             .run_pre_tool_use(
                 &ctx.tool_name,
                 &ctx.input,
-                agent.config.get_session_id().unwrap_or(""),
+                snapshot.config.session_id.as_deref().unwrap_or(""),
             )
             .await;
         ctx.hook_messages.pre = hook_result.messages.clone();
@@ -209,11 +225,22 @@ impl PipelineStage for PermissionStage {
         "permission"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
-        let approval_modified = agent
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        #[cfg(feature = "human-loop")]
+        let approval_modified = snapshot
             .check_tool_approval(&ctx.tool_name, &ctx.input)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))?;
+
+        #[cfg(not(feature = "human-loop"))]
+        let approval_modified = snapshot
+            .check_tool_approval(&ctx.tool_name, &ctx.input)
+            .await
+            .map_err(|_| ReactError::Other("Permission check failed".into()))?;
 
         if let Some(modified) = approval_modified
             && let Value::Object(map) = &modified
@@ -233,8 +260,12 @@ impl PipelineStage for ReadBeforeEditStage {
         "read_before_edit"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
-        if !agent.config.force_read_before_edit {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        if !snapshot.config.force_read_before_edit {
             return Ok(());
         }
         if !is_write_tool(&ctx.tool_name) {
@@ -244,13 +275,92 @@ impl PipelineStage for ReadBeforeEditStage {
             let canonical = std::fs::canonicalize(&path)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.clone());
-            if !agent.was_file_read(&canonical) {
+            let ttl = std::time::Duration::from_secs(30 * 60);
+            let mut files = snapshot
+                .recently_read_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let read = match files.get(&canonical) {
+                Some(instant) if instant.elapsed() < ttl => true,
+                Some(_) => {
+                    files.remove(&canonical);
+                    false
+                }
+                None => false,
+            };
+            if !read {
                 ctx.blocked = true;
                 ctx.block_reason = Some(format!(
                     "Read-before-edit is enabled. File '{}' has not been read. Use read_file first.",
                     path
                 ));
             }
+        }
+        Ok(())
+    }
+}
+
+/// Checks skill-based tool permissions (skill_allowed_tools whitelist).
+pub struct SkillPermissionStage;
+
+#[async_trait]
+impl PipelineStage for SkillPermissionStage {
+    fn name(&self) -> &str {
+        "skill_permission"
+    }
+
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        // Check if a skill is activated and has tool restrictions
+        if let Some(allowed_tools) = snapshot.tools.skill_allowed_tools.as_ref() {
+            // Check if the tool is in the whitelist
+            let permitted = allowed_tools.iter().any(|pattern| {
+                echo_execution::skills::external::types::tool_matcher(pattern, &ctx.tool_name)
+            });
+
+            if !permitted {
+                ctx.blocked = true;
+                ctx.block_reason = Some(format!(
+                    "Tool '{}' is not permitted by the activated skill's allowed_tools whitelist",
+                    ctx.tool_name
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Records business audit logs for tool execution.
+pub struct AuditStage;
+
+#[async_trait]
+impl PipelineStage for AuditStage {
+    fn name(&self) -> &str {
+        "audit"
+    }
+
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        // Log tool execution start to audit logger
+        if let Some(al) = &snapshot.guard.audit_logger {
+            let ev = crate::audit::AuditEvent::now(
+                snapshot.config.session_id.clone(),
+                snapshot.config.agent_name.clone(),
+                crate::audit::AuditEventType::ToolCall {
+                    tool: ctx.tool_name.clone(),
+                    input: ctx.input.clone(),
+                    output: String::new(),
+                    success: true,
+                    duration_ms: 0,
+                },
+            );
+            let _ = al.log(ev).await;
         }
         Ok(())
     }
@@ -265,15 +375,19 @@ impl PipelineStage for ExecuteStage {
         "execute"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         let execution_start = std::time::Instant::now();
 
         if ctx.call_id.is_empty() {
             ctx.call_id = format!("call_{}", uuid::Uuid::new_v4());
         }
         // Record ToolCall trace event (redaction handled by new_tool_call)
-        agent
-            .record_trace_event(crate::trace::RunEvent::new_tool_call(
+        snapshot
+            .record_event(crate::trace::RunEvent::new_tool_call(
                 ctx.call_id.clone(),
                 ctx.tool_name.clone(),
                 Some(ctx.input.clone()),
@@ -284,30 +398,57 @@ impl PipelineStage for ExecuteStage {
 
         // Execute tool; on infrastructure error, convert to ToolResult{success:false}
         // so downstream stages (trace, post-hook, callback) still execute.
-        let result = match agent
+        let result = match snapshot
             .tools
             .tool_manager
             .execute_tool(&ctx.tool_name, ctx.params.clone())
             .await
         {
             Ok(r) => r,
-            Err(e) => ToolResult {
-                kind: echo_core::tools::ToolResultKind::StructuredError {
-                    error_code: "tool_execution_failed".into(),
-                },
-                success: false,
-                output: String::new(),
-                error: Some(e.to_string()),
-                bytes: None,
-                data: None,
-                truncated: false,
-                mime_type: None,
-                metadata: std::collections::HashMap::new(),
-            },
+            Err(e) => {
+                let err_msg = e.to_string();
+                // Log failure to audit logger
+                if let Some(al) = &snapshot.guard.audit_logger {
+                    let ev = crate::audit::AuditEvent::now(
+                        snapshot.config.session_id.clone(),
+                        snapshot.config.agent_name.clone(),
+                        crate::audit::AuditEventType::ToolCall {
+                            tool: ctx.tool_name.clone(),
+                            input: ctx.input.clone(),
+                            output: err_msg.clone(),
+                            success: false,
+                            duration_ms: 0,
+                        },
+                    );
+                    let _ = al.log(ev).await;
+                }
+
+                ToolResult {
+                    kind: echo_core::tools::ToolResultKind::StructuredError {
+                        error_code: "tool_execution_failed".into(),
+                    },
+                    success: false,
+                    output: String::new(),
+                    error: Some(err_msg),
+                    bytes: None,
+                    data: None,
+                    truncated: false,
+                    mime_type: None,
+                    metadata: std::collections::HashMap::new(),
+                }
+            }
         };
 
         ctx.duration_ms = execution_start.elapsed().as_millis() as u64;
-        ctx.result = Some(result);
+        ctx.result = Some(result.clone());
+
+        // Record file read if tool was read_file and succeeded
+        if result.success && ctx.tool_name == "read_file" {
+            if let Some(path) = ctx.params.get("path").and_then(|v| v.as_str()) {
+                snapshot.record_file_read(path);
+            }
+        }
+
         Ok(())
     }
 }
@@ -321,9 +462,13 @@ impl PipelineStage for PostToolUseHookStage {
         "post_tool_use_hook"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         let hook_reg = {
-            let guard = agent.tools.hook_registry.read().await;
+            let guard = snapshot.tools.hook_registry.read().await;
             if guard.is_empty() {
                 return Ok(());
             }
@@ -345,7 +490,7 @@ impl PipelineStage for PostToolUseHookStage {
                 &ctx.tool_name,
                 &ctx.input,
                 output,
-                agent.config.get_session_id().unwrap_or(""),
+                snapshot.config.session_id.as_deref().unwrap_or(""),
             )
             .await;
         ctx.hook_messages.post = post_result.messages;
@@ -366,10 +511,14 @@ impl PipelineStage for OutputGuardStage {
         "output_guard"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         if let Some(ref result) = ctx.result
             && result.success
-            && let Some(guarded) = agent.check_tool_output_guard(&result.output).await
+            && let Some(guarded) = snapshot.check_tool_output_guard(&result.output).await
         {
             ctx.output = Some(guarded);
         }
@@ -386,13 +535,17 @@ impl PipelineStage for TruncationStage {
         "truncation"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         let raw = ctx
             .output
             .as_deref()
             .or_else(|| ctx.result.as_ref().map(|r| r.output.as_str()))
             .unwrap_or("");
-        ctx.output = Some(agent.truncate_tool_output(raw.to_string()).await);
+        ctx.output = Some(snapshot.truncate_tool_output(raw.to_string()).await);
         Ok(())
     }
 }
@@ -425,9 +578,13 @@ impl PipelineStage for CallbackStage {
         }
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
-        let agent_name = &agent.config.agent_name;
-        for cb in &agent.config.callbacks {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        let agent_name = &snapshot.config.agent_name;
+        for cb in &snapshot.config.callbacks {
             match self.phase {
                 CallbackPhase::Start => {
                     cb.on_tool_start(agent_name, &ctx.tool_name, &ctx.input)
@@ -456,12 +613,16 @@ impl PipelineStage for TraceRecordingStage {
         "trace_recording"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         if let Some(ref result) = ctx.result {
             // Always record ToolResult — success determines the outcome.
             // ToolError is additionally recorded for failure details.
-            agent
-                .record_trace_event(crate::trace::RunEvent::ToolResult {
+            snapshot
+                .record_event(crate::trace::RunEvent::ToolResult {
                     call_id: ctx.call_id.clone(),
                     name: ctx.tool_name.clone(),
                     success: result.success,
@@ -481,8 +642,8 @@ impl PipelineStage for TraceRecordingStage {
                 })
                 .await;
             if !result.success {
-                agent
-                    .record_trace_event(crate::trace::RunEvent::ToolError {
+                snapshot
+                    .record_event(crate::trace::RunEvent::ToolError {
                         call_id: ctx.call_id.clone(),
                         name: ctx.tool_name.clone(),
                         message: result.error.clone().unwrap_or_default(),
@@ -533,7 +694,9 @@ impl ToolExecutionPipeline {
                 Box::new(PreToolUseHookStage),
                 Box::new(PermissionStage),
                 Box::new(ReadBeforeEditStage),
+                Box::new(SkillPermissionStage),
                 Box::new(CallbackStage::START),
+                Box::new(AuditStage),
                 Box::new(ExecuteStage),
                 Box::new(TraceRecordingStage),
                 Box::new(PostToolUseHookStage),
@@ -548,12 +711,12 @@ impl ToolExecutionPipeline {
     pub(crate) async fn run(
         &self,
         ctx: &mut ToolExecutionContext,
-        agent: &ReactAgent,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         for stage in &self.stages {
             if ctx.blocked {
                 debug!(
-                    agent = %agent.config.agent_name,
+                    agent = %snapshot.config.agent_name,
                     stage = stage.name(),
                     reason = ?ctx.block_reason,
                     "Pipeline stage skipped (blocked)"
@@ -561,12 +724,12 @@ impl ToolExecutionPipeline {
                 break;
             }
             debug!(
-                agent = %agent.config.agent_name,
+                agent = %snapshot.config.agent_name,
                 stage = stage.name(),
                 tool = %ctx.tool_name,
                 "Pipeline stage running"
             );
-            stage.run(ctx, agent).await?;
+            stage.run(ctx, snapshot).await?;
         }
         Ok(())
     }
@@ -583,7 +746,11 @@ impl PipelineStage for PlanModeStage {
         "plan_mode"
     }
 
-    async fn run(&self, ctx: &mut ToolExecutionContext, _agent: &ReactAgent) -> Result<()> {
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        _snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
         if !ctx.plan_mode {
             return Ok(());
         }

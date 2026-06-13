@@ -32,6 +32,10 @@ pub struct StoreItem {
     /// Last access timestamp (Unix seconds). Used for decay/pruning decisions.
     #[serde(default)]
     pub last_accessed: Option<u64>,
+    /// Optional expiration time (Unix seconds). Items past this time are
+    /// candidates for pruning. `None` means the item never expires.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
 }
 
 fn default_importance() -> f32 {
@@ -51,6 +55,7 @@ impl StoreItem {
             score: None,
             importance: 5.0,
             last_accessed: None,
+            expires_at: None,
         }
     }
 
@@ -66,10 +71,26 @@ impl StoreItem {
         item
     }
 
+    /// Create a StoreItem with a TTL (time-to-live) in seconds from now.
+    pub fn with_ttl(namespace: Vec<String>, key: String, value: Value, ttl_secs: u64) -> Self {
+        let mut item = Self::new(namespace, key, value);
+        item.expires_at = Some(item.created_at.saturating_add(ttl_secs));
+        item
+    }
+
     /// Mark this item as accessed (updates `last_accessed`).
     pub fn touch(&mut self) {
         self.last_accessed = Some(crate::utils::time::now_secs());
     }
+}
+
+/// Result of a prune/dedup operation.
+#[derive(Debug, Clone, Default)]
+pub struct PruneResult {
+    /// Number of items removed.
+    pub removed: u64,
+    /// Number of items checked.
+    pub checked: u64,
 }
 
 /// Search mode
@@ -216,4 +237,21 @@ pub trait Store: Send + Sync {
 
     /// List all entries in the namespace (no keyword filter, no pagination limit).
     fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>>;
+
+    /// Remove expired items from a namespace.
+    ///
+    /// Returns the number of items removed. Default implementation is a no-op.
+    fn prune_expired<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
+        let _ = namespace;
+        Box::pin(async move { Ok(0) })
+    }
+
+    /// Deduplicate items in a namespace by content hash.
+    ///
+    /// Groups items by content fingerprint and keeps only the most recent one.
+    /// Returns the number of items removed. Default implementation is a no-op.
+    fn dedup_by_content<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<u64>> {
+        let _ = namespace;
+        Box::pin(async move { Ok(0) })
+    }
 }

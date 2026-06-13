@@ -35,7 +35,8 @@ pub mod provider_urls {
     pub const ANTHROPIC: &str = "https://api.anthropic.com/v1/messages";
     pub const OLLAMA: &str = "http://localhost:11434/api/chat";
     pub const DEEPSEEK: &str = "https://api.deepseek.com/chat/completions";
-    pub const DASHSCOPE: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+    pub const DASHSCOPE: &str =
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
     pub const GEMINI: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
     pub const MOONSHOT: &str = "https://api.moonshot.cn/v1/chat/completions";
     pub const ZHIPU: &str = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
@@ -1193,7 +1194,9 @@ mod tests {
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// RAII guard that sets an env var and restores (or removes) it on drop.

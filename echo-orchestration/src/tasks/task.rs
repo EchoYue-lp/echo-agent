@@ -2,6 +2,313 @@
 
 use serde::{Deserialize, Serialize};
 
+// ── Enhanced Task Types (Step 1) ──────────────────────────────────────────────
+
+/// Task type classification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskType {
+    /// Discovery: search, read, analyze
+    Discovery,
+    /// Implementation: modify, create, implement
+    Implementation,
+    /// Verification: test, verify, check
+    Verification,
+    /// Background: long-running background task
+    Background,
+    /// Delegation: delegate to sub-agent
+    Delegation,
+}
+
+impl Default for TaskType {
+    fn default() -> Self {
+        Self::Implementation
+    }
+}
+
+/// Task input specification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskInput {
+    pub name: String,
+    pub input_type: InputType,
+    pub source: String,
+    pub required: bool,
+}
+
+/// Input type classification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputType {
+    File,
+    Data,
+    Artifact,
+    Context,
+}
+
+/// Task output specification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskOutput {
+    pub name: String,
+    pub output_type: OutputType,
+    pub target: String,
+    pub validation: Option<String>,
+}
+
+/// Output type classification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputType {
+    File,
+    Artifact,
+    Result,
+    Status,
+}
+
+/// Context scope for task execution
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScope {
+    /// Only include task description
+    Minimal,
+    /// Include relevant files/artifacts
+    Relevant,
+    /// Inherit parent context
+    Full,
+    /// Completely isolated
+    Isolated,
+}
+
+impl Default for ContextScope {
+    fn default() -> Self {
+        Self::Relevant
+    }
+}
+
+/// Risk level classification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    /// Read-only, no side effects
+    Low,
+    /// Write operations, reversible
+    Medium,
+    /// Write operations, irreversible, requires verification
+    High,
+}
+
+impl Default for RiskLevel {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+/// Verification specification
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerificationSpec {
+    #[serde(default)]
+    pub verification_type: VerificationType,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub expected: Option<String>,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default)]
+    pub fallback_on_failure: FallbackStrategy,
+}
+
+fn default_timeout_secs() -> u64 {
+    300
+}
+
+impl Default for VerificationSpec {
+    fn default() -> Self {
+        Self {
+            verification_type: VerificationType::None,
+            command: None,
+            expected: None,
+            timeout_secs: 300,
+            retry_count: 0,
+            fallback_on_failure: FallbackStrategy::Abort,
+        }
+    }
+}
+
+/// Verification type
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationType {
+    Command,
+    FileExists,
+    DiffCheck,
+    Test,
+    HumanReview,
+    LlmReview,
+    None,
+}
+
+impl Default for VerificationType {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Fallback strategy on verification failure
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackStrategy {
+    Retry,
+    Replan,
+    AskUser,
+    Abort,
+}
+
+impl Default for FallbackStrategy {
+    fn default() -> Self {
+        Self::Abort
+    }
+}
+
+/// Checkpoint policy
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointPolicy {
+    AfterEach,
+    OnMilestone,
+    OnFailure,
+    Never,
+}
+
+impl Default for CheckpointPolicy {
+    fn default() -> Self {
+        Self::OnFailure
+    }
+}
+
+/// Task execution attempt record
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskAttempt {
+    pub attempt_id: u32,
+    pub started_at: u64,
+    pub completed_at: Option<u64>,
+    pub status: AttemptStatus,
+    pub evidence: Vec<Evidence>,
+    pub error: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// Attempt status
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptStatus {
+    Running,
+    Success,
+    Failed,
+    Timeout,
+    Cancelled,
+}
+
+/// Evidence record
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Evidence {
+    pub evidence_type: EvidenceType,
+    pub content: String,
+    pub source: String,
+    pub timestamp: u64,
+}
+
+/// Evidence type
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceType {
+    CommandOutput,
+    FileContent,
+    TestResult,
+    LlmOutput,
+    UserInput,
+}
+
+/// File change record
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub change_type: ChangeType,
+    pub diff: Option<String>,
+    pub checksum: Option<String>,
+}
+
+/// Change type
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeType {
+    Created,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+/// Artifact record
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub name: String,
+    pub artifact_type: ArtifactType,
+    pub path: String,
+    pub size_bytes: u64,
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+/// Artifact type
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactType {
+    File,
+    Report,
+    Model,
+    Data,
+    Image,
+    Other,
+}
+
+/// Command execution record
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandRecord {
+    pub command: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+}
+
+/// Verification result
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerificationResult {
+    pub verification_type: VerificationType,
+    pub passed: bool,
+    pub output: String,
+    pub duration_ms: u64,
+    pub retry_count: u32,
+}
+
+/// Task state with execution details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskState {
+    pub task_id: String,
+    pub status: TaskStatus,
+    pub evidence: Vec<Evidence>,
+    pub changed_files: Vec<FileChange>,
+    pub artifacts: Vec<Artifact>,
+    pub commands_run: Vec<CommandRecord>,
+    pub verification_result: Option<VerificationResult>,
+    pub remaining_risks: Vec<String>,
+    pub next_unblocked_tasks: Vec<String>,
+    pub context_summary: Option<String>,
+    pub retry_count: u32,
+    pub parent_task_id: Option<String>,
+    pub checkpoint_at: u64,
+}
+
 /// Task status
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
@@ -127,6 +434,77 @@ pub struct Task {
     /// Paired with [`metadata_json`](Self::metadata_json) for round-tripping.
     #[serde(skip)]
     pub metadata: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+
+    // ── Enhanced Fields (Step 1) ────────────────────────────────────────────
+    /// Task type classification (discovery/implementation/verification/background/delegation)
+    pub task_type: TaskType,
+
+    /// Acceptance criteria - conditions that must be met for task completion
+    pub acceptance_criteria: Vec<String>,
+
+    /// Input specifications
+    pub inputs: Vec<TaskInput>,
+
+    /// Expected output specifications
+    pub expected_outputs: Vec<TaskOutput>,
+
+    /// Allowed tools for this task (None = all tools allowed)
+    pub allowed_tools: Option<Vec<String>>,
+
+    /// Context scope for task execution
+    pub context_scope: ContextScope,
+
+    /// Risk level classification
+    pub risk_level: RiskLevel,
+
+    /// Whether this task can be parallelized with other tasks
+    pub can_parallelize: bool,
+
+    /// Whether this task requires write access
+    pub requires_write_access: bool,
+
+    /// Verification specification
+    pub verification: VerificationSpec,
+
+    /// Checkpoint policy
+    pub checkpoint_policy: CheckpointPolicy,
+
+    /// Execution attempt history
+    pub attempts: Vec<TaskAttempt>,
+
+    /// Task start timestamp
+    pub started_at: Option<u64>,
+
+    /// Task completion timestamp
+    pub completed_at: Option<u64>,
+
+    /// Structured error code (for programmatic error handling)
+    pub error_code: Option<String>,
+
+    // ── Execution State Fields (Step 4) ──────────────────────────────────────
+    /// Evidence collected during task execution
+    pub evidence: Vec<Evidence>,
+
+    /// Files changed during task execution
+    pub changed_files: Vec<FileChange>,
+
+    /// Artifacts produced during task execution
+    pub artifacts: Vec<Artifact>,
+
+    /// Commands executed during task execution
+    pub commands_run: Vec<CommandRecord>,
+
+    /// Verification result (if verification was performed)
+    pub verification_result: Option<VerificationResult>,
+
+    /// Remaining risks identified during task execution
+    pub remaining_risks: Vec<String>,
+
+    /// Tasks that will be unblocked when this task completes
+    pub next_unblocked_tasks: Vec<String>,
+
+    /// Context summary for task resumption
+    pub context_summary: Option<String>,
 }
 
 impl std::fmt::Debug for Task {
@@ -148,8 +526,26 @@ impl std::fmt::Debug for Task {
             .field("timeout_secs", &self.timeout_secs)
             .field("max_retries", &self.max_retries)
             .field("retry_count", &self.retry_count)
-            .field("execute_fn", &self.execute_fn.as_ref().map(|_| "Some(<fn>)"))
+            .field(
+                "execute_fn",
+                &self.execute_fn.as_ref().map(|_| "Some(<fn>)"),
+            )
             .field("metadata_json", &self.metadata_json)
+            .field("task_type", &self.task_type)
+            .field("acceptance_criteria", &self.acceptance_criteria)
+            .field("inputs", &self.inputs)
+            .field("expected_outputs", &self.expected_outputs)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("context_scope", &self.context_scope)
+            .field("risk_level", &self.risk_level)
+            .field("can_parallelize", &self.can_parallelize)
+            .field("requires_write_access", &self.requires_write_access)
+            .field("verification", &self.verification)
+            .field("checkpoint_policy", &self.checkpoint_policy)
+            .field("attempts", &self.attempts)
+            .field("started_at", &self.started_at)
+            .field("completed_at", &self.completed_at)
+            .field("error_code", &self.error_code)
             .finish()
     }
 }
@@ -172,6 +568,21 @@ impl PartialEq for Task {
             && self.timeout_secs == other.timeout_secs
             && self.max_retries == other.max_retries
             && self.retry_count == other.retry_count
+            && self.task_type == other.task_type
+            && self.acceptance_criteria == other.acceptance_criteria
+            && self.inputs == other.inputs
+            && self.expected_outputs == other.expected_outputs
+            && self.allowed_tools == other.allowed_tools
+            && self.context_scope == other.context_scope
+            && self.risk_level == other.risk_level
+            && self.can_parallelize == other.can_parallelize
+            && self.requires_write_access == other.requires_write_access
+            && self.verification == other.verification
+            && self.checkpoint_policy == other.checkpoint_policy
+            && self.attempts == other.attempts
+            && self.started_at == other.started_at
+            && self.completed_at == other.completed_at
+            && self.error_code == other.error_code
         // execute_fn, metadata_json, metadata intentionally excluded — not comparable
     }
 }
@@ -199,6 +610,31 @@ impl Task {
             execute_fn: None,
             metadata_json: None,
             metadata: None,
+            // Enhanced fields (Step 1) - all with sensible defaults
+            task_type: TaskType::default(),
+            acceptance_criteria: Vec::new(),
+            inputs: Vec::new(),
+            expected_outputs: Vec::new(),
+            allowed_tools: None,
+            context_scope: ContextScope::default(),
+            risk_level: RiskLevel::default(),
+            can_parallelize: true,
+            requires_write_access: false,
+            verification: VerificationSpec::default(),
+            checkpoint_policy: CheckpointPolicy::default(),
+            attempts: Vec::new(),
+            started_at: None,
+            completed_at: None,
+            error_code: None,
+            // Execution state fields (Step 4) - all empty/None by default
+            evidence: Vec::new(),
+            changed_files: Vec::new(),
+            artifacts: Vec::new(),
+            commands_run: Vec::new(),
+            verification_result: None,
+            remaining_risks: Vec::new(),
+            next_unblocked_tasks: Vec::new(),
+            context_summary: None,
         }
     }
 
@@ -290,6 +726,111 @@ impl Task {
     /// Returns `None` if no metadata was set or the type doesn't match.
     pub fn get_metadata<T: 'static>(&self) -> Option<&T> {
         self.metadata.as_ref()?.downcast_ref::<T>()
+    }
+
+    // ── Enhanced Builder Methods (Step 1) ────────────────────────────────────
+
+    /// Set task type
+    pub fn with_task_type(mut self, task_type: TaskType) -> Self {
+        self.task_type = task_type;
+        self
+    }
+
+    /// Set acceptance criteria
+    pub fn with_acceptance_criteria(mut self, criteria: Vec<String>) -> Self {
+        self.acceptance_criteria = criteria;
+        self
+    }
+
+    /// Add a single acceptance criterion
+    pub fn add_acceptance_criterion(&mut self, criterion: impl Into<String>) {
+        self.acceptance_criteria.push(criterion.into());
+    }
+
+    /// Set input specifications
+    pub fn with_inputs(mut self, inputs: Vec<TaskInput>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    /// Add a single input
+    pub fn add_input(&mut self, input: TaskInput) {
+        self.inputs.push(input);
+    }
+
+    /// Set expected output specifications
+    pub fn with_expected_outputs(mut self, outputs: Vec<TaskOutput>) -> Self {
+        self.expected_outputs = outputs;
+        self
+    }
+
+    /// Add a single expected output
+    pub fn add_expected_output(&mut self, output: TaskOutput) {
+        self.expected_outputs.push(output);
+    }
+
+    /// Set allowed tools
+    pub fn with_allowed_tools(mut self, tools: Vec<String>) -> Self {
+        self.allowed_tools = Some(tools);
+        self
+    }
+
+    /// Set context scope
+    pub fn with_context_scope(mut self, scope: ContextScope) -> Self {
+        self.context_scope = scope;
+        self
+    }
+
+    /// Set risk level
+    pub fn with_risk_level(mut self, level: RiskLevel) -> Self {
+        self.risk_level = level;
+        self
+    }
+
+    /// Set whether task can be parallelized
+    pub fn with_can_parallelize(mut self, can_parallelize: bool) -> Self {
+        self.can_parallelize = can_parallelize;
+        self
+    }
+
+    /// Set whether task requires write access
+    pub fn with_requires_write_access(mut self, requires: bool) -> Self {
+        self.requires_write_access = requires;
+        self
+    }
+
+    /// Set verification specification
+    pub fn with_verification(mut self, verification: VerificationSpec) -> Self {
+        self.verification = verification;
+        self
+    }
+
+    /// Set checkpoint policy
+    pub fn with_checkpoint_policy(mut self, policy: CheckpointPolicy) -> Self {
+        self.checkpoint_policy = policy;
+        self
+    }
+
+    /// Record task start
+    pub fn mark_started(&mut self) {
+        self.started_at = Some(super::time::now_secs());
+        self.status = TaskStatus::InProgress;
+        self.updated_at = super::time::now_secs();
+    }
+
+    /// Record task completion
+    pub fn mark_completed(&mut self, result: Option<String>) {
+        self.completed_at = Some(super::time::now_secs());
+        self.status = TaskStatus::Completed;
+        self.result = result;
+        self.updated_at = super::time::now_secs();
+    }
+
+    /// Record an execution attempt
+    pub fn record_attempt(&mut self, attempt: TaskAttempt) {
+        self.attempts.push(attempt);
+        self.retry_count = self.attempts.len() as u32;
+        self.updated_at = super::time::now_secs();
     }
 
     /// Whether already cancelled

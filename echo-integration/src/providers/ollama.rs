@@ -4,7 +4,9 @@
 //! Streaming uses NDJSON (one JSON object per line, `done: true` terminates).
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::types::{ChatCompletionResponse, DeltaMessage, FunctionCall, Message, ToolCall, Usage};
+use echo_core::llm::types::{
+    ChatCompletionResponse, DeltaMessage, FunctionCall, Message, ToolCall, Usage,
+};
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::StreamExt;

@@ -119,6 +119,63 @@ fn load_lazyframe(path: &Path, format: Option<&str>) -> Result<LazyFrame> {
     }
 }
 
+/// Build a standardized data tool response with consistent metadata.
+///
+/// Output envelope format:
+/// ```json
+/// {
+///   "tool": "tool_name",
+///   "rows": 100,
+///   "columns": 5,
+///   "column_names": ["a", "b"],
+///   "truncated": false,
+///   "data": [ ... ]
+/// }
+/// ```
+fn data_tool_response(tool_name: &str, df: &DataFrame, max_rows: usize) -> Value {
+    let total_rows = df.height();
+    let columns = df.width();
+    let column_names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let truncated = total_rows > max_rows;
+
+    let display_df = if truncated {
+        df.head(Some(max_rows))
+    } else {
+        df.clone()
+    };
+
+    let data = df_to_json(&display_df).unwrap_or(Value::Array(vec![]));
+
+    serde_json::json!({
+        "tool": tool_name,
+        "rows": total_rows,
+        "columns": columns,
+        "column_names": column_names,
+        "truncated": truncated,
+        "data": data,
+    })
+}
+
+/// Build a standardized data tool response with additional metadata fields.
+fn data_tool_response_with_meta(
+    tool_name: &str,
+    df: &DataFrame,
+    max_rows: usize,
+    extra: Vec<(&str, Value)>,
+) -> Value {
+    let mut base = data_tool_response(tool_name, df, max_rows);
+    if let Value::Object(ref mut map) = base {
+        for (key, val) in extra {
+            map.insert(key.to_string(), val);
+        }
+    }
+    base
+}
+
 /// Check if a column type is numeric
 pub fn is_numeric(dtype: &DataType) -> bool {
     matches!(
@@ -350,13 +407,16 @@ impl Tool for DataFilterTool {
             let max_rows = security.limits.max_preview_rows;
             let effective_limit = limit.map(|n| n.min(max_rows)).unwrap_or(max_rows);
             let result_df = df.head(Some(effective_limit));
-            let data_json = df_to_json(&result_df)?;
 
-            let result = serde_json::json!({
-                "filter": filter_expr,
-                "matched_rows": df.shape().0,
-                "data": data_json,
-            });
+            let result = data_tool_response_with_meta(
+                "filter_data",
+                &result_df,
+                effective_limit,
+                vec![
+                    ("filter", Value::String(filter_expr.to_string())),
+                    ("matched_rows", serde_json::json!(df.shape().0)),
+                ],
+            );
 
             Ok(ToolResult::success_json(result))
         })
@@ -436,12 +496,13 @@ impl Tool for DataAggregateTool {
                     message: format!("Aggregation execution failed: {}", e),
                 })?;
 
-            let data_json = df_to_json(&df)?;
-
-            let result = serde_json::json!({
-                "group_by": group_by,
-                "data": data_json,
-            });
+            let max_rows = security.limits.max_preview_rows;
+            let result = data_tool_response_with_meta(
+                "aggregate_data",
+                &df,
+                max_rows,
+                vec![("group_by", serde_json::json!(group_by))],
+            );
 
             Ok(ToolResult::success_json(result))
         })
@@ -832,12 +893,16 @@ impl Tool for DataTransformTool {
             let effective_limit = limit.map(|n| n.min(max_rows)).unwrap_or(max_rows);
             let result_df = df.head(Some(effective_limit));
 
-            let data_json = df_to_json(&result_df)?;
-            Ok(ToolResult::success_json(serde_json::json!({
-                "operation": operation,
-                "params": params,
-                "data": data_json,
-            })))
+            let result = data_tool_response_with_meta(
+                "transform_data",
+                &result_df,
+                effective_limit,
+                vec![
+                    ("operation", Value::String(operation.to_string())),
+                    ("params", Value::String(params.to_string())),
+                ],
+            );
+            Ok(ToolResult::success_json(result))
         })
     }
 }
@@ -1366,17 +1431,17 @@ impl Tool for DataTopNTool {
                     })?
             };
 
-            let data_json = df_to_json(&result_df)?;
-
-            let mut result = serde_json::json!({
-                "top_n": top_n,
-                "metric_column": metric_col,
-                "ascending": ascending,
-                "data": data_json,
-            });
+            let max_rows = security.limits.max_preview_rows;
+            let mut extra = vec![
+                ("top_n", serde_json::json!(top_n)),
+                ("metric_column", Value::String(metric_col.to_string())),
+                ("ascending", serde_json::json!(ascending)),
+            ];
             if let Some(dim) = dim_cols_str {
-                result["dimension_columns"] = serde_json::json!(dim);
+                extra.push(("dimension_columns", Value::String(dim.to_string())));
             }
+
+            let result = data_tool_response_with_meta("topn_data", &result_df, max_rows, extra);
 
             Ok(ToolResult::success_json(result))
         })
@@ -2261,11 +2326,18 @@ fn format_smart_float(f: f64) -> String {
         return "NaN".to_string();
     }
     if f.is_infinite() {
-        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+        return if f > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
     }
     let formatted = format!("{:.6}", f);
     if formatted.contains('.') {
-        formatted.trim_end_matches('0').trim_end_matches('.').to_string()
+        formatted
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     } else {
         formatted
     }
@@ -2275,7 +2347,7 @@ fn format_smart_float(f: f64) -> String {
 
 const MAX_MULTI_FILES: usize = 50;
 
-/// Load multiple DataFrames and vertically concatenate them
+/// Load multiple DataFrames and vertically concatenate them (using Polars concat for efficiency)
 fn load_multi_dataframes(paths: &[&Path], format: Option<&str>) -> Result<DataFrame> {
     if paths.is_empty() {
         return Err(ToolError::MissingParameter("file_paths".to_string()).into());
@@ -2292,13 +2364,14 @@ fn load_multi_dataframes(paths: &[&Path], format: Option<&str>) -> Result<DataFr
         .into());
     }
 
-    let mut result = load_dataframe(paths[0], format)?;
-    let schema = result.schema();
+    let first_df = load_dataframe(paths[0], format)?;
+    let schema = first_df.schema().clone();
 
+    // Load all DataFrames and validate schema compatibility
+    let mut all_dfs = vec![first_df];
     for path in &paths[1..] {
         let df = load_dataframe(path, format)?;
-        // Validate schema compatibility (column names must match)
-        if df.schema() != schema {
+        if *df.schema() != schema {
             return Err(ToolError::InvalidParameter {
                 name: "file_paths".to_string(),
                 message: format!(
@@ -2309,7 +2382,13 @@ fn load_multi_dataframes(paths: &[&Path], format: Option<&str>) -> Result<DataFr
             }
             .into());
         }
-        result.vstack(&df).map_err(|e| ToolError::ExecutionFailed {
+        all_dfs.push(df);
+    }
+
+    // Use single-pass concat via vstack_mut for efficiency (avoids O(n²) copies)
+    let mut result = all_dfs.remove(0);
+    for df in &all_dfs {
+        result = result.vstack(df).map_err(|e| ToolError::ExecutionFailed {
             tool: TOOL_NAME.to_string(),
             message: format!("Failed to concatenate DataFrames: {}", e),
         })?;
@@ -2565,7 +2644,7 @@ impl Tool for DataJoinTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as usize;
 
-            let left_suffix = parameters
+            let _left_suffix = parameters
                 .get("left_suffix")
                 .and_then(|v| v.as_str())
                 .unwrap_or("_left");
@@ -2623,7 +2702,7 @@ impl Tool for DataJoinTool {
 
             let mut right_df = right_df;
             for (old, new) in &right_rename_map {
-                right_df.rename(old, PlSmallStr::from_str(new));
+                let _ = right_df.rename(old, PlSmallStr::from_str(new));
             }
 
             // Determine join type
@@ -2694,25 +2773,43 @@ impl Tool for DataJoinTool {
     }
 }
 
-/// Convert DataFrame to a JSON array
+/// Convert DataFrame to a JSON array (column-major for performance)
 fn df_to_json(df: &DataFrame) -> Result<Value> {
+    let height = df.height();
+    if height == 0 {
+        return Ok(Value::Array(vec![]));
+    }
+
     let columns: Vec<String> = df
         .get_column_names()
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let mut records = Vec::new();
 
-    for i in 0..df.height() {
-        let mut record = serde_json::Map::new();
-        for col in &columns {
-            if let Ok(c) = df.column(col.as_str()) {
-                let value = c
-                    .get(i)
-                    .map(|v| any_value_to_json(&v))
-                    .unwrap_or(Value::Null);
-                record.insert(col.clone(), value);
-            }
+    // Pre-extract all column data as Vec<Value> to avoid repeated column lookups
+    let col_data: Vec<Vec<Value>> = columns
+        .iter()
+        .map(|col_name| {
+            df.column(col_name.as_str())
+                .map(|c| {
+                    (0..height)
+                        .map(|i| {
+                            c.get(i)
+                                .map(|v| any_value_to_json(&v))
+                                .unwrap_or(Value::Null)
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|_| vec![Value::Null; height])
+        })
+        .collect();
+
+    // Build records from pre-extracted column data
+    let mut records = Vec::with_capacity(height);
+    for i in 0..height {
+        let mut record = serde_json::Map::with_capacity(columns.len());
+        for (j, col_name) in columns.iter().enumerate() {
+            record.insert(col_name.clone(), col_data[j][i].clone());
         }
         records.push(Value::Object(record));
     }
@@ -2778,13 +2875,13 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
 
     // Helper to parse numeric value with proper error handling
     let parse_num = |s: &str, expr: &str| -> Result<f64> {
-        s.parse::<f64>().map_err(|_| ToolError::InvalidParameter {
-            name: "filter".to_string(),
-            message: format!(
-                "Invalid number '{}' in filter expression: '{}'",
-                s, expr
-            ),
-        }.into())
+        s.parse::<f64>().map_err(|_| {
+            ToolError::InvalidParameter {
+                name: "filter".to_string(),
+                message: format!("Invalid number '{}' in filter expression: '{}'", s, expr),
+            }
+            .into()
+        })
     };
 
     // Numeric comparisons (supports negative numbers: -?[\d.]+)
@@ -3164,18 +3261,24 @@ impl Tool for CorrelateTool {
             };
 
             if numeric_cols.len() < 2 {
-                return Ok(ToolResult::success(
-                    "Need at least 2 numeric columns for correlation analysis".to_string(),
-                ));
+                return Ok(ToolResult::success_json(serde_json::json!({
+                    "tool": "correlate_data",
+                    "error": "Need at least 2 numeric columns for correlation analysis",
+                })));
             }
 
             // Precompute ranks if Spearman
             let all_ranks: Option<Vec<Vec<f64>>> = if method == "spearman" {
-                Some(numeric_cols.iter().map(|c| {
-                    let s = df.column(c).unwrap().as_materialized_series();
-                    let s_f64 = s.cast(&DataType::Float64).unwrap();
-                    compute_ranks(&s_f64)
-                }).collect())
+                Some(
+                    numeric_cols
+                        .iter()
+                        .map(|c| {
+                            let s = df.column(c).unwrap().as_materialized_series();
+                            let s_f64 = s.cast(&DataType::Float64).unwrap();
+                            compute_ranks(&s_f64)
+                        })
+                        .collect(),
+                )
             } else {
                 None
             };
@@ -3205,29 +3308,32 @@ impl Tool for CorrelateTool {
                 matrix.push(row);
             }
 
-            // Format output
-            let mut output = format!("Correlation matrix ({} method):\n\n", method);
-            output.push_str(&format!("{:>15}", ""));
-            for col in &numeric_cols {
-                let truncated: String = col.chars().take(10).collect();
-                output.push_str(&format!("{:>12}", truncated));
-            }
-            output.push('\n');
+            // Format output as structured JSON
+            let matrix_json: Vec<Vec<Value>> = matrix
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|v| {
+                            if v.is_nan() {
+                                Value::Null
+                            } else {
+                                serde_json::Number::from_f64((*v * 1000.0).round() / 1000.0)
+                                    .map(Value::Number)
+                                    .unwrap_or(Value::Null)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
 
-            for (i, col1) in numeric_cols.iter().enumerate() {
-                let truncated: String = col1.chars().take(13).collect();
-                output.push_str(&format!("{:>15}", truncated));
-                for val in &matrix[i] {
-                    if val.is_nan() {
-                        output.push_str(&format!("{:>12}", "N/A"));
-                    } else {
-                        output.push_str(&format!("{:>12.3}", val));
-                    }
-                }
-                output.push('\n');
-            }
+            let result = serde_json::json!({
+                "tool": "correlate_data",
+                "method": method,
+                "columns": numeric_cols,
+                "matrix": matrix_json,
+            });
 
-            Ok(ToolResult::success(output))
+            Ok(ToolResult::success_json(result))
         })
     }
 }
@@ -3378,7 +3484,8 @@ impl Tool for PivotTool {
                 })?;
 
             // Step 2: Get unique values of the pivot column
-            let pivot_col_series = grouped.column(columns_str)
+            let pivot_col_series = grouped
+                .column(columns_str)
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "pivot_data".to_string(),
                     message: format!("Pivot column '{}' not found: {}", columns_str, e),
@@ -3386,17 +3493,18 @@ impl Tool for PivotTool {
                 .as_materialized_series()
                 .clone();
 
-            let unique_vals = pivot_col_series.unique().map_err(|e| ToolError::ExecutionFailed {
-                tool: "pivot_data".to_string(),
-                message: format!("Failed to get unique pivot values: {}", e),
-            })?;
+            let unique_vals =
+                pivot_col_series
+                    .unique()
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: "pivot_data".to_string(),
+                        message: format!("Failed to get unique pivot values: {}", e),
+                    })?;
 
             let pivot_values: Vec<String> = (0..unique_vals.len())
-                .map(|i| {
-                    match unique_vals.get(i) {
-                        Ok(v) => format!("{}", v),
-                        Err(_) => "null".to_string(),
-                    }
+                .map(|i| match unique_vals.get(i) {
+                    Ok(v) => format!("{}", v),
+                    Err(_) => "null".to_string(),
                 })
                 .collect();
 
@@ -3404,11 +3512,20 @@ impl Tool for PivotTool {
             let index_exprs: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
 
             // Start with the unique index rows
+            let index_names: Arc<[PlSmallStr]> = index_cols
+                .iter()
+                .map(|s| PlSmallStr::from(s.as_str()))
+                .collect::<Vec<_>>()
+                .into();
+            let index_selector = Selector::ByName {
+                names: index_names,
+                strict: true,
+            };
             let mut result = grouped
                 .clone()
                 .lazy()
                 .select(index_exprs.clone())
-                .unique(Some(index_cols.iter().map(|s| s.as_str()).collect()), UniqueKeepStrategy::First)
+                .unique(Some(index_selector), UniqueKeepStrategy::First)
                 .collect()
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: "pivot_data".to_string(),
@@ -3430,9 +3547,11 @@ impl Tool for PivotTool {
                         .lazy()
                         .filter(filter_expr)
                         .select(
-                            index_cols.iter().map(|c| col(c))
+                            index_cols
+                                .iter()
+                                .map(|c| col(c))
                                 .chain(std::iter::once(col(val_col).alias(new_col_name.as_str())))
-                                .collect::<Vec<_>>()
+                                .collect::<Vec<_>>(),
                         )
                         .collect()
                         .map_err(|e| ToolError::ExecutionFailed {
@@ -3441,18 +3560,23 @@ impl Tool for PivotTool {
                         })?;
 
                     // Left join with result
+                    let left_on: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+                    let right_on: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
                     result = result
                         .lazy()
                         .join(
                             filtered.lazy(),
-                            [index_cols.iter().map(|c| col(c)).collect::<Vec<_>>()],
-                            [index_cols.iter().map(|c| col(c)).collect::<Vec<_>>()],
+                            left_on,
+                            right_on,
                             JoinArgs::new(JoinType::Left),
                         )
                         .collect()
                         .map_err(|e| ToolError::ExecutionFailed {
                             tool: "pivot_data".to_string(),
-                            message: format!("Failed to join pivot column '{}': {}", new_col_name, e),
+                            message: format!(
+                                "Failed to join pivot column '{}': {}",
+                                new_col_name, e
+                            ),
                         })?;
                 }
             }
@@ -3472,5 +3596,125 @@ impl Tool for PivotTool {
                 }
             })))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_df_to_json_empty_dataframe() {
+        let df = DataFrame::empty();
+        let result = df_to_json(&df).unwrap();
+        assert!(result.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_df_to_json_with_data() {
+        let s1 = Series::new(PlSmallStr::from("name"), &["Alice", "Bob"]);
+        let s2 = Series::new(PlSmallStr::from("age"), &[30i32, 25]);
+        let df = DataFrame::new(2, vec![s1.into_column(), s2.into_column()]).unwrap();
+
+        let result = df_to_json(&df).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "Alice");
+        assert_eq!(arr[0]["age"], 30);
+        assert_eq!(arr[1]["name"], "Bob");
+        assert_eq!(arr[1]["age"], 25);
+    }
+
+    #[test]
+    fn test_data_tool_response_structure() {
+        let s1 = Series::new(PlSmallStr::from("x"), &[1i32, 2, 3]);
+        let df = DataFrame::new(3, vec![s1.into_column()]).unwrap();
+
+        let result = data_tool_response("test_tool", &df, 100);
+        let obj = result.as_object().unwrap();
+
+        // Verify standardized envelope
+        assert_eq!(obj["tool"], "test_tool");
+        assert_eq!(obj["rows"], 3);
+        assert_eq!(obj["columns"], 1);
+        assert!(!obj["truncated"].as_bool().unwrap());
+        assert!(obj["data"].is_array());
+        assert_eq!(obj["data"].as_array().unwrap().len(), 3);
+        assert!(
+            obj["column_names"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("x"))
+        );
+    }
+
+    #[test]
+    fn test_data_tool_response_truncation() {
+        let s1 = Series::new(PlSmallStr::from("v"), &(0..10).collect::<Vec<i32>>());
+        let df = DataFrame::new(10, vec![s1.into_column()]).unwrap();
+
+        let result = data_tool_response("test_tool", &df, 3);
+        let obj = result.as_object().unwrap();
+
+        assert_eq!(obj["rows"], 10);
+        assert!(obj["truncated"].as_bool().unwrap());
+        assert_eq!(obj["data"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_data_tool_response_with_meta() {
+        let s1 = Series::new(PlSmallStr::from("a"), &[1i32]);
+        let df = DataFrame::new(1, vec![s1.into_column()]).unwrap();
+
+        let result = data_tool_response_with_meta(
+            "filter_data",
+            &df,
+            100,
+            vec![
+                ("filter", Value::String("a > 0".to_string())),
+                ("matched_rows", serde_json::json!(1)),
+            ],
+        );
+        let obj = result.as_object().unwrap();
+
+        // Standard fields
+        assert_eq!(obj["tool"], "filter_data");
+        assert_eq!(obj["rows"], 1);
+        // Extra fields
+        assert_eq!(obj["filter"], "a > 0");
+        assert_eq!(obj["matched_rows"], 1);
+    }
+
+    #[test]
+    fn test_any_value_to_json_types() {
+        assert_eq!(any_value_to_json(&AnyValue::Null), Value::Null);
+        assert_eq!(
+            any_value_to_json(&AnyValue::Boolean(true)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            any_value_to_json(&AnyValue::Int32(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            any_value_to_json(&AnyValue::String("hello")),
+            serde_json::json!("hello")
+        );
+    }
+
+    #[test]
+    fn test_detect_format() {
+        use std::path::PathBuf;
+        assert_eq!(detect_format(&PathBuf::from("data.csv"), None), "csv");
+        assert_eq!(detect_format(&PathBuf::from("data.json"), None), "json");
+        assert_eq!(
+            detect_format(&PathBuf::from("data.parquet"), None),
+            "parquet"
+        );
+        assert_eq!(detect_format(&PathBuf::from("data.tsv"), None), "csv");
+        assert_eq!(
+            detect_format(&PathBuf::from("data.txt"), Some("json")),
+            "json"
+        );
     }
 }

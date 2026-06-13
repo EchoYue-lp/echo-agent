@@ -9,10 +9,15 @@
 
 pub mod compressor;
 pub mod horizon;
+pub mod invariants;
 pub mod levels;
+pub mod verifier;
 
 // Re-export from echo_core for backward compatibility
-pub use echo_core::compression::{CompressionInput, CompressionOutput, ContextCompressor};
+pub use echo_core::compression::{
+    CanonicalContext, CompressionCheckpoint, CompressionInput, CompressionOutput,
+    ContextCompressor, StructuredSummary, ToolPairFix, ToolPairFixType,
+};
 
 use crate::compression::compressor::SlidingWindowCompressor;
 use echo_core::budget::TokenBudget;
@@ -68,6 +73,90 @@ pub struct PrepareResult {
     pub messages: Vec<Message>,
     /// Compression statistics, populated only when auto-compression occurred.
     pub compressed: Option<ForceCompressStats>,
+    /// Compression checkpoint for audit, replay, and recovery.
+    pub checkpoint: Option<CompressionCheckpoint>,
+    /// Summary verification results (only when a summary was produced).
+    pub verification: Option<verifier::SummaryVerification>,
+}
+
+/// Token breakdown by message role.
+///
+/// Used by `/context` command to show where context window budget is spent.
+#[derive(Debug, Clone)]
+pub struct TokenBreakdown {
+    pub system: usize,
+    pub user: usize,
+    pub assistant: usize,
+    pub tool: usize,
+    pub summary: usize,
+    pub memory: usize,
+    pub total: usize,
+    pub max_context: Option<usize>,
+    pub token_limit: usize,
+    pub compression_count: u64,
+    pub compression_ratio: f64,
+}
+
+impl TokenBreakdown {
+    /// Format as a human-readable progress bar display.
+    pub fn format_bar(&self) -> String {
+        let max = self.max_context.unwrap_or(self.total.max(1));
+        let pct = |n: usize| -> f64 { if max == 0 { 0.0 } else { n as f64 / max as f64 } };
+
+        let bar = |label: &str, n: usize| -> String {
+            let frac = pct(n);
+            let filled = (frac * 20.0) as usize;
+            let bar_str: String = (0..20)
+                .map(|i| if i < filled { '█' } else { '░' })
+                .collect();
+            format!(
+                "  {:<12} {} {:>6} ({:>4.1}%)",
+                label,
+                bar_str,
+                fmt_tokens(n),
+                frac * 100.0
+            )
+        };
+
+        let mut s = format!(
+            "  Messages: {}  Tokens: {} / {} ({:.1}%)\n",
+            self.system + self.user + self.assistant + self.tool + self.summary + self.memory,
+            fmt_tokens(self.total),
+            fmt_tokens(max),
+            pct(self.total) * 100.0,
+        );
+        s.push_str(&bar("System:", self.system));
+        s.push('\n');
+        s.push_str(&bar("User:", self.user));
+        s.push('\n');
+        s.push_str(&bar("Assistant:", self.assistant));
+        s.push('\n');
+        s.push_str(&bar("Tool:", self.tool));
+        s.push('\n');
+        s.push_str(&bar("Summary:", self.summary));
+        s.push('\n');
+        s.push_str(&bar("Memory:", self.memory));
+        if let Some(mc) = self.max_context {
+            s.push_str(&format!("\n  Max context: {} tokens", fmt_tokens(mc)));
+        }
+        if self.compression_count > 0 {
+            s.push_str(&format!(
+                "\n  Compressions: {} | Ratio: {:.2}",
+                self.compression_count, self.compression_ratio
+            ));
+        }
+        s
+    }
+}
+
+fn fmt_tokens(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// Cumulative compression metrics for observability.
@@ -102,7 +191,8 @@ impl CompressionMetrics {
 
     /// Total tokens saved across all compression events.
     pub fn total_tokens_saved(&self) -> u64 {
-        self.total_tokens_before.saturating_sub(self.total_tokens_after)
+        self.total_tokens_before
+            .saturating_sub(self.total_tokens_after)
     }
 
     /// Compression ratio (0.0 = no savings, 1.0 = all tokens saved).
@@ -215,6 +305,10 @@ pub struct ContextManager {
     /// Optional callback for promoting evicted messages to long-term memory.
     /// When set, called with evicted messages after each compression pass.
     memory_promoter: Option<Arc<dyn MemoryPromoter>>,
+    /// Optional canonical context sources for re-injection after compression.
+    /// When set, system prompt, rules, and skill injections can be restored
+    /// if compression evicts them from the message buffer.
+    canonical_context: Option<CanonicalContext>,
 }
 
 impl ContextManager {
@@ -228,6 +322,7 @@ impl ContextManager {
             budget: None,
             visibility_horizon: None,
             memory_promoter: None,
+            canonical_context: None,
         }
     }
 
@@ -453,6 +548,88 @@ impl ContextManager {
         self.memory_promoter = None;
     }
 
+    /// Run memory promotion and tool-call sanitization on the internal buffer.
+    ///
+    /// Shared by `prepare()` and `force_compress*()` to ensure consistent
+    /// post-compression processing: evicted facts → long-term memory, and
+    /// broken tool-call pairs → fixed.
+    ///
+    /// Returns the number of evicted messages sent to the promoter.
+    async fn promote_and_sanitize(&mut self, evicted_messages: &[Message]) -> usize {
+        // ── Memory promotion ──
+        let count = if let Some(ref promoter) = self.memory_promoter {
+            if !evicted_messages.is_empty() {
+                promoter.promote(evicted_messages).await;
+                evicted_messages.len()
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // ── Tool-call sanitization ──
+        let (sanitized, _fixes) = sanitize_tool_call_pairing(&self.messages);
+        self.messages = sanitized;
+
+        count
+    }
+
+    /// Set canonical context sources for re-injection after compression.
+    ///
+    /// When set, `prepare()` will check if compression evicted critical context
+    /// (system prompt, rules, skill injections) and re-inject them if needed.
+    pub fn set_canonical_context(&mut self, context: CanonicalContext) {
+        self.canonical_context = Some(context);
+    }
+
+    /// Remove the canonical context.
+    pub fn remove_canonical_context(&mut self) {
+        self.canonical_context = None;
+    }
+
+    /// Re-inject canonical context if compression removed critical components.
+    ///
+    /// Called automatically at the end of `prepare()` when compression occurs.
+    fn reinject_canonical_context(&mut self) {
+        let Some(ref canonical) = self.canonical_context else {
+            return;
+        };
+
+        // Check: does the first message still contain the system prompt?
+        let has_system = self
+            .messages
+            .first()
+            .map(|m| m.role == Role::System)
+            .unwrap_or(false);
+
+        // If system message was lost, re-inject from canonical source
+        if !has_system {
+            if let Some(ref prompt) = canonical.system_prompt {
+                self.messages.insert(0, Message::system(prompt.clone()));
+                tracing::debug!("Re-injected system prompt from canonical context");
+            }
+        }
+
+        // Inject canonical context messages (system prompt, rules, skills)
+        if let Some(msgs) = canonical.to_reinjection_messages() {
+            // Insert after the first system message
+            let pos = if self
+                .messages
+                .first()
+                .map(|m| m.role == Role::System)
+                .unwrap_or(false)
+            {
+                1
+            } else {
+                0
+            };
+            for msg in msgs.into_iter().rev() {
+                self.messages.insert(pos, Message::system(msg));
+            }
+        }
+    }
+
     /// Remove the compressor, reverting to unlimited mode
     pub fn remove_compressor(&mut self) {
         self.compressor = None;
@@ -476,13 +653,69 @@ impl ContextManager {
         self.metrics = CompressionMetrics::new();
     }
 
+    /// Compute a token breakdown by message role.
+    ///
+    /// Useful for `/context` visualization — shows how context window budget is
+    /// distributed across system prompts, user messages, tool outputs, etc.
+    pub fn token_breakdown(&self, max_context: Option<usize>) -> TokenBreakdown {
+        let tokenizer = &*self.tokenizer;
+        let mut system = 0;
+        let mut user = 0;
+        let mut assistant = 0;
+        let mut tool = 0;
+        let mut summary = 0;
+        let mut memory = 0;
+
+        for msg in &self.messages {
+            let text = msg.content.as_text().unwrap_or_default();
+            let tokens = tokenizer.count_tokens(&text);
+            match msg.role {
+                Role::System => {
+                    if text.contains("[对话历史摘要]") {
+                        summary += tokens;
+                    } else if text.contains("[Relevant historical memories]")
+                        || text.contains("[Related historical memories]")
+                    {
+                        memory += tokens;
+                    } else {
+                        system += tokens;
+                    }
+                }
+                Role::User => user += tokens,
+                Role::Assistant => assistant += tokens,
+                Role::Tool => tool += tokens,
+                _ => {}
+            }
+        }
+
+        let total = system + user + assistant + tool + summary + memory;
+        let compression_ratio = self.metrics.compression_ratio();
+
+        TokenBreakdown {
+            system,
+            user,
+            assistant,
+            tool,
+            summary,
+            memory,
+            total,
+            max_context,
+            token_limit: self.token_limit,
+            compression_count: self.metrics.total_compressions,
+            compression_ratio,
+        }
+    }
+
     /// Force-compress the context, regardless of whether the current token count exceeds the limit.
     ///
     /// - If a compressor is configured, use it;
     /// - Otherwise, temporarily use `SlidingWindowCompressor::new(fallback_window)`.
     ///
     /// Protected messages are excluded from compression and preserved.
-    pub async fn force_compress(&mut self, fallback_window: usize) -> Result<ForceCompressStats> {
+    pub async fn force_compress(
+        &mut self,
+        fallback_window: usize,
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
 
@@ -494,6 +727,7 @@ impl ContextManager {
                     messages: compressible,
                     token_limit: self.token_limit,
                     current_query: None,
+                    focus_instructions: None,
                 })
                 .await?
         } else {
@@ -502,12 +736,25 @@ impl ContextManager {
                     messages: compressible,
                     token_limit: self.token_limit,
                     current_query: None,
+                    focus_instructions: None,
                 })
                 .await?
         };
 
-        let evicted = output.evicted.len();
+        let checkpoint = output
+            .checkpoint
+            .map(|cp| cp.with_protected_count(protected.len()));
+
+        let evicted_messages = output.evicted;
+        let evicted = evicted_messages.len();
         self.messages = Self::merge_protected(output.messages, protected);
+
+        // ── Memory promotion + sanitize ──
+        let memory_promotion_count = self.promote_and_sanitize(&evicted_messages).await;
+
+        let checkpoint =
+            checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
+
         let stats = ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
@@ -516,12 +763,83 @@ impl ContextManager {
             after_tokens: self.token_estimate(),
         };
         let name = if self.compressor.is_some() {
-            self.compressor.as_ref().map(|c| c.name()).unwrap_or("unknown")
+            self.compressor
+                .as_ref()
+                .map(|c| c.name())
+                .unwrap_or("unknown")
         } else {
             "SlidingWindow(fallback)"
         };
         self.metrics.record(&stats, name);
-        Ok(stats)
+        Ok((stats, checkpoint))
+    }
+
+    /// Force-compress with user-provided focus instructions.
+    ///
+    /// The focus instructions are passed to the compressor via `CompressionInput::current_query`,
+    /// allowing LLM-based compressors (Summary, IncrementalSummary, Adaptive L4) to
+    /// prioritize specific topics in their summaries.
+    pub async fn force_compress_with_focus(
+        &mut self,
+        focus_instructions: &str,
+        fallback_window: usize,
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
+        let before_count = self.messages.len();
+        let before_tokens = self.token_estimate();
+
+        let (compressible, protected) = self.split_protected(self.messages.clone());
+
+        let output = if let Some(compressor) = &self.compressor {
+            compressor
+                .compress(CompressionInput {
+                    messages: compressible,
+                    token_limit: self.token_limit,
+                    current_query: None,
+                    focus_instructions: Some(focus_instructions.to_string()),
+                })
+                .await?
+        } else {
+            SlidingWindowCompressor::new(fallback_window)
+                .compress(CompressionInput {
+                    messages: compressible,
+                    token_limit: self.token_limit,
+                    current_query: None,
+                    focus_instructions: Some(focus_instructions.to_string()),
+                })
+                .await?
+        };
+
+        let checkpoint = output
+            .checkpoint
+            .map(|cp| cp.with_protected_count(protected.len()));
+
+        let evicted_messages = output.evicted;
+        let evicted = evicted_messages.len();
+        self.messages = Self::merge_protected(output.messages, protected);
+
+        // ── Memory promotion + sanitize ──
+        let memory_promotion_count = self.promote_and_sanitize(&evicted_messages).await;
+
+        let checkpoint =
+            checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
+
+        let stats = ForceCompressStats {
+            before_count,
+            after_count: self.messages.len(),
+            evicted,
+            before_tokens,
+            after_tokens: self.token_estimate(),
+        };
+        let name = if self.compressor.is_some() {
+            self.compressor
+                .as_ref()
+                .map(|c| c.name())
+                .unwrap_or("unknown")
+        } else {
+            "SlidingWindow(fallback)"
+        };
+        self.metrics.record(&stats, name);
+        Ok((stats, checkpoint))
     }
 
     /// Force-compress using a **specific compressor**, without affecting the currently installed compressor config.
@@ -530,7 +848,7 @@ impl ContextManager {
     pub async fn force_compress_with(
         &mut self,
         compressor: &dyn ContextCompressor,
-    ) -> Result<ForceCompressStats> {
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
 
@@ -541,11 +859,24 @@ impl ContextManager {
                 messages: compressible,
                 token_limit: self.token_limit,
                 current_query: None,
+                focus_instructions: None,
             })
             .await?;
 
-        let evicted = output.evicted.len();
+        let checkpoint = output
+            .checkpoint
+            .map(|cp| cp.with_protected_count(protected.len()));
+
+        let evicted_messages = output.evicted;
+        let evicted = evicted_messages.len();
         self.messages = Self::merge_protected(output.messages, protected);
+
+        // ── Memory promotion + sanitize ──
+        let memory_promotion_count = self.promote_and_sanitize(&evicted_messages).await;
+
+        let checkpoint =
+            checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
+
         let stats = ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
@@ -554,7 +885,7 @@ impl ContextManager {
             after_tokens: self.token_estimate(),
         };
         self.metrics.record(&stats, compressor.name());
-        Ok(stats)
+        Ok((stats, checkpoint))
     }
 
     /// Update the system message content
@@ -583,6 +914,9 @@ impl ContextManager {
     /// Returns a [`PrepareResult`] containing the prepared messages and optional
     /// compression stats (populated only when auto-compression was triggered).
     pub async fn prepare(&mut self, current_query: Option<&str>) -> Result<PrepareResult> {
+        // ── Snapshot original messages for verification ──
+        let original_messages = self.messages.clone();
+
         // ── Pre-compression: Visibility Horizon pass ──────────────────
         // Compact tool traces beyond the active window before the main
         // compressor runs. This reduces the token count so the main
@@ -593,15 +927,22 @@ impl ContextManager {
                 messages: std::mem::take(&mut self.messages),
                 token_limit: self.token_limit,
                 current_query: current_query.map(String::from),
+                focus_instructions: None,
             };
             match horizon_compressor.compress(horizon_input).await {
                 Ok(output) => {
                     let compacted = before.saturating_sub(output.messages.len());
+                    let evicted_count = output.evicted.len();
+                    if evicted_count > 0 {
+                        if let Some(ref promoter) = self.memory_promoter {
+                            promoter.promote(&output.evicted).await;
+                        }
+                    }
                     if compacted > 0 {
                         tracing::debug!(
                             before_messages = before,
                             after_messages = output.messages.len(),
-                            evicted = output.evicted.len(),
+                            evicted = evicted_count,
                             "VisibilityHorizon pre-compaction applied"
                         );
                         self.metrics.record(
@@ -626,6 +967,16 @@ impl ContextManager {
 
         let estimated_tokens = Self::estimate_tokens(&self.messages, &*self.tokenizer);
 
+        // Compute effective token limit once so primary compression and any
+        // verifier fallback obey the same budget-aware allowance.
+        let effective_limit = if let Some(ref budget) = self.budget {
+            let allocation = budget.allocate(0, 0, estimated_tokens);
+            (estimated_tokens.saturating_sub(allocation.conversation_excess))
+                .max(self.token_limit / 2)
+        } else {
+            self.token_limit
+        };
+
         let needs_compression = if let Some(ref budget) = self.budget {
             // Budget-aware check: use percentage-based allocation
             let system_tokens = 0; // system prompt tokens already counted in messages
@@ -636,7 +987,7 @@ impl ContextManager {
             estimated_tokens > self.token_limit
         };
 
-        let compressed = if let Some(compressor) = &self.compressor
+        let (compressed, mut combined_checkpoint) = if let Some(compressor) = &self.compressor
             && needs_compression
         {
             let before_count = self.messages.len();
@@ -652,23 +1003,17 @@ impl ContextManager {
             );
             let start = std::time::Instant::now();
 
-            // Compute effective token limit for compression
-            let effective_limit = if let Some(ref budget) = self.budget {
-                let allocation = budget.allocate(0, 0, estimated_tokens);
-                (estimated_tokens.saturating_sub(allocation.conversation_excess))
-                    .max(self.token_limit / 2)
-            } else {
-                self.token_limit
-            };
+            // Use the budget-aware effective token limit computed above.
 
             let owned = std::mem::take(&mut self.messages);
             let (compressible, protected) = self.split_protected(owned);
 
             let compress_result = compressor
                 .compress(CompressionInput {
-                    messages: compressible,
+                    messages: compressible.clone(),
                     token_limit: effective_limit,
                     current_query: current_query.map(String::from),
+                    focus_instructions: None,
                 })
                 .await;
 
@@ -676,23 +1021,31 @@ impl ContextManager {
                 Ok(output) => {
                     let evicted_messages = output.evicted;
                     let evicted = evicted_messages.len();
+                    let compressor_checkpoint = output.checkpoint;
+                    let protected_count = protected.len();
                     self.messages = Self::merge_protected(output.messages, protected);
 
                     // ── L3 Memory Promotion ──
                     // If a memory promoter is configured, pass evicted messages
                     // so key facts can be extracted and stored for later recall.
-                    if let Some(ref promoter) = self.memory_promoter {
+                    let memory_promotion_count = if let Some(ref promoter) = self.memory_promoter {
                         if !evicted_messages.is_empty() {
                             promoter.promote(&evicted_messages).await;
+                            evicted_messages.len()
+                        } else {
+                            0
                         }
-                    }
+                    } else {
+                        0
+                    };
 
+                    let after_tokens = self.token_estimate();
                     let stats = ForceCompressStats {
                         before_count,
                         after_count: self.messages.len(),
                         evicted,
                         before_tokens,
-                        after_tokens: self.token_estimate(),
+                        after_tokens,
                     };
                     let elapsed = start.elapsed();
                     self.metrics.record(&stats, compressor_name);
@@ -709,27 +1062,151 @@ impl ContextManager {
                         "Compression complete"
                     );
 
-                    Some(stats)
+                    // Assemble the checkpoint from the compressor's output
+                    let compressed_checkpoint = compressor_checkpoint.map(|cp| {
+                        cp.with_protected_count(protected_count)
+                            .with_memory_promotion_count(memory_promotion_count)
+                    });
+
+                    (Some(stats), compressed_checkpoint)
                 }
                 Err(e) => {
-                    // Compression failed — restore protected messages at minimum.
-                    self.messages = Self::merge_protected(vec![], protected);
-                    tracing::warn!(error = %e, "Compression failed, messages may be partially lost");
-                    return Err(e);
+                    // Primary compressor failed — fall back to SlidingWindow as safety net
+                    // to avoid losing all non-protected messages.
+                    tracing::warn!(
+                        error = %e,
+                        "Primary compressor failed, falling back to SlidingWindowCompressor"
+                    );
+                    let fallback = SlidingWindowCompressor::new(40);
+                    match fallback
+                        .compress(CompressionInput {
+                            messages: compressible,
+                            token_limit: effective_limit,
+                            current_query: current_query.map(String::from),
+                            focus_instructions: None,
+                        })
+                        .await
+                    {
+                        Ok(fb_output) => {
+                            self.messages = Self::merge_protected(fb_output.messages, protected);
+                            let stats = ForceCompressStats {
+                                before_count,
+                                after_count: self.messages.len(),
+                                evicted: fb_output.evicted.len(),
+                                before_tokens,
+                                after_tokens: self.token_estimate(),
+                            };
+                            self.metrics.record(&stats, "SlidingWindow(fallback)");
+                            // Return the fallback result, not the original error
+                            (Some(stats), fb_output.checkpoint)
+                        }
+                        Err(fb_err) => {
+                            // Even the fallback failed — restore the original buffer before
+                            // returning so callers that retry do not observe truncated state.
+                            self.messages = original_messages.clone();
+                            tracing::error!(
+                                primary_error = %e,
+                                fallback_error = %fb_err,
+                                "Both primary compressor and SlidingWindow fallback failed — some conversation context lost"
+                            );
+                            return Err(e);
+                        }
+                    }
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         // Always sanitize tool_calls → tool_result pairing before sending to LLM.
         // Even without compression, session resume or manual manipulation can
         // produce invalid sequences.
-        let messages = sanitize_tool_call_pairing(&self.messages);
+        let (sanitized, tool_fixes) = sanitize_tool_call_pairing(&self.messages);
+        // Write sanitized messages back to the internal buffer so subsequent
+        // reads see consistent state, and canonical re-injection targets them.
+        self.messages = sanitized;
+
+        // Merge tool_pair_fixes into the compression checkpoint
+        if let Some(ref mut cp) = combined_checkpoint {
+            cp.tool_pair_fixes = tool_fixes;
+        }
+
+        // ── Summary verification ──
+        // Run lightweight rule-based checks when a summary was produced.
+        // On P0 check failure, fall back to SlidingWindowCompressor as safety net.
+        let verification = if let Some(ref cp) = combined_checkpoint {
+            if cp.summary.is_some() {
+                let v = verifier::verify_compression(&self.messages, cp, &original_messages);
+                if !v.passed {
+                    let p0_failed: Vec<&str> = v
+                        .checks
+                        .iter()
+                        .filter(|c| !c.passed && c.priority == verifier::CheckPriority::P0)
+                        .map(|c| c.name.as_str())
+                        .collect();
+                    if !p0_failed.is_empty() {
+                        tracing::warn!(
+                            failed_checks = ?p0_failed,
+                            "Summary verifier: P0 checks FAILED — falling back to SlidingWindowCompressor to recover critical information"
+                        );
+                        // Re-compress original messages with SlidingWindow as safety net
+                        let (orig_compressible, orig_protected) =
+                            self.split_protected(original_messages.clone());
+                        if let Ok(fb_output) = SlidingWindowCompressor::new(40)
+                            .compress(CompressionInput {
+                                messages: orig_compressible,
+                                token_limit: effective_limit,
+                                current_query: current_query.map(String::from),
+                                focus_instructions: None,
+                            })
+                            .await
+                        {
+                            self.messages =
+                                Self::merge_protected(fb_output.messages, orig_protected);
+                            // Re-sanitize after fallback
+                            let (sanitized, _fb_fixes) = sanitize_tool_call_pairing(&self.messages);
+                            self.messages = sanitized;
+                            // Update the checkpoint to note the fallback
+                            let fb_checkpoint =
+                                CompressionCheckpoint::new("SlidingWindow(verifier-fallback)")
+                                    .with_counts(self.messages.len(), fb_output.evicted.len())
+                                    .with_tokens(
+                                        Self::estimate_tokens(&original_messages, &*self.tokenizer),
+                                        self.token_estimate(),
+                                    );
+                            combined_checkpoint = Some(fb_checkpoint);
+                            tracing::info!(
+                                after_messages = self.messages.len(),
+                                after_tokens = self.token_estimate(),
+                                "Recovered via SlidingWindow fallback after P0 verification failure"
+                            );
+                        } else {
+                            tracing::error!(
+                                "SlidingWindow fallback also failed after P0 verification failure — continuing with current compressed messages"
+                            );
+                        }
+                    }
+                }
+                Some(v)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // ── Canonical context re-injection ──
+        // If canonical context is configured, ensure critical components
+        // (system prompt, rules, skill info) survived compression.
+        if self.canonical_context.is_some() {
+            self.reinject_canonical_context();
+        }
 
         Ok(PrepareResult {
-            messages,
+            messages: self.messages.clone(),
             compressed,
+            checkpoint: combined_checkpoint,
+            verification,
         })
     }
 
@@ -754,11 +1231,13 @@ impl ContextManager {
 /// This function repairs the sequence by:
 /// 1. Adding placeholder `tool` results for orphaned `tool_calls`
 /// 2. Removing orphaned `tool` messages without matching `tool_calls`
-fn sanitize_tool_call_pairing(messages: &[Message]) -> Vec<Message> {
+fn sanitize_tool_call_pairing(messages: &[Message]) -> (Vec<Message>, Vec<ToolPairFix>) {
     use std::collections::{HashMap, HashSet};
 
+    let mut fixes: Vec<ToolPairFix> = Vec::new();
+
     if messages.is_empty() {
-        return vec![];
+        return (vec![], fixes);
     }
 
     // Pass 1: Count tool_call_ids per assistant message and collect all available results
@@ -782,7 +1261,7 @@ fn sanitize_tool_call_pairing(messages: &[Message]) -> Vec<Message> {
 
     // If no tool_calls at all, return as-is
     if assistant_tool_calls.is_empty() && available_results.is_empty() {
-        return messages.to_vec();
+        return (messages.to_vec(), fixes);
     }
 
     // Build the set of all referenced tool_call_ids (from assistant messages)
@@ -811,6 +1290,10 @@ fn sanitize_tool_call_pairing(messages: &[Message]) -> Vec<Message> {
                             "unknown".to_string(),
                             "[Result unavailable — tool result was removed during context compression]".to_string(),
                         ));
+                        fixes.push(ToolPairFix {
+                            tool_call_id: id.clone(),
+                            fix_type: ToolPairFixType::PlaceholderResultInserted,
+                        });
                         inserted_placeholders.insert(id);
                     }
                 }
@@ -825,6 +1308,12 @@ fn sanitize_tool_call_pairing(messages: &[Message]) -> Vec<Message> {
                 if all_orphaned {
                     // Remove tool_calls field — treat as regular assistant message
                     let mut cleaned = msg.clone();
+                    for tc_id in tc_ids.iter() {
+                        fixes.push(ToolPairFix {
+                            tool_call_id: tc_id.clone(),
+                            fix_type: ToolPairFixType::DanglingCallCleared,
+                        });
+                    }
                     cleaned.tool_calls = None;
                     result.push(cleaned);
                 } else {
@@ -853,6 +1342,13 @@ fn sanitize_tool_call_pairing(messages: &[Message]) -> Vec<Message> {
             if !is_orphaned {
                 result.push(msg.clone());
             } else {
+                fixes.push(ToolPairFix {
+                    tool_call_id: msg
+                        .tool_call_id
+                        .clone()
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    fix_type: ToolPairFixType::OrphanedResultRemoved,
+                });
                 tracing::debug!(
                     tool_call_id = msg.tool_call_id.as_deref().unwrap_or("<none>"),
                     "Removed orphaned tool result message"
@@ -868,15 +1364,20 @@ fn sanitize_tool_call_pairing(messages: &[Message]) -> Vec<Message> {
         for id in ids {
             if !inserted_placeholders.contains(&id) {
                 result.push(Message::tool_result(
-                    id,
+                    id.clone(),
                     "unknown".to_string(),
-                    "[Result unavailable — tool result was removed during context compression]".to_string(),
+                    "[Result unavailable — tool result was removed during context compression]"
+                        .to_string(),
                 ));
+                fixes.push(ToolPairFix {
+                    tool_call_id: id,
+                    fix_type: ToolPairFixType::PlaceholderResultInserted,
+                });
             }
         }
     }
 
-    result
+    (result, fixes)
 }
 
 /// Builder for `ContextManager`
@@ -889,6 +1390,7 @@ pub struct ContextManagerBuilder {
     budget: Option<TokenBudget>,
     visibility_horizon: Option<horizon::VisibilityHorizonCompressor>,
     memory_promoter: Option<Arc<dyn MemoryPromoter>>,
+    canonical_context: Option<CanonicalContext>,
 }
 
 impl ContextManagerBuilder {
@@ -976,6 +1478,12 @@ impl ContextManagerBuilder {
         self
     }
 
+    /// Set the canonical context for re-injection after compression.
+    pub fn canonical_context(mut self, context: CanonicalContext) -> Self {
+        self.canonical_context = Some(context);
+        self
+    }
+
     pub fn build(self) -> ContextManager {
         ContextManager {
             messages: self.initial_messages,
@@ -990,6 +1498,7 @@ impl ContextManagerBuilder {
             metrics: CompressionMetrics::new(),
             visibility_horizon: self.visibility_horizon,
             memory_promoter: self.memory_promoter,
+            canonical_context: self.canonical_context,
         }
     }
 }
@@ -1042,8 +1551,8 @@ mod tests {
         ctx.push(Message::assistant("recent assistant".to_string()));
         ctx.push(Message::user("latest user".to_string()));
 
-        let messages = ctx.force_compress(2).await?;
-        assert!(messages.after_count >= 3);
+        let (stats, _checkpoint) = ctx.force_compress(2).await?;
+        assert!(stats.after_count >= 3);
 
         let rendered: Vec<(String, String)> = ctx
             .messages()
@@ -1076,7 +1585,7 @@ mod tests {
             Message::user("hello".to_string()),
             Message::assistant("hi".to_string()),
         ];
-        let result = sanitize_tool_call_pairing(&messages);
+        let (result, _fixes) = sanitize_tool_call_pairing(&messages);
         assert_eq!(result.len(), 3);
     }
 
@@ -1094,9 +1603,13 @@ mod tests {
         let messages = vec![
             Message::user("read file".to_string()),
             Message::assistant_with_tools(vec![tc]),
-            Message::tool_result("call_1".to_string(), "read_file".to_string(), "content".to_string()),
+            Message::tool_result(
+                "call_1".to_string(),
+                "read_file".to_string(),
+                "content".to_string(),
+            ),
         ];
-        let result = sanitize_tool_call_pairing(&messages);
+        let (result, _fixes) = sanitize_tool_call_pairing(&messages);
         assert_eq!(result.len(), 3);
         assert!(result[1].tool_calls.is_some());
     }
@@ -1106,10 +1619,14 @@ mod tests {
         // tool result without preceding assistant tool_calls
         let messages = vec![
             Message::user("hello".to_string()),
-            Message::tool_result("orphan_1".to_string(), "some_tool".to_string(), "result".to_string()),
+            Message::tool_result(
+                "orphan_1".to_string(),
+                "some_tool".to_string(),
+                "result".to_string(),
+            ),
             Message::assistant("hi".to_string()),
         ];
-        let result = sanitize_tool_call_pairing(&messages);
+        let (result, _fixes) = sanitize_tool_call_pairing(&messages);
         // orphaned tool message should be removed
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, Role::User);
@@ -1135,10 +1652,13 @@ mod tests {
             Message::assistant_with_tools(vec![tc]),
             Message::user("next question".to_string()),
         ];
-        let result = sanitize_tool_call_pairing(&messages);
+        let (result, _fixes) = sanitize_tool_call_pairing(&messages);
         // assistant's tool_calls should be nulled out → 3 messages (no placeholder)
         assert_eq!(result.len(), 3);
-        assert!(result[1].tool_calls.is_none(), "orphaned tool_calls should be removed");
+        assert!(
+            result[1].tool_calls.is_none(),
+            "orphaned tool_calls should be removed"
+        );
     }
 
     #[test]
@@ -1164,17 +1684,27 @@ mod tests {
         let messages = vec![
             Message::user("do stuff".to_string()),
             Message::assistant_with_tools(vec![tc1, tc2]),
-            Message::tool_result("call_present".to_string(), "read_file".to_string(), "content".to_string()),
+            Message::tool_result(
+                "call_present".to_string(),
+                "read_file".to_string(),
+                "content".to_string(),
+            ),
             // call_missing result was removed by compression
             Message::user("next".to_string()),
         ];
-        let result = sanitize_tool_call_pairing(&messages);
+        let (result, _fixes) = sanitize_tool_call_pairing(&messages);
         // Should have: user, assistant, tool(present), tool(placeholder), user
         assert_eq!(result.len(), 5);
         assert_eq!(result[2].tool_call_id.as_deref(), Some("call_present"));
         assert_eq!(result[3].role, Role::Tool);
         assert_eq!(result[3].tool_call_id.as_deref(), Some("call_missing"));
-        assert!(result[3].content.as_text_ref().unwrap().contains("unavailable"));
+        assert!(
+            result[3]
+                .content
+                .as_text_ref()
+                .unwrap()
+                .contains("unavailable")
+        );
     }
 
     // ── L3 Memory Promotion tests ────────────────────────────────────
@@ -1187,7 +1717,11 @@ mod tests {
     }
 
     impl TestPromoter {
-        fn new() -> (Self, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>) {
+        fn new() -> (
+            Self,
+            Arc<std::sync::atomic::AtomicUsize>,
+            Arc<std::sync::atomic::AtomicUsize>,
+        ) {
             let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let total_evicted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             (
@@ -1223,7 +1757,10 @@ mod tests {
         // Push enough messages to trigger compression
         ctx.push(Message::system("You are a helper.".to_string()));
         for i in 1..=10 {
-            ctx.push(Message::user(format!("Question number {} about various topics", i)));
+            ctx.push(Message::user(format!(
+                "Question number {} about various topics",
+                i
+            )));
             ctx.push(Message::assistant(format!(
                 "Here is a detailed answer to question {} with some explanation",
                 i
@@ -1235,7 +1772,10 @@ mod tests {
         let calls = call_count.load(std::sync::atomic::Ordering::Relaxed);
         let evicted = total_evicted.load(std::sync::atomic::Ordering::Relaxed);
 
-        assert!(calls > 0, "Memory promoter should have been called at least once");
+        assert!(
+            calls > 0,
+            "Memory promoter should have been called at least once"
+        );
         assert!(
             evicted > 0,
             "Promoter should have received evicted messages, got {}",
@@ -1260,10 +1800,7 @@ mod tests {
                 i
             )));
             // Simulate large tool output
-            ctx.push(Message::user(format!(
-                "[Tool result: {}]",
-                "x".repeat(500)
-            )));
+            ctx.push(Message::user(format!("[Tool result: {}]", "x".repeat(500))));
         }
 
         let tokens_before = ctx.token_estimate();

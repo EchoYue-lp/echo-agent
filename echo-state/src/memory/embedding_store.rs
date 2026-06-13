@@ -185,9 +185,24 @@ impl EmbeddingStore {
         let index = self.index.read().await;
         let json = serde_json::to_string(&index.data)
             .map_err(|e| MemoryError::SerializationError(format!("向量索引序列化失败: {e}")))?;
-        tokio::fs::write(path, json)
-            .await
-            .map_err(|e| MemoryError::IoError(e.to_string()))?;
+        // Atomic write: tmp + sync_all + rename to prevent corruption on crash
+        let tmp_path = path.with_extension("json.tmp");
+        {
+            let mut file = tokio::fs::File::create(&tmp_path)
+                .await
+                .map_err(|e| MemoryError::IoError(e.to_string()))?;
+            use tokio::io::AsyncWriteExt;
+            file.write_all(json.as_bytes())
+                .await
+                .map_err(|e| MemoryError::IoError(e.to_string()))?;
+            file.sync_all()
+                .await
+                .map_err(|e| MemoryError::IoError(e.to_string()))?;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(MemoryError::IoError(e.to_string()).into());
+        }
         debug!(path = %path.display(), "💾 向量索引已持久化");
         Ok(())
     }

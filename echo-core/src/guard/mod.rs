@@ -86,6 +86,14 @@ impl Default for GuardManager {
     }
 }
 
+impl Clone for GuardManager {
+    fn clone(&self) -> Self {
+        Self {
+            guards: self.guards.clone(),
+        }
+    }
+}
+
 impl GuardManager {
     /// Create an empty guard manager
     pub fn new() -> Self {

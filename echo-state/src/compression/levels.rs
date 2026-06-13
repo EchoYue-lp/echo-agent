@@ -7,12 +7,15 @@
 //! L4 Auto Compact: Full LLM summarization (handled externally)
 //! L5 Reactive: Emergency — keep only system prompt + last 3 messages
 
+use crate::compression::CompressionCheckpoint;
+use echo_core::error::Result;
 use echo_core::llm::LlmClient;
 use echo_core::llm::types::{Message, MessageContent, Role};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Truncate a string at a byte boundary without splitting multi-byte UTF-8 characters.
 ///
@@ -56,7 +59,6 @@ pub struct AdaptiveCompressionConfig {
     /// Token threshold to trigger L4 (LLM summarization)
     pub l4_compact_threshold_tokens: usize,
     /// Number of recent messages to keep during LLM compact
-    #[allow(dead_code)]
     pub l4_keep_recent: usize,
 }
 
@@ -82,6 +84,34 @@ impl Default for AdaptiveCompressionConfig {
             l4_keep_recent: 6,
         }
     }
+}
+
+/// Auto-tune compression thresholds based on the model's context window size.
+///
+/// Thresholds are set as percentages of `max_context_tokens`:
+/// - L1 (Snip): 60%
+/// - L2 (Micro): 75%
+/// - L3 (Collapse): 85%
+/// - L4 (Compact): 90%
+///
+/// L5 (Reactive) is not tuned — it triggers at 2× the L4 threshold regardless.
+///
+/// # Example
+///
+/// ```rust
+/// use echo_state::compression::levels::{AdaptiveCompressionConfig, tune_for_model};
+///
+/// let mut config = AdaptiveCompressionConfig::default();
+/// tune_for_model(&mut config, 200_000); // Claude's context window
+/// // Now L1=120K, L2=150K, L3=170K, L4=180K
+/// ```
+pub fn tune_for_model(config: &mut AdaptiveCompressionConfig, max_context_tokens: usize) {
+    let w = max_context_tokens;
+    config.l1_snip_threshold_tokens = w * 60 / 100;
+    config.l2_micro_threshold_tokens = w * 75 / 100;
+    config.l3_collapse_threshold_tokens = w * 85 / 100;
+    config.l4_compact_threshold_tokens = w * 90 / 100;
+    // L5 triggers at tokens > target * 2, so it's automatically adapted
 }
 
 /// Result of adaptive compression showing which levels were applied.
@@ -136,7 +166,8 @@ impl AdaptiveCompressor {
         current_tokens: usize,
         target_tokens: usize,
     ) -> AdaptiveCompressionResult {
-        let (result, _evicted) = self.compress_with_evicted(messages, current_tokens, target_tokens);
+        let (result, _evicted) =
+            self.compress_with_evicted(messages, current_tokens, target_tokens);
         result
     }
 
@@ -221,11 +252,13 @@ impl AdaptiveCompressor {
         messages: &mut Vec<Message>,
         current_tokens: usize,
         target_tokens: usize,
-    ) -> (AdaptiveCompressionResult, Vec<Message>) {
+        focus: Option<&str>,
+    ) -> (AdaptiveCompressionResult, Vec<Message>, Option<String>) {
         let tokens_before = current_tokens;
         let mut levels_applied = Vec::new();
         let mut tokens = current_tokens;
         let mut all_evicted = Vec::new();
+        let mut l4_summary: Option<String> = None;
 
         // L1: Snip large tool outputs + fold consecutive tools
         if tokens > self.config.l1_snip_threshold_tokens && tokens > target_tokens {
@@ -268,11 +301,13 @@ impl AdaptiveCompressor {
         // L4: Auto Compact — LLM summarization (only if LLM client is configured)
         if tokens > self.config.l4_compact_threshold_tokens && tokens > target_tokens {
             if let Some(llm) = &self.llm {
-                let (saved, evicted) = self.apply_l4_compact(messages, llm.as_ref()).await;
+                let (saved, evicted, summary) =
+                    self.apply_l4_compact(messages, llm.as_ref(), focus).await;
                 tokens = tokens.saturating_sub(saved);
                 if saved > 0 {
                     levels_applied.push("L4:Compact".to_string());
                     all_evicted.extend(evicted);
+                    l4_summary = summary;
                 }
             }
         }
@@ -294,6 +329,7 @@ impl AdaptiveCompressor {
                 tokens_after: tokens,
             },
             all_evicted,
+            l4_summary,
         )
     }
 
@@ -439,14 +475,16 @@ impl AdaptiveCompressor {
     }
 
     /// L4: Auto Compact — LLM summarization of older messages.
-    /// Returns (tokens_saved, evicted_messages).
+    /// Returns (tokens_saved, evicted_messages, summary_option).
     ///
-    /// On LLM failure, returns (0, vec![]) so the pipeline falls through to L5.
+    /// Tries structured JSON output first; falls back to natural language on failure.
+    /// On LLM failure, returns (0, vec![], None) so the pipeline falls through to L5.
     async fn apply_l4_compact(
         &self,
         messages: &mut Vec<Message>,
         llm: &dyn LlmClient,
-    ) -> (usize, Vec<Message>) {
+        focus: Option<&str>,
+    ) -> (usize, Vec<Message>, Option<String>) {
         let keep = self.config.l4_keep_recent;
 
         // Split into system / old / recent
@@ -462,29 +500,72 @@ impl AdaptiveCompressor {
             .collect();
 
         if non_system.len() <= keep {
-            return (0, vec![]);
+            return (0, vec![], None);
         }
 
         let split_at = non_system.len() - keep;
         let to_summarize = &non_system[..split_at];
         let to_keep = &non_system[split_at..];
 
-        // Build summary prompt using the built-in template
-        let prompt = crate::compression::compressor::default_summary_prompt(to_summarize);
-
-        // Call LLM — on failure, return gracefully so L5 can activate
-        let summary = match llm.chat_simple(vec![Message::user(prompt)]).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "L4 Auto-Compact: LLM summarization failed, falling through to L5");
-                return (0, vec![]);
+        // Try structured output first if provider supports it
+        let summary = if llm.capabilities().structured_output {
+            let prompt =
+                crate::compression::compressor::structured_summary_prompt(to_summarize, focus);
+            match llm
+                .chat(echo_core::llm::ChatRequest {
+                    messages: vec![Message::user(prompt)],
+                    temperature: Some(0.3),
+                    max_tokens: Some(2048),
+                    tools: None,
+                    tool_choice: None,
+                    response_format: Some(echo_core::llm::types::ResponseFormat::JsonObject),
+                    cancel_token: None,
+                })
+                .await
+            {
+                Ok(resp) => {
+                    let text = resp.content().unwrap_or_default().to_string();
+                    if let Some(parsed) = super::StructuredSummary::from_llm_response(&text) {
+                        parsed.to_json()
+                    } else {
+                        // JSON parse failed — use raw text
+                        text
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "L4 structured summary failed, falling back to natural language");
+                    // Fall through
+                    String::new()
+                }
             }
+        } else {
+            String::new()
+        };
+
+        // Natural language fallback
+        let summary = if summary.is_empty() {
+            let prompt = crate::compression::compressor::default_summary_prompt_with_focus(
+                to_summarize,
+                focus,
+            );
+            match llm.chat_simple(vec![Message::user(prompt)]).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "L4 Auto-Compact: LLM summarization failed, falling through to L5");
+                    return (0, vec![], None);
+                }
+            }
+        } else {
+            summary
         };
 
         // Calculate tokens saved
         let evicted_tokens: usize = to_summarize
             .iter()
-            .map(|m| self.tokenizer.count_tokens(m.content.as_text_ref().unwrap_or("")))
+            .map(|m| {
+                self.tokenizer
+                    .count_tokens(m.content.as_text_ref().unwrap_or(""))
+            })
             .sum();
         let summary_tokens = self.tokenizer.count_tokens(&summary);
         let saved = evicted_tokens.saturating_sub(summary_tokens);
@@ -492,12 +573,13 @@ impl AdaptiveCompressor {
         let evicted = to_summarize.to_vec();
 
         // Rebuild messages: system + summary + recent
+        let summary_clone = summary.clone();
         let mut new_messages = system_msgs;
         new_messages.push(Message::system(format!("[对话历史摘要]\n{}", summary)));
         new_messages.extend(to_keep.iter().cloned());
         *messages = new_messages;
 
-        (saved, evicted)
+        (saved, evicted, Some(summary_clone))
     }
 
     /// L5: Emergency — keep only system prompt + last 3 messages.
@@ -562,8 +644,10 @@ impl super::ContextCompressor for AdaptiveCompressor {
         input: super::CompressionInput,
     ) -> BoxFuture<'_, echo_core::error::Result<super::CompressionOutput>> {
         Box::pin(async move {
+            let start = Instant::now();
             let mut messages = input.messages;
             let target_tokens = input.token_limit;
+            let focus = input.focus_instructions.clone();
 
             // Estimate current token count from the input messages
             let current_tokens: usize = messages
@@ -572,10 +656,36 @@ impl super::ContextCompressor for AdaptiveCompressor {
                 .map(|c| self.tokenizer.count_tokens(&c))
                 .sum();
 
-            let (_result, evicted) =
-                self.compress_async(&mut messages, current_tokens, target_tokens).await;
+            let (result, evicted, l4_summary) = self
+                .compress_async(
+                    &mut messages,
+                    current_tokens,
+                    target_tokens,
+                    focus.as_deref(),
+                )
+                .await;
 
-            Ok(super::CompressionOutput { messages, evicted })
+            let tokens_after: usize = messages
+                .iter()
+                .filter_map(|m| m.content.as_text())
+                .map(|c| self.tokenizer.count_tokens(&c))
+                .sum();
+
+            let mut checkpoint = CompressionCheckpoint::new(self.name())
+                .with_counts(messages.len(), evicted.len())
+                .with_tokens(result.tokens_before, tokens_after)
+                .with_levels(result.levels_applied)
+                .with_duration_ms(start.elapsed().as_millis() as u64)
+                .with_focus(focus);
+            if let Some(summary) = l4_summary {
+                checkpoint = checkpoint.with_summary(summary);
+            }
+
+            Ok(super::CompressionOutput {
+                messages,
+                evicted,
+                checkpoint: Some(checkpoint),
+            })
         })
     }
 }
@@ -708,11 +818,11 @@ mod tests {
         // Original: 7 messages. Fold removes 3 tool msgs, inserts 1 fold msg => 7 - 3 + 1 = 5
         assert_eq!(messages.len(), 5);
         // The fold summary should be present
-        assert!(messages.iter().any(|m| m
-            .content
-            .as_text_ref()
-            .unwrap_or("")
-            .contains("L1 fold")));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.content.as_text_ref().unwrap_or("").contains("L1 fold"))
+        );
     }
 
     #[test]
@@ -761,9 +871,15 @@ mod tests {
         let result = ctx.prepare(None).await.unwrap();
         // Compression should have been triggered since we have many messages
         // and the token limit is very low (50)
-        assert!(result.compressed.is_some(), "compression should have been triggered");
+        assert!(
+            result.compressed.is_some(),
+            "compression should have been triggered"
+        );
         let stats = result.compressed.unwrap();
-        assert!(stats.before_count > stats.after_count, "messages should have been reduced");
+        assert!(
+            stats.before_count > stats.after_count,
+            "messages should have been reduced"
+        );
     }
 
     #[tokio::test]
@@ -790,12 +906,19 @@ mod tests {
             messages,
             token_limit: 0, // force compression
             current_query: None,
+            focus_instructions: None,
         };
 
         let output: CompressionOutput = compressor.compress(input).await.unwrap();
         // L3 should have evicted older messages
-        assert!(!output.evicted.is_empty(), "L3 should produce evicted messages");
-        assert!(output.messages.len() < 6, "output should have fewer messages");
+        assert!(
+            !output.evicted.is_empty(),
+            "L3 should produce evicted messages"
+        );
+        assert!(
+            output.messages.len() < 6,
+            "output should have fewer messages"
+        );
         // System message should be preserved
         assert!(output.messages.iter().any(|m| m.role == Role::System));
     }

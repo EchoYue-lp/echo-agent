@@ -64,6 +64,40 @@ impl Tool for CreateTaskTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Task tags (optional, for categorization and filtering)"
+                },
+                // Enhanced fields (Step 1)
+                "task_type": {
+                    "type": "string",
+                    "enum": ["discovery", "implementation", "verification", "background", "delegation"],
+                    "description": "Task type classification (default: implementation)"
+                },
+                "acceptance_criteria": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Acceptance criteria - conditions that must be met for task completion"
+                },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Allowed tools for this task (optional, None = all tools allowed)"
+                },
+                "context_scope": {
+                    "type": "string",
+                    "enum": ["minimal", "relevant", "full", "isolated"],
+                    "description": "Context scope for task execution (default: relevant)"
+                },
+                "risk_level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "Risk level classification (default: medium)"
+                },
+                "can_parallelize": {
+                    "type": "boolean",
+                    "description": "Whether this task can be parallelized with other tasks (default: true)"
+                },
+                "requires_write_access": {
+                    "type": "boolean",
+                    "description": "Whether this task requires write access (default: false)"
                 }
             },
             "required": ["task_id", "description", "reasoning"]
@@ -122,28 +156,100 @@ impl Tool for CreateTaskTool {
                 })
                 .unwrap_or_default();
 
-            let now = now_secs();
-            let task = Task {
-                id: task_id.to_string(),
-                description: description.to_string(),
-                subject: description.to_string(),
-                status: TaskStatus::Pending,
-                dependencies,
-                priority,
-                result: None,
-                reasoning: Some(reasoning.to_string()),
-                assigned_agent: assigned_agent.clone(),
-                tags: tags.clone(),
-                parent_id: None,
-                created_at: now,
-                updated_at: now,
-                timeout_secs: 0,
-                max_retries: 0,
-                retry_count: 0,
-                execute_fn: None,
-                metadata_json: None,
-                metadata: None,
+            // Parse enhanced fields (Step 1) with backward-compatible defaults
+            use crate::tasks::{
+                CheckpointPolicy, ContextScope, RiskLevel, TaskInput, TaskOutput, TaskType,
+                VerificationSpec,
             };
+
+            let task_type = parameters
+                .get("task_type")
+                .and_then(|v| v.as_str())
+                .and_then(|s| match s {
+                    "discovery" => Some(TaskType::Discovery),
+                    "implementation" => Some(TaskType::Implementation),
+                    "verification" => Some(TaskType::Verification),
+                    "background" => Some(TaskType::Background),
+                    "delegation" => Some(TaskType::Delegation),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let acceptance_criteria: Vec<String> = parameters
+                .get("acceptance_criteria")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let allowed_tools = parameters
+                .get("allowed_tools")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
+
+            let context_scope = parameters
+                .get("context_scope")
+                .and_then(|v| v.as_str())
+                .and_then(|s| match s {
+                    "minimal" => Some(ContextScope::Minimal),
+                    "relevant" => Some(ContextScope::Relevant),
+                    "full" => Some(ContextScope::Full),
+                    "isolated" => Some(ContextScope::Isolated),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let risk_level = parameters
+                .get("risk_level")
+                .and_then(|v| v.as_str())
+                .and_then(|s| match s {
+                    "low" => Some(RiskLevel::Low),
+                    "medium" => Some(RiskLevel::Medium),
+                    "high" => Some(RiskLevel::High),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let can_parallelize = parameters
+                .get("can_parallelize")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let requires_write_access = parameters
+                .get("requires_write_access")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let now = now_secs();
+            let task = Task::new(task_id, description)
+                .with_subject(description)
+                .with_dependencies(dependencies)
+                .with_priority(priority)
+                .with_task_type(task_type)
+                .with_acceptance_criteria(acceptance_criteria)
+                .with_context_scope(context_scope)
+                .with_risk_level(risk_level)
+                .with_can_parallelize(can_parallelize)
+                .with_requires_write_access(requires_write_access);
+
+            // Set optional fields
+            let mut task = task;
+            task.reasoning = Some(reasoning.to_string());
+            task.assigned_agent = assigned_agent.clone();
+            task.tags = tags.clone();
+            task.created_at = now;
+            task.updated_at = now;
+
+            if let Some(tools) = allowed_tools {
+                task = task.with_allowed_tools(tools);
+            }
 
             // Add task first
             self.task_manager.add_task(task.clone());

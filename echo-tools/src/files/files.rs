@@ -6,6 +6,9 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokio::fs;
+
+// Re-export encoding_rs for encoding detection
+use encoding_rs;
 // ── CreateFileTool ────────────────────────────────────────────────────────────
 pub struct CreateFileTool {
     base_dir: Option<PathBuf>,
@@ -189,10 +192,8 @@ impl Tool for DeleteFileTool {
                     message: format!("Failed to delete: {}", e),
                 })?;
 
-            let mut result = ToolResult::success(format!(
-                "File deleted successfully: {}",
-                path.display()
-            ));
+            let mut result =
+                ToolResult::success(format!("File deleted successfully: {}", path.display()));
 
             if let Some(tag) = checkpoint_tag {
                 result = result.with_meta("git_checkpoint", tag);
@@ -204,7 +205,10 @@ impl Tool for DeleteFileTool {
 }
 
 // ── ReadFileTool ──────────────────────────────────────────────────────────────
-/// Read file content
+/// Read file content with auto-encoding detection and structured output
+///
+/// Unified file reading tool with auto-encoding detection and structured JSON output.
+/// Supports offset/limit for pagination and automatic GBK fallback encoding.
 pub struct ReadFileTool {
     base_dir: Option<PathBuf>,
 }
@@ -233,8 +237,8 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read file content from the specified path, returns text content with line numbers. \
-         Supports offset/limit for reading specific sections of large files."
+        "Read file content with auto-encoding detection. Supports offset/limit for reading specific sections. \
+         Returns structured JSON with line numbers. Auto-detects UTF-8/GBK encoding."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -250,15 +254,31 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path to read (relative or absolute path)"
+                    "description": "File path to read (relative or absolute path). Also accepts 'file_path' for backward compatibility."
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Alias for 'path' (backward compatibility)"
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "Line number to start reading from (1-based, default: 1)"
+                    "description": "Line number to start reading from (1-based, default: 1). Also accepts 'start_line'."
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "Alias for 'offset' (backward compatibility)"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to read (default: all lines)"
+                    "description": "Maximum number of lines to read (default: all lines, -1 means preview limit). Also accepts 'line_count'."
+                },
+                "line_count": {
+                    "type": "integer",
+                    "description": "Alias for 'limit' (backward compatibility)"
+                },
+                "encoding": {
+                    "type": "string",
+                    "description": "File encoding (e.g. 'utf-8', 'gbk'), default auto-detect"
                 }
             },
             "required": ["path"]
@@ -270,19 +290,27 @@ impl Tool for ReadFileTool {
         parameters: ToolParameters,
     ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
+            // Support both 'path' and 'file_path' parameters
             let path_str = parameters
                 .get("path")
+                .or_else(|| parameters.get("file_path"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
+            // Support both 'offset' and 'start_line' parameters
             let offset = parameters
                 .get("offset")
+                .or_else(|| parameters.get("start_line"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as usize;
+
+            // Support both 'limit' and 'line_count' parameters
             let limit = parameters
                 .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|l| l as usize);
+                .or_else(|| parameters.get("line_count"))
+                .and_then(|v| v.as_i64());
+
+            let _encoding = parameters.get("encoding").and_then(|v| v.as_str());
 
             let path = resolve_path("read_file", path_str, &self.base_dir)?;
 
@@ -299,77 +327,61 @@ impl Tool for ReadFileTool {
                 )));
             }
 
-            // Size guard: warn for files > 100KB
-            let metadata =
-                tokio::fs::metadata(&path)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        tool: "read_file".to_string(),
-                        message: format!("Failed to read metadata: {}", e),
-                    })?;
-            let file_size = metadata.len();
-            if file_size > 100 * 1024 && limit.is_none() && offset == 1 {
-                // For large files without offset/limit, read only first 2000 lines
-                let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        tool: "read_file".to_string(),
-                        message: format!("Failed to read: {}", e),
-                    }
+            // Read file bytes
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "read_file".to_string(),
+                    message: format!("Failed to read: {}", e),
                 })?;
-                let lines: Vec<&str> = content.lines().collect();
-                let total_lines = lines.len();
-                let end = 2000.min(total_lines);
-                let mut output = String::new();
-                for (i, line) in lines.iter().take(end).enumerate() {
-                    output.push_str(&format!("{:>6}\t{}\n", i + 1, line));
-                }
-                if total_lines > end {
-                    output.push_str(&format!(
-                        "\n... (showing first {end} of {total_lines} lines, file size: {} bytes. Use offset/limit to read more.)",
-                        file_size
-                    ));
-                }
-                return Ok(ToolResult::success(output));
-            }
 
-            let content =
-                tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        tool: "read_file".to_string(),
-                        message: format!("Failed to read: {}", e),
-                    })?;
+            // Auto-detect encoding (prefer UTF-8, fall back to GBK)
+            let content = String::from_utf8(bytes.clone())
+                .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
 
-            let all_lines: Vec<&str> = content.lines().collect();
-            let total_lines = all_lines.len();
+            let lines: Vec<&str> = content.lines().collect();
+            let total_lines = lines.len();
 
-            // offset is 1-based
+            // Calculate read range
             let start = if offset > 0 { offset - 1 } else { 0 };
-            let end = match limit {
-                Some(l) => (start + l).min(total_lines),
-                None => total_lines,
+            let effective_limit = if let Some(l) = limit {
+                if l < 0 { 100 } else { l as usize } // -1 means preview limit (100 lines)
+            } else {
+                total_lines // Read all lines
             };
 
+            let end = (start + effective_limit).min(total_lines);
+
             if start >= total_lines {
-                return Ok(ToolResult::success(format!(
-                    "Offset {offset} exceeds total lines ({total_lines})"
-                )));
+                return Ok(ToolResult::success_json(serde_json::json!({
+                    "error": format!("Offset {} exceeds total lines ({})", offset, total_lines),
+                    "total_lines": total_lines
+                })));
             }
 
-            let mut output = String::new();
-            for (i, line) in all_lines[start..end].iter().enumerate() {
-                output.push_str(&format!("{:>6}\t{}\n", start + i + 1, line));
-            }
+            // Build structured output
+            let preview_lines: Vec<Value> = lines[start..end]
+                .iter()
+                .enumerate()
+                .map(|(idx, line)| {
+                    serde_json::json!({
+                        "line_number": start + idx + 1,
+                        "content": line,
+                    })
+                })
+                .collect();
 
-            if start > 0 || end < total_lines {
-                output.push_str(&format!(
-                    "\n(lines {start_offset}-{end_offset} of {total_lines})",
-                    start_offset = start + 1,
-                    end_offset = end,
-                ));
-            }
+            let result = serde_json::json!({
+                "file": path_str,
+                "total_lines": total_lines,
+                "start_line": start + 1,
+                "end_line": end,
+                "truncated": end < total_lines,
+                "remaining_lines": total_lines.saturating_sub(end),
+                "lines": preview_lines,
+            });
 
-            Ok(ToolResult::success(output))
+            Ok(ToolResult::success_json(result))
         })
     }
 }

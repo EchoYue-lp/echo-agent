@@ -71,10 +71,7 @@ impl LspManager {
         let mut client = StdioLspClient::new(config);
 
         // Initialize with project root
-        let root_uri = self
-            .project_root_uri
-            .as_deref()
-            .unwrap_or("file:///");
+        let root_uri = self.project_root_uri.as_deref().unwrap_or("file:///");
 
         client
             .initialize(root_uri)

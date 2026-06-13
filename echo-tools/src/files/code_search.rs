@@ -348,10 +348,7 @@ async fn try_ripgrep_search(
     // Check for real errors (exit code 2 = error)
     if let Some(code) = output.status.code() {
         if code == 2 {
-            return Err(RgError::Failed(format!(
-                "rg error: {}",
-                stderr.trim()
-            )));
+            return Err(RgError::Failed(format!("rg error: {}", stderr.trim())));
         }
     }
 

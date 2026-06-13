@@ -218,10 +218,6 @@ name = "demo12_resilience"
 required-features = ["testing"]
 
 [[example]]
-name = "demo16_testing"
-required-features = ["testing"]
-
-[[example]]
 name = "demo39_workflow"
 required-features = ["testing"]
 
@@ -259,10 +255,6 @@ required-features = ["sqlite", "web"]
 
 [[example]]
 name = "demo08_external_skills"
-required-features = ["sqlite"]
-
-[[example]]
-name = "demo14_memory_isolation"
 required-features = ["sqlite"]
 
 [[example]]
@@ -315,9 +307,6 @@ required-features = ["testing"]
 
 [[example]]
 name = "demo62_prompt_templates"
-
-[[example]]
-name = "demo63_tiered_memory"
 
 [[example]]
 name = "demo64_tool_pipeline"

@@ -62,7 +62,11 @@ pub struct SimpleTokenizer;
 
 impl Tokenizer for SimpleTokenizer {
     fn count_tokens(&self, text: &str) -> usize {
-        text.len() / 4 + 1
+        if text.is_empty() {
+            0
+        } else {
+            text.len() / 4 + 1
+        }
     }
 }
 

@@ -8,7 +8,7 @@
 use super::ReactAgent;
 #[cfg(feature = "subagent")]
 use crate::agent::Agent;
-use crate::compression::{ContextCompressor, ForceCompressStats};
+use crate::compression::{CompressionCheckpoint, ContextCompressor, ForceCompressStats};
 use crate::error::Result;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpServerEntry;
@@ -159,7 +159,7 @@ impl ReactAgent {
     pub async fn force_compress_with(
         &self,
         compressor: &dyn ContextCompressor,
-    ) -> Result<ForceCompressStats> {
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.memory
             .context
             .lock()
@@ -177,45 +177,69 @@ impl ReactAgent {
         &self,
         compressor: &dyn ContextCompressor,
         matcher: &str,
-    ) -> Result<ForceCompressStats> {
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some(matcher))
             .await;
-        let stats = self.force_compress_with(compressor).await?;
-        // Fire PostCompact with actual stats
-        {
-            let hook_stats = crate::skills::hooks::CompressHookStats {
-                before_count: stats.before_count,
-                after_count: stats.after_count,
-                before_tokens: stats.before_tokens,
-                after_tokens: stats.after_tokens,
-            };
-            let hook_ctx = crate::skills::hooks::HookContext::for_post_compact(
-                &hook_stats,
-                matcher,
-                self.config.session_id.as_deref().unwrap_or(""),
-                &self.config.agent_name,
-            );
-            let registry = self.tools.hook_registry.read().await.clone();
-            let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
-            if let Some(ctx) = &post_result.injected_context {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(format!(
-                        "[Hook:PostCompact] {}",
-                        ctx
-                    )));
-            }
-            for msg in &post_result.messages {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(msg.clone()));
-            }
+        let (stats, checkpoint) = self.force_compress_with(compressor).await?;
+        self.fire_post_compact_hook(matcher, &stats).await;
+        Ok((stats, checkpoint))
+    }
+
+    /// Force-compress the context with focus instructions and PreCompact/PostCompact hooks.
+    pub async fn force_compress_with_focus_and_hooks(
+        &self,
+        focus_instructions: &str,
+        window: usize,
+        matcher: &str,
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
+        self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some(matcher))
+            .await;
+        let (stats, checkpoint) = self
+            .memory
+            .context
+            .lock()
+            .await
+            .force_compress_with_focus(focus_instructions, window)
+            .await?;
+        self.fire_post_compact_hook(matcher, &stats).await;
+        Ok((stats, checkpoint))
+    }
+
+    async fn fire_post_compact_hook(&self, matcher: &str, stats: &ForceCompressStats) {
+        let hook_stats = crate::skills::hooks::CompressHookStats {
+            before_count: stats.before_count,
+            after_count: stats.after_count,
+            before_tokens: stats.before_tokens,
+            after_tokens: stats.after_tokens,
+        };
+        let hook_ctx = crate::skills::hooks::HookContext::for_post_compact(
+            &hook_stats,
+            matcher,
+            self.config.session_id.as_deref().unwrap_or(""),
+            &self.config.agent_name,
+        );
+        let registry = self.tools.hook_registry.read().await.clone();
+        let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+        if let Some(ctx) = &post_result.injected_context {
+            self.memory
+                .context
+                .lock()
+                .await
+                .push(crate::llm::types::Message::system(format!(
+                    "[Hook:PostCompact] {}",
+                    ctx
+                )));
         }
-        Ok(stats)
+        for msg in &post_result.messages {
+            self.memory
+                .context
+                .lock()
+                .await
+                .push(crate::llm::types::Message::system(format!(
+                    "[Hook:PostCompact] {}",
+                    msg
+                )));
+        }
     }
 
     /// Force-compress the context using the installed compressor (or fallback
@@ -223,54 +247,14 @@ impl ReactAgent {
     ///
     /// Designed for manual compression triggers (GUI button, `/compact` CLI command).
     /// Fires PreCompact/PostCompact hooks with matcher `"manual"`.
-    pub async fn force_compress_context(&self) -> Result<ForceCompressStats> {
-        self.fire_lifecycle_hook(
-            crate::skills::hooks::HookEvent::PreCompact,
-            Some("manual"),
-        )
-        .await;
-        let stats = self
-            .memory
-            .context
-            .lock()
-            .await
-            .force_compress(40)
-            .await?;
-        // Fire PostCompact with actual stats
-        {
-            let hook_stats = crate::skills::hooks::CompressHookStats {
-                before_count: stats.before_count,
-                after_count: stats.after_count,
-                before_tokens: stats.before_tokens,
-                after_tokens: stats.after_tokens,
-            };
-            let hook_ctx = crate::skills::hooks::HookContext::for_post_compact(
-                &hook_stats,
-                "manual",
-                self.config.session_id.as_deref().unwrap_or(""),
-                &self.config.agent_name,
-            );
-            let registry = self.tools.hook_registry.read().await.clone();
-            let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
-            if let Some(ctx) = &post_result.injected_context {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(format!(
-                        "[Hook:PostCompact] {}",
-                        ctx
-                    )));
-            }
-            for msg in &post_result.messages {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(msg.clone()));
-            }
-        }
-        Ok(stats)
+    pub async fn force_compress_context(
+        &self,
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
+        self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("manual"))
+            .await;
+        let (stats, checkpoint) = self.memory.context.lock().await.force_compress(40).await?;
+        self.fire_post_compact_hook("manual", &stats).await;
+        Ok((stats, checkpoint))
     }
 
     /// List all registered tool names
@@ -687,7 +671,7 @@ impl ReactAgent {
 
     /// Get the runtime state store, if configured.
     pub fn state_store(&self) -> &Option<Arc<dyn crate::state::RuntimeStateStore>> {
-        &self.state_store
+        &self.memory.state_store
     }
 
     /// Get the conversation store, if configured.

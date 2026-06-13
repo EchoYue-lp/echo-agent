@@ -1,8 +1,11 @@
-use crate::compression::{CompressionInput, CompressionOutput, ContextCompressor};
+use crate::compression::{
+    CompressionCheckpoint, CompressionInput, CompressionOutput, ContextCompressor,
+};
 use echo_core::error::Result;
 use echo_core::llm::types::Message;
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use futures::future::BoxFuture;
+use std::time::Instant;
 
 /// Multi-stage pipeline compressor.
 ///
@@ -43,10 +46,20 @@ impl ContextCompressor for HybridCompressor {
 
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
+            let start = Instant::now();
             let token_limit = input.token_limit;
             let current_query = input.current_query.clone();
+            let focus_instructions = input.focus_instructions.clone();
             let mut messages = input.messages;
             let mut all_evicted: Vec<Message> = Vec::new();
+            let mut stage_names: Vec<String> = Vec::new();
+            let mut last_summary: Option<String> = None;
+
+            let tokens_before: usize = messages
+                .iter()
+                .filter_map(|m| m.content.as_text())
+                .map(|c| self.tokenizer.count_tokens(&c))
+                .sum();
 
             for (i, stage) in self.stages.iter().enumerate() {
                 // Short-circuit: if tokens are already at or below the limit, skip remaining stages
@@ -73,15 +86,43 @@ impl ContextCompressor for HybridCompressor {
                         messages,
                         token_limit,
                         current_query: current_query.clone(),
+                        focus_instructions: focus_instructions.clone(),
                     })
                     .await?;
+                // Collect stage info from checkpoint if available
+                if let Some(ref cp) = output.checkpoint {
+                    let stage_info = format!("{}(id={})", cp.strategy, &cp.checkpoint_id[..8]);
+                    stage_names.push(stage_info);
+                    if cp.summary.is_some() {
+                        last_summary = cp.summary.clone();
+                    }
+                } else {
+                    stage_names.push(stage.name().to_string());
+                }
                 all_evicted.extend(output.evicted);
                 messages = output.messages;
+            }
+
+            let tokens_after: usize = messages
+                .iter()
+                .filter_map(|m| m.content.as_text())
+                .map(|c| self.tokenizer.count_tokens(&c))
+                .sum();
+
+            let hybrid_strategy = format!("Hybrid({})", stage_names.join("+"));
+            let mut checkpoint = CompressionCheckpoint::new(hybrid_strategy)
+                .with_counts(messages.len(), all_evicted.len())
+                .with_tokens(tokens_before, tokens_after)
+                .with_duration_ms(start.elapsed().as_millis() as u64)
+                .with_focus(focus_instructions.or(current_query));
+            if let Some(s) = last_summary {
+                checkpoint = checkpoint.with_summary(s);
             }
 
             Ok(CompressionOutput {
                 messages,
                 evicted: all_evicted,
+                checkpoint: Some(checkpoint),
             })
         })
     }
@@ -161,6 +202,7 @@ mod tests {
             messages,
             token_limit: 1000, // Very high — first stage result will be under this
             current_query: None,
+            focus_instructions: None,
         };
 
         let output = compressor.compress(input).await.unwrap();
@@ -191,6 +233,7 @@ mod tests {
             messages,
             token_limit: 1000,
             current_query: None,
+            focus_instructions: None,
         };
 
         let output = compressor.compress(input).await.unwrap();

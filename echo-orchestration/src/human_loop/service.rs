@@ -815,10 +815,8 @@ impl PermissionRequestHandler for PolicyAwareHandler {
             PermissionDecision::Deny { reason } => Ok(PermissionResponse::denied(Some(reason))),
             PermissionDecision::RequireApproval => {
                 // 关键修复：委托给 HumanLoopProvider 请求人类审批
-                let req = HumanLoopRequest::approval(
-                    &request.tool_name,
-                    request.tool_input.clone(),
-                );
+                let req =
+                    HumanLoopRequest::approval(&request.tool_name, request.tool_input.clone());
                 match self.provider.request(req).await? {
                     HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
                     HumanLoopResponse::ApprovedWithScope { .. } => {
@@ -836,12 +834,12 @@ impl PermissionRequestHandler for PolicyAwareHandler {
                     HumanLoopResponse::Text(text) => {
                         Ok(PermissionResponse::allowed().with_feedback(text))
                     }
-                    HumanLoopResponse::Timeout => Ok(PermissionResponse::denied(Some(
-                        "审批请求超时".to_string(),
-                    ))),
-                    HumanLoopResponse::Deferred => Ok(PermissionResponse::denied(Some(
-                        "审批被推迟".to_string(),
-                    ))),
+                    HumanLoopResponse::Timeout => {
+                        Ok(PermissionResponse::denied(Some("审批请求超时".to_string())))
+                    }
+                    HumanLoopResponse::Deferred => {
+                        Ok(PermissionResponse::denied(Some("审批被推迟".to_string())))
+                    }
                     HumanLoopResponse::Selection { .. } => Ok(PermissionResponse::denied(Some(
                         "收到意外的 Selection 响应".to_string(),
                     ))),

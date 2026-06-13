@@ -9,6 +9,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::security::{ResourceLimits, SecurityConfig};
+use calamine::Reader; // Import Reader trait for sheet_names(), worksheet_range(), etc.
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
@@ -227,7 +228,11 @@ impl Tool for ExcelInfoTool {
                                     .unwrap_or_default()
                             })
                             .collect();
-                        let row2_non_empty: Vec<&str> = row2.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                        let row2_non_empty: Vec<&str> = row2
+                            .iter()
+                            .map(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                         if !row2_non_empty.is_empty() && row2 != headers {
                             info.push(format!("    Row 2: {}", row2_non_empty.join(" | ")));
                         }
@@ -241,13 +246,20 @@ impl Tool for ExcelInfoTool {
                     let (fh, fw) = formula_range.get_size();
                     for row in 0..fh {
                         for col in 0..fw {
-                            if let Some(formula_str) = formula_range.get_value((row as u32, col as u32)) {
+                            if let Some(formula_str) =
+                                formula_range.get_value((row as u32, col as u32))
+                            {
                                 if !formula_str.is_empty() {
                                     formula_count += 1;
                                     if sample_formulas.len() < 5 {
                                         // Get the cell reference (e.g. "A10")
                                         let col_letter = col_to_letter(col);
-                                        sample_formulas.push(format!("{}{}={}", col_letter, row + 1, formula_str));
+                                        sample_formulas.push(format!(
+                                            "{}{}={}",
+                                            col_letter,
+                                            row + 1,
+                                            formula_str
+                                        ));
                                     }
                                 }
                             }
@@ -375,7 +387,7 @@ impl Tool for ExcelToCsvTool {
             }
 
             // Prepend UTF-8 BOM so Excel correctly detects encoding for non-ASCII content
-            let bom = "\xEF\xBB\xBF";
+            let bom = "\u{FEFF}";
             let csv_output = format!("{}{}", bom, csv_content.join("\n"));
             tokio::fs::write(output_path, csv_output)
                 .await
@@ -418,7 +430,14 @@ fn read_excel_xlsx(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
+    read_excel_data(
+        &mut workbook,
+        file_path,
+        sheet_name,
+        preview_rows,
+        skip_rows,
+        limits,
+    )
 }
 
 /// Read xls file
@@ -437,7 +456,14 @@ fn read_excel_xls(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
+    read_excel_data(
+        &mut workbook,
+        file_path,
+        sheet_name,
+        preview_rows,
+        skip_rows,
+        limits,
+    )
 }
 
 /// Read xlsb file
@@ -456,7 +482,14 @@ fn read_excel_xlsb(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
+    read_excel_data(
+        &mut workbook,
+        file_path,
+        sheet_name,
+        preview_rows,
+        skip_rows,
+        limits,
+    )
 }
 
 /// Read ods file
@@ -475,7 +508,14 @@ fn read_excel_ods(
             message: format!("Failed to open Excel file: {}", e),
         })?;
 
-    read_excel_data(&mut workbook, file_path, sheet_name, preview_rows, skip_rows, limits)
+    read_excel_data(
+        &mut workbook,
+        file_path,
+        sheet_name,
+        preview_rows,
+        skip_rows,
+        limits,
+    )
 }
 
 /// Generic Excel data reader
@@ -507,7 +547,9 @@ fn read_excel_data<R: calamine::Reader<std::io::BufReader<std::fs::File>>>(
     let available_rows = height - skip;
 
     // Limit preview rows to max allowed
-    let display_rows = preview_rows.min(available_rows).min(limits.max_preview_rows);
+    let display_rows = preview_rows
+        .min(available_rows)
+        .min(limits.max_preview_rows);
 
     // Format output
     let mut result = Vec::new();
@@ -516,10 +558,18 @@ fn read_excel_data<R: calamine::Reader<std::io::BufReader<std::fs::File>>>(
     result.push(format!("Total rows: {}", height));
     result.push(format!("Total cols: {}", width));
     if skip > 0 {
-        result.push(format!("Skipped rows: {} (starting from row {})", skip, skip + 1));
+        result.push(format!(
+            "Skipped rows: {} (starting from row {})",
+            skip,
+            skip + 1
+        ));
     }
     result.push(String::new());
-    result.push(format!("Data preview ({} rows from row {}):", display_rows, skip + 1));
+    result.push(format!(
+        "Data preview ({} rows from row {}):",
+        display_rows,
+        skip + 1
+    ));
     result.push(String::new());
 
     // Headers and data (with skip offset)
@@ -577,7 +627,11 @@ fn format_smart_float(f: f64) -> String {
         return "NaN".to_string();
     }
     if f.is_infinite() {
-        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+        return if f > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
     }
     // Use up to 6 decimal places, then strip trailing zeros
     let formatted = format!("{:.6}", f);
@@ -591,18 +645,17 @@ fn format_smart_float(f: f64) -> String {
 
 /// Open any Excel format (.xlsx/.xls/.xlsb/.ods) using auto-detection.
 fn open_excel_auto(file_path: &str) -> Result<calamine::Sheets<std::io::BufReader<std::fs::File>>> {
-    calamine::open_workbook_auto(file_path).map_err(|e| ToolError::ExecutionFailed {
-        tool: TOOL_NAME.to_string(),
-        message: format!("Failed to open Excel file '{}': {}", file_path, e),
+    calamine::open_workbook_auto(file_path).map_err(|e| {
+        echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
+            tool: TOOL_NAME.to_string(),
+            message: format!("Failed to open Excel file '{}': {}", file_path, e),
+        }))
     })
 }
 
 /// Resolve a sheet name or numeric index to an actual sheet name.
 /// If `sheet_name` is a numeric string like "0", "1", etc., return the corresponding sheet name.
-fn resolve_sheet_name(
-    sheets: &[String],
-    sheet_name: Option<&str>,
-) -> String {
+fn resolve_sheet_name(sheets: &[String], sheet_name: Option<&str>) -> String {
     match sheet_name {
         Some(name) => {
             // Try parsing as index
@@ -1110,7 +1163,10 @@ impl Tool for ExcelLoadTool {
                 // All rows before it are skipped (title rows, metadata, etc.)
                 let data_start_row = header_row_idx + 1;
                 if data_start_row >= height {
-                    all_results.push(format!("Sheet '{}': header_row={} but only {} rows, skipped.", sheet_name_str, header_row_idx, height));
+                    all_results.push(format!(
+                        "Sheet '{}': header_row={} but only {} rows, skipped.",
+                        sheet_name_str, header_row_idx, height
+                    ));
                     continue;
                 }
                 let data_rows = height - data_start_row;
@@ -1160,7 +1216,8 @@ impl Tool for ExcelLoadTool {
                                 col_is_datetime[col] = false;
                                 col_has_data[col] = true;
                             }
-                            Some(calamine::Data::DateTime(_)) | Some(calamine::Data::DateTimeIso(_)) => {
+                            Some(calamine::Data::DateTime(_))
+                            | Some(calamine::Data::DateTimeIso(_)) => {
                                 col_is_numeric[col] = false;
                                 col_is_bool[col] = false;
                                 col_has_data[col] = true;
@@ -1199,53 +1256,68 @@ impl Tool for ExcelLoadTool {
                         let vals: Vec<Option<String>> = vec![None; load_rows];
                         series_list.push(Series::new(col_name, vals));
                     } else if col_is_bool[col] {
-                        let vals: Vec<Option<bool>> = (data_start_row..(data_start_row + load_rows))
-                            .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
-                                Some(calamine::Data::Bool(b)) => Some(*b),
-                                _ => None,
-                            })
+                        let vals: Vec<Option<bool>> = (data_start_row
+                            ..(data_start_row + load_rows))
+                            .map(
+                                |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                    Some(calamine::Data::Bool(b)) => Some(*b),
+                                    _ => None,
+                                },
+                            )
                             .collect();
                         series_list.push(Series::new(col_name, vals));
                     } else if col_is_datetime[col] {
-                        let vals: Vec<Option<String>> = (data_start_row..(data_start_row + load_rows))
-                            .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
-                                Some(calamine::Data::Empty) | None => None,
-                                Some(v) => {
-                                    let s = format_cell_value(v);
-                                    if s.is_empty() { None } else { Some(s) }
-                                }
-                            })
+                        let vals: Vec<Option<String>> = (data_start_row
+                            ..(data_start_row + load_rows))
+                            .map(
+                                |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                    Some(calamine::Data::Empty) | None => None,
+                                    Some(v) => {
+                                        let s = format_cell_value(v);
+                                        if s.is_empty() { None } else { Some(s) }
+                                    }
+                                },
+                            )
                             .collect();
                         series_list.push(Series::new(col_name, vals));
                     } else if col_is_numeric[col] {
                         if col_has_float[col] {
-                            let vals: Vec<Option<f64>> = (data_start_row..(data_start_row + load_rows))
-                                .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
-                                    Some(calamine::Data::Float(f)) => Some(*f),
-                                    Some(calamine::Data::Int(i)) => Some(*i as f64),
-                                    _ => None,
+                            let vals: Vec<Option<f64>> = (data_start_row
+                                ..(data_start_row + load_rows))
+                                .map(|row_idx| {
+                                    match range.get_value((row_idx as u32, col as u32)) {
+                                        Some(calamine::Data::Float(f)) => Some(*f),
+                                        Some(calamine::Data::Int(i)) => Some(*i as f64),
+                                        _ => None,
+                                    }
                                 })
                                 .collect();
                             series_list.push(Series::new(col_name, vals));
                         } else {
-                            let vals: Vec<Option<i64>> = (data_start_row..(data_start_row + load_rows))
-                                .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
-                                    Some(calamine::Data::Int(i)) => Some(*i),
-                                    Some(calamine::Data::Float(f)) => Some(*f as i64),
-                                    _ => None,
+                            let vals: Vec<Option<i64>> = (data_start_row
+                                ..(data_start_row + load_rows))
+                                .map(|row_idx| {
+                                    match range.get_value((row_idx as u32, col as u32)) {
+                                        Some(calamine::Data::Int(i)) => Some(*i),
+                                        Some(calamine::Data::Float(f)) => Some(*f as i64),
+                                        _ => None,
+                                    }
                                 })
                                 .collect();
                             series_list.push(Series::new(col_name, vals));
                         }
                     } else {
-                        let vals: Vec<Option<String>> = (data_start_row..(data_start_row + load_rows))
-                            .map(|row_idx| match range.get_value((row_idx as u32, col as u32)) {
-                                Some(calamine::Data::Empty) | None => None,
-                                Some(v) => {
-                                    let s = format_cell_value(v);
-                                    if s.is_empty() { None } else { Some(s) }
-                                }
-                            })
+                        let vals: Vec<Option<String>> = (data_start_row
+                            ..(data_start_row + load_rows))
+                            .map(
+                                |row_idx| match range.get_value((row_idx as u32, col as u32)) {
+                                    Some(calamine::Data::Empty) | None => None,
+                                    Some(v) => {
+                                        let s = format_cell_value(v);
+                                        if s.is_empty() { None } else { Some(s) }
+                                    }
+                                },
+                            )
                             .collect();
                         series_list.push(Series::new(col_name, vals));
                     }
@@ -1258,7 +1330,10 @@ impl Tool for ExcelLoadTool {
                 let mut df =
                     DataFrame::new(col_count, columns).map_err(|e| ToolError::ExecutionFailed {
                         tool: TOOL_NAME.to_string(),
-                        message: format!("Failed to create DataFrame for sheet '{}': {}", sheet_name_str, e),
+                        message: format!(
+                            "Failed to create DataFrame for sheet '{}': {}",
+                            sheet_name_str, e
+                        ),
                     })?;
 
                 // Determine output path (with sheet suffix for multi-sheet)
@@ -1267,10 +1342,17 @@ impl Tool for ExcelLoadTool {
                         let ext = std::path::Path::new(out)
                             .extension()
                             .and_then(|e| e.to_str())
-                            .unwrap_or(format.as_str());
+                            .unwrap_or(&*format);
                         let stem_out = std::path::Path::new(out).file_stem().unwrap_or_default();
-                        let parent_out = std::path::Path::new(out).parent().unwrap_or(std::path::Path::new("."));
-                        parent_out.join(format!("{}_{}.{}", stem_out.to_string_lossy(), sheet_name_str, ext))
+                        let parent_out = std::path::Path::new(out)
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."));
+                        parent_out.join(format!(
+                            "{}_{}.{}",
+                            stem_out.to_string_lossy(),
+                            sheet_name_str,
+                            ext
+                        ))
                     } else {
                         security.validate_output_file(out)?
                     }
@@ -1330,11 +1412,21 @@ impl Tool for ExcelLoadTool {
 
                 // Build result summary for this sheet
                 let shape = df.shape();
-                let col_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-                let dtypes: Vec<String> = col_names.iter().map(|name| {
-                    let dtype = df.column(name).map(|c| c.dtype().clone()).unwrap_or_default();
-                    format!("{}: {:?}", name, dtype)
-                }).collect();
+                let col_names: Vec<String> = df
+                    .get_column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let dtypes: Vec<String> = col_names
+                    .iter()
+                    .map(|name| {
+                        let dtype = df
+                            .column(name)
+                            .map(|c| c.dtype().clone())
+                            .unwrap_or_default();
+                        format!("{}: {:?}", name, dtype)
+                    })
+                    .collect();
 
                 let mut sheet_result = Vec::new();
                 if is_multi {
@@ -1343,7 +1435,10 @@ impl Tool for ExcelLoadTool {
                 sheet_result.push(format!("  Loaded → {} ({})", out_path.display(), format));
                 sheet_result.push(format!("  Shape: {} rows x {} columns", shape.0, shape.1));
                 if header_row_idx > 0 {
-                    sheet_result.push(format!("  Header row: {} (skipped {} rows above)", header_row_idx, header_row_idx));
+                    sheet_result.push(format!(
+                        "  Header row: {} (skipped {} rows above)",
+                        header_row_idx, header_row_idx
+                    ));
                 }
                 sheet_result.push("  Columns:".to_string());
                 for d in &dtypes {

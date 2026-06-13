@@ -24,12 +24,14 @@
 //! Use as a standalone [`ContextCompressor`] or integrate into
 //! [`ContextManager`](crate::compression::ContextManager) as a pre-compression pass.
 
+use crate::compression::CompressionCheckpoint;
 use echo_core::compression::{CompressionInput, CompressionOutput, ContextCompressor};
 use echo_core::error::Result;
 use echo_core::llm::types::{Message, MessageContent, Role};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -148,11 +150,7 @@ impl VisibilityHorizonCompressor {
             // 2. Strip tool_calls from the assistant message (keep reasoning text)
             if let Some(asst) = messages.get_mut(group.assistant_idx) {
                 // Preserve the assistant's text content as a user-visible note
-                let original_text = asst
-                    .content
-                    .as_text()
-                    .unwrap_or_default()
-                    .to_string();
+                let original_text = asst.content.as_text().unwrap_or_default().to_string();
                 asst.tool_calls = None;
                 if original_text.trim().is_empty() {
                     // No text — convert to a brief note
@@ -222,13 +220,8 @@ impl VisibilityHorizonCompressor {
                     let mut result_tokens = 0;
                     let mut errors = Vec::new();
 
-                    while result_end < messages.len()
-                        && messages[result_end].role == Role::Tool
-                    {
-                        let content = messages[result_end]
-                            .content
-                            .as_text()
-                            .unwrap_or_default();
+                    while result_end < messages.len() && messages[result_end].role == Role::Tool {
+                        let content = messages[result_end].content.as_text().unwrap_or_default();
                         result_tokens += self.tokenizer.count_tokens(&content);
 
                         // Heuristic: if content starts with "[Error" or "[error", count as failure
@@ -295,10 +288,7 @@ impl VisibilityHorizonCompressor {
 
         let summary = format!(
             "[Horizon compact: {} | {} | {}→~{} tokens]",
-            tool_names,
-            status,
-            group.result_tokens,
-            self.config.compact_max_tokens
+            tool_names, status, group.result_tokens, self.config.compact_max_tokens
         );
 
         // Ensure summary stays within token budget
@@ -344,9 +334,37 @@ impl VisibilityHorizonCompressor {
 impl ContextCompressor for VisibilityHorizonCompressor {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
+            let start = Instant::now();
+            let tokenizer = HeuristicTokenizer;
+            let tokens_before: usize = input
+                .messages
+                .iter()
+                .filter_map(|m| m.content.as_text())
+                .map(|c| tokenizer.count_tokens(&c))
+                .sum();
+            let original_count = input.messages.len();
+
             let mut messages = input.messages;
             let evicted = self.compact_horizon(&mut messages);
-            Ok(CompressionOutput { messages, evicted })
+
+            let tokens_after: usize = messages
+                .iter()
+                .filter_map(|m| m.content.as_text())
+                .map(|c| tokenizer.count_tokens(&c))
+                .sum();
+
+            let checkpoint = CompressionCheckpoint::new(self.name())
+                .with_counts(messages.len(), evicted.len())
+                .with_tokens(tokens_before, tokens_after)
+                .with_covered_range(0, original_count.saturating_sub(1))
+                .with_duration_ms(start.elapsed().as_millis() as u64)
+                .with_focus(input.focus_instructions.clone());
+
+            Ok(CompressionOutput {
+                messages,
+                evicted,
+                checkpoint: Some(checkpoint),
+            })
         })
     }
 
@@ -403,8 +421,16 @@ mod tests {
             ]));
 
             // Two tool results (simulating parallel execution)
-            messages.push(tool_result(&call_id_a, &tool_a, &"file content ".repeat(100 * i)));
-            messages.push(tool_result(&call_id_b, &tool_b, &"grep output ".repeat(80 * i)));
+            messages.push(tool_result(
+                &call_id_a,
+                &tool_a,
+                &"file content ".repeat(100 * i),
+            ));
+            messages.push(tool_result(
+                &call_id_b,
+                &tool_b,
+                &"grep output ".repeat(80 * i),
+            ));
 
             // Assistant final answer
             messages.push(Message::assistant(format!("Answer to question {}", i)));
@@ -450,10 +476,7 @@ mod tests {
 
         let evicted = compressor.compact_horizon(&mut messages);
 
-        assert!(
-            !evicted.is_empty(),
-            "Some tool results should be evicted"
-        );
+        assert!(!evicted.is_empty(), "Some tool results should be evicted");
         assert!(
             messages.len() < original_len,
             "Message count should decrease: was {}, now {}",
@@ -462,15 +485,15 @@ mod tests {
         );
 
         // Verify compacted messages contain horizon summary
-        let has_summary = messages
-            .iter()
-            .any(|m| m.content.as_text().is_some_and(|t| t.contains("[Horizon compact")));
+        let has_summary = messages.iter().any(|m| {
+            m.content
+                .as_text()
+                .is_some_and(|t| t.contains("[Horizon compact"))
+        });
         assert!(has_summary, "Should contain a horizon compact summary");
 
         // Verify recent turns (4-6) are NOT compacted — tool results still present
-        let has_recent_tool = messages
-            .iter()
-            .any(|m| m.role == Role::Tool);
+        let has_recent_tool = messages.iter().any(|m| m.role == Role::Tool);
         assert!(has_recent_tool, "Recent tool results should be preserved");
     }
 
@@ -533,7 +556,10 @@ mod tests {
         let evicted = compressor.compact_horizon(&mut messages);
 
         // Turn 1's tool group has 2 user turns after it → > 1 → should compact
-        assert!(!evicted.is_empty(), "Parallel tool results should be evicted");
+        assert!(
+            !evicted.is_empty(),
+            "Parallel tool results should be evicted"
+        );
 
         // Verify the summary mentions both tools
         let has_summary = messages.iter().any(|m| {
@@ -569,7 +595,11 @@ mod tests {
         // Summary should indicate partial success
         let summary = messages
             .iter()
-            .find(|m| m.content.as_text().is_some_and(|t| t.contains("[Horizon compact")))
+            .find(|m| {
+                m.content
+                    .as_text()
+                    .is_some_and(|t| t.contains("[Horizon compact"))
+            })
             .and_then(|m| m.content.as_text())
             .unwrap_or_default();
 
@@ -601,10 +631,15 @@ mod tests {
         let _evicted = compressor.compact_horizon(&mut messages);
 
         // The assistant's "important reasoning text" should be preserved
-        let has_reasoning = messages
-            .iter()
-            .any(|m| m.content.as_text().is_some_and(|t| t.contains("important reasoning")));
-        assert!(has_reasoning, "Non-tool assistant messages should be preserved");
+        let has_reasoning = messages.iter().any(|m| {
+            m.content
+                .as_text()
+                .is_some_and(|t| t.contains("important reasoning"))
+        });
+        assert!(
+            has_reasoning,
+            "Non-tool assistant messages should be preserved"
+        );
 
         // User messages should be preserved
         let user_count = messages.iter().filter(|m| m.role == Role::User).count();
@@ -636,14 +671,18 @@ mod tests {
         assert!(!evicted.is_empty(), "Tool results should be evicted");
 
         // Global objective should be injected as first message
-        assert!(messages[0]
-            .content
-            .as_text()
-            .is_some_and(|t| t.contains("[Global Objective]")));
-        assert!(messages[0]
-            .content
-            .as_text()
-            .is_some_and(|t| t.contains("Build a sorting algorithm")));
+        assert!(
+            messages[0]
+                .content
+                .as_text()
+                .is_some_and(|t| t.contains("[Global Objective]"))
+        );
+        assert!(
+            messages[0]
+                .content
+                .as_text()
+                .is_some_and(|t| t.contains("Build a sorting algorithm"))
+        );
     }
 
     #[tokio::test]
@@ -661,6 +700,7 @@ mod tests {
             messages,
             token_limit: 100_000,
             current_query: None,
+            focus_instructions: None,
         };
 
         let output = compressor.compress(input).await.unwrap();
@@ -688,8 +728,7 @@ mod tests {
         // Build conversations with CONSTANT-SIZE tool outputs to isolate
         // the effect of turn count on token growth.
         fn build_constant_conversation(turns: usize) -> Vec<Message> {
-            let mut messages =
-                vec![Message::system("You are a helpful assistant.".to_string())];
+            let mut messages = vec![Message::system("You are a helpful assistant.".to_string())];
             for i in 1..=turns {
                 messages.push(Message::user(format!("Question {}", i)));
                 let ca = format!("call_{}a", i);
@@ -771,10 +810,7 @@ mod tests {
         );
 
         // Verify recent turns preserve real tool results
-        let recent_tool_results: usize = messages
-            .iter()
-            .filter(|m| m.role == Role::Tool)
-            .count();
+        let recent_tool_results: usize = messages.iter().filter(|m| m.role == Role::Tool).count();
         // 6 preserved turns × 2 tool results = 12
         assert!(
             recent_tool_results >= 10,
@@ -812,7 +848,11 @@ mod tests {
         // Verify compacted summaries are present
         let summary_count = messages
             .iter()
-            .filter(|m| m.content.as_text().is_some_and(|t| t.contains("[Horizon compact")))
+            .filter(|m| {
+                m.content
+                    .as_text()
+                    .is_some_and(|t| t.contains("[Horizon compact"))
+            })
             .count();
         assert!(
             summary_count >= 20,
@@ -835,10 +875,12 @@ mod tests {
 
         // Constant-size outputs for predictable measurement
         fn build_constant_conversation(turns: usize) -> Vec<Message> {
-            let mut messages =
-                vec![Message::system("You are a helpful assistant.".to_string())];
+            let mut messages = vec![Message::system("You are a helpful assistant.".to_string())];
             for i in 1..=turns {
-                messages.push(Message::user(format!("Question {} about various topics", i)));
+                messages.push(Message::user(format!(
+                    "Question {} about various topics",
+                    i
+                )));
                 let ca = format!("call_{}a", i);
                 let cb = format!("call_{}b", i);
                 messages.push(assistant_with_tools(&[
@@ -884,7 +926,11 @@ mod tests {
         // Verify compaction happened for old turns
         let compact_count = msgs_50
             .iter()
-            .filter(|m| m.content.as_text().is_some_and(|t| t.contains("[Horizon compact")))
+            .filter(|m| {
+                m.content
+                    .as_text()
+                    .is_some_and(|t| t.contains("[Horizon compact"))
+            })
             .count();
         assert!(
             compact_count >= 40,

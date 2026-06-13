@@ -131,7 +131,10 @@ impl<T: Send + 'static> BackgroundTask<T> {
 
     /// Convenience: check if the task is still running (non-blocking).
     pub async fn is_running(&self) -> bool {
-        matches!(*self.status.read().await, BackgroundTaskStatus::Running { .. })
+        matches!(
+            *self.status.read().await,
+            BackgroundTaskStatus::Running { .. }
+        )
     }
 
     /// Convenience: check if the task has reached a terminal state.
@@ -180,8 +183,9 @@ impl<T: Send + 'static> BackgroundTask<T> {
                 BackgroundTaskStatus::Failed { error, .. } => {
                     Some(error.contains("panic") || error.contains("JoinError"))
                 }
-                BackgroundTaskStatus::Cancelled
-                | BackgroundTaskStatus::Completed { .. } => Some(false),
+                BackgroundTaskStatus::Cancelled | BackgroundTaskStatus::Completed { .. } => {
+                    Some(false)
+                }
                 // If finished but still shows Running/Pending, something is off
                 _ => Some(false),
             }
@@ -488,7 +492,11 @@ impl TaskSpawner {
                     finished_at: Instant::now(),
                 }
             } else {
-                let error = result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+                let error = result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default();
                 BackgroundTaskStatus::Failed {
                     error,
                     at: Instant::now(),
@@ -496,7 +504,10 @@ impl TaskSpawner {
             };
 
             *status_inner.write().await = final_status.clone();
-            terminal_flag_inner.store(final_status.is_terminal(), std::sync::atomic::Ordering::Relaxed);
+            terminal_flag_inner.store(
+                final_status.is_terminal(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
 
             // Send result (ignore if receiver dropped)
             let _ = tx.send(result);
@@ -703,19 +714,25 @@ mod tests {
     #[test]
     fn test_status_is_terminal() {
         assert!(!BackgroundTaskStatus::Pending.is_terminal());
-        assert!(!BackgroundTaskStatus::Running {
-            started_at: Instant::now()
-        }
-        .is_terminal());
-        assert!(BackgroundTaskStatus::Completed {
-            finished_at: Instant::now()
-        }
-        .is_terminal());
-        assert!(BackgroundTaskStatus::Failed {
-            error: "test".into(),
-            at: Instant::now()
-        }
-        .is_terminal());
+        assert!(
+            !BackgroundTaskStatus::Running {
+                started_at: Instant::now()
+            }
+            .is_terminal()
+        );
+        assert!(
+            BackgroundTaskStatus::Completed {
+                finished_at: Instant::now()
+            }
+            .is_terminal()
+        );
+        assert!(
+            BackgroundTaskStatus::Failed {
+                error: "test".into(),
+                at: Instant::now()
+            }
+            .is_terminal()
+        );
         assert!(BackgroundTaskStatus::Cancelled.is_terminal());
     }
 

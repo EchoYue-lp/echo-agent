@@ -249,10 +249,7 @@ pub enum PluginDependency {
     /// Simple dependency — just a name, any version.
     Simple(String),
     /// Versioned dependency with semver constraint.
-    Versioned {
-        name: String,
-        version: String,
-    },
+    Versioned { name: String, version: String },
 }
 
 impl PluginDependency {
@@ -293,8 +290,7 @@ impl std::fmt::Display for ValidationError {
 impl PluginManifest {
     /// Load a manifest from a YAML string.
     pub fn from_yaml(yaml: &str) -> Result<Self, String> {
-        serde_yaml_ng::from_str(yaml)
-            .map_err(|e| format!("Failed to parse manifest YAML: {e}"))
+        serde_yaml_ng::from_str(yaml).map_err(|e| format!("Failed to parse manifest YAML: {e}"))
     }
 
     /// Load a manifest from a file path.
@@ -426,7 +422,9 @@ impl PluginManifest {
                 if path.contains("..") {
                     errors.push(ValidationError {
                         field: format!("components.{field}"),
-                        message: format!("Path '{path}' must not contain '..' (no traversal outside plugin root)"),
+                        message: format!(
+                            "Path '{path}' must not contain '..' (no traversal outside plugin root)"
+                        ),
                     });
                 }
             }
@@ -473,8 +471,7 @@ fn is_kebab_case(s: &str) -> bool {
 /// Check if a string is a valid identifier: letters, digits, underscores.
 fn is_valid_identifier(s: &str) -> bool {
     !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.chars().next().unwrap().is_ascii_digit()
 }
 
@@ -546,7 +543,10 @@ dependencies:
         let m = PluginManifest::from_yaml(yaml).unwrap();
         assert_eq!(m.name, "data-analysis-pack");
         assert_eq!(m.version, "1.2.0");
-        assert_eq!(m.components.skills.as_ref().unwrap().first(), Some("./skills/"));
+        assert_eq!(
+            m.components.skills.as_ref().unwrap().first(),
+            Some("./skills/")
+        );
         assert_eq!(m.config.len(), 2);
         assert_eq!(m.dependencies.len(), 2);
         assert!(m.is_valid());
@@ -601,10 +601,7 @@ dependencies:
         assert_eq!(m.dependencies[0].name(), "simple-dep");
         assert_eq!(m.dependencies[0].version_constraint(), None);
         assert_eq!(m.dependencies[1].name(), "versioned-dep");
-        assert_eq!(
-            m.dependencies[1].version_constraint(),
-            Some(">=2.0.0")
-        );
+        assert_eq!(m.dependencies[1].version_constraint(), Some(">=2.0.0"));
     }
 
     #[test]

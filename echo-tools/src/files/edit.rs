@@ -417,7 +417,7 @@ mod tests {
     fn test_colorize_diff() {
         let raw = "--- a/test.txt\n+++ b/test.txt\n@@ -1,2 +1,2 @@\n hello\n-world\n+rust\n";
         let colored = colorize_diff(raw);
-        assert!(colored.contains("\x1b[1m"));  // bold header
+        assert!(colored.contains("\x1b[1m")); // bold header
         assert!(colored.contains("\x1b[36m")); // cyan hunk
         assert!(colored.contains("\x1b[31m")); // red removed
         assert!(colored.contains("\x1b[32m")); // green added

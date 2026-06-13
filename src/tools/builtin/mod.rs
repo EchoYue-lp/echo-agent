@@ -13,7 +13,7 @@ pub(crate) mod human_in_loop;
 pub(crate) mod memory;
 pub(crate) mod memory_write;
 #[cfg(feature = "tasks")]
-pub(crate) mod plan;
+pub(crate) mod plan_tool;
 #[cfg(feature = "tasks")]
 pub(crate) mod spawn_task;
 #[cfg(feature = "tasks")]

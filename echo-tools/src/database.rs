@@ -283,10 +283,12 @@ impl Tool for DescribeTableTool {
 /// Only allows `sqlite://`, `mysql://`, `postgresql://`, and `postgres://` schemes.
 /// For SQLite, also validates that the path doesn't contain suspicious patterns.
 fn validate_db_url(url_str: &str) -> Result<()> {
-    let scheme_end = url_str.find("://").ok_or_else(|| ToolError::InvalidParameter {
-        name: "connection_url".to_string(),
-        message: "Invalid URL format: missing '://'".to_string(),
-    })?;
+    let scheme_end = url_str
+        .find("://")
+        .ok_or_else(|| ToolError::InvalidParameter {
+            name: "connection_url".to_string(),
+            message: "Invalid URL format: missing '://'".to_string(),
+        })?;
     let scheme = &url_str[..scheme_end];
 
     match scheme {
@@ -299,7 +301,7 @@ fn validate_db_url(url_str: &str) -> Result<()> {
                     scheme
                 ),
             }
-            .into())
+            .into());
         }
     }
 
@@ -339,7 +341,9 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
     // Silently ignored on SQLite (which doesn't enforce this), but provides real
     // protection on PostgreSQL and MySQL.
     if !conn_url.starts_with("sqlite") {
-        let _ = sqlx::query("SET TRANSACTION READ ONLY").execute(&pool).await;
+        let _ = sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&pool)
+            .await;
     }
 
     let rows =

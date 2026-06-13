@@ -105,20 +105,29 @@ impl Tool for PubMedSearchTool {
             );
 
             if let Some(d) = min_date {
-                search_url.push_str(&format!("&mindate={}&datetype=pdat", urlencoding::encode(d)));
+                search_url.push_str(&format!(
+                    "&mindate={}&datetype=pdat",
+                    urlencoding::encode(d)
+                ));
             }
             if let Some(d) = max_date {
-                search_url.push_str(&format!("&maxdate={}&datetype=pdat", urlencoding::encode(d)));
+                search_url.push_str(&format!(
+                    "&maxdate={}&datetype=pdat",
+                    urlencoding::encode(d)
+                ));
             }
 
             let client = shared_client();
 
-            let response = client.get(&search_url).send().await.map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("PubMed ESearch request failed: {}", e),
-                }
-            })?;
+            let response =
+                client
+                    .get(&search_url)
+                    .send()
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("PubMed ESearch request failed: {}", e),
+                    })?;
 
             let status = response.status();
             if !status.is_success() {
@@ -130,12 +139,13 @@ impl Tool for PubMedSearchTool {
                 .into());
             }
 
-            let json: Value = response.json().await.map_err(|e| {
-                ToolError::ExecutionFailed {
+            let json: Value = response
+                .json()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("Failed to parse ESearch response: {}", e),
-                }
-            })?;
+                })?;
 
             let id_list = json
                 .get("esearchresult")
@@ -172,19 +182,23 @@ impl Tool for PubMedSearchTool {
                 pmids.join(",")
             );
 
-            let response = client.get(&fetch_url).send().await.map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("PubMed EFetch request failed: {}", e),
-                }
-            })?;
+            let response =
+                client
+                    .get(&fetch_url)
+                    .send()
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("PubMed EFetch request failed: {}", e),
+                    })?;
 
-            let xml_text = response.text().await.map_err(|e| {
-                ToolError::ExecutionFailed {
+            let xml_text = response
+                .text()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("Failed to read EFetch response: {}", e),
-                }
-            })?;
+                })?;
 
             let papers = parse_pubmed_xml(&xml_text)?;
 
@@ -262,9 +276,7 @@ fn parse_pubmed_xml(xml: &str) -> Result<Vec<Value>> {
                     }
                     "PMID" if in_medline_citation => current_tag = "pmid".to_string(),
                     "ArticleTitle" if in_medline_citation => current_tag = "title".to_string(),
-                    "AbstractText" if in_medline_citation => {
-                        current_tag = "abstract".to_string()
-                    }
+                    "AbstractText" if in_medline_citation => current_tag = "abstract".to_string(),
                     "Title" if in_journal => current_tag = "journal".to_string(),
                     "Year" if in_journal => current_tag = "year".to_string(),
                     "LastName" if in_author => current_tag = "last_name".to_string(),

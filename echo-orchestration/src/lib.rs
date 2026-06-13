@@ -10,6 +10,7 @@
 //! | [`human_loop`] | Human-in-the-loop approvals — console, webhook, WebSocket, permission pipeline |
 //! | [`tasks`] | DAG task management — `TaskManager`, scheduling, hooks, events |
 //! | [`scheduler`] | Cron-based task scheduling — `CronTask`, `SchedulerRunner` |
+//! | [`planning`] | Structured task planning — `PlanSpec`, `PlanValidator` |
 //!
 //! ## Feature Flags
 //!
@@ -19,6 +20,7 @@
 //! depending on `echo_orchestration` directly.
 
 pub mod human_loop;
+pub mod planning;
 pub mod scheduler;
 pub mod tasks;
 pub mod workflow;

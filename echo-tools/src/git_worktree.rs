@@ -4,9 +4,9 @@
 //! worktree to avoid file conflicts. Worktrees share the same .git object
 //! store, so they're lightweight.
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use serde::{Deserialize, Serialize};
 
 /// Configuration for a new worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,14 +34,19 @@ pub struct ManagedWorktree {
 ///
 /// Returns the worktree path. The caller is responsible for cleanup via
 /// `remove_worktree()` when done.
-pub fn create_worktree(repo_path: &Path, config: &WorktreeConfig) -> Result<ManagedWorktree, String> {
+pub fn create_worktree(
+    repo_path: &Path,
+    config: &WorktreeConfig,
+) -> Result<ManagedWorktree, String> {
     let git_root = find_git_root(repo_path)?;
 
     // Generate worktree path
     let worktree_dir = if let Some(ref suffix) = config.path_suffix {
         git_root.join(".worktrees").join(suffix)
     } else {
-        let branch_safe = config.branch.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+        let branch_safe = config
+            .branch
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
         git_root.join(".worktrees").join(&branch_safe)
     };
 
@@ -53,8 +58,7 @@ pub fn create_worktree(repo_path: &Path, config: &WorktreeConfig) -> Result<Mana
 
     // Build git worktree add command
     let mut cmd = Command::new("git");
-    cmd.args(["worktree", "add"])
-        .current_dir(&git_root);
+    cmd.args(["worktree", "add"]).current_dir(&git_root);
 
     if let Some(ref base) = config.base {
         cmd.args(["-b", &config.branch, &worktree_dir.to_string_lossy(), base]);
@@ -62,7 +66,8 @@ pub fn create_worktree(repo_path: &Path, config: &WorktreeConfig) -> Result<Mana
         cmd.args(["-b", &config.branch, &worktree_dir.to_string_lossy()]);
     }
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| format!("Failed to run git worktree add: {e}"))?;
 
     if !output.status.success() {
@@ -70,7 +75,12 @@ pub fn create_worktree(repo_path: &Path, config: &WorktreeConfig) -> Result<Mana
         // If branch already exists, try without -b
         if stderr.contains("already exists") {
             let output2 = Command::new("git")
-                .args(["worktree", "add", &worktree_dir.to_string_lossy(), &config.branch])
+                .args([
+                    "worktree",
+                    "add",
+                    &worktree_dir.to_string_lossy(),
+                    &config.branch,
+                ])
                 .current_dir(&git_root)
                 .output()
                 .map_err(|e| format!("Failed to run git worktree add (existing branch): {e}"))?;
@@ -99,7 +109,12 @@ pub fn remove_worktree(repo_path: &Path, worktree: &ManagedWorktree) -> Result<(
 
     // Remove worktree
     let output = Command::new("git")
-        .args(["worktree", "remove", "--force", &worktree.path.to_string_lossy()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree.path.to_string_lossy(),
+        ])
         .current_dir(&git_root)
         .output()
         .map_err(|e| format!("Failed to remove worktree: {e}"))?;
@@ -167,7 +182,11 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<ManagedWorktree>, String> 
 }
 
 /// Merge changes from a worktree branch back to the base branch.
-pub fn merge_worktree(repo_path: &Path, worktree: &ManagedWorktree, target_branch: &str) -> Result<String, String> {
+pub fn merge_worktree(
+    repo_path: &Path,
+    worktree: &ManagedWorktree,
+    target_branch: &str,
+) -> Result<String, String> {
     let git_root = find_git_root(repo_path)?;
 
     // First checkout target branch
@@ -178,8 +197,11 @@ pub fn merge_worktree(repo_path: &Path, worktree: &ManagedWorktree, target_branc
         .map_err(|e| format!("Failed to checkout target branch: {e}"))?;
 
     if !co.status.success() {
-        return Err(format!("Failed to checkout {}: {}", target_branch,
-            String::from_utf8_lossy(&co.stderr)));
+        return Err(format!(
+            "Failed to checkout {}: {}",
+            target_branch,
+            String::from_utf8_lossy(&co.stderr)
+        ));
     }
 
     // Merge the worktree branch
@@ -190,8 +212,10 @@ pub fn merge_worktree(repo_path: &Path, worktree: &ManagedWorktree, target_branc
         .map_err(|e| format!("Failed to merge: {e}"))?;
 
     if !merge.status.success() {
-        return Err(format!("Merge conflict or error: {}",
-            String::from_utf8_lossy(&merge.stderr)));
+        return Err(format!(
+            "Merge conflict or error: {}",
+            String::from_utf8_lossy(&merge.stderr)
+        ));
     }
 
     Ok(format!("Merged {} into {}", worktree.branch, target_branch))
@@ -205,7 +229,9 @@ fn find_git_root(path: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("Not a git repository: {e}"))?;
 
     if output.status.success() {
-        Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+        Ok(PathBuf::from(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        ))
     } else {
         Err("Not a git repository".to_string())
     }

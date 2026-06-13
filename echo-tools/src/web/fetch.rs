@@ -6,7 +6,7 @@
 use crate::security::{ssrf_safe_redirect_policy, validate_url};
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
+use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use reqwest::Client;

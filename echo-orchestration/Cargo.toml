@@ -46,3 +46,4 @@ dashmap = "6"
 fastrand = "2"
 tokio-util = { version = "0.7", features = ["rt"] }
 cron = "0.12"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }

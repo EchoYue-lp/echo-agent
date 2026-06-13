@@ -8,8 +8,8 @@ use echo_core::budget::TokenBudgetConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Default token limit for agent context (8000 tokens).
-pub const DEFAULT_TOKEN_LIMIT: usize = 8000;
+/// Default token limit for agent context (128000 tokens, matches TokenBudget default).
+pub const DEFAULT_TOKEN_LIMIT: usize = 128_000;
 
 /// Agent role enum, determining its responsibility scope in a multi-agent system.
 ///
@@ -45,7 +45,7 @@ pub struct AgentConfig {
     pub(crate) model_name: String,
     pub(crate) system_prompt: String,
     pub(crate) agent_name: String,
-    /// Maximum iteration rounds, prevents infinite loops
+    /// Maximum iteration rounds, prevents infinite loops (default: 100, effectively unlimited for most tasks)
     pub(crate) max_iterations: usize,
     /// Tool allowlist (empty = no restriction, all registered tools can be called)
     pub(crate) allowed_tools: Vec<String>,
@@ -86,12 +86,14 @@ pub struct AgentConfig {
     pub(crate) enable_memory: bool,
     /// Long-term memory Store file path (default `~/.echo-agent/store.json`)
     pub(crate) memory_path: String,
-    /// Session identifier, used by Checkpointer to restore historical context of the same conversation across process restarts.
+    /// Session identifier for process-local/logical run grouping.
+    ///
+    /// Runtime crash recovery uses `conversation_id` + `RuntimeStateStore`; the
+    /// legacy Checkpointer path is deprecated and no longer drives ReactAgent
+    /// restore behavior.
     pub(crate) session_id: Option<String>,
     /// Conversation identifier, used by ConversationStore to persist transcript/history projections.
     pub(crate) conversation_id: Option<String>,
-    /// Checkpointer file path (default `~/.echo-agent/checkpoints.json`)
-    pub(crate) checkpointer_path: String,
     /// Structured output format (None = default text)
     pub(crate) response_format: Option<ResponseFormat>,
     /// Maximum token count for a single tool output (None = no limit).
@@ -134,6 +136,9 @@ pub struct AgentConfig {
     pub(crate) verifier_min_score: f64,
     /// Maximum number of verifier retry attempts before accepting the answer.
     pub(crate) verifier_max_retries: usize,
+
+    /// Planning policy for framework-driven planning mode triggers.
+    pub(crate) planning_policy: echo_orchestration::planning::PlanningPolicy,
 }
 
 impl AgentConfig {
@@ -151,14 +156,14 @@ impl AgentConfig {
             model_name: model_name.to_string(),
             system_prompt: system_prompt.to_string(),
             agent_name: agent_name.to_string(),
-            max_iterations: 10,
+            max_iterations: 100,
             allowed_tools: Vec::new(),
             role: AgentRole::default(),
             enable_tool: false,
             enable_task: false,
             enable_human_in_loop: false,
             enable_subagent: false,
-            token_limit: usize::MAX,
+            token_limit: DEFAULT_TOKEN_LIMIT,
             stream_buffer_size: 256,
             callbacks: Vec::new(),
             llm_max_retries: 3,
@@ -173,7 +178,6 @@ impl AgentConfig {
             memory_path: "~/.echo-agent/store.json".to_string(),
             session_id: None,
             conversation_id: None,
-            checkpointer_path: "~/.echo-agent/checkpoints.json".to_string(),
             response_format: None,
             max_tool_output_tokens: None,
             compress_threshold_ratio: 0.2,
@@ -189,6 +193,7 @@ impl AgentConfig {
             verifier_enabled: false,
             verifier_min_score: 7.0,
             verifier_max_retries: 2,
+            planning_policy: echo_orchestration::planning::PlanningPolicy::default(),
         }
     }
 
@@ -359,10 +364,11 @@ impl AgentConfig {
     /// Set maximum iteration rounds
     ///
     /// # Parameters
-    /// * `max_iterations` - Maximum iteration count, prevents infinite loops
+    /// * `max_iterations` - Maximum iteration count, prevents infinite loops (default: 100)
     ///
     /// # Description
-    /// The Agent performs at most the specified number of iterations during execution; exceeding this limit terminates execution
+    /// The Agent performs at most the specified number of iterations during execution; exceeding this limit terminates execution.
+    /// Default is 100, which is effectively unlimited for most tasks. Set to a lower value for stricter control.
     pub fn max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
         self
@@ -457,7 +463,8 @@ impl AgentConfig {
     /// Reference to session identifier, or `None` if not set
     ///
     /// # Description
-    /// The session identifier is used by Checkpointer to restore the same conversation's historical context across process restarts
+    /// The session identifier is a lightweight run/thread label. Durable runtime
+    /// recovery uses `conversation_id` with `RuntimeStateStore`.
     pub fn get_session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
@@ -468,8 +475,9 @@ impl AgentConfig {
     /// Reference to conversation identifier, or `None` if not set
     ///
     /// # Description
-    /// The conversation identifier is used for `ConversationStore` transcript/history projections;
-    /// it is a separate concept from `session_id`, which is used for restoring thread state.
+    /// The conversation identifier is used for `ConversationStore` transcript/history projections
+    /// and `RuntimeStateStore` crash-recovery checkpoints. It is distinct from
+    /// `session_id`, which is only a run/thread label.
     pub fn get_conversation_id(&self) -> Option<&str> {
         self.conversation_id.as_deref()
     }
@@ -536,14 +544,6 @@ impl AgentConfig {
     /// Long-term memory store file path
     pub fn get_memory_path(&self) -> &str {
         &self.memory_path
-    }
-
-    /// Get checkpointer file path
-    ///
-    /// # Returns
-    /// Checkpointer file path
-    pub fn get_checkpointer_path(&self) -> &str {
-        &self.checkpointer_path
     }
 
     /// Get tool execution configuration
@@ -638,7 +638,8 @@ impl AgentConfig {
     /// * `id` - Session identifier
     ///
     /// # Description
-    /// The session identifier is used by Checkpointer to restore the same conversation's historical context across process restarts
+    /// The session identifier is a lightweight run/thread label. Durable runtime
+    /// recovery uses `conversation_id` with `RuntimeStateStore`.
     pub fn session_id(mut self, id: &str) -> Self {
         self.session_id = Some(id.to_string());
         self
@@ -674,6 +675,12 @@ impl AgentConfig {
         self
     }
 
+    /// Set the planning policy for framework-driven planning mode triggers.
+    pub fn planning_policy(mut self, policy: echo_orchestration::planning::PlanningPolicy) -> Self {
+        self.planning_policy = policy;
+        self
+    }
+
     /// Set conversation identifier
     ///
     /// # Parameters
@@ -684,15 +691,6 @@ impl AgentConfig {
     /// Unlike `session_id`, it does not handle thread state restoration.
     pub fn conversation_id(mut self, id: &str) -> Self {
         self.conversation_id = Some(id.to_string());
-        self
-    }
-
-    /// Set checkpointer file path
-    ///
-    /// # Parameters
-    /// * `path` - Checkpointer file path
-    pub fn checkpointer_path(mut self, path: &str) -> Self {
-        self.checkpointer_path = path.to_string();
         self
     }
 
@@ -841,8 +839,8 @@ mod tests {
         assert_eq!(config.get_model_name(), "qwen3-max");
         assert_eq!(config.get_agent_name(), "assistant");
         assert_eq!(config.get_system_prompt(), "You are a helpful assistant");
-        assert_eq!(config.get_max_iterations(), 10);
-        assert_eq!(config.get_token_limit(), usize::MAX);
+        assert_eq!(config.get_max_iterations(), 100);
+        assert_eq!(config.get_token_limit(), DEFAULT_TOKEN_LIMIT);
         assert!(!config.is_tool_enabled());
         assert!(!config.is_task_enabled());
         assert!(!config.is_human_in_loop_enabled());
@@ -967,17 +965,6 @@ mod tests {
             AgentConfig::new("model", "agent", "prompt").memory_path("/custom/path/store.json");
 
         assert_eq!(config.get_memory_path(), "/custom/path/store.json");
-    }
-
-    #[test]
-    fn test_agent_config_checkpointer_path() {
-        let config = AgentConfig::new("model", "agent", "prompt")
-            .checkpointer_path("/custom/path/checkpoints.json");
-
-        assert_eq!(
-            config.get_checkpointer_path(),
-            "/custom/path/checkpoints.json"
-        );
     }
 
     #[test]

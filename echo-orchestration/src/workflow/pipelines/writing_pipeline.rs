@@ -32,9 +32,9 @@
 //! # }
 //! ```
 
+use crate::workflow::SharedAgent;
 use crate::workflow::graph::{Graph, GraphBuilder, GraphResult};
 use crate::workflow::state::SharedState;
-use crate::workflow::SharedAgent;
 use echo_core::error::Result;
 
 // ── Configuration ──────────────────────────────────────────────────────────────

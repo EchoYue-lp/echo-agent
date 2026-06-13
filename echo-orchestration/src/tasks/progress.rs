@@ -90,7 +90,10 @@ impl PhasePlan {
     /// Create a new phase plan from an ordered list of phases.
     pub fn new(phases: Vec<Phase>) -> Self {
         let total_weight = phases.iter().map(|p| p.weight).sum();
-        Self { phases, total_weight }
+        Self {
+            phases,
+            total_weight,
+        }
     }
 
     /// Calculate overall progress percentage (0.0–100.0) given the current

@@ -86,6 +86,56 @@ impl Default for ContextInheritance {
 
 // ── Subagent Context ──────────────────────────────────────────────────────────
 
+/// Memory scope for subagent context
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemoryScope {
+    /// No memory inheritance
+    None,
+    /// Only inherit relevant memories (based on task similarity)
+    Relevant,
+    /// Full memory inheritance
+    Full,
+}
+
+impl Default for MemoryScope {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Output schema specification for subagent
+#[derive(Debug, Clone)]
+pub struct OutputSchema {
+    /// Whether to include summary in output
+    pub summary: bool,
+    /// Whether to include findings in output
+    pub findings: bool,
+    /// Whether to include evidence in output
+    pub evidence: bool,
+    /// Whether to include files read in output
+    pub files_read: bool,
+    /// Whether to include recommendations in output
+    pub recommendations: bool,
+    /// Whether to include blockers in output
+    pub blockers: bool,
+    /// Whether to include confidence score in output
+    pub confidence: bool,
+}
+
+impl Default for OutputSchema {
+    fn default() -> Self {
+        Self {
+            summary: true,
+            findings: true,
+            evidence: false,
+            files_read: false,
+            recommendations: false,
+            blockers: false,
+            confidence: false,
+        }
+    }
+}
+
 /// Snapshot of a parent agent's context for inheritance.
 ///
 /// Extracted from the parent before spawning a subagent.
@@ -100,6 +150,24 @@ pub struct SubagentContext {
     pub messages: Vec<Message>,
     /// Parent's memory store (if shared).
     pub store: Option<Arc<dyn Store>>,
+
+    // ── Scoped Context Fields (Step 6) ──────────────────────────────────────
+    /// Parent's overall goal (for context)
+    pub parent_goal: Option<String>,
+    /// Task assigned to this subagent
+    pub assigned_task: Option<String>,
+    /// Relevant files for this task
+    pub relevant_files: Vec<String>,
+    /// Relevant artifacts from parent execution
+    pub relevant_artifacts: Vec<String>,
+    /// Constraints for this subagent (e.g., time limits, resource limits)
+    pub constraints: Vec<String>,
+    /// Allowed tools for this subagent (overrides inheritance)
+    pub allowed_tools: Option<Vec<String>>,
+    /// Memory scope for this subagent
+    pub memory_scope: MemoryScope,
+    /// Output schema specification
+    pub output_schema: OutputSchema,
 }
 
 impl std::fmt::Debug for SubagentContext {
@@ -109,6 +177,14 @@ impl std::fmt::Debug for SubagentContext {
             .field("tool_definitions", &self.tool_definitions)
             .field("messages", &self.messages)
             .field("store", &self.store.as_ref().map(|_| "Store { .. }"))
+            .field("parent_goal", &self.parent_goal)
+            .field("assigned_task", &self.assigned_task)
+            .field("relevant_files", &self.relevant_files)
+            .field("relevant_artifacts", &self.relevant_artifacts)
+            .field("constraints", &self.constraints)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("memory_scope", &self.memory_scope)
+            .field("output_schema", &self.output_schema)
             .finish()
     }
 }
@@ -121,6 +197,15 @@ impl SubagentContext {
             tool_definitions: Vec::new(),
             messages: Vec::new(),
             store: None,
+            // Scoped context fields
+            parent_goal: None,
+            assigned_task: None,
+            relevant_files: Vec::new(),
+            relevant_artifacts: Vec::new(),
+            constraints: Vec::new(),
+            allowed_tools: None,
+            memory_scope: MemoryScope::default(),
+            output_schema: OutputSchema::default(),
         }
     }
 
@@ -171,6 +256,15 @@ impl SubagentContext {
             } else {
                 None
             },
+            // Scoped context fields - default to empty/None
+            parent_goal: None,
+            assigned_task: None,
+            relevant_files: Vec::new(),
+            relevant_artifacts: Vec::new(),
+            constraints: Vec::new(),
+            allowed_tools: None,
+            memory_scope: MemoryScope::default(),
+            output_schema: OutputSchema::default(),
         }
     }
 
@@ -180,6 +274,12 @@ impl SubagentContext {
             || !self.tool_definitions.is_empty()
             || !self.messages.is_empty()
             || self.store.is_some()
+            || self.parent_goal.is_some()
+            || self.assigned_task.is_some()
+            || !self.relevant_files.is_empty()
+            || !self.relevant_artifacts.is_empty()
+            || !self.constraints.is_empty()
+            || self.allowed_tools.is_some()
     }
 }
 

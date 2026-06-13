@@ -9,6 +9,16 @@
 //! 2. **User questions** — original user inputs are useful context for recall
 //! 3. **Keyword signals** — messages containing "decided", "important", "remember", "conclusion"
 //! 4. **Skip**: tool results, system messages, very short messages (<50 chars)
+//!
+//! # Deduplication
+//!
+//! Facts are deduplicated by content hash: instead of a sequential counter,
+//! the key is derived from a hash of the fact text. This means the same fact
+//! extracted multiple times will overwrite (upsert) rather than create duplicates.
+//!
+//! # Expiry
+//!
+//! Promoted facts automatically expire after a configurable TTL (default 30 days).
 
 use echo_core::llm::types::{Message, Role};
 use echo_core::memory::Store;
@@ -20,41 +30,102 @@ use std::sync::Arc;
 /// Namespace for L3 promoted memory items.
 const L3_NAMESPACE: &[&str] = &["l3_promoted"];
 
+/// Default TTL for promoted facts: 30 days in seconds.
+const DEFAULT_TTL_SECS: u64 = 30 * 24 * 3600;
+
 /// Store-backed memory promoter.
 ///
 /// Extracts key facts from evicted messages and writes them to a [`Store`]
 /// under the `l3_promoted` namespace.
 pub struct StoreMemoryPromoter {
     store: Arc<dyn Store>,
-    /// Counter for unique key generation.
-    counter: std::sync::atomic::AtomicU64,
+    /// Whether content-based dedup is enabled.
+    dedup_enabled: bool,
+    /// TTL in seconds for promoted facts (None = never expire).
+    ttl_secs: Option<u64>,
+    /// Write counter for triggering periodic auto-prune.
+    write_count: std::sync::atomic::AtomicU64,
+    /// Auto-prune every N writes (default 100).
+    auto_prune_interval: u64,
 }
 
 impl StoreMemoryPromoter {
+    /// Create a new promoter with dedup enabled and 30-day TTL.
     pub fn new(store: Arc<dyn Store>) -> Self {
         Self {
             store,
-            counter: std::sync::atomic::AtomicU64::new(0),
+            dedup_enabled: true,
+            ttl_secs: Some(DEFAULT_TTL_SECS),
+            write_count: std::sync::atomic::AtomicU64::new(0),
+            auto_prune_interval: 100,
         }
+    }
+
+    /// Create a promoter without dedup (sequential keys, like old behavior).
+    pub fn without_dedup(store: Arc<dyn Store>) -> Self {
+        Self {
+            store,
+            dedup_enabled: false,
+            ttl_secs: Some(DEFAULT_TTL_SECS),
+            write_count: std::sync::atomic::AtomicU64::new(0),
+            auto_prune_interval: 100,
+        }
+    }
+
+    /// Set a custom TTL for promoted facts.
+    pub fn with_ttl_days(mut self, days: u64) -> Self {
+        self.ttl_secs = Some(days * 24 * 3600);
+        self
+    }
+
+    /// Disable TTL (facts never expire).
+    pub fn without_ttl(mut self) -> Self {
+        self.ttl_secs = None;
+        self
+    }
+
+    /// Compute a deterministic content-based key for deduplication.
+    ///
+    /// Uses FNV-1a hash (deterministic across process restarts) to ensure
+    /// the same fact always maps to the same key, enabling cross-session dedup.
+    fn content_key(fact: &str) -> String {
+        let hash = echo_core::utils::hash::fnv1a_64(fact.as_bytes());
+        format!("l3_{:016x}", hash)
     }
 }
 
 impl MemoryPromoter for StoreMemoryPromoter {
     fn promote(&self, evicted: &[Message]) -> BoxFuture<'_, ()> {
         let facts = extract_key_facts(evicted);
+        let dedup_enabled = self.dedup_enabled;
+        let ttl_secs = self.ttl_secs;
+
+        let num_facts = facts.len() as u64;
+        let write_count = self
+            .write_count
+            .fetch_add(num_facts, std::sync::atomic::Ordering::Relaxed);
+        let auto_prune_interval = self.auto_prune_interval;
         let store = self.store.clone();
-        let seq = self
-            .counter
-            .fetch_add(facts.len() as u64, std::sync::atomic::Ordering::Relaxed);
 
         Box::pin(async move {
-            for (i, fact) in facts.into_iter().enumerate() {
-                let key = format!("l3_{:06}_{}", seq + i as u64, timestamp_short());
-                let value = json!({
+            let expires_at = ttl_secs.map(|ttl| chrono::Utc::now().timestamp() as u64 + ttl);
+
+            for (fact, fact_type) in facts.into_iter() {
+                let key = if dedup_enabled {
+                    Self::content_key(&fact)
+                } else {
+                    // Fallback: timestamp-based key
+                    format!("l3_{}", chrono::Utc::now().timestamp_millis())
+                };
+                let mut value = json!({
                     "content": fact,
+                    "type": fact_type,
                     "source": "l3_memory_promotion",
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 });
+                if let Some(exp) = expires_at {
+                    value["expires_at"] = json!(exp);
+                }
                 if let Err(e) = store.put(L3_NAMESPACE, &key, value).await {
                     tracing::debug!(
                         error = %e,
@@ -62,12 +133,30 @@ impl MemoryPromoter for StoreMemoryPromoter {
                     );
                 }
             }
+
+            // ── Periodic auto-prune ──
+            // Every `auto_prune_interval` cumulative writes, clean up expired facts.
+            if write_count > 0 && write_count % auto_prune_interval < num_facts {
+                match store.prune_expired(L3_NAMESPACE).await {
+                    Ok(removed) if removed > 0 => {
+                        tracing::debug!(
+                            removed = removed,
+                            total_writes = write_count + num_facts,
+                            "Auto-pruned expired L3 promoted facts"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Auto-prune of L3 facts failed");
+                    }
+                    _ => {}
+                }
+            }
         })
     }
 }
 
 /// Extract key facts from evicted messages using heuristics.
-fn extract_key_facts(messages: &[Message]) -> Vec<String> {
+fn extract_key_facts(messages: &[Message]) -> Vec<(String, &'static str)> {
     let mut facts = Vec::new();
 
     for msg in messages {
@@ -82,18 +171,24 @@ fn extract_key_facts(messages: &[Message]) -> Vec<String> {
                 continue;
             }
             Role::Tool => {
-                // Skip tool results — already summarized by horizon compressor
+                // Extract a tool digest: key findings from tool outputs
+                if let Some(digest) = tool_digest(&text) {
+                    facts.push((truncate_fact(&digest), "tool_output"));
+                }
                 continue;
             }
             Role::Assistant => {
                 // Extract conclusion-like content from assistant messages
                 if contains_signal_word(&text) {
-                    facts.push(truncate_fact(&text));
+                    facts.push((truncate_fact(&text), classify_fact_type(&text, &msg.role)));
                 } else {
                     // Take the last paragraph as a potential conclusion
                     if let Some(last_para) = last_paragraph(&text) {
                         if last_para.len() >= 50 {
-                            facts.push(truncate_fact(&last_para));
+                            facts.push((
+                                truncate_fact(&last_para),
+                                classify_fact_type(&last_para, &msg.role),
+                            ));
                         }
                     }
                 }
@@ -101,7 +196,7 @@ fn extract_key_facts(messages: &[Message]) -> Vec<String> {
             Role::User => {
                 // User questions are useful context for recall
                 if text.len() >= 50 && !text.starts_with('[') {
-                    facts.push(truncate_fact(&text));
+                    facts.push((truncate_fact(&text), classify_fact_type(&text, &msg.role)));
                 }
             }
             _ => {}
@@ -109,6 +204,94 @@ fn extract_key_facts(messages: &[Message]) -> Vec<String> {
     }
 
     facts
+}
+
+/// Classify a fact by content patterns.
+fn classify_fact_type(text: &str, role: &Role) -> &'static str {
+    let lower = text.to_lowercase();
+    if lower.contains("todo") || lower.contains("fixme") || lower.contains("待处理") {
+        "pending_task"
+    } else if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("panic")
+        || lower.contains("失败")
+        || lower.contains("错误")
+    {
+        "error"
+    } else if lower.contains("decided") || lower.contains("decision") || lower.contains("决定") {
+        "decision"
+    } else if lower.contains(".rs")
+        || lower.contains(".py")
+        || lower.contains(".js")
+        || lower.contains(".toml")
+        || lower.contains("src/")
+        || lower.contains("/file")
+    {
+        "file_reference"
+    } else if lower.contains("prefer")
+        || lower.contains("don't")
+        || lower.contains("must")
+        || lower.contains("should")
+        || lower.contains("不要")
+        || lower.contains("必须")
+    {
+        "user_preference"
+    } else {
+        if *role == Role::User {
+            "user_query"
+        } else if *role == Role::Assistant {
+            "assistant_conclusion"
+        } else {
+            "general"
+        }
+    }
+}
+
+/// Extract a concise digest from tool output — key findings, errors, file paths.
+/// Returns `None` if nothing meaningful can be extracted.
+fn tool_digest(text: &str) -> Option<String> {
+    let mut highlights: Vec<&str> = Vec::new();
+
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("error")
+            || lower.contains("fail")
+            || lower.contains("panic")
+            || lower.contains("失败")
+            || lower.contains("错误")
+            || lower.contains("异常")
+        {
+            highlights.push(line.trim());
+        } else if (lower.contains(".rs")
+            || lower.contains(".py")
+            || lower.contains(".js")
+            || lower.contains(".toml")
+            || lower.contains("src/"))
+            && line.len() < 200
+        {
+            highlights.push(line.trim());
+        } else if lower.contains("test result")
+            || lower.contains("pass")
+            || lower.contains("fail")
+            || lower.contains("测试")
+            || lower.contains("通过")
+        {
+            highlights.push(line.trim());
+        }
+    }
+
+    if highlights.is_empty() {
+        None
+    } else {
+        Some(
+            highlights
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | "),
+        )
+    }
 }
 
 /// Check if text contains signal words indicating important facts.
@@ -138,21 +321,25 @@ fn last_paragraph(text: &str) -> Option<String> {
     text.rsplit("\n\n").next().map(|s| s.trim().to_string())
 }
 
-/// Truncate a fact to a reasonable length (~200 chars).
+/// Truncate a fact to a reasonable length (~300 chars), UTF-8 safe.
 fn truncate_fact(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.len() <= 300 {
         trimmed.to_string()
     } else {
-        format!("{}...", &trimmed[..300])
+        // Find the largest char boundary <= 300 to avoid panic on multi-byte UTF-8.
+        let cut = trimmed
+            .char_indices()
+            .take_while(|(i, _)| *i < 300)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}...", &trimmed[..cut])
     }
 }
 
 /// Short timestamp for unique key suffix.
-fn timestamp_short() -> String {
-    let now = chrono::Utc::now();
-    now.format("%Y%m%d%H%M%S").to_string()
-}
+/// FNV-1a hash — deterministic across process restarts.
 
 #[cfg(test)]
 mod tests {
@@ -188,7 +375,7 @@ mod tests {
         )];
         let facts = extract_key_facts(&messages);
         assert_eq!(facts.len(), 1);
-        assert!(facts[0].contains("PostgreSQL"));
+        assert!(facts[0].0.contains("PostgreSQL"));
     }
 
     #[test]
@@ -200,7 +387,7 @@ mod tests {
         )];
         let facts = extract_key_facts(&messages);
         assert_eq!(facts.len(), 1);
-        assert!(facts[0].contains("authentication"));
+        assert!(facts[0].0.contains("authentication"));
     }
 
     #[test]
@@ -274,7 +461,11 @@ mod tests {
         );
 
         // Verify extracted facts contain key information
-        let all_facts = facts.join(" ");
+        let all_facts: String = facts
+            .iter()
+            .map(|(s, _)| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
             all_facts.contains("PostgreSQL"),
             "Should preserve the database decision fact"

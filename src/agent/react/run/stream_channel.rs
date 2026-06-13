@@ -346,6 +346,12 @@ impl AgentSnapshot {
 
             if !tool_call_map.is_empty() {
                 let (msg_tc, steps) = build_tool_calls_from_map(&tool_call_map);
+                yield_event!(
+                    tx,
+                    AgentEvent::ToolBatchStart {
+                        tool_count: steps.len()
+                    }
+                );
                 for (_, name, args) in &steps {
                     yield_event!(
                         tx,
@@ -563,6 +569,7 @@ impl AgentSnapshot {
                         }
                     }
                 }
+                yield_event!(tx, AgentEvent::ToolBatchEnd);
                 self.auto_snapshot(&context, iteration).await;
 
                 // Periodic runtime checkpoint based on configured interval
@@ -607,6 +614,10 @@ impl AgentSnapshot {
                 }
                 // Rich runtime checkpoint (messages + plan + skills + blocked reason)
                 self.save_runtime_checkpoint(&context, None).await;
+                // Persist user-visible transcript projection — single source of
+                // truth for GUI/TUI history. Product layers should rely on this
+                // instead of re-implementing save_messages on every chat turn.
+                self.save_transcript_projection(&context).await;
                 // Update TaskNode to Success
                 if let Some(ref node_id) = task_node_id {
                     self.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
@@ -676,6 +687,9 @@ impl AgentSnapshot {
         // Save runtime checkpoint with blocked reason before failing
         self.save_runtime_checkpoint(&context, Some("Max iterations exceeded".to_string()))
             .await;
+        // Even on failure we save the transcript so the user sees what was
+        // attempted in the GUI/TUI history pane.
+        self.save_transcript_projection(&context).await;
         // Update TaskNode to Failed
         if let Some(ref node_id) = task_node_id {
             self.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
@@ -734,23 +748,6 @@ impl AgentSnapshot {
             },
         )
         .await
-    }
-
-    async fn truncate_output(&self, output: String) -> String {
-        let Some(mt) = self.config.max_tool_output_tokens else {
-            return output;
-        };
-        if output.chars().count() / 3 <= mt {
-            return output;
-        }
-        let ratio = mt as f64 / (output.chars().count() as f64 / 3.0);
-        format!(
-            "{}\n[Output truncated]",
-            output
-                .chars()
-                .take((output.len() as f64 * ratio * 0.95) as usize)
-                .collect::<String>()
-        )
     }
 
     async fn fire_hook(&self, event: crate::skills::hooks::HookEvent, matcher: Option<&str>) {
@@ -966,6 +963,8 @@ impl AgentSnapshot {
         }
         // Rich runtime checkpoint
         self.save_runtime_checkpoint(&context, None).await;
+        // Persist transcript projection so product layers see the final state.
+        self.save_transcript_projection(&context).await;
         // Update TaskNode to Success
         if let Some(ref node_id) = task_node_id {
             self.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
@@ -999,8 +998,8 @@ impl AgentSnapshot {
     /// Execute a single tool call with the full policy pipeline:
     /// PreToolUse hooks → read-before-edit guard → execute → PostToolUse hooks → audit.
     ///
-    /// Mirrors `ReactAgent::execute_tool_feedback_raw` but uses the
-    /// snapshot's owned state so it can run inside a `'static` future.
+    /// Uses the unified ToolExecutionPipeline (15 stages) for consistent behavior
+    /// between streaming and non-streaming paths.
     fn execute_tool_with_policy<'a>(
         &'a self,
         tool_name: &'a str,
@@ -1008,200 +1007,55 @@ impl AgentSnapshot {
         input: &'a Value,
     ) -> futures::future::BoxFuture<'a, std::result::Result<String, crate::error::ReactError>> {
         Box::pin(async move {
-            // ── Intervention callbacks (highest-priority decision point, streaming path) ──
-            for intervention in &self.tools.intervention_callbacks {
-                let result = intervention
-                    .on_tool_call(&self.config.agent_name, tool_name, input)
-                    .await;
-                if result.cancel {
-                    return Err(crate::error::ReactError::Other(format!(
-                        "Agent execution cancelled by intervention: tool {}",
-                        tool_name
-                    )));
-                }
-                if result.block {
-                    let reason = result
-                        .block_reason
-                        .unwrap_or_else(|| "blocked by intervention callback".into());
-                    return Ok(format!(
-                        "Tool {} blocked by intervention: {}",
-                        tool_name, reason
-                    ));
-                }
-                if let Some(redirect) = result.redirect_to {
-                    let redirect_args = result.modified_args.unwrap_or_else(|| input.clone());
-                    let redirect_params: ToolParameters = if let Value::Object(map) = &redirect_args
-                    {
-                        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                    } else {
-                        params.clone()
-                    };
-                    return self
-                        .execute_tool_with_policy(&redirect, &redirect_params, &redirect_args)
-                        .await;
-                }
-                if let Some(modified) = result.modified_args {
-                    let modified_params: ToolParameters = if let Value::Object(map) = &modified {
-                        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                    } else {
-                        params.clone()
-                    };
-                    return self
-                        .execute_tool_with_policy(tool_name, &modified_params, &modified)
-                        .await;
-                }
-                // injected_context from interventions is handled at the think level
-                // (not directly applicable in the tool execution policy path)
-            }
-
-            // ── PreToolUse hooks ──
-            let hook_reg = self.tools.hook_registry.read().await.clone();
-            let pre_result = hook_reg
-                .run_pre_tool_use(
-                    tool_name,
-                    input,
-                    self.config.session_id.as_deref().unwrap_or(""),
-                )
-                .await;
-            if pre_result.block {
-                let reason = pre_result
-                    .block_reason
-                    .unwrap_or_else(|| "blocked by skill hook".into());
-                return Ok(format!("Tool {} blocked by hook: {}", tool_name, reason));
-            }
-
-            let mut effective_params = params.clone();
-            let mut effective_input = input.clone();
-            if let Some(updated) = pre_result.updated_input
-                && let Value::Object(map) = &updated
-            {
-                effective_params = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                effective_input = updated;
-            }
-
-            self.validate_read_before_edit(tool_name, &effective_params)?;
-
-            // ── Skill permission check ──
-            // If a skill is activated and declares allowed_tools, verify
-            // the current tool is permitted by the whitelist.
-            if let Some(ref allowed) = self.tools.skill_allowed_tools {
-                let permitted = allowed.iter().any(|matcher| {
-                    echo_execution::skills::external::types::tool_matcher(matcher, tool_name)
+            // Use the unified pipeline for consistent behavior
+            let pipeline = self
+                .tool_execution_pipeline
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| {
+                    std::sync::Arc::new(
+                        crate::agent::react::run::pipeline::ToolExecutionPipeline::default_pipeline(
+                        ),
+                    )
                 });
-                if !permitted {
-                    let msg = format!(
-                        "Tool '{}' is not permitted by the active skill's allowed-tools whitelist: [{}]",
-                        tool_name,
-                        allowed.iter().cloned().collect::<Vec<_>>().join(", ")
-                    );
-                    tracing::warn!(tool = tool_name, "{}", msg);
-                    return Ok(msg);
-                }
-            }
 
-            // ── Business audit: tool start ──
-            if let Some(al) = &self.guard.audit_logger {
-                let ev = crate::audit::AuditEvent::now(
-                    self.config.session_id.clone(),
-                    self.config.agent_name.clone(),
-                    crate::audit::AuditEventType::ToolCall {
-                        tool: tool_name.to_string(),
-                        input: effective_input.clone(),
-                        output: String::new(),
-                        success: true,
-                        duration_ms: 0,
-                    },
-                );
-                let _ = al.log(ev).await;
-            }
-
-            // ── Execute ──
-            let call_id = format!("call_{}", uuid::Uuid::new_v4());
-            // Record ToolCall trace event (redaction handled by new_tool_call)
-            self.record_event(crate::trace::RunEvent::new_tool_call(
-                call_id.clone(),
-                tool_name.to_string(),
-                Some(effective_input.clone()),
-                None,
-                0,
-            ))
-            .await;
-
-            let result = match self
-                .tools
-                .tool_manager
-                .execute_tool(tool_name, effective_params.clone())
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    // Record ToolError trace event
-                    self.record_event(crate::trace::RunEvent::ToolError {
-                        call_id: call_id.clone(),
-                        name: tool_name.to_string(),
-                        message: err_msg.clone(),
-                    })
-                    .await;
-                    // Audit failure
-                    if let Some(al) = &self.guard.audit_logger {
-                        let ev = crate::audit::AuditEvent::now(
-                            self.config.session_id.clone(),
-                            self.config.agent_name.clone(),
-                            crate::audit::AuditEventType::ToolCall {
-                                tool: tool_name.to_string(),
-                                input: effective_input.clone(),
-                                output: err_msg.clone(),
-                                success: false,
-                                duration_ms: 0,
-                            },
-                        );
-                        let _ = al.log(ev).await;
-                    }
-                    // Error softening
-                    if self.config.tool_error_feedback && tool_name != TOOL_FINAL_ANSWER {
-                        return Ok(format!(
-                            "[Tool error] {e}\nTry adjusting parameters or using another tool."
-                        ));
-                    }
-                    return Err(e);
-                }
+            let mut ctx = crate::agent::react::run::pipeline::ToolExecutionContext {
+                call_id: String::new(),
+                tool_name: tool_name.to_string(),
+                params: params.clone(),
+                input: input.clone(),
+                hook_messages: crate::agent::react::run::context::HookMessageBatches::default(),
+                result: None,
+                output: None,
+                blocked: false,
+                block_reason: None,
+                duration_ms: 0,
+                plan_mode: self.config.plan_mode,
             };
 
-            // Record ToolResult trace event
-            self.record_event(crate::trace::RunEvent::ToolResult {
-                call_id: call_id.clone(),
-                name: tool_name.to_string(),
-                success: result.success,
-                output_preview: Some(result.output.chars().take(200).collect()),
-                output_truncated: false,
-                duration_ms: 0,
-            })
-            .await;
+            match pipeline.run(&mut ctx, self).await {
+                Ok(()) => {
+                    // Check if execution was blocked
+                    if ctx.blocked {
+                        let reason = ctx
+                            .block_reason
+                            .unwrap_or_else(|| format!("Tool {} blocked", tool_name));
+                        return Ok(reason);
+                    }
 
-            if result.success {
-                self.record_file_read_if_needed(tool_name, &effective_params);
+                    // Return the final output (after guard + truncation)
+                    if let Some(output) = ctx.output {
+                        Ok(output)
+                    } else if let Some(result) = ctx.result {
+                        Ok(result.output)
+                    } else {
+                        Err(crate::error::ReactError::Other(
+                            "Pipeline completed without result".into(),
+                        ))
+                    }
+                }
+                Err(e) => Err(e),
             }
-
-            // ── PostToolUse hooks ──
-            let post_result = hook_reg
-                .run_post_tool_use(
-                    tool_name,
-                    &effective_input,
-                    &result.output,
-                    self.config.session_id.as_deref().unwrap_or(""),
-                )
-                .await;
-            if post_result.block {
-                let reason = post_result
-                    .block_reason
-                    .unwrap_or_else(|| format!("Tool {} output blocked by hook", tool_name));
-                return Ok(reason);
-            }
-
-            // ── Truncate ──
-            let truncated = self.truncate_output(result.output).await;
-            Ok(truncated)
         })
     }
 

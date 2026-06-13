@@ -6,7 +6,7 @@
 //!
 //! | Module | Description |
 //! |--------|-------------|
-//! | [`memory`] | Dual-layer memory: `Store` (long-term KV) + `Checkpointer` (session persistence) |
+//! | [`memory`] | Long-term KV memory (`Store`) + user-visible transcript projection (`ConversationStore`) |
 //! | [`compression`] | Context compression: SlidingWindow, LLM Summary, and Hybrid strategies |
 //! | [`audit`] | Structured audit logging with pluggable backends (in-memory, file) |
 //! | [`skill_telemetry`] | Skill execution telemetry: activation tracking, success/failure metrics |

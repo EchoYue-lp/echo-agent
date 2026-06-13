@@ -253,9 +253,7 @@ impl HookAction {
                     ));
                 }
             }
-            HookAction::Agent {
-                name, timeout, ..
-            } => {
+            HookAction::Agent { name, timeout, .. } => {
                 if name.is_empty() {
                     return Err("Agent hook has empty agent name".into());
                 }

@@ -82,7 +82,11 @@ impl SkillTelemetry {
             // Track failure patterns
             if let Some(ref msg) = record.error_message {
                 let snippet = truncate_to_200(msg);
-                if let Some(pattern) = self.common_failures.iter_mut().find(|f| f.error_snippet == snippet) {
+                if let Some(pattern) = self
+                    .common_failures
+                    .iter_mut()
+                    .find(|f| f.error_snippet == snippet)
+                {
                     pattern.count += 1;
                     pattern.last_occurred = record.activated_at;
                 } else {
@@ -147,7 +151,10 @@ impl SkillTelemetryStore {
     }
 
     /// Record a skill execution, updating aggregated telemetry.
-    pub async fn record_execution(&self, record: &SkillExecutionRecord) -> echo_core::error::Result<()> {
+    pub async fn record_execution(
+        &self,
+        record: &SkillExecutionRecord,
+    ) -> echo_core::error::Result<()> {
         let mut telemetry = self
             .get_telemetry(&record.skill_name)
             .await?
@@ -170,19 +177,23 @@ impl SkillTelemetryStore {
     }
 
     /// Get aggregated telemetry for a specific skill.
-    pub async fn get_telemetry(&self, skill_name: &str) -> echo_core::error::Result<Option<SkillTelemetry>> {
+    pub async fn get_telemetry(
+        &self,
+        skill_name: &str,
+    ) -> echo_core::error::Result<Option<SkillTelemetry>> {
         match self
             .store
             .get(&["agent", "skill_telemetry"], skill_name)
             .await
         {
             Ok(Some(item)) => {
-                let telemetry: SkillTelemetry = serde_json::from_value(item.value).map_err(|e| {
-                    echo_core::error::ReactError::Other(format!(
-                        "Failed to deserialize telemetry for '{}': {}",
-                        skill_name, e
-                    ))
-                })?;
+                let telemetry: SkillTelemetry =
+                    serde_json::from_value(item.value).map_err(|e| {
+                        echo_core::error::ReactError::Other(format!(
+                            "Failed to deserialize telemetry for '{}': {}",
+                            skill_name, e
+                        ))
+                    })?;
                 Ok(Some(telemetry))
             }
             Ok(None) => Ok(None),

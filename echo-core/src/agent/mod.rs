@@ -7,8 +7,8 @@ pub mod intervention;
 pub mod prompt_template;
 mod types;
 
-pub use intervention::{InterventionCallback, InterventionResult, CallbackBridge};
 pub use factory::{AgentFactory, AgentFactoryConfig, DefaultAgentFactory};
+pub use intervention::{CallbackBridge, InterventionCallback, InterventionResult};
 pub use prompt_template::PromptTemplateManager;
 
 pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, ThresholdCritic};
@@ -73,6 +73,14 @@ pub enum AgentEvent {
         /// Stream event payload
         event: crate::tools::ToolStreamEvent,
     },
+    /// Emitted before a batch of tools starts executing.
+    /// All tools between ToolBatchStart and ToolBatchEnd are concurrent.
+    ToolBatchStart {
+        /// Number of tools in this batch
+        tool_count: usize,
+    },
+    /// Emitted after all tools in the batch have completed.
+    ToolBatchEnd,
 
     // ── Guard & Safety ──────────────────────────────────────────────────────
     /// A guard was triggered
@@ -225,6 +233,8 @@ impl AgentEvent {
             | AgentEvent::ToolResult { .. }
             | AgentEvent::ToolError { .. }
             | AgentEvent::ToolStream { .. }
+            | AgentEvent::ToolBatchStart { .. }
+            | AgentEvent::ToolBatchEnd
             | AgentEvent::GuardTriggered { .. }
             | AgentEvent::SafetyNotice { .. }
             | AgentEvent::ParameterError { .. } => AgentPhase::Acting,
@@ -487,7 +497,9 @@ pub trait Agent: Send + Sync {
         _task: &'a str,
     ) -> BoxFuture<'a, Result<String>> {
         Box::pin(async {
-            Err(ReactError::Other("delegation not supported by this agent".into()))
+            Err(ReactError::Other(
+                "delegation not supported by this agent".into(),
+            ))
         })
     }
 }

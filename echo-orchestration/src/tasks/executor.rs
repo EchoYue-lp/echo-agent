@@ -41,8 +41,12 @@
 
 use super::hooks::{RetryDecision, TaskHookRegistry};
 use super::manager::TaskManager;
+use super::replanner::Replanner;
+use super::scheduler::TaskScheduler;
 use super::store::{CheckpointStore, ExecutionCheckpoint};
 use super::task::{Task, TaskStatus};
+use super::verifier::Verifier;
+use crate::tasks::BackgroundCheckpointStore;
 use dashmap::DashMap;
 use echo_core::error::{ReactError, Result};
 use std::sync::Arc;
@@ -330,6 +334,16 @@ pub struct TaskExecutor {
     shared_spawner: Option<Arc<super::background_task::TaskSpawner>>,
     /// Cooperative cancellation token for the entire executor.
     cancel: CancellationToken,
+
+    // ── Step 10: Integrated components ──────────────────────────────────
+    /// Optional replanner for automatic plan adjustment on failure/blocking.
+    replanner: Option<Arc<dyn Replanner>>,
+    /// Optional verifier for task completion verification.
+    verifier: Option<Arc<dyn Verifier>>,
+    /// Optional scheduler for strategy-based task scheduling.
+    scheduler: Option<Arc<TaskScheduler>>,
+    /// Optional background task checkpoint store.
+    background_checkpoint_store: Option<Arc<dyn BackgroundCheckpointStore>>,
 }
 
 impl TaskExecutor {
@@ -348,6 +362,11 @@ impl TaskExecutor {
             running_tasks: Arc::new(DashMap::new()),
             shared_spawner: None,
             cancel: CancellationToken::new(),
+            // Step 10: Initialize integrated components
+            replanner: None,
+            verifier: None,
+            scheduler: None,
+            background_checkpoint_store: None,
         }
     }
 
@@ -390,11 +409,46 @@ impl TaskExecutor {
     ///
     /// When set, all async DAG executions share the same spawner so tasks
     /// appear in a unified `list()` and share concurrency control.
-    pub fn with_task_spawner(
-        mut self,
-        spawner: Arc<super::background_task::TaskSpawner>,
-    ) -> Self {
+    pub fn with_task_spawner(mut self, spawner: Arc<super::background_task::TaskSpawner>) -> Self {
         self.shared_spawner = Some(spawner);
+        self
+    }
+
+    // ── Step 10: Integrated component builders ────────────────────────────
+
+    /// Set a replanner for automatic plan adjustment on failure/blocking.
+    ///
+    /// When set, the executor will trigger replanning when tasks fail or get blocked.
+    pub fn with_replanner(mut self, replanner: Arc<dyn Replanner>) -> Self {
+        self.replanner = Some(replanner);
+        self
+    }
+
+    /// Set a verifier for task completion verification.
+    ///
+    /// When set, the executor will verify task completion before marking as completed.
+    pub fn with_verifier(mut self, verifier: Arc<dyn Verifier>) -> Self {
+        self.verifier = Some(verifier);
+        self
+    }
+
+    /// Set a scheduler for strategy-based task scheduling.
+    ///
+    /// When set, the executor will use the scheduler to determine execution strategy
+    /// (parallel, serial, worktree-isolated, etc.).
+    pub fn with_scheduler(mut self, scheduler: Arc<TaskScheduler>) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
+    /// Set a background task checkpoint store.
+    ///
+    /// When set, background task states will be persisted to this store.
+    pub fn with_background_checkpoint_store(
+        mut self,
+        store: Arc<dyn BackgroundCheckpointStore>,
+    ) -> Self {
+        self.background_checkpoint_store = Some(store);
         self
     }
 
@@ -410,6 +464,12 @@ impl TaskExecutor {
 
     /// Execute all ready tasks in parallel
     ///
+    /// When a [`TaskScheduler`] is configured, the executor respects the
+    /// scheduling strategy: parallel groups are executed group-by-group
+    /// (tasks within a group run concurrently), then serial-sequence tasks
+    /// run one at a time.  Without a scheduler, all ready tasks run in
+    /// parallel (legacy behaviour).
+    ///
     /// Returns the number of tasks executed
     pub async fn execute_ready_tasks(&self) -> Result<Vec<TaskExecutionResult>> {
         let mut ready_tasks: Vec<Task> = self.task_manager.get_ready_tasks();
@@ -419,10 +479,16 @@ impl TaskExecutor {
         }
 
         // Sort by priority descending (highest priority first).
-        // When semaphore permits are limited, higher priority tasks get spawned
-        // first and thus acquire permits first.
         ready_tasks.sort_by_key(|t| std::cmp::Reverse(t.priority));
 
+        // If a scheduler is configured, use it to determine execution order.
+        if let Some(ref scheduler) = self.scheduler {
+            return self
+                .execute_with_scheduler(ready_tasks, scheduler.as_ref())
+                .await;
+        }
+
+        // ── Legacy path: all ready tasks run in parallel ──
         info!(
             tasks = ready_tasks.len(),
             max_concurrent = self.config.max_concurrent,
@@ -431,16 +497,82 @@ impl TaskExecutor {
             self.config.max_concurrent
         );
 
-        let mut handles = Vec::with_capacity(ready_tasks.len());
+        self.spawn_parallel_batch(ready_tasks).await
+    }
 
-        for task in ready_tasks {
-            // Fire unified TaskCreated hook at scheduling time (before execution begins)
+    /// Execute ready tasks following the scheduler's plan.
+    ///
+    /// Parallel groups run group-by-group (group-internal concurrency),
+    /// serial-sequence tasks run one at a time.
+    async fn execute_with_scheduler(
+        &self,
+        ready_tasks: Vec<Task>,
+        scheduler: &TaskScheduler,
+    ) -> Result<Vec<TaskExecutionResult>> {
+        let plan = scheduler.schedule(&ready_tasks);
+
+        if !plan.conflicts.is_empty() {
+            warn!(
+                conflicts = ?plan.conflicts,
+                strategy = ?plan.strategy,
+                "Write conflicts detected; serialising conflicting tasks"
+            );
+        }
+
+        info!(
+            tasks = ready_tasks.len(),
+            parallel_groups = plan.parallel_groups.len(),
+            serial_tasks = plan.serial_sequence.len(),
+            strategy = ?plan.strategy,
+            "Executing ready tasks with scheduler"
+        );
+
+        // Build a lookup: task ID → Task for quick access
+        let task_map: std::collections::HashMap<String, Task> =
+            ready_tasks.into_iter().map(|t| (t.id.clone(), t)).collect();
+
+        let mut all_results = Vec::new();
+
+        // 1. Execute parallel groups sequentially (group-internal concurrency)
+        for group_ids in &plan.parallel_groups {
+            let group_tasks: Vec<Task> = group_ids
+                .iter()
+                .filter_map(|id| task_map.get(id).cloned())
+                .collect();
+            if group_tasks.is_empty() {
+                continue;
+            }
+            debug!(group_size = group_tasks.len(), "Executing parallel group");
+            let results = self.spawn_parallel_batch(group_tasks).await?;
+            all_results.extend(results);
+        }
+
+        // 2. Execute serial-sequence tasks one at a time
+        for task_id in &plan.serial_sequence {
+            if let Some(task) = task_map.get(task_id).cloned() {
+                debug!(task_id = %task_id, "Executing serial task");
+                let result = self
+                    .spawn_and_run_single(task, self.config.max_concurrent.max(1) as u32)
+                    .await;
+                all_results.push(result);
+            }
+        }
+
+        Ok(all_results)
+    }
+
+    /// Spawn a batch of tasks to run concurrently (subject to semaphore).
+    async fn spawn_parallel_batch(&self, tasks: Vec<Task>) -> Result<Vec<TaskExecutionResult>> {
+        let mut handles = Vec::with_capacity(tasks.len());
+
+        for task in tasks {
+            // Fire unified TaskCreated hook at scheduling time
             if let Some(ref executor) = self.config.unified_hook_executor {
                 let ctx = echo_core::hooks::HookContext::for_task_created(
                     &task.id,
                     &task.subject,
-                    "", // session_id not available at this layer
-                    "", // agent_name not available at this layer
+                    "",
+                    "",
                 );
                 executor(ctx).await;
             }
@@ -453,11 +585,12 @@ impl TaskExecutor {
                 .map_err(|e| ReactError::Other(format!("Semaphore acquire error: {}", e)))?;
             let manager = self.task_manager.clone();
             let config = self.config.clone();
-            // Per-task execute_fn overrides global execute_fn
             let execute_fn = task.execute_fn.clone().or_else(|| self.execute_fn.clone());
             let hooks = self.hooks.clone();
             let running_tasks = self.running_tasks.clone();
             let task_store = self.task_store.clone();
+            let verifier = self.verifier.clone();
+            let replanner = self.replanner.clone();
             let task_id = task.id.clone();
             let cancel = CancellationToken::new();
             let cancel_clone = cancel.clone();
@@ -467,14 +600,13 @@ impl TaskExecutor {
                 let _permit = permit;
                 let start = Instant::now();
 
-                // Check cancellation before starting
                 if task.is_cancelled() || cancel_clone.is_cancelled() {
                     running_tasks.remove(&task_id);
                     return TaskExecutionResult::cancelled(&task_id);
                 }
 
-                // Execute with retry, racing against cancellation
                 let manager2 = manager.clone();
+                let verifier_clone = verifier.clone();
                 let result = tokio::select! {
                     biased;
                     _ = cancel_clone.cancelled() => {
@@ -489,6 +621,8 @@ impl TaskExecutor {
                         hooks,
                         cancel_clone.clone(),
                         task_store,
+                        verifier_clone,
+                        replanner,
                     ) => {
                         result
                     }
@@ -507,7 +641,6 @@ impl TaskExecutor {
             }));
         }
 
-        // Wait for all tasks to complete
         let mut results = Vec::with_capacity(handles.len());
         for handle in handles {
             match handle.await {
@@ -521,6 +654,58 @@ impl TaskExecutor {
         Ok(results)
     }
 
+    /// Execute a single task with semaphore permit, returning its result.
+    async fn spawn_and_run_single(&self, task: Task, _max_concurrent: u32) -> TaskExecutionResult {
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| TaskExecutionResult::cancelled(&task.id));
+
+        let permit = match permit {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+
+        let _permit = permit;
+        let start = Instant::now();
+        let task_id = task.id.clone();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        self.running_tasks.insert(task_id.clone(), cancel);
+
+        let result = tokio::select! {
+            biased;
+            _ = cancel_clone.cancelled() => {
+                let _ = self.task_manager.cancel_task(&task_id);
+                TaskExecutionResult::cancelled(&task_id)
+            }
+            result = Self::run_task_with_retry(
+                task,
+                self.task_manager.clone(),
+                self.config.clone(),
+                self.execute_fn.clone(),
+                self.hooks.clone(),
+                cancel_clone.clone(),
+                self.task_store.clone(),
+                self.verifier.clone(),
+                self.replanner.clone(),
+            ) => {
+                result
+            }
+        };
+
+        self.running_tasks.remove(&task_id);
+        debug!(
+            task_id = %task_id,
+            duration_ms = start.elapsed().as_millis(),
+            status = ?result.status,
+            "Serial task execution completed"
+        );
+        result
+    }
+
     /// Run a single task with retry logic
     async fn run_task_with_retry(
         task: Task,
@@ -530,6 +715,8 @@ impl TaskExecutor {
         hooks: Arc<TaskHookRegistry>,
         cancel: CancellationToken,
         task_store: Option<Arc<dyn super::store::TaskStore>>,
+        verifier: Option<Arc<dyn Verifier>>,
+        replanner: Option<Arc<dyn Replanner>>,
     ) -> TaskExecutionResult {
         let task_id = task.id.clone();
         let timeout_secs = if task.timeout_secs > 0 {
@@ -578,6 +765,11 @@ impl TaskExecutor {
                 let block_reason = format!("Upstream task failed: {}", error_summary);
                 let _ =
                     manager.update_task_status(&task_id, TaskStatus::Blocked(block_reason.clone()));
+
+                // ── Replanner: TaskBlocked trigger ──
+                Self::try_replan_on_blocked(replanner.clone(), &manager, &task_id, &block_reason)
+                    .await;
+
                 return TaskExecutionResult::failure(
                     &task_id,
                     block_reason,
@@ -657,6 +849,51 @@ impl TaskExecutor {
                         Some(start.elapsed().as_secs()),
                         None,
                     );
+
+                    // Verify task completion if verifier is set
+                    if let Some(ref verifier) = verifier {
+                        if let Some(task_snapshot) = manager.get_task(&task_id) {
+                            match verifier.verify(&task_snapshot).await {
+                                Ok(verification_result) => {
+                                    if verification_result.passed {
+                                        info!(task_id = %task_id, "Task verification passed");
+                                    } else {
+                                        warn!(task_id = %task_id, "Task verification failed: {}", verification_result.output);
+                                        let fail_reason = format!(
+                                            "Verification failed: {}",
+                                            verification_result.output
+                                        );
+
+                                        // ── Replanner: verification failure trigger ──
+                                        Self::try_replan_on_failure(
+                                            replanner.clone(),
+                                            &manager,
+                                            &task_id,
+                                            &fail_reason,
+                                        )
+                                        .await;
+
+                                        // Mark as failed due to verification failure
+                                        let _ = manager.update_task_status(
+                                            &task_id,
+                                            TaskStatus::Failed(fail_reason.clone()),
+                                        );
+                                        return TaskExecutionResult::failure(
+                                            &task_id,
+                                            fail_reason,
+                                            start.elapsed(),
+                                            current_attempt,
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(task_id = %task_id, error = %e, "Verification error");
+                                    // Continue with completion even if verification errors
+                                }
+                            }
+                        }
+                    }
+
                     let _ = manager.update_task_status(&task_id, TaskStatus::Completed);
                     manager.set_task_result(&task_id, output.clone());
 
@@ -786,7 +1023,10 @@ impl TaskExecutor {
                         }
                     }
 
-                    // Final failure
+                    // Final failure — try replanning before giving up
+                    Self::try_replan_on_failure(replanner.clone(), &manager, &task_id, &error_str)
+                        .await;
+
                     let _ =
                         manager.update_task_status(&task_id, TaskStatus::Failed(error_str.clone()));
 
@@ -826,6 +1066,71 @@ impl TaskExecutor {
                     );
                 }
             }
+        }
+    }
+
+    /// Attempt replanning when a task fails (exhausted retries / verification failure).
+    async fn try_replan_on_failure(
+        replanner: Option<Arc<dyn Replanner>>,
+        manager: &Arc<TaskManager>,
+        task_id: &str,
+        error: &str,
+    ) {
+        let Some(replanner) = replanner else { return };
+        let trigger = super::replanner::ReplanTrigger::TaskFailure {
+            task_id: task_id.to_string(),
+            error: error.to_string(),
+        };
+        if matches!(
+            replanner.should_replan(&trigger),
+            super::replanner::ReplanDecision::Replan { .. }
+        ) {
+            let current_plan = manager.get_summary();
+            let tasks_snapshot = manager.get_all_tasks();
+            match replanner
+                .replan(&trigger, &current_plan, &tasks_snapshot)
+                .await
+            {
+                Ok(_new_plan_json) => {
+                    info!(task_id = %task_id, "Replanner generated new plan after task failure");
+                }
+                Err(e) => warn!(task_id = %task_id, error = %e, "Replan attempt failed"),
+            }
+        }
+    }
+
+    /// Attempt replanning when a task is blocked by upstream failure.
+    async fn try_replan_on_blocked(
+        replanner: Option<Arc<dyn Replanner>>,
+        manager: &Arc<TaskManager>,
+        task_id: &str,
+        reason: &str,
+    ) {
+        let Some(replanner) = replanner else { return };
+        let trigger = super::replanner::ReplanTrigger::TaskBlocked {
+            task_id: task_id.to_string(),
+            reason: reason.to_string(),
+        };
+        if matches!(
+            replanner.should_replan(&trigger),
+            super::replanner::ReplanDecision::Replan { .. }
+        ) {
+            let current_plan = manager.get_summary();
+            let tasks_snapshot = manager.get_all_tasks();
+            // Fire-and-forget: don't block the current task's failure path
+            let replanner = Arc::clone(&replanner);
+            let task_id_owned = task_id.to_string();
+            tokio::spawn(async move {
+                match replanner
+                    .replan(&trigger, &current_plan, &tasks_snapshot)
+                    .await
+                {
+                    Ok(_new_plan_json) => {
+                        info!(task_id = %task_id_owned, "Replanner generated new plan after task blocked");
+                    }
+                    Err(e) => warn!(task_id = %task_id_owned, error = %e, "Replan on block failed"),
+                }
+            });
         }
     }
 
@@ -908,13 +1213,11 @@ impl TaskExecutor {
         let mut empty_rounds: u32 = 0;
         let mut batch_count: u64 = 0;
         let max_empty_rounds: u32 = 3;
-        let round_timeout = Duration::from_secs(
-            if self.config.round_timeout_secs > 0 {
-                self.config.round_timeout_secs
-            } else {
-                3600 // default 1 hour
-            },
-        );
+        let round_timeout = Duration::from_secs(if self.config.round_timeout_secs > 0 {
+            self.config.round_timeout_secs
+        } else {
+            3600 // default 1 hour
+        });
 
         loop {
             // Check executor-level cancellation before each round
@@ -1074,17 +1377,14 @@ impl TaskExecutor {
             ready_tasks.len()
         );
 
-        let spawner = self
-            .shared_spawner
-            .clone()
-            .unwrap_or_else(|| {
-                Arc::new(super::background_task::TaskSpawner::new(
-                    super::background_task::TaskSpawnerConfig {
-                        max_concurrent: self.config.max_concurrent,
-                        default_timeout_secs: self.config.default_timeout_secs,
-                    },
-                ))
-            });
+        let spawner = self.shared_spawner.clone().unwrap_or_else(|| {
+            Arc::new(super::background_task::TaskSpawner::new(
+                super::background_task::TaskSpawnerConfig {
+                    max_concurrent: self.config.max_concurrent,
+                    default_timeout_secs: self.config.default_timeout_secs,
+                },
+            ))
+        });
 
         let mut handles = Vec::with_capacity(ready_tasks.len());
         for task in ready_tasks {
@@ -1098,6 +1398,7 @@ impl TaskExecutor {
             let hooks = self.hooks.clone();
             let semaphore = self.semaphore.clone();
             let task_store = self.task_store.clone();
+            let verifier = self.verifier.clone();
 
             let handle = spawner.spawn(&task_name, async move {
                 let _permit = semaphore
@@ -1113,6 +1414,8 @@ impl TaskExecutor {
                     hooks,
                     CancellationToken::new(),
                     task_store,
+                    verifier,
+                    None, // replanner
                 )
                 .await;
 

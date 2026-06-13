@@ -144,7 +144,8 @@ impl AgentFactory for DefaultAgentFactory {
         Err(crate::error::ReactError::Other(
             "DefaultAgentFactory::create_agent must be called from the facade crate \
              (echo_agent), which provides the concrete ReactAgentBuilder-based implementation. \
-             Use echo_agent::agent::default_factory::DefaultAgentFactory instead.".into(),
+             Use echo_agent::agent::default_factory::DefaultAgentFactory instead."
+                .into(),
         ))
     }
 }

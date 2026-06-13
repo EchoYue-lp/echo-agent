@@ -81,12 +81,14 @@ impl StdioLspClient {
             .spawn()
             .map_err(|e| LspError::SpawnError(format!("{}: {e}", self.config.command)))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            LspError::SpawnError("Failed to capture stdin".into())
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            LspError::SpawnError("Failed to capture stdout".into())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| LspError::SpawnError("Failed to capture stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| LspError::SpawnError("Failed to capture stdout".into()))?;
 
         // Create writer channel
         let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
@@ -342,11 +344,12 @@ impl LspClient for StdioLspClient {
                 .await?;
 
             // Result can be a single Location or an array
-            let locations: Vec<Location> = if let Ok(loc) = serde_json::from_value::<Location>(result.clone()) {
-                vec![loc]
-            } else {
-                serde_json::from_value(result).unwrap_or_default()
-            };
+            let locations: Vec<Location> =
+                if let Ok(loc) = serde_json::from_value::<Location>(result.clone()) {
+                    vec![loc]
+                } else {
+                    serde_json::from_value(result).unwrap_or_default()
+                };
 
             Ok(locations)
         })
@@ -368,8 +371,7 @@ impl LspClient for StdioLspClient {
                 .send_request("textDocument/references", Some(params))
                 .await?;
 
-            let locations: Vec<Location> =
-                serde_json::from_value(result).unwrap_or_default();
+            let locations: Vec<Location> = serde_json::from_value(result).unwrap_or_default();
             Ok(locations)
         })
     }
@@ -385,7 +387,9 @@ impl LspClient for StdioLspClient {
                 "position": { "line": position.line, "character": position.character }
             });
 
-            let result = self.send_request("textDocument/hover", Some(params)).await?;
+            let result = self
+                .send_request("textDocument/hover", Some(params))
+                .await?;
 
             if result.is_null() {
                 return Ok(None);

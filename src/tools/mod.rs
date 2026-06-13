@@ -104,7 +104,7 @@ pub const WRITE_TOOLS: &[&str] = &[
 ];
 
 /// Tools that read file content.
-pub const READ_TOOLS: &[&str] = &["read_file", "read_text"];
+pub const READ_TOOLS: &[&str] = &["read_file"];
 
 /// Check if a tool name is a write tool.
 pub fn is_write_tool(name: &str) -> bool {

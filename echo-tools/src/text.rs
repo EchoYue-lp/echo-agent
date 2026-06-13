@@ -14,126 +14,6 @@ use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
 const TOOL_NAME: &str = "text_tools";
 
-/// Text file reading tool
-pub struct TextReadTool;
-
-impl Tool for TextReadTool {
-    fn name(&self) -> &str {
-        "read_text"
-    }
-
-    fn description(&self) -> &str {
-        "Read text file content, supports various text formats. Auto-detects encoding."
-    }
-
-    fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
-        vec![echo_core::tools::permission::ToolPermission::Read]
-    }
-    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
-        echo_core::tools::ToolRiskLevel::ReadOnly
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Absolute path to the text file"
-                },
-                "start_line": {
-                    "type": "integer",
-                    "description": "Start line number (default 1)"
-                },
-                "line_count": {
-                    "type": "integer",
-                    "description": "Number of lines to read (default 100, -1 means all)"
-                },
-                "encoding": {
-                    "type": "string",
-                    "description": "File encoding (e.g. 'utf-8', 'gbk'), default auto-detect"
-                }
-            },
-            "required": ["file_path"]
-        })
-    }
-
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
-        Box::pin(async move {
-            let file_path = parameters
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
-
-            let start_line = parameters
-                .get("start_line")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1)
-                .max(1) as usize; // Ensure it's at least 1
-
-            let line_count = parameters
-                .get("line_count")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(100);
-
-            let _encoding = parameters.get("encoding").and_then(|v| v.as_str());
-
-            let security = SecurityConfig::global();
-            let path = security.validate_file(file_path)?;
-
-            // Read file
-            let bytes = std::fs::read(&path).map_err(|e| ToolError::ExecutionFailed {
-                tool: TOOL_NAME.to_string(),
-                message: format!("Failed to read file: {}", e),
-            })?;
-
-            // Try to decode (prefer UTF-8, fall back to other encodings)
-            let content = String::from_utf8(bytes.clone()).unwrap_or_else(|_| {
-                // Try GBK decoding
-                encoding_rs::GBK.decode(&bytes).0.into_owned()
-            });
-
-            let lines: Vec<&str> = content.lines().collect();
-            let total_lines = lines.len();
-
-            // Apply preview row limit
-            let max_preview = security.limits.max_preview_rows;
-            let effective_line_count = if line_count < 0 {
-                max_preview
-            } else {
-                (line_count as usize).min(max_preview)
-            };
-
-            // Calculate read range
-            let start = (start_line - 1).min(total_lines);
-            let end = (start + effective_line_count).min(total_lines);
-
-            // Structured output
-            let preview_lines_data: Vec<Value> = lines[start..end]
-                .iter()
-                .enumerate()
-                .map(|(idx, line)| {
-                    serde_json::json!({
-                        "line_number": start + idx + 1,
-                        "content": line,
-                    })
-                })
-                .collect();
-
-            let result = serde_json::json!({
-                "file": file_path,
-                "total_lines": total_lines,
-                "start_line": start + 1,
-                "end_line": end,
-                "truncated": end < total_lines,
-                "remaining_lines": total_lines.saturating_sub(end),
-                "lines": preview_lines_data,
-            });
-            Ok(ToolResult::success_json(result))
-        })
-    }
-}
-
 /// Text search tool
 pub struct TextSearchTool;
 
@@ -572,5 +452,238 @@ impl Tool for TextExportTool {
                 input_file, output_file
             )))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echo_core::tools::Tool;
+    use std::io::Write;
+
+    /// Helper to create a temporary file with content (unique per test)
+    fn create_temp_file(content: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join("echo_tools_text_tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("test_{}_{}.txt", std::process::id(), id));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn cleanup_temp_file(path: &str) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn test_text_search_basic() {
+        let path = create_temp_file("hello world\nfoo bar\nhello again\n");
+
+        let tool = super::TextSearchTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("pattern".to_string(), serde_json::json!("hello"));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success);
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["match_count"], 2);
+        assert_eq!(output["pattern"], "hello");
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_search_case_insensitive() {
+        let path = create_temp_file("Hello World\nhello world\nHELLO WORLD\n");
+
+        let tool = super::TextSearchTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("pattern".to_string(), serde_json::json!("hello"));
+        params.insert("ignore_case".to_string(), serde_json::json!(true));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success);
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["match_count"], 3);
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_search_regex() {
+        let path = create_temp_file("error: 404\nwarning: slow\nerror: 500\ninfo: ok\n");
+
+        let tool = super::TextSearchTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("pattern".to_string(), serde_json::json!("error: \\d+"));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success);
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["match_count"], 2);
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_stats() {
+        let path = create_temp_file("hello world\n你好世界\nthird line\n");
+
+        let tool = super::TextStatsTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success);
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["lines"], 3);
+        assert!(output["chinese_chars"].as_u64().unwrap() > 0);
+        assert!(output["words"].as_u64().unwrap() > 0);
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_process_unique() {
+        let path = create_temp_file("apple\nbanana\napple\ncherry\nbanana\n");
+
+        let tool = super::TextProcessTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("operation".to_string(), serde_json::json!("unique"));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success);
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["original_lines"], 5);
+        assert_eq!(output["result_lines"], 3);
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_process_sort() {
+        let path = create_temp_file("cherry\napple\nbanana\n");
+
+        let tool = super::TextProcessTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("operation".to_string(), serde_json::json!("sort"));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success);
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let preview = output["preview"].as_array().unwrap();
+        assert_eq!(preview[0], "apple");
+        assert_eq!(preview[1], "banana");
+        assert_eq!(preview[2], "cherry");
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_process_head_tail() {
+        let path = create_temp_file("line1\nline2\nline3\nline4\nline5\n");
+
+        let tool = super::TextProcessTool;
+
+        // Test head
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("operation".to_string(), serde_json::json!("head"));
+        params.insert("count".to_string(), serde_json::json!(2));
+
+        let result = tool.execute(params).await.unwrap();
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["result_lines"], 2);
+
+        // Test tail
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("operation".to_string(), serde_json::json!("tail"));
+        params.insert("count".to_string(), serde_json::json!(2));
+
+        let result = tool.execute(params).await.unwrap();
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["result_lines"], 2);
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_process_trim() {
+        let path = create_temp_file("hello\n\n\nworld\n\n");
+
+        let tool = super::TextProcessTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("operation".to_string(), serde_json::json!("trim"));
+
+        let result = tool.execute(params).await.unwrap();
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["result_lines"], 2);
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_process_invalid_operation() {
+        let path = create_temp_file("hello\n");
+
+        let tool = super::TextProcessTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!(path));
+        params.insert("operation".to_string(), serde_json::json!("nonexistent"));
+
+        let result = tool.execute(params).await;
+        assert!(result.is_err());
+
+        cleanup_temp_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_text_search_missing_params() {
+        let tool = super::TextSearchTool;
+
+        // Missing file_path
+        let params = std::collections::HashMap::new();
+        let result = tool.execute(params).await;
+        assert!(result.is_err());
+
+        // Missing pattern
+        let mut params = std::collections::HashMap::new();
+        params.insert("file_path".to_string(), serde_json::json!("/tmp/test.txt"));
+        let result = tool.execute(params).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_text_export() {
+        let input_path = create_temp_file("cherry\napple\nbanana\n");
+        let output_path = format!("{}_export", input_path);
+
+        let tool = super::TextExportTool;
+        let mut params = std::collections::HashMap::new();
+        params.insert("input_file".to_string(), serde_json::json!(input_path));
+        params.insert("output_file".to_string(), serde_json::json!(output_path));
+        params.insert("operation".to_string(), serde_json::json!("sort"));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success);
+
+        // Verify output file exists and is sorted
+        let content = std::fs::read_to_string(&output_path).unwrap();
+        assert!(content.starts_with("apple"));
+        assert!(content.contains("banana"));
+        assert!(content.ends_with("cherry"));
+
+        cleanup_temp_file(&input_path);
+        cleanup_temp_file(&output_path);
     }
 }

@@ -1450,3 +1450,257 @@ fn replace_tool_when_not_exists() {
         "New tool should be registered"
     );
 }
+
+// ── recall_long_term_memories injects as system role ─────────────────────────
+
+/// Regression test for review finding: prior code pushed recalled memories as
+/// `Message::user`, producing two consecutive user turns and confusing the
+/// model into treating historical memories as a fresh user request. The fix
+/// is to inject them as `Message::system` with a `[memory_context]` marker.
+#[tokio::test]
+async fn recall_injects_memories_as_system_message_not_user() {
+    use crate::agent::react::run::types::StreamMode;
+    use crate::memory::InMemoryStore;
+    use serde_json::json;
+
+    let agent_name = "recall_role_test";
+    let config = AgentConfig::new("test-model", agent_name, "system prompt").enable_memory(false);
+    let mut agent = ReactAgent::new(config);
+
+    // Seed the long-term store with a fact that will be recalled by exact-text search.
+    let store: Arc<dyn crate::memory::Store> = Arc::new(InMemoryStore::new());
+    store
+        .put(
+            &[agent_name, "memories"],
+            "fact-1",
+            json!({ "content": "user prefers Rust over Python", "importance": 0.9 }),
+        )
+        .await
+        .expect("seed memory put");
+    agent.set_memory_store(store);
+
+    // Drive prepare_stream_context with a query that should hit the seeded fact.
+    let recalled = agent.prepare_stream_context(StreamMode::Chat, "Rust").await;
+    assert!(
+        recalled >= 1,
+        "expected at least one memory to be recalled, got {recalled}"
+    );
+
+    // The context now must contain a system message carrying the [memory_context]
+    // marker — and crucially, no two adjacent user messages from the recall path.
+    let ctx = agent.memory.context.lock().await;
+    let messages = ctx.messages();
+
+    let memory_systems: Vec<&Message> = messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::System
+                && m.text_content()
+                    .is_some_and(|c| c.contains("[memory_context]"))
+        })
+        .collect();
+    assert_eq!(
+        memory_systems.len(),
+        1,
+        "expected exactly one system message with [memory_context] marker, found: {:?}",
+        messages
+            .iter()
+            .map(|m| format!("{:?}: {:?}", m.role, m.text_content()))
+            .collect::<Vec<_>>()
+    );
+
+    // The seeded content must appear in that system message.
+    assert!(
+        memory_systems[0]
+            .text_content()
+            .is_some_and(|c| c.contains("user prefers Rust over Python")),
+        "memory_context system message should contain seeded fact"
+    );
+
+    // No adjacent user-user pair from the recall injection.
+    let mut prev_user = false;
+    let mut adjacent_user_pair = false;
+    for m in messages {
+        if m.role == Role::User {
+            if prev_user {
+                adjacent_user_pair = true;
+                break;
+            }
+            prev_user = true;
+        } else {
+            prev_user = false;
+        }
+    }
+    assert!(
+        !adjacent_user_pair,
+        "found two adjacent Role::User messages — recall must not push a user-role memory before the actual user input"
+    );
+}
+
+// ── save_transcript_projection ──────────────────────────────────────────────
+
+/// Verify `AgentRunSnapshot::save_transcript_projection` calls
+/// `ConversationStore::save_messages` with the projection of in-memory messages,
+/// and silently no-ops when no `conversation_id` is configured.
+#[tokio::test]
+async fn save_transcript_projection_writes_to_conversation_store() {
+    use crate::agent::snapshot::AgentRunSnapshot;
+    use crate::memory::{
+        Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
+        StoredMessage,
+    };
+    use echo_core::error::Result as CoreResult;
+    use futures::future::BoxFuture;
+    use std::sync::Mutex as StdMutex;
+
+    /// Minimal in-memory ConversationStore that records every save_messages call.
+    struct RecordingStore {
+        saves: StdMutex<Vec<(String, Vec<StoredMessage>)>>,
+        conversations: StdMutex<Vec<Conversation>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> Self {
+            Self {
+                saves: StdMutex::new(Vec::new()),
+                conversations: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ConversationStore for RecordingStore {
+        fn create_conversation<'a>(
+            &'a self,
+            conv: NewConversation,
+        ) -> BoxFuture<'a, CoreResult<Conversation>> {
+            Box::pin(async move {
+                let c = Conversation {
+                    id: 1,
+                    conversation_id: conv.conversation_id,
+                    user_id: conv.user_id,
+                    agent_type: conv.agent_type,
+                    title: conv.title,
+                    summary: None,
+                    compressed_before_id: None,
+                    created_at: "now".to_string(),
+                    updated_at: "now".to_string(),
+                };
+                self.conversations.lock().unwrap().push(c.clone());
+                Ok(c)
+            })
+        }
+
+        fn get_conversation<'a>(
+            &'a self,
+            conversation_id: &'a str,
+        ) -> BoxFuture<'a, CoreResult<Option<Conversation>>> {
+            Box::pin(async move {
+                Ok(self
+                    .conversations
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|c| c.conversation_id == conversation_id)
+                    .cloned())
+            })
+        }
+
+        fn list_conversations<'a>(
+            &'a self,
+            _filter: ConversationFilter,
+        ) -> BoxFuture<'a, CoreResult<Vec<ConversationMeta>>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn update_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _title: Option<&'a str>,
+            _summary: Option<&'a str>,
+            _compressed_before_id: Option<i64>,
+        ) -> BoxFuture<'a, CoreResult<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn delete_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, CoreResult<()>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn save_messages<'a>(
+            &'a self,
+            conversation_id: &'a str,
+            messages: &'a [StoredMessage],
+        ) -> BoxFuture<'a, CoreResult<()>> {
+            let key = conversation_id.to_string();
+            let msgs = messages.to_vec();
+            Box::pin(async move {
+                self.saves.lock().unwrap().push((key, msgs));
+                Ok(())
+            })
+        }
+
+        fn get_messages<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, CoreResult<Vec<StoredMessage>>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn count_messages<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, CoreResult<usize>> {
+            Box::pin(async move { Ok(0) })
+        }
+    }
+
+    // ── Case 1: conversation_id + store both set → save_messages is invoked ──
+    let store = Arc::new(RecordingStore::new());
+    let config =
+        AgentConfig::new("test-model", "agent", "sys").conversation_id("conv-projection-test");
+    let mut agent = ReactAgent::new(config);
+    agent.set_conversation_store(store.clone());
+    // Seed two user messages.
+    {
+        let mut ctx = agent.memory.context.lock().await;
+        ctx.push(Message::user("hello".to_string()));
+        ctx.push(Message::user("world".to_string()));
+    }
+
+    let snap = AgentRunSnapshot::from_agent(&agent);
+    snap.save_transcript_projection(&agent.memory.context).await;
+
+    let saves = store.saves.lock().unwrap().clone();
+    assert_eq!(saves.len(), 1, "save_messages should fire exactly once");
+    let (saved_conv_id, saved_msgs) = &saves[0];
+    assert_eq!(saved_conv_id, "conv-projection-test");
+    assert!(
+        saved_msgs.len() >= 2,
+        "projection should include the two pushed user messages, got {} messages",
+        saved_msgs.len()
+    );
+    let user_texts: Vec<&str> = saved_msgs
+        .iter()
+        .filter(|m| m.role == "user")
+        .filter_map(|m| m.content.as_deref())
+        .collect();
+    assert!(user_texts.contains(&"hello"));
+    assert!(user_texts.contains(&"world"));
+
+    // ── Case 2: missing conversation_id → no-op ──
+    let store2 = Arc::new(RecordingStore::new());
+    let config2 = AgentConfig::new("test-model", "agent", "sys"); // no conversation_id
+    let mut agent2 = ReactAgent::new(config2);
+    agent2.set_conversation_store(store2.clone());
+    let snap2 = AgentRunSnapshot::from_agent(&agent2);
+    snap2
+        .save_transcript_projection(&agent2.memory.context)
+        .await;
+    assert!(
+        store2.saves.lock().unwrap().is_empty(),
+        "without conversation_id, save_transcript_projection must early-return without saving"
+    );
+}

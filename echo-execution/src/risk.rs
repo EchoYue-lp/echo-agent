@@ -70,8 +70,8 @@ impl ToolRiskClassifier {
     pub fn classify(tool_name: &str) -> ToolRiskCategory {
         match tool_name {
             // Read-only
-            "read_file" | "read_text" | "search" | "grep" | "list_files" | "git_log"
-            | "git_status" | "git_diff" | "git_blame" | "git_branch" => ToolRiskCategory::ReadOnly,
+            "read_file" | "search" | "grep" | "list_files" | "git_log" | "git_status"
+            | "git_diff" | "git_blame" | "git_branch" => ToolRiskCategory::ReadOnly,
             // File write
             "edit_file" | "write_file" | "append_file" | "create_file" | "update_file"
             | "move_file" => ToolRiskCategory::FileWrite,

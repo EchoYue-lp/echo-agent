@@ -63,14 +63,14 @@ impl AgentProfile {
         // Update tool usage from telemetry common_tools
         for t in telemetry {
             for (tool_name, count) in &t.common_tools {
-                let stats = self
-                    .tool_usage
-                    .entry(tool_name.clone())
-                    .or_insert_with(|| ToolUsageStats {
-                        usage_count: 0,
-                        success_count: 0,
-                        common_skills: Vec::new(),
-                    });
+                let stats =
+                    self.tool_usage
+                        .entry(tool_name.clone())
+                        .or_insert_with(|| ToolUsageStats {
+                            usage_count: 0,
+                            success_count: 0,
+                            common_skills: Vec::new(),
+                        });
                 stats.usage_count += count;
                 // Estimate success_count from skill success rate
                 stats.success_count += (*count as f64 * t.success_rate()) as u64;
@@ -309,13 +309,12 @@ impl ProfileStore {
     pub async fn load_agent_profile(&self) -> echo_core::error::Result<Option<AgentProfile>> {
         match self.store.get(&["agent", "profile"], "current").await {
             Ok(Some(item)) => {
-                let profile: AgentProfile =
-                    serde_json::from_value(item.value).map_err(|e| {
-                        echo_core::error::ReactError::Other(format!(
-                            "Failed to deserialize agent profile: {}",
-                            e
-                        ))
-                    })?;
+                let profile: AgentProfile = serde_json::from_value(item.value).map_err(|e| {
+                    echo_core::error::ReactError::Other(format!(
+                        "Failed to deserialize agent profile: {}",
+                        e
+                    ))
+                })?;
                 Ok(Some(profile))
             }
             Ok(None) => Ok(None),
@@ -324,10 +323,7 @@ impl ProfileStore {
     }
 
     /// Save the agent profile.
-    pub async fn save_agent_profile(
-        &self,
-        profile: &AgentProfile,
-    ) -> echo_core::error::Result<()> {
+    pub async fn save_agent_profile(&self, profile: &AgentProfile) -> echo_core::error::Result<()> {
         let value = serde_json::to_value(profile).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to serialize agent profile: {}", e))
         })?;
@@ -335,10 +331,7 @@ impl ProfileStore {
             .put(&["agent", "profile"], "current", value)
             .await
             .map_err(|e| {
-                echo_core::error::ReactError::Other(format!(
-                    "Failed to save agent profile: {}",
-                    e
-                ))
+                echo_core::error::ReactError::Other(format!("Failed to save agent profile: {}", e))
             })
     }
 
@@ -346,13 +339,12 @@ impl ProfileStore {
     pub async fn load_user_profile(&self) -> echo_core::error::Result<Option<UserProfile>> {
         match self.store.get(&["user", "profile"], "current").await {
             Ok(Some(item)) => {
-                let profile: UserProfile =
-                    serde_json::from_value(item.value).map_err(|e| {
-                        echo_core::error::ReactError::Other(format!(
-                            "Failed to deserialize user profile: {}",
-                            e
-                        ))
-                    })?;
+                let profile: UserProfile = serde_json::from_value(item.value).map_err(|e| {
+                    echo_core::error::ReactError::Other(format!(
+                        "Failed to deserialize user profile: {}",
+                        e
+                    ))
+                })?;
                 Ok(Some(profile))
             }
             Ok(None) => Ok(None),

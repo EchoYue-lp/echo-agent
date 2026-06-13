@@ -342,8 +342,7 @@ impl ToolManager {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let delay_ms =
-                    self.config.retry_delay_ms * (1u64 << (attempt as u64 - 1).min(5));
+                let delay_ms = self.config.retry_delay_ms * (1u64 << (attempt as u64 - 1).min(5));
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 

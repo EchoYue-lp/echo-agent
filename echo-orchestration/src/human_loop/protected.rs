@@ -537,10 +537,7 @@ mod tests {
     #[test]
     fn test_database_passwords() {
         let checker = ProtectedPathChecker::new();
-        for path in &[
-            "/home/user/.pgpass",
-            "/home/user/.my.cnf",
-        ] {
+        for path in &["/home/user/.pgpass", "/home/user/.my.cnf"] {
             let result = checker.check("Read", &json!({"path": path}));
             assert!(
                 matches!(result, ProtectedPathResult::Protected { .. }),

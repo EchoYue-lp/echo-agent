@@ -35,9 +35,6 @@ pub mod data;
 #[cfg(feature = "data")]
 #[cfg_attr(docsrs, doc(cfg(feature = "data")))]
 pub mod data_quality;
-#[cfg(feature = "statistics")]
-#[cfg_attr(docsrs, doc(cfg(feature = "statistics")))]
-pub mod statistics;
 #[cfg(feature = "database")]
 #[cfg_attr(docsrs, doc(cfg(feature = "database")))]
 pub mod database;
@@ -50,9 +47,6 @@ pub mod git;
 #[cfg(feature = "git")]
 #[cfg_attr(docsrs, doc(cfg(feature = "git")))]
 pub mod git_worktree;
-#[cfg(feature = "git")]
-#[cfg_attr(docsrs, doc(cfg(feature = "git")))]
-pub mod worktree_tool;
 #[cfg(feature = "media")]
 #[cfg_attr(docsrs, doc(cfg(feature = "media")))]
 pub mod image;
@@ -68,6 +62,9 @@ pub mod rag;
 #[cfg(feature = "research")]
 #[cfg_attr(docsrs, doc(cfg(feature = "research")))]
 pub mod research;
+#[cfg(feature = "statistics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "statistics")))]
+pub mod statistics;
 #[cfg(feature = "media")]
 #[cfg_attr(docsrs, doc(cfg(feature = "media")))]
 pub mod text;
@@ -77,6 +74,9 @@ pub mod web;
 #[cfg(feature = "media")]
 #[cfg_attr(docsrs, doc(cfg(feature = "media")))]
 pub mod word;
+#[cfg(feature = "git")]
+#[cfg_attr(docsrs, doc(cfg(feature = "git")))]
+pub mod worktree_tool;
 
 mod registry;
 pub use registry::register_all_tools;

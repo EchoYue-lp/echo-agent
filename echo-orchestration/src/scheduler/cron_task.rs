@@ -129,7 +129,9 @@ impl CronTaskStore {
         if let Some(ref backend) = self.backend {
             let rt = tokio::runtime::Handle::try_current()
                 .map_err(|_| echo_core::error::ReactError::Other("No tokio runtime".into()))?;
-            let item = tokio::task::block_in_place(|| rt.block_on(backend.get(STORE_NAMESPACE, STORE_KEY)))?;
+            let item = tokio::task::block_in_place(|| {
+                rt.block_on(backend.get(STORE_NAMESPACE, STORE_KEY))
+            })?;
             match item {
                 Some(store_item) => {
                     // Value is stored as serde_json::Value — extract the string
@@ -279,7 +281,10 @@ impl CronTaskStore {
         self.save_all(&tasks)?;
         // Remove legacy file after successful migration
         let _ = std::fs::remove_file(&legacy_path);
-        debug!("Migrated {} cron tasks and removed legacy file", tasks.len());
+        debug!(
+            "Migrated {} cron tasks and removed legacy file",
+            tasks.len()
+        );
         Ok(())
     }
 }

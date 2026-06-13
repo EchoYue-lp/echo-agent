@@ -129,10 +129,7 @@ fn parse_template(template: &str) -> Vec<TemplateElement> {
 }
 
 /// Render a sequence of parsed template elements using the provided variables.
-fn render_elements(
-    elements: &[TemplateElement],
-    variables: &HashMap<String, String>,
-) -> String {
+fn render_elements(elements: &[TemplateElement], variables: &HashMap<String, String>) -> String {
     let mut result = String::new();
     let mut i = 0;
 
@@ -372,7 +369,10 @@ mod tests {
         let manager = PromptTemplateManager::new();
         manager.register("intro", "I am {{name}}, a {{role}} at {{company}}.");
         let result = manager
-            .render("intro", &[("name", "Bob"), ("role", "engineer"), ("company", "Acme")])
+            .render(
+                "intro",
+                &[("name", "Bob"), ("role", "engineer"), ("company", "Acme")],
+            )
             .unwrap();
         assert_eq!(result, "I am Bob, a engineer at Acme.");
     }
@@ -429,9 +429,7 @@ mod tests {
             "{{#if premium}}Premium features enabled.{{#else}}Standard features only.{{#endif}}",
         );
         // Premium present
-        let result = manager
-            .render("cond_else", &[("premium", "true")])
-            .unwrap();
+        let result = manager.render("cond_else", &[("premium", "true")]).unwrap();
         assert_eq!(result, "Premium features enabled.");
         // Premium absent
         let result = manager.render("cond_else", &[]).unwrap();
@@ -441,10 +439,7 @@ mod tests {
     #[test]
     fn test_conditional_empty_value_acts_as_absent() {
         let manager = PromptTemplateManager::new();
-        manager.register(
-            "cond_empty",
-            "{{#if var}}Present{{#else}}Absent{{#endif}}",
-        );
+        manager.register("cond_empty", "{{#if var}}Present{{#else}}Absent{{#endif}}");
         // Empty string value triggers the else branch
         let result = manager.render("cond_empty", &[("var", "")]).unwrap();
         assert_eq!(result, "Absent");
@@ -475,10 +470,7 @@ mod tests {
         let manager = PromptTemplateManager::new();
         let result = manager.render("nonexistent", &[]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not found"));
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[test]
@@ -555,7 +547,10 @@ mod tests {
     fn test_get_template() {
         let manager = PromptTemplateManager::new();
         manager.register("key", "Hello {{name}}");
-        assert_eq!(manager.get_template("key"), Some("Hello {{name}}".to_string()));
+        assert_eq!(
+            manager.get_template("key"),
+            Some("Hello {{name}}".to_string())
+        );
         assert_eq!(manager.get_template("missing"), None);
     }
 

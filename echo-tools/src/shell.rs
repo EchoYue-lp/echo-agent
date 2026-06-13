@@ -91,10 +91,8 @@ const SHELL_METACHARACTERS: &[char] = &[
 /// Commands that are safe to run inside a sandbox (sandbox provides isolation)
 static SANDBOX_SAFE_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
-        "bash", "sh", "zsh", "fish",
-        "python", "python3", "node", "perl", "ruby", "php",
-        "pip", "pip3", "npm", "yarn", "pnpm",
-        "sed", "awk",
+        "bash", "sh", "zsh", "fish", "python", "python3", "node", "perl", "ruby", "php", "pip",
+        "pip3", "npm", "yarn", "pnpm", "sed", "awk",
     ])
 });
 
@@ -118,6 +116,8 @@ pub struct ShellTool {
     strict_mode: bool,
     /// Optional sandbox executor
     sandbox: Option<Arc<dyn SandboxExecutor>>,
+    /// Command timeout in seconds (default 60 seconds)
+    timeout_secs: u64,
 }
 
 impl Default for ShellTool {
@@ -127,11 +127,12 @@ impl Default for ShellTool {
 }
 
 impl ShellTool {
-    /// Create a new Shell tool (default strict mode)
+    /// Create a new Shell tool (default strict mode, 60s timeout)
     pub fn new() -> Self {
         Self {
             strict_mode: true,
             sandbox: None,
+            timeout_secs: 60,
         }
     }
 
@@ -140,12 +141,19 @@ impl ShellTool {
         Self {
             strict_mode: false,
             sandbox: None,
+            timeout_secs: 60,
         }
     }
 
     /// Set the sandbox executor; commands will be executed through the sandbox
     pub fn with_sandbox(mut self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
         self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Set command timeout in seconds (default 60 seconds)
+    pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
         self
     }
 
@@ -342,6 +350,10 @@ impl Tool for ShellTool {
                 "command": {
                     "type": "string",
                     "description": "The command to execute (only safe commands in the whitelist; shell syntax like pipes/redirects/command substitution is not supported)"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Command timeout in seconds (default: 60, max: 300)"
                 }
             },
             "required": ["command"]
@@ -354,6 +366,13 @@ impl Tool for ShellTool {
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("command".to_string()))?;
+
+            // Extract timeout parameter (default 60s, max 300s)
+            let timeout_secs = parameters
+                .get("timeout")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(self.timeout_secs)
+                .min(300); // Cap at 300 seconds
 
             match self.check_command_safety(command) {
                 CommandSafety::Safe => {}
@@ -378,9 +397,13 @@ impl Tool for ShellTool {
             if has_sandbox && has_metacharacters {
                 // Use sh -c through sandbox for commands with shell syntax
                 let sandbox = self.sandbox.as_ref().unwrap();
-                let sandbox_cmd = SandboxCommand::program("sh", vec!["-c".to_string(), command.to_string()]);
-                match sandbox.execute(sandbox_cmd).await {
-                    Ok(result) => {
+                let sandbox_cmd =
+                    SandboxCommand::program("sh", vec!["-c".to_string(), command.to_string()]);
+
+                // Wrap with timeout
+                let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
+                match tokio::time::timeout(timeout_duration, sandbox.execute(sandbox_cmd)).await {
+                    Ok(Ok(result)) => {
                         if result.success() {
                             return Ok(ToolResult::success(result.stdout));
                         } else {
@@ -390,10 +413,16 @@ impl Tool for ShellTool {
                             )));
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         return Ok(ToolResult::error(format!(
                             "Sandbox execution failed: {}",
                             e
+                        )));
+                    }
+                    Err(_) => {
+                        return Ok(ToolResult::error(format!(
+                            "⏱️ Command timeout after {} seconds\nCommand: {}",
+                            timeout_secs, command
                         )));
                     }
                 }
@@ -411,8 +440,11 @@ impl Tool for ShellTool {
             // If sandbox is configured, execute via sandbox (using program mode to avoid shell injection)
             if let Some(sandbox) = &self.sandbox {
                 let sandbox_cmd = SandboxCommand::program(program, args.to_vec());
-                match sandbox.execute(sandbox_cmd).await {
-                    Ok(result) => {
+
+                // Wrap with timeout
+                let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
+                match tokio::time::timeout(timeout_duration, sandbox.execute(sandbox_cmd)).await {
+                    Ok(Ok(result)) => {
                         if result.success() {
                             Ok(ToolResult::success(result.stdout))
                         } else {
@@ -422,15 +454,26 @@ impl Tool for ShellTool {
                             )))
                         }
                     }
-                    Err(e) => Ok(ToolResult::error(format!(
+                    Ok(Err(e)) => Ok(ToolResult::error(format!(
                         "Sandbox execution failed: {}",
                         e
+                    ))),
+                    Err(_) => Ok(ToolResult::error(format!(
+                        "⏱️ Command timeout after {} seconds\nCommand: {}",
+                        timeout_secs, command
                     ))),
                 }
             } else {
                 // Direct execution (no sandbox, using direct argv mode to reject sh -c injection)
-                match Command::new(program).args(args).output().await {
-                    Ok(output) => {
+                // Wrap with timeout
+                let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
+                match tokio::time::timeout(
+                    timeout_duration,
+                    Command::new(program).args(args).output(),
+                )
+                .await
+                {
+                    Ok(Ok(output)) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -445,9 +488,13 @@ impl Tool for ShellTool {
                             )))
                         }
                     }
-                    Err(e) => Ok(ToolResult::error(format!(
+                    Ok(Err(e)) => Ok(ToolResult::error(format!(
                         "Unable to execute command: {}",
                         e
+                    ))),
+                    Err(_) => Ok(ToolResult::error(format!(
+                        "⏱️ Command timeout after {} seconds\nCommand: {}",
+                        timeout_secs, command
                     ))),
                 }
             }
@@ -822,5 +869,78 @@ mod tests {
             "Dangerous command corpus: {} commands tested, 100% interception rate",
             total
         );
+    }
+
+    #[test]
+    fn test_timeout_configuration() {
+        let tool = ShellTool::new();
+        assert_eq!(tool.timeout_secs, 60);
+
+        let tool_custom = ShellTool::new().with_timeout(120);
+        assert_eq!(tool_custom.timeout_secs, 120);
+
+        // Permissive mode also has default timeout
+        let permissive = ShellTool::new_permissive();
+        assert_eq!(permissive.timeout_secs, 60);
+    }
+
+    #[tokio::test]
+    async fn test_shell_timeout_triggers() {
+        // Create a permissive shell tool with 1 second timeout (to allow sleep command)
+        let tool = ShellTool::new_permissive().with_timeout(1);
+
+        let mut params = HashMap::new();
+        // sleep 10 should definitely trigger the 1s timeout
+        params.insert("command".to_string(), serde_json::json!("sleep 10"));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(
+            !result.success,
+            "Expected timeout failure, got success: {:?}",
+            result
+        );
+        let error_msg = result.error.unwrap_or_default();
+        assert!(
+            error_msg.contains("timeout")
+                || error_msg.contains("Timeout")
+                || error_msg.contains("⏱️"),
+            "Expected timeout error, got: {}",
+            error_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_timeout_per_call_override() {
+        let tool = ShellTool::new_permissive().with_timeout(60);
+
+        let mut params = HashMap::new();
+        params.insert("command".to_string(), serde_json::json!("sleep 10"));
+        params.insert("timeout".to_string(), serde_json::json!(1)); // Override to 1s
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(
+            !result.success,
+            "Expected timeout failure with per-call override, got success"
+        );
+        let error_msg = result.error.unwrap_or_default();
+        assert!(
+            error_msg.contains("timeout") || error_msg.contains("⏱️"),
+            "Expected timeout error with per-call override, got: {}",
+            error_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_timeout_cap_at_300() {
+        let tool = ShellTool::new();
+
+        let mut params = HashMap::new();
+        params.insert("command".to_string(), serde_json::json!("echo ok"));
+        // Request 999s timeout, should be capped at 300s (but command finishes fast)
+        params.insert("timeout".to_string(), serde_json::json!(999));
+
+        let result = tool.execute(params).await.unwrap();
+        assert!(result.success, "Command should succeed: {:?}", result);
+        assert!(result.output.contains("ok"));
     }
 }

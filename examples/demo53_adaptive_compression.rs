@@ -442,6 +442,7 @@ async fn demo_context_manager_integration() {
         messages,
         token_limit: 0,
         current_query: None,
+        focus_instructions: None,
     };
 
     let output: CompressionOutput = compressor2.compress(input).await.unwrap();
