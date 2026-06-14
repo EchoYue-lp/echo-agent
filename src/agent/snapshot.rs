@@ -629,4 +629,175 @@ impl AgentRunSnapshot {
         );
         format!("{}{}{}", head, notice, tail)
     }
+
+    // ── Lifecycle hook fan-out ───────────────────────────────────────
+
+    /// Fire a lifecycle hook (`SessionEnd` / `PreCompact` / `StopFailure`).
+    /// Used by the prepare / compact / finalize / max-iterations phases.
+    pub(crate) async fn fire_hook(
+        &self,
+        event: crate::skills::hooks::HookEvent,
+        matcher: Option<&str>,
+    ) {
+        let sid = self.config.session_id.clone().unwrap_or_default();
+        let hc = match event {
+            crate::skills::hooks::HookEvent::SessionEnd => {
+                crate::skills::hooks::HookContext::for_session_end(
+                    matcher.unwrap_or("other"),
+                    &sid,
+                    &self.config.agent_name,
+                )
+            }
+            crate::skills::hooks::HookEvent::PreCompact => {
+                crate::skills::hooks::HookContext::for_pre_compact(
+                    &Default::default(),
+                    matcher.unwrap_or("auto"),
+                    &sid,
+                    &self.config.agent_name,
+                )
+            }
+            crate::skills::hooks::HookEvent::StopFailure => {
+                crate::skills::hooks::HookContext::for_stop_failure(
+                    "",
+                    matcher.unwrap_or(""),
+                    &sid,
+                    &self.config.agent_name,
+                )
+            }
+            _ => return,
+        };
+        let reg = self.tools.hook_registry.read().await.clone();
+        let _ = reg.run_lifecycle_hooks(&hc).await;
+    }
+
+    // ── Auto snapshot (memory snapshot capture) ──────────────────────
+
+    /// Capture a memory snapshot for the current iteration if the snapshot
+    /// manager indicates one is due.
+    pub(crate) async fn auto_snapshot(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        iteration: usize,
+    ) {
+        let should_capture = {
+            let mgr = self.snapshot_manager.read().unwrap();
+            mgr.as_ref().is_some_and(|m| m.should_capture(iteration))
+            // RwLockReadGuard dropped here — before any await
+        };
+        if should_capture {
+            let ctx = context.lock().await;
+            let ms = ctx.messages().to_vec();
+            drop(ctx);
+            if let Some(ref mut m) = *self.snapshot_manager.write().unwrap() {
+                m.capture(iteration, &ms);
+            }
+        }
+    }
+
+    // ── Tool approval (snapshot semantics) ───────────────────────────
+
+    /// Whether a tool requires human approval before execution. This mirrors
+    /// the streaming-path semantics: it consults `self.permission_service`
+    /// directly without flushing pending permission rules (the non-streaming
+    /// `ReactAgent::tool_needs_approval` in `run/approval.rs` does flush —
+    /// this divergence is preserved intentionally to keep streaming behavior
+    /// byte-identical to the pre-refactor implementation).
+    #[cfg(feature = "human-loop")]
+    pub(crate) async fn tool_needs_approval(&self, tool_name: &str) -> bool {
+        use crate::tools::permission::{PermissionDecision, PermissionMode};
+        if let Some(svc) = &self.permission_service {
+            let mode = svc.mode().await;
+            if matches!(
+                mode,
+                PermissionMode::BypassPermissions | PermissionMode::DontAsk | PermissionMode::Plan
+            ) {
+                return false;
+            }
+            let perms = self
+                .tools
+                .tool_manager
+                .get_tool(tool_name)
+                .map(|t| t.permissions())
+                .unwrap_or_default();
+            return svc
+                .check_with_permissions(tool_name, &serde_json::json!({}), &perms)
+                .await
+                .unwrap_or(PermissionDecision::RequireApproval)
+                .requires_approval();
+        }
+        false
+    }
+
+    /// `human-loop` feature stub — no approval ever required.
+    #[cfg(not(feature = "human-loop"))]
+    #[allow(dead_code)]
+    pub(crate) async fn tool_needs_approval(&self, _: &str) -> bool {
+        false
+    }
+
+    // ── Tool execution (full pipeline) ───────────────────────────────
+
+    /// Execute a single tool call with the full policy pipeline:
+    /// PreToolUse hooks → read-before-edit guard → execute → PostToolUse hooks → audit.
+    ///
+    /// Uses the unified ToolExecutionPipeline (15 stages) for consistent behavior
+    /// between streaming and non-streaming paths.
+    pub(crate) fn execute_tool_with_policy<'a>(
+        &'a self,
+        tool_name: &'a str,
+        params: &'a crate::tools::ToolParameters,
+        input: &'a serde_json::Value,
+    ) -> futures::future::BoxFuture<'a, std::result::Result<String, crate::error::ReactError>> {
+        Box::pin(async move {
+            // Use the unified pipeline for consistent behavior
+            let pipeline = self
+                .tool_execution_pipeline
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| {
+                    std::sync::Arc::new(
+                        crate::agent::react::run::pipeline::ToolExecutionPipeline::default_pipeline(
+                        ),
+                    )
+                });
+
+            let mut ctx = crate::agent::react::run::pipeline::ToolExecutionContext {
+                call_id: String::new(),
+                tool_name: tool_name.to_string(),
+                params: params.clone(),
+                input: input.clone(),
+                hook_messages: crate::agent::react::run::context::HookMessageBatches::default(),
+                result: None,
+                output: None,
+                blocked: false,
+                block_reason: None,
+                duration_ms: 0,
+                plan_mode: self.config.plan_mode,
+            };
+
+            match pipeline.run(&mut ctx, self).await {
+                Ok(()) => {
+                    // Check if execution was blocked
+                    if ctx.blocked {
+                        let reason = ctx
+                            .block_reason
+                            .unwrap_or_else(|| format!("Tool {} blocked", tool_name));
+                        return Ok(reason);
+                    }
+
+                    // Return the final output (after guard + truncation)
+                    if let Some(output) = ctx.output {
+                        Ok(output)
+                    } else if let Some(result) = ctx.result {
+                        Ok(result.output)
+                    } else {
+                        Err(crate::error::ReactError::Other(
+                            "Pipeline completed without result".into(),
+                        ))
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        })
+    }
 }

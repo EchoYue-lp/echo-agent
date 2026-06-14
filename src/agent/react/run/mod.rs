@@ -15,11 +15,13 @@ pub(crate) mod approval;
 pub(crate) mod context;
 pub(crate) mod direct;
 pub(crate) mod execution;
+pub(crate) mod phases;
 /// Tool execution pipeline — composable 13-stage middleware for tool calls.
 pub mod pipeline;
 pub(crate) mod processor;
 pub(crate) mod react_loop;
 pub(crate) mod retry;
 pub(crate) mod stream_channel;
+pub(crate) mod stream_macros;
 pub(crate) mod types;
 pub(crate) use types::StreamMode;

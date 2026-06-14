@@ -31,37 +31,6 @@ impl ReactAgent {
         service.add_rules(pending).await;
     }
 
-    /// Automatically capture a state snapshot according to the snapshot policy
-    #[allow(dead_code)]
-    pub(crate) async fn auto_snapshot(&self, iteration: usize) {
-        let should = self
-            .memory
-            .snapshot_manager
-            .read()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|mgr| mgr.should_capture(iteration));
-
-        if should {
-            let ctx = self.memory.context.lock().await;
-            let messages = ctx.messages().to_vec();
-            let id = self
-                .memory
-                .snapshot_manager
-                .write()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .capture(iteration, &messages);
-            debug!(
-                agent = %self.config.agent_name,
-                iteration = iteration,
-                snapshot_id = %id,
-                "📸 Auto-snapshot captured"
-            );
-        }
-    }
-
     #[allow(dead_code)]
     pub(crate) async fn log_user_input_audit(&self, content: &str) {
         if let Some(al) = &self.guard.audit_logger {

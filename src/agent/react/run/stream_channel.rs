@@ -2,65 +2,25 @@
 //!
 //! Uses a tokio::mpsc channel + spawned task instead of `try_stream!`.
 //! All streaming execution goes through this module.
+//!
+//! The body of [`AgentRunSnapshot::run_core_loop`] is a thin driver that
+//! sequences the phase functions in [`super::phases`]: the loop itself stays
+//! here so there is one — and only one — place to read the unified ReAct
+//! control flow. Each phase is responsible for a focused subset of work
+//! (audit, compaction, LLM call, tool execution, verification, finalization)
+//! and reports back via outcome enums; the driver translates those into
+//! either "continue", a terminal `finalize_*`, or an early return.
 
-use super::super::{ReactAgent, StepType, TOOL_FINAL_ANSWER};
-use super::processor::{build_tool_calls_from_map, process_stream_chunk};
+use super::super::ReactAgent;
+use super::phases::{self, IterOutcome, LoopState, PrepareOutcome};
 use super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
-use crate::error::{AgentError, ReactError, Result};
+use crate::error::Result;
 use crate::llm::types::Message;
-use crate::tools::{ToolParameters, is_read_tool, is_write_tool};
-use futures::StreamExt;
-use futures::future::join_all;
-use serde_json::Value;
-use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{Instrument, debug, info, info_span};
-
-// Default stream buffer capacity
-const DEFAULT_STREAM_BUFFER: usize = 256;
-
-macro_rules! yield_event {
-    ($tx:expr, $event:expr) => {
-        match $tx.try_send(Ok($event)) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Channel full — drop event and log
-                tracing::warn!(
-                    "Stream buffer full ({}), dropping event",
-                    DEFAULT_STREAM_BUFFER
-                );
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                return Ok(());
-            }
-        }
-    };
-}
-
-/// Like `yield_event!` but uses blocking `send().await` — MUST be used for
-/// terminal events (FinalAnswer) that the consumer needs to reset UI state.
-/// Dropping a FinalAnswer would leave the UI stuck in "Thinking..." forever.
-macro_rules! yield_final_event {
-    ($tx:expr, $event:expr) => {
-        if $tx.send(Ok($event)).await.is_err() {
-            // Receiver dropped — consumer is gone, exit gracefully.
-            return Ok(());
-        }
-    };
-}
-macro_rules! try_send {
-    ($tx:expr, $fallible:expr) => {
-        match $fallible {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = $tx.try_send(Err(e.into()));
-                return Ok(());
-            }
-        }
-    };
-}
+use tracing::debug;
 
 // ── ReactAgent: entry point ──────────────────────────────────────────
 
@@ -114,9 +74,8 @@ impl ReactAgent {
     }
 }
 
-// ── AgentSnapshot ────────────────────────────────────────────────────
+// ── AgentRunSnapshot: core loop driver ───────────────────────────────
 
-// AgentSnapshot is now AgentRunSnapshot from crate::agent::snapshot
 use crate::agent::snapshot::AgentRunSnapshot as AgentSnapshot;
 
 // Helper to create snapshot from agent (keeps the same API for rest of file)
@@ -125,14 +84,17 @@ fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
 }
 
 impl AgentSnapshot {
-    // ── Main loop ────────────────────────────────────────────────────
-
     /// Unified ReAct core loop — shared by both streaming and non-streaming paths.
     ///
     /// The non-streaming path (`run_react_loop`) creates a channel and runs this
     /// method, then collects `FinalAnswer` from the events. The streaming path
     /// (`run_stream_channel`) spawns this in a `tokio::spawn` and returns the
     /// receiver as a `BoxStream`.
+    ///
+    /// This body is intentionally thin: each block of work lives in
+    /// [`super::phases`]. The single `for iteration in 0..max_iterations` loop
+    /// is the project's only ReAct loop — phase functions are called from
+    /// here, never from a sibling driver.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_core_loop(
         self,
@@ -148,980 +110,108 @@ impl AgentSnapshot {
         // (acquired in run_stream_channel via lock_owned()), so we don't
         // need to lock again here.
 
-        let agent = self.config.agent_name.clone();
-        let callbacks = self.config.callbacks.clone();
-
-        match mode {
-            StreamMode::Execute => info!(agent = %agent, "Agent streaming task execution{label}"),
-            StreamMode::Chat => info!(agent = %agent, "Agent streaming conversation{label}"),
-        }
-        if recalled > 0 {
-            yield_event!(tx, AgentEvent::MemoryRecalled { count: recalled });
-        }
-
-        // Audit: user input
-        if let Some(al) = &self.guard.audit_logger {
-            let event = crate::audit::AuditEvent::now(
-                self.config.session_id.clone(),
-                self.config.agent_name.clone(),
-                crate::audit::AuditEventType::UserInput {
-                    content: text.clone(),
-                },
-            );
-            let _ = al.log(event).await;
-        }
-
-        // UserPromptSubmit hook
+        // ── Pre-loop preparation ─────────────────────────────────────
+        let mut state = match phases::prepare::prepare_turn(
+            &self, &context, &tx, &text, &label, mode, recalled,
+        )
+        .await?
         {
-            let hook_ctx = crate::skills::hooks::HookContext::for_user_prompt_submit(
-                &text,
-                None,
-                self.config.session_id.as_deref().unwrap_or(""),
-                &self.config.agent_name,
-            );
-            let registry = self.tools.hook_registry.read().await.clone();
-            let result = registry.run_lifecycle_hooks(&hook_ctx).await;
-            if result.block {
-                yield_final_event!(
-                    tx,
-                    AgentEvent::FinalAnswer(format!(
-                        "Blocked by UserPromptSubmit hook: {}",
-                        result.block_reason.unwrap_or_default()
-                    ))
-                );
-                self.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
-                    .await;
-                return Ok(());
-            }
-            if let Some(ctx) = &result.injected_context {
-                context.lock().await.push(Message::system(ctx.clone()));
-            }
-            for msg in &result.messages {
-                context.lock().await.push(Message::system(msg.clone()));
-            }
-        }
+            PrepareOutcome::Continue { task_node_id } => LoopState::new(task_node_id),
+            PrepareOutcome::BlockedAndDone | PrepareOutcome::Abandoned => return Ok(()),
+        };
 
-        let mut stop_hook_continued = false;
-        let mut verifier_retry_count = 0usize;
+        let agent_name = self.config.agent_name.clone();
 
-        // Create TaskNode for this execution turn (DAG tracking)
-        let task_node_id = self.create_execution_node(&text).await;
-
+        // ── The single core ReAct loop ───────────────────────────────
         for iteration in 0..self.config.max_iterations {
-            for cb in &callbacks {
-                cb.on_iteration(&agent, iteration).await;
+            for cb in self.config.callbacks.iter() {
+                cb.on_iteration(&agent_name, iteration).await;
             }
-            debug!(agent = %agent, iteration = iteration + 1, "--- Streaming iteration{label} ---");
+            debug!(
+                agent = %agent_name,
+                iteration = iteration + 1,
+                "--- Streaming iteration{label} ---",
+            );
 
-            self.fire_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
-                .await;
-            // Save checkpoint before compression (preserves full context)
-            self.save_runtime_checkpoint(&context, None).await;
-            let prepare_result = try_send!(tx, context.lock().await.prepare(None).await);
-
-            if let Some(ref stats) = prepare_result.compressed {
-                yield_event!(
-                    tx,
-                    AgentEvent::ContextCompressed {
-                        before_count: stats.before_count,
-                        after_count: stats.after_count,
-                        before_tokens: stats.before_tokens,
-                        after_tokens: stats.after_tokens,
-                    }
-                );
-                let hs = crate::skills::hooks::CompressHookStats {
-                    before_count: stats.before_count,
-                    after_count: stats.after_count,
-                    before_tokens: stats.before_tokens,
-                    after_tokens: stats.after_tokens,
+            // Compact: PreCompact hook → checkpoint → ContextManager.prepare
+            //          → PostCompact hook (if compression occurred)
+            let messages =
+                match phases::compact::run_compact(&self, &context, &tx, iteration).await? {
+                    phases::CompactOutcome::Continue(m) => m,
+                    phases::CompactOutcome::Abandoned => return Ok(()),
                 };
-                let hc = crate::skills::hooks::HookContext::for_post_compact(
-                    &hs,
-                    "auto",
-                    self.config.session_id.as_deref().unwrap_or(""),
-                    &self.config.agent_name,
-                );
-                let reg = self.tools.hook_registry.read().await.clone();
-                let r = reg.run_lifecycle_hooks(&hc).await;
-                if let Some(c) = &r.injected_context {
-                    context
-                        .lock()
-                        .await
-                        .push(Message::system(format!("[Hook:PostCompact] {}", c)));
-                }
-                for m in &r.messages {
-                    context.lock().await.push(Message::system(m.clone()));
-                }
-            }
 
-            let messages = prepare_result.messages;
-            for cb in &callbacks {
-                cb.on_think_start(&agent, &messages).await;
-            }
+            // Think: callbacks + interventions + LLM stream → buffered output
+            let think =
+                match phases::think::run_think(&self, &context, &tx, &mut state, messages).await? {
+                    phases::ThinkOutcome::Continue(t) => t,
+                    phases::ThinkOutcome::Abandoned
+                    | phases::ThinkOutcome::Cancelled
+                    | phases::ThinkOutcome::Blocked => return Ok(()),
+                };
 
-            // ── Intervention callbacks for think (streaming path) ──
-            for intervention in &self.tools.intervention_callbacks {
-                let result = intervention.on_think_start(&agent, &messages).await;
-                if result.cancel {
-                    if let Some(ref node_id) = task_node_id {
-                        self.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
-                            .await;
-                    }
-                    let _ = tx.try_send(Err(ReactError::Other(
-                        "Agent execution cancelled by intervention at think".into(),
-                    )));
-                    return Ok(());
-                }
-                if result.block {
-                    let reason = result
-                        .block_reason
-                        .unwrap_or_else(|| "blocked by intervention at think".into());
-                    if let Some(ref node_id) = task_node_id {
-                        self.update_node_status(
-                            node_id,
-                            crate::state::TaskNodeStatus::Blocked {
-                                reason: reason.clone(),
-                            },
+            // Branch: tool calls vs text answer vs no-response
+            let outcome = if !think.tool_call_map.is_empty() {
+                phases::tools::run_tools(&self, &context, &tx, &mut state, iteration, think, &label)
+                    .await?
+            } else if !think.content_buffer.is_empty() {
+                let pt = think.pt;
+                let ct = think.ct;
+                match phases::verify::verify_final_text(
+                    &self, &context, &tx, &mut state, iteration, think, &label,
+                )
+                .await?
+                {
+                    IterOutcome::Continue => continue,
+                    IterOutcome::FinalText { answer } => {
+                        match phases::finalize::emit_final_text(
+                            &self, &context, &tx, &mut state, iteration, pt, ct, answer,
                         )
-                        .await;
-                    }
-                    let _ = tx.try_send(Err(ReactError::Other(format!(
-                        "Think blocked by intervention: {}",
-                        reason
-                    ))));
-                    return Ok(());
-                }
-                if let Some(injected) = result.injected_context {
-                    context.lock().await.push(Message::system(injected));
-                }
-            }
-
-            let mut llm_stream = Box::pin(try_send!(
-                tx,
-                self.create_llm_stream(messages.clone()).await
-            ));
-            let mut content_buffer = String::new();
-            let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
-            let mut last_usage = None;
-            let mut in_reasoning = false;
-
-            while let Some(cr) = llm_stream.next().await {
-                let chunk = try_send!(tx, cr);
-                if chunk.usage.is_some() {
-                    last_usage = chunk.usage.clone();
-                }
-                for event in process_stream_chunk(
-                    &chunk,
-                    &mut content_buffer,
-                    &mut tool_call_map,
-                    &mut in_reasoning,
-                ) {
-                    yield_event!(tx, event);
-                }
-            }
-
-            let pt = last_usage
-                .as_ref()
-                .and_then(|u| u.prompt_tokens)
-                .unwrap_or(0) as usize;
-            let ct = last_usage
-                .as_ref()
-                .and_then(|u| u.completion_tokens)
-                .unwrap_or(0) as usize;
-
-            // Record usage in the token tracker for cumulative tracking
-            if let Some(ref u) = last_usage {
-                self.token_tracker.record_usage(u);
-            }
-
-            if in_reasoning {
-                yield_event!(
-                    tx,
-                    AgentEvent::ThinkEnd {
-                        prompt_tokens: pt,
-                        completion_tokens: ct
-                    }
-                );
-            }
-
-            if !tool_call_map.is_empty() {
-                let (msg_tc, steps) = build_tool_calls_from_map(&tool_call_map);
-                yield_event!(
-                    tx,
-                    AgentEvent::ToolBatchStart {
-                        tool_count: steps.len()
-                    }
-                );
-                for (_, name, args) in &steps {
-                    yield_event!(
-                        tx,
-                        AgentEvent::ToolCall {
-                            name: name.clone(),
-                            args: args.clone()
-                        }
-                    );
-                }
-                {
-                    let ts: Vec<StepType> = steps
-                        .iter()
-                        .map(|(id, n, a)| StepType::Call {
-                            tool_call_id: id.clone(),
-                            function_name: n.clone(),
-                            arguments: a.clone(),
-                        })
-                        .collect();
-                    for cb in &callbacks {
-                        cb.on_think_end(&agent, &ts, pt, ct).await;
-                    }
-                }
-                context
-                    .lock()
-                    .await
-                    .push(Message::assistant_with_tools(msg_tc));
-
-                #[cfg(feature = "human-loop")]
-                let (appr, conc) = {
-                    let mut a = vec![];
-                    let mut c = vec![];
-                    for s in steps {
-                        if self.tool_needs_approval(&s.1).await {
-                            a.push(s);
-                        } else {
-                            c.push(s);
+                        .await?
+                        {
+                            ControlFlow::Continue(()) => continue,
+                            ControlFlow::Break(()) => return Ok(()),
                         }
                     }
-                    (a, c)
-                };
-                #[cfg(not(feature = "human-loop"))]
-                #[allow(clippy::type_complexity)]
-                let (appr, conc): (
-                    Vec<(String, String, Value)>,
-                    Vec<(String, String, Value)>,
-                ) = (vec![], steps);
-
-                if !conc.is_empty() {
-                    let mc = self.tools.tool_manager.max_concurrency();
-                    let snapshot = self.clone();
-                    let futs: Vec<_> = conc
-                        .iter()
-                        .map(|(_, n, a)| {
-                            let snapshot = snapshot.clone();
-                            let name = n.clone();
-                            let args = a.clone();
-                            async move {
-                                let params = if let Value::Object(m) = &args {
-                                    m.clone().into_iter().collect()
-                                } else {
-                                    HashMap::new()
-                                };
-                                snapshot
-                                    .execute_tool_with_policy(&name, &params, &args)
-                                    .await
-                            }
-                            .instrument(info_span!("tool", tool.name = %n))
-                        })
-                        .collect();
-                    let bt = super::retry::compute_concurrent_tool_batch_timeout(
-                        &self.config.tool_execution,
-                        futs.len(),
-                        mc,
-                    );
-                    let results: Vec<std::result::Result<String, ReactError>>;
-                    if let Some(to) = bt {
-                        results = try_send!(
-                            tx,
-                            tokio::time::timeout(to, join_all(futs)).await.map_err(|_| {
-                                ReactError::from(crate::error::ToolError::Timeout(
-                                    "batch timeout".into(),
-                                ))
-                            })
-                        );
-                    } else {
-                        results = join_all(futs).await;
-                    }
-
-                    for ((id, fname, _), result) in conc.into_iter().zip(results) {
-                        match result {
-                            Ok(output) => {
-                                yield_event!(
-                                    tx,
-                                    AgentEvent::ToolResult {
-                                        name: fname.clone(),
-                                        output: output.clone()
-                                    }
-                                );
-                                context.lock().await.push(Message::tool_result(
-                                    id,
-                                    fname.clone(),
-                                    output.clone(),
-                                ));
-                                if fname == TOOL_FINAL_ANSWER {
-                                    // Verify answer before accepting
-                                    if self
-                                        .verify_answer(&context, &output, verifier_retry_count)
-                                        .await
-                                    {
-                                        return self
-                                            .finish(
-                                                context,
-                                                agent,
-                                                callbacks,
-                                                label,
-                                                &output,
-                                                iteration,
-                                                stop_hook_continued,
-                                                tx,
-                                                task_node_id.clone(),
-                                            )
-                                            .await;
-                                    }
-                                    // Verifier failed — continue loop for self-correction
-                                    verifier_retry_count += 1;
-                                }
-                            }
-                            Err(error) => {
-                                yield_event!(
-                                    tx,
-                                    AgentEvent::ToolError {
-                                        name: fname.clone(),
-                                        error: error.to_string()
-                                    }
-                                );
-                                context.lock().await.push(Message::tool_result(
-                                    id,
-                                    fname.clone(),
-                                    format!("[Error] {error}"),
-                                ));
-                                // Checkpoint on tool error for recovery
-                                self.save_runtime_checkpoint(
-                                    &context,
-                                    Some(format!("Tool error: {fname}")),
-                                )
-                                .await;
-                            }
-                        }
-                    }
+                    other => other,
                 }
-
-                for (id, fname, args) in appr {
-                    let params = if let Value::Object(m) = &args {
-                        m.clone().into_iter().collect()
-                    } else {
-                        HashMap::new()
-                    };
-                    match self.execute_tool_with_policy(&fname, &params, &args).await {
-                        Ok(truncated) => {
-                            yield_event!(
-                                tx,
-                                AgentEvent::ToolResult {
-                                    name: fname.clone(),
-                                    output: truncated.clone()
-                                }
-                            );
-                            context.lock().await.push(Message::tool_result(
-                                id,
-                                fname.clone(),
-                                truncated.clone(),
-                            ));
-                            if fname == TOOL_FINAL_ANSWER {
-                                // Verify answer before accepting
-                                if self
-                                    .verify_answer(&context, &truncated, verifier_retry_count)
-                                    .await
-                                {
-                                    return self
-                                        .finish(
-                                            context,
-                                            agent,
-                                            callbacks,
-                                            label,
-                                            &truncated,
-                                            iteration,
-                                            stop_hook_continued,
-                                            tx,
-                                            task_node_id.clone(),
-                                        )
-                                        .await;
-                                }
-                                // Verifier failed — continue loop for self-correction
-                                verifier_retry_count += 1;
-                            }
-                        }
-                        Err(error) => {
-                            yield_event!(
-                                tx,
-                                AgentEvent::ToolError {
-                                    name: fname.clone(),
-                                    error: error.to_string()
-                                }
-                            );
-                            context.lock().await.push(Message::tool_result(
-                                id,
-                                fname.clone(),
-                                format!("[Error] {error}"),
-                            ));
-                            // Checkpoint on tool error for recovery
-                            self.save_runtime_checkpoint(
-                                &context,
-                                Some(format!("Tool error: {fname}")),
-                            )
-                            .await;
-                        }
-                    }
-                }
-                yield_event!(tx, AgentEvent::ToolBatchEnd);
-                self.auto_snapshot(&context, iteration).await;
-
-                // Periodic runtime checkpoint based on configured interval
-                let interval = self.config.react_checkpoint_interval;
-                if interval > 0 && (iteration + 1) % interval == 0 {
-                    self.save_runtime_checkpoint(&context, None).await;
-                }
-            } else if !content_buffer.is_empty() {
-                // Verify text-only answer before accepting
-                if !self
-                    .verify_answer(&context, &content_buffer, verifier_retry_count)
-                    .await
-                {
-                    // Push the LLM's answer to context so it can see its own attempt
-                    context
-                        .lock()
-                        .await
-                        .push(Message::assistant(content_buffer.clone()));
-                    verifier_retry_count += 1;
-                    continue; // Continue loop for self-correction
-                }
-
-                let ts = vec![StepType::Thought(content_buffer.clone())];
-                for cb in &callbacks {
-                    cb.on_think_end(&agent, &ts, pt, ct).await;
-                    cb.on_final_answer(&agent, &content_buffer).await;
-                }
-                context
-                    .lock()
-                    .await
-                    .push(Message::assistant(content_buffer.clone()));
-                self.auto_snapshot(&context, iteration).await;
-                if let Some(al) = &self.guard.audit_logger {
-                    let ev = crate::audit::AuditEvent::now(
-                        self.config.session_id.clone(),
-                        self.config.agent_name.clone(),
-                        crate::audit::AuditEventType::FinalAnswer {
-                            content: content_buffer.clone(),
-                        },
-                    );
-                    let _ = al.log(ev).await;
-                }
-                // Rich runtime checkpoint (messages + plan + skills + blocked reason)
-                self.save_runtime_checkpoint(&context, None).await;
-                // Persist user-visible transcript projection — single source of
-                // truth for GUI/TUI history. Product layers should rely on this
-                // instead of re-implementing save_messages on every chat turn.
-                self.save_transcript_projection(&context).await;
-                // Update TaskNode to Success
-                if let Some(ref node_id) = task_node_id {
-                    self.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
-                        .await;
-                }
-                // Finalize trace before moving content_buffer into the event
-                self.finalize_run(
-                    crate::trace::RunStatus::Completed,
-                    Some(&content_buffer),
-                    None,
-                )
-                .await;
-                yield_final_event!(tx, AgentEvent::FinalAnswer(content_buffer));
-                let hc = crate::skills::hooks::HookContext::for_stop(
-                    None,
-                    self.config.session_id.as_deref().unwrap_or(""),
-                    &self.config.agent_name,
-                    stop_hook_continued,
-                );
-                let reg = self.tools.hook_registry.read().await.clone();
-                let sr = reg.run_lifecycle_hooks(&hc).await;
-                if let Some(reason) = &sr.continue_reason
-                    && !stop_hook_continued
-                {
-                    context
-                        .lock()
-                        .await
-                        .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
-                    stop_hook_continued = true;
-                    continue;
-                }
-                self.fire_hook(
-                    crate::skills::hooks::HookEvent::SessionEnd,
-                    Some("complete"),
-                )
-                .await;
-                return Ok(());
             } else {
-                self.finalize_run(
-                    crate::trace::RunStatus::Failed,
-                    None,
-                    Some("No response from LLM"),
-                )
-                .await;
-                if let Some(ref node_id) = task_node_id {
-                    self.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
-                        .await;
-                }
-                let _ = tx.try_send(Err(ReactError::Agent(Box::new(AgentError::NoResponse {
-                    model: self.config.model_name.clone(),
-                    agent: self.config.agent_name.clone(),
-                }))));
-                return Ok(());
-            }
-        }
-
-        self.fire_hook(
-            crate::skills::hooks::HookEvent::SessionEnd,
-            Some("max_iterations"),
-        )
-        .await;
-        self.fire_hook(
-            crate::skills::hooks::HookEvent::StopFailure,
-            Some("max_iterations"),
-        )
-        .await;
-        // Save runtime checkpoint with blocked reason before failing
-        self.save_runtime_checkpoint(&context, Some("Max iterations exceeded".to_string()))
-            .await;
-        // Even on failure we save the transcript so the user sees what was
-        // attempted in the GUI/TUI history pane.
-        self.save_transcript_projection(&context).await;
-        // Update TaskNode to Failed
-        if let Some(ref node_id) = task_node_id {
-            self.update_node_status(node_id, crate::state::TaskNodeStatus::Failed)
-                .await;
-        }
-        self.finalize_run(
-            crate::trace::RunStatus::Failed,
-            None,
-            Some("Max iterations exceeded"),
-        )
-        .await;
-        let _ = tx.try_send(Err(ReactError::Agent(Box::new(
-            AgentError::MaxIterationsExceeded(self.config.max_iterations),
-        ))));
-        Ok(())
-    }
-
-    // ── Helpers ──────────────────────────────────────────────────────
-
-    async fn create_llm_stream(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<impl futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>>> {
-        let tools = if self.config.enable_tool {
-            let t = self.tools.tool_manager.get_openai_tools();
-            if t.is_empty() { None } else { Some(t) }
-        } else {
-            None
-        };
-        let cancel = self.cancel_token.clone();
-        super::retry::retry_llm_call(
-            &self.config.agent_name,
-            self.config.llm_max_retries,
-            self.config.llm_retry_delay_ms,
-            &self.guard.circuit_breaker,
-            || {
-                let c = self.client.clone();
-                let m = self.config.model_name.clone();
-                let ms = messages.clone();
-                let t = tools.clone();
-                let ct = cancel.clone();
-                async move {
-                    crate::llm::stream_chat(
-                        c,
-                        &m,
-                        ms,
-                        self.config.temperature,
-                        self.config.max_tokens,
-                        t,
-                        None,
-                        None,
-                        ct,
-                    )
-                    .await
-                }
-            },
-        )
-        .await
-    }
-
-    async fn fire_hook(&self, event: crate::skills::hooks::HookEvent, matcher: Option<&str>) {
-        let sid = self.config.session_id.clone().unwrap_or_default();
-        let hc = match event {
-            crate::skills::hooks::HookEvent::SessionEnd => {
-                crate::skills::hooks::HookContext::for_session_end(
-                    matcher.unwrap_or("other"),
-                    &sid,
-                    &self.config.agent_name,
-                )
-            }
-            crate::skills::hooks::HookEvent::PreCompact => {
-                crate::skills::hooks::HookContext::for_pre_compact(
-                    &Default::default(),
-                    matcher.unwrap_or("auto"),
-                    &sid,
-                    &self.config.agent_name,
-                )
-            }
-            crate::skills::hooks::HookEvent::StopFailure => {
-                crate::skills::hooks::HookContext::for_stop_failure(
-                    "",
-                    matcher.unwrap_or(""),
-                    &sid,
-                    &self.config.agent_name,
-                )
-            }
-            _ => return,
-        };
-        let reg = self.tools.hook_registry.read().await.clone();
-        let _ = reg.run_lifecycle_hooks(&hc).await;
-    }
-
-    async fn auto_snapshot(
-        &self,
-        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
-        iteration: usize,
-    ) {
-        let should_capture = {
-            let mgr = self.snapshot_manager.read().unwrap();
-            mgr.as_ref().is_some_and(|m| m.should_capture(iteration))
-            // RwLockReadGuard dropped here — before any await
-        };
-        if should_capture {
-            let ctx = context.lock().await;
-            let ms = ctx.messages().to_vec();
-            drop(ctx);
-            if let Some(ref mut m) = *self.snapshot_manager.write().unwrap() {
-                m.capture(iteration, &ms);
-            }
-        }
-    }
-
-    #[cfg(feature = "human-loop")]
-    async fn tool_needs_approval(&self, tool_name: &str) -> bool {
-        use crate::tools::permission::{PermissionDecision, PermissionMode};
-        if let Some(svc) = &self.permission_service {
-            let mode = svc.mode().await;
-            if matches!(
-                mode,
-                PermissionMode::BypassPermissions | PermissionMode::DontAsk | PermissionMode::Plan
-            ) {
-                return false;
-            }
-            let perms = self
-                .tools
-                .tool_manager
-                .get_tool(tool_name)
-                .map(|t| t.permissions())
-                .unwrap_or_default();
-            return svc
-                .check_with_permissions(tool_name, &serde_json::json!({}), &perms)
-                .await
-                .unwrap_or(PermissionDecision::RequireApproval)
-                .requires_approval();
-        }
-        false
-    }
-    #[cfg(not(feature = "human-loop"))]
-    #[allow(dead_code)]
-    async fn tool_needs_approval(&self, _: &str) -> bool {
-        false
-    }
-
-    /// Verify a final answer with the configured Critic.
-    ///
-    /// Returns `true` if the answer passes verification (or verification is disabled).
-    /// Returns `false` if the answer fails and feedback has been injected into
-    /// the context for self-correction.
-    async fn verify_answer(
-        &self,
-        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
-        answer: &str,
-        retry_count: usize,
-    ) -> bool {
-        // Skip if verifier is disabled or no critic is configured
-        if !self.config.verifier_enabled {
-            return true;
-        }
-        let Some(ref critic) = self.critic else {
-            return true;
-        };
-        // Don't retry beyond max (but always allow the first check)
-        if retry_count > 0 && retry_count >= self.config.verifier_max_retries {
-            tracing::info!(
-                retries = retry_count,
-                "Verifier max retries reached, accepting answer"
-            );
-            return true;
-        }
-
-        let task_description = {
-            let ctx = context.lock().await;
-            // Use the last user message as the task description
-            ctx.messages()
-                .iter()
-                .rev()
-                .find(|m| m.role == echo_core::llm::types::Role::User)
-                .map(|m| {
-                    m.content
-                        .as_text()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default()
-        };
-
-        match critic.critique(&task_description, answer, "").await {
-            Ok(critique) => {
-                if critique.passed || critique.score >= self.config.verifier_min_score {
-                    tracing::debug!(score = critique.score, "Verifier passed, accepting answer");
-                    true
-                } else {
-                    let feedback = format!(
-                        "[Verifier feedback] Score: {}/10 (min: {}). {}\nSuggestions: {}",
-                        critique.score,
-                        self.config.verifier_min_score,
-                        critique.feedback,
-                        if critique.suggestions.is_empty() {
-                            "N/A".to_string()
-                        } else {
-                            critique.suggestions.join(", ")
-                        },
-                    );
-                    tracing::info!(
-                        score = critique.score,
-                        retry = retry_count + 1,
-                        max = self.config.verifier_max_retries,
-                        "Verifier rejected answer, injecting feedback for self-correction"
-                    );
-                    context.lock().await.push(Message::system(feedback));
-                    false
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Verifier critique failed, accepting answer");
-                true // Fail-open: accept answer if critique itself errors
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn finish(
-        &self,
-        context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
-        agent: String,
-        callbacks: Vec<Arc<dyn crate::agent::AgentCallback>>,
-        label: String,
-        output: &str,
-        _iteration: usize,
-        stop_hook_continued: bool,
-        tx: mpsc::Sender<Result<AgentEvent>>,
-        task_node_id: Option<String>,
-    ) -> Result<()> {
-        for cb in &callbacks {
-            cb.on_final_answer(&agent, output).await;
-        }
-
-        // ── Intervention callbacks for final answer (streaming path) ──
-        for intervention in &self.tools.intervention_callbacks {
-            let result = intervention.on_final_answer(&agent, output).await;
-            if result.cancel {
-                return Err(ReactError::Other(
-                    "Agent execution cancelled by intervention at final answer".into(),
-                ));
-            }
-            if result.block {
-                let reason = result
-                    .block_reason
-                    .unwrap_or_else(|| "blocked by intervention at final answer".into());
-                info!(agent = %agent, reason = %reason, "Intervention blocked final answer (streaming)");
-                return Err(ReactError::Other(format!(
-                    "Final answer blocked by intervention: {}",
-                    reason
-                )));
-            }
-            if let Some(injected) = result.injected_context {
-                context.lock().await.push(Message::system(injected));
-            }
-        }
-
-        info!(agent = %agent, "Streaming execution completed{label}");
-        if let Some(al) = &self.guard.audit_logger {
-            let ev = crate::audit::AuditEvent::now(
-                self.config.session_id.clone(),
-                self.config.agent_name.clone(),
-                crate::audit::AuditEventType::FinalAnswer {
-                    content: output.to_string(),
-                },
-            );
-            let _ = al.log(ev).await;
-        }
-        // Rich runtime checkpoint
-        self.save_runtime_checkpoint(&context, None).await;
-        // Persist transcript projection so product layers see the final state.
-        self.save_transcript_projection(&context).await;
-        // Update TaskNode to Success
-        if let Some(ref node_id) = task_node_id {
-            self.update_node_status(node_id, crate::state::TaskNodeStatus::Success)
-                .await;
-        }
-        yield_final_event!(tx, AgentEvent::FinalAnswer(output.to_string()));
-        let hc = crate::skills::hooks::HookContext::for_stop(
-            None,
-            self.config.session_id.as_deref().unwrap_or(""),
-            &self.config.agent_name,
-            stop_hook_continued,
-        );
-        let reg = self.tools.hook_registry.read().await.clone();
-        let sr = reg.run_lifecycle_hooks(&hc).await;
-        if let Some(reason) = &sr.continue_reason
-            && !stop_hook_continued
-        {
-            context
-                .lock()
-                .await
-                .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
-        }
-        self.fire_hook(
-            crate::skills::hooks::HookEvent::SessionEnd,
-            Some("complete"),
-        )
-        .await;
-        Ok(())
-    }
-
-    /// Execute a single tool call with the full policy pipeline:
-    /// PreToolUse hooks → read-before-edit guard → execute → PostToolUse hooks → audit.
-    ///
-    /// Uses the unified ToolExecutionPipeline (15 stages) for consistent behavior
-    /// between streaming and non-streaming paths.
-    fn execute_tool_with_policy<'a>(
-        &'a self,
-        tool_name: &'a str,
-        params: &'a ToolParameters,
-        input: &'a Value,
-    ) -> futures::future::BoxFuture<'a, std::result::Result<String, crate::error::ReactError>> {
-        Box::pin(async move {
-            // Use the unified pipeline for consistent behavior
-            let pipeline = self
-                .tool_execution_pipeline
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| {
-                    std::sync::Arc::new(
-                        crate::agent::react::run::pipeline::ToolExecutionPipeline::default_pipeline(
-                        ),
-                    )
-                });
-
-            let mut ctx = crate::agent::react::run::pipeline::ToolExecutionContext {
-                call_id: String::new(),
-                tool_name: tool_name.to_string(),
-                params: params.clone(),
-                input: input.clone(),
-                hook_messages: crate::agent::react::run::context::HookMessageBatches::default(),
-                result: None,
-                output: None,
-                blocked: false,
-                block_reason: None,
-                duration_ms: 0,
-                plan_mode: self.config.plan_mode,
+                IterOutcome::NoResponse
             };
 
-            match pipeline.run(&mut ctx, self).await {
-                Ok(()) => {
-                    // Check if execution was blocked
-                    if ctx.blocked {
-                        let reason = ctx
-                            .block_reason
-                            .unwrap_or_else(|| format!("Tool {} blocked", tool_name));
-                        return Ok(reason);
-                    }
-
-                    // Return the final output (after guard + truncation)
-                    if let Some(output) = ctx.output {
-                        Ok(output)
-                    } else if let Some(result) = ctx.result {
-                        Ok(result.output)
-                    } else {
-                        Err(crate::error::ReactError::Other(
-                            "Pipeline completed without result".into(),
-                        ))
+            match outcome {
+                IterOutcome::Continue => continue,
+                IterOutcome::Finish { output } => {
+                    return phases::finalize::finalize_completed_run(
+                        &self, context, &label, &output, iteration, &state, tx,
+                    )
+                    .await;
+                }
+                // FinalText is only produced by verify_final_text and is
+                // already handled inline in the text branch above. Reaching
+                // it here would mean a phase returned an outcome out of band
+                // — guard against future refactors by treating it as a
+                // terminal text emission.
+                IterOutcome::FinalText { answer } => {
+                    let pt = 0;
+                    let ct = 0;
+                    match phases::finalize::emit_final_text(
+                        &self, &context, &tx, &mut state, iteration, pt, ct, answer,
+                    )
+                    .await?
+                    {
+                        ControlFlow::Continue(()) => continue,
+                        ControlFlow::Break(()) => return Ok(()),
                     }
                 }
-                Err(e) => Err(e),
-            }
-        })
-    }
-
-    fn validate_read_before_edit(
-        &self,
-        tool_name: &str,
-        params: &ToolParameters,
-    ) -> std::result::Result<(), crate::error::ReactError> {
-        if !self.config.force_read_before_edit || !is_write_tool(tool_name) {
-            return Ok(());
-        }
-
-        if let Some(path) = extract_path_param(params) {
-            let canonical = canonicalize_for_read_tracking(&path);
-            let ttl = std::time::Duration::from_secs(30 * 60);
-            let mut files = self
-                .recently_read_files
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let read = match files.get(&canonical) {
-                Some(instant) if instant.elapsed() < ttl => true,
-                Some(_) => {
-                    files.remove(&canonical);
-                    false
+                IterOutcome::NoResponse => {
+                    return phases::finalize::finalize_no_response(&self, &state, tx).await;
                 }
-                None => false,
-            };
-            drop(files);
-            if !read {
-                return Err(crate::error::ReactError::Other(format!(
-                    "Read-before-edit is enabled. File '{}' has not been read in this conversation turn. Use read_file to read it first, then retry this operation.",
-                    path
-                )));
+                IterOutcome::Abandoned => return Ok(()),
             }
         }
 
-        Ok(())
+        // ── Post-loop: max iterations exceeded ───────────────────────
+        phases::finalize::finalize_max_iterations(&self, &context, &state, tx).await
     }
-
-    fn record_file_read_if_needed(&self, tool_name: &str, params: &ToolParameters) {
-        if !self.config.force_read_before_edit || !is_read_tool(tool_name) {
-            return;
-        }
-
-        if let Some(path) = extract_path_param(params) {
-            let canonical = canonicalize_for_read_tracking(&path);
-            self.recently_read_files
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(canonical, std::time::Instant::now());
-        }
-    }
-}
-
-// ── Read-before-edit helpers ─────────────────────────────────────────────────
-
-fn extract_path_param(params: &ToolParameters) -> Option<String> {
-    params
-        .get("path")
-        .or_else(|| params.get("file_path"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-fn canonicalize_for_read_tracking(path: &str) -> String {
-    std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string())
 }
