@@ -46,34 +46,33 @@ pub trait Skill: Send + Sync {
 }
 ```
 
-**Example: Calculator Skill**
+**Example: Research Skill**
 
 ```rust
-pub struct CalculatorSkill;
+pub struct ResearchSkill;
 
-impl Skill for CalculatorSkill {
-    fn name(&self) -> &str { "calculator" }
-    
-    fn description(&self) -> &str { 
-        "Mathematical computation capability, supporting addition, subtraction, multiplication, and division" 
+impl Skill for ResearchSkill {
+    fn name(&self) -> &str { "research" }
+
+    fn description(&self) -> &str {
+        "Web research capability: searches the web and summarizes findings"
     }
-    
+
     fn tools(&self) -> Vec<Box<dyn Tool>> {
         vec![
-            Box::new(AddTool),
-            Box::new(SubtractTool),
-            Box::new(MultiplyTool),
-            Box::new(DivideTool),
+            Box::new(SearchTool),
+            Box::new(FetchTool),
+            Box::new(SummarizeTool),
         ]
     }
-    
+
     fn system_prompt_injection(&self) -> Option<String> {
-        Some("You have precise mathematical computation capabilities. For any mathematical computation task, use the calculator tools.".into())
+        Some("You have web research capabilities. When you need fresh information, first call search, then fetch the most relevant pages and summarize.".into())
     }
 }
 
 // Registration
-agent.add_skill(Box::new(CalculatorSkill));
+agent.add_skill(Box::new(ResearchSkill));
 ```
 
 ### 2. File-based Skills
@@ -303,25 +302,25 @@ use echo_agent::prelude::*;
 use echo_agent::skills::Skill;
 
 // Define a Skill
-struct WeatherSkill;
+struct GitWorkflowSkill;
 
-impl Skill for WeatherSkill {
-    fn name(&self) -> &str { "weather" }
-    fn description(&self) -> &str { "Weather query capability" }
+impl Skill for GitWorkflowSkill {
+    fn name(&self) -> &str { "git-workflow" }
+    fn description(&self) -> &str { "Git operations: branches, commits, PR/MR, conflict resolution" }
     fn tools(&self) -> Vec<Box<dyn Tool>> {
         vec![
-            Box::new(GetWeatherTool),
-            Box::new(GetForecastTool),
+            Box::new(GitStatusTool),
+            Box::new(GitDiffTool),
         ]
     }
     fn system_prompt_injection(&self) -> Option<String> {
-        Some("You can query real-time weather and forecasts for cities worldwide.".into())
+        Some("You can perform git workflow operations. Always check status before making changes.".into())
     }
 }
 
 // Registration
 let mut agent = ReactAgentBuilder::simple("qwen3-max", "Assistant")?;
-agent.add_skill(Box::new(WeatherSkill));
+agent.add_skill(Box::new(GitWorkflowSkill));
 ```
 
 ### File-based Skill
@@ -374,16 +373,15 @@ echo-agent's Skill system is aligned with the [agentskills.io](https://agentskil
 ```rust
 fn system_prompt_injection(&self) -> Option<String> {
     Some(r#"
-## Calculator Skill
+## Research Skill
 
-You have precise mathematical computation capabilities. Use the following tools for calculations:
+You have web research capabilities. Use the following tools:
 
-- add: Add two numbers
-- subtract: Subtract two numbers
-- multiply: Multiply two numbers
-- divide: Divide two numbers
+- search: search the web with a query
+- fetch: download a specific URL's contents
+- summarize: condense a fetched page
 
-Note: When dividing, check that the divisor is not zero.
+Note: prefer authoritative sources; cross-check claims across at least two pages.
 "#.into())
 }
 ```

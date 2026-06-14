@@ -56,7 +56,6 @@
 | [36 - 数据质量与统计](36-data-quality-statistics.md) | Data Quality / Statistics | 数据画像、异常检测、描述统计、相关性分析 |
 | [37 - 代码搜索](37-code-search.md) | Code Search | Ripgrep、结构化输出、glob/type 过滤、50KB 上限 |
 | [38 - Agent 工厂与模式](38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | 模式切换、本地化、模板渲染 |
-| [39 - 分层记忆](39-tiered-memory.md) | Tiered Memory | 热/温/冷三层、自动淘汰、Token 预算管理 |
 | [40 - Context 系统](40-context-system.md) | Context System | ContextAssembler、ContextBudgeter、ContextSelector、优先级排序、预算感知 |
 
 ### 入门指南

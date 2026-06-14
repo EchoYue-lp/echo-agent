@@ -37,10 +37,11 @@ skills/
 ---
 name: my-skill
 description: Short description of the skill
-version: 1.0.0
-author: Your Name
-tags: [domain, category]
-activation_patterns:
+metadata:
+  version: "1.0.0"
+  author: Your Name
+  tags: [domain, category]
+triggers:
   - "keyword1"
   - "keyword2"
 ---
@@ -74,7 +75,7 @@ Detailed step-by-step instructions.
 ### Writing High-Quality SKILL.md
 
 **✅ Good practices:**
-- Precise `activation_patterns` (avoid overly broad patterns)
+- Precise `triggers` (avoid overly broad patterns)
 - Structured guide with headings, lists, code blocks
 - Output format examples
 - Keep Tier 2 under 5000 tokens

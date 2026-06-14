@@ -38,10 +38,11 @@ skills/
 ---
 name: my-skill
 description: 简短描述技能用途
-version: 1.0.0
-author: Your Name
-tags: [domain, category]
-activation_patterns:
+metadata:
+  version: "1.0.0"
+  author: Your Name
+  tags: [domain, category]
+triggers:
   - "关键词1"
   - "关键词2"
 ---
@@ -75,7 +76,7 @@ activation_patterns:
 ### 编写高质量 SKILL.md
 
 **✅ 好的写法：**
-- 明确的 `activation_patterns`（避免太宽泛导致误激活）
+- 明确的 `triggers`（避免太宽泛导致误激活）
 - 结构化的使用指南（标题、列表、代码块）
 - 提供输出格式示例
 - 保持 Tier 2 < 5000 tokens

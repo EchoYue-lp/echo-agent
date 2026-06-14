@@ -1118,7 +1118,6 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 60 | [`demo60_data_quality`](examples/demo60_data_quality.rs) | Data quality profiling + statistical analysis |
 | 61 | [`demo61_agent_factory`](examples/demo61_agent_factory.rs) | Agent factory, mode engine, prompt templates |
 | 62 | [`demo62_prompt_templates`](examples/demo62_prompt_templates.rs) | Prompt template manager with variable substitution |
-| 63 | [`demo63_tiered_memory`](examples/demo63_tiered_memory.rs) | Tiered memory: hot/warm/cold with auto-eviction |
 | 64 | [`demo64_tool_pipeline`](examples/demo64_tool_pipeline.rs) | Tool execution pipeline + approval stack |
 | 65 | [`demo65_context_assembler`](examples/demo65_context_assembler.rs) | ContextAssembler: budget-aware context assembly with priority ordering |
 | 66 | [`demo66_context_selector`](examples/demo66_context_selector.rs) | ContextSelector: score and select files by task relevance |
@@ -1193,7 +1192,6 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Data Quality & Statistics | [EN](docs/en/36-data-quality-statistics.md) | [ZH](docs/zh/36-data-quality-statistics.md) |
 | Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
 | Agent Factory & Modes | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
-| Tiered Memory | [EN](docs/en/39-tiered-memory.md) | [ZH](docs/zh/39-tiered-memory.md) |
 | Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
 
 ---

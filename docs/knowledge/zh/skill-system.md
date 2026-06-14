@@ -46,34 +46,33 @@ pub trait Skill: Send + Sync {
 }
 ```
 
-**示例：计算器技能**
+**示例：调研技能**
 
 ```rust
-pub struct CalculatorSkill;
+pub struct ResearchSkill;
 
-impl Skill for CalculatorSkill {
-    fn name(&self) -> &str { "calculator" }
-    
-    fn description(&self) -> &str { 
-        "数学计算能力，支持加减乘除" 
+impl Skill for ResearchSkill {
+    fn name(&self) -> &str { "research" }
+
+    fn description(&self) -> &str {
+        "网页调研能力：搜索 + 抓取 + 摘要"
     }
-    
+
     fn tools(&self) -> Vec<Box<dyn Tool>> {
         vec![
-            Box::new(AddTool),
-            Box::new(SubtractTool),
-            Box::new(MultiplyTool),
-            Box::new(DivideTool),
+            Box::new(SearchTool),
+            Box::new(FetchTool),
+            Box::new(SummarizeTool),
         ]
     }
-    
+
     fn system_prompt_injection(&self) -> Option<String> {
-        Some("你有精确的数学计算能力。对于任何数学计算任务，请使用计算器工具。".into())
+        Some("你拥有网页调研能力。当需要最新信息时，先用 search 检索，再 fetch 关键页面、最后 summarize 总结。".into())
     }
 }
 
 // 注册
-agent.add_skill(Box::new(CalculatorSkill));
+agent.add_skill(Box::new(ResearchSkill));
 ```
 
 ### 2. File-based Skill（文件型）
@@ -303,25 +302,25 @@ use echo_agent::prelude::*;
 use echo_agent::skills::Skill;
 
 // 定义 Skill
-struct WeatherSkill;
+struct GitWorkflowSkill;
 
-impl Skill for WeatherSkill {
-    fn name(&self) -> &str { "weather" }
-    fn description(&self) -> &str { "天气查询能力" }
+impl Skill for GitWorkflowSkill {
+    fn name(&self) -> &str { "git-workflow" }
+    fn description(&self) -> &str { "Git 操作：分支、提交、PR/MR、冲突解决" }
     fn tools(&self) -> Vec<Box<dyn Tool>> {
         vec![
-            Box::new(GetWeatherTool),
-            Box::new(GetForecastTool),
+            Box::new(GitStatusTool),
+            Box::new(GitDiffTool),
         ]
     }
     fn system_prompt_injection(&self) -> Option<String> {
-        Some("你可以查询全球城市的实时天气和天气预报。".into())
+        Some("你能执行 git 工作流操作。修改前请先检查 status。".into())
     }
 }
 
 // 注册
 let mut agent = ReactAgentBuilder::simple("qwen3-max", "助手")?;
-agent.add_skill(Box::new(WeatherSkill));
+agent.add_skill(Box::new(GitWorkflowSkill));
 ```
 
 ### 文件型 Skill
@@ -374,16 +373,15 @@ echo-agent 的 Skill 系统对齐 [agentskills.io](https://agentskills.io/specif
 ```rust
 fn system_prompt_injection(&self) -> Option<String> {
     Some(r#"
-## 计算器技能
+## 调研技能
 
-你有精确的数学计算能力。使用以下工具进行计算：
+你拥有网页调研能力。请使用以下工具：
 
-- add: 两数相加
-- subtract: 两数相减
-- multiply: 两数相乘
-- divide: 两数相除
+- search: 用查询词搜索网页
+- fetch: 下载特定 URL 的内容
+- summarize: 对抓取页面做摘要
 
-注意：除法时检查除数是否为零。
+注意：优先使用权威来源；至少跨两个页面交叉验证关键论断。
 "#.into())
 }
 ```

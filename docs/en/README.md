@@ -58,7 +58,6 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [36 - Data Quality & Statistics](./36-data-quality-statistics.md) | Data Quality / Statistics | Data profiling, anomaly detection, descriptive stats, correlation analysis |
 | [37 - Code Search](./37-code-search.md) | Code Search | Ripgrep, structured output, glob/type filtering, 50KB cap |
 | [38 - Agent Factory & Modes](./38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | mode switching, localization, template rendering |
-| [39 - Tiered Memory](./39-tiered-memory.md) | Tiered Memory | Hot/warm/cold tiers, automatic eviction, token budget management |
 | [40 - Context System](./40-context-system.md) | Context System | ContextAssembler, ContextBudgeter, ContextSelector, priority ordering, budget awareness |
 
 ### Getting Started Guides
