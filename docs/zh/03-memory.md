@@ -2,75 +2,90 @@
 
 ## 是什么
 
-echo-agent 的记忆系统分为两个核心层次，分别解决不同粒度的"记住"问题：
+echo-agent 的记忆系统包含三个正交层次，每层解决不同的"记住"问题：
 
 | 层次 | 接口 | 类比 | 解决的问题 |
 |------|------|------|-----------|
-| **短期记忆** | `Checkpointer` | 录音机 | 同一线程在进程重启后可恢复执行上下文 |
-| **长期记忆** | `Store` | 笔记本 | 跨会话保留领域知识和用户偏好 |
+| **运行时检查点** | `RuntimeStateStore` | 黑匣子 | 进程崩溃后恢复进行中的对话 |
+| **历史投影** | `ConversationStore` | 聊天记录 | 用户可见的消息历史投影（驱动 GUI/TUI 历史面板） |
+| **长期知识** | `Store` | 笔记本 | 跨会话保留用户偏好、领域知识、任务结果 |
 
-这一设计直接对应 LangGraph 的 `Checkpointer`（短期）和 `Store`（长期）两层架构。
+运行时检查点和历史投影针对同一段对话从不同角度切入：检查点保存**完整运行时状态**（消息 + 计划 + 激活技能 + 阻塞原因 + TaskNode DAG），用于重启循环；历史投影是**用户可见**的消息流投影。Store 是正交的长期知识后端。
 
 ---
 
-## 短期记忆：Checkpointer
+## 运行时检查点：RuntimeStateStore
 
 ### 解决什么问题
 
-LLM 的上下文窗口在每次请求结束后就消失了。如果 Agent 在处理长任务时被中断，或者用户想在明天继续昨天的对话，没有 Checkpointer 就需要从头开始。
+LLM 的上下文窗口在每次请求结束后就消失了，进程也可能在循环中途崩溃。没有运行时检查点，长任务被中断就需要从头开始；用户想在明天继续昨天的对话也只能重新输入。
 
-Checkpointer 在每轮对话结束后自动将运行时线程状态保存到磁盘（或内存），下次使用同一 `session_id` 启动时自动恢复，实现**线程连续性**。
+`RuntimeStateStore` 在 run 推进过程中持续保存完整的 `AgentCheckpoint`（消息 + 当前计划 + 激活技能 + 阻塞原因 + 时间戳）。下次使用同一 `conversation_id` 启动时，运行时自动恢复先前状态，实现**线程连续性**。
 
 ### 工作原理
 
 ```
-session_id: "user-123-chat-5"
+conversation_id: "user-123-chat-5"
                 │
                 ▼
-checkpoints.json:
+SqliteRuntimeStateStore (~/.echo-agent/state.db):
 {
   "user-123-chat-5": {
-    "session_id": "user-123-chat-5",
-    "messages": [
-      { "role": "system",    "content": "你是一个助手" },
-      { "role": "user",      "content": "帮我写一首诗" },
-      { "role": "assistant", "content": "..." },
-      { "role": "user",      "content": "改成七言绝句" }
-    ]
+    "messages_json":  "...完整消息历史...",
+    "current_plan":   "Step 3: draft the haiku",
+    "active_skills":  ["doc-writing"],
+    "blocked_reason": null,
+    "timestamp":      "2026-06-14T...",
   }
 }
 ```
 
 ### 使用方式
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
+use std::sync::Arc;
 
-// 方式一：通过 AgentConfig 自动管理（推荐）
-let config = AgentConfig::new("qwen3-max", "assistant", "你是一个助手")
-    .session_id("user-alice-thread-1")       // 线程 ID：用于 Checkpointer 恢复
-    .conversation_id("conv-alice-2026-001") // 可选：用于历史 transcript 投影
-    .checkpointer_path("./checkpoints.json"); // 持久化文件路径
+# async fn demo() -> echo_agent::error::Result<()> {
+let state_store = Arc::new(SqliteRuntimeStateStore::open("./state.db").await?);
 
-let mut agent = ReactAgent::new(config);
-// 首次运行：保存线程状态到文件
-// 再次运行（同 session_id）：自动恢复上次的线程状态
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .conversation_id("user-alice-conv-001")  // 恢复键
+    .state_store(state_store)
+    .build()?;
+// 首次运行：每轮收尾时持久化 AgentCheckpoint
+// 再次运行（同 conversation_id）：运行时自动恢复先前状态
 let _ = agent.execute("你好").await?;
+# Ok(())
+# }
+```
 
-// 方式二：手动操作 Checkpointer（用于审计、跨 Agent 读取等）
-let cp = FileCheckpointer::new("./checkpoints.json")?;
+trait 与 `SqliteRuntimeStateStore` 实现位于 `echo-agent/src/state/mod.rs`。
 
-// 读取某个会话的历史
-if let Some(checkpoint) = cp.get("user-alice-session-1").await? {
-    println!("历史消息数: {}", checkpoint.messages.len());
-}
+---
 
-// 列出所有会话
-let sessions = cp.list_sessions().await?;
-println!("所有会话: {:?}", sessions);
+## 历史投影：ConversationStore
 
-// 删除某个会话
-cp.delete_session("user-alice-session-1").await?;
+`ConversationStore` 是消息流的用户可见投影 —— 一行一条 `StoredMessage`，由 `run_core_loop` 收尾时自动写入。GUI/TUI 历史面板渲染的就是它。
+
+- 以 `conversation_id` 为键（与 `RuntimeStateStore` 同键）
+- 与 `RuntimeStateStore` 独立 —— 可单独启用、同时启用、都不启用
+- 具体实现：`SqliteConversationStore`（`echo-agent/echo-state/src/memory/sqlite_conversation.rs`）
+
+```rust,no_run
+use echo_agent::prelude::*;
+use std::sync::Arc;
+
+# async fn demo() -> echo_agent::error::Result<()> {
+let conv_store = Arc::new(SqliteConversationStore::open("./conversations.db").await?);
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .conversation_id("user-alice-conv-001")
+    .conversation_store(conv_store)
+    .build()?;
+# Ok(())
+# }
 ```
 
 ---
@@ -79,7 +94,7 @@ cp.delete_session("user-alice-session-1").await?;
 
 ### 解决什么问题
 
-Checkpointer 保存的是运行时线程状态（消息流和执行连续性），但很多信息不应该以原始对话形式存储，而是需要以结构化方式持久保存，例如：
+运行时检查点保存的是消息流，但很多信息不应该以原始对话形式存储，而是需要以结构化方式持久保存，例如：
 - 用户偏好（"偏好古典音乐"）
 - 领域知识（"项目代号是 OMEGA"）
 - 任务成果（"分析结果：斐波那契前10项为..."）
@@ -127,9 +142,10 @@ LLM 需要检索时
 
 ### 使用方式
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
 
+# async fn demo() -> echo_agent::error::Result<()> {
 // 方式一：通过 AgentConfig 自动注册 remember/recall/forget 工具
 let config = AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
     .enable_memory(true)
@@ -163,26 +179,29 @@ store.delete(&["my_agent", "memories"], "fact-001").await?;
 
 // 列出所有 namespace
 let namespaces = store.list_namespaces(None).await?;
+# Ok(())
+# }
 ```
 
 ---
 
-## 两层记忆对比
+## 三层记忆联动
 
 ```
 用户第 1 天：
   user: "我叫张三，喜欢古典音乐"
   agent → remember("张三喜欢古典音乐")  ← 存入 Store（跨会话永久保存）
-  session 结束 → Checkpointer 保存线程状态
+  轮次收尾 → RuntimeStateStore 保存 AgentCheckpoint
+            → ConversationStore 保存消息行
 
-第 2 天，同一线程继续：
-  Checkpointer 恢复：agent 知道昨天说了什么（"帮我写一首诗" 等历史消息）
+第 2 天，相同 conversation_id：
+  RuntimeStateStore 恢复：agent 在先前状态上继续运行循环
   user: "推荐一首曲子"
   agent → recall("音乐偏好") → "张三喜欢古典音乐"
   → 推荐巴赫的哥德堡变奏曲
 
-第 3 天，全新线程：
-  Checkpointer: 没有此 session_id → 空的消息历史（不知道第 1 天说了什么）
+第 3 天，全新 conversation_id：
+  RuntimeStateStore: 没有此键 → 全新运行时状态
   user: "推荐一首曲子"
   agent → recall("音乐偏好") → "张三喜欢古典音乐"（Store 还在！）
   → 仍然推荐古典音乐
@@ -192,42 +211,36 @@ let namespaces = store.list_namespaces(None).await?;
 
 ## 内存实现（测试用）
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
 
-// 内存版 Checkpointer（进程退出后数据丢失，适合测试）
-let cp = InMemoryCheckpointer::new();
-
-// 内存版 Store（适合测试）
-let store = InMemoryStore::new();
+let store = InMemoryStore::new(); // 进程退出后数据丢失
+// 测试中需要 RuntimeStateStore / ConversationStore 时，
+// 使用 SQLite 实现配合临时文件（参见 `tempfile::NamedTempFile`）或 `:memory:` SQLite URI。
 ```
 
 ---
 
 ## 上下文隔离
 
-每个 Agent 都有独立的 Store namespace 和 Checkpointer `session_id`：
+每个 Agent 都有独立的 Store namespace 和 `conversation_id`：
 
 ```
-主 Agent    session_id = "main-001"     namespace = ["main_agent", "memories"]
-SubAgent A  session_id = "sub-a-001"    namespace = ["sub_a", "memories"]
-SubAgent B  session_id = "sub-b-001"    namespace = ["sub_b", "memories"]
+主 Agent    conversation_id = "main-conv-001"     namespace = ["main_agent", "memories"]
+SubAgent A  conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memories"]
+SubAgent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
 ```
 
 - SubAgent A 无法读取 SubAgent B 的记忆（不同 namespace）
-- SubAgent A 无法看到主 Agent 的线程状态（不同 session_id）
-- 主 Agent 持有 `Store` 和 `Checkpointer` 对象，可以显式跨 namespace / session 读取（用于审计）
+- SubAgent A 无法看到主 Agent 的运行时状态（不同 `conversation_id`）
+- 主 Agent 持有 `Store` / `RuntimeStateStore` 对象，可显式跨 conversation / namespace 读取（用于审计）
 
 ---
 
-## 历史投影
+## conversation_id 与 session_id
 
-`ConversationStore` 与 `Checkpointer` 是分开的：
-
-- `session_id`：运行时线程标识，只用于恢复 / 续接
-- `conversation_id`：产品层历史标识，只用于把 transcript/history 投影到 `ConversationStore`
-
-如果启用了 `ConversationStore`，应显式设置 `conversation_id`。它已经不再回退使用 `session_id`。
+- `conversation_id`：持久化的对话标识。同时作为 `RuntimeStateStore`（完整运行时状态）和 `ConversationStore`（历史投影）的键。这是跨进程恢复时设置的字段。
+- `session_id`：进程内 run-grouping 标签，不持久化、不参与恢复。
 
 对应示例：`examples/demo14_memory_isolation.rs`
 

@@ -175,22 +175,9 @@ agent.reset();                                    // ← trait method, clears co
 agent.chat("Turn 2: Who am I?").await?;           // Agent no longer knows "Alice"
 ```
 
-### Cross-process session restoration with Checkpointer
+### Cross-process session restoration with RuntimeStateStore
 
-The multi-turn history from `chat()` can be persisted with a Checkpointer and restored after a restart:
-
-```rust
-use echo_agent::prelude::*;
-use std::sync::Arc;
-
-let cp = FileCheckpointer::new("~/.echo-agent/checkpoints.json")?;
-let mut agent = ReactAgent::new(config);
-agent.set_checkpointer(Arc::new(cp), "user-alice-session".to_string());
-
-// On first launch, the Checkpointer restores any existing history
-agent.chat("Let's continue where we left off…").await?;
-// Each chat() turn auto-saves a Checkpoint
-```
+The multi-turn history from `chat()` can be persisted with a [`RuntimeStateStore`](../../src/state/mod.rs) (the `SqliteRuntimeStateStore` implementation persists a full `AgentCheckpoint`: messages + plan + active skills + blocked reason). On the next launch, configure the same `conversation_id` and the runtime restores the prior state automatically. See [03-memory.md](./03-memory.md) for the full example.
 
 ---
 
@@ -311,7 +298,7 @@ async fn chat_stream_handler(
 ## Notes
 
 1. **Each user session needs its own Agent instance**: `ReactAgent` is not `Sync` — use a separate instance per user, or wrap with `Arc<Mutex<ReactAgent>>`
-2. **`reset()` only clears in-memory history**: Persisted Checkpointer data is unaffected; `execute()` will still restore it on the next call
+2. **`reset()` only clears in-memory history**: Persisted runtime state in `RuntimeStateStore` is unaffected; `execute()` will still restore it on the next call
 3. **Context growth**: Long conversations accumulate tokens — use `set_compressor()` to prevent context overflow
 4. **Mixing `execute()` and `chat()`**: `execute()` always resets history on each call, discarding any context accumulated by prior `chat()` calls
 

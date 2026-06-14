@@ -464,7 +464,7 @@ tokio::runtime::Runtime::new().unwrap().block_on(async {
 
 ## Migration from Flat Memory
 
-If you have an existing agent that uses a flat `Vec<String>` or bare `Checkpointer` for memory, here is how to migrate to `TieredMemory`.
+If you have an existing agent that uses a flat `Vec<String>` or a bare message list for memory, here is how to migrate to `TieredMemory`.
 
 ### Before: Flat Memory
 
@@ -563,7 +563,7 @@ memory.add_short_term_simple("summary text".to_string());
 
 ## See Also
 
-- [03-memory.md](03-memory.md) — Checkpointer and Store basics
+- [03-memory.md](03-memory.md) — Store, RuntimeStateStore, and ConversationStore basics
 - [04-compression.md](04-compression.md) — Context window compression
 - [19-self-reflection.md](19-self-reflection.md) — Reflection-driven memory updates
 - [28-config-reference.md](28-config-reference.md) — Full configuration reference

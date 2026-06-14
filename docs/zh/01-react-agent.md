@@ -31,7 +31,7 @@ ReAct 范式解决了：
 ```
 execute(task)
     │
-    ├─ 1. 加载会话历史（Checkpointer）
+    ├─ 1. 加载运行时状态（RuntimeStateStore）
     ├─ 2. 注入长期记忆（Store）
     │
     └─ Loop（max_iterations 次）:
@@ -53,7 +53,7 @@ execute(task)
           │
           └─ 将 assistant + tool_results 消息追加到上下文
 
-    └─ 保存会话历史（Checkpointer）
+    └─ 保存运行时状态（RuntimeStateStore）
 ```
 
 ---
@@ -81,8 +81,8 @@ AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
     .enable_memory(true)        // 启用长期记忆（Store + remember/recall/forget 工具）
     .enable_human_in_loop(true) // 启用人工介入
     .enable_cot(true)           // 启用 Chain-of-Thought 引导语（Builder 默认 true）
-    .session_id("thread-001")   // 线程 ID：用于 Checkpointer 恢复/续接
-    .conversation_id("conv-001")// 可选：用于 transcript/history 投影
+    .session_id("thread-001")   // run-grouping 标签（进程内）
+    .conversation_id("conv-001")// 对话 ID，同时作为 RuntimeStateStore 的恢复键
     .token_limit(8192)          // 上下文 token 上限（超限自动压缩）
     .max_iterations(30)         // 最大迭代次数（防止死循环）
 ```

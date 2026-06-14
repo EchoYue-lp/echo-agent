@@ -58,7 +58,7 @@ math_agent.execute("Calculate 7 * 8")
 | Context (message history) | Each Agent is an independent `ReactAgent` Rust object — `ContextManager` has no shared references |
 | Tool set | Each SubAgent registers its own tools; Orchestrator's tools are invisible to SubAgents |
 | Long-term memory | Each Agent uses `[agent_name, "memories"]` as an independent Store namespace |
-| Short-term session | Each Agent has an independent `session_id`; Checkpointer stores per-session |
+| Short-term session | Each Agent has an independent `conversation_id`; `RuntimeStateStore` tracks per-conversation state |
 
 ---
 
@@ -155,7 +155,7 @@ Concurrent calls to the **same SubAgent** are serialized by `AsyncMutex` to main
 // SubAgent with its own session and memory, fully isolated from the main Agent
 let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
     .session_id("sub-a-session-001")
-    .checkpointer_path("./checkpoints.json") // same file, unique session_id
+    .conversation_id("sub-a-conv-001")       // unique conversation_id for RuntimeStateStore
     .enable_memory(true)
     .memory_path("./store.json");            // same file, unique namespace
 ```

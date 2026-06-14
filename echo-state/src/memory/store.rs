@@ -244,7 +244,7 @@ impl FileStore {
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MemoryError::SerializationError(e.to_string()))?;
         let tmp = format!("{}.tmp", self.path.display());
-        // Atomic write: write to tmp, sync, then rename — matches FileCheckpointer pattern
+        // Atomic write: tmp + fsync + rename
         {
             let mut file = tokio::fs::File::create(&tmp)
                 .await

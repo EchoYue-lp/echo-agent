@@ -58,7 +58,7 @@ math_agent.execute("计算 7 * 8")
 | 上下文（消息历史） | 每个 Agent 是独立的 `ReactAgent` Rust 对象，`ContextManager` 无共享引用 |
 | 工具集 | 每个 SubAgent 独立注册工具，Orchestrator 的工具对 SubAgent 不可见 |
 | 长期记忆 | 每个 Agent 使用 `[agent_name, "memories"]` 作为独立 Store namespace |
-| 短期会话 | 每个 Agent 有独立 `session_id`，Checkpointer 按 session 存储 |
+| 短期会话 | 每个 Agent 有独立 `conversation_id`，`RuntimeStateStore` 按 conversation 存储运行时状态 |
 
 ---
 
@@ -155,7 +155,7 @@ LLM 一次返回：
 // SubAgent 启用自己的 session 和 memory，与主 Agent 完全隔离
 let sub_config = AgentConfig::new("qwen3-max", "sub_a", "...")
     .session_id("sub-a-session-001")
-    .checkpointer_path("./checkpoints.json") // 共用文件，独立 session_id
+    .conversation_id("sub-a-conv-001")        // 独立 conversation_id（RuntimeStateStore 键）
     .enable_memory(true)
     .memory_path("./store.json");            // 共用文件，独立 namespace
 ```

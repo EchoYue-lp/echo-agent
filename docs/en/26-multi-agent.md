@@ -89,7 +89,7 @@ User: "Read src/main.rs and find related documentation online"
 ### Context Isolation
 
 Each SubAgent runs in its own context. By default:
-- No memory sharing (each has its own Store/Checkpointer)
+- No memory sharing (each has its own Store / runtime state)
 - No tool sharing (each has its own ToolManager)
 - No history sharing (each has its own message list)
 

@@ -34,7 +34,7 @@ impl Agent for MyAgent {
 - **Agent traits**: `Agent`, `ReActAgent`, `SubAgent`
 - **LLM abstractions**: `LlmClient`, `ChatRequest`, `ChatResponse`, `TokenUsage`
 - **Tool system**: `Tool`, `TypedTool`, `ToolResult`, `ToolPermission`
-- **Memory traits**: `Store`, `Checkpointer`, `Embedder`, tiered memory, decay, scope isolation
+- **Memory traits**: `Store`, `ConversationStore`, `Embedder`, tiered memory, decay, scope isolation
 - **Error handling**: `AgentError`, unified error types
 - **Guard system**: Content filtering traits (`Guard`, `GuardResult`)
 - **Retry**: `RetryPolicy` with exponential backoff

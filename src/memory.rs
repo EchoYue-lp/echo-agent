@@ -12,11 +12,6 @@
 //!   active_skills + blocked_reason + TaskNode DAG) used to resume an
 //!   in-flight conversation across process restarts. See [`crate::state`].
 //!
-//! `Checkpointer` is **deprecated** — it predates `RuntimeStateStore` and
-//! its setters are now no-ops on `ReactAgent`. New code should use
-//! [`crate::state::RuntimeStateStore`] for crash recovery and
-//! `ConversationStore` for user-visible history.
-//!
 //! # Quick Start
 //!
 //! ```rust,no_run
@@ -38,10 +33,11 @@
 //! | Type | Description |
 //! |------|-------------|
 //! | [`Store`] | Trait for long-term memory backends |
-//! | [`Checkpointer`] | Deprecated legacy session persistence trait |
 //! | [`InMemoryStore`] / [`FileStore`] | Built-in store implementations |
 //! | [`SqliteStore`] | SQLite-backed store (feature `sqlite`) |
 //! | [`SnapshotManager`] | Capture and restore agent state at any point |
+//! | [`crate::state::RuntimeStateStore`] | Full runtime checkpoint for crash recovery |
+//! | [`ConversationStore`] | User-visible transcript projection |
 
 /// Direct re-exports from `echo_state::memory`.
 pub mod state {

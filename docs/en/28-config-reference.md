@@ -74,9 +74,8 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `memory_path` | `String` | `"~/.echo-agent/store.json"` | Memory store file path |
-| `session_id` | `Option<String>` | `None` | Checkpointer session ID |
-| `conversation_id` | `Option<String>` | `None` | Conversation store ID |
-| `checkpointer_path` | `String` | `"~/.echo-agent/checkpoints.json"` | Checkpointer file path |
+| `session_id` | `Option<String>` | `None` | Logical run-grouping label (in-process; not persisted) |
+| `conversation_id` | `Option<String>` | `None` | Conversation ID — keys both `ConversationStore` and `RuntimeStateStore` |
 
 #### Context & Compression
 
@@ -221,8 +220,8 @@ ReactAgentBuilder::new()
 ReactAgentBuilder::new()
     .store(memory_store)                          // long-term memory store
     .with_memory_tools(store)                     // register remember/recall/forget tools
-    .checkpointer(checkpointer, session_id)       // session persistence
-    .session_id("sess_1")                         // session ID
+    .state_store(state_store)                     // RuntimeStateStore for crash recovery
+    .session_id("sess_1")                         // session label
     .conversation_id("conv_1")                    // conversation transcript ID
     .with_run_store(run_store)                    // execution tracing
 ```

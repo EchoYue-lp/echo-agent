@@ -88,9 +88,9 @@ pub struct AgentConfig {
     pub(crate) memory_path: String,
     /// Session identifier for process-local/logical run grouping.
     ///
-    /// Runtime crash recovery uses `conversation_id` + `RuntimeStateStore`; the
-    /// legacy Checkpointer path is deprecated and no longer drives ReactAgent
-    /// restore behavior.
+    /// Runtime crash recovery uses `conversation_id` together with
+    /// [`crate::state::RuntimeStateStore`]; this field is purely an
+    /// in-process label and does not drive restore behavior.
     pub(crate) session_id: Option<String>,
     /// Conversation identifier, used by ConversationStore to persist transcript/history projections.
     pub(crate) conversation_id: Option<String>,

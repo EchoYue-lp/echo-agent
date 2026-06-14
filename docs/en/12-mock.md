@@ -11,7 +11,7 @@ The `echo_agent::testing` module provides a suite of tools for testing component
 | `MockAgent` | Real SubAgent | Test multi-agent orchestration logic |
 | `FailingMockAgent` | An always-failing SubAgent | Test orchestration fault-tolerance paths |
 
-Combined with the built-in `InMemoryStore` and `InMemoryCheckpointer`, these cover the vast majority of unit and integration test scenarios.
+Combined with the built-in `InMemoryStore`, these cover the vast majority of unit and integration test scenarios. For tests that need a `RuntimeStateStore` or `ConversationStore`, use the SQLite implementations against a temp file or `:memory:` URI.
 
 ---
 
@@ -228,16 +228,14 @@ assert_eq!(broken.call_count(), 1); // failed calls are still recorded
 
 ---
 
-## Using InMemoryStore / InMemoryCheckpointer
+## Using InMemoryStore
 
-For tests involving the memory system, use the built-in in-memory implementations (no file I/O):
+For tests involving the long-term memory layer, use the built-in `InMemoryStore` (no file I/O):
 
-```rust
-use echo_agent::memory::checkpointer::{Checkpointer, InMemoryCheckpointer};
-use echo_agent::memory::store::{InMemoryStore, Store};
-use echo_agent::llm::types::Message;
+```rust,no_run
+use echo_agent::memory::{InMemoryStore, Store};
 
-// ── Store ──────────────────────────────────────────────────────
+# async fn demo() -> echo_agent::error::Result<()> {
 let store = InMemoryStore::new();
 let ns = vec!["test_agent", "memories"];
 
@@ -248,21 +246,11 @@ assert_eq!(item.value, serde_json::json!("user prefers dark mode"));
 
 let results = store.search(&ns, "dark", 10).await?;
 assert_eq!(results.len(), 1);
-
-// ── Checkpointer ───────────────────────────────────────────────
-let cp = InMemoryCheckpointer::new();
-let messages = vec![
-    Message::user("Hello".to_string()),
-    Message::assistant("Hi there!".to_string()),
-];
-
-cp.put("session-1", messages).await?;
-let snapshot = cp.get("session-1").await?.unwrap();
-assert_eq!(snapshot.messages.len(), 2);
-
-cp.delete_session("session-1").await?;
-assert!(cp.get("session-1").await?.is_none());
+# Ok(())
+# }
 ```
+
+For `RuntimeStateStore` / `ConversationStore` in tests, instantiate `SqliteRuntimeStateStore` / `SqliteConversationStore` against a `tempfile::NamedTempFile` or the `:memory:` SQLite URI.
 
 ---
 
@@ -331,7 +319,7 @@ mod tests {
 | SubAgent orchestration logic | `MockAgent` + real orchestrator | Yes (orchestrator) |
 | Orchestration fault tolerance | `FailingMockAgent` | Yes (orchestrator) |
 | Memory storage | `InMemoryStore` | No |
-| Session restore | `InMemoryCheckpointer` | No |
+| Runtime state restore | `SqliteRuntimeStateStore` (`:memory:` URI) | No |
 | End-to-end Agent behavior | Real LLM | Yes |
 
 ---

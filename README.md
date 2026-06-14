@@ -186,7 +186,7 @@ echo-agent ships with **67 registered tools** across 8 crates, all accessible th
 |---------|-------------|-------------|
 | **ReAct Engine** | Thought → Action → Observation loop with CoT | `agent.execute("task").await?` |
 | **Tool System** | `#[tool]` macro with auto JSON Schema, timeout + retry | `#[tool(name = "calc")] async fn calc(...)` |
-| **Dual-layer Memory** | `Store` (long-term KV) + `Checkpointer` (session) | `.with_memory_tools(store)` |
+| **Memory** | `Store` (long-term KV) + `RuntimeStateStore` (crash recovery) + `ConversationStore` (transcript) | `.with_memory_tools(store)` |
 | **Context Compression** | SlidingWindow / LLM Summary / Hybrid | `SlidingWindowCompressor::new(4096)` |
 | **Token Budget** | Auto-truncation + pre-think compression trigger | `.max_tool_output_tokens(2000)` |
 | **Unified Retry** | One `RetryPolicy` for LLM, MCP, A2A, sandbox | `with_retry(&policy, \|\| ...)` |
@@ -457,10 +457,11 @@ Built-in media tools (feature `media`): PDF extract/info, Excel read/info/to_csv
 
 Built-in data tools (feature `data`): Polars-powered read/filter/aggregate/stats/transform/export.
 
-### 3. Dual-layer Memory — Store + Checkpointer
+### 3. Memory — Store + RuntimeStateStore + ConversationStore
 
 - **Store**: Long-term key-value storage with namespace isolation (`InMemoryStore`, `FileStore`, `SqliteStore`)
-- **Checkpointer**: Session history preservation across restarts (`FileCheckpointer`, `InMemoryCheckpointer`)
+- **RuntimeStateStore**: Full runtime checkpoint (messages + plan + active skills + blocked reason) for crash recovery (`SqliteRuntimeStateStore`)
+- **ConversationStore**: User-visible transcript projection persisted automatically at run finalization
 
 One line to give your agent persistent memory — no manual tool wiring:
 

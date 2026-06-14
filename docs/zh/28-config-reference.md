@@ -74,9 +74,8 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `memory_path` | `String` | `"~/.echo-agent/store.json"` | 记忆存储文件路径 |
-| `session_id` | `Option<String>` | `None` | 检查点会话 ID |
-| `conversation_id` | `Option<String>` | `None` | 对话存储 ID |
-| `checkpointer_path` | `String` | `"~/.echo-agent/checkpoints.json"` | 检查点文件路径 |
+| `session_id` | `Option<String>` | `None` | 进程内 run-grouping 标签（不持久化） |
+| `conversation_id` | `Option<String>` | `None` | 对话 ID —— 同时作为 `ConversationStore` 与 `RuntimeStateStore` 的键 |
 
 #### 上下文与压缩
 
@@ -221,8 +220,8 @@ ReactAgentBuilder::new()
 ReactAgentBuilder::new()
     .store(memory_store)                          // 长期记忆存储
     .with_memory_tools(store)                     // 注册 remember/recall/forget 工具
-    .checkpointer(checkpointer, session_id)       // 会话持久化
-    .session_id("sess_1")                         // 会话 ID
+    .state_store(state_store)                     // RuntimeStateStore 用于崩溃恢复
+    .session_id("sess_1")                         // 会话标签
     .conversation_id("conv_1")                    // 对话记录 ID
     .with_run_store(run_store)                    // 执行追踪
 ```

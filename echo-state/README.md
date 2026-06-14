@@ -28,7 +28,7 @@ let compressor = SlidingWindowCompressor::new(4096);
 
 ## Contents
 
-- **Memory**: Dual-layer memory — `Store` (long-term KV) + `Checkpointer` (session persistence)
+- **Memory**: `Store` (long-term KV) + `ConversationStore` (transcript persistence)
 - **Context Compression**: SlidingWindow, LLM Summary, and Hybrid compressors
 - **Audit Logging**: Structured event logging with pluggable backends
 

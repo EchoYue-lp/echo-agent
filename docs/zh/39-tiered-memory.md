@@ -463,7 +463,7 @@ tokio::runtime::Runtime::new().unwrap().block_on(async {
 
 ## 从扁平记忆迁移
 
-如果你现有的 Agent 使用扁平的 `Vec<String>` 或裸 `Checkpointer` 做记忆，以下是迁移到 `TieredMemory` 的方法。
+如果你现有的 Agent 使用扁平的 `Vec<String>` 或裸消息列表做记忆，以下是迁移到 `TieredMemory` 的方法。
 
 ### 迁移前：扁平记忆
 
@@ -561,7 +561,7 @@ memory.add_short_term_simple("摘要文本".to_string());
 
 ## 参见
 
-- [03-memory.md](03-memory.md) — Checkpointer 与 Store 基础
+- [03-memory.md](03-memory.md) — Store、RuntimeStateStore 与 ConversationStore 基础
 - [04-compression.md](04-compression.md) — 上下文窗口压缩
 - [19-self-reflection.md](19-self-reflection.md) — 反思驱动的记忆更新
 - [28-config-reference.md](28-config-reference.md) — 完整配置参考

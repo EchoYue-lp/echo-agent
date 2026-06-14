@@ -2,72 +2,90 @@
 
 ## What It Is
 
-echo-agent's memory system has two core layers, each solving a different granularity of "remembering":
+echo-agent's memory system has three orthogonal layers, each solving a different "remembering" problem:
 
 | Layer | Interface | Analogy | Problem Solved |
 |-------|-----------|---------|----------------|
-| **Short-term** | `Checkpointer` | Voice recorder | Resume interrupted threads across process restarts |
-| **Long-term** | `Store` | Notebook | Retain domain knowledge and user preferences across sessions |
+| **Runtime checkpoint** | `RuntimeStateStore` | Black box recorder | Resume an in-flight conversation across process restarts |
+| **Transcript** | `ConversationStore` | Chat log | User-visible message history projection (drives GUI/TUI history panes) |
+| **Long-term knowledge** | `Store` | Notebook | Persist user preferences, domain facts, task results across sessions |
 
-This design directly mirrors LangGraph's two-tier architecture: `Checkpointer` (short-term) and `Store` (long-term).
+Runtime checkpoint and transcript address the same conversation from different angles: the checkpoint is the *complete* runtime state (messages + plan + active skills + blocked reason + TaskNode DAG) used to restart the loop; the transcript is the *user-visible* projection of just the message stream. The Store is the orthogonal long-term knowledge backend.
 
 ---
 
-## Short-term Memory: Checkpointer
+## Runtime Checkpoint: RuntimeStateStore
 
 ### Problem It Solves
 
-An LLM's context window vanishes after each request ends. Without a Checkpointer, a long task interrupted halfway requires starting over, and a user wanting to continue yesterday's conversation must repeat themselves.
+An LLM's context window vanishes after each request ends, and a process can crash mid-loop. Without a runtime checkpoint, a long task interrupted halfway requires starting over, and a user wanting to continue yesterday's conversation must repeat themselves.
 
-The Checkpointer automatically saves the runtime thread state at the end of each conversation turn. The next time an Agent is launched with the same `session_id`, it automatically restores the previous context — providing **thread continuity**.
+`RuntimeStateStore` saves the full `AgentCheckpoint` (messages + current plan + active skills + blocked reason + timestamp) as the run progresses. The next time an Agent is launched with the same `conversation_id`, it automatically restores the previous runtime state — providing **thread continuity**.
 
 ### How It Works
 
 ```
-session_id: "user-123-chat-5"
+conversation_id: "user-123-chat-5"
                 │
                 ▼
-checkpoints.json:
+SqliteRuntimeStateStore (~/.echo-agent/state.db):
 {
   "user-123-chat-5": {
-    "session_id": "user-123-chat-5",
-    "messages": [
-      { "role": "system",    "content": "You are an assistant" },
-      { "role": "user",      "content": "Write me a poem" },
-      { "role": "assistant", "content": "..." },
-      { "role": "user",      "content": "Make it a haiku" }
-    ]
+    "messages_json":  "...full message history...",
+    "current_plan":   "Step 3: draft the haiku",
+    "active_skills":  ["doc-writing"],
+    "blocked_reason": null,
+    "timestamp":      "2026-06-14T...",
   }
 }
 ```
 
 ### Usage
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
+use std::sync::Arc;
 
-// Option 1: Auto-managed via AgentConfig (recommended)
-let config = AgentConfig::new("qwen3-max", "assistant", "You are an assistant")
-    .session_id("user-alice-thread-1")        // thread ID for Checkpointer restore
-    .conversation_id("conv-alice-2026-001")  // optional: transcript/history projection ID
-    .checkpointer_path("./checkpoints.json"); // persistence file path
+# async fn demo() -> echo_agent::error::Result<()> {
+let state_store = Arc::new(SqliteRuntimeStateStore::open("./state.db").await?);
 
-let mut agent = ReactAgent::new(config);
-// First run: saves session history to file
-// Subsequent runs (same session_id): automatically restores previous thread state
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .conversation_id("user-alice-conv-001")  // restore key
+    .state_store(state_store)
+    .build()?;
+// First run: persists AgentCheckpoint after each turn finalization.
+// Subsequent runs (same conversation_id): runtime restores the previous state.
 let _ = agent.execute("Hello").await?;
+# Ok(())
+# }
+```
 
-// Option 2: Direct Checkpointer API (for auditing, cross-agent reads, etc.)
-let cp = FileCheckpointer::new("./checkpoints.json")?;
+See `echo-agent/src/state/mod.rs` for the trait and `SqliteRuntimeStateStore` implementation.
 
-if let Some(checkpoint) = cp.get("user-alice-session-1").await? {
-    println!("Message count: {}", checkpoint.messages.len());
-}
+---
 
-let sessions = cp.list_sessions().await?;
-println!("All sessions: {:?}", sessions);
+## Transcript: ConversationStore
 
-cp.delete_session("user-alice-session-1").await?;
+`ConversationStore` is the user-visible projection of the message stream — one row per `StoredMessage`, populated automatically at `run_core_loop` finalization. It is what GUI/TUI history panes render.
+
+- Keyed by `conversation_id` (same key as `RuntimeStateStore`).
+- Independent of `RuntimeStateStore` — you can enable either, both, or neither.
+- Concrete implementation: `SqliteConversationStore` (`echo-agent/echo-state/src/memory/sqlite_conversation.rs`).
+
+```rust,no_run
+use echo_agent::prelude::*;
+use std::sync::Arc;
+
+# async fn demo() -> echo_agent::error::Result<()> {
+let conv_store = Arc::new(SqliteConversationStore::open("./conversations.db").await?);
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .conversation_id("user-alice-conv-001")
+    .conversation_store(conv_store)
+    .build()?;
+# Ok(())
+# }
 ```
 
 ---
@@ -76,7 +94,7 @@ cp.delete_session("user-alice-session-1").await?;
 
 ### Problem It Solves
 
-The Checkpointer saves the runtime thread state (message stream + execution continuity), but many pieces of information shouldn't be stored as raw conversation state — they need to persist in a structured way:
+The runtime checkpoint preserves the message stream, but many pieces of information shouldn't be stored as raw conversation state — they need to persist in a structured way:
 - User preferences ("prefers classical music")
 - Domain knowledge ("project codename is OMEGA")
 - Task results ("analysis: Fibonacci first 10 terms are...")
@@ -120,9 +138,10 @@ LLM needs to retrieve:
 
 ### Usage
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
 
+# async fn demo() -> echo_agent::error::Result<()> {
 // Option 1: Via AgentConfig — auto-registers remember/recall/forget tools
 let config = AgentConfig::new("qwen3-max", "my_agent", "You are an assistant")
     .enable_memory(true)
@@ -156,26 +175,29 @@ store.delete(&["my_agent", "memories"], "fact-001").await?;
 
 // List all namespaces
 let namespaces = store.list_namespaces(None).await?;
+# Ok(())
+# }
 ```
 
 ---
 
-## Two-layer Memory in Practice
+## Three Layers in Practice
 
 ```
 Day 1:
   user:  "My name is Alice and I love jazz music"
   agent → remember("Alice loves jazz music")  ← stored in Store (persists forever)
-  session ends → Checkpointer saves conversation history
+  turn finalization → RuntimeStateStore saves AgentCheckpoint
+                    → ConversationStore saves message rows
 
-Day 2, same thread resumed:
-  Checkpointer restores: agent knows what was said on Day 1
+Day 2, same conversation_id:
+  RuntimeStateStore restores: agent resumes the runtime loop with prior state
   user:  "Recommend a song"
   agent → recall("music preferences") → "Alice loves jazz music"
   → Recommends Miles Davis
 
-Day 3, brand new thread:
-  Checkpointer: no matching session_id → empty message history
+Day 3, brand new conversation_id:
+  RuntimeStateStore: no matching key → fresh runtime state
   user:  "Recommend a song"
   agent → recall("music preferences") → "Alice loves jazz music" (Store still exists!)
   → Still recommends jazz
@@ -185,39 +207,36 @@ Day 3, brand new thread:
 
 ## In-memory Implementations (for testing)
 
-```rust
+```rust,no_run
 use echo_agent::prelude::*;
 
-let cp    = InMemoryCheckpointer::new(); // data lost on process exit
-let store = InMemoryStore::new();
+let store = InMemoryStore::new(); // data lost on process exit
+// For RuntimeStateStore / ConversationStore in tests, use the SQLite implementations
+// against a temp file (see `tempfile::NamedTempFile`) or a `:memory:` SQLite URI.
 ```
 
 ---
 
 ## Context Isolation
 
-Each Agent has an independent Store namespace and Checkpointer `session_id`:
+Each Agent has an independent Store namespace and `conversation_id`:
 
 ```
-Main Agent    session_id = "main-001"     namespace = ["main_agent", "memories"]
-SubAgent A    session_id = "sub-a-001"    namespace = ["sub_a", "memories"]
-SubAgent B    session_id = "sub-b-001"    namespace = ["sub_b", "memories"]
+Main Agent    conversation_id = "main-conv-001"     namespace = ["main_agent", "memories"]
+SubAgent A    conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memories"]
+SubAgent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
 ```
 
-- SubAgent A cannot read SubAgent B's memories (different namespace)
-- SubAgent A cannot see the main Agent's thread state (different session_id)
-- The main Agent holds the `Store` and `Checkpointer` objects and can explicitly read any session or namespace (for auditing)
+- SubAgent A cannot read SubAgent B's memories (different namespace).
+- SubAgent A cannot see the main Agent's runtime state (different `conversation_id`).
+- The main Agent holds the `Store` / `RuntimeStateStore` objects and can explicitly read any conversation or namespace (for auditing).
 
 ---
 
-## Transcript Projection
+## conversation_id vs session_id
 
-`ConversationStore` is separate from `Checkpointer`.
-
-- `session_id`: runtime thread identity, used only for restore/resume
-- `conversation_id`: product/history identity, used only when projecting transcript/history into `ConversationStore`
-
-If you enable a `ConversationStore`, set `conversation_id` explicitly. It no longer falls back to `session_id`.
+- `conversation_id`: durable conversation identity. Keys both `RuntimeStateStore` (full runtime state) and `ConversationStore` (transcript projection). This is the field you set to resume across process restarts.
+- `session_id`: in-process logical run-grouping label. Not persisted; not used to drive restore.
 
 See: `examples/demo14_memory_isolation.rs`
 

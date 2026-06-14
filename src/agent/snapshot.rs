@@ -267,9 +267,9 @@ impl AgentRunSnapshot {
 
     /// Save a rich checkpoint to the [`RuntimeStateStore`](crate::state::RuntimeStateStore).
     ///
-    /// Unlike the legacy Checkpointer API, which only persisted message history,
-    /// this saves the full [`AgentCheckpoint`] including
-    /// messages, active skills, current plan, and blocked reason.
+    /// Persists the full [`AgentCheckpoint`] (messages, active skills, current
+    /// plan, and blocked reason) so an in-flight conversation can resume
+    /// across process restarts.
     ///
     /// Silently no-ops if no state store or conversation_id is configured.
     pub async fn save_runtime_checkpoint(

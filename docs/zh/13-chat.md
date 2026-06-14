@@ -175,22 +175,9 @@ agent.reset();                               // ← trait 方法，清除上下�
 agent.chat("第二轮：我是谁？").await?;       // Agent 不再记得"张三"
 ```
 
-### 结合 Checkpointer 跨进程续接
+### 结合 RuntimeStateStore 跨进程续接
 
-`chat()` 的多轮历史可以配合 Checkpointer 持久化，在重启后恢复：
-
-```rust
-use echo_agent::prelude::*;
-use std::sync::Arc;
-
-let cp = FileCheckpointer::new("~/.echo-agent/checkpoints.json")?;
-let mut agent = ReactAgent::new(config);
-agent.set_checkpointer(Arc::new(cp), "user-alice-session".to_string());
-
-// 首次启动：会从 Checkpointer 恢复已有历史（如有）
-agent.chat("继续我们上次的对话…").await?;
-// 每轮 chat() 结束后自动保存 Checkpoint
-```
+`chat()` 的多轮历史可以通过 [`RuntimeStateStore`](../../src/state/mod.rs) 持久化（`SqliteRuntimeStateStore` 实现保存完整 `AgentCheckpoint`：消息 + 计划 + 激活技能 + 阻塞原因）。下次启动时，使用相同的 `conversation_id` 即可由运行时自动恢复先前状态。完整示例参见 [03-memory.md](./03-memory.md)。
 
 ---
 
@@ -309,7 +296,7 @@ async fn chat_stream_handler(
 ## 注意事项
 
 1. **多用户场景下需要独立 Agent 实例**：`ReactAgent` 不是线程安全的，每个用户会话应有独立实例（或用 `Arc<Mutex<ReactAgent>>`）
-2. **reset() 清除的是内存中的历史**：如果配置了 Checkpointer，已持久化的会话不受影响，下次调用 `execute()` 时仍会恢复
+2. **reset() 清除的是内存中的历史**：`RuntimeStateStore` 中已持久化的运行时状态不受影响，下次调用 `execute()` 时仍会恢复
 3. **上下文增长**：长时间对话会累积大量 token，建议配合 `set_compressor()` 使用
 4. **`execute()` 不影响 `chat()` 的历史**：混用 `execute()` 和 `chat()` 时，`execute()` 每次调用都会重置历史，之前 `chat()` 积累的上下文会丢失
 

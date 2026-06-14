@@ -11,7 +11,7 @@
 | `MockAgent` | 真实 SubAgent | 测试多 Agent 编排逻辑 |
 | `FailingMockAgent` | 总是失败的 SubAgent | 测试编排容错路径 |
 
-配合框架内置的 `InMemoryStore` 和 `InMemoryCheckpointer`，可以覆盖绝大多数场景的单元 / 集成测试。
+配合框架内置的 `InMemoryStore`，可以覆盖绝大多数场景的单元 / 集成测试。需要 `RuntimeStateStore` 或 `ConversationStore` 时，使用 SQLite 实现配合临时文件或 `:memory:` URI。
 
 ---
 
@@ -233,16 +233,14 @@ assert_eq!(broken.call_count(), 1); // 失败的调用也被记录
 
 ---
 
-## 配合 InMemoryStore / InMemoryCheckpointer
+## 配合 InMemoryStore
 
-对于涉及记忆系统的测试，使用内置的内存实现（无文件 I/O）：
+对于涉及长期记忆层的测试，使用内置的 `InMemoryStore`（无文件 I/O）：
 
-```rust
-use echo_agent::memory::checkpointer::{Checkpointer, InMemoryCheckpointer};
-use echo_agent::memory::store::{InMemoryStore, Store};
-use echo_agent::llm::types::Message;
+```rust,no_run
+use echo_agent::memory::{InMemoryStore, Store};
 
-// ── Store 测试 ─────────────────────────────────────────────────
+# async fn demo() -> echo_agent::error::Result<()> {
 let store = InMemoryStore::new();
 let ns = vec!["test_agent", "memories"];
 
@@ -253,21 +251,11 @@ assert_eq!(item.value, serde_json::json!("内容1"));
 
 let results = store.search(&ns, "内容", 10).await?;
 assert_eq!(results.len(), 1);
-
-// ── Checkpointer 测试 ─────────────────────────────────────────
-let cp = InMemoryCheckpointer::new();
-let messages = vec![
-    Message::user("你好".to_string()),
-    Message::assistant("你好！".to_string()),
-];
-
-cp.put("session-1", messages).await?;
-let snapshot = cp.get("session-1").await?.unwrap();
-assert_eq!(snapshot.messages.len(), 2);
-
-cp.delete_session("session-1").await?;
-assert!(cp.get("session-1").await?.is_none());
+# Ok(())
+# }
 ```
+
+测试中需要 `RuntimeStateStore` / `ConversationStore` 时，使用 `SqliteRuntimeStateStore` / `SqliteConversationStore` 配合 `tempfile::NamedTempFile` 或 `:memory:` SQLite URI 即可。
 
 ---
 
@@ -336,7 +324,7 @@ mod tests {
 | SubAgent 编排逻辑 | `MockAgent` + 真实编排器 | 是（编排器本身） |
 | 编排容错 | `FailingMockAgent` | 是（编排器本身） |
 | 记忆存储 | `InMemoryStore` | 否 |
-| 会话恢复 | `InMemoryCheckpointer` | 否 |
+| 运行时状态恢复 | `SqliteRuntimeStateStore`（`:memory:` URI） | 否 |
 | 端到端 Agent 行为 | 真实 LLM | 是 |
 
 ---

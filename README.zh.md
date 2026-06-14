@@ -143,7 +143,7 @@ echo-agent 提供 **67 个注册工具**，跨越 8 个 crate，通过一行 `us
 |------|------|---------|
 | **ReAct 引擎** | Thought → Action → Observation 循环 | `agent.execute("task").await?` |
 | **工具系统** | `#[tool]` 宏 + 自动 JSON Schema + 超时重试 | `#[tool(name = "calc")] async fn calc(...)` |
-| **双层记忆** | `Store`（长期 KV）+ `Checkpointer`（会话） | `.with_memory_tools(store)` |
+| **记忆系统** | `Store`（长期 KV）+ `RuntimeStateStore`（崩溃恢复）+ `ConversationStore`（会话历史） | `.with_memory_tools(store)` |
 | **上下文压缩** | 滑动窗口 / LLM 摘要 / 混合管道 | `SlidingWindowCompressor::new(4096)` |
 | **Token 预算** | 自动截断 + think 前触发压缩 | `.max_tool_output_tokens(2000)` |
 | **统一重试** | 一套策略覆盖 LLM、MCP、A2A、沙箱 | `with_retry(&policy, \|\| ...)` |
@@ -408,10 +408,11 @@ async fn weather(city: String) -> Result<ToolResult> {
 
 内置数据工具（feature `data`）：基于 Polars 的读取/过滤/聚合/统计/转换/导出。
 
-### 3. 双层记忆 — Store + Checkpointer
+### 3. 记忆系统 — Store + RuntimeStateStore + ConversationStore
 
 - **Store**：长期键值存储，支持命名空间隔离（`InMemoryStore`、`FileStore`、`SqliteStore`）
-- **Checkpointer**：跨重启的会话历史保存（`FileCheckpointer`、`InMemoryCheckpointer`）
+- **RuntimeStateStore**：完整运行时检查点（消息 + 计划 + 激活技能 + 阻塞原因），用于跨进程崩溃恢复（`SqliteRuntimeStateStore`）
+- **ConversationStore**：用户可见的对话历史投影，run 收尾时自动持久化
 
 一行代码让 Agent 拥有持久记忆——无需手动工具接线：
 

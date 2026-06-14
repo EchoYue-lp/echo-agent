@@ -31,7 +31,7 @@ ReAct solves:
 ```
 execute(task)
     │
-    ├─ 1. Load session history (Checkpointer)
+    ├─ 1. Load runtime state (RuntimeStateStore)
     ├─ 2. Inject long-term memories (Store)
     │
     └─ Loop (up to max_iterations):
@@ -53,7 +53,7 @@ execute(task)
           │
           └─ Append assistant + tool_results messages to context
 
-    └─ Save session history (Checkpointer)
+    └─ Save runtime state (RuntimeStateStore)
 ```
 
 ---
@@ -81,8 +81,8 @@ AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
     .enable_memory(true)        // enable long-term memory (Store + remember/recall/forget tools)
     .enable_human_in_loop(true) // enable human approval gate
     .enable_cot(true)           // enable Chain-of-Thought prompt injection (Builder default: true)
-    .session_id("thread-001")   // thread ID for Checkpointer restore/resume
-    .conversation_id("conv-001")// optional transcript/history projection ID
+    .session_id("thread-001")   // logical run-grouping label
+    .conversation_id("conv-001")// transcript ID, also keys RuntimeStateStore restore
     .token_limit(8192)          // context token limit (auto-compress when exceeded)
     .max_iterations(30)         // max iterations (prevents infinite loops)
 ```

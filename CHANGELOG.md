@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- **`Checkpointer` trait and its implementations** (`FileCheckpointer`,
+  `InMemoryCheckpointer`) are gone from the source tree. The trait was
+  already absent from public re-exports as of 0.2.0, and its setters were
+  no-ops on `ReactAgent`. New code should use:
+  - [`RuntimeStateStore`](src/state/mod.rs) — full runtime checkpoint
+    (messages + current plan + active skills + blocked reason + TaskNode
+    DAG) for crash recovery; concrete implementation:
+    `SqliteRuntimeStateStore`.
+  - `ConversationStore` — user-visible transcript projection;
+    concrete implementation: `SqliteConversationStore`.
+
+### Changed
+
+- Documentation overhaul: removed all references to the deprecated
+  `Checkpointer` API across `README{,.zh}.md`, `echo-core/README.md`,
+  `echo-state/README.md`, and the `docs/{en,zh}/` guides. The memory
+  chapter (`docs/{en,zh}/03-memory.md`) is now organized around the three
+  layers: `RuntimeStateStore`, `ConversationStore`, and `Store`.
+- Doc-comments in `src/memory.rs`, `src/agent/config.rs`,
+  `src/agent/snapshot.rs`, and `echo-state/src/memory/store.rs` no longer
+  reference the legacy trait.
+
 ## [0.2.0] — 2026-05-29
 
 ### Added
