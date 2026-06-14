@@ -59,6 +59,9 @@ fn spawn_human_loop_worker(
                     println!("💬 Human-in-the-loop: {prompt}");
                     responder.respond("用户补充：今天下雨，请按雨天折扣计算。".to_string());
                 }
+                _ => {
+                    // SelectionRequest and other variants — not used by this demo.
+                }
             }
         }
     })

@@ -83,6 +83,9 @@ async fn main() -> Result<()> {
                     println!("💬 确认请求（demo05）: {prompt}");
                     responder.respond("自动审批输入".to_string())
                 }
+                _ => {
+                    // SelectionRequest and other variants — not used by this demo.
+                }
             }
         }
     });

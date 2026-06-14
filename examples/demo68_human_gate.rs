@@ -9,7 +9,8 @@
 //! ```
 
 use echo_agent::human_loop::{
-    ApprovalDecision, HumanLoopEvent, HumanLoopManager, HumanLoopRequest, HumanLoopResponse,
+    ApprovalDecision, HumanLoopEvent, HumanLoopManager, HumanLoopProvider, HumanLoopRequest,
+    HumanLoopResponse,
 };
 use std::sync::Arc;
 use std::time::Duration;

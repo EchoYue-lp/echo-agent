@@ -126,6 +126,9 @@ async fn main() -> echo_agent::error::Result<()> {
                 HumanLoopEvent::InputRequest { responder, .. } => {
                     responder.respond("无需额外输入".to_string());
                 }
+                _ => {
+                    // SelectionRequest and other variants — not used by this demo.
+                }
             }
         }
     });

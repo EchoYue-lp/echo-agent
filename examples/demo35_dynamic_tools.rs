@@ -140,8 +140,11 @@ fn demo_api_basics() {
     let removed_search = agent.remove_tool("search_web");
     let removed_doc = agent.remove_tool("read_document");
 
-    assert!(removed_search.is_some());
-    assert!(removed_doc.is_some());
+    // `Agent::remove_tool` (trait method, in scope via prelude::*) returns
+    // `bool`; the inherent `ReactAgent::remove_tool` returning the boxed
+    // tool is shadowed here. Both are equivalent for the assertion.
+    assert!(removed_search);
+    assert!(removed_doc);
 
     agent.add_tool(Box::new(WriteCodeTool));
     agent.add_tool(Box::new(ExecuteCodeTool));
@@ -186,8 +189,8 @@ fn demo_edge_cases() {
     // 2.1 移除不存在的工具
     println!("  [2.1] 移除不存在的工具");
     let not_found = agent.remove_tool("nonexistent_tool");
-    assert!(not_found.is_none());
-    println!("    remove_tool('nonexistent_tool') = None ✓\n");
+    assert!(!not_found);
+    println!("    remove_tool('nonexistent_tool') = false ✓\n");
 
     // 2.2 replace_tool 新工具不存在时自动注册
     println!("  [2.2] replace_tool 不存在时自动注册");

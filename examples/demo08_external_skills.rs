@@ -789,6 +789,8 @@ async fn demo_6_new_features() -> echo_agent::error::Result<()> {
             paths: vec![],
             triggers: vec![],
             hooks: None,
+            depends_on: vec![],
+            sandbox: None,
         });
         locked_registry.mark_activated("locked-skill");
         let locked_shared = shared_registry(locked_registry);

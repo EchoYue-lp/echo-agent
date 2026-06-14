@@ -196,6 +196,9 @@ async fn main() -> Result<()> {
                     responder
                         .respond("客户未补充更多信息，请基于已知订单信息继续处理。".to_string());
                 }
+                _ => {
+                    // SelectionRequest and other variants — not used by this demo.
+                }
             }
         }
     });

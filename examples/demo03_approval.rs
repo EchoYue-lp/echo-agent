@@ -67,6 +67,11 @@ async fn main() -> Result<()> {
                     println!("💬 输入请求: {}", prompt);
                     responder.respond("提醒对象是产品团队，时间是下周三下午三点".to_string());
                 }
+                _ => {
+                    // SelectionRequest and other variants — not exercised by
+                    // this demo; ignore so the example keeps compiling as
+                    // HumanLoopEvent gains new variants.
+                }
             }
         }
     });
