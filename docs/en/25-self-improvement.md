@@ -192,7 +192,7 @@ The generator:
 After every conversation turn, spawns a background task to extract memory and skill updates:
 
 ```rust
-use echo_agent::improve::{BackgroundReviewer, BackgroundReviewConfig};
+use echo_agent::evolution::{BackgroundReviewer, BackgroundReviewConfig};
 
 let reviewer = BackgroundReviewer::new(
     BackgroundReviewConfig {

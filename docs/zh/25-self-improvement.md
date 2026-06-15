@@ -184,7 +184,7 @@ println!("改进后的提示词:\n{}", improved_prompt);
 每次对话轮次后，启动后台任务提取记忆和技能更新：
 
 ```rust
-use echo_agent::improve::{BackgroundReviewer, BackgroundReviewConfig};
+use echo_agent::evolution::{BackgroundReviewer, BackgroundReviewConfig};
 
 let reviewer = BackgroundReviewer::new(
     BackgroundReviewConfig {

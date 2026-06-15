@@ -35,6 +35,7 @@ pub mod layer;
 pub mod merge;
 pub mod patch;
 pub mod review;
+pub mod runtime_integration;
 pub mod security;
 pub mod triggers;
 
@@ -63,6 +64,7 @@ pub use review::{
     ConflictDetector, ConflictGroup, MemoryMerger, MemoryReviewer, MergeResult, ReviewChange,
     ReviewConfig, ReviewReport, StalenessReport, StalenessScorer,
 };
+pub use runtime_integration::MemoryRuntimeIntegrationBuilder;
 pub use security::{
     EvolutionSecurityGuard, InputTrustLevel, PromptInjectionDetector, ScanResult, SecretScanner,
     SecurityConfig, SecurityVerdict,
