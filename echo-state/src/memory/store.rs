@@ -34,6 +34,18 @@ impl InMemoryStore {
             data: RwLock::new(HashMap::new()),
         }
     }
+
+    /// Insert a complete `StoreItem` directly, preserving its timestamps.
+    ///
+    /// Unlike `Store::put`, this method does **not** override `created_at` or
+    /// `updated_at` — the caller controls the full item state. Intended for
+    /// test code that needs to simulate old entries.
+    pub async fn put_raw(&self, item: StoreItem) {
+        let ns_key = item.namespace.join("/");
+        let mut data = self.data.write().await;
+        let bucket = data.entry(ns_key).or_default();
+        bucket.insert(item.key.clone(), item);
+    }
 }
 
 impl Store for InMemoryStore {

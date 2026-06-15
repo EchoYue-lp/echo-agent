@@ -3,10 +3,8 @@
 //! 展示 echo-agent 自进化流水线的核心功能：
 //! 1. Analyzer —— 失败模式检测
 //! 2. RunCritique —— 人类可读的分析报告
-//! 3. CritiqueStore —— 模式聚合与趋势追踪
-//! 4. Curator —— 技能生命周期管理
-//! 5. TrajectorySaver —— 微调数据生成（ShareGPT 格式）
-//! 6. SelfEvolution —— 一键自进化（概念演示）
+//! 3. Curator —— 技能生命周期管理
+//! 4. TrajectorySaver —— 微调数据生成（ShareGPT 格式）
 //!
 //! 全程无真实 LLM 调用，使用 Mock 数据演示离线分析能力。
 //!
@@ -66,13 +64,12 @@ async fn main() {
     println!("╚══════════════════════════════════════════════════╝");
 
     demo_analyzer().await;
-    demo_critique_store().await;
+    demo_critique_aggregation().await;
     demo_curator().await;
     demo_trajectory_saver().await;
-    demo_self_evolution_concept().await;
 
     println!("\n╔══════════════════════════════════════════════════╗");
-    println!("║  全部 5 个场景通过 ✅                             ║");
+    println!("║  全部 4 个场景通过 ✅                             ║");
     println!("╚══════════════════════════════════════════════════╝");
 }
 
@@ -171,15 +168,13 @@ async fn demo_analyzer() {
     println!("\n{}", critique.format_report());
 }
 
-/// 场景 2：CritiqueStore — 模式聚合
-async fn demo_critique_store() {
-    section!(2, "CritiqueStore — 模式聚合与趋势追踪");
+/// 场景 2：批判聚合 — 演示多次分析的结果聚合
+async fn demo_critique_aggregation() {
+    section!(2, "批判聚合 — 多次分析的模式检测");
 
-    let store = CritiqueStore::new();
-
-    // 构造多个运行的批判
+    // 构造多个运行并分析
     let run1 = make_run(
-        "run_store_001",
+        "run_agg_001",
         "任务 1",
         vec![
             RunEvent::ToolCall {
@@ -202,7 +197,7 @@ async fn demo_critique_store() {
     );
 
     let run2 = make_run(
-        "run_store_002",
+        "run_agg_002",
         "任务 2",
         vec![
             RunEvent::ToolCall {
@@ -224,29 +219,25 @@ async fn demo_critique_store() {
         RunStatus::Completed,
     );
 
-    let critique1 = Analyzer::analyze(&run1);
-    let critique2 = Analyzer::analyze(&run2);
+    let critiques = Analyzer::analyze_batch(&[run1, run2]);
 
-    store.store(critique1);
-    store.store(critique2);
+    println!("  分析了 {} 次运行", critiques.len());
+    assert_eq!(critiques.len(), 2);
+    pass!("批量分析完成");
 
-    println!("  存储了 {} 条批判", store.len());
-    assert_eq!(store.len(), 2);
-    pass!("存储了 2 条批判");
-
-    // 查看高频模式
-    let patterns = store.top_patterns(5);
-    println!("\n  高频问题模式:");
-    for (pattern, count) in &patterns {
+    // 聚合问题模式
+    let mut issue_counts = std::collections::HashMap::new();
+    for critique in &critiques {
+        for issue in &critique.issues {
+            let key = format!("{:?}", std::mem::discriminant(issue));
+            *issue_counts.entry(key).or_insert(0usize) += 1;
+        }
+    }
+    println!("\n  问题模式聚合:");
+    for (pattern, count) in &issue_counts {
         println!("    {pattern}: {count} 次");
     }
-    assert!(!patterns.is_empty(), "应有高频模式");
-    pass!("高频模式聚合正确");
-
-    // 按运行 ID 查询
-    let critiques = store.get_by_run("run_store_001");
-    assert_eq!(critiques.len(), 1);
-    pass!("按运行 ID 查询正确");
+    pass!("问题模式聚合正确");
 }
 
 /// 场景 3：Curator — 技能生命周期管理
@@ -381,51 +372,4 @@ async fn demo_trajectory_saver() {
 
     // 清理
     let _ = tokio::fs::remove_dir_all(&dir).await;
-}
-
-/// 场景 5：SelfEvolution 概念演示
-async fn demo_self_evolution_concept() {
-    section!(5, "SelfEvolution — 一键自进化（概念演示）");
-
-    println!("  SelfEvolution 是自进化系统的统一入口。");
-    println!("  一个 .enable() 开启全部功能：");
-    println!();
-    println!("  ```rust");
-    println!("  let result = SelfEvolution::new()");
-    println!("      .with_eval_cases(cases)");
-    println!("      .with_run_store(run_store)");
-    println!("      .max_iterations(5)");
-    println!("      .with_report_dir(\"./reports\")");
-    println!("      .enable()");
-    println!("      .run(|| create_agent())");
-    println!("      .await;");
-    println!("  ```");
-    println!();
-    println!("  它内部执行以下循环：");
-    println!("    1. 在训练集上评估 Agent");
-    println!("    2. 分析失败运行的轨迹");
-    println!("    3. 生成改进建议（提示词/策略/评估用例）");
-    println!("    4. 在留出集上重新评估（盲测）");
-    println!("    5. 追踪最佳分数，达到阈值提前停止");
-    println!();
-    println!("  安全模型：所有建议需人工审查，不会自动修改代码或策略。");
-
-    // 展示各组件的协作关系
-    println!("\n  自进化流水线组件:");
-    println!("    ┌─────────────┐  ┌─────────────┐  ┌────────────────┐");
-    println!("    │  EvalRunner  │  │  Analyzer   │  │PromptGenerator │");
-    println!("    │  (评估)      │  │ (检测)      │  │  (改进)        │");
-    println!("    └──────┬──────┘  └──────┬──────┘  └───────┬────────┘");
-    println!("           │                │                  │");
-    println!("    ┌──────▼────────────────▼──────────────────▼────────┐");
-    println!("    │              ImprovementLoop                        │");
-    println!("    │  评估 → 批判 → 建议 → 重新评估 → 追踪最优          │");
-    println!("    └───────────────────────────────────────────────────┘");
-    println!();
-    println!("    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐");
-    println!("    │BackgroundRev │  │   Curator    │  │TrajectorySaver│");
-    println!("    │(从对话中学习) │  │(技能生命周期) │  │(微调数据)     │");
-    println!("    └──────────────┘  └──────────────┘  └──────────────┘");
-
-    pass!("SelfEvolution 概念演示完成");
 }

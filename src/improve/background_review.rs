@@ -2,15 +2,18 @@
 //!
 //! After every conversation turn, [`BackgroundReviewer`] spawns a background task
 //! that replays the conversation and asks "should any memory or skill be saved or
-//! updated?". Writes go to the memory/skill stores. The main conversation is never
-//! touched.
+//! updated?". Writes go to the memory/skill stores with typed metadata. The main
+//! conversation is never touched.
 //!
 //! Inspired by Hermes Agent's background review system.
 
 use crate::error::Result;
+use crate::evolution::MemoryLayerManager;
 use crate::llm::LlmClient;
 use crate::memory::store::Store;
 use crate::trace::{Run, RunEvent, RunStore};
+use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
+use echo_state::memory::typed_store::TypedMemoryStore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -112,6 +115,8 @@ pub struct BackgroundReviewer {
     config: BackgroundReviewConfig,
     llm_client: Arc<dyn LlmClient>,
     memory_store: Option<Arc<dyn Store>>,
+    typed_store: Option<TypedMemoryStore>,
+    layer_manager: Option<Arc<MemoryLayerManager>>,
     run_store: Option<Arc<dyn RunStore>>,
 }
 
@@ -123,12 +128,26 @@ impl BackgroundReviewer {
         memory_store: Option<Arc<dyn Store>>,
         run_store: Option<Arc<dyn RunStore>>,
     ) -> Self {
+        let typed_store = memory_store
+            .as_ref()
+            .map(|s| TypedMemoryStore::new(s.clone()));
         Self {
             config,
             llm_client,
             memory_store,
+            typed_store,
+            layer_manager: None,
             run_store,
         }
+    }
+
+    /// Route extracted memories through the evolution layer manager.
+    ///
+    /// This keeps background review writes on the same path as explicit memory
+    /// writes: security guard, audit log, promotion, and shared review counter.
+    pub fn with_layer_manager(mut self, layer_manager: Arc<MemoryLayerManager>) -> Self {
+        self.layer_manager = Some(layer_manager);
+        self
     }
 
     /// Get the review prompt based on configuration.
@@ -205,6 +224,8 @@ impl BackgroundReviewer {
         let run_id = run.run_id.clone();
         let llm_client = self.llm_client.clone();
         let memory_store = self.memory_store.clone();
+        let typed_store = self.typed_store.clone();
+        let layer_manager = self.layer_manager.clone();
 
         // Build the full review message
         let review_message = format!(
@@ -214,7 +235,15 @@ impl BackgroundReviewer {
 
         // Spawn background task — return handle immediately (non-blocking)
         let handle = tokio::spawn(async move {
-            Self::run_review(llm_client, memory_store, run_id, review_message).await
+            Self::run_review(
+                llm_client,
+                memory_store,
+                typed_store,
+                layer_manager,
+                run_id,
+                review_message,
+            )
+            .await
         });
 
         Ok(handle)
@@ -258,6 +287,8 @@ impl BackgroundReviewer {
         let run_id = run_id.to_string();
         let llm_client = self.llm_client.clone();
         let memory_store = self.memory_store.clone();
+        let typed_store = self.typed_store.clone();
+        let layer_manager = self.layer_manager.clone();
         let config = self.config.clone();
         let prompt = self.review_prompt().to_string();
 
@@ -297,7 +328,15 @@ impl BackgroundReviewer {
                  Other tools will be denied at runtime — do not attempt them."
             );
 
-            BackgroundReviewer::run_review(llm_client, memory_store, run_id, review_message).await
+            BackgroundReviewer::run_review(
+                llm_client,
+                memory_store,
+                typed_store,
+                layer_manager,
+                run_id,
+                review_message,
+            )
+            .await
         });
 
         Ok(handle)
@@ -309,7 +348,9 @@ impl BackgroundReviewer {
     /// The LLM response is parsed for action keywords.
     async fn run_review(
         llm_client: Arc<dyn LlmClient>,
-        memory_store: Option<Arc<dyn Store>>,
+        _memory_store: Option<Arc<dyn Store>>,
+        _typed_store: Option<TypedMemoryStore>,
+        layer_manager: Option<Arc<MemoryLayerManager>>,
         run_id: String,
         message: String,
     ) -> ReviewOutcome {
@@ -363,25 +404,29 @@ impl BackgroundReviewer {
                 actions.push("Skill update recommended".to_string());
             }
 
-            // If we have a memory store and the review suggests saving, try to persist
-            if let Some(ref store) = memory_store
+            // Persist only through the real layered memory manager so review
+            // writes receive security checks, audit log, promotion, and write
+            // counter handling.
+            if let Some(ref layer_manager) = layer_manager
                 && !content.contains("Nothing to save")
             {
-                // Save the review summary as a memory entry
+                // Classify the memory type based on review content
+                let (memory_type, topic) = classify_review_content(&content);
+
+                let meta = MemoryMeta::new(memory_type, MemorySource::AutoExtracted, topic);
+
                 let key = format!("review_{}", &run_id);
-                let value = serde_json::json!({
-                    "review": content,
-                    "run_id": &run_id,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                });
-                if store
-                    .put(&["background_reviews"], &key, value)
+                if layer_manager
+                    .write_memory(&key, &content, meta)
                     .await
                     .is_ok()
                     && actions.is_empty()
                 {
                     actions.push("Review saved to memory".to_string());
                 }
+            } else if !content.contains("Nothing to save") {
+                actions
+                    .push("Review memory write skipped: layer manager not configured".to_string());
             }
         }
 
@@ -392,6 +437,56 @@ impl BackgroundReviewer {
             error: None,
         }
     }
+}
+
+// ── Review content classification ────────────────────────────────────────
+
+/// Classify review content into a memory type and topic.
+///
+/// Uses simple keyword heuristics to determine what kind of memory
+/// the review produced and what topic bucket it belongs to.
+fn classify_review_content(content: &str) -> (MemoryType, String) {
+    let lower = content.to_lowercase();
+
+    // Check for skill-related signals first
+    if lower.contains("skill")
+        && (lower.contains("create")
+            || lower.contains("update")
+            || lower.contains("patch")
+            || lower.contains("recommend"))
+    {
+        return (MemoryType::SkillCandidate, "skills".to_string());
+    }
+
+    // Check for debugging/error signals
+    if lower.contains("bug")
+        || lower.contains("error")
+        || lower.contains("fix")
+        || lower.contains("debug")
+        || lower.contains("failure")
+    {
+        return (MemoryType::DebuggingLesson, "debugging".to_string());
+    }
+
+    // Check for user preference signals
+    if lower.contains("prefer")
+        || lower.contains("style")
+        || lower.contains("format")
+        || lower.contains("verbose")
+        || lower.contains("concise")
+        || lower.contains("always")
+        || lower.contains("never")
+    {
+        return (MemoryType::UserPreference, "user".to_string());
+    }
+
+    // Check for tool usage signals
+    if lower.contains("tool") || lower.contains("command") || lower.contains("utility") {
+        return (MemoryType::ToolUsage, "tools".to_string());
+    }
+
+    // Default: general project fact
+    (MemoryType::ProjectFact, "project".to_string())
 }
 
 #[cfg(test)]

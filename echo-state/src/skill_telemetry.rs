@@ -3,7 +3,7 @@
 //! Provides `SkillTelemetryStore` which wraps the framework `Store` trait to persist
 //! telemetry data under the `["agent", "skill_telemetry"]` namespace.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,10 @@ pub struct SkillTelemetry {
     pub last_used: u64,
     /// First used timestamp (epoch milliseconds).
     pub first_used: u64,
+    /// Recent execution results (last 20 executions, true = success, false = failure).
+    /// Used for computing recent_success_rate in health monitoring.
+    #[serde(default)]
+    pub recent_records: VecDeque<bool>,
 }
 
 impl SkillTelemetry {
@@ -69,6 +73,7 @@ impl SkillTelemetry {
             common_failures: Vec::new(),
             last_used: now,
             first_used: now,
+            recent_records: VecDeque::new(),
         }
     }
 
@@ -106,6 +111,12 @@ impl SkillTelemetry {
         if record.activated_at < self.first_used {
             self.first_used = record.activated_at;
         }
+
+        // Maintain recent_records FIFO (last 20 executions)
+        self.recent_records.push_front(record.success);
+        if self.recent_records.len() > 20 {
+            self.recent_records.pop_back();
+        }
     }
 
     /// Success rate as a percentage (0.0 to 1.0).
@@ -122,6 +133,16 @@ impl SkillTelemetry {
             return 0;
         }
         self.total_duration_ms / self.activation_count
+    }
+
+    /// Recent success rate based on the last 20 executions (0.0 to 1.0).
+    /// Returns 0.0 if no recent records are available.
+    pub fn recent_success_rate(&self) -> f64 {
+        if self.recent_records.is_empty() {
+            return 0.0;
+        }
+        let successes = self.recent_records.iter().filter(|&&s| s).count();
+        successes as f64 / self.recent_records.len() as f64
     }
 }
 
@@ -326,5 +347,47 @@ mod tests {
 
         let long = "a".repeat(300);
         assert_eq!(truncate_to_200(&long).len(), 200);
+    }
+
+    #[test]
+    fn test_recent_records_fifo() {
+        let mut t = SkillTelemetry::new("coding");
+
+        // Record 25 executions (more than the 20 FIFO limit)
+        for i in 0..25 {
+            let r = make_record("coding", i % 2 == 0, 1000);
+            t.record(&r);
+        }
+
+        // Should only keep last 20
+        assert_eq!(t.recent_records.len(), 20);
+        assert_eq!(t.activation_count, 25);
+    }
+
+    #[test]
+    fn test_recent_success_rate_empty() {
+        let t = SkillTelemetry::new("coding");
+        assert_eq!(t.recent_success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_recent_success_rate_all_success() {
+        let mut t = SkillTelemetry::new("coding");
+        for _ in 0..5 {
+            t.record(&make_record("coding", true, 1000));
+        }
+        assert!((t.recent_success_rate() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_recent_success_rate_mixed() {
+        let mut t = SkillTelemetry::new("coding");
+        // 3 success, 2 failure
+        t.record(&make_record("coding", true, 1000));
+        t.record(&make_record("coding", true, 1000));
+        t.record(&make_record("coding", false, 1000));
+        t.record(&make_record("coding", true, 1000));
+        t.record(&make_record("coding", false, 1000));
+        assert!((t.recent_success_rate() - 0.6).abs() < f64::EPSILON);
     }
 }

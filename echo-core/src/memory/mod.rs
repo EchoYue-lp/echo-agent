@@ -16,6 +16,7 @@ pub mod conversation;
 pub mod embedder;
 pub mod scope;
 pub mod store;
+pub mod types;
 
 pub use scope::MemoryScope;
 
@@ -25,3 +26,6 @@ pub use conversation::{
 };
 pub use embedder::Embedder;
 pub use store::{SearchMode, SearchQuery, Store, StoreItem};
+pub use types::{
+    MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
+};

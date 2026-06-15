@@ -29,6 +29,8 @@ pub enum HookEventCategory {
     Task,
     /// Error/failure events — generally do not support matcher.
     Error,
+    /// Evolution/memory lifecycle events — matcher filters by memory source or layer.
+    Evolution,
 }
 
 // ── Hook Event ─────────────────────────────────────────────────────────
@@ -44,6 +46,7 @@ pub enum HookEventCategory {
 /// | Subagent | `SubagentStart`, `SubagentStop` | Subagent type/name |
 /// | Task | `TaskCreated`, `TaskCompleted` | Task subject/name |
 /// | Error | `StopFailure` | Not supported |
+/// | Evolution | `PostMemoryWrite`, `MemoryLayerChange` | Memory source or layer name |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum HookEvent {
@@ -112,6 +115,24 @@ pub enum HookEvent {
     // ── Extended subagent events ──
     /// Subagent was cancelled.
     SubagentCancelled,
+
+    // ── Evolution events ──
+    /// After any memory is persisted to the Store.
+    PostMemoryWrite,
+    /// After a memory is promoted or demoted between layers.
+    MemoryLayerChange,
+    /// After a skill candidate is detected from memory patterns.
+    SkillCandidateDetected,
+    /// After a skill transitions between lifecycle states.
+    SkillLifecycleTransition,
+    /// After a skill health check completes.
+    SkillHealthCheck,
+    /// After a skill patch is applied.
+    SkillPatchApplied,
+    /// After two or more skills are merged.
+    SkillMergeApplied,
+    /// After a memory is promoted to a rule in AGENTS.md.
+    RulePromoted,
 }
 
 impl HookEvent {
@@ -147,6 +168,17 @@ impl HookEvent {
             | HookEvent::PostToolBatch
             | HookEvent::PluginLoaded
             | HookEvent::PluginDisabled => HookEventCategory::Lifecycle,
+
+            HookEvent::PostMemoryWrite
+            | HookEvent::MemoryLayerChange
+            | HookEvent::SkillCandidateDetected
+            | HookEvent::SkillLifecycleTransition
+            | HookEvent::SkillHealthCheck
+            | HookEvent::SkillPatchApplied
+            | HookEvent::SkillMergeApplied
+            | HookEvent::RulePromoted => {
+                HookEventCategory::Evolution
+            }
         }
     }
 
@@ -163,6 +195,7 @@ impl HookEvent {
                 | HookEventCategory::Lifecycle
                 | HookEventCategory::Subagent
                 | HookEventCategory::Task
+                | HookEventCategory::Evolution
         )
     }
 
@@ -196,6 +229,14 @@ impl HookEvent {
             HookEvent::TaskTimeout => "TaskTimeout",
             HookEvent::TaskCancelled => "TaskCancelled",
             HookEvent::SubagentCancelled => "SubagentCancelled",
+            HookEvent::PostMemoryWrite => "PostMemoryWrite",
+            HookEvent::MemoryLayerChange => "MemoryLayerChange",
+            HookEvent::SkillCandidateDetected => "SkillCandidateDetected",
+            HookEvent::SkillLifecycleTransition => "SkillLifecycleTransition",
+            HookEvent::SkillHealthCheck => "SkillHealthCheck",
+            HookEvent::SkillPatchApplied => "SkillPatchApplied",
+            HookEvent::SkillMergeApplied => "SkillMergeApplied",
+            HookEvent::RulePromoted => "RulePromoted",
         }
     }
 }
@@ -312,6 +353,20 @@ pub struct HookContext {
     /// Whether this Stop hook is being re-invoked (prevents infinite loops).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_hook_active: Option<bool>,
+
+    // ── Evolution event fields ──
+    /// Memory key that was written (PostMemoryWrite only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_key: Option<String>,
+    /// Memory source that triggered the write (PostMemoryWrite only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_source: Option<String>,
+    /// Layer the memory was promoted/demoted from (MemoryLayerChange only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_from_layer: Option<String>,
+    /// Layer the memory was promoted/demoted to (MemoryLayerChange only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_to_layer: Option<String>,
 }
 
 impl Default for HookContext {
@@ -345,6 +400,10 @@ impl Default for HookContext {
             failure_error: None,
             failure_category: None,
             stop_hook_active: None,
+            memory_key: None,
+            memory_source: None,
+            memory_from_layer: None,
+            memory_to_layer: None,
         }
     }
 }
@@ -706,6 +765,46 @@ impl HookContext {
             ..Self::default()
         }
     }
+
+    // ── Factory methods for evolution events ──
+
+    /// Create context for PostMemoryWrite event.
+    pub fn for_post_memory_write(
+        memory_key: &str,
+        memory_source: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::PostMemoryWrite,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(memory_source.to_string()),
+            memory_key: Some(memory_key.to_string()),
+            memory_source: Some(memory_source.to_string()),
+            ..Self::default()
+        }
+    }
+
+    /// Create context for MemoryLayerChange event.
+    pub fn for_memory_layer_change(
+        memory_key: &str,
+        from_layer: &str,
+        to_layer: &str,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Self {
+        Self {
+            event: HookEvent::MemoryLayerChange,
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            matcher: Some(format!("{from_layer}->{to_layer}")),
+            memory_key: Some(memory_key.to_string()),
+            memory_from_layer: Some(from_layer.to_string()),
+            memory_to_layer: Some(to_layer.to_string()),
+            ..Self::default()
+        }
+    }
 }
 
 // ── Hook Result ─────────────────────────────────────────────────────────
@@ -846,6 +945,14 @@ mod tests {
         assert_eq!(HookEvent::TaskCreated.category(), HookEventCategory::Task);
         assert_eq!(HookEvent::TaskCompleted.category(), HookEventCategory::Task);
         assert_eq!(HookEvent::StopFailure.category(), HookEventCategory::Error);
+        assert_eq!(
+            HookEvent::PostMemoryWrite.category(),
+            HookEventCategory::Evolution
+        );
+        assert_eq!(
+            HookEvent::MemoryLayerChange.category(),
+            HookEventCategory::Evolution
+        );
     }
 
     #[test]
@@ -888,6 +995,8 @@ mod tests {
         assert_eq!(HookEvent::TaskCreated.as_str(), "TaskCreated");
         assert_eq!(HookEvent::TaskCompleted.as_str(), "TaskCompleted");
         assert_eq!(HookEvent::StopFailure.as_str(), "StopFailure");
+        assert_eq!(HookEvent::PostMemoryWrite.as_str(), "PostMemoryWrite");
+        assert_eq!(HookEvent::MemoryLayerChange.as_str(), "MemoryLayerChange");
     }
 
     #[test]
@@ -1007,5 +1116,49 @@ mod tests {
             result.injected_context,
             Some("subagent context".to_string())
         );
+    }
+
+    #[test]
+    fn test_evolution_event_category() {
+        assert_eq!(
+            HookEvent::PostMemoryWrite.category(),
+            HookEventCategory::Evolution
+        );
+        assert_eq!(
+            HookEvent::MemoryLayerChange.category(),
+            HookEventCategory::Evolution
+        );
+    }
+
+    #[test]
+    fn test_evolution_event_supports_matcher() {
+        assert!(HookEvent::PostMemoryWrite.supports_matcher());
+        assert!(HookEvent::MemoryLayerChange.supports_matcher());
+    }
+
+    #[test]
+    fn test_evolution_event_as_str() {
+        assert_eq!(HookEvent::PostMemoryWrite.as_str(), "PostMemoryWrite");
+        assert_eq!(HookEvent::MemoryLayerChange.as_str(), "MemoryLayerChange");
+    }
+
+    #[test]
+    fn test_for_post_memory_write() {
+        let ctx = HookContext::for_post_memory_write("build_java8", "error_resolution", "s1", "a1");
+        assert_eq!(ctx.event, HookEvent::PostMemoryWrite);
+        assert_eq!(ctx.memory_key.as_deref(), Some("build_java8"));
+        assert_eq!(ctx.memory_source.as_deref(), Some("error_resolution"));
+        assert_eq!(ctx.matcher.as_deref(), Some("error_resolution"));
+    }
+
+    #[test]
+    fn test_for_memory_layer_change() {
+        let ctx =
+            HookContext::for_memory_layer_change("build_java8", "warm", "hot", "s1", "a1");
+        assert_eq!(ctx.event, HookEvent::MemoryLayerChange);
+        assert_eq!(ctx.memory_key.as_deref(), Some("build_java8"));
+        assert_eq!(ctx.memory_from_layer.as_deref(), Some("warm"));
+        assert_eq!(ctx.memory_to_layer.as_deref(), Some("hot"));
+        assert_eq!(ctx.matcher.as_deref(), Some("warm->hot"));
     }
 }

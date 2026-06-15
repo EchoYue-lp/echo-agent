@@ -1,3 +1,24 @@
+//! # Observability & Evolution Pipeline
+//!
+//! The framework provides a layered system for observability and self-improvement:
+//!
+//! ```text
+//! trace (执行追踪)
+//!   ↓ 提供 Run, RunEvent, RunStore 等执行追踪数据
+//! eval (评测框架) [feature = "eval"]
+//!   ↓ 基于 trace 数据运行 EvalCase，生成 EvalReport
+//! improve (自动优化) [feature = "improve"]
+//!   ↓ 分析 trace 和 eval 结果，优化 prompt/skill，管理 Curator 生命周期
+//! evolution (结构化演化)
+//!   └─ 管理 typed memory、change audit、security、skill 生命周期
+//! ```
+//!
+//! - [`trace`]: 执行追踪基础设施 — 完整记录单次执行的 Run/RunEvent/RunStore
+//! - [`eval`]: 评测框架 — 定义 EvalCase/SuccessCriteria，基于 trace 运行评测
+//! - [`improve`]: 自动优化 — 分析 trace 检测失败模式，生成改进建议
+//! - [`evolution`]: 结构化演化 — typed memory、change audit、security、skill lifecycle
+//!
+
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -15,6 +36,7 @@ pub mod error;
 #[cfg_attr(docsrs, doc(cfg(feature = "eval")))]
 pub mod eval;
 pub mod event_bus;
+pub mod evolution;
 pub mod guard;
 pub mod headless;
 #[cfg(feature = "improve")]
@@ -116,7 +138,7 @@ pub mod prelude {
     // Agent
     pub use crate::agent::{
         Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle, AgentRole, CancellationToken,
-        InterventionCallback, InterventionResult, ReactAgent, ReactAgentBuilder, Runner, StepType,
+        InterventionCallback, InterventionResult, ReactAgent, ReactAgentBuilder, StepType,
         StructuredAgent,
     };
     // Prompt Template

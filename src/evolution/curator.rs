@@ -1,8 +1,19 @@
 //! Curator — skill lifecycle management.
 //!
-//! Automatically manages skill lifecycle: Active → Stale → Archived.
+//! Manages the full skill lifecycle: `Candidate → Draft → Active → Stale → Deprecated → Archived`.
 //! Only operates on agent-created skills (never bundled/external).
 //! Never auto-deletes, only archives.
+//!
+//! # Lifecycle States
+//!
+//! | State | Meaning | Auto-transition |
+//! |-------|---------|-----------------|
+//! | `Candidate` | Pattern discovered from memory, not yet formalized | → Draft (after review) |
+//! | `Draft` | SKILL.md created but not activated | → Active (after review/usage) |
+//! | `Active` | In use, appears in skill catalog | → Stale (after inactivity) |
+//! | `Stale` | Not used recently, may be outdated | → Deprecated (after longer inactivity) |
+//! | `Deprecated` | Replaced or known outdated, still accessible | → Archived (after even longer inactivity) |
+//! | `Archived` | Removed from all paths, kept for reference | Terminal |
 //!
 //! Inspired by Hermes Agent's curator system.
 
@@ -15,14 +26,20 @@ use crate::error::Result;
 // ── SkillLifecycle ─────────────────────────────────────────────────
 
 /// Lifecycle state of a skill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillLifecycle {
-    /// Actively used and relevant.
+    /// Pattern discovered from memory, not yet formalized. No SKILL.md file yet.
+    Candidate,
+    /// SKILL.md created with minimal content, not yet injected into catalog.
+    Draft,
+    /// Actively used and relevant. Appears in skill catalog.
     Active,
     /// Not used recently, may be outdated.
     Stale,
-    /// No longer relevant, kept for reference.
+    /// Replaced by another skill or known to be outdated. Still accessible but not in catalog.
+    Deprecated,
+    /// No longer relevant, kept for reference only.
     Archived,
 }
 
@@ -45,6 +62,9 @@ pub struct SkillMeta {
     pub pinned: bool,
     /// Whether this skill is agent-created (vs bundled/external).
     pub agent_created: bool,
+    /// If deprecated/archived, which skill supersedes this one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 // ── CuratorConfig ──────────────────────────────────────────────────
@@ -54,6 +74,8 @@ pub struct SkillMeta {
 pub struct CuratorConfig {
     /// Days of inactivity before a skill becomes stale.
     pub stale_days: u64,
+    /// Days of inactivity before a skill becomes deprecated.
+    pub deprecate_days: u64,
     /// Days of inactivity before a skill is archived.
     pub archive_days: u64,
     /// Whether the curator is enabled.
@@ -64,6 +86,7 @@ impl Default for CuratorConfig {
     fn default() -> Self {
         Self {
             stale_days: 30,
+            deprecate_days: 60,
             archive_days: 90,
             enabled: true,
         }
@@ -106,8 +129,11 @@ impl CuratorState {
 /// Skill lifecycle manager.
 ///
 /// Manages the transition of skills through lifecycle states:
+/// - Candidate → Draft (manual promotion)
+/// - Draft → Active (manual promotion or after N successful uses)
 /// - Active → Stale (after `stale_days` of inactivity)
-/// - Stale → Archived (after `archive_days` of inactivity)
+/// - Stale → Deprecated (after `deprecate_days` of inactivity)
+/// - Deprecated → Archived (after `archive_days` of inactivity)
 ///
 /// Only operates on agent-created skills. Pinned skills are exempt.
 pub struct Curator {
@@ -161,11 +187,91 @@ impl Curator {
                     last_modified_at: now,
                     pinned: false,
                     agent_created,
+                    superseded_by: None,
                 },
             );
         }
 
         self.save_state(&state)
+    }
+
+    /// Register a new skill candidate (discovered from memory patterns).
+    pub fn register_candidate(&self, name: &str) -> Result<()> {
+        let mut state = self.load_state();
+        let now = chrono::Utc::now();
+
+        if state.skills.contains_key(name) {
+            // Already registered, skip
+            return Ok(());
+        }
+
+        state.skills.insert(
+            name.to_string(),
+            SkillMeta {
+                name: name.to_string(),
+                lifecycle: SkillLifecycle::Candidate,
+                created_at: now,
+                last_used_at: now,
+                last_modified_at: now,
+                pinned: false,
+                agent_created: true,
+                superseded_by: None,
+            },
+        );
+
+        self.save_state(&state)
+    }
+
+    /// Promote a Candidate skill to Draft.
+    pub fn promote_to_draft(&self, name: &str) -> Result<bool> {
+        let mut state = self.load_state();
+        let now = chrono::Utc::now();
+
+        if let Some(meta) = state.skills.get_mut(name) {
+            if meta.lifecycle == SkillLifecycle::Candidate {
+                meta.lifecycle = SkillLifecycle::Draft;
+                meta.last_modified_at = now;
+                self.save_state(&state)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Promote a Draft skill to Active.
+    pub fn promote_to_active(&self, name: &str) -> Result<bool> {
+        let mut state = self.load_state();
+        let now = chrono::Utc::now();
+
+        if let Some(meta) = state.skills.get_mut(name) {
+            if meta.lifecycle == SkillLifecycle::Draft {
+                meta.lifecycle = SkillLifecycle::Active;
+                meta.last_modified_at = now;
+                self.save_state(&state)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Deprecate a skill, optionally specifying which skill supersedes it.
+    pub fn deprecate_skill(&self, name: &str, superseded_by: Option<&str>) -> Result<bool> {
+        let mut state = self.load_state();
+        let now = chrono::Utc::now();
+
+        if let Some(meta) = state.skills.get_mut(name) {
+            if matches!(
+                meta.lifecycle,
+                SkillLifecycle::Active | SkillLifecycle::Stale
+            ) {
+                meta.lifecycle = SkillLifecycle::Deprecated;
+                meta.superseded_by = superseded_by.map(|s| s.to_string());
+                meta.last_modified_at = now;
+                self.save_state(&state)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Pin a skill (exempt from auto-transitions).
@@ -206,13 +312,24 @@ impl Curator {
                 continue;
             }
 
+            // Candidates and Drafts don't auto-transition based on inactivity
+            if matches!(
+                meta.lifecycle,
+                SkillLifecycle::Candidate | SkillLifecycle::Draft
+            ) {
+                continue;
+            }
+
             let idle_days = (now - meta.last_used_at).num_days() as u64;
 
             let new_lifecycle = match meta.lifecycle {
                 SkillLifecycle::Active if idle_days >= self.config.stale_days => {
                     Some(SkillLifecycle::Stale)
                 }
-                SkillLifecycle::Stale if idle_days >= self.config.archive_days => {
+                SkillLifecycle::Stale if idle_days >= self.config.deprecate_days => {
+                    Some(SkillLifecycle::Deprecated)
+                }
+                SkillLifecycle::Deprecated if idle_days >= self.config.archive_days => {
                     Some(SkillLifecycle::Archived)
                 }
                 _ => None,
@@ -233,8 +350,11 @@ impl Curator {
     /// Get a summary of the curator state.
     pub fn status(&self) -> CuratorStatus {
         let state = self.load_state();
+        let mut candidate = 0;
+        let mut draft = 0;
         let mut active = 0;
         let mut stale = 0;
+        let mut deprecated = 0;
         let mut archived = 0;
         let mut pinned = 0;
 
@@ -243,16 +363,22 @@ impl Curator {
                 pinned += 1;
             }
             match meta.lifecycle {
+                SkillLifecycle::Candidate => candidate += 1,
+                SkillLifecycle::Draft => draft += 1,
                 SkillLifecycle::Active => active += 1,
                 SkillLifecycle::Stale => stale += 1,
+                SkillLifecycle::Deprecated => deprecated += 1,
                 SkillLifecycle::Archived => archived += 1,
             }
         }
 
         CuratorStatus {
             total: state.skills.len(),
+            candidate,
+            draft,
             active,
             stale,
+            deprecated,
             archived,
             pinned,
             last_run_at: state.last_run_at,
@@ -264,8 +390,11 @@ impl Curator {
 #[derive(Debug, Clone)]
 pub struct CuratorStatus {
     pub total: usize,
+    pub candidate: usize,
+    pub draft: usize,
     pub active: usize,
     pub stale: usize,
+    pub deprecated: usize,
     pub archived: usize,
     pub pinned: usize,
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -373,5 +502,132 @@ mod tests {
         let status = curator.status();
         assert_eq!(status.active, 1);
         assert_eq!(status.pinned, 1);
+    }
+
+    #[test]
+    fn test_candidate_to_draft_to_active() {
+        let curator = temp_curator();
+
+        // Register as candidate
+        curator.register_candidate("my-skill").unwrap();
+        let state = curator.load_state();
+        assert_eq!(
+            state.skills["my-skill"].lifecycle,
+            SkillLifecycle::Candidate
+        );
+
+        // Promote to draft
+        let promoted = curator.promote_to_draft("my-skill").unwrap();
+        assert!(promoted);
+        let state = curator.load_state();
+        assert_eq!(state.skills["my-skill"].lifecycle, SkillLifecycle::Draft);
+
+        // Promote to active
+        let promoted = curator.promote_to_active("my-skill").unwrap();
+        assert!(promoted);
+        let state = curator.load_state();
+        assert_eq!(state.skills["my-skill"].lifecycle, SkillLifecycle::Active);
+    }
+
+    #[test]
+    fn test_deprecate_skill() {
+        let curator = temp_curator();
+        curator.touch_skill("old-skill", true).unwrap();
+
+        let deprecated = curator
+            .deprecate_skill("old-skill", Some("new-skill"))
+            .unwrap();
+        assert!(deprecated);
+
+        let state = curator.load_state();
+        assert_eq!(
+            state.skills["old-skill"].lifecycle,
+            SkillLifecycle::Deprecated
+        );
+        assert_eq!(
+            state.skills["old-skill"].superseded_by.as_deref(),
+            Some("new-skill")
+        );
+    }
+
+    #[test]
+    fn test_full_lifecycle() {
+        let curator = temp_curator();
+
+        // Candidate -> Draft -> Active
+        curator.register_candidate("lifecycle-skill").unwrap();
+        curator.promote_to_draft("lifecycle-skill").unwrap();
+        curator.promote_to_active("lifecycle-skill").unwrap();
+
+        // Set last_used_at to make it stale
+        let mut state = curator.load_state();
+        state
+            .skills
+            .get_mut("lifecycle-skill")
+            .unwrap()
+            .last_used_at = chrono::Utc::now() - chrono::Duration::days(35);
+        curator.save_state(&state).unwrap();
+
+        let transitions = curator.apply_transitions().unwrap();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].2, SkillLifecycle::Stale);
+
+        // Set last_used_at to make it deprecated
+        let mut state = curator.load_state();
+        state
+            .skills
+            .get_mut("lifecycle-skill")
+            .unwrap()
+            .last_used_at = chrono::Utc::now() - chrono::Duration::days(65);
+        curator.save_state(&state).unwrap();
+
+        let transitions = curator.apply_transitions().unwrap();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].2, SkillLifecycle::Deprecated);
+
+        // Set last_used_at to make it archived
+        let mut state = curator.load_state();
+        state
+            .skills
+            .get_mut("lifecycle-skill")
+            .unwrap()
+            .last_used_at = chrono::Utc::now() - chrono::Duration::days(95);
+        curator.save_state(&state).unwrap();
+
+        let transitions = curator.apply_transitions().unwrap();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].2, SkillLifecycle::Archived);
+    }
+
+    #[test]
+    fn test_candidate_no_auto_transition() {
+        let curator = temp_curator();
+        curator.register_candidate("cand-skill").unwrap();
+
+        // Set last_used_at to very old
+        let mut state = curator.load_state();
+        state.skills.get_mut("cand-skill").unwrap().last_used_at =
+            chrono::Utc::now() - chrono::Duration::days(200);
+        curator.save_state(&state).unwrap();
+
+        // Candidates should NOT auto-transition
+        let transitions = curator.apply_transitions().unwrap();
+        assert!(transitions.is_empty());
+
+        let state = curator.load_state();
+        assert_eq!(
+            state.skills["cand-skill"].lifecycle,
+            SkillLifecycle::Candidate
+        );
+    }
+
+    #[test]
+    fn test_register_candidate_idempotent() {
+        let curator = temp_curator();
+        curator.register_candidate("my-skill").unwrap();
+        curator.register_candidate("my-skill").unwrap(); // Should not fail
+
+        let state = curator.load_state();
+        assert_eq!(state.skills.len(), 1);
     }
 }

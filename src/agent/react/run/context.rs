@@ -2,9 +2,10 @@
 
 use super::super::ReactAgent;
 use super::types::StreamMode;
-use crate::llm::types::Message;
+use crate::llm::types::{Message, Role};
 use crate::memory::SearchQuery;
 use crate::skills::hooks::{HookContext, HookEvent};
+use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryStore};
 use tracing::{debug, info, warn};
 
 #[derive(Clone, Default)]
@@ -14,6 +15,92 @@ pub(crate) struct HookMessageBatches {
 }
 
 impl ReactAgent {
+    /// Detect memory-worthy conversational triggers and persist them through the
+    /// real layered memory manager. Currently this wires the reliable
+    /// user-correction path; explicit saves are handled by the `remember` tool.
+    pub(crate) async fn detect_and_write_memory_triggers(&self, user_message: &str) {
+        let Some(layer_manager) = &self.memory_layer_manager else {
+            return;
+        };
+
+        let assistant_message = {
+            let ctx = self.memory.context.lock().await;
+            ctx.messages()
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role, Role::Assistant))
+                .and_then(|m| m.content.as_text())
+                .map(|s| s.to_string())
+        };
+        let (last_tool_failure, last_tool_success, tool_sequences) =
+            match self.memory_trigger_state.lock() {
+                Ok(state) => (
+                    state.last_tool_failure.clone(),
+                    state.last_tool_success.clone(),
+                    state.tool_sequences.clone(),
+                ),
+                Err(e) => {
+                    tracing::warn!("memory trigger state lock poisoned: {}", e);
+                    (None, None, Vec::new())
+                }
+            };
+
+        let trigger_ctx = crate::evolution::TriggerContext {
+            user_message: Some(user_message.to_string()),
+            assistant_message,
+            last_tool_failure,
+            last_tool_success,
+            tool_sequences,
+            ..Default::default()
+        };
+        let detector = crate::evolution::TriggerDetector::new();
+        let triggers = detector.detect(&trigger_ctx);
+        let mut consumed_error_resolution = false;
+        let mut consumed_repeated_workflow = false;
+        for trigger in triggers {
+            let meta =
+                crate::memory::MemoryMeta::new(trigger.memory_type, trigger.source, trigger.topic)
+                    .with_confidence(trigger.confidence);
+
+            match layer_manager
+                .write_memory(&trigger.suggested_key, &trigger.content, meta)
+                .await
+            {
+                Ok(_) => {
+                    consumed_error_resolution |=
+                        matches!(trigger.source, crate::memory::MemorySource::ErrorResolution);
+                    consumed_repeated_workflow |= matches!(
+                        trigger.source,
+                        crate::memory::MemorySource::RepeatedWorkflow
+                    );
+                    tracing::info!(
+                        key = %trigger.suggested_key,
+                        "Memory trigger persisted through layered memory"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        key = %trigger.suggested_key,
+                        error = %e,
+                        "Memory trigger write failed"
+                    );
+                }
+            }
+        }
+
+        if consumed_error_resolution || consumed_repeated_workflow {
+            if let Ok(mut state) = self.memory_trigger_state.lock() {
+                if consumed_error_resolution {
+                    state.last_tool_failure = None;
+                    state.last_tool_success = None;
+                }
+                if consumed_repeated_workflow {
+                    state.tool_sequences.clear();
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "human-loop")]
     pub(crate) async fn flush_pending_permission_rules(
         &self,
@@ -149,6 +236,23 @@ impl ReactAgent {
             }
             Err(err) => return Err(err),
         };
+
+        // Also search typed layered memories written by remember, Auto Memory,
+        // and background review. This is the warm layer used by
+        // MemoryLayerManager, and is the main runtime recall path for new memory.
+        let typed_store = TypedMemoryStore::new(store.clone());
+        if let Ok(typed_items) = typed_store
+            .search_typed(&["agent", "typed_memories"], query, 5, &MemoryFilter::new())
+            .await
+        {
+            let mut existing_keys: std::collections::HashSet<String> =
+                results.iter().map(|i| i.key.clone()).collect();
+            for entry in typed_items {
+                if existing_keys.insert(entry.key.clone()) {
+                    results.push(entry.raw);
+                }
+            }
+        }
 
         // Also search L3 promoted facts (compression auto-promoted memories)
         let l3_ns: &[&str] = &["l3_promoted"];
@@ -299,6 +403,29 @@ impl ReactAgent {
             HookEvent::SubagentCancelled => {
                 HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
             }
+            // Evolution events — use dedicated factory methods
+            HookEvent::PostMemoryWrite => HookContext::for_post_memory_write(
+                "",
+                matcher.unwrap_or(""),
+                &session_id,
+                &agent_name,
+            ),
+            HookEvent::MemoryLayerChange => HookContext::for_memory_layer_change(
+                "",
+                "",
+                matcher.unwrap_or(""),
+                &session_id,
+                &agent_name,
+            ),
+            // Phase 5 evolution events — use generic lifecycle context
+            HookEvent::SkillCandidateDetected
+            | HookEvent::SkillLifecycleTransition
+            | HookEvent::SkillHealthCheck
+            | HookEvent::SkillPatchApplied
+            | HookEvent::SkillMergeApplied
+            | HookEvent::RulePromoted => {
+                HookContext::for_lifecycle(event, matcher.unwrap_or(""), &session_id, &agent_name)
+            }
             // Tool events should use run_pre_tool_use / run_post_tool_use / run_post_tool_use_failure directly
             HookEvent::PreToolUse
             | HookEvent::PostToolUse
@@ -344,6 +471,8 @@ impl ReactAgent {
                 // Multi-turn chat mode: do not reset context
             }
         }
+
+        self.detect_and_write_memory_triggers(input).await;
 
         // Inject relevant long-term memories
         let mut recalled = 0usize;
@@ -403,6 +532,10 @@ impl ReactAgent {
 
         // Extract text from message for long-term memory retrieval
         let text = message.content.as_text().unwrap_or_default();
+        if !text.is_empty() {
+            self.detect_and_write_memory_triggers(&text).await;
+        }
+
         let mut recalled = 0usize;
         if !text.is_empty()
             && let Ok(items) = self.recall_long_term_memories(&text).await

@@ -4,31 +4,36 @@
 //!
 //! | Tool       | Store Operation                              |
 //! |------------|----------------------------------------------|
-//! | `remember` | `store.put(namespace, uuid, value)`          |
+//! | `remember` | `MemoryLayerManager::write_memory()` when layered memory is installed |
 //! | `recall`   | `store.search(namespace, query, limit)`      |
 //! | `forget`   | `store.delete(namespace, key)`              |
 
 use futures::future::BoxFuture;
 
 use crate::error::ToolError;
+use crate::evolution::{MemoryLayer, MemoryLayerManager};
 use crate::memory::{SearchQuery, Store, StoreItem};
 use crate::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::debug;
 
-// ── RememberTool ─────────────────────────────────────────────────────────────
+// ── LegacyStoreRememberTool ─────────────────────────────────────────────────
 
-/// Store important information into the persistent Store
+/// Legacy store-backed remember tool.
 ///
-/// Internally calls `store.put(namespace, uuid, {"content": ..., "importance": ..., "tags": [...]})`
-pub struct RememberTool {
+/// New runtime paths should install [`LayeredRememberTool`] so explicit saves
+/// go through `MemoryLayerManager::write_memory`. This legacy variant remains
+/// only for agents that enable the old Store memory tools without a layer
+/// manager.
+pub struct LegacyStoreRememberTool {
     pub store: Arc<dyn Store>,
     /// Storage namespace, e.g. `["alice", "memories"]`
     pub namespace: Vec<String>,
 }
 
-impl RememberTool {
+impl LegacyStoreRememberTool {
     pub fn new(store: Arc<dyn Store>, namespace: Vec<String>) -> Self {
         Self { store, namespace }
     }
@@ -38,7 +43,7 @@ impl RememberTool {
     }
 }
 
-impl Tool for RememberTool {
+impl Tool for LegacyStoreRememberTool {
     fn name(&self) -> &str {
         "remember"
     }
@@ -121,6 +126,111 @@ impl Tool for RememberTool {
                 key.get(..8).unwrap_or(&key),
                 importance,
                 content,
+            )))
+        })
+    }
+}
+
+// ── LayeredRememberTool ────────────────────────────────────────────────────
+
+/// Store memory through the evolution layer manager.
+///
+/// This preserves the public `remember` tool contract while routing writes
+/// through typed memory, security checks, audit logging, promotion, and the
+/// shared review counter.
+pub struct LayeredRememberTool {
+    pub layer_manager: Arc<MemoryLayerManager>,
+}
+
+impl LayeredRememberTool {
+    pub fn new(layer_manager: Arc<MemoryLayerManager>) -> Self {
+        Self { layer_manager }
+    }
+}
+
+impl Tool for LayeredRememberTool {
+    fn name(&self) -> &str {
+        "remember"
+    }
+
+    fn description(&self) -> &str {
+        "Store information worth long-term retention into persistent typed memory. \
+         Suitable for user preferences, project facts, decisions, debugging lessons, and durable workflow patterns."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The specific content to remember; please describe concisely and completely"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of tags for categorization and retrieval (optional), e.g. [\"preferences\", \"programming\"]"
+                },
+                "importance": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Importance level (1-10), default 5; higher values are prioritized in recall"
+                }
+            },
+            "required": ["content"]
+        })
+    }
+
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let content = parameters
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
+
+            let tags: Vec<String> = parameters
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let importance = parameters
+                .get("importance")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 10))
+                .unwrap_or(5);
+
+            let memory_type = classify_memory_type(content, &tags);
+            let topic = tags
+                .first()
+                .cloned()
+                .unwrap_or_else(|| memory_type_topic(memory_type).to_string());
+            let confidence = (0.55 + importance as f32 * 0.045).clamp(0.0, 1.0);
+            let meta = MemoryMeta::new(memory_type, MemorySource::ExplicitSave, topic)
+                .with_confidence(confidence);
+            let key = uuid::Uuid::new_v4().to_string();
+
+            self.layer_manager.write_memory(&key, content, meta).await?;
+
+            let tag_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" (tags: {})", tags.join(", "))
+            };
+            Ok(ToolResult::success(format!(
+                "✅ Remembered in typed memory (ID: {}, importance: {}): \"{}\"{}",
+                key.get(..8).unwrap_or(&key),
+                importance,
+                content,
+                tag_str
             )))
         })
     }
@@ -408,7 +518,211 @@ impl Tool for SearchMemoryTool {
     }
 }
 
+// ── LayeredRecallTool / LayeredSearchMemoryTool ────────────────────────────
+
+pub struct LayeredRecallTool {
+    pub layer_manager: Arc<MemoryLayerManager>,
+}
+
+impl LayeredRecallTool {
+    pub fn new(layer_manager: Arc<MemoryLayerManager>) -> Self {
+        Self { layer_manager }
+    }
+}
+
+impl Tool for LayeredRecallTool {
+    fn name(&self) -> &str {
+        "recall"
+    }
+
+    fn description(&self) -> &str {
+        "Search typed long-term memory across hot and warm layers."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search keywords or description, e.g. \"user preferences\" or \"project convention\""
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "Maximum number of results to return (default 5)"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let query = parameters
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
+            let limit = parameters
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 20) as usize)
+                .unwrap_or(5);
+
+            let items = self.layer_manager.search_layered(query, limit).await?;
+            if items.is_empty() {
+                return Ok(ToolResult::success(format!(
+                    "No memories found matching \"{}\".",
+                    query
+                )));
+            }
+
+            let mut lines = vec![format!("Found {} matching typed memories:", items.len())];
+            for (i, (layer, item)) in items.iter().enumerate() {
+                lines.push(format!(
+                    "{}. [{}:{}] {}",
+                    i + 1,
+                    format_memory_layer(*layer),
+                    item.key.get(..8).unwrap_or(&item.key),
+                    format_typed_memory(item),
+                ));
+            }
+            Ok(ToolResult::success(lines.join("\n")))
+        })
+    }
+}
+
+pub struct LayeredSearchMemoryTool {
+    pub layer_manager: Arc<MemoryLayerManager>,
+}
+
+impl LayeredSearchMemoryTool {
+    pub fn new(layer_manager: Arc<MemoryLayerManager>) -> Self {
+        Self { layer_manager }
+    }
+}
+
+impl Tool for LayeredSearchMemoryTool {
+    fn name(&self) -> &str {
+        "search_memory"
+    }
+
+    fn description(&self) -> &str {
+        "Search typed long-term memory across hot and warm layers."
+    }
+
+    fn parameters(&self) -> Value {
+        LayeredRecallTool::new(self.layer_manager.clone()).parameters()
+    }
+
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        Box::pin(async move {
+            let query = parameters
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
+            let limit = parameters
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 20) as usize)
+                .unwrap_or(5);
+
+            let items = self.layer_manager.search_layered(query, limit).await?;
+            if items.is_empty() {
+                return Ok(ToolResult::success(format!(
+                    "No memories found matching \"{}\".",
+                    query
+                )));
+            }
+
+            let mut lines = vec![format!("Found {} matching typed memories:", items.len())];
+            for (i, (layer, item)) in items.iter().enumerate() {
+                lines.push(format!(
+                    "{}. [{}:{}] {}",
+                    i + 1,
+                    format_memory_layer(*layer),
+                    item.key.get(..8).unwrap_or(&item.key),
+                    format_typed_memory(item),
+                ));
+            }
+            Ok(ToolResult::success(lines.join("\n")))
+        })
+    }
+}
+
 // ── Helper functions ────────────────────────────────────────────────────────
+
+fn classify_memory_type(content: &str, tags: &[String]) -> MemoryType {
+    let lower = format!(
+        "{} {}",
+        content.to_lowercase(),
+        tags.join(" ").to_lowercase()
+    );
+    if lower.contains("prefer")
+        || lower.contains("always")
+        || lower.contains("never")
+        || lower.contains("style")
+        || lower.contains("user")
+    {
+        MemoryType::UserPreference
+    } else if lower.contains("decision")
+        || lower.contains("decided")
+        || lower.contains("architecture")
+        || lower.contains("choose")
+    {
+        MemoryType::ArchitectureDecision
+    } else if lower.contains("error")
+        || lower.contains("bug")
+        || lower.contains("fix")
+        || lower.contains("failed")
+    {
+        MemoryType::DebuggingLesson
+    } else if lower.contains("command") || lower.contains("cargo") || lower.contains("npm") {
+        MemoryType::CommandPattern
+    } else if lower.contains("workflow") || lower.contains("process") {
+        MemoryType::WorkflowPattern
+    } else {
+        MemoryType::ProjectFact
+    }
+}
+
+fn memory_type_topic(memory_type: MemoryType) -> &'static str {
+    match memory_type {
+        MemoryType::UserPreference => "user",
+        MemoryType::ProjectFact => "project",
+        MemoryType::ArchitectureDecision => "architecture",
+        MemoryType::DebuggingLesson | MemoryType::ErrorResolution => "debugging",
+        MemoryType::CommandPattern => "commands",
+        MemoryType::ToolUsage => "tools",
+        MemoryType::WorkflowPattern | MemoryType::SkillCandidate => "workflow",
+        MemoryType::DeprecatedNote => "deprecated",
+    }
+}
+
+fn format_memory_layer(layer: MemoryLayer) -> &'static str {
+    match layer {
+        MemoryLayer::Hot => "hot",
+        MemoryLayer::Warm => "warm",
+        MemoryLayer::Cold => "cold",
+    }
+}
+
+fn format_typed_memory(item: &echo_state::memory::typed_store::TypedMemoryEntry) -> String {
+    format!(
+        "{} (type: {:?}, confidence: {:.0}%, topic: {})",
+        item.content,
+        item.meta.memory_type,
+        item.meta.confidence * 100.0,
+        item.meta.topic
+    )
+}
 
 fn format_store_item(item: &StoreItem) -> String {
     match &item.value {

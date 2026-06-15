@@ -15,49 +15,47 @@
 //!
 //! # Component Usage Status
 //!
-//! This module contains 8 components, but only 4 are actively used in echo-agent-cli:
+//! ## Active Components (Integrated in echo-agent-cli)
 //!
-//! ## Active Components (Integrated)
+//! - [`TrajectorySaver`] — Automatically saves conversation trajectories to `~/.echo-agent/trajectories/` in ShareGPT JSONL format.
+//! - [`BackgroundReviewer`] — LLM-based conversation review that extracts memories and skill suggestions.
+//! - [`Curator`] — Manages skill lifecycle (Active → Stale → Archived, with Candidate/Draft/Deprecated extensions).
+//! - [`Analyzer`] — Statically analyzes Run traces to detect failure patterns.
 //!
-//! - [`TrajectorySaver`] — Automatically saves conversation trajectories to `~/.echo-agent/trajectories/` in ShareGPT JSONL format after every conversation. Used for fine-tuning and analysis.
-//! - [`BackgroundReviewer`] — LLM-based conversation review that extracts memories and skill suggestions. Triggered manually via `/review` command or `POST /api/evolution/review`.
-//! - [`Curator`] — Manages skill lifecycle (Active → Stale → Archived). Triggered manually via `/curator` command or `POST /api/evolution/curator`.
-//! - [`Analyzer`] — Statically analyzes Run traces to detect failure patterns (WriteWithoutRead, ExcessiveRetries, etc.). Used by `/self-review` command.
+//! ## Eval-Driven Improvement
 //!
-//! ## Experimental Components (Not Integrated)
+//! - [`ImprovementLoop`] — Iterative prompt optimization loop.
+//! - [`EvalDrivenImprovement`] — Unified entry point wrapping ImprovementLoop with HTML reports.
+//! - [`PromptGenerator`] — LLM-driven prompt improvement generator.
 //!
-//! The following components are defined but not currently instantiated in echo-agent-cli:
+//! # Complementary Module: `evolution`
 //!
-//! - [`CritiqueStore`] / [`DualLayerCritiqueStore`] — Storage for RunCritique analysis results with pattern aggregation. Designed for project-level and global-level persistence, but not wired into any pipeline.
-//! - [`ImprovementLoop`] — Iterative prompt optimization loop that evaluates, analyzes failures, and suggests improvements across multiple iterations.
-//! - [`SelfEvolution`] — Unified entry point for the self-improvement pipeline. Wraps ImprovementLoop with eval cases and HTML report generation.
-//! - [`PromptGenerator`] — LLM-driven prompt improvement generator. Creates improved system prompts based on failure analysis.
-//!
-//! These components are available for future integration and can be used via the library API or custom implementations. See `echo-agent/examples/demo51_self_improvement.rs` for usage examples.
+//! The [`evolution`](crate::evolution) module provides the memory/skill/rule
+//! lifecycle management system with typed metadata, change audit, and security.
+//! It complements this module's eval-driven improvement approach.
 //!
 //! # Data Storage Locations
 //!
 //! - Trajectories: `~/.echo-agent/trajectories/YYYY-MM-DD.jsonl`
 //! - Curator state: `~/.echo-agent/curator_state.json`
 //! - Background review memories: Memory store under `["background_reviews"]` namespace
-//! - CritiqueStore (unused): Would store to `.echo-agent/evolution/critiques/` (project) and `~/.echo-agent/evolution/critiques/` (global)
 
 pub mod analyzer;
 pub mod background_review;
-pub mod curator;
-pub mod evolution;
+pub mod eval_improvement;
 pub mod generator;
 pub mod r#loop;
-pub mod store;
 pub mod trajectory;
+
+// Re-export Curator types from evolution module
+pub use crate::evolution::curator::{
+    Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle,
+};
 pub use analyzer::Analyzer;
 pub use background_review::{BackgroundReviewConfig, BackgroundReviewer, ReviewOutcome};
-pub use curator::{Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle};
-pub use evolution::SelfEvolution;
+pub use eval_improvement::EvalDrivenImprovement;
 pub use generator::PromptGenerator;
 pub use r#loop::{ImprovementLoop, LoopResult};
-pub use store::CritiqueStore;
-pub use store::DualLayerCritiqueStore;
 pub use trajectory::{TrajectoryEntry, TrajectorySaver, TrajectoryStats};
 
 use serde::{Deserialize, Serialize};

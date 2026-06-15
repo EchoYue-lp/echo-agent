@@ -655,6 +655,9 @@ impl ReactAgent {
         .await;
         *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(turn.clone());
 
+        // Persist memory-worthy triggers before recall injection mutates context.
+        self.detect_and_write_memory_triggers(message).await;
+
         // Inject relevant long-term memories
         let mut recalled = 0usize;
         match self.recall_long_term_memories(message).await {

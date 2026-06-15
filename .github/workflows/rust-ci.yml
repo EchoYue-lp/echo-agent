@@ -8,38 +8,19 @@ on:
   pull_request:
 
 jobs:
-  check:
+  ci:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Cargo fmt check
-        run: cargo fmt --check
-
-      - name: Cargo clippy workspace
-        run: cargo clippy --workspace --all-targets
-
-      - name: Cargo test workspace
-        run: cargo test --workspace
-
-      - name: Cargo check workspace all features
-        run: cargo check --workspace --all-features --all-targets
-
-      - name: Cargo check examples all features
-        run: cargo check --examples --all-features
-
-      - name: Cargo check workspace minimal features
-        run: cargo check --workspace --no-default-features --all-targets
-
-      - name: Cargo check workspace all targets
-        run: cargo check --workspace --all-targets
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features
+      - run: cargo check --workspace --all-targets --no-default-features

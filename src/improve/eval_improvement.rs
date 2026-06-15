@@ -1,19 +1,20 @@
-//! Self-evolution engine — unified entry point for the entire improve loop.
+//! Eval-driven improvement engine — unified entry point for the evaluation improvement loop.
 //!
 //! One switch to enable everything: eval with LLM grader, A/B comparison,
 //! prompt regeneration, HTML report generation, and iterative improvement.
 //!
+//! Renamed from `SelfEvolution` to `EvalDrivenImprovement` to avoid naming
+//! collision with the new `evolution` module (memory/skill/rule lifecycle).
+//!
 //! # Usage
 //!
 //! ```rust,ignore
-//! let mut evolution = SelfEvolution::new()
-//!     .with_agent(agent)
+//! let result = EvalDrivenImprovement::new()
 //!     .with_eval_cases(cases)
-//!     .with_grader(grader, grading_agent)
-//!     .enable(); // ← single switch
-//!
-//! let result = evolution.run().await;
-//! println!("Best score: {:.2} (iteration {})", result.best_score, result.best_iteration);
+//!     .with_run_store(store)
+//!     .enable()
+//!     .run(agent_factory)
+//!     .await;
 //! ```
 
 use crate::eval::{EvalCase, generate_html};
@@ -21,19 +22,12 @@ use crate::improve::{ImprovementLoop, LoopResult};
 use crate::trace::RunStore;
 use std::sync::Arc;
 
-/// Unified self-evolution engine. One `.enable()` turns everything on.
+/// Eval-driven improvement engine. One `.enable()` turns everything on.
 ///
-/// # Usage
-///
-/// ```rust,ignore
-/// let result = SelfEvolution::new()
-///     .with_eval_cases(cases)
-///     .with_run_store(store)
-///     .enable()
-///     .run(agent_factory)
-///     .await;
-/// ```
-pub struct SelfEvolution {
+/// This is the evaluation-focused improvement system that uses eval cases
+/// to iteratively improve agent prompts. It is distinct from the `evolution`
+/// module which handles memory/skill/rule lifecycle management.
+pub struct EvalDrivenImprovement {
     cases: Vec<EvalCase>,
     run_store: Option<Arc<dyn RunStore>>,
     max_iterations: usize,
@@ -41,13 +35,13 @@ pub struct SelfEvolution {
     enabled: bool,
 }
 
-impl Default for SelfEvolution {
+impl Default for EvalDrivenImprovement {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SelfEvolution {
+impl EvalDrivenImprovement {
     pub fn new() -> Self {
         Self {
             cases: Vec::new(),
@@ -75,7 +69,7 @@ impl SelfEvolution {
         self
     }
 
-    /// Enable self-evolution.
+    /// Enable the eval-driven improvement engine.
     pub fn enable(mut self) -> Self {
         self.enabled = true;
         self
@@ -84,7 +78,7 @@ impl SelfEvolution {
         self.enabled
     }
 
-    /// Run the full self-evolution pipeline.
+    /// Run the full improvement pipeline.
     pub async fn run<F>(&self, agent_factory: F) -> Option<LoopResult>
     where
         F: Fn() -> Box<dyn crate::agent::Agent>,

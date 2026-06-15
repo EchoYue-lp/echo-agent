@@ -40,7 +40,10 @@ use crate::tools::builtin::answer::FinalAnswerTool;
 use crate::tools::builtin::check_task::{CheckTaskStatusTool, ListBackgroundTasksTool};
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
-use crate::tools::builtin::memory::{ForgetTool, RecallTool, RememberTool, SearchMemoryTool};
+use crate::tools::builtin::memory::{
+    ForgetTool, LayeredRecallTool, LayeredRememberTool, LayeredSearchMemoryTool,
+    LegacyStoreRememberTool, RecallTool, SearchMemoryTool,
+};
 #[cfg(feature = "tasks")]
 use crate::tools::builtin::spawn_task::SpawnBackgroundTaskTool;
 #[cfg(feature = "tasks")]
@@ -193,6 +196,19 @@ pub struct ReactAgent {
 
     /// Optional Critic for final_answer verification.
     pub(crate) critic: Option<Arc<dyn echo_core::agent::Critic>>,
+
+    /// Layered memory manager used by runtime-triggered memory writes.
+    pub(crate) memory_layer_manager: Option<Arc<crate::evolution::MemoryLayerManager>>,
+
+    /// Runtime state consumed by TriggerDetector between turns.
+    pub(crate) memory_trigger_state: Arc<std::sync::Mutex<MemoryTriggerRuntimeState>>,
+}
+
+#[derive(Default)]
+pub(crate) struct MemoryTriggerRuntimeState {
+    pub last_tool_failure: Option<crate::evolution::ToolFailureRecord>,
+    pub last_tool_success: Option<crate::evolution::ToolSuccessRecord>,
+    pub tool_sequences: Vec<crate::evolution::ToolSequenceRecord>,
 }
 
 // ── Construction & initialization ──────────────────────────────────────────────
@@ -304,9 +320,6 @@ impl ReactAgent {
         // ── Core tools ─────────────────────────────────────────────
         tool_manager.register(Box::new(FinalAnswerTool));
         tool_manager.register(Box::new(crate::tools::builtin::todo::TodoWriteTool));
-        tool_manager.register(Box::new(
-            crate::tools::builtin::memory_write::MemoryWriteTool,
-        ));
 
         // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
@@ -453,7 +466,31 @@ impl ReactAgent {
             intent_router: None,
             plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             critic: None,
+            memory_layer_manager: None,
+            memory_trigger_state: Arc::new(std::sync::Mutex::new(
+                MemoryTriggerRuntimeState::default(),
+            )),
         }
+    }
+
+    /// Replace default memory tools with layered memory tools backed by the
+    /// main runtime memory layer manager.
+    pub fn install_memory_layer_manager(
+        &mut self,
+        layer_manager: Arc<crate::evolution::MemoryLayerManager>,
+    ) {
+        self.tools
+            .tool_manager
+            .register(Box::new(LayeredRememberTool::new(layer_manager.clone())));
+        self.tools
+            .tool_manager
+            .register(Box::new(LayeredRecallTool::new(layer_manager.clone())));
+        self.tools
+            .tool_manager
+            .register(Box::new(LayeredSearchMemoryTool::new(
+                layer_manager.clone(),
+            )));
+        self.memory_layer_manager = Some(layer_manager);
     }
 
     /// Create an Agent from a configuration file.
@@ -515,7 +552,7 @@ impl ReactAgent {
                 );
                 let agent_name = config.agent_name.clone();
                 let namespace = vec![agent_name, "memories".to_string()];
-                tool_manager.register(Box::new(RememberTool::new(
+                tool_manager.register(Box::new(LegacyStoreRememberTool::new(
                     store.clone(),
                     namespace.clone(),
                 )));
@@ -745,15 +782,32 @@ impl ReactAgent {
     /// ```
     pub fn set_memory_store(&mut self, store: Arc<dyn Store>) {
         let ns = vec![self.config.agent_name.clone(), "memories".to_string()];
-        self.tools
-            .tool_manager
-            .register(Box::new(RememberTool::new(store.clone(), ns.clone())));
-        self.tools
-            .tool_manager
-            .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
-        self.tools
-            .tool_manager
-            .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
+        if let Some(layer_manager) = &self.memory_layer_manager {
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredRememberTool::new(layer_manager.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredRecallTool::new(layer_manager.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredSearchMemoryTool::new(
+                    layer_manager.clone(),
+                )));
+        } else {
+            self.tools
+                .tool_manager
+                .register(Box::new(LegacyStoreRememberTool::new(
+                    store.clone(),
+                    ns.clone(),
+                )));
+            self.tools
+                .tool_manager
+                .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
+        }
         self.tools
             .tool_manager
             .register(Box::new(ForgetTool::new(store.clone(), ns)));
@@ -785,15 +839,32 @@ impl ReactAgent {
     /// take effect — no silent fallback.
     pub async fn install_memory_store(&mut self, store: Arc<dyn Store>) {
         let ns = vec![self.config.agent_name.clone(), "memories".to_string()];
-        self.tools
-            .tool_manager
-            .register(Box::new(RememberTool::new(store.clone(), ns.clone())));
-        self.tools
-            .tool_manager
-            .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
-        self.tools
-            .tool_manager
-            .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
+        if let Some(layer_manager) = &self.memory_layer_manager {
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredRememberTool::new(layer_manager.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredRecallTool::new(layer_manager.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredSearchMemoryTool::new(
+                    layer_manager.clone(),
+                )));
+        } else {
+            self.tools
+                .tool_manager
+                .register(Box::new(LegacyStoreRememberTool::new(
+                    store.clone(),
+                    ns.clone(),
+                )));
+            self.tools
+                .tool_manager
+                .register(Box::new(RecallTool::new(store.clone(), ns.clone())));
+            self.tools
+                .tool_manager
+                .register(Box::new(SearchMemoryTool::new(store.clone(), ns.clone())));
+        }
         self.tools
             .tool_manager
             .register(Box::new(ForgetTool::new(store.clone(), ns)));

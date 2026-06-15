@@ -24,6 +24,7 @@ pub mod sqlite_conversation;
 #[cfg(feature = "sqlite")]
 pub mod sqlite_store;
 pub mod store;
+pub mod typed_store;
 
 // Re-export traits and data types from echo-core (backward compatibility)
 pub use echo_core::memory::conversation::{
@@ -32,6 +33,9 @@ pub use echo_core::memory::conversation::{
 };
 pub use echo_core::memory::embedder::Embedder;
 pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
+pub use echo_core::memory::types::{
+    MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
+};
 
 // Re-export concrete implementations from sub-modules
 pub use conversation::{project_message, project_messages};
@@ -43,6 +47,7 @@ pub use sqlite_conversation::SqliteConversationStore;
 #[cfg(feature = "sqlite")]
 pub use sqlite_store::SqliteStore;
 pub use store::{FileStore, InMemoryStore};
+pub use typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 
 #[cfg(test)]
 pub use test_utils::MockEmbedder;

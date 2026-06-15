@@ -8,7 +8,7 @@ use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result, ToolError};
 use crate::guard::GuardDirection;
 use crate::llm::{ChatRequest, Message};
-use crate::tools::ToolParameters;
+use crate::tools::{ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,6 +28,77 @@ pub(crate) struct ToolExecutionFailure {
 }
 
 impl ReactAgent {
+    fn summarize_trigger_text(value: impl AsRef<str>, max_chars: usize) -> String {
+        let text = value.as_ref();
+        let mut out: String = text.chars().take(max_chars).collect();
+        if text.chars().count() > max_chars {
+            out.push('…');
+        }
+        out
+    }
+
+    fn record_memory_trigger_tool_event(
+        &self,
+        tool_name: &str,
+        input: &Value,
+        result: Option<&ToolResult>,
+        error: Option<&str>,
+    ) {
+        let Ok(mut state) = self.memory_trigger_state.lock() else {
+            return;
+        };
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let session_id = self.config.get_session_id().unwrap_or("").to_string();
+        state
+            .tool_sequences
+            .push(crate::evolution::ToolSequenceRecord {
+                tool_name: tool_name.to_string(),
+                session_id,
+                timestamp: timestamp.clone(),
+            });
+        if state.tool_sequences.len() > 100 {
+            let excess = state.tool_sequences.len() - 100;
+            state.tool_sequences.drain(0..excess);
+        }
+
+        let input_summary = Self::summarize_trigger_text(input.to_string(), 160);
+        match (result, error) {
+            (Some(result), _) if result.success => {
+                if state.last_tool_failure.is_some() {
+                    state.last_tool_success = Some(crate::evolution::ToolSuccessRecord {
+                        tool_name: tool_name.to_string(),
+                        input_summary,
+                        output_summary: Self::summarize_trigger_text(&result.output, 160),
+                        timestamp,
+                    });
+                }
+            }
+            (Some(result), _) => {
+                state.last_tool_failure = Some(crate::evolution::ToolFailureRecord {
+                    tool_name: tool_name.to_string(),
+                    input_summary,
+                    error: Self::summarize_trigger_text(
+                        result.error.as_deref().unwrap_or(&result.output),
+                        160,
+                    ),
+                    timestamp,
+                });
+                state.last_tool_success = None;
+            }
+            (None, Some(error)) => {
+                state.last_tool_failure = Some(crate::evolution::ToolFailureRecord {
+                    tool_name: tool_name.to_string(),
+                    input_summary,
+                    error: Self::summarize_trigger_text(error, 160),
+                    timestamp,
+                });
+                state.last_tool_success = None;
+            }
+            (None, None) => {}
+        }
+    }
+
     #[tracing::instrument(skip(self, input), fields(agent = %self.config.agent_name, tool.name = %tool_name))]
     pub(crate) fn execute_tool_feedback_raw<'a>(
         &'a self,
@@ -366,6 +437,12 @@ impl ReactAgent {
         match pipeline.run(&mut ctx, &snapshot).await {
             Ok(()) => {
                 if ctx.blocked {
+                    self.record_memory_trigger_tool_event(
+                        tool_name,
+                        input,
+                        None,
+                        ctx.block_reason.as_deref(),
+                    );
                     return Ok(ToolExecutionOutcome {
                         tool_result: None,
                         output: ctx
@@ -376,6 +453,7 @@ impl ReactAgent {
                 }
 
                 if let Some(result) = ctx.result {
+                    self.record_memory_trigger_tool_event(tool_name, input, Some(&result), None);
                     if result.success {
                         let output = ctx.output.unwrap_or_else(|| result.output.clone());
                         Ok(ToolExecutionOutcome {
@@ -408,16 +486,30 @@ impl ReactAgent {
                         }
                     }
                 } else {
+                    self.record_memory_trigger_tool_event(
+                        tool_name,
+                        input,
+                        None,
+                        Some("Pipeline completed without result"),
+                    );
                     Err(ToolExecutionFailure {
                         error: ReactError::Other("Pipeline completed without result".into()),
                         hook_messages: ctx.hook_messages,
                     })
                 }
             }
-            Err(error) => Err(ToolExecutionFailure {
-                error,
-                hook_messages: ctx.hook_messages,
-            }),
+            Err(error) => {
+                self.record_memory_trigger_tool_event(
+                    tool_name,
+                    input,
+                    None,
+                    Some(&error.to_string()),
+                );
+                Err(ToolExecutionFailure {
+                    error,
+                    hook_messages: ctx.hook_messages,
+                })
+            }
         }
     }
 
