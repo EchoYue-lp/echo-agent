@@ -10,6 +10,9 @@
 //! cargo run --example demo17_chat
 //! ```
 
+// 演示函数按需在 main() 中启用；未启用的部分保留为参考，允许暂时未用。
+#![allow(dead_code)]
+
 use echo_agent::agent::{Agent, AgentEvent};
 use echo_agent::prelude::*;
 use echo_agent::tool;

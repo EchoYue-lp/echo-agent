@@ -388,6 +388,16 @@ async fn run_command_sandboxed(
 /// **推荐做法**：在 `PromptContext` 中设置 `sandbox = Some(Arc::new(SandboxManager::auto_detect()))`
 /// 以启用沙箱执行路径，确保超时后进程被正确终止。
 async fn run_command_direct(command: &str, ctx: &PromptContext) -> String {
+    // Security gate: a skill's shell block is arbitrary code sourced from a
+    // SKILL.md file. When running without a sandbox (the default), validate it
+    // against the same strict policy the ShellTool uses, so a local skill can't
+    // use `!`-blocks to run `rm -rf` or other destructive commands. Skills
+    // needing such commands should be routed through a sandbox instead.
+    if let Err(reason) = check_skill_command_safety(command) {
+        warn!(command = command, reason = %reason, "Skill shell command rejected by safety policy");
+        return format!("[error: command rejected by safety policy: {reason}]");
+    }
+
     let shell_cmd = build_shell_command(command, ctx);
 
     let mut cmd = tokio::process::Command::new(&shell_cmd.program);
@@ -539,6 +549,54 @@ fn set_minimal_cmd_env(cmd: &mut tokio::process::Command, ctx: &PromptContext) {
     }
     if !ctx.session_id.is_empty() {
         cmd.env("SESSION_ID", &ctx.session_id);
+    }
+}
+
+/// Check whether a skill's shell command may run outside a sandbox.
+///
+/// Skill `!`-blocks are arbitrary code sourced from a SKILL.md file (local or,
+/// in the future, fetched). When no sandbox is configured this validates the
+/// command against the strict default policy — the same gate `ShellTool` and
+/// `spawn_background_task` use — so a skill cannot use an inline shell block to
+/// run destructive commands (`rm -rf`, arbitrary metacharacters, etc.). Skills
+/// that genuinely need such commands must be routed through a sandbox.
+///
+/// Returns `Ok(())` if the command is safe, or `Err(reason)` describing the
+/// rejection.
+fn check_skill_command_safety(command: &str) -> std::result::Result<(), String> {
+    #[cfg(feature = "shell")]
+    {
+        use echo_tools::shell::{CommandSafety, validate_command_safety};
+        return match validate_command_safety(command) {
+            CommandSafety::Safe => Ok(()),
+            CommandSafety::RequiresApproval(reason) | CommandSafety::Dangerous(reason) => {
+                Err(reason)
+            }
+        };
+    }
+
+    // Fallback when the `shell` feature is disabled: a conservative inline gate.
+    #[allow(unreachable_code)]
+    {
+        const SHELL_META: &[char] = &['|', ';', '&', '$', '`', '>', '<', '(', ')', '\n', '\r'];
+        if command.chars().any(|c| SHELL_META.contains(&c)) {
+            return Err(
+                "Skill command contains shell metacharacters; sandbox execution required. \
+                 Enable the `shell` feature for the full safety classifier."
+                    .to_string(),
+            );
+        }
+        let base = command.split_whitespace().next().unwrap_or("");
+        let base = base.rsplit(['/', '\\']).next().unwrap_or(base);
+        if matches!(
+            base,
+            "rm" | "rmdir" | "mkfs" | "dd" | "shutdown" | "reboot" | "halt" | "poweroff"
+        ) {
+            return Err(format!(
+                "Skill command '{base}' is destructive; sandbox execution required"
+            ));
+        }
+        Ok(())
     }
 }
 

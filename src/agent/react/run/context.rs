@@ -88,15 +88,15 @@ impl ReactAgent {
             }
         }
 
-        if consumed_error_resolution || consumed_repeated_workflow {
-            if let Ok(mut state) = self.memory_trigger_state.lock() {
-                if consumed_error_resolution {
-                    state.last_tool_failure = None;
-                    state.last_tool_success = None;
-                }
-                if consumed_repeated_workflow {
-                    state.tool_sequences.clear();
-                }
+        if (consumed_error_resolution || consumed_repeated_workflow)
+            && let Ok(mut state) = self.memory_trigger_state.lock()
+        {
+            if consumed_error_resolution {
+                state.last_tool_failure = None;
+                state.last_tool_success = None;
+            }
+            if consumed_repeated_workflow {
+                state.tool_sequences.clear();
             }
         }
     }
@@ -128,10 +128,13 @@ impl ReactAgent {
                     content: content.to_string(),
                 },
             );
-            let _ = al.log(event).await;
+            if let Err(e) = al.log(event).await {
+                tracing::error!(error = %e, "audit log write failed — event dropped");
+            }
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn log_tool_call_audit(
         &self,
         tool: &str,
@@ -152,7 +155,9 @@ impl ReactAgent {
                     duration_ms,
                 },
             );
-            let _ = al.log(event).await;
+            if let Err(e) = al.log(event).await {
+                tracing::error!(error = %e, "audit log write failed — event dropped");
+            }
         }
     }
 
@@ -166,7 +171,9 @@ impl ReactAgent {
                     content: content.to_string(),
                 },
             );
-            let _ = al.log(event).await;
+            if let Err(e) = al.log(event).await {
+                tracing::error!(error = %e, "audit log write failed — event dropped");
+            }
         }
     }
 

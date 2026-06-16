@@ -35,20 +35,17 @@
 //! are demoted back to warm based on a demotion score.
 
 use echo_core::memory::store::Store;
-use echo_core::memory::types::{
-    MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
-};
+use echo_core::memory::types::{MemoryMeta, MemoryRisk, MemorySource, MemoryType};
 use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::audit::{ChangeEntry, ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use super::security::{EvolutionSecurityGuard, InputTrustLevel, SecretScanner};
+use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
+use super::security::{EvolutionSecurityGuard, InputTrustLevel};
 use echo_core::error::{ConfigError, ReactError};
-use std::io;
 
 /// Alias for layer operation results.
 type Result<T> = std::result::Result<T, ReactError>;
@@ -127,21 +124,12 @@ impl HotEntryMeta {
 // ── MemoryFile ─────────────────────────────────────────────────────────
 
 /// Parsed structure of MEMORY.md.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryFile {
     /// Entries from YAML frontmatter.
     pub entries: Vec<HotEntryMeta>,
     /// The markdown body (human-readable, loaded into context).
     pub body: String,
-}
-
-impl Default for MemoryFile {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            body: String::new(),
-        }
-    }
 }
 
 // ── LayerChangeResult ──────────────────────────────────────────────────
@@ -491,7 +479,7 @@ impl MemoryLayerManager {
 
         // Increment write counter and check if review should be triggered.
         let count = self.write_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if count % self.review_every_n_writes == 0 {
+        if count.is_multiple_of(self.review_every_n_writes) {
             tracing::info!(
                 count,
                 threshold = self.review_every_n_writes,
@@ -514,10 +502,10 @@ impl MemoryLayerManager {
 
         // Consider promotion
         let promotion = self.consider_promotion(key).await;
-        if promotion.is_ok() {
-            if let Some(observer) = &self.write_observer {
-                observer.on_memory_write().await;
-            }
+        if promotion.is_ok()
+            && let Some(observer) = &self.write_observer
+        {
+            observer.on_memory_write().await;
         }
         promotion
     }
@@ -542,12 +530,11 @@ impl MemoryLayerManager {
                 break;
             }
             // Simple keyword match: check if key or topic contains the query
-            if meta.key.to_lowercase().contains(&query_lower)
-                || meta.topic.to_lowercase().contains(&query_lower)
+            if (meta.key.to_lowercase().contains(&query_lower)
+                || meta.topic.to_lowercase().contains(&query_lower))
+                && let Some(entry) = self.hot_meta_to_entry(meta, &file.body)
             {
-                if let Some(entry) = self.hot_meta_to_entry(meta, &file.body) {
-                    results.push((MemoryLayer::Hot, entry));
-                }
+                results.push((MemoryLayer::Hot, entry));
             }
         }
 
@@ -927,7 +914,7 @@ fn format_memory_md(file: &MemoryFile) -> String {
             Ok(yaml) => {
                 // serde_yaml adds "---\n" prefix, strip it
                 let yaml = yaml.trim_start_matches("---\n");
-                out.push_str(&yaml);
+                out.push_str(yaml);
             }
             Err(_) => {
                 // Fallback: empty frontmatter
@@ -1014,6 +1001,7 @@ mod security_ext {
 
 #[cfg(test)]
 mod tests {
+    use super::super::audit::ChangeEntry;
     use super::*;
     use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
     use echo_state::memory::store::InMemoryStore;
@@ -1041,7 +1029,7 @@ mod tests {
 
     fn make_manager() -> MemoryLayerManager {
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.into_path();
+        let dir_path = dir.keep();
         let store = Arc::new(InMemoryStore::new());
         let change_log = Box::new(NullChangeLog);
         MemoryLayerManager::new(dir_path, store, change_log)

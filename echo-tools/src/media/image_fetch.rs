@@ -69,15 +69,16 @@ impl ImageFetchTool {
     /// Download image from URL and return base64 encoded data
     #[allow(dead_code)]
     async fn download_image_as_base64(&self, url: &str) -> Result<(String, String)> {
-        // SSRF protection: validate URL before making the request
-        crate::security::validate_url(url)?;
-
-        let response = self.client.get(url).send().await.map_err(|e| {
-            echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
-                tool: "image_fetch".into(),
-                message: format!("Failed to download image: {}", e),
-            }))
-        })?;
+        // SSRF protection: resolve + validate + connect on pinned IPs, closing the
+        // DNS-rebinding TOCTOU window (previously only validated, then re-resolved).
+        let response = crate::security::ssrf_safe_get(url, std::time::Duration::from_secs(30), 5)
+            .await
+            .map_err(|e| {
+                echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
+                    tool: "image_fetch".into(),
+                    message: format!("Failed to download image: {}", e),
+                }))
+            })?;
 
         if !response.status().is_success() {
             return Err(echo_core::error::ReactError::Tool(Box::new(

@@ -24,7 +24,6 @@ use std::collections::HashMap;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
 use crate::error::Result;
-use echo_core::utils::hash::fnv1a_64;
 
 #[cfg(feature = "improve")]
 use super::curator::{Curator, CuratorConfig};
@@ -243,11 +242,11 @@ impl SkillCandidateDetector {
                         // Update with new sample count and confidence.
                         let updated = SkillCandidate {
                             created_at: parse_candidate_created_at(&existing)
-                                .unwrap_or_else(|| candidate.created_at),
+                                .unwrap_or(candidate.created_at),
                             ..candidate.clone()
                         };
-                        let value = serde_json::to_value(&updated)
-                            .unwrap_or_else(|_| serde_json::Value::Null);
+                        let value =
+                            serde_json::to_value(&updated).unwrap_or(serde_json::Value::Null);
                         let content = serde_json::to_string(&value).unwrap_or_default();
                         typed_store
                             .put_typed(CANDIDATE_NAMESPACE, &key, &content, existing.meta.clone())
@@ -257,8 +256,7 @@ impl SkillCandidateDetector {
                 }
             } else {
                 // New candidate — persist and register.
-                let value =
-                    serde_json::to_value(&candidate).unwrap_or_else(|_| serde_json::Value::Null);
+                let value = serde_json::to_value(&candidate).unwrap_or(serde_json::Value::Null);
                 let content = serde_json::to_string(&value).unwrap_or_default();
                 typed_store
                     .put_typed(
@@ -366,15 +364,15 @@ fn extract_tool_name_after_keyword(after: &str) -> String {
     // Strip leading colon and optional whitespace: "tool: cargo" or "tool:cargo"
     let s = s.strip_prefix(':').unwrap_or(s).trim_start();
     // Strip surrounding quotes: "tool 'cargo'" or "tool \"cargo\""
-    if let Some(rest) = s.strip_prefix('\'') {
-        if let Some(end) = rest.find('\'') {
-            return rest[..end].to_string();
-        }
+    if let Some(rest) = s.strip_prefix('\'')
+        && let Some(end) = rest.find('\'')
+    {
+        return rest[..end].to_string();
     }
-    if let Some(rest) = s.strip_prefix('"') {
-        if let Some(end) = rest.find('"') {
-            return rest[..end].to_string();
-        }
+    if let Some(rest) = s.strip_prefix('"')
+        && let Some(end) = rest.find('"')
+    {
+        return rest[..end].to_string();
     }
     // Unquoted: take the first word (alphanumeric + dashes/underscores).
     s.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')

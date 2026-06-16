@@ -128,7 +128,12 @@ pub struct InMemoryPermissionAuditSink {
 impl Clone for InMemoryPermissionAuditSink {
     fn clone(&self) -> Self {
         Self {
-            entries: RwLock::new(self.entries.read().unwrap().clone()),
+            entries: RwLock::new(
+                self.entries
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
             capacity: self.capacity,
         }
     }
@@ -145,13 +150,13 @@ impl InMemoryPermissionAuditSink {
 
     /// 获取最近 N 条审计记录
     pub fn recent(&self, n: usize) -> Vec<PermissionAuditEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.iter().rev().take(n).cloned().collect()
     }
 
     /// 获取所有审计记录（按时间正序）
     pub fn all(&self) -> Vec<PermissionAuditEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.iter().cloned().collect()
     }
 
@@ -160,18 +165,21 @@ impl InMemoryPermissionAuditSink {
     where
         F: Fn(&PermissionAuditEntry) -> bool,
     {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.iter().filter(|e| predicate(e)).cloned().collect()
     }
 
     /// 获取审计记录数量
     pub fn count(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// 清空所有审计记录
     pub fn clear(&self) {
-        self.entries.write().unwrap().clear();
+        self.entries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -184,7 +192,7 @@ impl Default for InMemoryPermissionAuditSink {
 #[async_trait]
 impl PermissionAuditSink for InMemoryPermissionAuditSink {
     async fn record(&self, entry: PermissionAuditEntry) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         if entries.len() >= self.capacity {
             entries.pop_front();
         }

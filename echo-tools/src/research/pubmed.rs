@@ -315,7 +315,6 @@ fn parse_pubmed_xml(xml: &str) -> Result<Vec<Value>> {
                 if tag == "ArticleId" && in_article {
                     // Check for DOI in attributes
                     let mut id_type = String::new();
-                    let mut id_value = String::new();
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"IdType" {
                             id_type = String::from_utf8_lossy(&attr.value).to_string();
@@ -325,7 +324,6 @@ fn parse_pubmed_xml(xml: &str) -> Result<Vec<Value>> {
                         // The DOI value is in the text content, which we already consumed
                         // For empty elements, the value might be in the attribute
                     }
-                    let _ = id_value; // suppress unused warning
                 }
             }
             Ok(Event::End(e)) => {

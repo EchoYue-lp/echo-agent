@@ -1,15 +1,27 @@
-# 自进化系统 — 分析、批判、进化
+# 自进化系统 — 分析、演化、技能自创建
 
 ## 概述
 
-自进化系统分析已完成的 Agent 运行，检测失败模式，生成改进建议，并迭代提升 Agent 性能。它将评估、轨迹分析、提示词重新生成和后台学习整合为统一系统。
+自进化系统让 Agent 从运行经验中**持续改进自身**：分析失败、积累结构化记忆、从重复模式中**自动创建技能**、合并/维护已过时的技能，并把高置信度的知识晋升为永久规则。
+
+它由两个互补的模块组成：
+
+- [`improve`](../../src/improve) — **评估驱动**的离线改进：分析轨迹、生成提示词建议、迭代调优。
+- [`evolution`](../../src/evolution) — **运行时演化**闭环：分层记忆、变更审计、技能生命周期（候选→草稿→激活）、技能合并/健康/补丁、规则晋升、安全防护。
 
 ```
-运行 Agent → 收集轨迹 → 分析失败 → 生成建议
-                                        ↓
-                                    人工审查
-                                        ↓
-                                    应用变更 → 重新评估 → 循环
+运行 Agent
+   │
+   ├─ 运行中 ──────── TriggerDetector（在线发现新记忆）──┐
+   ├─ 压缩淘汰 ────── memory_promoter（生命周期管理）──┤
+   └─ 会话/任务结束 ─ BackgroundReviewer（深度回顾）──┤
+                                                       ▼
+                                    MemoryLayerManager（热/暖/冷分层）
+                                                       │
+                           ┌───────────────┬──────────┴──────────┬───────────────┐
+                           ▼               ▼                     ▼               ▼
+                     MemoryReviewer    SkillCandidate      SkillHealth/      RulePromoter
+                     （审查/合并/GC）  Detector→Draft      Merge/Patch      （→ AGENTS.md）
 ```
 
 ---
@@ -21,46 +33,52 @@
 - **失败模式重复**：Agent 不读文件就写入、过度重试失败工具、遗漏明显工具
 - **无反馈循环**：过去的失败不影响未来行为
 - **无经验记忆**：每次会话从零开始
-- **技能老化**：技能过时却未被发现
+- **技能老化/重复**：技能过时却未被发现，或多个技能功能重叠
+- **知识无法沉淀**：学到的高价值经验永远是临时记忆，进不了永久规则
 
 ---
 
 ## 安全模型
 
-所有建议都需要人工审查。系统不会自动：
+所有建议性变更都需要人工审查。系统**不会自动**：
+
 - 修改核心运行时代码
-- 放松安全策略
-- 更改权限规则
-- 发布或部署任何内容
+- 放松安全策略 / 更改权限规则
+- 应用技能合并、补丁或规则晋升（仅生成提案，由人通过命令应用）
+- 把来自不可信来源（工具输出）的记忆晋升到热层或规则
+
+所有对记忆/技能/规则的变更都写入变更审计日志（`change-log.jsonl`），可查询、可回滚。写入时还会进行密钥扫描与提示注入检测。
 
 ---
 
-## 流水线架构
+## 模块全景
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    自进化流水线                            │
-│                                                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────────┐  │
-│  │  EvalRunner  │  │  Analyzer   │  │PromptGenerator │  │
-│  │  (评估)      │  │ (检测)      │  │  (改进)        │  │
-│  └──────┬──────┘  └──────┬──────┘  └───────┬────────┘  │
-│         │                │                  │            │
-│  ┌──────▼────────────────▼──────────────────▼────────┐  │
-│  │              ImprovementLoop                        │  │
-│  │  评估 → 批判 → 建议 → 重新评估 → 追踪最优          │  │
-│  └───────────────────────────────────────────────────┘  │
-│                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │BackgroundRev │  │   Curator    │  │TrajectorySaver│  │
-│  │(从对话中学习) │  │(技能生命周期) │  │(微调数据)     │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
+| 模块 | 职责 | 位置 |
+|------|------|------|
+| **Analyzer** | 检测运行轨迹中的失败模式 | `improve/` |
+| **ImprovementLoop** | 评估→批判→建议→重新评估的迭代调优 | `improve/` |
+| **EvalDrivenImprovement** | 一键启动完整评估改进循环（原 `SelfEvolution`） | `improve/` |
+| **PromptGenerator** | LLM 驱动的提示词改进 | `improve/` |
+| **TrajectorySaver** | 将运行转为 ShareGPT 微调数据 | `improve/` |
+| **TypedMemoryStore** | 带元数据的结构化记忆读写 | `echo-state` |
+| **MemoryLayerManager** | 热/暖/冷三层记忆管理 | `evolution/` |
+| **ChangeLog** | 变更审计与回滚 | `evolution/` |
+| **TriggerDetector** | 在线对话信号→新记忆 | `evolution/` |
+| **MemoryReviewer** | 陈旧评分、冲突检测、合并、归档（GC） | `evolution/` |
+| **Curator** | 技能生命周期状态机 | `evolution/` |
+| **SkillCandidateDetector** | 从重复模式发现技能候选 | `evolution/` |
+| **SkillDraftGenerator** | 从候选生成草稿 SKILL.md | `evolution/` |
+| **SkillSimilarityDetector / SkillMerger** | 检测重叠技能并合并 | `evolution/` |
+| **SkillHealthMonitor** | 技能健康评分（驱动弃用） | `evolution/` |
+| **SkillPatcher** | 从失败遥测生成技能补丁 | `evolution/` |
+| **RulePromoter** | 高置信度记忆→AGENTS.md 规则 | `echo-agent-app-core` |
+| **ReviewIntegration / Dashboard** | 产品层审查调度与状态仪表盘 | `echo-agent-app-core` |
 
 ---
 
-## Analyzer — 失败检测
+## 第一部分：评估驱动改进（`improve`）
+
+### Analyzer — 失败检测
 
 `Analyzer` 检查已完成的运行轨迹，检测常见失败模式：
 
@@ -72,6 +90,7 @@ println!("{}", critique.format_report());
 ```
 
 输出：
+
 ```
 运行: run_abc123
 成功: false (得分: 0.65)
@@ -85,7 +104,7 @@ println!("{}", critique.format_report());
   [策略] force_read_before_edit: true — 原因: Agent 先写后读 2 次
 ```
 
-### 检测的问题类型
+#### 检测的问题类型
 
 | 问题 | 检测逻辑 | 建议 |
 |------|----------|------|
@@ -96,11 +115,7 @@ println!("{}", critique.format_report());
 | `MissingTool` | 未使用预期工具 | 建议添加工具指令 |
 | `ExcessiveToolCalls` | 一次运行 > 20 次工具调用 | 添加效率指令 |
 
----
-
-## ImprovementLoop — 迭代改进
-
-循环运行评估、批判失败、生成建议并追踪改进：
+### ImprovementLoop — 迭代改进
 
 ```rust
 use echo_agent::improve::ImprovementLoop;
@@ -108,39 +123,23 @@ use echo_agent::improve::ImprovementLoop;
 let loop_runner = ImprovementLoop {
     max_iterations: 5,
     improvement_threshold: 0.95,  // 测试得分 >= 95% 时停止
-    holdout_ratio: 0.4,           // 40% 用于测试，60% 用于训练
+    holdout_ratio: 0.4,           // 40% 测试，60% 训练
 };
 
 let result = loop_runner.run(&cases, agent_factory, &run_store).await;
-
 println!("最优得分: {:.2}，第 {} 次迭代", result.best_score, result.best_iteration);
-for iter in &result.iterations {
-    println!("  迭代 {}: 训练={:.2}, 测试={:.2}, {} 条建议",
-        iter.iteration, iter.train_score, iter.eval_report.avg_score,
-        iter.suggestions.len());
-}
 ```
 
-### 工作原理
+工作原理：按标准类型分层拆分用例防止过拟合 → 训练集评估 → `Analyzer` 批判 → 生成去重建议 → 留出集盲测 → 追踪最优 → 达到阈值提前停止。
 
-1. **分层拆分**：按标准类型（TestPass、OutputContains 等）拆分用例，防止过拟合
-2. **训练评估**：在训练集上运行 Agent
-3. **批判**：加载失败运行的轨迹，用 `Analyzer` 分析
-4. **生成建议**：收集并去重所有批判中的建议
-5. **测试评估**：在留出集上运行 Agent（盲测——生成器看不到测试分数）
-6. **追踪最优**：记录各迭代的最佳测试分数
-7. **提前停止**：达到 `improvement_threshold` 时提前停止
+### EvalDrivenImprovement — 一键启动
 
----
-
-## SelfEvolution — 一键启动
-
-`SelfEvolution` 引擎是最简单的入口——一个 `.enable()` 开启全部功能：
+> **注意**：原 `SelfEvolution` 类型已**重命名**为 `EvalDrivenImprovement`（避免与新 `evolution` 模块命名冲突）。
 
 ```rust
-use echo_agent::improve::SelfEvolution;
+use echo_agent::improve::EvalDrivenImprovement;
 
-let result = SelfEvolution::new()
+let result = EvalDrivenImprovement::new()
     .with_eval_cases(cases)
     .with_run_store(run_store)
     .max_iterations(5)
@@ -148,188 +147,295 @@ let result = SelfEvolution::new()
     .enable()
     .run(|| create_agent())
     .await;
-
-if let Some(result) = result {
-    println!("最优: {:.2} (第 {} 次迭代)", result.best_score, result.best_iteration);
-    // HTML 报告生成在 ./eval_reports/
-    // - iter_0.html, iter_1.html, ..., final.html
-}
 ```
 
----
+### PromptGenerator 与 TrajectorySaver
 
-## PromptGenerator — LLM 驱动的提示词改进
-
-使用 LLM 基于失败分析生成改进的系统提示词：
-
-```rust
-use echo_agent::improve::PromptGenerator;
-
-let generator = PromptGenerator::new();
-
-let improved_prompt = generator.generate_improved_prompt(
-    &agent,
-    current_system_prompt,
-    &critiques,
-    "代码编辑",
-).await;
-
-println!("改进后的提示词:\n{}", improved_prompt);
-```
-
----
-
-## BackgroundReviewer — 从对话中学习
-
-每次对话轮次后，启动后台任务提取记忆和技能更新：
-
-```rust
-use echo_agent::evolution::{BackgroundReviewer, BackgroundReviewConfig};
-
-let reviewer = BackgroundReviewer::new(
-    BackgroundReviewConfig {
-        enabled: true,
-        max_iterations: 8,
-        review_memory: true,   // 提取用户偏好
-        review_skills: true,   // 提取可复用模式
-    },
-    llm_client,
-    Some(memory_store),
-    Some(run_store),
-);
-
-// 审查已完成的运行
-let outcome = reviewer.review(&run).await?;
-println!("操作: {:?}", outcome.actions);
-// 例如: ["已审查记忆", "建议更新技能"]
-```
-
-### 关注的信号
-
-**记忆信号**：
-- 用户人设、偏好、个人细节
-- 对 Agent 行为的期望
-
-**技能信号**：
-- 用户纠正（"不要这样做"、"太啰嗦"）
-- 非平凡的技术或解决方案
-- 过时或缺失的技能
-
-**忽略的内容**：
-- 环境失败（缺少二进制文件）
-- 瞬态错误
-- 一次性任务叙述
-
----
-
-## Curator — 技能生命周期管理
-
-自动管理技能生命周期：Active → Stale → Archived
-
-```rust
-use echo_agent::improve::{Curator, CuratorConfig};
-
-let curator = Curator::new(
-    CuratorConfig {
-        stale_days: 30,    // 30 天未使用 → Stale
-        archive_days: 90,  // 90 天未使用 → Archived
-        enabled: true,
-    },
-    "~/.echo-agent/curator_state.json",
-);
-
-// 使用时注册技能
-curator.touch_skill("my-code-review", true)?;
-
-// 固定重要技能（免于自动转换）
-curator.pin_skill("critical-skill")?;
-
-// 应用自动转换
-let transitions = curator.apply_transitions()?;
-for (name, from, to) in &transitions {
-    println!("{name}: {from:?} → {to:?}");
-}
-```
-
----
-
-## TrajectorySaver — 微调数据
-
-将已完成的运行转换为 ShareGPT 格式的 JSONL，用于模型微调：
+- `PromptGenerator` — 基于 `Analyzer` 的失败分析，用 LLM 生成改进的系统提示词。
+- `TrajectorySaver` — 把完成的运行转为 ShareGPT JSONL，用于模型微调：
 
 ```rust
 use echo_agent::improve::TrajectorySaver;
 
 let saver = TrajectorySaver::default_dir()?;
-
-// 保存已完成的运行
 saver.save(&run, "qwen3-max").await?;
-
-// 列出保存的轨迹
 let entries = saver.list(Some("2026-05-29")).await?;
-for entry in &entries {
-    println!("{}: {} 轮, {} token, {} 次工具调用",
-        entry.id, entry.conversations.len(),
-        entry.token_usage, entry.tool_call_count);
-}
 ```
 
 ---
 
-## 使用场景
+## 第二部分：运行时演化闭环（`evolution`）
 
-| 组件 | 何时使用 | 频率 |
-|------|----------|------|
-| `Analyzer` | 每次运行失败后 | 每次运行 |
-| `ImprovementLoop` | 调优提示词时 | 每次会话 |
-| `SelfEvolution` | 完整评估+改进循环 | 每次发布 |
-| `BackgroundReviewer` | 每次对话后 | 每轮对话 |
-| `Curator` | 定期技能维护 | 每天/每周 |
-| `TrajectorySaver` | 收集微调数据 | 持续 |
+这是 `v0.2.x` 新增的核心自进化能力，让 Agent 在运行过程中持续积累并复用知识。
+
+### 类型化记忆 — `TypedMemoryStore`
+
+每条记忆都带结构化元数据 `MemoryMeta`：类型、置信度、稳定性、风险、状态、来源、主题。向后兼容——未类型化的旧条目读取时自动获得默认元数据。
+
+```rust
+use echo_state::memory::typed_store::{TypedMemoryStore, MemoryFilter};
+use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType, MemoryStatus};
+
+let store = TypedMemoryStore::new(arc_store);
+
+// 写入带元数据的记忆
+let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::UserCorrection, "build-tool")
+    .with_confidence(0.9)
+    .with_stability(0.8);
+store
+    .put_typed(&["agent", "typed_memories"], "build:java8", "项目用 Java 8", meta)
+    .await?;
+
+// 按条件过滤检索
+let filter = MemoryFilter::new()
+    .with_type(MemoryType::ProjectFact)
+    .with_min_confidence(0.7);
+let entries = store.list_typed(&["agent", "typed_memories"], &filter).await?;
+```
+
+#### MemoryType 分类
+
+`UserPreference | ProjectFact | ArchitectureDecision | DebuggingLesson | ErrorResolution | CommandPattern | ToolUsage | WorkflowPattern | SkillCandidate | DeprecatedNote`
+
+#### MemorySource 与默认置信度
+
+| 来源 | 含义 | 默认置信度 |
+|------|------|-----------|
+| `ExplicitSave` | `/remember` 或 `remember` 工具显式保存 | 1.0 |
+| `UserCorrection` | 检测到用户纠正 Agent | 0.9 |
+| `ErrorResolution` | 工具失败后以不同方法成功重试 | 0.85 |
+| `RepeatedWorkflow` | 相同工具序列被观察 ≥3 次 | 0.75 |
+| `AutoExtracted` | AutoMemory 从会话归档提取 | 0.6 |
+
+### 三层记忆管理 — `MemoryLayerManager`
+
+记忆按价值分层，热层始终加载进上下文，暖/冷层按需检索：
+
+- **热层**（`.echo-agent/MEMORY.md`）：最高价值，YAML frontmatter + markdown 正文，上限 ~2000 token，人类与 Agent 都可编辑。
+- **暖层**（Store KV `["agent","typed_memories"]`）：按主题组织，按需加载。
+- **冷层**（Store KV `["agent","cold_memories"]`）：归档旧/低置信度记忆。
+
+```rust
+use echo_agent::evolution::{MemoryLayerManager, JsonlChangeLog, MemoryMeta, MemorySource, MemoryType};
+use std::path::PathBuf;
+
+let mgr = MemoryLayerManager::new(
+    PathBuf::from(".echo-agent"),
+    arc_store,
+    Box::new(JsonlChangeLog::new(PathBuf::from(".echo-agent/evolution/change-log.jsonl"))),
+);
+
+// 写入（自动扫描密钥/注入，并按置信度判断是否进热层）
+let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "deploy")
+    .with_confidence(0.95);
+mgr.write_memory("deploy:prod-script", "部署用 pnpm build", meta).await?;
+
+// 晋升/降级
+mgr.promote("some-key").await?;          // 冷→暖→热
+mgr.demote("some-key", "stale").await?;  // 热→暖→冷
+
+// 跨层搜索
+let hits = mgr.search_layered("deploy", 10).await?;
+```
+
+### 变更审计 — `ChangeLog`
+
+所有对记忆/技能/规则的变更都记录到 append-only JSONL，支持过滤查询：
+
+```rust
+use echo_agent::evolution::{ChangeFilter, ChangeType, EntityType};
+
+let filter = ChangeFilter::new()
+    .with_entity_type(EntityType::Memory)
+    .with_change_type(ChangeType::Promote)
+    .with_limit(50);
+// 日志文件：.echo-agent/evolution/change-log.jsonl
+```
+
+### 记忆审查与 GC — `MemoryReviewer`
+
+记忆会积累。审查器对暖层做陈旧度评分、冲突检测、合并、归档：
+
+```
+staleness = age·0.35 + low_usage·0.20 + instability·0.20 + contradiction·0.20 + source_weakness·0.05
+```
+
+| 陈旧度 | 状态 |
+|--------|------|
+| < 0.40 | Active |
+| 0.40–0.65 | Stale |
+| 0.65–0.85 | Deprecated |
+| ≥ 0.85 | Archived（降级到冷层） |
+
+```rust
+use echo_agent::evolution::{MemoryReviewer, ReviewConfig};
+
+let reviewer = MemoryReviewer::new();
+let report = reviewer
+    .review(&typed_store, &layer_manager, &change_log, &ReviewConfig::default())
+    .await?;
+// report.archived / report.merges_applied / report.superseded_keys
+```
+
+产品层通过 `ReviewIntegration` 调度：每 50 次记忆写入或会话结束时自动触发，也可用 `/memory-review` 手动触发。
+
+### 技能生命周期与自创建
+
+#### 完整生命周期（Curator 状态机）
+
+```
+Candidate → Draft → Active → Stale → Deprecated → Archived
+```
+
+`Curator`（位于 `evolution/`）管理这些状态转换：
+
+```rust
+use echo_agent::evolution::{Curator, CuratorConfig, SkillLifecycle};
+
+let curator = Curator::new(
+    CuratorConfig { stale_days: 30, archive_days: 90, enabled: true },
+    "~/.echo-agent/curator_state.json",
+);
+curator.register_candidate("cargo-build")?;   // 候选
+curator.promote_to_draft("cargo-build")?;      // → 草稿
+curator.promote_to_active("cargo-build")?;     // → 激活
+curator.pin_skill("critical-skill")?;          // 固定免于自动转换
+let transitions = curator.apply_transitions()?; // 按闲置时间自动转换
+```
+
+#### 从观察模式自动创建技能
+
+1. **`SkillCandidateDetector`** 扫描 `TypedMemoryStore` 中 `WorkflowPattern`/`DebuggingLesson` 记忆；当同一主题 ≥3 条且来源为 `RepeatedWorkflow` → 提出技能候选。
+
+   ```rust
+   use echo_agent::evolution::SkillCandidateDetector;
+   let detector = SkillCandidateDetector::new();
+   let report = detector.detect(&typed_store, &change_log).await?;
+   // report.new_candidates / report.reinforced
+   ```
+
+2. **`SkillDraftGenerator`** 从候选用模板生成草稿 `SKILL.md`，保存到 `.echo-agent/skills/_drafts/<name>/SKILL.md`。
+
+   ```rust
+   use echo_agent::evolution::SkillDraftGenerator;
+   let gen = SkillDraftGenerator::new(".echo-agent".into(), &change_log);
+   let result = gen.generate_from_candidate(&candidate).await?;
+   // result.skill_md_path 指向生成的草稿
+   ```
+
+3. 人工审查后通过 `/skill-promote <name>` 将 Draft 移至 Active，技能即出现在技能目录中。
+
+### 技能合并、健康、补丁
+
+| 组件 | 评分公式 / 行为 |
+|------|----------------|
+| **SkillSimilarityDetector** | `description·0.25 + trigger·0.30 + scope·0.15 + tool·0.10 + pitfall·0.10 + co_activation·0.10`；≥0.75 出合并提案，≥0.90 强烈建议 |
+| **SkillMerger** | 应用合并提案：保留激活次数更高的为主，吸收次要技能的触发器与独特指令；需 `/skill-merge <a> <b>` 人工应用 |
+| **SkillHealthMonitor** | `success_rate·0.30 + recent_success·0.20 + usage·0.10 + freshness·0.15 + approval·0.15 + cmd_validity·0.10`；≥0.75 健康，<0.55 不健康 |
+| **SkillPatcher** | 分析遥测 `common_failures` → 生成 `SkillPatch`（加前置条件/工具/错误处理）；需 `/skill-patch <name>` 人工应用 |
+
+```rust
+use echo_agent::evolution::{SkillSimilarityDetector, SkillHealthMonitor};
+
+let detector = SkillSimilarityDetector::new(arc_store.clone());
+// 传入当前所有技能描述符；≥0.75 相似度产出合并提案，需 `/skill-merge` 人工应用
+let proposals = detector.scan_and_propose(&skill_descriptors, &change_log).await?;
+
+let monitor = SkillHealthMonitor::new(arc_store);
+for report in monitor.analyze_all_skills().await? {
+    println!("{}: {:?}", report.skill_name, report.status);
+}
+```
+
+### 规则晋升（产品层）
+
+`RulePromoter`（位于 `echo-agent-app-core`）扫描高置信度记忆（confidence≥0.95, stability≥0.9, revision_count==0），生成 `RuleProposal`，经 `/rule-promote` 人工批准后写入 `.echo-agent/AGENTS.md`，源记忆标记为 `Superseded`。
+
+### 安全加固 — `EvolutionSecurityGuard`
+
+- **写入前**：密钥扫描（AWS `AKIA...`、GitHub `ghp_...`、`BEGIN PRIVATE KEY` 等，匹配项替换为 `[REDACTED]`）+ 提示注入检测（如 "ignore previous" 模式）
+- **不可信输入隔离**：工具输出来源的记忆 `risk = High`，未经人工批准不可晋升到热层或规则
+- **速率限制**：每会话最多 50 次记忆写入，每天最多 5 次技能补丁
+- 所有变更经 `ChangeLog` 可回滚
 
 ---
 
-## 与 Agent 的集成
+## 自动记忆责任边界
 
-自进化系统**不内置于 Agent 循环中**，而是作为独立的分析和改进 pass 外部运行。这种设计保持 Agent 轻量——大多数用户在生产环境中不需要自进化。
+系统中有三条自动记忆路径，职责严格划分以避免重复系统：
 
-### Feature 开关
+| 系统 | 主要职责 | 不应承担 |
+|------|---------|---------|
+| `TriggerDetector`（运行时） | 在线对话中轻量发现新记忆（用户偏好、纠正、已验证的错误解决、重复工作流） | 会话归档总结、`.echo-agent/project.md` 写入 |
+| `AutoMemory`（框架+应用） | 会话结束/手动触发时的归档总结（提取观察、分类、写入 typed memory，应用层可写 `project.md`） | 压缩淘汰、运行时策略调度 |
+| `memory_promoter`（压缩路径） | 因 token 压力被压缩/淘汰的消息的生命周期管理（长期化、淘汰、降级） | 新偏好发现、UI 触发的提取 |
+| `BackgroundReviewer`（应用调度） | 完成 run 后异步深度回顾，提取高价值记忆与改进信号 | GUI/TUI/CLI 产品调度策略 |
 
-通过 `improve` feature flag 启用：
+> 关键约束：任何需要进入运行时 recall 的 typed memory，**必须**统一走框架的 `MemoryLayerManager::write_memory`，产品层不自行维护 category/type/key/write 规则。
+
+---
+
+## 文件布局
+
+```
+.echo-agent/
+  MEMORY.md                        # 热层（人类可读，Agent 与人类都可编辑）
+  AGENTS.md                        # 自动晋升的规则
+  project.md / local.md            # 已有的静态提示文件
+  memory/
+    topics/*.md                    # 暖层主题文件
+    archive/                       # 冷层归档
+  evolution/
+    change-log.jsonl               # 变更审计日志
+    skill_candidates/              # 候选提案
+    patches/                       # 技能补丁
+  skills/
+    _drafts/<name>/SKILL.md        # 草稿技能
+  curator_state.json               # Curator 状态
+```
+
+## Store 命名空间
+
+| 命名空间 | 用途 |
+|---------|------|
+| `["agent", "typed_memories"]` | 类型化记忆（暖层） |
+| `["agent", "cold_memories"]` | 归档记忆（冷层） |
+| `["agent", "skill_candidates"]` | 技能候选提案 |
+| `["agent", "skill_telemetry"]` | 技能遥测 |
+| `["agent", "profile"]` | Agent 配置 |
+| `["agent", "evolution", "patches"]` | 技能补丁 |
+| `["agent", "evolution", "merges"]` | 合并提案 |
+| `["agent", "evolution", "rules"]` | 规则提案 |
+
+---
+
+## Feature 开关与使用模式
+
+`evolution` 默认随框架启用；`improve` 与 `eval` 通过 feature flag 开启：
 
 ```toml
 [dependencies]
 echo_agent = { version = "0.2", features = ["improve"] }
 ```
 
-> 注意：`improve` 依赖 `eval` 评估框架。使用 `SelfEvolution` 或 `ImprovementLoop` 时，需同时启用 `eval`。
+> 使用 `EvalDrivenImprovement` / `ImprovementLoop` 时需同时启用 `eval`（`improve` 依赖它）。
 
-### 使用模式
+自进化系统**不内置于 Agent 循环**，而是作为独立的分析/演化 pass 运行，保持 Agent 轻量：
 
 ```
-┌─────────────────────────────────────────────────┐
-│  生产环境（无自进化）                              │
-│  agent.execute("执行任务").await                   │
-└─────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────┐
-│  自进化（独立 pass）                               │
-│  SelfEvolution::new()                            │
-│      .with_eval_cases(cases)                     │
-│      .enable()                                   │
-│      .run(agent_factory)                         │
-│      .await                                      │
-└─────────────────────────────────────────────────┘
+生产环境（无自进化）：   agent.execute("执行任务").await
+自进化（独立 pass）：    EvalDrivenImprovement::new()...run(agent_factory).await
+运行时演化：            MemoryLayerManager / TriggerDetector / ReviewIntegration 集成
 ```
 
 ### 与 Self-Reflection 的区别
 
-| 维度 | Self-Reflection | Self-Improvement |
-|------|----------------|------------------|
-| 时机 | Agent 执行期间 | Agent 执行之后 |
+| 维度 | Self-Reflection | 自进化 |
+|------|----------------|--------|
+| 时机 | Agent 执行期间 | Agent 执行之后 / 运行时持续 |
 | 范围 | 单任务 | 跨任务模式 |
-| 反馈 | 语言（LLM 批判） | 结构化（代码分析） |
-| Feature flag | `self-reflection` | `improve` |
-| 集成方式 | 内置于 Agent 循环 | 外部批处理 |
+| 反馈 | 语言（LLM 批判） | 结构化（记忆、技能、规则） |
+| Feature flag | `self-reflection` | `improve` + `evolution` |
+| 集成方式 | 内置于 Agent 循环 | 外部批处理 / 运行时演化 |
 
-另见：[24 - 评估系统](./24-eval-system.md) 了解驱动此流水线的评估框架。
+另见：[24 - 评估系统](./24-eval-system.md) 了解驱动 `improve` 流水线的评估框架；[03 - 记忆系统](./03-memory.md) 了解底层 Store。

@@ -200,6 +200,10 @@ pub struct AgentRunSnapshot {
     pub permission_service: Option<Arc<crate::human_loop::PermissionService>>,
     /// Token usage tracker shared with the parent ReactAgent.
     pub token_tracker: Arc<echo_core::tokenizer::TokenUsageTracker>,
+    /// Self-calibrating tokenizer shared with the parent ReactAgent. The think
+    /// phase feeds real `usage.prompt_tokens` back into it so context-window
+    /// and compression estimates converge to the model's actual tokenization.
+    pub calibrated_tokenizer: Arc<echo_core::tokenizer::CalibratedTokenizer>,
     /// Runtime state store for rich checkpointing (messages + plan + skills).
     pub state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
     /// Conversation store for user-visible transcript projection. When both
@@ -231,6 +235,7 @@ impl AgentRunSnapshot {
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
             token_tracker: Arc::clone(&agent.token_tracker),
+            calibrated_tokenizer: Arc::clone(&agent.calibrated_tokenizer),
             state_store: agent.memory.state_store.clone(),
             conversation_store: agent.memory.conversation_store.clone(),
             critic: agent.critic.clone(),
@@ -575,7 +580,9 @@ impl AgentRunSnapshot {
                         reason: reason.clone(),
                     },
                 );
-                let _ = al.log(event).await;
+                if let Err(e) = al.log(event).await {
+                    tracing::error!(error = %e, "audit log write failed — event dropped");
+                }
             }
             Some(format!("Output content filtered by safety guard: {reason}"))
         } else {
@@ -680,7 +687,10 @@ impl AgentRunSnapshot {
         iteration: usize,
     ) {
         let should_capture = {
-            let mgr = self.snapshot_manager.read().unwrap();
+            let mgr = self
+                .snapshot_manager
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             mgr.as_ref().is_some_and(|m| m.should_capture(iteration))
             // RwLockReadGuard dropped here — before any await
         };
@@ -688,7 +698,11 @@ impl AgentRunSnapshot {
             let ctx = context.lock().await;
             let ms = ctx.messages().to_vec();
             drop(ctx);
-            if let Some(ref mut m) = *self.snapshot_manager.write().unwrap() {
+            if let Some(ref mut m) = *self
+                .snapshot_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+            {
                 m.capture(iteration, &ms);
             }
         }

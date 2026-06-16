@@ -183,22 +183,20 @@ fn extract_key_facts(messages: &[Message]) -> Vec<(String, &'static str)> {
                     facts.push((truncate_fact(&text), classify_fact_type(&text, &msg.role)));
                 } else {
                     // Take the last paragraph as a potential conclusion
-                    if let Some(last_para) = last_paragraph(&text) {
-                        if last_para.len() >= 50 {
+                    if let Some(last_para) = last_paragraph(&text)
+                        && last_para.len() >= 50 {
                             facts.push((
                                 truncate_fact(&last_para),
                                 classify_fact_type(&last_para, &msg.role),
                             ));
                         }
-                    }
                 }
             }
-            Role::User => {
+            Role::User
                 // User questions are useful context for recall
-                if text.len() >= 50 && !text.starts_with('[') {
+                if text.len() >= 50 && !text.starts_with('[') => {
                     facts.push((truncate_fact(&text), classify_fact_type(&text, &msg.role)));
                 }
-            }
             _ => {}
         }
     }
@@ -257,24 +255,19 @@ fn tool_digest(text: &str) -> Option<String> {
         if lower.contains("error")
             || lower.contains("fail")
             || lower.contains("panic")
+            || lower.contains("test result")
+            || lower.contains("pass")
             || lower.contains("失败")
             || lower.contains("错误")
             || lower.contains("异常")
-        {
-            highlights.push(line.trim());
-        } else if (lower.contains(".rs")
-            || lower.contains(".py")
-            || lower.contains(".js")
-            || lower.contains(".toml")
-            || lower.contains("src/"))
-            && line.len() < 200
-        {
-            highlights.push(line.trim());
-        } else if lower.contains("test result")
-            || lower.contains("pass")
-            || lower.contains("fail")
             || lower.contains("测试")
             || lower.contains("通过")
+            || ((lower.contains(".rs")
+                || lower.contains(".py")
+                || lower.contains(".js")
+                || lower.contains(".toml")
+                || lower.contains("src/"))
+                && line.len() < 200)
         {
             highlights.push(line.trim());
         }
@@ -340,7 +333,6 @@ fn truncate_fact(text: &str) -> String {
 
 /// Short timestamp for unique key suffix.
 /// FNV-1a hash — deterministic across process restarts.
-
 #[cfg(test)]
 mod tests {
     use super::*;

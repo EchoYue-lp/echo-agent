@@ -5,7 +5,7 @@ use futures::future::BoxFuture;
 use super::client::McpClient;
 use super::types::McpTool;
 use echo_core::error::Result;
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolResultKind, ToolRiskLevel};
 
 /// 将 MCP 工具适配为框架的 `Tool` trait
 ///
@@ -35,31 +35,60 @@ impl Tool for McpToolAdapter {
         self.tool.input_schema.clone()
     }
 
+    /// Map the MCP server's `annotations.read_only_hint` / `destructive_hint`
+    /// to the framework's [`ToolRiskLevel`] so the permission/approval system
+    /// treats MCP tools with the same risk gating as built-in tools.
+    fn risk_level(&self) -> ToolRiskLevel {
+        if let Some(ref ann) = self.tool.annotations {
+            if ann.destructive_hint == Some(true) {
+                return ToolRiskLevel::Dangerous;
+            }
+            if ann.read_only_hint == Some(true) {
+                return ToolRiskLevel::ReadOnly;
+            }
+        }
+        ToolRiskLevel::Standard
+    }
+
     fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
         Box::pin(async move {
             let args = serde_json::Value::Object(parameters.into_iter().collect());
             let result = self.client.call_tool(&self.tool.name, args).await?;
 
-            let mut text = McpClient::content_to_text(&result.content);
+            let text = McpClient::content_to_text(&result.content);
 
-            // 将结构化输出拼入文本（MCP 规范字段）
-            if let Some(ref structured) = result.structured_content {
-                let structured_str = serde_json::to_string_pretty(structured).unwrap_or_default();
-                text = format!("{text}\n\n结构化数据:\n{structured_str}");
+            // Preserve the MCP spec's `structuredContent` as structured `data`
+            // (callers can render it directly instead of re-parsing the text),
+            // and map `isError` to the structured-error kind. The text view
+            // remains a human-readable concatenation for the LLM.
+            if result.is_error {
+                let mut tr = ToolResult::error(text);
+                if let Some(structured) = result.structured_content {
+                    tr = tr.with_data(structured);
+                    tr.kind = ToolResultKind::StructuredError {
+                        error_code: "mcp_is_error".to_string(),
+                    };
+                }
+                return Ok(tr);
             }
 
-            // 将 MCP 服务端返回的所有非标准扩展字段也拼入文本，
-            // 确保任意 MCP 服务端的额外字段都不会被静默丢弃
+            let mut tr = if let Some(structured) = result.structured_content {
+                // success_json sets kind = Json and data; keep the text view too.
+                let mut t = ToolResult::success_json(structured);
+                t.output = text;
+                t
+            } else {
+                ToolResult::success(text)
+            };
+
+            // Surface non-standard extension fields in the text view so no
+            // MCP server extra data is silently dropped.
             if !result.extra.is_empty() {
                 let extra_str = serde_json::to_string_pretty(&result.extra).unwrap_or_default();
-                text = format!("{text}\n\n附加字段:\n{extra_str}");
+                tr.output.push_str(&format!("\n\n附加字段:\n{extra_str}"));
             }
 
-            if result.is_error {
-                Ok(ToolResult::error(text))
-            } else {
-                Ok(ToolResult::success(text))
-            }
+            Ok(tr)
         })
     }
 }

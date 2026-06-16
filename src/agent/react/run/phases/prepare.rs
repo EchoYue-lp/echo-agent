@@ -50,7 +50,9 @@ pub(crate) async fn prepare_turn(
                 content: text.to_string(),
             },
         );
-        let _ = al.log(event).await;
+        if let Err(e) = al.log(event).await {
+            tracing::error!(error = %e, "audit log write failed — event dropped");
+        }
     }
 
     // UserPromptSubmit hook

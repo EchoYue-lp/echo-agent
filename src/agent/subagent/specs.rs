@@ -13,11 +13,12 @@ use super::types::{ExecutionMode, SubagentDefinition, SubagentKind};
 ///
 /// This is the user-facing concept; it maps to [`ContextInheritance`] which
 /// is the internal mechanism used by the executor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ContextPolicy {
     /// Inherit everything: system prompt, tools, recent history, memory.
     FullContext,
     /// Only the task description — no parent history or tools.
+    #[default]
     TaskOnly,
     /// Only specific files (not yet implemented — falls back to TaskOnly).
     SelectedFiles(Vec<String>),
@@ -27,12 +28,6 @@ pub enum ContextPolicy {
     ErrorOnly,
     /// Only a brief summary of the parent's conversation.
     SummaryOnly,
-}
-
-impl Default for ContextPolicy {
-    fn default() -> Self {
-        Self::TaskOnly
-    }
 }
 
 impl ContextPolicy {

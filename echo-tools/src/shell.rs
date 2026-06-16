@@ -107,6 +107,21 @@ pub enum CommandSafety {
     Dangerous(String),
 }
 
+/// Validate a shell command against the strict default safety policy.
+///
+/// This is the canonical, reusable safety gate used by every shell-execution
+/// path in the framework (the synchronous `ShellTool` plus async/background
+/// spawners such as `spawn_background_task`). It uses the default strict
+/// `ShellTool` (no sandbox, strict whitelist), so it rejects shell
+/// metacharacters, dangerous commands, and non-whitelisted programs.
+///
+/// Callers that execute commands obtained from the LLM (or any untrusted
+/// source) **must** call this before spawning a process and honor the
+/// returned [`CommandSafety`] verdict.
+pub fn validate_command_safety(command: &str) -> CommandSafety {
+    ShellTool::default().check_command_safety(command)
+}
+
 /// Shell command execution tool (with safety checks)
 ///
 /// Optional sandbox executor integration: when `sandbox` is set, all commands execute through the sandbox,
@@ -465,11 +480,13 @@ impl Tool for ShellTool {
                 }
             } else {
                 // Direct execution (no sandbox, using direct argv mode to reject sh -c injection)
-                // Wrap with timeout
+                // Wrap with timeout. `kill_on_drop(true)` ensures the child is terminated
+                // if this future is dropped mid-execution (e.g. user cancels the run with
+                // Ctrl-C) — without it the process would be orphaned and keep running.
                 let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
                 match tokio::time::timeout(
                     timeout_duration,
-                    Command::new(program).args(args).output(),
+                    Command::new(program).args(args).kill_on_drop(true).output(),
                 )
                 .await
                 {

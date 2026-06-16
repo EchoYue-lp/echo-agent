@@ -100,7 +100,10 @@ impl SessionApprovalCache {
     pub fn is_approved(&self, tool_name: &str, args: &Value) -> bool {
         // 先检查全局审批
         {
-            let global = self.global_approvals.read().unwrap();
+            let global = self
+                .global_approvals
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(recorded_at) = global.get(tool_name)
                 && self.is_entry_valid(recorded_at)
             {
@@ -110,7 +113,7 @@ impl SessionApprovalCache {
 
         // 再检查参数级审批
         let key = self.args_key(args);
-        let approvals = self.approvals.read().unwrap();
+        let approvals = self.approvals.read().unwrap_or_else(|e| e.into_inner());
         if let Some(entries) = approvals.get(tool_name)
             && let Some(recorded_at) = entries.get(&key)
             && self.is_entry_valid(recorded_at)
@@ -129,7 +132,7 @@ impl SessionApprovalCache {
             }
             ApprovalScope::Session => {
                 let key = self.args_key(args);
-                let mut approvals = self.approvals.write().unwrap();
+                let mut approvals = self.approvals.write().unwrap_or_else(|e| e.into_inner());
 
                 // 容量检查
                 let entry = approvals.entry(tool_name.to_string()).or_default();
@@ -146,7 +149,10 @@ impl SessionApprovalCache {
                 entry.insert(key, Instant::now());
             }
             ApprovalScope::SessionAllTools => {
-                let mut global = self.global_approvals.write().unwrap();
+                let mut global = self
+                    .global_approvals
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
 
                 // 容量检查
                 if global.len() >= self.max_entries
@@ -165,19 +171,28 @@ impl SessionApprovalCache {
     /// 撤销某个工具的所有缓存审批
     pub fn revoke(&self, tool_name: &str) {
         {
-            let mut approvals = self.approvals.write().unwrap();
+            let mut approvals = self.approvals.write().unwrap_or_else(|e| e.into_inner());
             approvals.remove(tool_name);
         }
         {
-            let mut global = self.global_approvals.write().unwrap();
+            let mut global = self
+                .global_approvals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             global.remove(tool_name);
         }
     }
 
     /// 清空所有缓存
     pub fn clear(&self) {
-        self.approvals.write().unwrap().clear();
-        self.global_approvals.write().unwrap().clear();
+        self.approvals
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.global_approvals
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// 清理过期条目
@@ -197,7 +212,7 @@ impl SessionApprovalCache {
 
         // 清理参数级审批
         {
-            let mut approvals = self.approvals.write().unwrap();
+            let mut approvals = self.approvals.write().unwrap_or_else(|e| e.into_inner());
             for hashes in approvals.values_mut() {
                 let before = hashes.len();
                 hashes.retain(|_, recorded_at| now.duration_since(*recorded_at) < ttl);
@@ -209,7 +224,10 @@ impl SessionApprovalCache {
 
         // 清理全局审批
         {
-            let mut global = self.global_approvals.write().unwrap();
+            let mut global = self
+                .global_approvals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             let before = global.len();
             global.retain(|_, recorded_at| now.duration_since(*recorded_at) < ttl);
             removed += before - global.len();
@@ -220,8 +238,11 @@ impl SessionApprovalCache {
 
     /// 获取缓存统计信息
     pub fn stats(&self) -> CacheStats {
-        let approvals = self.approvals.read().unwrap();
-        let global = self.global_approvals.read().unwrap();
+        let approvals = self.approvals.read().unwrap_or_else(|e| e.into_inner());
+        let global = self
+            .global_approvals
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
 
         let per_tool_entries: usize = approvals.values().map(|h| h.len()).sum();
         let tools_cached = approvals.len();
@@ -278,8 +299,18 @@ impl Default for SessionApprovalCache {
 impl Clone for SessionApprovalCache {
     fn clone(&self) -> Self {
         Self {
-            approvals: Arc::new(RwLock::new(self.approvals.read().unwrap().clone())),
-            global_approvals: Arc::new(RwLock::new(self.global_approvals.read().unwrap().clone())),
+            approvals: Arc::new(RwLock::new(
+                self.approvals
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            )),
+            global_approvals: Arc::new(RwLock::new(
+                self.global_approvals
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            )),
             cache_ttl: self.cache_ttl,
             max_entries: self.max_entries,
             hash_args: self.hash_args,

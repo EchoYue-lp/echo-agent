@@ -10,7 +10,6 @@
 //! fast, free, and reproducible. A future iteration can add LLM-assisted
 //! refinement via [`PromptGenerator`](crate::improve::PromptGenerator).
 
-use chrono::Utc;
 use std::path::PathBuf;
 
 use echo_state::memory::typed_store::TypedMemoryStore;
@@ -256,9 +255,8 @@ fn yaml_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use echo_core::memory::types::{MemorySource, MemoryType};
-    use echo_state::memory::store::InMemoryStore;
-    use std::sync::Arc;
+    use chrono::Utc;
+    use echo_core::memory::types::MemoryType;
 
     /// A no-op ChangeLog for testing.
     struct NullChangeLog;
@@ -332,9 +330,9 @@ mod tests {
         let content = std::fs::read_to_string(&result.skill_md_path).unwrap();
 
         // Extract YAML frontmatter.
-        let yaml = if content.starts_with("---") {
-            let end = content[3..].find("---").unwrap_or(content.len());
-            &content[3..end + 3]
+        let yaml = if let Some(rest) = content.strip_prefix("---") {
+            let end = rest.find("---").unwrap_or(rest.len());
+            &rest[..end]
         } else {
             panic!("Missing frontmatter delimiter");
         };

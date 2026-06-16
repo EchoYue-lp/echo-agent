@@ -33,13 +33,13 @@
 //! future LLM-assisted reviewer) decides whether to act.
 
 use chrono::{DateTime, Duration, Utc};
-use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryStatus, MemoryType};
+use echo_core::memory::types::{MemoryMeta, MemoryStatus, MemoryType};
 use echo_core::utils::hash::fnv1a_64;
 use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 use std::collections::HashMap;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use super::layer::{MemoryLayer, MemoryLayerManager};
+use super::layer::MemoryLayerManager;
 use crate::error::Result;
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -704,9 +704,10 @@ impl Default for MemoryReviewer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::layer::MemoryLayer;
     use super::*;
     use echo_core::memory::store::StoreItem;
-    use echo_core::memory::types::{MemoryRisk, MemorySource};
+    use echo_core::memory::types::MemorySource;
     use echo_state::memory::store::InMemoryStore;
     use std::sync::Arc;
 
@@ -1004,7 +1005,7 @@ mod tests {
     // ── MemoryReviewer end-to-end ──
 
     fn make_layer_manager(store: Arc<dyn echo_core::memory::store::Store>) -> MemoryLayerManager {
-        let dir = tempfile::tempdir().expect("tempdir").into_path();
+        let dir = tempfile::tempdir().expect("tempdir").keep();
         MemoryLayerManager::new(dir, store, Box::new(NullChangeLog))
     }
 

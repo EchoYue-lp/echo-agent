@@ -87,20 +87,15 @@ impl Default for ContextInheritance {
 // ── Subagent Context ──────────────────────────────────────────────────────────
 
 /// Memory scope for subagent context
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum MemoryScope {
     /// No memory inheritance
+    #[default]
     None,
     /// Only inherit relevant memories (based on task similarity)
     Relevant,
     /// Full memory inheritance
     Full,
-}
-
-impl Default for MemoryScope {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Output schema specification for subagent

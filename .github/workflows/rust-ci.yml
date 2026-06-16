@@ -21,6 +21,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-targets --all-features
-      - run: cargo check --workspace --all-targets --no-default-features
+      # --locked: fail if Cargo.lock would need updating, so CI never silently
+      # regresses dependency versions vs the committed lockfile.
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      # Verify the framework still compiles with no optional features (the
+      # minimal-deps build). Scoped to the library crate — some inline test
+      # modules assume feature-gated trait methods and don't build under
+      # --no-default-features, which is fine for a lib-only smoke check.
+      - run: cargo check --workspace --lib --no-default-features --locked

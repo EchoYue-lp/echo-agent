@@ -104,6 +104,22 @@ pub(crate) async fn run_think(
         .and_then(|u| u.completion_tokens)
         .unwrap_or(0) as usize;
 
+    // Feed the actual prompt-token count back into the CalibratedTokenizer so
+    // future context-window / compression estimates converge to the model's
+    // real tokenization. Without this the calibration factor stays at 1.0 and
+    // the tokenizer is no more accurate than the raw heuristic.
+    if pt > 0 {
+        use echo_core::tokenizer::Tokenizer;
+        let estimated: usize = messages
+            .iter()
+            .filter_map(|m| m.text_content())
+            .map(|t| snap.calibrated_tokenizer.count_tokens(&t))
+            .sum();
+        if estimated > 0 {
+            snap.calibrated_tokenizer.calibrate(estimated, pt as u32);
+        }
+    }
+
     // Record usage in the token tracker for cumulative tracking
     if let Some(ref u) = last_usage {
         snap.token_tracker.record_usage(u);

@@ -176,9 +176,7 @@ impl HookEvent {
             | HookEvent::SkillHealthCheck
             | HookEvent::SkillPatchApplied
             | HookEvent::SkillMergeApplied
-            | HookEvent::RulePromoted => {
-                HookEventCategory::Evolution
-            }
+            | HookEvent::RulePromoted => HookEventCategory::Evolution,
         }
     }
 
@@ -1153,8 +1151,7 @@ mod tests {
 
     #[test]
     fn test_for_memory_layer_change() {
-        let ctx =
-            HookContext::for_memory_layer_change("build_java8", "warm", "hot", "s1", "a1");
+        let ctx = HookContext::for_memory_layer_change("build_java8", "warm", "hot", "s1", "a1");
         assert_eq!(ctx.event, HookEvent::MemoryLayerChange);
         assert_eq!(ctx.memory_key.as_deref(), Some("build_java8"));
         assert_eq!(ctx.memory_from_layer.as_deref(), Some("warm"));

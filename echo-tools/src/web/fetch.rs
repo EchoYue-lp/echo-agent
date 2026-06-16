@@ -3,7 +3,7 @@
 //! Provides [`WebFetchTool`], fetches URL content and converts it to readable text.
 //! Supports HTML → plain text conversion, suitable for LLM consumption.
 
-use crate::security::{ssrf_safe_redirect_policy, validate_url};
+use crate::security::ssrf_safe_redirect_policy;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
@@ -47,6 +47,9 @@ fn build_client() -> &'static Client {
 ///
 /// Fetches content from the specified URL, converting HTML to readable text.
 pub struct WebFetchTool {
+    /// Retained for potential direct-client use by future call sites; the SSRF-safe
+    /// path goes through `security::ssrf_safe_get`, which builds its own pinned client.
+    #[allow(dead_code)]
     client: Client,
     max_content_length: usize,
     text_width: usize,
@@ -169,17 +172,17 @@ impl Tool for WebFetchTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(self.max_content_length as u64) as usize;
 
-            // SSRF protection: validate target address
-            validate_url(url)?;
-
-            tracing::info!("WebFetch: url='{}', max_length={}", url, max_length);
-
-            let response = match self.client.get(url).send().await {
+            // SSRF protection: resolve + validate + connect on pinned IPs, closing
+            // the DNS-rebinding TOCTOU window that validate_url+client.get leaves.
+            let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
+            let response = match crate::security::ssrf_safe_get(url, timeout, 5).await {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(ToolResult::error(format!("Request failed: {}", e)));
                 }
             };
+
+            tracing::info!("WebFetch: url='{}', max_length={}", url, max_length);
 
             let status = response.status();
             if !status.is_success() {

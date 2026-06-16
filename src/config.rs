@@ -118,15 +118,15 @@ impl AppConfig {
                 // Warn if token_limit exceeds model context window
                 if let Some(llm) = agent.llm_client() {
                     let caps = llm.capabilities();
-                    if let Some(max_ctx) = caps.max_context_tokens {
-                        if self.agent.token_limit as u32 > max_ctx {
-                            tracing::warn!(
-                                token_limit = self.agent.token_limit,
-                                max_context = max_ctx,
-                                "token_limit exceeds model context window; compression may never trigger. \
+                    if let Some(max_ctx) = caps.max_context_tokens
+                        && self.agent.token_limit as u32 > max_ctx
+                    {
+                        tracing::warn!(
+                            token_limit = self.agent.token_limit,
+                            max_context = max_ctx,
+                            "token_limit exceeds model context window; compression may never trigger. \
                                  Consider setting token_limit <= max_context_tokens."
-                            );
-                        }
+                        );
                     }
                 }
                 agent

@@ -514,7 +514,7 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
-        let mut prompt = if config.enable_tool && config.enable_cot {
+        let prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -524,6 +524,11 @@ impl ReactAgent {
             config.system_prompt.clone()
         };
 
+        // Project rules are only injected when the feature is enabled; the `mut`
+        // binding is therefore also gated to avoid an unused-`mut` warning when
+        // the feature is off.
+        #[cfg(feature = "project-rules")]
+        let mut prompt = prompt;
         #[cfg(feature = "project-rules")]
         if config.auto_project_rules {
             let wd = config
@@ -1385,16 +1390,22 @@ impl ReactAgent {
             .await;
     }
 
+    #[allow(dead_code)]
     const MAX_READ_FILES: usize = 1024;
     /// TTL for recently-read-file entries (30 minutes).
+    #[allow(dead_code)]
     const READ_FILES_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
     /// Record that a file was successfully read (for read-before-edit enforcement).
     /// Caps at MAX_READ_FILES entries to prevent unbounded growth in long sessions.
     /// Entries exceeding the TTL are lazily evicted.
+    #[allow(dead_code)]
     pub(crate) fn record_file_read(&self, path: &str) {
         if self.config.force_read_before_edit {
-            let mut files = self.recently_read_files.lock().unwrap();
+            let mut files = self
+                .recently_read_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             files.insert(path.to_string(), std::time::Instant::now());
             // Evict expired entries first
             let ttl = Self::READ_FILES_TTL;
@@ -1413,11 +1424,15 @@ impl ReactAgent {
     /// still within the TTL window.
     /// Returns `true` if read-before-edit is disabled, or if the path was
     /// previously recorded via [`record_file_read`] and hasn't expired.
+    #[allow(dead_code)]
     pub(crate) fn was_file_read(&self, path: &str) -> bool {
         if !self.config.force_read_before_edit {
             return true; // enforcement disabled — allow all
         }
-        let mut files = self.recently_read_files.lock().unwrap();
+        let mut files = self
+            .recently_read_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match files.get(path) {
             Some(instant) if instant.elapsed() < Self::READ_FILES_TTL => true,
             Some(_) => {
@@ -1611,6 +1626,15 @@ impl ReactAgent {
                 "dontask" | "dont-ask" => PermissionMode::DontAsk,
                 _ => PermissionMode::Default,
             };
+            // Security: make bypass mode loud. BypassPermissions auto-allows every
+            // tool (shell, write, MCP) with no per-action approval. Surface this in
+            // the trace/audit log so it is never silently enabled via config or env.
+            if matches!(pm, PermissionMode::BypassPermissions) {
+                tracing::warn!(
+                    agent = %self.config.agent_name,
+                    "Permission mode set to full-auto/BypassPermissions: ALL tools                      (including shell and file writes) will be auto-approved without                      per-action confirmation. Use the admin bypass_disabled switch to                      deny this in shared/CI environments."
+                );
+            }
             service.set_mode_sync(pm);
         }
     }
@@ -1784,7 +1808,12 @@ impl Agent for ReactAgent {
 
     fn system_prompt(&self) -> &str {
         // Check for runtime override first
-        if self.mutable_system_prompt.read().unwrap().is_some() {
+        if self
+            .mutable_system_prompt
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             // We can't return a reference to the RwLock contents directly,
             // so fall back to config prompt. The override is picked up at
             // the start of each new turn via build_system_prompt().
@@ -1986,7 +2015,10 @@ impl Agent for ReactAgent {
     }
 
     fn set_system_prompt(&self, prompt: &str) {
-        *self.mutable_system_prompt.write().unwrap() = Some(prompt.to_string());
+        *self
+            .mutable_system_prompt
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(prompt.to_string());
     }
 
     fn delegate_to<'a>(&'a self, target: &'a str, task: &'a str) -> BoxFuture<'a, Result<String>> {

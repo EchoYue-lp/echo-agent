@@ -449,6 +449,6 @@ async fn demo_context_manager_integration() {
     println!("  Output messages: {}", output.messages.len());
     println!("  Evicted messages: {}", output.evicted.len());
     println!("  Compressor name: {}", compressor2.name());
-    assert!(output.evicted.len() > 0, "should have evicted messages");
+    assert!(!output.evicted.is_empty(), "should have evicted messages");
     println!("  ✅ ContextCompressor::compress() works directly on AdaptiveCompressor");
 }

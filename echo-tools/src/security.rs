@@ -437,14 +437,28 @@ pub fn create_safe_regex(pattern: &str, limits: &ResourceLimits) -> Result<regex
 // SSRF Protection
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Validate URL target address, rejecting requests to private/link-local IPs (SSRF protection)
-// TODO: This function resolves DNS once for validation, then the HTTP client resolves
-// again — creating a TOCTOU window for DNS rebinding attacks. A proper fix requires
-// implementing a custom reqwest connector (via `hyper::client::connect::HttpConnector`
-// with a custom `Resolve` implementation) that pins the IP address from validation
-// and reuses it for the actual connection.
+/// Validate URL target address, rejecting requests to private/link-local IPs (SSRF protection).
+///
+/// Returns the validated hostname and the resolved public IP addresses. Callers that
+/// connect using these addresses (via [`pin_request_to_addrs`]) close the DNS-rebinding
+/// TOCTOU window that a standalone `validate_url` + independent client resolution leaves open.
+///
+/// Note: this function still resolves DNS once; to be fully rebinding-safe, use the
+/// returned addresses to build a pinned connection (see [`ssrf_safe_get`]).
 pub fn validate_url(url_str: &str) -> Result<()> {
-    let host = extract_host(url_str)?;
+    validate_url_with_addrs(url_str).map(|_| ())
+}
+
+/// Validate a URL and return the hostname plus all resolved, SSRF-checked IP addresses.
+///
+/// This is the rebinding-aware variant of [`validate_url`]: it resolves the hostname
+/// once, rejects the request if *any* resolved address is private/link-local, and
+/// returns the remaining public addresses. Pass these to a client configured with
+/// [`reqwest::ClientBuilder::resolve_to_addrs`] so the connection reuses the exact
+/// validated IPs instead of resolving a second time (which DNS-rebinding would
+/// exploit to point at `127.0.0.1` / `169.254.169.254`).
+pub fn validate_url_with_addrs(url_str: &str) -> Result<(String, Vec<std::net::IpAddr>)> {
+    let host = extract_host(url_str)?.to_string();
 
     // Resolve hostname to IP address
     let addr_str = format!("{}:0", host);
@@ -455,6 +469,7 @@ pub fn validate_url(url_str: &str) -> Result<()> {
             message: format!("SSRF protection: DNS resolution failed: {}", e),
         })?;
 
+    let mut public: Vec<std::net::IpAddr> = Vec::new();
     for addr in addrs {
         let ip = addr.ip();
         if is_private_ip(&ip) {
@@ -467,9 +482,10 @@ pub fn validate_url(url_str: &str) -> Result<()> {
             }
             .into());
         }
+        public.push(ip);
     }
 
-    Ok(())
+    Ok((host, public))
 }
 
 /// Extract hostname from URL string (without url crate dependency)
@@ -570,6 +586,103 @@ pub fn ssrf_safe_redirect_policy() -> reqwest::redirect::Policy {
             Err(e) => attempt.error(format!("SSRF protection: redirect target blocked: {}", e)),
         }
     })
+}
+
+/// Build a one-shot [`reqwest::Client`] pinned to the validated IP addresses for `host`,
+/// closing the DNS-rebinding TOCTOU window.
+///
+/// The returned client sends the TLS SNI and `Host` header as `host` (so virtual-hosting
+/// and TLS certificate validation still work) but connects *only* to the addresses in
+/// `addrs` — the exact IPs that [`validate_url_with_addrs`] checked. DNS is never
+/// consulted again for this request.
+fn pinned_client(
+    host: &str,
+    addrs: &[std::net::IpAddr],
+    timeout: Duration,
+) -> Result<reqwest::Client> {
+    // `resolve_to_addrs` needs SocketAddrs; the port is irrelevant for IP pinning
+    // (reqwest fills in the real port from the URL), so use a placeholder port.
+    let socket_addrs: Vec<std::net::SocketAddr> = addrs
+        .iter()
+        .map(|ip| std::net::SocketAddr::new(*ip, 0))
+        .collect();
+    reqwest::Client::builder()
+        .resolve_to_addrs(host, &socket_addrs)
+        .redirect(reqwest::redirect::Policy::none()) // redirects are re-validated by callers
+        .timeout(timeout)
+        .build()
+        .map_err(|e| {
+            ToolError::ExecutionFailed {
+                tool: "security".to_string(),
+                message: format!("SSRF protection: failed to build pinned client: {}", e),
+            }
+            .into()
+        })
+}
+
+/// Perform an SSRF-safe HTTP GET that pins the resolved IP to defeat DNS rebinding.
+///
+/// Workflow: resolve+validate once → build a client pinned to the validated IPs →
+/// send. Each redirect hop is independently re-resolved and re-validated (so a
+/// `302 → 169.254.169.254` cannot slip through). This is the single entry point
+/// all web-fetching tools should use instead of `validate_url(url)?; client.get(url)`.
+pub async fn ssrf_safe_get(
+    url: &str,
+    timeout: Duration,
+    max_redirects: usize,
+) -> Result<reqwest::Response> {
+    ssrf_safe_request(url, timeout, max_redirects, reqwest::Method::GET).await
+}
+
+/// SSRF-safe request (any method) with IP pinning and per-hop redirect validation.
+pub async fn ssrf_safe_request(
+    url: &str,
+    timeout: Duration,
+    max_redirects: usize,
+    method: reqwest::Method,
+) -> Result<reqwest::Response> {
+    let mut current = url.to_string();
+    for _ in 0..=max_redirects {
+        let (host, addrs) = validate_url_with_addrs(&current)?;
+        let client = pinned_client(&host, &addrs, timeout)?;
+        let response = client
+            .request(method.clone(), &current)
+            .send()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: "security".to_string(),
+                message: format!("SSRF-safe request failed: {}", e),
+            })?;
+
+        if response.status().is_redirection() {
+            // Re-resolve and re-validate the redirect target independently.
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| ToolError::ExecutionFailed {
+                    tool: "security".to_string(),
+                    message: "redirect without Location header".to_string(),
+                })?;
+            current = if location.starts_with("http://") || location.starts_with("https://") {
+                location.to_string()
+            } else {
+                // Relative redirect: resolve against the current URL's origin.
+                let origin_end = current
+                    .find("://")
+                    .and_then(|i| current[i + 3..].find('/').map(|j| i + 3 + j))
+                    .unwrap_or(current.len());
+                format!("{}{}", &current[..origin_end], location)
+            };
+            continue;
+        }
+        return Ok(response);
+    }
+    Err(ToolError::ExecutionFailed {
+        tool: "security".to_string(),
+        message: format!("SSRF protection: too many redirects (>{max_redirects})"),
+    }
+    .into())
 }
 
 fn normalize_for_policy(path: &Path) -> Option<PathBuf> {

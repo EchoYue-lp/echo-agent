@@ -157,10 +157,7 @@ impl Tool for CreateTaskTool {
                 .unwrap_or_default();
 
             // Parse enhanced fields (Step 1) with backward-compatible defaults
-            use crate::tasks::{
-                CheckpointPolicy, ContextScope, RiskLevel, TaskInput, TaskOutput, TaskType,
-                VerificationSpec,
-            };
+            use crate::tasks::{ContextScope, RiskLevel, TaskType};
 
             let task_type = parameters
                 .get("task_type")

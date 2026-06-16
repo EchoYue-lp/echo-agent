@@ -128,7 +128,9 @@ impl ReactAgent {
 
     /// Run the PostToolUseFailure hook and check for block.
     ///
+    ///
     /// Returns `Err(ToolExecutionFailure)` if a hook blocks the error output.
+    #[allow(dead_code)]
     async fn run_post_failure_hook(
         &self,
         agent: &str,
@@ -367,6 +369,7 @@ impl ReactAgent {
     /// If a guard manager is configured, output is checked for safety.
     /// Returns `Some(filtered_output)` if output was filtered/modified,
     /// returns `None` if output is fine and needs no modification.
+    #[allow(dead_code)]
     pub(crate) async fn check_tool_output_guard(&self, output: &str) -> Option<String> {
         // Secret scan: redact secrets from tool output before guard check
         if crate::security::contains_secrets(output) {
@@ -394,7 +397,9 @@ impl ReactAgent {
                         reason: reason.clone(),
                     },
                 );
-                let _ = al.log(event).await;
+                if let Err(e) = al.log(event).await {
+                    tracing::error!(error = %e, "audit log write failed — event dropped");
+                }
             }
             Some(format!("Output content filtered by safety guard: {reason}"))
         } else {

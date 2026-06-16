@@ -8,6 +8,7 @@ use serde_json::Value;
 #[cfg(feature = "human-loop")]
 use tracing::{info, warn};
 
+#[allow(dead_code)]
 impl ReactAgent {
     #[cfg(feature = "human-loop")]
     /// Determine whether a tool requires human approval (for process_steps to decide serial/parallel execution)
@@ -203,7 +204,9 @@ impl ReactAgent {
                     reason: reason.to_string(),
                 },
             );
-            let _ = al.log(event).await;
+            if let Err(e) = al.log(event).await {
+                tracing::error!(error = %e, "audit log write failed — event dropped");
+            }
         }
 
         // Fire PermissionDenied hook
@@ -348,7 +351,9 @@ impl ReactAgent {
                     risk_level: risk_level_str,
                 },
             );
-            let _ = al.log(event).await;
+            if let Err(e) = al.log(event).await {
+                tracing::error!(error = %e, "audit log write failed — event dropped");
+            }
         }
 
         let req = crate::human_loop::HumanLoopRequest::approval(tool_name, input.clone());
@@ -394,7 +399,9 @@ impl ReactAgent {
                     duration_ms,
                 },
             );
-            let _ = al.log(event).await;
+            if let Err(e) = al.log(event).await {
+                tracing::error!(error = %e, "audit log write failed — event dropped");
+            }
         }
 
         match response {

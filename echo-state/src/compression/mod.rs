@@ -347,13 +347,21 @@ impl ContextManager {
             return;
         }
 
-        // Identify protected messages (should not be deleted)
-        let mut protected_indices: Vec<usize> = Vec::new();
-        for (i, msg) in self.messages.iter().enumerate() {
-            if self.is_protected(msg) {
-                protected_indices.push(i);
-            }
-        }
+        // Identify protected messages (should not be deleted).
+        // Use a HashSet for O(1) membership checks below (the previous Vec-based
+        // `contains` made the selection loop O(n·m)).
+        let protected: std::collections::HashSet<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, msg)| {
+                if self.is_protected(msg) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Find the position of the first non-system message
         let first_non_system = self
@@ -362,37 +370,42 @@ impl ContextManager {
             .position(|m| m.role != Role::System)
             .unwrap_or(0);
 
-        // Calculate how many non-protected messages need to be deleted
+        // Calculate how many non-protected messages need to be deleted and collect
+        // their indices into a HashSet for O(1) lookup during the single-pass removal.
         let excess = self.messages.len() - target;
-        let mut to_remove = Vec::new();
-        let mut removed = 0;
+        let mut to_remove: std::collections::HashSet<usize> =
+            std::collections::HashSet::with_capacity(excess);
         for i in first_non_system..self.messages.len() {
-            if removed >= excess {
+            if to_remove.len() >= excess {
                 break;
             }
             // Skip protected messages
-            if protected_indices.contains(&i) {
+            if protected.contains(&i) {
                 continue;
             }
-            to_remove.push(i);
-            removed += 1;
+            to_remove.insert(i);
         }
 
         if to_remove.is_empty() {
             return;
         }
 
+        let evicted = to_remove.len();
         tracing::warn!(
             total = self.messages.len(),
             cap = target,
-            evicted = to_remove.len(),
+            evicted,
             "Message count exceeded hard cap, applying sliding window degradation (preserving protected messages)"
         );
 
-        // Remove from back to front to avoid index shifting
-        for &i in to_remove.iter().rev() {
-            self.messages.remove(i);
-        }
+        // Single-pass O(n) removal: drop the selected indices in one sweep instead of
+        // the previous O(n·k) reverse `Vec::remove` loop (each remove shifted the tail).
+        let mut idx = 0;
+        self.messages.retain(|_| {
+            let keep = !to_remove.contains(&idx);
+            idx += 1;
+            keep
+        });
     }
 
     /// Batch-append messages

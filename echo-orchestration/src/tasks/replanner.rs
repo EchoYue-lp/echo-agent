@@ -142,7 +142,7 @@ impl Replanner for LlmReplanner {
         let trigger = trigger.clone();
         let current_plan = current_plan.to_string();
         let tasks = tasks.to_vec();
-        let replan_attempts = self
+        let _replan_attempts = self
             .replan_attempts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 

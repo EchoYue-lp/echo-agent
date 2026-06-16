@@ -329,19 +329,32 @@ mod tests {
 
     #[test]
     fn test_memory_type_default_stability() {
-        assert!(MemoryType::UserPreference.default_stability() > MemoryType::CommandPattern.default_stability());
-        assert!(MemoryType::ArchitectureDecision.default_stability() > MemoryType::ErrorResolution.default_stability());
+        assert!(
+            MemoryType::UserPreference.default_stability()
+                > MemoryType::CommandPattern.default_stability()
+        );
+        assert!(
+            MemoryType::ArchitectureDecision.default_stability()
+                > MemoryType::ErrorResolution.default_stability()
+        );
     }
 
     #[test]
     fn test_memory_source_default_confidence() {
         assert_eq!(MemorySource::ExplicitSave.default_confidence(), 1.0);
-        assert!(MemorySource::UserCorrection.default_confidence() > MemorySource::AutoExtracted.default_confidence());
+        assert!(
+            MemorySource::UserCorrection.default_confidence()
+                > MemorySource::AutoExtracted.default_confidence()
+        );
     }
 
     #[test]
     fn test_memory_meta_new() {
-        let meta = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "build");
+        let meta = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "build",
+        );
         assert_eq!(meta.memory_type, MemoryType::DebuggingLesson);
         assert_eq!(meta.source, MemorySource::ErrorResolution);
         assert_eq!(meta.topic, "build");
@@ -352,10 +365,14 @@ mod tests {
 
     #[test]
     fn test_memory_meta_builder() {
-        let meta = MemoryMeta::new(MemoryType::UserPreference, MemorySource::ExplicitSave, "style")
-            .with_confidence(0.99)
-            .with_stability(0.95)
-            .with_risk(MemoryRisk::Medium);
+        let meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "style",
+        )
+        .with_confidence(0.99)
+        .with_stability(0.95)
+        .with_risk(MemoryRisk::Medium);
         assert!((meta.confidence - 0.99).abs() < f32::EPSILON);
         assert!((meta.stability - 0.95).abs() < f32::EPSILON);
         assert_eq!(meta.risk, MemoryRisk::Medium);
@@ -368,35 +385,52 @@ mod tests {
             .with_stability(0.80);
         assert!(meta.is_hot_eligible());
 
-        let low_confidence = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "test")
-            .with_confidence(0.50);
+        let low_confidence =
+            MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "test")
+                .with_confidence(0.50);
         assert!(!low_confidence.is_hot_eligible());
     }
 
     #[test]
     fn test_rule_eligible() {
-        let meta = MemoryMeta::new(MemoryType::UserPreference, MemorySource::ExplicitSave, "style")
-            .with_confidence(0.99)
-            .with_stability(0.95);
+        let meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "style",
+        )
+        .with_confidence(0.99)
+        .with_stability(0.95);
         assert!(meta.is_rule_eligible());
 
         // Not eligible: wrong type
-        let bug_meta = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "test")
-            .with_confidence(0.99)
-            .with_stability(0.95);
+        let bug_meta = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "test",
+        )
+        .with_confidence(0.99)
+        .with_stability(0.95);
         assert!(!bug_meta.is_rule_eligible());
 
         // Not eligible: high risk
-        let risky = MemoryMeta::new(MemoryType::UserPreference, MemorySource::ExplicitSave, "test")
-            .with_confidence(0.99)
-            .with_stability(0.95)
-            .with_risk(MemoryRisk::High);
+        let risky = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "test",
+        )
+        .with_confidence(0.99)
+        .with_stability(0.95)
+        .with_risk(MemoryRisk::High);
         assert!(!risky.is_rule_eligible());
     }
 
     #[test]
     fn test_typed_memory_value_roundtrip() {
-        let meta = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "build");
+        let meta = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "build",
+        );
         let value = TypedMemoryValue::new("Maven needs Java 8", meta);
         let json = value.to_value().unwrap();
         let parsed = TypedMemoryValue::from_value(&json).unwrap();
@@ -419,18 +453,26 @@ mod tests {
 
     #[test]
     fn test_staleness_active_low() {
-        let meta = MemoryMeta::new(MemoryType::UserPreference, MemorySource::ExplicitSave, "style")
-            .with_confidence(0.95)
-            .with_stability(0.90);
+        let meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "style",
+        )
+        .with_confidence(0.95)
+        .with_stability(0.90);
         assert!(meta.base_staleness() < 0.3);
     }
 
     #[test]
     fn test_staleness_archived_high() {
-        let meta = MemoryMeta::new(MemoryType::DeprecatedNote, MemorySource::AutoExtracted, "old")
-            .with_confidence(0.3)
-            .with_stability(0.2)
-            .with_status(MemoryStatus::Archived);
+        let meta = MemoryMeta::new(
+            MemoryType::DeprecatedNote,
+            MemorySource::AutoExtracted,
+            "old",
+        )
+        .with_confidence(0.3)
+        .with_stability(0.2)
+        .with_status(MemoryStatus::Archived);
         assert!(meta.base_staleness() > 0.5);
     }
 }

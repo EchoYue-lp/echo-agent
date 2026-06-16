@@ -3,11 +3,12 @@
 //! Defines how a team of agents coordinates to accomplish a task.
 
 /// How a team of agents collaborates.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TeamStrategy {
     /// One manager agent decomposes the task and fans out sub-tasks to workers.
     /// Workers execute independently and report results back to the manager,
     /// who synthesizes the final answer.
+    #[default]
     ManagerWorker,
     /// Agents run in a fixed sequence: each agent's output becomes the next
     /// agent's input. The last agent produces the final result.
@@ -30,12 +31,6 @@ pub enum TeamStrategy {
         /// Reducer agent name (merges findings).
         reducer: String,
     },
-}
-
-impl Default for TeamStrategy {
-    fn default() -> Self {
-        Self::ManagerWorker
-    }
 }
 
 impl TeamStrategy {

@@ -4,7 +4,7 @@
 //! that don't inherit the full parent context.
 
 use crate::agent::subagent::context::{MemoryScope, OutputSchema, SubagentContext};
-use crate::tasks::{Artifact, Evidence, Task};
+use crate::tasks::Evidence;
 use echo_core::llm::ToolDefinition;
 use echo_core::llm::types::Message;
 use std::sync::Arc;

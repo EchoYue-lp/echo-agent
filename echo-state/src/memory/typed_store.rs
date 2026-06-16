@@ -6,7 +6,9 @@
 
 use echo_core::error::Result;
 use echo_core::memory::store::{Store, StoreItem};
-use echo_core::memory::types::{MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue};
+use echo_core::memory::types::{
+    MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
+};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
@@ -222,7 +224,11 @@ impl TypedMemoryStore {
     }
 
     /// Read a typed memory entry by key.
-    pub async fn get_typed(&self, namespace: &[&str], key: &str) -> Result<Option<TypedMemoryEntry>> {
+    pub async fn get_typed(
+        &self,
+        namespace: &[&str],
+        key: &str,
+    ) -> Result<Option<TypedMemoryEntry>> {
         match self.inner.get(namespace, key).await? {
             Some(item) => Ok(Some(TypedMemoryEntry::from_store_item(item))),
             None => Ok(None),
@@ -294,9 +300,9 @@ impl TypedMemoryStore {
                 };
 
                 let new_value = TypedMemoryValue::new(content, meta);
-                let json_value = new_value
-                    .to_value()
-                    .map_err(|e| echo_core::error::MemoryError::SerializationError(e.to_string()))?;
+                let json_value = new_value.to_value().map_err(|e| {
+                    echo_core::error::MemoryError::SerializationError(e.to_string())
+                })?;
                 self.inner.put(namespace, key, json_value).await?;
                 Ok(true)
             }
@@ -326,7 +332,11 @@ mod tests {
         let store = make_state_store();
         let typed = TypedMemoryStore::new(store);
 
-        let meta = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "build");
+        let meta = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "build",
+        );
         typed
             .put_typed(&["test", "memories"], "m1", "Maven needs Java 8", meta)
             .await
@@ -350,15 +360,28 @@ mod tests {
         let typed = TypedMemoryStore::new(store);
 
         // Insert two memories with different types
-        let meta1 = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "build");
+        let meta1 = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "build",
+        );
         typed
             .put_typed(&["test", "memories"], "m1", "Maven compile error", meta1)
             .await
             .unwrap();
 
-        let meta2 = MemoryMeta::new(MemoryType::UserPreference, MemorySource::ExplicitSave, "style");
+        let meta2 = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "style",
+        );
         typed
-            .put_typed(&["test", "memories"], "m2", "User prefers concise answers", meta2)
+            .put_typed(
+                &["test", "memories"],
+                "m2",
+                "User prefers concise answers",
+                meta2,
+            )
             .await
             .unwrap();
 
@@ -377,16 +400,24 @@ mod tests {
         let store = make_state_store();
         let typed = TypedMemoryStore::new(store);
 
-        let meta_active = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "project")
-            .with_confidence(0.9);
+        let meta_active = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "project",
+        )
+        .with_confidence(0.9);
         typed
             .put_typed(&["test", "memories"], "m1", "Uses npm", meta_active)
             .await
             .unwrap();
 
-        let meta_draft = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "project")
-            .with_confidence(0.3)
-            .with_status(MemoryStatus::Draft);
+        let meta_draft = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "project",
+        )
+        .with_confidence(0.3)
+        .with_status(MemoryStatus::Draft);
         typed
             .put_typed(&["test", "memories"], "m2", "Maybe uses yarn", meta_draft)
             .await
@@ -411,10 +442,7 @@ mod tests {
             "review": "Some review content",
             "run_id": "test-123"
         });
-        store
-            .put(&["test", "raw"], "r1", raw_value)
-            .await
-            .unwrap();
+        store.put(&["test", "raw"], "r1", raw_value).await.unwrap();
 
         // Read through TypedMemoryStore
         let typed = TypedMemoryStore::new(store);
@@ -434,16 +462,24 @@ mod tests {
         let store = make_state_store();
         let typed = TypedMemoryStore::new(store);
 
-        let meta = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "build");
+        let meta = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "build",
+        );
         typed
             .put_typed(&["test", "memories"], "m1", "Maven needs Java 8", meta)
             .await
             .unwrap();
 
         // Update status to Superseded
-        let new_meta = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "build")
-            .with_status(MemoryStatus::Superseded)
-            .with_confidence(0.5);
+        let new_meta = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "build",
+        )
+        .with_status(MemoryStatus::Superseded)
+        .with_confidence(0.5);
         let updated = typed
             .update_meta(&["test", "memories"], "m1", new_meta)
             .await
@@ -482,9 +518,13 @@ mod tests {
 
     #[test]
     fn test_memory_filter_matches() {
-        let meta = MemoryMeta::new(MemoryType::DebuggingLesson, MemorySource::ErrorResolution, "build")
-            .with_confidence(0.85)
-            .with_status(MemoryStatus::Active);
+        let meta = MemoryMeta::new(
+            MemoryType::DebuggingLesson,
+            MemorySource::ErrorResolution,
+            "build",
+        )
+        .with_confidence(0.85)
+        .with_status(MemoryStatus::Active);
 
         let entry = TypedMemoryEntry {
             key: "m1".to_string(),
@@ -498,9 +538,17 @@ mod tests {
         };
 
         // Should match type filter
-        assert!(MemoryFilter::new().with_type(MemoryType::DebuggingLesson).matches(&entry));
+        assert!(
+            MemoryFilter::new()
+                .with_type(MemoryType::DebuggingLesson)
+                .matches(&entry)
+        );
         // Should not match different type
-        assert!(!MemoryFilter::new().with_type(MemoryType::UserPreference).matches(&entry));
+        assert!(
+            !MemoryFilter::new()
+                .with_type(MemoryType::UserPreference)
+                .matches(&entry)
+        );
         // Should match min_confidence
         assert!(MemoryFilter::new().with_min_confidence(0.8).matches(&entry));
         assert!(!MemoryFilter::new().with_min_confidence(0.9).matches(&entry));

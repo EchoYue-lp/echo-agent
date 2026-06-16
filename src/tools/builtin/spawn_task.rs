@@ -123,6 +123,17 @@ impl Tool for SpawnBackgroundTaskTool {
                         ));
                     }
 
+                    // Security gate: every command sourced from the LLM must pass
+                    // the same safety policy as the synchronous ShellTool. We use
+                    // the strict default classifier so dangerous commands and shell
+                    // metacharacters are rejected here too (closing a bypass that
+                    // previously ran arbitrary `sh -c` outside the defended path).
+                    if let Err(reason) = check_command_allowed(&cmd_for_task) {
+                        return Err(crate::error::ReactError::Other(format!(
+                            "Background command rejected by safety policy: {reason}"
+                        )));
+                    }
+
                     // Use tokio::process::Command for safe async execution
                     let output = tokio::process::Command::new("sh")
                         .arg("-c")
@@ -200,5 +211,58 @@ fn truncate_output(bytes: &[u8]) -> String {
             bytes.len()
         ));
         s
+    }
+}
+
+/// Characters that allow shell injection / control-flow hijacking.
+const SHELL_METACHARACTERS: &[char] = &['|', ';', '&', '$', '`', '>', '<', '(', ')', '\n', '\r'];
+
+/// Commands that are always rejected, regardless of feature flags.
+const DANGEROUS_COMMANDS: &[&str] = &[
+    "rm", "rmdir", "mkfs", "dd", "shutdown", "reboot", "halt", "poweroff",
+];
+
+/// Check whether a background command may run.
+///
+/// When the `shell` feature is enabled this delegates to the canonical
+/// [`echo_tools::shell::validate_command_safety`] classifier (same logic as
+/// the synchronous `ShellTool`). When it is disabled, a conservative inline
+/// gate rejects shell metacharacters and a small dangerous-command blocklist,
+/// so the spawn path is never wide open even without the full classifier.
+///
+/// Returns `Ok(())` if the command may run, or `Err(reason)` describing why
+/// it was rejected.
+fn check_command_allowed(command: &str) -> Result<(), String> {
+    #[cfg(feature = "shell")]
+    {
+        use echo_tools::shell::{CommandSafety, validate_command_safety};
+        return match validate_command_safety(command) {
+            CommandSafety::Safe => Ok(()),
+            CommandSafety::RequiresApproval(reason) | CommandSafety::Dangerous(reason) => {
+                Err(reason)
+            }
+        };
+    }
+
+    // Fallback gate when the `shell` feature is disabled.
+    #[allow(unreachable_code)]
+    {
+        if command.chars().any(|c| SHELL_METACHARACTERS.contains(&c)) {
+            return Err(
+                "Command contains shell metacharacters; background execution rejected. \
+                 Enable the `shell` feature for the full safety classifier."
+                    .to_string(),
+            );
+        }
+        // Inspect the first whitespace-delimited token (the program name).
+        let base = command.split_whitespace().next().unwrap_or("");
+        // Strip any leading path component to get the program basename.
+        let base = base.rsplit(['/', '\\']).next().unwrap_or(base);
+        if DANGEROUS_COMMANDS.contains(&base) {
+            return Err(format!(
+                "Command '{base}' is in the dangerous command blocklist; background execution rejected"
+            ));
+        }
+        Ok(())
     }
 }

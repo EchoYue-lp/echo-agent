@@ -5,7 +5,6 @@
 //! that can drive skill lifecycle decisions (e.g., deprecation).
 
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use echo_core::memory::store::Store;

@@ -7,17 +7,19 @@ use futures::future::BoxFuture;
 use std::sync::Arc;
 
 use crate::error::ToolError;
-use crate::tasks::{Task, TaskManager};
+use crate::tasks::TaskManager;
 use crate::tools::{Tool, ToolParameters, ToolResult};
-use echo_orchestration::planning::{PlanSpec, PlanValidator, ValidationReport};
+use echo_orchestration::planning::{PlanSpec, PlanValidator};
 use serde_json::{Value, json};
 
 /// Tool for creating structured task plans
+#[allow(dead_code)]
 pub struct CreatePlanTool {
     task_manager: Arc<TaskManager>,
     validator: PlanValidator,
 }
 
+#[allow(dead_code)]
 impl CreatePlanTool {
     pub fn new(task_manager: Arc<TaskManager>) -> Self {
         Self {
@@ -313,8 +315,6 @@ Example:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::TaskStatus;
-    use echo_orchestration::planning::plan_spec::*;
 
     #[tokio::test]
     async fn test_create_plan_tool_valid() {

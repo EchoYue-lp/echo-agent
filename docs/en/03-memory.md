@@ -240,3 +240,10 @@ SubAgent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memor
 
 See: `examples/demo14_memory_isolation.rs`
 
+---
+
+## Typed and Layered Memory (Self-Evolution)
+
+This page covers the three underlying Stores (long-term `Store`, runtime `RuntimeStateStore`, conversation `ConversationStore`).
+For **structured memory with metadata** (type, confidence, source) and **hot/warm/cold tiered management, write triggers, review/GC, skill auto-creation** and other runtime evolution capabilities,
+see [25 - Self-Evolution](./25-self-improvement.md) (the `evolution` module).

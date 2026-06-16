@@ -4,7 +4,6 @@
 //! pipeline of discrete stages. Each stage implements [`PipelineStage`] and
 //! can be added, removed, or reordered via [`ToolExecutionPipeline`].
 
-use super::super::ReactAgent;
 use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result};
 use crate::tools::{ToolParameters, ToolResult, is_write_tool};
@@ -360,7 +359,9 @@ impl PipelineStage for AuditStage {
                     duration_ms: 0,
                 },
             );
-            let _ = al.log(ev).await;
+            if let Err(e) = al.log(ev).await {
+                tracing::error!(error = %e, "audit log write failed — event dropped");
+            }
         }
         Ok(())
     }
@@ -420,7 +421,9 @@ impl PipelineStage for ExecuteStage {
                             duration_ms: 0,
                         },
                     );
-                    let _ = al.log(ev).await;
+                    if let Err(e) = al.log(ev).await {
+                        tracing::error!(error = %e, "audit log write failed — event dropped");
+                    }
                 }
 
                 ToolResult {
@@ -443,10 +446,11 @@ impl PipelineStage for ExecuteStage {
         ctx.result = Some(result.clone());
 
         // Record file read if tool was read_file and succeeded
-        if result.success && ctx.tool_name == "read_file" {
-            if let Some(path) = ctx.params.get("path").and_then(|v| v.as_str()) {
-                snapshot.record_file_read(path);
-            }
+        if result.success
+            && ctx.tool_name == "read_file"
+            && let Some(path) = ctx.params.get("path").and_then(|v| v.as_str())
+        {
+            snapshot.record_file_read(path);
         }
 
         Ok(())

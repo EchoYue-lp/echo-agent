@@ -6,7 +6,6 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use std::path::Path;
-use tracing::{debug, info, warn};
 
 /// SQLite-backed runtime state store.
 pub struct SqliteRuntimeStateStore {

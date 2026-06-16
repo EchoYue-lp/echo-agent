@@ -528,7 +528,7 @@ mod tests {
 
         let map: SubAgentMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
         {
-            let mut m = map.write().unwrap();
+            let mut m = map.write().unwrap_or_else(|e| e.into_inner());
             m.insert(
                 "migrated".to_string(),
                 Arc::new(MockAgent::new("migrated")) as Arc<dyn Agent>,

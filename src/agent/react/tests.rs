@@ -264,7 +264,7 @@ fn react_agent_set_model() {
 #[tokio::test]
 async fn react_agent_set_system_prompt() {
     let config = AgentConfig::minimal("test-model", "helper");
-    let mut agent = ReactAgent::new(config);
+    let agent = ReactAgent::new(config);
 
     let original_prompt = agent.system_prompt().to_string();
     assert_eq!(original_prompt, "helper");
@@ -1416,7 +1416,7 @@ fn remove_tool_basic() {
 #[test]
 fn remove_tool_nonexistent() {
     let config = AgentConfig::minimal("model", "agent");
-    let mut agent = ReactAgent::new(config);
+    let agent = ReactAgent::new(config);
     let removed = agent.remove_tool("nonexistent");
     assert!(!removed, "Should return false for nonexistent tool");
 }

@@ -37,7 +37,7 @@
 | [22 - 论文检索工具](22-research-tools.md) | Research | ArXiv 搜索、Semantic Scholar、PDF 下载、BibTeX 生成 |
 | [23 - Hooks 系统](23-hooks.md) | Hooks | Skills hooks（20 个事件）、Task hooks、Subagent hooks |
 | [24 - 评估系统](24-eval-system.md) | Eval | EvalCase、SuccessCriteria、LlmGrader、A/B 对比、回归套件、HTML 报告 |
-| [25 - 自进化系统](25-self-improvement.md) | Improve | Analyzer、ImprovementLoop、SelfEvolution、BackgroundReviewer、Curator、TrajectorySaver |
+| [25 - 自进化系统](25-self-improvement.md) | Improve / Evolution | Analyzer、ImprovementLoop、EvalDrivenImprovement、分层记忆、技能自创建、合并/健康/补丁、规则晋升、变更审计 |
 | [26 - 多 Agent 模式](26-multi-agent.md) | SubAgent / TeamAgent | 父子委托（Sync/Fork/Teammate）、对等协作（ManagerWorker/Pipeline/Debate/Swarm） |
 | [27 - 追踪系统](27-tracing.md) | Trace | Run、RunEvent（11 种类型）、RunStore、JsonlRunStore、生命周期、密钥脱敏 |
 | [28 - 配置参考](28-config-reference.md) | Config | AgentConfig、ReactAgentBuilder、ToolExecutionConfig、TokenBudgetConfig、YAML 配置、Feature Flags |
@@ -233,4 +233,4 @@ async fn main() -> Result<()> {
 | `examples/demo48_personal_assistant.rs` | 个人智能助理 |
 | `examples/demo49_research_agent.rs` | 研究与报告助手 |
 | `examples/demo50_eval.rs` | 评估系统：用例、标准、约束、轨迹回放、触发准确率、HTML 报告 |
-| `examples/demo51_self_improvement.rs` | 自进化：Analyzer、CritiqueStore、Curator、TrajectorySaver、SelfEvolution |
+| `examples/demo51_self_improvement.rs` | 自进化：Analyzer 失败检测、Curator 技能生命周期、TrajectorySaver 微调数据 |

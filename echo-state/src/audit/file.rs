@@ -42,9 +42,12 @@ impl AuditLogger for FileAuditLogger {
             let line = serde_json::to_string(&event)
                 .map_err(|e| echo_core::error::ReactError::Other(e.to_string()))?;
 
-            if let Ok(mut guard) = self.writer.lock()
-                && let Some(writer) = guard.as_mut()
-            {
+            // Recover from a poisoned lock (another thread panicked while holding it)
+            // rather than silently dropping the audit event — the rest of the codebase
+            // uses this same `into_inner()` recovery pattern. This ensures a security
+            // audit record is never lost without a signal.
+            let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(writer) = guard.as_mut() {
                 writeln!(writer, "{}", line)?;
                 writer.flush()?;
             }

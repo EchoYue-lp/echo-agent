@@ -227,13 +227,13 @@ impl Curator {
         let mut state = self.load_state();
         let now = chrono::Utc::now();
 
-        if let Some(meta) = state.skills.get_mut(name) {
-            if meta.lifecycle == SkillLifecycle::Candidate {
-                meta.lifecycle = SkillLifecycle::Draft;
-                meta.last_modified_at = now;
-                self.save_state(&state)?;
-                return Ok(true);
-            }
+        if let Some(meta) = state.skills.get_mut(name)
+            && meta.lifecycle == SkillLifecycle::Candidate
+        {
+            meta.lifecycle = SkillLifecycle::Draft;
+            meta.last_modified_at = now;
+            self.save_state(&state)?;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -243,13 +243,13 @@ impl Curator {
         let mut state = self.load_state();
         let now = chrono::Utc::now();
 
-        if let Some(meta) = state.skills.get_mut(name) {
-            if meta.lifecycle == SkillLifecycle::Draft {
-                meta.lifecycle = SkillLifecycle::Active;
-                meta.last_modified_at = now;
-                self.save_state(&state)?;
-                return Ok(true);
-            }
+        if let Some(meta) = state.skills.get_mut(name)
+            && meta.lifecycle == SkillLifecycle::Draft
+        {
+            meta.lifecycle = SkillLifecycle::Active;
+            meta.last_modified_at = now;
+            self.save_state(&state)?;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -259,17 +259,17 @@ impl Curator {
         let mut state = self.load_state();
         let now = chrono::Utc::now();
 
-        if let Some(meta) = state.skills.get_mut(name) {
-            if matches!(
+        if let Some(meta) = state.skills.get_mut(name)
+            && matches!(
                 meta.lifecycle,
                 SkillLifecycle::Active | SkillLifecycle::Stale
-            ) {
-                meta.lifecycle = SkillLifecycle::Deprecated;
-                meta.superseded_by = superseded_by.map(|s| s.to_string());
-                meta.last_modified_at = now;
-                self.save_state(&state)?;
-                return Ok(true);
-            }
+            )
+        {
+            meta.lifecycle = SkillLifecycle::Deprecated;
+            meta.superseded_by = superseded_by.map(|s| s.to_string());
+            meta.last_modified_at = now;
+            self.save_state(&state)?;
+            return Ok(true);
         }
         Ok(false)
     }

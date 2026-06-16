@@ -82,27 +82,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 4. Print progress from the watch subscriber ───────────────
     let printer = tokio::spawn(async move {
-        loop {
-            match sub.changed().await {
-                Ok(()) => {
-                    let p = sub.borrow();
-                    let eta = p.eta_secs.map(|s| format!(" ETA {s}s")).unwrap_or_default();
-                    println!(
-                        "  📡 [{}/{}] {} — {:.1}%{}",
-                        p.phase_index + 1,
-                        p.total_phases,
-                        p.current_phase,
-                        p.percentage,
-                        eta,
-                    );
-                    if let Some(msg) = &p.message {
-                        println!("      └─ {msg}");
-                    }
-                    if p.percentage >= 100.0 {
-                        break;
-                    }
+        while let Ok(()) = sub.changed().await {
+            {
+                let p = sub.borrow();
+                let eta = p.eta_secs.map(|s| format!(" ETA {s}s")).unwrap_or_default();
+                println!(
+                    "  📡 [{}/{}] {} — {:.1}%{}",
+                    p.phase_index + 1,
+                    p.total_phases,
+                    p.current_phase,
+                    p.percentage,
+                    eta,
+                );
+                if let Some(msg) = &p.message {
+                    println!("      └─ {msg}");
                 }
-                Err(_) => break, // sender dropped
+                if p.percentage >= 100.0 {
+                    break;
+                }
             }
         }
     });
@@ -112,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut count = 0u32;
         while let Ok(event) = bus_rx.recv().await {
             if let TaskEvent::Progress { task_id, progress } = event.as_ref() {
-                if count % 3 == 0 {
+                if count.is_multiple_of(3) {
                     println!(
                         "  🔔 bus: {} @ {:.1}% ({})",
                         task_id, progress.percentage, progress.current_phase

@@ -258,7 +258,7 @@ impl TrajectorySaver {
             }
         }
 
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         Ok(entries)
     }
 

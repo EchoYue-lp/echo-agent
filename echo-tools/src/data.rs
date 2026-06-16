@@ -3269,16 +3269,26 @@ impl Tool for CorrelateTool {
 
             // Precompute ranks if Spearman
             let all_ranks: Option<Vec<Vec<f64>>> = if method == "spearman" {
-                Some(
-                    numeric_cols
-                        .iter()
-                        .map(|c| {
-                            let s = df.column(c).unwrap().as_materialized_series();
-                            let s_f64 = s.cast(&DataType::Float64).unwrap();
-                            compute_ranks(&s_f64)
-                        })
-                        .collect(),
-                )
+                let ranks: std::result::Result<Vec<Vec<f64>>, ToolError> = numeric_cols
+                    .iter()
+                    .map(|c| {
+                        let s = df
+                            .column(c)
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                tool: "correlate_data".to_string(),
+                                message: format!("column '{}' missing: {}", c, e),
+                            })?
+                            .as_materialized_series();
+                        let s_f64 =
+                            s.cast(&DataType::Float64)
+                                .map_err(|e| ToolError::ExecutionFailed {
+                                    tool: "correlate_data".to_string(),
+                                    message: format!("failed to cast column '{}' to f64: {}", c, e),
+                                })?;
+                        Ok(compute_ranks(&s_f64))
+                    })
+                    .collect();
+                Some(ranks?)
             } else {
                 None
             };
@@ -3297,10 +3307,32 @@ impl Tool for CorrelateTool {
                         compute_pearson(&r1, &r2)
                     } else {
                         // Pearson
-                        let s1 = df.column(col1).unwrap().as_materialized_series();
-                        let s2 = df.column(col2).unwrap().as_materialized_series();
-                        let s1_f64 = s1.cast(&DataType::Float64).unwrap();
-                        let s2_f64 = s2.cast(&DataType::Float64).unwrap();
+                        let s1 = df
+                            .column(col1)
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                tool: "correlate_data".to_string(),
+                                message: format!("column '{}' missing: {}", col1, e),
+                            })?
+                            .as_materialized_series();
+                        let s2 = df
+                            .column(col2)
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                tool: "correlate_data".to_string(),
+                                message: format!("column '{}' missing: {}", col2, e),
+                            })?
+                            .as_materialized_series();
+                        let s1_f64 = s1.cast(&DataType::Float64).map_err(|e| {
+                            ToolError::ExecutionFailed {
+                                tool: "correlate_data".to_string(),
+                                message: format!("failed to cast '{}' to f64: {}", col1, e),
+                            }
+                        })?;
+                        let s2_f64 = s2.cast(&DataType::Float64).map_err(|e| {
+                            ToolError::ExecutionFailed {
+                                tool: "correlate_data".to_string(),
+                                message: format!("failed to cast '{}' to f64: {}", col2, e),
+                            }
+                        })?;
                         compute_pearson(&s1_f64, &s2_f64)
                     };
                     row.push(corr);

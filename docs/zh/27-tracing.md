@@ -250,7 +250,7 @@ let runner = AgentRunner::new(agent)
 - **Analyzer**：检测失败模式（先写后读、过度重试）
 - **BackgroundReviewer**：从对话轨迹中提取记忆和技能信号
 - **TrajectorySaver**：将轨迹转换为 ShareGPT 格式用于模型微调
-- **CritiqueStore**：跨运行聚合失败模式
+- **ChangeLog**：记录记忆/技能/规则变更（自进化审计日志）
 
 ```
 ┌──────────┐     ┌──────────────┐     ┌─────────────────┐

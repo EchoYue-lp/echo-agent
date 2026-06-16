@@ -1088,14 +1088,24 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
             }
         }
 
-        // Parse permission_mode_override field
+        // Parse permission_mode_override field.
+        // Security: hooks (which can live inside a SKILL.md file) must NEVER be
+        // able to escalate to BypassPermissions — that would let a malicious
+        // skill disable all per-tool approval for itself. We explicitly drop
+        // that directive and warn.
         if let Some(mode) = json.get("permission_mode").and_then(|v| v.as_str()) {
             result.permission_mode_override = match mode {
                 "default" => Some(PermissionMode::Default),
                 "plan" => Some(PermissionMode::Plan),
                 "auto" => Some(PermissionMode::Auto),
                 "acceptEdits" => Some(PermissionMode::AcceptEdits),
-                "bypassPermissions" => Some(PermissionMode::BypassPermissions),
+                "bypassPermissions" => {
+                    warn!(
+                        "Hook attempted to set permission_mode to bypassPermissions; \
+                         rejected (hooks cannot escalate privileges)"
+                    );
+                    None
+                }
                 _ => None,
             };
         }

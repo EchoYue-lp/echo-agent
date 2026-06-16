@@ -66,7 +66,9 @@ pub(crate) async fn finalize_completed_run(
                 content: output.to_string(),
             },
         );
-        let _ = al.log(ev).await;
+        if let Err(e) = al.log(ev).await {
+            tracing::error!(error = %e, "audit log write failed — event dropped");
+        }
     }
     // Rich runtime checkpoint
     snap.save_runtime_checkpoint(&context, None).await;
@@ -146,7 +148,9 @@ pub(crate) async fn emit_final_text(
                 content: answer.clone(),
             },
         );
-        let _ = al.log(ev).await;
+        if let Err(e) = al.log(ev).await {
+            tracing::error!(error = %e, "audit log write failed — event dropped");
+        }
     }
     // Rich runtime checkpoint (messages + plan + skills + blocked reason)
     snap.save_runtime_checkpoint(context, None).await;

@@ -250,7 +250,7 @@ The improvement system uses traces for:
 - **Analyzer**: Detecting failure patterns (write-without-read, excessive retries)
 - **BackgroundReviewer**: Extracting memory and skill signals from conversation traces
 - **TrajectorySaver**: Converting traces to ShareGPT format for model fine-tuning
-- **CritiqueStore**: Aggregating failure patterns across runs
+- **ChangeLog**: Records memory/skill/rule mutations (self-evolution audit log)
 
 ```
 ┌──────────┐     ┌──────────────┐     ┌─────────────────┐

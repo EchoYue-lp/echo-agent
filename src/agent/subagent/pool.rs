@@ -47,11 +47,11 @@ impl SubAgentPool {
         // Try to get from pool first
         {
             let mut agents = self.agents.write().await;
-            if let Some(pool) = agents.get_mut(&name) {
-                if let Some(agent) = pool.pop() {
-                    agent.reset().await;
-                    return Ok(agent);
-                }
+            if let Some(pool) = agents.get_mut(&name)
+                && let Some(agent) = pool.pop()
+            {
+                agent.reset().await;
+                return Ok(agent);
             }
         }
 

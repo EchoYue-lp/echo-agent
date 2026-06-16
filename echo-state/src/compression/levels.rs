@@ -8,7 +8,6 @@
 //! L5 Reactive: Emergency — keep only system prompt + last 3 messages
 
 use crate::compression::CompressionCheckpoint;
-use echo_core::error::Result;
 use echo_core::llm::LlmClient;
 use echo_core::llm::types::{Message, MessageContent, Role};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};

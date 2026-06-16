@@ -39,7 +39,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [22 - Research Tools](./22-research-tools.md) | Research | ArXiv search, Semantic Scholar, PDF fetch, BibTeX generation |
 | [23 - Hooks System](./23-hooks.md) | Hooks | Skills hooks (20 events), Task hooks, Subagent hooks |
 | [24 - Eval System](./24-eval-system.md) | Eval | EvalCase, SuccessCriteria, LlmGrader, A/B comparison, regression, HTML reports |
-| [25 - Self-Improvement](./25-self-improvement.md) | Improve | Analyzer, ImprovementLoop, SelfEvolution, BackgroundReviewer, Curator, TrajectorySaver |
+| [25 - Self-Evolution](./25-self-improvement.md) | Improve / Evolution | Analyzer, ImprovementLoop, EvalDrivenImprovement, tiered memory, skill auto-creation, merge/health/patch, rule promotion, change audit |
 | [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerWorker/Pipeline/Debate/Swarm) |
 | [27 - Tracing System](./27-tracing.md) | Trace | Run, RunEvent (11 types), RunStore, JsonlRunStore, lifecycle, secret redaction |
 | [28 - Config Reference](./28-config-reference.md) | Config | AgentConfig, ReactAgentBuilder, ToolExecutionConfig, TokenBudgetConfig, YAML config, feature flags |
@@ -238,4 +238,4 @@ See `examples/README.md` for the full classification and upkeep rules.
 | `examples/demo48_personal_assistant.rs` | Personal smart assistant |
 | `examples/demo49_research_agent.rs` | Research & report assistant |
 | `examples/demo50_eval.rs` | Eval system: cases, criteria, constraints, trajectory replay, trigger accuracy, HTML reports |
-| `examples/demo51_self_improvement.rs` | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver, SelfEvolution |
+| `examples/demo51_self_improvement.rs` | Self-improvement: Analyzer failure detection, Curator skill lifecycle, TrajectorySaver fine-tune data |

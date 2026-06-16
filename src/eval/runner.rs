@@ -589,14 +589,14 @@ fn extract_number_near_key(text: &str, key: &str) -> Option<f64> {
     // Build a pattern that matches "key" followed by separators and a number
     let escaped_key = regex::escape(key);
     let pattern = format!(r"(?i){escaped_key}\s*[:=：]\s*(-?\d+\.?\d*(?:\s*%|e[+-]?\d+)?)");
-    if let Ok(re) = regex::Regex::new(&pattern) {
-        if let Some(captures) = re.captures(text) {
-            let num_str = captures
-                .get(1)
-                .map(|m| m.as_str().replace('%', "").replace('，', ""))
-                .unwrap_or_default();
-            return num_str.trim().parse::<f64>().ok();
-        }
+    if let Ok(re) = regex::Regex::new(&pattern)
+        && let Some(captures) = re.captures(text)
+    {
+        let num_str = captures
+            .get(1)
+            .map(|m| m.as_str().replace(['%', '，'], ""))
+            .unwrap_or_default();
+        return num_str.trim().parse::<f64>().ok();
     }
 
     // Fallback: find the key and look for a number in the next 50 chars
@@ -604,10 +604,10 @@ fn extract_number_near_key(text: &str, key: &str) -> Option<f64> {
     let lower_key = key.to_lowercase();
     if let Some(pos) = lower_text.find(&lower_key) {
         let after = &text[pos..text.len().min(pos + key.len() + 50)];
-        if let Ok(re) = regex::Regex::new(r"(-?\d+\.?\d*(?:e[+-]?\d+)?)") {
-            if let Some(m) = re.find(after) {
-                return m.as_str().parse::<f64>().ok();
-            }
+        if let Ok(re) = regex::Regex::new(r"(-?\d+\.?\d*(?:e[+-]?\d+)?)")
+            && let Some(m) = re.find(after)
+        {
+            return m.as_str().parse::<f64>().ok();
         }
     }
     None

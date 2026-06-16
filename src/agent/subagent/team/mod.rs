@@ -389,6 +389,12 @@ pub struct TeamAgentBuilder {
     strategy: strategy::TeamStrategy,
 }
 
+impl Default for TeamAgentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TeamAgentBuilder {
     pub fn new() -> Self {
         Self {

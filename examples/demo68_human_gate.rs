@@ -27,25 +27,23 @@ async fn main() {
     let mgr = manager.clone();
     let handler = tokio::spawn(async move {
         while let Some(event) = mgr.recv_event().await {
-            match event {
-                HumanLoopEvent::SelectionRequest {
-                    task_id,
-                    prompt,
-                    options,
-                    phase,
-                    responder,
-                    ..
-                } => {
-                    println!("  👀 [Frontend]  task={task_id}, phase={phase}");
-                    println!("  📋 [Frontend]  \"{prompt}\"");
-                    for (i, opt) in options.iter().enumerate() {
-                        println!("  [{i}] {opt}");
-                    }
-                    // Auto-select "Approve"
-                    responder.respond("Approve".to_string(), None);
-                    println!("  📨 [Frontend]  responded: Approve");
+            if let HumanLoopEvent::SelectionRequest {
+                task_id,
+                prompt,
+                options,
+                phase,
+                responder,
+                ..
+            } = event
+            {
+                println!("  👀 [Frontend]  task={task_id}, phase={phase}");
+                println!("  📋 [Frontend]  \"{prompt}\"");
+                for (i, opt) in options.iter().enumerate() {
+                    println!("  [{i}] {opt}");
                 }
-                _ => {}
+                // Auto-select "Approve"
+                responder.respond("Approve".to_string(), None);
+                println!("  📨 [Frontend]  responded: Approve");
             }
         }
     });
@@ -112,16 +110,14 @@ async fn main() {
     let mgr3 = manager3.clone();
     let handler3 = tokio::spawn(async move {
         while let Some(event) = mgr3.recv_event().await {
-            match event {
-                HumanLoopEvent::ApprovalRequest {
-                    tool_name,
-                    responder,
-                    ..
-                } => {
-                    println!("  👀 [Frontend]  approval for tool: {tool_name}");
-                    responder.respond(ApprovalDecision::Approved);
-                }
-                _ => {}
+            if let HumanLoopEvent::ApprovalRequest {
+                tool_name,
+                responder,
+                ..
+            } = event
+            {
+                println!("  👀 [Frontend]  approval for tool: {tool_name}");
+                responder.respond(ApprovalDecision::Approved);
             }
         }
     });

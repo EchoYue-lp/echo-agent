@@ -4,7 +4,7 @@
 //! then proposes or executes merges to reduce redundancy.
 
 use chrono::{DateTime, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use echo_core::memory::store::Store;
@@ -213,6 +213,7 @@ impl SkillSimilarityDetector {
 
 /// Executes skill merges by updating descriptors and marking skills as deprecated.
 pub struct SkillMerger {
+    #[allow(dead_code)]
     store: Arc<dyn Store>,
     #[cfg(feature = "improve")]
     curator: Curator,
@@ -342,6 +343,7 @@ fn word_similarity(text_a: &str, text_b: &str) -> f64 {
 mod tests {
     use super::*;
     use echo_state::memory::store::InMemoryStore;
+    use std::collections::HashMap;
 
     fn make_descriptor(
         name: &str,

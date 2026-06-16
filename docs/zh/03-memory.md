@@ -244,3 +244,10 @@ SubAgent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memorie
 
 对应示例：`examples/demo14_memory_isolation.rs`
 
+---
+
+## 类型化与分层记忆（自进化）
+
+本文档介绍的是底层的三种 Store（长期 `Store`、运行时 `RuntimeStateStore`、对话 `ConversationStore`）。
+若你需要**带元数据的结构化记忆**（类型、置信度、来源）和**热/暖/冷三层自动管理、写入触发、审查/GC、技能自创建**等运行时演化能力，
+参见 [25 - 自进化系统](./25-self-improvement.md)（`evolution` 模块）。
