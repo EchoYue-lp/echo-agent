@@ -61,6 +61,11 @@ impl ProgressBridge {
         self.enabled.store(false, Ordering::SeqCst);
     }
 
+    /// Task ID this bridge reports progress for.
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
     fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
@@ -98,6 +103,14 @@ impl ProgressBridge {
 }
 
 impl AgentCallback for ProgressBridge {
+    fn callback_kind(&self) -> Option<&'static str> {
+        Some("ProgressBridge")
+    }
+
+    fn callback_id(&self) -> Option<&str> {
+        Some(&self.task_id)
+    }
+
     fn on_iteration<'a>(
         &'a self,
         _agent: &'a str,

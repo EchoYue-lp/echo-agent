@@ -493,6 +493,11 @@ impl ReactAgent {
         self.memory_layer_manager = Some(layer_manager);
     }
 
+    /// Whether this agent has the layered memory runtime installed.
+    pub fn has_memory_layer_manager(&self) -> bool {
+        self.memory_layer_manager.is_some()
+    }
+
     /// Create an Agent from a configuration file.
     ///
     /// Searches for `echo-agent.yaml` and loads the config.

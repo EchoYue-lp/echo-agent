@@ -351,7 +351,26 @@ impl ReactAgent {
     pub fn remove_callbacks_by_type_name(&mut self, type_name: &str) {
         self.config.callbacks.retain(|cb| {
             let name = std::any::type_name_of_val(cb.as_ref()).to_string();
-            !name.contains(type_name)
+            let kind_matches = cb
+                .callback_kind()
+                .map(|kind| kind.contains(type_name))
+                .unwrap_or_else(|| name.contains(type_name));
+            !kind_matches
+        });
+    }
+
+    /// Remove callbacks of a given type whose stable callback ID matches.
+    ///
+    /// Useful for task-scoped temporary callbacks such as `ProgressBridge`,
+    /// where removing by type alone can delete another active task's callback.
+    pub fn remove_callbacks_by_type_name_and_id(&mut self, type_name: &str, callback_id: &str) {
+        self.config.callbacks.retain(|cb| {
+            let name = std::any::type_name_of_val(cb.as_ref()).to_string();
+            let kind_matches = cb
+                .callback_kind()
+                .map(|kind| kind.contains(type_name))
+                .unwrap_or_else(|| name.contains(type_name));
+            !(kind_matches && cb.callback_id() == Some(callback_id))
         });
     }
 
@@ -920,5 +939,40 @@ impl ReactAgent {
             agent = %self.config.agent_name,
             "System prompt updated"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::AgentCallback;
+    use crate::agent::config::AgentConfig;
+
+    struct IdentifiedCallback {
+        id: &'static str,
+    }
+
+    impl AgentCallback for IdentifiedCallback {
+        fn callback_kind(&self) -> Option<&'static str> {
+            Some("IdentifiedCallback")
+        }
+
+        fn callback_id(&self) -> Option<&str> {
+            Some(self.id)
+        }
+    }
+
+    #[test]
+    fn remove_callbacks_by_type_name_and_id_is_precise() {
+        let config = AgentConfig::minimal("test-model", "helper");
+        let mut agent = ReactAgent::new(config);
+
+        agent.add_callback(Arc::new(IdentifiedCallback { id: "task-a" }));
+        agent.add_callback(Arc::new(IdentifiedCallback { id: "task-b" }));
+
+        agent.remove_callbacks_by_type_name_and_id("IdentifiedCallback", "task-a");
+
+        assert_eq!(agent.config.callbacks.len(), 1);
+        assert_eq!(agent.config.callbacks[0].callback_id(), Some("task-b"));
     }
 }

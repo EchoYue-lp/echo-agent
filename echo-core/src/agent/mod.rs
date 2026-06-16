@@ -606,6 +606,16 @@ fn cancel_aware_stream<'a>(
 
 /// Agent lifecycle callback interface
 pub trait AgentCallback: Send + Sync {
+    /// Optional stable callback kind for targeted removal.
+    fn callback_kind(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Optional stable identifier for removing a specific callback instance.
+    fn callback_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Called before the model starts a reasoning step.
     fn on_think_start<'a>(
         &'a self,
