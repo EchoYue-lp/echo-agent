@@ -560,8 +560,7 @@ impl ReactAgentBuilder {
     #[cfg(feature = "human-loop")]
     /// Set unified permission service
     ///
-    /// Once set, this service takes priority for permission checks,
-    /// falling back to the legacy PermissionPolicy logic.
+    /// Once set, this service is the single permission-checking entry point.
     pub fn permission_service(mut self, service: Arc<PermissionService>) -> Self {
         self.permission_service = Some(service);
         self

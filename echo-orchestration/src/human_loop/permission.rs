@@ -49,6 +49,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use echo_core::error::Result;
+use super::policy::ApprovalScope;
 
 // ── 风险等级 ────────────────────────────────────────────────────────────────────
 
@@ -660,15 +661,19 @@ impl<P: super::HumanLoopProvider + 'static> PermissionRequestHandler
 
         match self.provider.request(req).await? {
             HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
-            HumanLoopResponse::ApprovedWithScope { scope: _ } => Ok(PermissionResponse::allowed()),
-            HumanLoopResponse::ModifiedArgs { args, scope: _ } => {
+            HumanLoopResponse::ApprovedWithScope { scope } => {
+                Ok(permission_response_with_scope(
+                    &request.tool_name,
+                    &request.tool_input,
+                    scope,
+                ))
+            }
+            HumanLoopResponse::ModifiedArgs { args, scope } => {
                 // 保留用户修改的参数，传递给调用方
-                Ok(PermissionResponse {
-                    decision: PermissionResponseDecision::Allowed,
-                    rule_updates: Vec::new(),
-                    feedback: None,
-                    updated_input: Some(args),
-                })
+                let mut response =
+                    permission_response_with_scope(&request.tool_name, &request.tool_input, scope);
+                response.updated_input = Some(args);
+                Ok(response)
             }
             HumanLoopResponse::Rejected { reason } => Ok(PermissionResponse::denied(reason)),
             HumanLoopResponse::Text(text) => Ok(PermissionResponse::allowed().with_feedback(text)),
@@ -682,6 +687,30 @@ impl<P: super::HumanLoopProvider + 'static> PermissionRequestHandler
                 "收到意外的 Selection 响应".to_string(),
             ))),
         }
+    }
+}
+
+fn permission_response_with_scope(
+    tool_name: &str,
+    tool_input: &Value,
+    scope: ApprovalScope,
+) -> PermissionResponse {
+    match scope {
+        ApprovalScope::Once => PermissionResponse::allowed(),
+        ApprovalScope::Session => PermissionResponse {
+            decision: PermissionResponseDecision::Allowed,
+            rule_updates: vec![PermissionUpdate::add_session_rule(
+                PermissionResponse::build_matcher(tool_name, tool_input),
+            )],
+            feedback: None,
+            updated_input: None,
+        },
+        ApprovalScope::SessionAllTools => PermissionResponse {
+            decision: PermissionResponseDecision::Allowed,
+            rule_updates: vec![PermissionUpdate::add_session_rule(tool_name.to_string())],
+            feedback: None,
+            updated_input: None,
+        },
     }
 }
 

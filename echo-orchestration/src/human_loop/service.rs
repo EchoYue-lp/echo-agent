@@ -153,8 +153,8 @@ pub struct PermissionService {
     denial_tracker: tokio::sync::Mutex<DenialTracker>,
     /// Classifier（auto 模式）
     classifier: Option<Arc<dyn Classifier>>,
-    /// 权限请求处理器
-    request_handler: Arc<dyn PermissionRequestHandler>,
+    /// 权限请求处理器（可原地替换，避免重建整个服务导致配置丢失）
+    request_handler: Arc<std::sync::RwLock<Arc<dyn PermissionRequestHandler>>>,
     /// 受保护路径检查器
     protected_paths: ProtectedPathChecker,
     /// 审计 Sink（可选）
@@ -164,6 +164,13 @@ pub struct PermissionService {
 }
 
 impl PermissionService {
+    fn strict_confirmation_required(permissions: &[ToolPermission]) -> bool {
+        permissions.contains(&ToolPermission::Write)
+            || permissions.contains(&ToolPermission::Execute)
+            || permissions.contains(&ToolPermission::Network)
+            || permissions.contains(&ToolPermission::Sensitive)
+    }
+
     /// 创建新的权限服务
     pub fn new() -> Self {
         let config = PermissionServiceConfig::default();
@@ -180,7 +187,7 @@ impl PermissionService {
                 max_denials,
             )),
             classifier: None,
-            request_handler: Arc::new(NullPermissionRequestHandler),
+            request_handler: Arc::new(std::sync::RwLock::new(Arc::new(NullPermissionRequestHandler))),
             protected_paths: ProtectedPathChecker::new(),
             audit_sink: None,
             last_modified_args: RwLock::new(None),
@@ -193,31 +200,6 @@ impl PermissionService {
     pub fn from_provider(provider: Arc<dyn super::HumanLoopProvider>) -> Self {
         let handler: Arc<dyn PermissionRequestHandler> = Arc::new(DynProviderHandler { provider });
         Self::new().with_request_handler(handler)
-    }
-
-    /// 从 `PermissionPolicy` 创建权限服务
-    ///
-    /// 便捷构造方法，自动将旧 Policy 适配到新管线。
-    /// Policy 的 `RequireApproval` 会正确委托给 `HumanLoopProvider`。
-    pub fn from_policy(
-        policy: Arc<dyn echo_core::tools::permission::PermissionPolicy>,
-        provider: Arc<dyn super::HumanLoopProvider>,
-    ) -> Self {
-        let handler = Arc::new(PolicyAwareHandler { policy, provider });
-        Self::new().with_request_handler(handler)
-    }
-
-    /// 注入旧 PermissionPolicy 的语义
-    ///
-    /// 将旧 Policy 和默认 Provider 组合为 `PolicyAwareHandler`，
-    /// 使 `RequireApproval` 正确路由到人类审批流程。
-    pub fn with_legacy_policy(
-        self,
-        policy: Arc<dyn echo_core::tools::permission::PermissionPolicy>,
-    ) -> Self {
-        let provider = super::default_provider();
-        let handler = Arc::new(PolicyAwareHandler { policy, provider });
-        self.with_request_handler(handler)
     }
 
     /// 设置超时策略
@@ -247,14 +229,43 @@ impl PermissionService {
 
     /// 设置权限请求处理器
     pub fn with_request_handler(mut self, handler: Arc<dyn PermissionRequestHandler>) -> Self {
-        self.request_handler = handler;
+        self.request_handler = Arc::new(std::sync::RwLock::new(handler));
         self
     }
 
     /// 是否已配置真实的权限请求处理器（非 NullHandler）
     /// 使用 trait method 标记而非 type_name 字符串匹配
     fn has_real_handler(&self) -> bool {
-        !self.request_handler.is_null_handler()
+        if let Ok(handler) = self.request_handler.read() {
+            return !handler.is_null_handler();
+        }
+        true // lock poisoned — assume real handler
+    }
+
+    /// 原地替换权限请求处理器（provider），不重建整个 PermissionService。
+    ///
+    /// 这是 `set_human_loop_provider` 的正确底层调用：它保留了 mode、
+    /// bypass_disabled、classifier、audit_sink、protected_paths、缓存等所有配置，
+    /// 只替换 handler。避免了 `build_permission_service` 全量重建导致的状态丢失。
+    pub fn replace_provider(&self, provider: Arc<dyn super::HumanLoopProvider>) {
+        let handler: Arc<dyn PermissionRequestHandler> = Arc::new(DynProviderHandler { provider });
+        if let Ok(mut guard) = self.request_handler.write() {
+            *guard = handler;
+        }
+        // 切换 provider 时清除审批缓存——旧 provider 的审批不应延续到新 provider
+        self.cache.clear();
+    }
+
+    /// Replace only the UI/provider transport and keep existing session approvals.
+    ///
+    /// GUI/Tauri installs a per-run provider before each message so concurrent
+    /// conversations stay isolated. That provider swap is not a permission
+    /// boundary and must not erase approvals such as "approve for this session".
+    pub fn replace_provider_preserving_cache(&self, provider: Arc<dyn super::HumanLoopProvider>) {
+        let handler: Arc<dyn PermissionRequestHandler> = Arc::new(DynProviderHandler { provider });
+        if let Ok(mut guard) = self.request_handler.write() {
+            *guard = handler;
+        }
     }
 
     /// 设置最大连续拒绝次数
@@ -427,6 +438,24 @@ impl PermissionService {
             }};
         }
 
+        // 0. 受保护路径检查（最高优先级，在任何权限模式之前）
+        // 即使在 BypassPermissions 模式下，.git/.ssh/.env 等也必须被保护
+        match self.protected_paths.check(tool_name, tool_input) {
+            ProtectedPathResult::Protected {
+                matched_pattern,
+                path,
+            } => {
+                audit_return!(
+                    PermissionDecision::Deny {
+                        reason: format!("受保护路径 '{}'（匹配规则 '{}'）", path, matched_pattern),
+                    },
+                    "protected_path",
+                    "protected_paths"
+                );
+            }
+            ProtectedPathResult::Safe => {}
+        }
+
         // 1. Bypass 模式（可被管理员禁用）
         if config.mode == PermissionMode::BypassPermissions {
             if config.bypass_disabled {
@@ -458,24 +487,6 @@ impl PermissionService {
             audit_return!(PermissionDecision::Allow, "plan_mode", "plan_mode");
         }
 
-        // 3. 受保护路径检查（最高优先级，在规则匹配之前）
-        // 即使规则匹配允许，受保护路径也必须被拒绝
-        match self.protected_paths.check(tool_name, tool_input) {
-            ProtectedPathResult::Protected {
-                matched_pattern,
-                path,
-            } => {
-                audit_return!(
-                    PermissionDecision::Deny {
-                        reason: format!("受保护路径 '{}'（匹配规则 '{}'）", path, matched_pattern),
-                    },
-                    "protected_path",
-                    "protected_paths"
-                );
-            }
-            ProtectedPathResult::Safe => {}
-        }
-
         // 4. 检查规则注册表
         {
             let rules = self.rules.read().await;
@@ -503,10 +514,9 @@ impl PermissionService {
         }
 
         // 5.5 未配置 handler 时直接返回 RequireApproval（而非静默拒绝）
-        let needs_handler = matches!(
-            config.mode,
-            PermissionMode::Default | PermissionMode::AcceptEdits
-        );
+        let needs_handler = matches!(config.mode, PermissionMode::Default | PermissionMode::AcceptEdits)
+            || (config.mode == PermissionMode::StrictConfirm
+                && Self::strict_confirmation_required(permissions));
         if needs_handler && !self.has_real_handler() {
             audit_return!(
                 PermissionDecision::RequireApproval,
@@ -532,6 +542,14 @@ impl PermissionService {
                 } else {
                     self.check_with_handler(tool_name, tool_input, permissions)
                         .await?
+                }
+            }
+            PermissionMode::StrictConfirm => {
+                if Self::strict_confirmation_required(permissions) {
+                    self.check_with_handler(tool_name, tool_input, permissions)
+                        .await?
+                } else {
+                    PermissionDecision::Allow
                 }
             }
             PermissionMode::DontAsk => {
@@ -621,7 +639,13 @@ impl PermissionService {
             .with_risk_level(risk_level)
             .with_risk_based_suggestions();
 
-        let response = self.request_handler.handle(request).await?;
+        // 通过 RwLock 读取当前 handler（支持运行时原地替换 provider）
+        let handler = self
+            .request_handler
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let response = handler.handle(request).await?;
 
         // 处理用户修改的参数
         if let Some(modified) = &response.updated_input {
@@ -763,15 +787,14 @@ impl PermissionRequestHandler for DynProviderHandler {
 
         match self.provider.request(req).await? {
             HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
-            HumanLoopResponse::ApprovedWithScope { scope: _ } => Ok(PermissionResponse::allowed()),
-            HumanLoopResponse::ModifiedArgs { args, scope: _ } => {
+            HumanLoopResponse::ApprovedWithScope { scope } => {
+                Ok(response_with_scope(&request.tool_name, scope))
+            }
+            HumanLoopResponse::ModifiedArgs { args, scope } => {
                 // 保留用户修改的参数，传递给调用方
-                Ok(PermissionResponse {
-                    decision: PermissionResponseDecision::Allowed,
-                    rule_updates: Vec::new(),
-                    feedback: None,
-                    updated_input: Some(args),
-                })
+                let mut response = response_with_scope(&request.tool_name, scope);
+                response.updated_input = Some(args);
+                Ok(response)
             }
             HumanLoopResponse::Rejected { reason } => Ok(PermissionResponse::denied(reason)),
             HumanLoopResponse::Text(text) => Ok(PermissionResponse::allowed().with_feedback(text)),
@@ -788,72 +811,21 @@ impl PermissionRequestHandler for DynProviderHandler {
     }
 }
 
-// ── Policy Aware Handler (桥接 PermissionPolicy + HumanLoopProvider) ─────────
-
-/// 将旧 `PermissionPolicy` 桥接到 `PermissionRequestHandler`
-///
-/// 关键修复：`RequireApproval` 正确委托给 `HumanLoopProvider`，
-/// 而非返回 denied（旧 `PolicyBridgeHandler` 的语义丢失问题）。
-struct PolicyAwareHandler {
-    policy: Arc<dyn echo_core::tools::permission::PermissionPolicy>,
-    provider: Arc<dyn super::HumanLoopProvider>,
-}
-
-#[async_trait]
-impl PermissionRequestHandler for PolicyAwareHandler {
-    async fn handle(&self, request: PermissionRequest) -> Result<PermissionResponse> {
-        use super::{HumanLoopRequest, HumanLoopResponse};
-
-        // 先咨询旧 Policy
-        let decision = self
-            .policy
-            .check(&request.tool_name, &request.required_permissions)
-            .await;
-
-        match decision {
-            PermissionDecision::Allow => Ok(PermissionResponse::allowed()),
-            PermissionDecision::Deny { reason } => Ok(PermissionResponse::denied(Some(reason))),
-            PermissionDecision::RequireApproval => {
-                // 关键修复：委托给 HumanLoopProvider 请求人类审批
-                let req =
-                    HumanLoopRequest::approval(&request.tool_name, request.tool_input.clone());
-                match self.provider.request(req).await? {
-                    HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
-                    HumanLoopResponse::ApprovedWithScope { .. } => {
-                        Ok(PermissionResponse::allowed())
-                    }
-                    HumanLoopResponse::ModifiedArgs { args, .. } => Ok(PermissionResponse {
-                        decision: PermissionResponseDecision::Allowed,
-                        rule_updates: Vec::new(),
-                        feedback: None,
-                        updated_input: Some(args),
-                    }),
-                    HumanLoopResponse::Rejected { reason } => {
-                        Ok(PermissionResponse::denied(reason))
-                    }
-                    HumanLoopResponse::Text(text) => {
-                        Ok(PermissionResponse::allowed().with_feedback(text))
-                    }
-                    HumanLoopResponse::Timeout => {
-                        Ok(PermissionResponse::denied(Some("审批请求超时".to_string())))
-                    }
-                    HumanLoopResponse::Deferred => {
-                        Ok(PermissionResponse::denied(Some("审批被推迟".to_string())))
-                    }
-                    HumanLoopResponse::Selection { .. } => Ok(PermissionResponse::denied(Some(
-                        "收到意外的 Selection 响应".to_string(),
-                    ))),
-                }
-            }
-            PermissionDecision::Ask { suggestions } => Ok(PermissionResponse {
-                decision: PermissionResponseDecision::NeedMoreInfo {
-                    question: suggestions.join(", "),
-                },
-                rule_updates: Vec::new(),
-                feedback: None,
-                updated_input: None,
-            }),
-        }
+fn response_with_scope(tool_name: &str, scope: ApprovalScope) -> PermissionResponse {
+    match scope {
+        ApprovalScope::Once => PermissionResponse::allowed(),
+        ApprovalScope::Session => PermissionResponse {
+            decision: PermissionResponseDecision::Allowed,
+            rule_updates: vec![PermissionUpdate::add_session_rule(tool_name.to_string())],
+            feedback: None,
+            updated_input: None,
+        },
+        ApprovalScope::SessionAllTools => PermissionResponse {
+            decision: PermissionResponseDecision::Allowed,
+            rule_updates: vec![PermissionUpdate::add_session_rule("*".to_string())],
+            feedback: None,
+            updated_input: None,
+        },
     }
 }
 
@@ -931,9 +903,10 @@ impl PermissionServiceBuilder {
                 max_denials,
             )),
             classifier: self.classifier,
-            request_handler: self
-                .request_handler
-                .unwrap_or(Arc::new(NullPermissionRequestHandler)),
+            request_handler: Arc::new(std::sync::RwLock::new(
+                self.request_handler
+                    .unwrap_or_else(|| Arc::new(NullPermissionRequestHandler)),
+            )),
             protected_paths: self.protected_paths,
             audit_sink: None,
             last_modified_args: RwLock::new(None),
@@ -952,6 +925,33 @@ impl Default for PermissionServiceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::error::Result as EchoResult;
+    use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingAllowHandler {
+        count: Arc<AtomicUsize>,
+        response: PermissionResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl PermissionRequestHandler for CountingAllowHandler {
+        async fn handle(&self, _request: PermissionRequest) -> EchoResult<PermissionResponse> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(self.response.clone())
+        }
+    }
+
+    struct TestHumanLoopProvider;
+
+    impl super::super::HumanLoopProvider for TestHumanLoopProvider {
+        fn request(
+            &self,
+            _req: super::super::HumanLoopRequest,
+        ) -> BoxFuture<'_, EchoResult<super::super::HumanLoopResponse>> {
+            Box::pin(async { Ok(super::super::HumanLoopResponse::Approved) })
+        }
+    }
 
     #[tokio::test]
     async fn test_permission_service_new() {
@@ -986,6 +986,95 @@ mod tests {
             .await
             .unwrap();
         assert!(decision.is_denied());
+    }
+
+    #[tokio::test]
+    async fn test_strict_confirm_allows_read_without_handler() {
+        let service = PermissionService::new();
+        service.set_mode(PermissionMode::StrictConfirm).await;
+
+        let decision = service
+            .check_with_permissions("Read", &serde_json::json!({}), &[ToolPermission::Read])
+            .await
+            .unwrap();
+
+        assert!(decision.is_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_strict_confirm_write_uses_handler_and_session_scope() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let service = PermissionService::new().with_request_handler(Arc::new(
+            CountingAllowHandler {
+                count: count.clone(),
+                response: PermissionResponse {
+                    decision: PermissionResponseDecision::Allowed,
+                    rule_updates: vec![PermissionUpdate::add_session_rule("Write".to_string())],
+                    feedback: None,
+                    updated_input: None,
+                },
+            },
+        ));
+        service.set_mode(PermissionMode::StrictConfirm).await;
+
+        let decision = service
+            .check_with_permissions("Write", &serde_json::json!({}), &[ToolPermission::Write])
+            .await
+            .unwrap();
+        assert!(decision.is_allowed());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        let decision = service
+            .check_with_permissions("Write", &serde_json::json!({}), &[ToolPermission::Write])
+            .await
+            .unwrap();
+        assert!(decision.is_allowed());
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "session approval should install a rule and skip the handler next time"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_provider_transport_swap_preserves_session_approval_cache() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let service = PermissionService::new().with_request_handler(Arc::new(
+            CountingAllowHandler {
+                count: count.clone(),
+                response: PermissionResponse {
+                    decision: PermissionResponseDecision::Allowed,
+                    rule_updates: vec![PermissionUpdate::add_session_rule("Bash".to_string())],
+                    feedback: None,
+                    updated_input: None,
+                },
+            },
+        ));
+        service.set_mode(PermissionMode::StrictConfirm).await;
+
+        let decision = service
+            .check_with_permissions("Bash", &serde_json::json!({}), &[ToolPermission::Execute])
+            .await
+            .unwrap();
+        assert!(decision.is_allowed());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        service.replace_provider_preserving_cache(Arc::new(TestHumanLoopProvider));
+
+        let decision = service
+            .check_with_permissions(
+                "Bash",
+                &serde_json::json!({"command": "pwd"}),
+                &[ToolPermission::Execute],
+            )
+            .await
+            .unwrap();
+        assert!(decision.is_allowed());
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "GUI provider transport swaps must not erase session approvals"
+        );
     }
 
     #[tokio::test]

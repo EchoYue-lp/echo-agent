@@ -53,6 +53,7 @@ impl std::fmt::Display for ToolPermission {
 /// - Auto: AI classifier auto-decides
 /// - Bubble: sub-agent permissions bubble up
 /// - DontAsk: silently reject tools not matching an allow rule (no user prompt)
+/// - StrictConfirm: ask before write/execute/network/sensitive operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
@@ -74,6 +75,9 @@ pub enum PermissionMode {
     /// An intermediate mode between Default and BypassPermissions,
     /// suitable for CI/CD and other unattended execution scenarios.
     DontAsk,
+    /// Strict interactive mode: reads are allowed, mutating or external operations ask.
+    #[serde(rename = "strict")]
+    StrictConfirm,
 }
 
 impl PermissionMode {
@@ -86,6 +90,7 @@ impl PermissionMode {
             // if an explicit allow rule matches; otherwise silently rejected.
             PermissionMode::DontAsk => false,
             PermissionMode::Plan => false,
+            PermissionMode::StrictConfirm => false,
             _ => false,
         }
     }
@@ -97,6 +102,7 @@ impl PermissionMode {
             PermissionMode::Auto => false,
             PermissionMode::DontAsk => false, // silently reject, no interaction
             PermissionMode::AcceptEdits => false, // edits auto-accepted, others still need confirmation
+            PermissionMode::StrictConfirm => true,
             _ => true,
         }
     }
@@ -117,6 +123,7 @@ impl std::fmt::Display for PermissionMode {
             PermissionMode::Auto => write!(f, "auto"),
             PermissionMode::Bubble => write!(f, "bubble"),
             PermissionMode::DontAsk => write!(f, "dontAsk"),
+            PermissionMode::StrictConfirm => write!(f, "strict"),
         }
     }
 }

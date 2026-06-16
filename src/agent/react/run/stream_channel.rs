@@ -145,7 +145,9 @@ impl AgentSnapshot {
             let messages =
                 match phases::compact::run_compact(&self, &context, &tx, iteration).await? {
                     phases::CompactOutcome::Continue(m) => m,
-                    phases::CompactOutcome::Abandoned => return Ok(()),
+                    phases::CompactOutcome::Abandoned => {
+                        return Ok(());
+                    }
                 };
 
             // Think: callbacks + interventions + LLM stream → buffered output
@@ -154,7 +156,9 @@ impl AgentSnapshot {
                     phases::ThinkOutcome::Continue(t) => t,
                     phases::ThinkOutcome::Abandoned
                     | phases::ThinkOutcome::Cancelled
-                    | phases::ThinkOutcome::Blocked => return Ok(()),
+                    | phases::ThinkOutcome::Blocked => {
+                        return Ok(());
+                    }
                 };
 
             // Branch: tool calls vs text answer vs no-response
@@ -187,7 +191,9 @@ impl AgentSnapshot {
             };
 
             match outcome {
-                IterOutcome::Continue => continue,
+                IterOutcome::Continue => {
+                    continue;
+                }
                 IterOutcome::Finish { output } => {
                     return phases::finalize::finalize_completed_run(
                         &self, context, &label, &output, iteration, &state, tx,
@@ -214,7 +220,9 @@ impl AgentSnapshot {
                 IterOutcome::NoResponse => {
                     return phases::finalize::finalize_no_response(&self, &state, tx).await;
                 }
-                IterOutcome::Abandoned => return Ok(()),
+                IterOutcome::Abandoned => {
+                    return Ok(());
+                }
             }
         }
 

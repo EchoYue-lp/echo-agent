@@ -118,7 +118,7 @@ pub struct AgentConfig {
     pub(crate) enable_notebook: bool,
     /// Loop detection configuration.
     pub(crate) loop_detector_config: LoopDetectorConfig,
-    /// Permission mode for tool execution (default, plan, auto-edit, full-auto, auto, dontask).
+    /// Permission mode for tool execution (default, plan, auto-edit, full-auto, auto, strict).
     pub(crate) permission_mode: String,
     /// How often to checkpoint the React loop state (in iterations).
     /// 0 = only checkpoint at end of execution (default).
@@ -809,7 +809,7 @@ impl AgentConfig {
         &self.loop_detector_config
     }
 
-    /// Set the permission mode (default, plan, auto-edit, full-auto, auto, dontask).
+    /// Set the permission mode (default, plan, auto-edit, full-auto, auto, strict).
     pub fn permission_mode(mut self, mode: &str) -> Self {
         self.permission_mode = mode.to_string();
         self

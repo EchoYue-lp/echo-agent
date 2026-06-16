@@ -1099,6 +1099,7 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
                 "plan" => Some(PermissionMode::Plan),
                 "auto" => Some(PermissionMode::Auto),
                 "acceptEdits" => Some(PermissionMode::AcceptEdits),
+                "strict" => Some(PermissionMode::StrictConfirm),
                 "bypassPermissions" => {
                     warn!(
                         "Hook attempted to set permission_mode to bypassPermissions; \

@@ -18,6 +18,7 @@ pub(crate) fn process_stream_chunk(
     content_buffer: &mut String,
     tool_call_map: &mut HashMap<u32, (String, String, String)>,
     in_reasoning: &mut bool,
+    emit_content_tokens: bool,
 ) -> Vec<AgentEvent> {
     let mut events = Vec::new();
 
@@ -45,7 +46,9 @@ pub(crate) fn process_stream_chunk(
                 });
             }
             content_buffer.push_str(content);
-            events.push(AgentEvent::Token(content.clone()));
+            if emit_content_tokens {
+                events.push(AgentEvent::Token(content.clone()));
+            }
         }
 
         if let Some(delta_calls) = &choice.delta.tool_calls {

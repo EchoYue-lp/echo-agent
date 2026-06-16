@@ -1254,8 +1254,40 @@ impl ReactAgent {
     ///
     /// Updates both `approval_provider` (tool approval guard) and the `human_in_loop`
     /// built-in tool (LLM-initiated triggers), keeping both pointing to the same provider.
+    ///
+    /// Uses `PermissionService::replace_provider` to swap the handler **in place**,
+    /// preserving all existing configuration (mode, bypass_disabled, classifier,
+    /// audit_sink, protected_paths, rules) and clearing the approval cache so
+    /// stale approvals from the old provider don't carry over.
     pub fn set_human_loop_provider(&mut self, provider: Arc<dyn HumanLoopProvider>) {
         self.approval.approval_provider = provider.clone();
+        // 原地替换 PermissionService 的 handler，不重建整个服务——
+        // 避免丢失 mode/bypass_disabled/classifier/audit_sink 等配置。
+        #[cfg(feature = "human-loop")]
+        if let Some(ref service) = self.approval.permission_service {
+            service.replace_provider(provider.clone());
+        }
+        if self.tools.tool_manager.get_tool("human_in_loop").is_some() {
+            self.tools
+                .tool_manager
+                .register(Box::new(HumanInLoop::new(provider)));
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    /// Replace the HumanLoopProvider transport without clearing session approvals.
+    ///
+    /// Desktop GUI installs a run-scoped provider for each message so approval
+    /// responses can be routed back to the right window/conversation. That
+    /// transport swap should not invalidate "approve for this session".
+    pub fn set_human_loop_provider_preserving_approvals(
+        &mut self,
+        provider: Arc<dyn HumanLoopProvider>,
+    ) {
+        self.approval.approval_provider = provider.clone();
+        if let Some(ref service) = self.approval.permission_service {
+            service.replace_provider_preserving_cache(provider.clone());
+        }
         if self.tools.tool_manager.get_tool("human_in_loop").is_some() {
             self.tools
                 .tool_manager
@@ -1606,7 +1638,7 @@ impl ReactAgent {
 
     /// Set the permission mode at runtime.
     ///
-    /// Accepted values: "default", "plan", "auto-edit", "full-auto", "auto", "dontask".
+    /// Accepted values: "default", "plan", "auto-edit", "full-auto", "auto", "strict".
     /// When "plan" is set, write operations are rejected (equivalent to plan_mode).
     /// Also propagates to `PermissionService` if wired (sync, non-blocking).
     pub fn set_permission_mode(&mut self, mode: &str) {
@@ -1623,7 +1655,9 @@ impl ReactAgent {
                 "plan" => PermissionMode::Plan,
                 "auto-edit" | "accept-edits" => PermissionMode::AcceptEdits,
                 "auto" => PermissionMode::Auto,
-                "dontask" | "dont-ask" => PermissionMode::DontAsk,
+                "strict" | "strict-confirm" | "strict-confirmation" => {
+                    PermissionMode::StrictConfirm
+                }
                 _ => PermissionMode::Default,
             };
             // Security: make bypass mode loud. BypassPermissions auto-allows every
@@ -1636,6 +1670,9 @@ impl ReactAgent {
                 );
             }
             service.set_mode_sync(pm);
+            // F2 修复：切换权限模式时清除审批缓存。旧模式下的审批决策
+            //（如 Default 模式批准的 shell）不应延续到新模式（如 Plan）。
+            service.clear_cache();
         }
     }
 

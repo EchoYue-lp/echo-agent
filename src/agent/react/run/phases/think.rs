@@ -90,6 +90,7 @@ pub(crate) async fn run_think(
             &mut content_buffer,
             &mut tool_call_map,
             &mut in_reasoning,
+            false,
         ) {
             yield_event_or!(tx, event, ThinkOutcome::Abandoned);
         }
@@ -134,6 +135,31 @@ pub(crate) async fn run_think(
             },
             ThinkOutcome::Abandoned
         );
+    }
+
+    if !content_buffer.is_empty() {
+        if !tool_call_map.is_empty() {
+            yield_event_or!(tx, AgentEvent::ThinkStart, ThinkOutcome::Abandoned);
+            yield_event_or!(
+                tx,
+                AgentEvent::Token(content_buffer.clone()),
+                ThinkOutcome::Abandoned
+            );
+            yield_event_or!(
+                tx,
+                AgentEvent::ThinkEnd {
+                    prompt_tokens: pt,
+                    completion_tokens: ct,
+                },
+                ThinkOutcome::Abandoned
+            );
+        } else {
+            yield_event_or!(
+                tx,
+                AgentEvent::Token(content_buffer.clone()),
+                ThinkOutcome::Abandoned
+            );
+        }
     }
 
     Ok(ThinkOutcome::Continue(ThinkOutput {
