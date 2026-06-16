@@ -44,6 +44,103 @@ pub mod provider_urls {
 
 // ── 公共类型 ─────────────────────────────────────────────────────────────────
 
+/// Static metadata for a built-in provider.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ProviderMetadata {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base_url: &'static str,
+    pub env_vars: &'static [&'static str],
+    pub default_models: &'static [&'static str],
+    pub requires_api_key: bool,
+}
+
+pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
+    ProviderMetadata {
+        id: "deepseek",
+        name: "DeepSeek",
+        base_url: provider_urls::DEEPSEEK,
+        env_vars: &["DEEPSEEK_API_KEY"],
+        default_models: &["deepseek-v4-flash", "deepseek-v4-pro"],
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "dashscope",
+        name: "通义千问",
+        base_url: provider_urls::DASHSCOPE,
+        env_vars: &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
+        default_models: &["qwen3.7-max", "qwen3.6-plus"],
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "openai",
+        name: "OpenAI",
+        base_url: provider_urls::OPENAI,
+        env_vars: &["OPENAI_API_KEY"],
+        default_models: &["gpt-5.5"],
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "anthropic",
+        name: "Anthropic",
+        base_url: provider_urls::ANTHROPIC,
+        env_vars: &["ANTHROPIC_API_KEY"],
+        default_models: &["claude-opus-4-8", "claude-opus-4-7"],
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "gemini",
+        name: "Gemini",
+        base_url: provider_urls::GEMINI,
+        env_vars: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        default_models: &["gemini-3.5-flash"],
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "moonshot",
+        name: "Moonshot",
+        base_url: provider_urls::MOONSHOT,
+        env_vars: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+        default_models: &["kimi-k2.6"],
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "zhipu",
+        name: "智谱",
+        base_url: provider_urls::ZHIPU,
+        env_vars: &["ZHIPU_API_KEY", "GLM_API_KEY"],
+        default_models: &["glm-5.1"],
+        requires_api_key: true,
+    },
+    ProviderMetadata {
+        id: "ollama",
+        name: "Ollama",
+        base_url: provider_urls::OLLAMA,
+        env_vars: &[],
+        default_models: &["llama3.1", "qwen2.5", "deepseek-r1", "codellama", "mistral"],
+        requires_api_key: false,
+    },
+];
+
+pub fn all_provider_metadata() -> &'static [ProviderMetadata] {
+    BUILTIN_PROVIDER_METADATA
+}
+
+pub fn provider_metadata(provider: &str) -> Option<ProviderMetadata> {
+    let lower = provider.to_lowercase();
+    let canonical = match lower.as_str() {
+        "qwen" | "aliyun" => "dashscope",
+        "kimi" => "moonshot",
+        "glm" => "zhipu",
+        "google" => "gemini",
+        other => other,
+    };
+    BUILTIN_PROVIDER_METADATA
+        .iter()
+        .copied()
+        .find(|metadata| metadata.id == canonical)
+}
+
 /// LLM 供应商类型
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum LlmProvider {
@@ -381,6 +478,8 @@ impl ProviderFactory {
             "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
             "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
             "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
+            "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "azure" | "azure_openai" => &["AZURE_OPENAI_API_KEY"],
             "ollama" => return String::new(),
             _ => return String::new(),
         };
@@ -411,7 +510,7 @@ impl ProviderFactory {
 // ── 内置 Provider 定义 ───────────────────────────────────────────────────────
 
 /// 已知 Provider 的默认 base_url 映射
-fn provider_base_url(provider: &str) -> Option<&'static str> {
+pub fn provider_base_url(provider: &str) -> Option<&'static str> {
     match provider.to_lowercase().as_str() {
         "openai" => Some("https://api.openai.com/v1/chat/completions"),
         "anthropic" => Some("https://api.anthropic.com/v1/messages"),
@@ -1110,7 +1209,7 @@ fn fallback_env_alias(var_name: &str) -> Option<&'static str> {
     }
 }
 
-fn provider_env_var_names(provider: &str) -> &'static [&'static str] {
+pub fn provider_env_var_names(provider: &str) -> &'static [&'static str] {
     match provider.to_lowercase().as_str() {
         "anthropic" => &["ANTHROPIC_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],
@@ -1118,6 +1217,8 @@ fn provider_env_var_names(provider: &str) -> &'static [&'static str] {
         "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
         "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
+        "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "azure" | "azure_openai" => &["AZURE_OPENAI_API_KEY"],
         "ollama" => &[],
         _ => &[],
     }

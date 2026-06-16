@@ -92,7 +92,7 @@ impl AgentSnapshot {
     /// receiver as a `BoxStream`.
     ///
     /// This body is intentionally thin: each block of work lives in
-    /// [`super::phases`]. The single `for iteration in 0..max_iterations` loop
+    /// [`super::phases`]. The single iteration loop
     /// is the project's only ReAct loop — phase functions are called from
     /// here, never from a sibling driver.
     #[allow(clippy::too_many_arguments)]
@@ -123,7 +123,14 @@ impl AgentSnapshot {
         let agent_name = self.config.agent_name.clone();
 
         // ── The single core ReAct loop ───────────────────────────────
-        for iteration in 0..self.config.max_iterations {
+        // max_iterations == 0 means unlimited. Use usize::MAX as a practical
+        // sentinel so the rest of the loop keeps normal for-loop semantics.
+        let max_iterations = if self.config.max_iterations == 0 {
+            usize::MAX
+        } else {
+            self.config.max_iterations
+        };
+        for iteration in 0..max_iterations {
             for cb in self.config.callbacks.iter() {
                 cb.on_iteration(&agent_name, iteration).await;
             }

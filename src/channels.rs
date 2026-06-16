@@ -65,6 +65,7 @@ pub use echo_integration::channels::prelude::*;
 
 use crate::agent::Agent;
 use crate::agent::react::ReactAgent;
+use crate::llm::LlmConfig;
 use crate::prelude::AgentConfig;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -108,6 +109,27 @@ impl AgentChannelHandler {
                 .enable_tool(true)
                 .enable_memory(true),
         )
+    }
+
+    /// Create with standard presets and an explicit LLM runtime config.
+    ///
+    /// Use this when the product layer has already resolved provider
+    /// credentials/endpoints from GUI configuration.
+    pub fn standard_with_llm_config(
+        model: &str,
+        agent_name: &str,
+        system_prompt: &str,
+        llm_config: LlmConfig,
+    ) -> echo_core::error::Result<Self> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model(model)
+            .name(agent_name)
+            .system_prompt(system_prompt)
+            .enable_tools()
+            .enable_memory()
+            .llm_config(llm_config)
+            .build()?;
+        Ok(Self::new(agent))
     }
 }
 

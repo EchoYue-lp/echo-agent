@@ -38,6 +38,7 @@
 use crate::agent::AgentConfig;
 use crate::skills::hooks::HooksDefinition;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 // ── Config structs ────────────────────────────────────────────────────
@@ -49,6 +50,10 @@ use std::path::PathBuf;
 pub struct AppConfig {
     /// Model configuration (name, temperature, max_tokens).
     pub model: ModelConfig,
+    /// Provider-level credentials and endpoint overrides configured from GUI.
+    pub model_providers: BTreeMap<String, ModelProviderConfig>,
+    /// User-configured models shown in GUI model switchers.
+    pub configured_models: Vec<ConfiguredModel>,
     /// Agent behaviour configuration (system prompt, iterations, feature toggles).
     pub agent: AgentYamlConfig,
     /// MCP (Model Context Protocol) configuration.
@@ -171,11 +176,13 @@ impl AppConfig {
 /// Users can specify other providers (openai, anthropic, qwen, etc.) and their models.
 ///
 /// Authentication and base URL can be set via:
-/// - Environment variables: ECHOCOWORK_AUTH_TOKEN, ECHOCOWORK_BASE_URL, ECHOCOWORK_MODEL (highest priority)
-/// - Config file: auth_token and base_url fields
+/// - Config file: auth_token and base_url fields (highest priority)
+/// - Environment variables: ECHOCOWORK_AUTH_TOKEN, ECHOCOWORK_BASE_URL, ECHOCOWORK_MODEL
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// Default configured model id used by GUI/runtime switchers.
+    pub default_model_id: Option<String>,
     /// Model provider (e.g. "deepseek", "openai", "anthropic", "qwen").
     pub provider: String,
     /// Model name (e.g. "deepseek-v4-flash", "gpt-5.5", "claude-3.5-sonnet").
@@ -193,6 +200,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            default_model_id: None,
             provider: "deepseek".to_string(),
             name: "deepseek-v4-flash".to_string(),
             auth_token: None,
@@ -205,21 +213,26 @@ impl Default for ModelConfig {
 
 impl ModelConfig {
     /// Get the effective authentication token.
-    /// Priority: ECHOCOWORK_AUTH_TOKEN env var > config file auth_token field
+    /// Priority: config file auth_token field > ECHOCOWORK_AUTH_TOKEN env var
     pub fn get_auth_token(&self) -> Option<String> {
-        std::env::var("ECHOCOWORK_AUTH_TOKEN")
-            .ok()
+        self.auth_token
+            .clone()
             .filter(|s| !s.is_empty())
-            .or_else(|| self.auth_token.clone())
+            .or_else(|| {
+                std::env::var("ECHOCOWORK_AUTH_TOKEN")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
     }
 
     /// Get the effective base URL.
-    /// Priority: ECHOCOWORK_BASE_URL env var > config file base_url field
+    /// Priority: config file base_url field > ECHOCOWORK_BASE_URL env var
     pub fn get_base_url(&self) -> Option<String> {
-        std::env::var("ECHOCOWORK_BASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| self.base_url.clone())
+        self.base_url.clone().filter(|s| !s.is_empty()).or_else(|| {
+            std::env::var("ECHOCOWORK_BASE_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
     }
 
     /// Get the effective model name.
@@ -232,6 +245,50 @@ impl ModelConfig {
     }
 }
 
+/// Provider-level credentials configured through GUI.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ModelProviderConfig {
+    /// API authentication token for this provider.
+    pub auth_token: Option<String>,
+    /// Base URL override for this provider.
+    pub base_url: Option<String>,
+}
+
+/// A user-configured model entry available in GUI/TUI switchers.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ConfiguredModel {
+    /// Stable model id, unique within the config.
+    pub id: String,
+    /// Human-friendly display name.
+    pub display_name: String,
+    /// Provider id.
+    pub provider: String,
+    /// Provider model name.
+    pub model: String,
+    /// Whether this model should be shown in quick switchers.
+    pub enabled: bool,
+    /// Optional model-specific maximum output tokens.
+    pub max_tokens: Option<u32>,
+    /// Optional model-specific temperature.
+    pub temperature: Option<f32>,
+}
+
+impl Default for ConfiguredModel {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+            provider: String::new(),
+            model: String::new(),
+            enabled: true,
+            max_tokens: None,
+            temperature: None,
+        }
+    }
+}
+
 /// Agent configuration (YAML mapping).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -240,7 +297,7 @@ pub struct AgentYamlConfig {
     pub name: String,
     /// System prompt (shapes agent behaviour and tone).
     pub system_prompt: String,
-    /// Maximum iterations (max reasoning steps per conversation turn).
+    /// Maximum iterations (max reasoning steps per conversation turn). 0 means unlimited.
     pub max_iterations: usize,
     /// Enable tools (when false, agent does text-only conversation).
     pub enable_tools: bool,
@@ -269,8 +326,8 @@ impl Default for AgentYamlConfig {
     fn default() -> Self {
         Self {
             name: "echo-assistant".to_string(),
-            system_prompt: "You are an intelligent assistant that helps users answer questions and complete tasks.".to_string(),
-            max_iterations: 10,
+            system_prompt: "You are Echo Agent, a practical AI collaborator for real software, research, and operations work. Help users clarify goals, inspect the available context, use tools to make progress, verify results, and communicate concise outcomes.".to_string(),
+            max_iterations: 0,
             enable_tools: true,
             enable_memory: true,
             enable_human_in_loop: true,
@@ -597,7 +654,7 @@ mod tests {
         assert_eq!(config.model.provider, "deepseek");
         assert_eq!(config.model.name, "deepseek-v4-flash");
         assert_eq!(config.agent.name, "echo-assistant");
-        assert_eq!(config.agent.max_iterations, 10);
+        assert_eq!(config.agent.max_iterations, 0);
         assert!(config.agent.enable_tools);
         assert!(config.agent.enable_memory);
         assert!(config.agent.enable_human_in_loop);
@@ -617,6 +674,24 @@ mod tests {
         assert!(agent_config.is_memory_enabled());
         assert!(agent_config.is_human_in_loop_enabled());
         assert_eq!(agent_config.get_max_iterations(), 10);
+    }
+
+    #[test]
+    fn test_model_config_values_override_echo_cowork_env() {
+        let _token_guard = EnvGuard::set("ECHOCOWORK_AUTH_TOKEN", "env-token");
+        let _base_url_guard = EnvGuard::set("ECHOCOWORK_BASE_URL", "https://env.example/v1");
+
+        let config = ModelConfig {
+            auth_token: Some("config-token".to_string()),
+            base_url: Some("https://config.example/v1".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(config.get_auth_token().as_deref(), Some("config-token"));
+        assert_eq!(
+            config.get_base_url().as_deref(),
+            Some("https://config.example/v1")
+        );
     }
 
     #[test]

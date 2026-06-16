@@ -1582,8 +1582,8 @@ impl ReactAgent {
     /// `/think low` sets a low iteration count for quick responses, while
     /// `/think high` allows more reasoning steps.
     ///
-    /// # Panics
-    /// Panics if `max` is 0 (the loop would never execute).
+    /// Passing 0 means unlimited; the run loop will continue until the task
+    /// completes, is cancelled, or another runtime safety mechanism stops it.
     /// Get a reference to the shared context manager (for stats/display).
     pub fn context(&self) -> &Arc<tokio::sync::Mutex<crate::compression::ContextManager>> {
         &self.memory.context
@@ -1645,7 +1645,7 @@ impl ReactAgent {
     }
 
     pub fn set_max_iterations(&mut self, max: usize) {
-        self.config.max_iterations = max.max(1);
+        self.config.max_iterations = max;
     }
 
     /// Delegate a task to a subagent by name.
