@@ -187,7 +187,9 @@ impl PermissionService {
                 max_denials,
             )),
             classifier: None,
-            request_handler: Arc::new(std::sync::RwLock::new(Arc::new(NullPermissionRequestHandler))),
+            request_handler: Arc::new(std::sync::RwLock::new(Arc::new(
+                NullPermissionRequestHandler,
+            ))),
             protected_paths: ProtectedPathChecker::new(),
             audit_sink: None,
             last_modified_args: RwLock::new(None),
@@ -514,9 +516,11 @@ impl PermissionService {
         }
 
         // 5.5 未配置 handler 时直接返回 RequireApproval（而非静默拒绝）
-        let needs_handler = matches!(config.mode, PermissionMode::Default | PermissionMode::AcceptEdits)
-            || (config.mode == PermissionMode::StrictConfirm
-                && Self::strict_confirmation_required(permissions));
+        let needs_handler = matches!(
+            config.mode,
+            PermissionMode::Default | PermissionMode::AcceptEdits
+        ) || (config.mode == PermissionMode::StrictConfirm
+            && Self::strict_confirmation_required(permissions));
         if needs_handler && !self.has_real_handler() {
             audit_return!(
                 PermissionDecision::RequireApproval,
@@ -1004,8 +1008,8 @@ mod tests {
     #[tokio::test]
     async fn test_strict_confirm_write_uses_handler_and_session_scope() {
         let count = Arc::new(AtomicUsize::new(0));
-        let service = PermissionService::new().with_request_handler(Arc::new(
-            CountingAllowHandler {
+        let service =
+            PermissionService::new().with_request_handler(Arc::new(CountingAllowHandler {
                 count: count.clone(),
                 response: PermissionResponse {
                     decision: PermissionResponseDecision::Allowed,
@@ -1013,8 +1017,7 @@ mod tests {
                     feedback: None,
                     updated_input: None,
                 },
-            },
-        ));
+            }));
         service.set_mode(PermissionMode::StrictConfirm).await;
 
         let decision = service
@@ -1039,8 +1042,8 @@ mod tests {
     #[tokio::test]
     async fn test_provider_transport_swap_preserves_session_approval_cache() {
         let count = Arc::new(AtomicUsize::new(0));
-        let service = PermissionService::new().with_request_handler(Arc::new(
-            CountingAllowHandler {
+        let service =
+            PermissionService::new().with_request_handler(Arc::new(CountingAllowHandler {
                 count: count.clone(),
                 response: PermissionResponse {
                     decision: PermissionResponseDecision::Allowed,
@@ -1048,8 +1051,7 @@ mod tests {
                     feedback: None,
                     updated_input: None,
                 },
-            },
-        ));
+            }));
         service.set_mode(PermissionMode::StrictConfirm).await;
 
         let decision = service

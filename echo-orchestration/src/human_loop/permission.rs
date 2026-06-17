@@ -48,8 +48,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-use echo_core::error::Result;
 use super::policy::ApprovalScope;
+use echo_core::error::Result;
 
 // ── 风险等级 ────────────────────────────────────────────────────────────────────
 
@@ -661,13 +661,11 @@ impl<P: super::HumanLoopProvider + 'static> PermissionRequestHandler
 
         match self.provider.request(req).await? {
             HumanLoopResponse::Approved => Ok(PermissionResponse::allowed()),
-            HumanLoopResponse::ApprovedWithScope { scope } => {
-                Ok(permission_response_with_scope(
-                    &request.tool_name,
-                    &request.tool_input,
-                    scope,
-                ))
-            }
+            HumanLoopResponse::ApprovedWithScope { scope } => Ok(permission_response_with_scope(
+                &request.tool_name,
+                &request.tool_input,
+                scope,
+            )),
             HumanLoopResponse::ModifiedArgs { args, scope } => {
                 // 保留用户修改的参数，传递给调用方
                 let mut response =
