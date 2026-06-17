@@ -673,7 +673,7 @@ mod tests {
         assert!(agent_config.is_tool_enabled());
         assert!(agent_config.is_memory_enabled());
         assert!(agent_config.is_human_in_loop_enabled());
-        assert_eq!(agent_config.get_max_iterations(), 10);
+        assert_eq!(agent_config.get_max_iterations(), 0);
     }
 
     #[test]

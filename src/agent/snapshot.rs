@@ -426,8 +426,8 @@ impl AgentRunSnapshot {
         let conv_id = self.config.conversation_id.as_ref()?;
 
         let node_id = format!("exec-{}", uuid::Uuid::new_v4());
-        let name = if user_input.len() > 100 {
-            format!("{}...", &user_input[..100])
+        let name = if user_input.chars().count() > 100 {
+            format!("{}...", user_input.chars().take(100).collect::<String>())
         } else {
             user_input.to_string()
         };
