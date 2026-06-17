@@ -18,3 +18,6 @@ echo-macros/target/
 echo-integration/target/
 echo-tools/target/
 */Cargo.lock
+
+# Worktree directories
+.worktrees/

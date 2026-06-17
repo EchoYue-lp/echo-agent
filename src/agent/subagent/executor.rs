@@ -578,21 +578,37 @@ impl SubagentExecutor {
 
             let agent = agent_arc.as_ref();
 
+            // Race the (non-cancel-aware) agent.execute against BOTH the
+            // caller's cancel token and the timeout. Previously only the
+            // timeout was honored and cancel was checked once before entry —
+            // so a long-running fork kept going after the parent cancelled.
+            // tokio::select! drops the losing branches' futures, winding down
+            // the worker as far as the executor cooperatively allows.
+            let exec_fut = agent.execute(&enhanced_task);
             let result = if timeout_secs > 0 {
-                match tokio::time::timeout(
-                    Duration::from_secs(timeout_secs),
-                    agent.execute(&enhanced_task),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(_) => Err(ReactError::Other(format!(
-                        "Fork subagent '{}' timed out after {}s",
-                        agent_name, timeout_secs
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(ReactError::Other(format!(
+                        "Fork subagent '{}' cancelled", agent_name
                     ))),
+                    r = tokio::time::timeout(Duration::from_secs(timeout_secs), exec_fut) => {
+                        match r {
+                            Ok(r) => r,
+                            Err(_) => Err(ReactError::Other(format!(
+                                "Fork subagent '{}' timed out after {}s",
+                                agent_name, timeout_secs
+                            ))),
+                        }
+                    }
                 }
             } else {
-                agent.execute(&enhanced_task).await
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(ReactError::Other(format!(
+                        "Fork subagent '{}' cancelled", agent_name
+                    ))),
+                    r = exec_fut => r,
+                }
             };
 
             result.map(|output| SubagentResult {

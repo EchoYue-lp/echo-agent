@@ -1765,6 +1765,58 @@ impl ReactAgent {
         Ok(result.output)
     }
 
+    /// Delegate a task to a specific subagent by name, with caller-supplied
+    /// cancellation.
+    ///
+    /// This is the cancel-aware counterpart of
+    /// [`delegate_to_agent`](Self::delegate_to_agent). It exists so that
+    /// product-layer runtimes (e.g. a TaskRuntime DAG executor) can fan out
+    /// work to the registered subagents AND propagate parent-run cancellation
+    /// into each worker — the plain `delegate_to_agent` hard-codes a fresh,
+    /// never-cancelled token, which makes parent→child cancellation
+    /// impossible and is unsuitable for parallel DAG dispatch.
+    ///
+    /// The caller typically passes a *child* of the parent run's token
+    /// (`parent_cancel.child_token()`); cancelling the parent then cancels
+    /// every worker dispatched via this method.
+    ///
+    /// Returns the worker's output string, or an error if the target agent
+    /// is not registered.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_to_agent_with_cancel(
+        &self,
+        target: &str,
+        task: &str,
+        cancel: CancellationToken,
+    ) -> Result<String> {
+        use crate::agent::subagent::executor::DispatchRequest;
+        use crate::agent::subagent::types::ExecutionMode;
+
+        // Verify the target agent exists in the registry
+        let agents = self.tools.subagent_registry.list_available().await;
+        if !agents.iter().any(|d| d.name == target) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Subagent '{}' not found. Available agents: {:?}",
+                target,
+                agents.iter().map(|d| &d.name).collect::<Vec<_>>()
+            )));
+        }
+
+        let mode = ExecutionMode::Fork;
+        let req = DispatchRequest {
+            agent_name: target.to_string(),
+            task: task.to_string(),
+            mode_override: Some(mode.clone()),
+            cancel,
+            parent_agent: self.config.agent_name.clone(),
+            parent_context: self.build_parent_context(&mode).await,
+            delegate_depth: 0,
+        };
+
+        let result = self.tools.subagent_executor.dispatch(req).await?;
+        Ok(result.output)
+    }
+
     /// Build parent context for subagent dispatch based on execution mode.
     ///
     /// Shared by `delegate_task()`, `delegate_to_agent()`, and conceptually

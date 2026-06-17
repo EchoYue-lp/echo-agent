@@ -197,6 +197,12 @@ pub mod prelude {
         Embedder, EmbeddingStore, FileStore, HttpEmbedder, InMemoryStore, SnapshotManager,
         SnapshotPolicy, StateSnapshot, Store, StoreItem,
     };
+    // Typed-memory metadata types. These live in echo_core::memory but are
+    // re-exported here so downstream products (e.g. echo-agent-app-core's
+    // TaskRuntime memory bridge) can reach them through the echo_agent facade
+    // without depending on echo_core directly — keeping the facade as the
+    // single integration surface.
+    pub use echo_core::memory::{MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType};
 
     // Skills
     pub use crate::skills::{
