@@ -332,6 +332,13 @@ impl ReactAgent {
         self.config.max_tokens = max_tokens;
     }
 
+    /// Set the token limit (context window budget) at runtime.
+    /// When set to a finite value, this enables token budget tracking and
+    /// may trigger compression. Set to `usize::MAX` to disable.
+    pub fn set_token_limit(&mut self, token_limit: usize) {
+        self.config.token_limit = token_limit;
+    }
+
     /// Add Agent callback
     ///
     /// # Parameters

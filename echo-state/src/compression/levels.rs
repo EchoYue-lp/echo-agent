@@ -87,7 +87,7 @@ impl Default for AdaptiveCompressionConfig {
 
 /// Auto-tune compression thresholds based on the model's context window size.
 ///
-/// Thresholds are set as percentages of `max_context_tokens`:
+/// Thresholds are set as percentages of the context window:
 /// - L1 (Snip): 60%
 /// - L2 (Micro): 75%
 /// - L3 (Collapse): 85%
@@ -104,8 +104,8 @@ impl Default for AdaptiveCompressionConfig {
 /// tune_for_model(&mut config, 200_000); // Claude's context window
 /// // Now L1=120K, L2=150K, L3=170K, L4=180K
 /// ```
-pub fn tune_for_model(config: &mut AdaptiveCompressionConfig, max_context_tokens: usize) {
-    let w = max_context_tokens;
+pub fn tune_for_model(config: &mut AdaptiveCompressionConfig, context_window: usize) {
+    let w = context_window;
     config.l1_snip_threshold_tokens = w * 60 / 100;
     config.l2_micro_threshold_tokens = w * 75 / 100;
     config.l3_collapse_threshold_tokens = w * 85 / 100;

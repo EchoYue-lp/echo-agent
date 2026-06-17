@@ -56,10 +56,6 @@ pub struct ProviderCapabilities {
     /// Ollama and local models typically do not.
     pub supports_parallel_tool_calls: bool,
 
-    /// Known maximum context window in tokens for this provider's default model.
-    /// `None` means unknown.
-    pub max_context_tokens: Option<u32>,
-
     /// Tokenizer name or identifier for accurate token counting (e.g.
     /// `"cl100k_base"` for GPT-4, `"o200k_base"` for GPT-4o).
     /// `None` means the tokenizer is unknown; callers should fall back to
@@ -82,7 +78,6 @@ impl ProviderCapabilities {
             structured_output: true,
             requires_version_header: false,
             supports_parallel_tool_calls: true,
-            max_context_tokens: None, // varies by model; see ModelProfile
             tokenizer_name: None,
         }
     }
@@ -100,7 +95,6 @@ impl ProviderCapabilities {
             structured_output: false, // no JSON mode in Messages API
             requires_version_header: true,
             supports_parallel_tool_calls: true,
-            max_context_tokens: Some(200_000), // Claude 3.x+
             tokenizer_name: Some("claude"),
         }
     }
@@ -118,7 +112,6 @@ impl ProviderCapabilities {
             structured_output: false,
             requires_version_header: false,
             supports_parallel_tool_calls: false,
-            max_context_tokens: None, // varies by model
             tokenizer_name: None,
         }
     }
@@ -167,11 +160,39 @@ pub struct ModelProfile {
     /// capabilities; may be overridden for specific models).
     pub supports_parallel_tool_calls: bool,
 
-    /// Known maximum context window in tokens (None if unknown).
-    pub max_context_tokens: Option<u32>,
-
     /// Tokenizer name for accurate token counting (None if unknown).
     pub tokenizer_name: Option<&'static str>,
+}
+
+/// 根据厂商和模型名称推断上下文窗口大小。
+/// 未匹配到已知模式时返回 None。
+pub fn infer_context_window(_provider: &str, model_name: &str) -> Option<u32> {
+    let lower = model_name.to_ascii_lowercase();
+    if lower.contains("qwen3-235b") {
+        Some(131_072)
+    } else if lower.starts_with("gpt-5.5") || lower.starts_with("gpt-4.5") {
+        Some(128_000)
+    } else if lower.starts_with("gpt-4o") || lower.contains("gpt-4o") {
+        // GPT-4o / GPT-4o-mini: 128K context
+        Some(128_000)
+    } else if lower.starts_with("gpt-4-turbo") || lower.contains("gpt-4-turbo") {
+        Some(128_000)
+    } else if lower.starts_with("gpt-4") {
+        // Original GPT-4 (non-turbo, non-o): 8K context
+        Some(8_192)
+    } else if lower.starts_with("claude-3-opus") {
+        Some(200_000)
+    } else if lower.starts_with("claude-3.5") || lower.starts_with("claude-4") {
+        Some(200_000)
+    } else if lower.starts_with("claude-") {
+        Some(200_000)
+    } else if lower.starts_with("deepseek-") {
+        Some(128_000)
+    } else if lower.starts_with("qwen-") {
+        Some(131_072)
+    } else {
+        None
+    }
 }
 
 impl ModelProfile {
@@ -193,27 +214,6 @@ impl ModelProfile {
         let supports_images = capabilities.image_input
             && !lower.starts_with("gpt-5.5") // o1 doesn't support images
             && !lower.starts_with("o3"); // o3-mini doesn't support images
-
-        // Known max context window (tokens)
-        let max_context_tokens = if lower.contains("qwen3-235b") {
-            Some(131_072)
-        } else if lower.starts_with("gpt-5.5") || lower.starts_with("gpt-4.5") {
-            Some(128_000)
-        } else if lower.starts_with("gpt-4") && !lower.starts_with("gpt-5.5") {
-            Some(8_192)
-        } else if lower.starts_with("claude-3-opus") {
-            Some(200_000)
-        } else if lower.starts_with("claude-3.5") || lower.starts_with("claude-4") {
-            Some(200_000)
-        } else if lower.starts_with("claude-") {
-            Some(200_000)
-        } else if lower.starts_with("deepseek-") {
-            Some(128_000)
-        } else if lower.starts_with("qwen-") {
-            Some(131_072)
-        } else {
-            capabilities.max_context_tokens
-        };
 
         // Known max output tokens
         let max_output_tokens = if lower.contains("qwen3-235b") {
@@ -245,7 +245,6 @@ impl ModelProfile {
             max_output_tokens,
             supports_streaming: true, // All supported providers stream
             supports_parallel_tool_calls: capabilities.supports_parallel_tool_calls,
-            max_context_tokens,
             tokenizer_name,
         }
     }

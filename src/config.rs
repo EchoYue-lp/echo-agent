@@ -37,6 +37,8 @@
 
 use crate::agent::AgentConfig;
 use crate::skills::hooks::HooksDefinition;
+use echo_core::budget::TokenBudgetConfig;
+use echo_core::llm::capabilities::infer_context_window;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -72,17 +74,47 @@ pub struct AppConfig {
     pub tui: TuiConfig,
 }
 
+/// 解析最终的上下文窗口值。
+/// 优先级：用户显式设置 > 名称模式推断 > 默认 128K
+fn resolve_context_window(explicit: Option<u32>, provider: &str, model_name: &str) -> usize {
+    explicit
+        .or_else(|| infer_context_window(provider, model_name))
+        .unwrap_or(128_000)
+        .clamp(1, 10_000_000) as usize
+}
+
 impl AppConfig {
     /// Convert to the library's `AgentConfig` (builder style).
     ///
     /// Note: compressor is NOT set here because `set_compressor` is async.
     /// Callers should use `apply_compressor` after constructing the agent.
     pub fn to_agent_config(&self) -> AgentConfig {
+        let context_window = resolve_context_window(
+            self.model.context_window,
+            &self.model.provider,
+            &self.model.name,
+        );
+        // 三态语义：显式 token_limit > 0 时用 token_limit；
+        // 否则若用户显式设了 context_window，用它做 token_limit；
+        // 两者都没配时保持 usize::MAX（旧行为：不启用压缩/budget）。
         let token_limit = if self.agent.token_limit > 0 {
             self.agent.token_limit
+        } else if self.model.context_window.is_some() {
+            context_window
         } else {
             usize::MAX
         };
+        // TokenBudget 只在显式配置了 context_window 时设置 total_window，
+        // 否则保持 Default（None → 走自动检测），避免强制启用 budget。
+        let token_budget_config = if self.model.context_window.is_some() || self.agent.token_limit > 0 {
+            TokenBudgetConfig {
+                total_window: Some(context_window),
+                ..Default::default()
+            }
+        } else {
+            TokenBudgetConfig::default()
+        };
+
         AgentConfig::standard(
             &self.model.name,
             &self.agent.name,
@@ -96,6 +128,7 @@ impl AppConfig {
         .temperature(self.model.temperature)
         .max_tokens(self.model.max_tokens)
         .token_limit(token_limit)
+        .token_budget(token_budget_config)
         .tool_execution(crate::tools::ToolExecutionConfig {
             timeout_ms: self.agent.tool_timeout_ms,
             ..Default::default()
@@ -113,27 +146,21 @@ impl AppConfig {
     /// `SummaryCompressor` / `HybridCompressor` with an `LlmClient` and call
     /// `agent.set_compressor()` directly.
     pub async fn apply_compressor(&self, agent: &crate::agent::ReactAgent) {
-        if self.agent.token_limit == 0 {
+        // 使用与 to_agent_config 相同的三态逻辑判定是否启用压缩：
+        // 显式 token_limit > 0 或显式 context_window → 启用；否则不启用。
+        let context_window = resolve_context_window(
+            self.model.context_window,
+            &self.model.provider,
+            &self.model.name,
+        );
+        let should_compress = self.agent.token_limit > 0 || self.model.context_window.is_some();
+        if !should_compress {
             return;
         }
         use crate::compression::compressor::SlidingWindowCompressor;
         let window = self.agent.compress_window.max(2);
         match self.agent.compress_strategy.as_str() {
             "sliding" | "" => {
-                // Warn if token_limit exceeds model context window
-                if let Some(llm) = agent.llm_client() {
-                    let caps = llm.capabilities();
-                    if let Some(max_ctx) = caps.max_context_tokens
-                        && self.agent.token_limit as u32 > max_ctx
-                    {
-                        tracing::warn!(
-                            token_limit = self.agent.token_limit,
-                            max_context = max_ctx,
-                            "token_limit exceeds model context window; compression may never trigger. \
-                                 Consider setting token_limit <= max_context_tokens."
-                        );
-                    }
-                }
                 agent
                     .set_compressor(SlidingWindowCompressor::new(window))
                     .await;
@@ -143,16 +170,14 @@ impl AppConfig {
                     AdaptiveCompressionConfig, AdaptiveCompressor, tune_for_model,
                 };
                 let mut config = AdaptiveCompressionConfig::default();
-                // Auto-tune thresholds from model profile if available
-                if let Some(llm) = agent.llm_client() {
-                    let caps = llm.capabilities();
-                    if let Some(max_ctx) = caps.max_context_tokens {
-                        tune_for_model(&mut config, max_ctx as usize);
-                        tracing::info!(
-                            max_context = max_ctx,
-                            "Tuned adaptive compression for model"
-                        );
-                    }
+                // Auto-tune thresholds from the resolved context_window (not
+                // the raw YAML token_limit which may be 0/unset).
+                if context_window < usize::MAX {
+                    tune_for_model(&mut config, context_window);
+                    tracing::info!(
+                        context_window = context_window,
+                        "Tuned adaptive compression from context window"
+                    );
                 }
                 agent.set_compressor(AdaptiveCompressor::new(config)).await;
             }
@@ -195,6 +220,9 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     /// Temperature parameter (0.0–2.0, None means use model default).
     pub temperature: Option<f32>,
+    /// Optional model context window size in tokens.
+    /// When None, falls back to name-based inference.
+    pub context_window: Option<u32>,
 }
 
 impl Default for ModelConfig {
@@ -207,6 +235,7 @@ impl Default for ModelConfig {
             base_url: None,
             max_tokens: None,
             temperature: None,
+            context_window: None,
         }
     }
 }
@@ -273,6 +302,11 @@ pub struct ConfiguredModel {
     pub max_tokens: Option<u32>,
     /// Optional model-specific temperature.
     pub temperature: Option<f32>,
+    /// Optional model context window size in tokens.
+    /// When set, overrides the auto-detected value for compression threshold,
+    /// TokenBudget allocation, and adaptive compression tuning.
+    /// When None, falls back to name-based inference.
+    pub context_window: Option<u32>,
 }
 
 impl Default for ConfiguredModel {
@@ -285,6 +319,7 @@ impl Default for ConfiguredModel {
             enabled: true,
             max_tokens: None,
             temperature: None,
+            context_window: None,
         }
     }
 }
