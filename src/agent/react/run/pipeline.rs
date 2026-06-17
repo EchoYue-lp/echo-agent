@@ -399,10 +399,19 @@ impl PipelineStage for ExecuteStage {
 
         // Execute tool; on infrastructure error, convert to ToolResult{success:false}
         // so downstream stages (trace, post-hook, callback) still execute.
+        //
+        // Build a per-agent ToolContext from the snapshot's RuntimeConfig so
+        // the (shared, stateless) ToolManager receives the correct working_dir
+        // for THIS agent/session — avoiding cross-session cwd contamination.
+        let tool_ctx = echo_core::tools::ToolContext {
+            working_dir: snapshot.config.working_dir.clone(),
+            conversation_id: snapshot.config.conversation_id.clone(),
+            run_id: snapshot.current_run_id.clone(),
+        };
         let result = match snapshot
             .tools
             .tool_manager
-            .execute_tool(&ctx.tool_name, ctx.params.clone())
+            .execute_tool_with_context(&ctx.tool_name, ctx.params.clone(), &tool_ctx)
             .await
         {
             Ok(r) => r,

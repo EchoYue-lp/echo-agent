@@ -458,7 +458,43 @@ pub trait Tool: Send + Sync {
     /// JSON Schema describing accepted parameters.
     fn parameters(&self) -> serde_json::Value;
     /// Execute the tool with untyped JSON parameters.
-    fn execute<'a>(&'a self, parameters: ToolParameters) -> BoxFuture<'a, Result<ToolResult>>;
+    ///
+    /// **Default implementation** delegates to [`Self::execute_with_context`]
+    /// with an empty [`ToolContext`] — so tools that override
+    /// `execute_with_context` need NOT also implement `execute`. Legacy tools
+    /// that only implement `execute` keep working because the default
+    /// `execute_with_context` delegates back to `execute` (no infinite
+    /// recursion: a concrete `impl Tool` must override at least one of the two).
+    fn execute<'a>(&'a self, parameters: ToolParameters) -> BoxFuture<'a, Result<ToolResult>> {
+        // Cannot delegate to execute_with_context directly because its ctx
+        // borrow is tied to 'a (self's lifetime) and a default() temporary
+        // would not live that long. Inline a default ctx owned by the future.
+        Box::pin(async move {
+            let ctx = ToolContext::default();
+            self.execute_with_context(parameters, &ctx).await
+        })
+    }
+
+    /// Execute the tool with a runtime [`ToolContext`].
+    ///
+    /// **Default implementation** ignores `ctx` and delegates to
+    /// [`Self::execute`] — therefore existing `impl Tool` blocks need no
+    /// changes to keep working. Tools that care about `working_dir`
+    /// (ShellTool, file tools, git, worktree_tool) override this method to
+    /// honor `ctx.working_dir` / `ctx.resolve_path` when building
+    /// `SandboxCommand`s or resolving file paths.
+    ///
+    /// The framework's [`ToolManager::execute_tool_with_context`] always
+    /// routes through this method, so a per-agent `working_dir` is naturally
+    /// delivered to tools without the (shared, stateless) ToolManager holding
+    /// any session state — avoiding cross-session cwd contamination.
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        _ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        self.execute(parameters)
+    }
 
     /// Stream tool execution, producing incremental [`ToolStreamEvent`]s.
     ///
@@ -517,5 +553,127 @@ pub trait Tool: Send + Sync {
             ToolRiskLevel::Standard => "Standard: limited side effects",
             ToolRiskLevel::Dangerous => "Dangerous: irreversible side effects",
         }
+    }
+}
+
+/// 运行时上下文，工具执行时由 ExecuteStage 注入。
+///
+/// 所有字段均为 `Option`，`None` = 回退默认行为（向后兼容老工具）。
+/// 工具 override `Tool::execute_with_context` 时可读取这些字段。
+#[derive(Debug, Clone, Default)]
+pub struct ToolContext {
+    /// 会话绑定的默认工作目录（通常是 worktree 路径）。
+    /// None = 回退进程 `current_dir`。
+    pub working_dir: Option<std::path::PathBuf>,
+    /// 会话标识（透传给 trace/audit）。
+    pub conversation_id: Option<String>,
+    /// 当前 run 标识（透传给 trace/audit）。
+    pub run_id: Option<String>,
+}
+
+impl ToolContext {
+    /// 解析路径：有绑定且为相对路径则 join；绝对路径或无绑定则原样返回。
+    pub fn resolve_path<'a>(&self, path: &'a std::path::Path) -> std::borrow::Cow<'a, std::path::Path> {
+        match &self.working_dir {
+            Some(base) if !path.is_absolute() => std::borrow::Cow::Owned(base.join(path)),
+            _ => std::borrow::Cow::Borrowed(path),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tool_context_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_default_is_all_none() {
+        let ctx = ToolContext::default();
+        assert!(ctx.working_dir.is_none());
+        assert!(ctx.conversation_id.is_none());
+        assert!(ctx.run_id.is_none());
+    }
+
+    #[test]
+    fn test_new_sets_fields() {
+        let ctx = ToolContext {
+            working_dir: Some(PathBuf::from("/tmp/wt")),
+            conversation_id: Some("conv-1".into()),
+            run_id: Some("run-1".into()),
+        };
+        assert_eq!(ctx.working_dir.as_deref(), Some(std::path::Path::new("/tmp/wt")));
+        assert_eq!(ctx.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(ctx.run_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn test_resolve_path_relative_joins() {
+        let ctx = ToolContext { working_dir: Some(PathBuf::from("/repo/wt")), ..Default::default() };
+        let resolved = ctx.resolve_path(std::path::Path::new("src/main.rs"));
+        assert_eq!(resolved.as_ref(), std::path::Path::new("/repo/wt/src/main.rs"));
+    }
+
+    #[test]
+    fn test_resolve_path_absolute_not_joined() {
+        let ctx = ToolContext { working_dir: Some(PathBuf::from("/repo/wt")), ..Default::default() };
+        let resolved = ctx.resolve_path(std::path::Path::new("/etc/hosts"));
+        assert_eq!(resolved.as_ref(), std::path::Path::new("/etc/hosts"));
+    }
+
+    #[test]
+    fn test_resolve_path_no_working_dir_passthrough() {
+        let ctx = ToolContext::default();
+        let resolved = ctx.resolve_path(std::path::Path::new("a/b"));
+        assert_eq!(resolved.as_ref(), std::path::Path::new("a/b"));
+    }
+}
+
+#[cfg(test)]
+mod execute_with_context_tests {
+    use super::*;
+
+    /// A "legacy-style" tool that only implements `execute`. Verifies the
+    /// trait's default `execute_with_context` delegates to `execute`
+    /// regardless of the supplied context.
+    struct LegacyTool;
+
+    impl Tool for LegacyTool {
+        fn name(&self) -> &str {
+            "legacy"
+        }
+        fn description(&self) -> &str {
+            "old-style tool, no context awareness"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute<'a>(
+            &'a self,
+            params: ToolParameters,
+        ) -> BoxFuture<'a, Result<ToolResult>> {
+            Box::pin(async move {
+                let msg = format!(
+                    "echo: {}",
+                    params.get("x").and_then(|v| v.as_str()).unwrap_or("")
+                );
+                Ok(ToolResult::success(msg))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_delegates_to_execute_ignoring_ctx() {
+        let tool = LegacyTool;
+        // A non-default ctx that the default impl must ignore.
+        let ctx = ToolContext {
+            working_dir: Some(std::path::PathBuf::from("/wt")),
+            conversation_id: Some("c".into()),
+            run_id: Some("r".into()),
+        };
+        let mut params = ToolParameters::new();
+        params.insert("x".into(), serde_json::json!("hello"));
+        let result = tool.execute_with_context(params, &ctx).await.unwrap();
+        assert!(result.success, "expected success");
+        assert_eq!(result.output, "echo: hello");
     }
 }

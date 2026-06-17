@@ -58,17 +58,18 @@ impl Tool for CreateFileTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
-            let path = resolve_path("create_file", path_str, &self.base_dir)?;
+            let path = resolve_path("create_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -154,17 +155,18 @@ impl Tool for DeleteFileTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
-            let path = resolve_path("delete_file", path_str, &self.base_dir)?;
+            let path = resolve_path("delete_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -285,10 +287,11 @@ impl Tool for ReadFileTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             // Support both 'path' and 'file_path' parameters
             let path_str = parameters
@@ -312,7 +315,7 @@ impl Tool for ReadFileTool {
 
             let _encoding = parameters.get("encoding").and_then(|v| v.as_str());
 
-            let path = resolve_path("read_file", path_str, &self.base_dir)?;
+            let path = resolve_path("read_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -441,10 +444,11 @@ impl Tool for WriteFileTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             let path_str = parameters
                 .get("path")
@@ -456,7 +460,7 @@ impl Tool for WriteFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
 
-            let path = resolve_path("write_file", path_str, &self.base_dir)?;
+            let path = resolve_path("write_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             // Auto-create parent directory
             if let Some(parent) = path.parent() {
@@ -557,10 +561,11 @@ impl Tool for AppendFileTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             use tokio::io::AsyncWriteExt;
 
@@ -574,7 +579,7 @@ impl Tool for AppendFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
 
-            let path = resolve_path("append_file", path_str, &self.base_dir)?;
+            let path = resolve_path("append_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -670,10 +675,11 @@ impl Tool for UpdateFileTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             let path_str = parameters
                 .get("path")
@@ -689,7 +695,7 @@ impl Tool for UpdateFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("new_content".to_string()))?;
 
-            let path = resolve_path("update_file", path_str, &self.base_dir)?;
+            let path = resolve_path("update_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -782,10 +788,11 @@ impl Tool for MoveFileTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             let old_path_str = parameters
                 .get("old_path")
@@ -797,8 +804,8 @@ impl Tool for MoveFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("new_path".to_string()))?;
 
-            let old_path = resolve_path("move_file", old_path_str, &self.base_dir)?;
-            let new_path = resolve_path("move_file", new_path_str, &self.base_dir)?;
+            let old_path = resolve_path("move_file", old_path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let new_path = resolve_path("move_file", new_path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !old_path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -902,17 +909,18 @@ impl Tool for ListDirTool {
         })
     }
 
-    fn execute(
-        &self,
+    fn execute_with_context<'a>(
+        &'a self,
         parameters: ToolParameters,
-    ) -> BoxFuture<'_, echo_core::error::Result<ToolResult>> {
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
         Box::pin(async move {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
 
-            let path = resolve_path("list_dir", path_str, &self.base_dir)?;
+            let path = resolve_path("list_dir", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -989,5 +997,80 @@ impl Tool for ListDirTool {
 
             Ok(ToolResult::success(output))
         })
+    }
+}
+
+#[cfg(test)]
+mod worktree_cwd_tests {
+    use super::*;
+    use echo_core::tools::ToolContext;
+
+    /// Unique temp dir without the `tempfile` dev-dependency.
+    fn unique_dir(prefix: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_create_file_lands_in_context_working_dir() {
+        // Regression for worktree cwd: a relative `path` must resolve under
+        // ctx.working_dir, not the process cwd.
+        let wt = unique_dir("echo-files-wt");
+        let tool = CreateFileTool::new();
+        let ctx = ToolContext {
+            working_dir: Some(wt.clone()),
+            ..Default::default()
+        };
+
+        let mut params = ToolParameters::new();
+        params.insert("path".into(), serde_json::json!("sub/hello.txt"));
+
+        let result = tool.execute_with_context(params, &ctx).await.unwrap();
+        assert!(result.success, "create_file should succeed: {:?}", result);
+
+        let written = wt.join("sub").join("hello.txt");
+        assert!(
+            written.exists(),
+            "file should exist at {:?}, working_dir was {:?}",
+            written,
+            wt
+        );
+        // CreateFileTool creates an empty file; content is verified to be empty.
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), "");
+
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_uses_context_working_dir() {
+        // Pre-create a marker file in the worktree dir, then list_dir with "."
+        // and ctx.working_dir set — the listing must include the marker.
+        let wt = unique_dir("echo-files-list");
+        std::fs::write(wt.join("marker.txt"), "m").unwrap();
+
+        let tool = ListDirTool::new();
+        let ctx = ToolContext {
+            working_dir: Some(wt.clone()),
+            ..Default::default()
+        };
+
+        let mut params = ToolParameters::new();
+        params.insert("path".into(), serde_json::json!("."));
+
+        let result = tool.execute_with_context(params, &ctx).await.unwrap();
+        assert!(result.success, "list_dir should succeed: {:?}", result);
+        assert!(
+            result.output.contains("marker.txt"),
+            "list_dir output should include marker.txt: {}",
+            result.output
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
     }
 }

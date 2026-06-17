@@ -35,7 +35,11 @@ impl Tool for EnterWorktreeTool {
     fn description(&self) -> &str {
         "Create a new git worktree for isolated parallel work. \
          Use this when a sub-agent needs to work on a separate branch \
-         without conflicting with other agents or the main working tree."
+         without conflicting with other agents or the main working tree. \
+         NOTE: this only creates the worktree on disk — it does NOT switch the \
+         agent's runtime working directory. To run subsequent tools inside the \
+         new worktree, the host must bind it as the session working_dir \
+         (e.g. via the /worktree command), not via this tool."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {

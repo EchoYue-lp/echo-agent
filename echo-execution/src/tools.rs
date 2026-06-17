@@ -15,8 +15,8 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 pub use echo_core::tools::{
-    Tool, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult, ToolRiskLevel,
-    ToolStreamEvent,
+    Tool, ToolContext, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult,
+    ToolRiskLevel, ToolStreamEvent,
 };
 
 impl ToolRegistrar for ToolManager {
@@ -158,11 +158,40 @@ impl ToolManager {
 
     /// 执行工具
     ///
-    /// 支持并发控制、超时和重试。
+    /// 支持并发控制、超时和重试。等价于以空 [`ToolContext`] 调用
+    /// [`Self::execute_tool_with_context`]（向后兼容）。
     pub async fn execute_tool(
         &self,
         tool_name: &str,
         parameters: ToolParameters,
+    ) -> Result<ToolResult> {
+        self.execute_tool_inner(tool_name, parameters, &ToolContext::default())
+            .await
+    }
+
+    /// 带运行时上下文执行工具。
+    ///
+    /// [`ToolManager`] 本身不持有任何 `ToolContext` 状态 —— `ctx` 由调用方
+    /// （ExecuteStage）每次传入，从 per-agent 的 config 构造。这保证了
+    /// 跨会话共享同一个 `ToolManager`（如 AgentPool 的 pooled agent）也
+    /// 不会串会话：每个 agent 的 `working_dir` 只跟随它自己的 ctx。
+    pub async fn execute_tool_with_context(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult> {
+        self.execute_tool_inner(tool_name, parameters, ctx).await
+    }
+
+    /// Shared body of [`Self::execute_tool`] / [`Self::execute_tool_with_context`]:
+    /// 并发控制、超时、重试、结果缓存，最终通过
+    /// [`Tool::execute_with_context`] 路由到具体工具。
+    async fn execute_tool_inner(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
     ) -> Result<ToolResult> {
         let tool = self
             .get_tool(tool_name)
@@ -228,7 +257,7 @@ impl ToolManager {
             let result = if self.config.timeout_ms > 0 {
                 match tokio::time::timeout(
                     Duration::from_millis(self.config.timeout_ms),
-                    tool.execute(parameters.clone()),
+                    tool.execute_with_context(parameters.clone(), ctx),
                 )
                 .await
                 {
@@ -236,7 +265,7 @@ impl ToolManager {
                     Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
                 }
             } else {
-                tool.execute(parameters.clone()).await
+                tool.execute_with_context(parameters.clone(), ctx).await
             };
 
             match result {
@@ -375,5 +404,144 @@ impl ToolManager {
         }
 
         Err(last_err.unwrap_or_else(|| ToolError::NotFound(tool_name.to_string()).into()))
+    }
+}
+
+#[cfg(test)]
+mod execute_with_context_tests {
+    use super::*;
+    use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    /// Records the `ToolContext` it was called with, so we can verify
+    /// `execute_tool_with_context` actually forwards the caller-supplied ctx.
+    struct CtxCapturingTool {
+        captured: Arc<Mutex<Option<ToolContext>>>,
+    }
+
+    impl Tool for CtxCapturingTool {
+        fn name(&self) -> &str {
+            "capture"
+        }
+        fn description(&self) -> &str {
+            "captures the ctx passed to execute_with_context"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn execute<'a>(
+            &'a self,
+            _p: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            unreachable!("should route through execute_with_context")
+        }
+        fn execute_with_context<'a>(
+            &'a self,
+            _p: ToolParameters,
+            ctx: &'a ToolContext,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            let cap = self.captured.clone();
+            Box::pin(async move {
+                *cap.lock().unwrap() = Some(ctx.clone());
+                Ok(ToolResult::success("ok"))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_with_context_forwards_ctx() {
+        let tm = ToolManager::new();
+        let captured = Arc::new(Mutex::new(None));
+        tm.register(Box::new(CtxCapturingTool { captured: captured.clone() }));
+
+        let ctx = ToolContext {
+            working_dir: Some(PathBuf::from("/wt/x")),
+            conversation_id: Some("c".into()),
+            run_id: Some("r".into()),
+        };
+        tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx)
+            .await
+            .unwrap();
+
+        let got = captured.lock().unwrap().clone().expect("ctx not captured");
+        assert_eq!(got.working_dir.as_deref(), Some(std::path::Path::new("/wt/x")));
+        assert_eq!(got.conversation_id.as_deref(), Some("c"));
+        assert_eq!(got.run_id.as_deref(), Some("r"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_passes_default_ctx() {
+        // The legacy execute_tool must still work: it routes through the same
+        // inner path with a default (all-None) ctx.
+        let tm = ToolManager::new();
+        let captured = Arc::new(Mutex::new(None));
+        tm.register(Box::new(CtxCapturingTool { captured: captured.clone() }));
+
+        tm.execute_tool("capture", ToolParameters::new()).await.unwrap();
+
+        let got = captured.lock().unwrap().clone().expect("ctx not captured");
+        assert!(got.working_dir.is_none());
+        assert!(got.conversation_id.is_none());
+        assert!(got.run_id.is_none());
+    }
+
+    /// P0 regression (review P0): two "agents" sharing the SAME ToolManager
+    /// must NOT cross-contaminate each other's working_dir. The ToolManager
+    /// holds no cwd state — each call supplies its own ctx, so concurrent or
+    /// interleaved calls with different ctxs stay isolated.
+    ///
+    /// This simulates the AgentPool pattern where pooled agents share one
+    /// ToolManager via Arc. If ToolManager ever started caching working_dir,
+    /// this test would catch it.
+    #[tokio::test]
+    async fn test_shared_tool_manager_does_not_cross_contaminate_cwd() {
+        use std::path::Path;
+
+        // One shared ToolManager (mirrors AgentPool's shared Arc<ToolManager>).
+        let tm = ToolManager::new();
+        // Single capture slot is overwritten each call — so we run the two
+        // "sessions" strictly sequentially and assert after each, which is
+        // enough to prove the ctx comes from the caller, not ToolManager state.
+        let captured = Arc::new(Mutex::new(None));
+        tm.register(Box::new(CtxCapturingTool { captured: captured.clone() }));
+
+        // "Session A" binds worktree /wt/a.
+        let ctx_a = ToolContext {
+            working_dir: Some(PathBuf::from("/wt/a")),
+            conversation_id: Some("conv-a".into()),
+            run_id: Some("run-a".into()),
+        };
+        tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_a)
+            .await
+            .unwrap();
+        let got_a = captured.lock().unwrap().clone().expect("A: ctx not captured");
+        assert_eq!(got_a.working_dir.as_deref(), Some(Path::new("/wt/a")));
+        assert_eq!(got_a.conversation_id.as_deref(), Some("conv-a"));
+
+        // "Session B" binds worktree /wt/b on the SAME ToolManager.
+        let ctx_b = ToolContext {
+            working_dir: Some(PathBuf::from("/wt/b")),
+            conversation_id: Some("conv-b".into()),
+            run_id: Some("run-b".into()),
+        };
+        tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_b)
+            .await
+            .unwrap();
+        let got_b = captured.lock().unwrap().clone().expect("B: ctx not captured");
+        assert_eq!(got_b.working_dir.as_deref(), Some(Path::new("/wt/b")));
+        assert_eq!(got_b.conversation_id.as_deref(), Some("conv-b"));
+
+        // Session A re-runs and must still get /wt/a, proving B's call did not
+        // mutate any shared ToolManager state.
+        tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_a)
+            .await
+            .unwrap();
+        let got_a2 = captured.lock().unwrap().clone().expect("A2: ctx not captured");
+        assert_eq!(
+            got_a2.working_dir.as_deref(),
+            Some(Path::new("/wt/a")),
+            "session A must still see /wt/a after session B used the same ToolManager"
+        );
     }
 }

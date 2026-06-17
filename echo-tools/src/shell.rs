@@ -375,7 +375,11 @@ impl Tool for ShellTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let command = parameters
                 .get("command")
@@ -412,8 +416,11 @@ impl Tool for ShellTool {
             if has_sandbox && has_metacharacters {
                 // Use sh -c through sandbox for commands with shell syntax
                 let sandbox = self.sandbox.as_ref().unwrap();
-                let sandbox_cmd =
+                let mut sandbox_cmd =
                     SandboxCommand::program("sh", vec!["-c".to_string(), command.to_string()]);
+                if let Some(dir) = &ctx.working_dir {
+                    sandbox_cmd = sandbox_cmd.with_working_dir(dir);
+                }
 
                 // Wrap with timeout
                 let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
@@ -454,7 +461,10 @@ impl Tool for ShellTool {
 
             // If sandbox is configured, execute via sandbox (using program mode to avoid shell injection)
             if let Some(sandbox) = &self.sandbox {
-                let sandbox_cmd = SandboxCommand::program(program, args.to_vec());
+                let mut sandbox_cmd = SandboxCommand::program(program, args.to_vec());
+                if let Some(dir) = &ctx.working_dir {
+                    sandbox_cmd = sandbox_cmd.with_working_dir(dir);
+                }
 
                 // Wrap with timeout
                 let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
@@ -484,9 +494,14 @@ impl Tool for ShellTool {
                 // if this future is dropped mid-execution (e.g. user cancels the run with
                 // Ctrl-C) — without it the process would be orphaned and keep running.
                 let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
+                let mut command_builder = Command::new(program);
+                command_builder.args(args).kill_on_drop(true);
+                if let Some(dir) = &ctx.working_dir {
+                    command_builder.current_dir(dir);
+                }
                 match tokio::time::timeout(
                     timeout_duration,
-                    Command::new(program).args(args).kill_on_drop(true).output(),
+                    command_builder.output(),
                 )
                 .await
                 {
@@ -959,5 +974,55 @@ mod tests {
         let result = tool.execute(params).await.unwrap();
         assert!(result.success, "Command should succeed: {:?}", result);
         assert!(result.output.contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_honors_context_working_dir() {
+        // Regression test for the worktree cwd bug: ShellTool must run the
+        // command in ctx.working_dir when set. Uses a unique tmp dir under the
+        // std temp dir (no tempfile dependency).
+        use echo_core::tools::ToolContext;
+
+        let unique = format!(
+            "echo-shell-wt-test-{}-{}",
+            std::process::id(),
+            nanoid_counter()
+        );
+        let wt_dir = std::env::temp_dir().join(&unique);
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let tool = ShellTool::new();
+        let ctx = ToolContext {
+            working_dir: Some(wt_dir.clone()),
+            ..Default::default()
+        };
+
+        let mut params = HashMap::new();
+        params.insert("command".to_string(), serde_json::json!("pwd"));
+
+        let result = tool.execute_with_context(params, &ctx).await.unwrap();
+        assert!(result.success, "pwd should succeed: {:?}", result);
+
+        // Compare via canonicalize to handle macOS /var -> /private/var symlink.
+        let got = std::path::Path::new(result.output.trim());
+        let got_canonical = std::fs::canonicalize(got).unwrap_or_else(|_| got.to_path_buf());
+        let want_canonical =
+            std::fs::canonicalize(&wt_dir).unwrap_or_else(|_| wt_dir.clone());
+        assert_eq!(
+            got_canonical, want_canonical,
+            "pwd output {:?} should match working_dir {:?}",
+            result.output.trim(),
+            wt_dir
+        );
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+    }
+
+    fn nanoid_counter() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
     }
 }

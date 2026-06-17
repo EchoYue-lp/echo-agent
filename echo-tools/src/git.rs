@@ -35,7 +35,7 @@ pub struct GitStatusTool {
 impl ToolRunner<GitStatusToolParams> for GitStatusTool {
     async fn run(&self, params: GitStatusToolParams) -> Result<ToolResult> {
         let repo_path = params.repo_path.as_deref().unwrap_or(".");
-        let output = run_git(repo_path, &["status", "--short"])?;
+        let output = run_git(&repo_path,&["status", "--short"])?;
         if output.is_empty() {
             Ok(ToolResult::success("Working directory clean, no changes"))
         } else {
@@ -89,12 +89,17 @@ impl Tool for GitDiffTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = effective_repo_path(&repo_path, ctx);
 
             let mut args = vec!["diff"];
             let staged = parameters
@@ -120,7 +125,7 @@ impl Tool for GitDiffTool {
                 args.push(fp);
             }
 
-            let output = run_git(repo_path, &args)?;
+            let output = run_git(&repo_path,&args)?;
             if output.is_empty() {
                 Ok(ToolResult::success("No differences".to_string()))
             } else {
@@ -179,12 +184,17 @@ impl Tool for GitLogTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = effective_repo_path(&repo_path, ctx);
 
             let count = parameters
                 .get("count")
@@ -214,7 +224,7 @@ impl Tool for GitLogTool {
             let extra_strs: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
             args.extend(&extra_strs);
 
-            let output = run_git(repo_path, &args)?;
+            let output = run_git(&repo_path,&args)?;
             if output.is_empty() {
                 Ok(ToolResult::success(
                     "Repository has no commit history".to_string(),
@@ -295,7 +305,7 @@ impl Tool for GitBlameTool {
             args.push(file_path.to_string());
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(repo_path, &str_args)?;
+            let output = run_git(&repo_path,&str_args)?;
             Ok(ToolResult::success(output))
         })
     }
@@ -346,12 +356,17 @@ impl Tool for GitBranchTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = effective_repo_path(&repo_path, ctx);
 
             let action;
             let args: Vec<String>;
@@ -371,7 +386,7 @@ impl Tool for GitBranchTool {
             }
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(repo_path, &str_args)?;
+            let output = run_git(&repo_path,&str_args)?;
             Ok(ToolResult::success(format!("{}:\n{}", action, output)))
         })
     }
@@ -419,12 +434,17 @@ impl Tool for GitCommitTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let repo_path = parameters
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
+            let repo_path = effective_repo_path(&repo_path, ctx);
             let message = parameters
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -435,13 +455,13 @@ impl Tool for GitCommitTool {
                 for f_val in files {
                     if let Some(f) = f_val.as_str() {
                         let add_args = ["add", f];
-                        run_git(repo_path, &add_args)?;
+                        run_git(&repo_path,&add_args)?;
                     }
                 }
             }
 
             let commit_args = ["commit", "-m", message];
-            let output = run_git(repo_path, &commit_args)?;
+            let output = run_git(&repo_path,&commit_args)?;
             Ok(ToolResult::success(format!(
                 "Commit succeeded:\n{}",
                 output
@@ -451,6 +471,31 @@ impl Tool for GitCommitTool {
 }
 
 // ── Helper ──────────────────────────────────────────────────────────────────
+
+/// Resolve the effective repository path for a git tool invocation.
+///
+/// When the LLM passes no `repo_path` (the default `"."`), run the git
+/// command inside the session-bound `working_dir` (e.g. a worktree) if one
+/// is set, so git operations target the isolated checkout instead of the
+/// process cwd. An explicit user-supplied `repo_path` always wins.
+fn effective_repo_path(user_repo_path: &str, ctx: &echo_core::tools::ToolContext) -> String {
+    // When working_dir is set (worktree binding), resolve relative paths
+    // against it — matching file tool semantics. Absolute paths and "." pass
+    // through ("." resolves to working_dir when set).
+    if user_repo_path == "." {
+        if let Some(dir) = &ctx.working_dir {
+            return dir.to_string_lossy().to_string();
+        }
+        return ".".to_string();
+    }
+    // Relative path: join with working_dir if set
+    if !std::path::Path::new(user_repo_path).is_absolute() {
+        if let Some(dir) = &ctx.working_dir {
+            return dir.join(user_repo_path).to_string_lossy().to_string();
+        }
+    }
+    user_repo_path.to_string()
+}
 
 fn run_git(repo_path: &str, args: &[&str]) -> Result<String> {
     // Validate repo_path: reject path traversal and ensure the path exists

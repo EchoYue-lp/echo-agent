@@ -82,7 +82,11 @@ impl Tool for RepoMapTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let path_str = parameters
                 .get("path")
@@ -99,7 +103,14 @@ impl Tool for RepoMapTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or("tree");
 
-            let root = if let Some(ref base) = self.base_dir {
+            // Effective base: construction-time base_dir (with confinement)
+            // takes priority; otherwise fall back to runtime working_dir.
+            let effective_base: Option<PathBuf> = self
+                .base_dir
+                .clone()
+                .or_else(|| ctx.working_dir.as_ref().map(|p| p.to_path_buf()));
+
+            let root = if let Some(ref base) = effective_base {
                 let resolved = if Path::new(path_str).is_absolute() {
                     PathBuf::from(path_str)
                 } else {

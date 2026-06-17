@@ -226,6 +226,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     current_plan,
                     active_skills,
                     blocked_reason,
+                    // working_dir column not yet in the sqlite schema; default
+                    // to None on read (full persistence tracked as follow-up).
+                    working_dir: None,
                     timestamp,
                 })
             });
@@ -313,6 +316,7 @@ mod tests {
             current_plan: Some("plan".to_string()),
             active_skills: vec!["coding".to_string()],
             blocked_reason: None,
+            working_dir: None,
             timestamp: Utc::now(),
         };
         store.save_checkpoint(&checkpoint).await.unwrap();
@@ -376,6 +380,7 @@ mod tests {
             current_plan: Some("Step 1: Get API key, Step 2: Process data".to_string()),
             active_skills: vec!["data-wrangling".to_string()],
             blocked_reason: Some("Waiting for API key approval".to_string()),
+            working_dir: None,
             timestamp: Utc::now(),
         };
         store.save_checkpoint(&checkpoint).await.unwrap();

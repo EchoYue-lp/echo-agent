@@ -123,6 +123,10 @@ pub struct AgentCheckpoint {
     pub active_skills: Vec<String>,
     /// If the agent was blocked, the reason.
     pub blocked_reason: Option<String>,
+    /// Session-bound working directory (worktree path). Restored on hydration
+    /// so a worktree-bound session resumes in the same isolated checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<std::path::PathBuf>,
     /// Timestamp when the checkpoint was captured.
     pub timestamp: DateTime<Utc>,
 }
@@ -136,6 +140,7 @@ impl AgentCheckpoint {
             current_plan: None,
             active_skills: Vec::new(),
             blocked_reason: None,
+            working_dir: None,
             timestamp: Utc::now(),
         }
     }

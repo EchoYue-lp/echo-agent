@@ -88,7 +88,11 @@ impl Tool for EditFileTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let path_str = parameters
                 .get("path")
@@ -115,7 +119,7 @@ impl Tool for EditFileTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let path = resolve_path("edit_file", path_str, &self.base_dir)?;
+            let path = resolve_path("edit_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(

@@ -47,6 +47,9 @@ pub struct ReactAgentBuilder {
     store: Option<Arc<dyn Store>>,
     session_id: Option<String>,
     conversation_id: Option<String>,
+    /// Session-bound working directory (worktree path). Propagated to
+    /// `AgentConfig.working_dir` on build, then into every tool's ToolContext.
+    working_dir: Option<std::path::PathBuf>,
     #[cfg(feature = "human-loop")]
     approval_provider: Option<Arc<dyn HumanLoopProvider>>,
     #[cfg(feature = "human-loop")]
@@ -109,6 +112,7 @@ impl ReactAgentBuilder {
             store: None,
             session_id: None,
             conversation_id: None,
+            working_dir: None,
             #[cfg(feature = "human-loop")]
             approval_provider: None,
             #[cfg(feature = "human-loop")]
@@ -550,6 +554,14 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Set the session-bound working directory (worktree path). Propagated to
+    /// `AgentConfig.working_dir`, which `ExecuteStage` injects into every tool
+    /// call's `ToolContext` so shell/file/git tools run inside the worktree.
+    pub fn working_dir(mut self, working_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.working_dir = Some(working_dir.into());
+        self
+    }
+
     #[cfg(feature = "human-loop")]
     /// Set approval Provider
     pub fn approval_provider(mut self, provider: Arc<dyn HumanLoopProvider>) -> Self {
@@ -725,6 +737,9 @@ impl ReactAgentBuilder {
         }
         if let Some(conversation_id) = &self.conversation_id {
             config = config.conversation_id(conversation_id);
+        }
+        if let Some(working_dir) = &self.working_dir {
+            config.working_dir = Some(working_dir.clone());
         }
         if self.react_checkpoint_interval > 0 {
             config = config.react_checkpoint_interval(self.react_checkpoint_interval);

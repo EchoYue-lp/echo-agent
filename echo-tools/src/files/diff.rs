@@ -79,7 +79,11 @@ impl Tool for DiffTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let path_a_str = parameters
                 .get("path_a")
@@ -100,7 +104,7 @@ impl Tool for DiffTool {
                 ));
             }
 
-            let path_a = resolve_path("diff", path_a_str, &self.base_dir)?;
+            let path_a = resolve_path("diff", path_a_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !path_a.exists() {
                 return Ok(ToolResult::error(format!(
@@ -120,7 +124,7 @@ impl Tool for DiffTool {
             let (content_b_val, label_b) = if let Some(content) = content_b {
                 (content.to_string(), "<provided content>".to_string())
             } else {
-                let path_b = resolve_path("diff", path_b_str.unwrap(), &self.base_dir)?;
+                let path_b = resolve_path("diff", path_b_str.unwrap(), &self.base_dir, ctx.working_dir.as_deref())?;
                 if !path_b.exists() {
                     return Ok(ToolResult::error(format!(
                         "File does not exist: {}",

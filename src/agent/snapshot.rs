@@ -63,6 +63,10 @@ pub struct RuntimeConfig {
     pub max_iterations: usize,
     pub session_id: Option<String>,
     pub conversation_id: Option<String>,
+    /// Session-bound working directory (worktree path). Injected into each
+    /// tool call's ToolContext so file/shell/git tools run inside the
+    /// isolated checkout. None = use process cwd (backward compatible).
+    pub working_dir: Option<std::path::PathBuf>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub tool_error_feedback: bool,
@@ -94,6 +98,7 @@ impl RuntimeConfig {
             max_iterations: config.max_iterations,
             session_id: config.session_id.clone(),
             conversation_id: config.conversation_id.clone(),
+            working_dir: config.working_dir.clone(),
             temperature: config.temperature,
             max_tokens: config.max_tokens,
             tool_error_feedback: config.tool_error_feedback,
@@ -313,6 +318,7 @@ impl AgentRunSnapshot {
             current_plan,
             active_skills: self.tools.active_skill_names.clone(),
             blocked_reason,
+            working_dir: self.config.working_dir.clone(),
             timestamp: chrono::Utc::now(),
         };
 

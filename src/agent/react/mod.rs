@@ -696,7 +696,12 @@ impl ReactAgent {
         self.llm_client = Some(client);
     }
 
-    /// Set the working directory for the agent (affects project rules, tool paths, etc.).
+    /// Set the working directory for the agent.
+    ///
+    /// Affects project-rules file lookup AND, via `RuntimeConfig` →
+    /// `ExecuteStage` → `ToolContext`, the cwd of every tool call (shell,
+    /// file, git) — so binding a worktree path here isolates that agent's
+    /// file operations. Pass `None` to clear (fall back to process cwd).
     pub fn set_working_dir(&mut self, path: Option<std::path::PathBuf>) {
         self.config.working_dir = path;
     }
@@ -928,6 +933,18 @@ impl ReactAgent {
     /// Get the current conversation_id for conversation history projection.
     pub fn conversation_id(&self) -> Option<&str> {
         self.config.get_conversation_id()
+    }
+
+    /// Clear the working directory binding (e.g. `/worktree exit`). Subsequent
+    /// tool calls fall back to the process cwd. (Setting it uses
+    /// [`set_working_dir`](Self::set_working_dir) with `Some(path)`.)
+    pub fn clear_working_dir(&mut self) {
+        self.config.working_dir = None;
+    }
+
+    /// The current working directory binding, if any.
+    pub fn working_dir(&self) -> Option<&std::path::Path> {
+        self.config.working_dir.as_deref()
     }
 
     /// Get the current conversation history messages (read-only).

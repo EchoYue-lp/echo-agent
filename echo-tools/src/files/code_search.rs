@@ -131,7 +131,11 @@ impl Tool for CodeSearchTool {
         })
     }
 
-    fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             // Parse new-style query, falling back to legacy "symbol" parameter
             let query = parameters
@@ -180,7 +184,7 @@ impl Tool for CodeSearchTool {
                 .unwrap_or(50) as usize;
 
             // Resolve search path
-            let search_path = super::resolve_path("code_search", path_str, &self.base_dir)?;
+            let search_path = super::resolve_path("code_search", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
 
             if !search_path.exists() {
                 return Err(ToolError::ExecutionFailed {

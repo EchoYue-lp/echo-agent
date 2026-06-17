@@ -12,18 +12,40 @@ use std::path::{Component, Path, PathBuf};
 use echo_core::error::{Result, ToolError};
 
 /// Resolve a user-supplied relative/absolute path into a safe absolute path.
-/// If base_dir is set, restrict resolution within it; otherwise use the raw path directly.
 ///
-/// - Absolute path: normalize then verify it stays within base_dir
-/// - Relative path: expand relative to base_dir then verify
+/// Path base priority for relative paths:
+/// 1. `base_dir` (construction-time confinement, e.g. `with_base_dir`)
+/// 2. `working_dir` (runtime per-call dir, e.g. a session-bound worktree)
+/// 3. process `current_dir` (fallback)
+///
+/// When `base_dir` is set, resolution is confined within it (absolute paths
+/// must stay inside; relative paths are joined under it; symlinks are
+/// canonicalized defensively). When only `working_dir` is set, relative paths
+/// are joined under it but there is no confinement check (it acts as a CWD
+/// override). When neither is set, behavior is unchanged from before
+/// (raw path + best-effort canonicalize).
+///
+/// - Absolute path: normalize then (if base_dir set) verify it stays within base_dir
+/// - Relative path: expand relative to the chosen base then verify
 ///
 /// After textual normalization, `std::fs::canonicalize()` is used to resolve symlinks
 /// and verify the real path stays within the allowed directory. For write operations
 /// where the target file doesn't exist yet, the parent directory is canonicalized instead.
-fn resolve_path(tool: &str, path_str: &str, base_dir: &Option<PathBuf>) -> Result<PathBuf> {
+fn resolve_path(
+    tool: &str,
+    path_str: &str,
+    base_dir: &Option<PathBuf>,
+    working_dir: Option<&Path>,
+) -> Result<PathBuf> {
     let requested = Path::new(path_str);
 
-    let resolved = if let Some(base) = base_dir {
+    // Effective base: construction-time base_dir takes priority (confinement);
+    // otherwise fall back to the runtime working_dir (CWD override, no confinement).
+    let effective_base: Option<PathBuf> = base_dir
+        .clone()
+        .or_else(|| working_dir.map(|p| p.to_path_buf()));
+
+    let resolved = if let Some(ref base) = effective_base {
         let normalized_base = normalize_path(base);
 
         // Relative path: expand with base_dir as root; absolute path: normalize directly
