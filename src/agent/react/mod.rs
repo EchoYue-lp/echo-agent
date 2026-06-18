@@ -1501,14 +1501,17 @@ impl ReactAgent {
             .clear();
     }
 
-    /// Entry point for text-based streaming: clear read files, build `StreamInit`,
-    /// and delegate to `run_stream_channel`.
+    /// Entry point for text-based streaming: build `StreamInit` and delegate
+    /// to `run_stream_channel`.
+    ///
+    /// `clear_read_files` is now done inside `prepare_stream_context`
+    /// (converged with the non-streaming path), so it is no longer cleared
+    /// here to avoid a double clear.
     async fn run_stream_entry(
         &self,
         input: &str,
         mode: run::StreamMode,
     ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
-        self.clear_read_files();
         self.run_stream_channel(
             run::types::StreamInit {
                 text: input.to_string(),
@@ -1520,14 +1523,13 @@ impl ReactAgent {
         .await
     }
 
-    /// Entry point for multimodal streaming: clear read files, build `StreamInit`,
-    /// and delegate to `run_stream_channel`.
+    /// Entry point for multimodal streaming: build `StreamInit` and delegate
+    /// to `run_stream_channel`. (`clear_read_files` is done in prepare.)
     async fn run_stream_message_entry(
         &self,
         message: crate::llm::types::Message,
         mode: run::StreamMode,
     ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
-        self.clear_read_files();
         let text = message.content.as_text().unwrap_or_default();
         self.run_stream_channel(
             run::types::StreamInit {

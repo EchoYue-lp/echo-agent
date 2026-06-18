@@ -9,14 +9,11 @@
 //! control flow. Each phase is responsible for a focused subset of work
 //! (audit, compaction, LLM call, tool execution, verification, finalization)
 //!
-//! **Known gap (P1-3/P1-4):** The streaming path does not run IntentRouter
-//! classification (short-circuit, skill activation) or `GuardDirection::Input`
-//! checks. Both are present in the non-streaming path (`react_loop.rs`).
-//! Streaming callers bypass these pre-flight checks; a future PR should
-//! converge the two paths so that `run_stream_channel` also calls
-//! `prepare_react_context` instead of the lighter `prepare_stream_context`.
-//! and reports back via outcome enums; the driver translates those into
-//! either "continue", a terminal `finalize_*`, or an early return.
+//! **Converged with the non-streaming path:** `run_stream_channel` runs the
+//! same pre-flight checks as `prepare_react_context` — `GuardDirection::Input`
+//! and `IntentRouter` classification (DirectAnswer shortcut, skill activation).
+//! A blocked guard or a DirectAnswer short-circuit yields a stream pre-filled
+//! with terminal events without entering `run_core_loop`.
 
 use super::super::ReactAgent;
 use super::phases::{self, IterOutcome, LoopState, PrepareOutcome};
@@ -38,7 +35,8 @@ impl ReactAgent {
         init: StreamInit,
         mode: StreamMode,
     ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
-        let (tx, rx) = mpsc::channel::<Result<AgentEvent>>(self.config.stream_buffer_size);
+        let buffer = self.config.stream_buffer_size;
+        let (tx, rx) = mpsc::channel::<Result<AgentEvent>>(buffer);
         let context = self.memory.context.clone();
         let text = init.text.clone();
         let message = init.message.clone();
@@ -49,14 +47,144 @@ impl ReactAgent {
         // entire stream lifetime.
         let execution_guard = self.execution_mutex.clone().lock_owned().await;
 
+        // Start trace run BEFORE the prepare phase so trace events emitted
+        // below (PhaseTransition, GuardBlock audit) are recorded rather than
+        // silently dropped when current_run_id is None.
+        self.start_trace_run(&text).await;
+
+        // ── Restore thread context (Execute mode) + memory triggers/recall ──
         let recalled = if let Some(ref msg) = init.message {
             self.prepare_stream_context_with_message(mode, msg).await
         } else {
             self.prepare_stream_context(mode, &init.text).await
         };
 
-        // Start trace run for streaming path
-        self.start_trace_run(&text).await;
+        // ── G1: Guard input check (converged with prepare_react_context) ──
+        // A blocked guard yields a stream pre-filled with a single terminal
+        // FinalAnswer event (mirrors non-streaming Ok(msg) semantics) and does
+        // NOT spawn run_core_loop. We must drop the owned execution_guard here
+        // or the agent's mutex leaks (the spawn below owns it normally).
+        if let Some(gm) = &self.guard.guard_manager {
+            let result = gm
+                .check_all(&text, crate::guard::GuardDirection::Input)
+                .await;
+            if let Ok(crate::guard::GuardResult::Block { reason }) = &result {
+                let agent = self.config.agent_name.clone();
+                debug!(agent = %agent, reason = %reason, "🛡️ Stream input blocked by guard");
+                if let Some(al) = &self.guard.audit_logger {
+                    let event = crate::audit::AuditEvent::now(
+                        self.config.session_id.clone(),
+                        agent.clone(),
+                        crate::audit::AuditEventType::GuardBlock {
+                            guard: "guard_manager".to_string(),
+                            direction: crate::guard::GuardDirection::Input,
+                            reason: reason.clone(),
+                        },
+                    );
+                    if let Err(e) = al.log(event).await {
+                        tracing::warn!(error = %e, "Failed to log guard audit event");
+                    }
+                }
+                let _ = tx
+                    .send(Ok(AgentEvent::FinalAnswer(format!(
+                        "Request blocked by safety guard: {reason}"
+                    ))))
+                    .await;
+                // Drop the owned guard to release the execution mutex — the
+                // spawned task normally owns it, but we short-circuited.
+                drop(execution_guard);
+                return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
+            }
+        }
+
+        // ── G2: IntentRouter classification (converged with run_react_loop) ──
+        // DirectAnswer streams its tokens then a FinalAnswer and skips the
+        // core loop; SkillRequired injects a system message and falls through
+        // to the normal core loop.
+        if let Some(ref router) = self.intent_router {
+            let messages = self.memory.context.lock().await.messages().to_vec();
+            let intent = router.classify(&text, &messages).await;
+            match intent {
+                crate::intent::Intent::DirectAnswer { confidence } => {
+                    tracing::info!(
+                        agent = %self.config.agent_name,
+                        confidence = confidence,
+                        "🎯 Stream IntentRouter: DirectAnswer shortcut"
+                    );
+                    let mut snap = make_snapshot(self);
+                    snap.current_run_id = self
+                        .current_run_id
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    // DirectAnswer uses trimmed [system, user] messages and does
+                    // not consume the recalled context, so the recall count is
+                    // informational only.
+                    let _ = recalled;
+                    let content = snap
+                        .direct_answer_stream(&self.config.system_prompt, &text, &tx)
+                        .await?;
+                    // Push assistant message so the agent remembers this turn.
+                    self.memory
+                        .context
+                        .lock()
+                        .await
+                        .push(Message::assistant(content));
+                    drop(execution_guard);
+                    return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
+                }
+                crate::intent::Intent::SkillRequired {
+                    skill_name,
+                    confidence,
+                } => {
+                    tracing::info!(
+                        agent = %self.config.agent_name,
+                        skill = %skill_name,
+                        confidence = confidence,
+                        "🎯 Stream IntentRouter: activating skill"
+                    );
+                    if self.tools.skill_registry.is_installed(&skill_name)
+                        && !self.tools.skill_registry.is_activated(&skill_name)
+                    {
+                        match self.tools.skill_registry.activate(&skill_name).await {
+                            Ok(content) => {
+                                self.memory
+                                    .context
+                                    .lock()
+                                    .await
+                                    .push(Message::system(content.instructions));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    skill = %skill_name,
+                                    error = %e,
+                                    "Stream IntentRouter: failed to activate skill"
+                                );
+                            }
+                        }
+                    }
+                    // Fall through to run_core_loop.
+                }
+                crate::intent::Intent::WorkflowRequired {
+                    workflow_name,
+                    confidence,
+                } => {
+                    tracing::info!(
+                        agent = %self.config.agent_name,
+                        workflow = %workflow_name,
+                        confidence = confidence,
+                        "🎯 Stream IntentRouter: WorkflowRequired (fallback to ReAct for now)"
+                    );
+                    // Fall through to run_core_loop.
+                }
+                crate::intent::Intent::Fallback => {
+                    tracing::debug!(
+                        agent = %self.config.agent_name,
+                        "Stream IntentRouter: Fallback to ReAct"
+                    );
+                }
+            }
+        }
 
         let mut snap = make_snapshot(self);
         // Pass current run_id from the agent to the snapshot
@@ -91,6 +219,64 @@ fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
 }
 
 impl AgentSnapshot {
+    /// Streaming "direct answer" shortcut used by IntentRouter.
+    ///
+    /// Bypasses the ReAct loop and calls the LLM directly with a trimmed
+    /// `[system, user]` message pair (no tools, no ContextManager history),
+    /// streaming `AgentEvent::Token` for each content chunk and finishing with
+    /// a single `AgentEvent::FinalAnswer`. Mirrors the non-streaming
+    /// `ReactAgent::direct_answer` semantics but yields tokens as they arrive.
+    ///
+    /// Returns the full accumulated text so the caller can push the assistant
+    /// message into context. On error, the error is forwarded to `tx` and an
+    /// empty string is returned.
+    pub(crate) async fn direct_answer_stream(
+        &self,
+        system_prompt: &str,
+        message: &str,
+        tx: &mpsc::Sender<Result<AgentEvent>>,
+    ) -> Result<String> {
+        let messages = vec![
+            Message::system(system_prompt.to_string()),
+            Message::user(message.to_string()),
+        ];
+
+        let stream = super::phases::think::create_llm_stream(self, messages).await?;
+        let mut stream = std::pin::pin!(stream);
+        let mut content = String::new();
+        use futures::StreamExt;
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(AgentEvent::Error {
+                            source: "direct_answer".into(),
+                            message: e.to_string(),
+                        }))
+                        .await;
+                    return Ok(content);
+                }
+            };
+            // DirectAnswer is plain text — only forward content deltas, ignore
+            // reasoning/tool_call deltas (no tools are attached).
+            if let Some(choice) = chunk.choices.first()
+                && let Some(delta) = &choice.delta.content
+                && !delta.is_empty()
+            {
+                content.push_str(delta);
+                if tx.send(Ok(AgentEvent::Token(delta.clone()))).await.is_err() {
+                    // Receiver dropped — caller cancelled the stream.
+                    break;
+                }
+            }
+        }
+
+        // Terminal event — frontend treats FinalAnswer as end-of-stream.
+        let _ = tx.send(Ok(AgentEvent::FinalAnswer(content.clone()))).await;
+        Ok(content)
+    }
+
     /// Unified ReAct core loop — shared by both streaming and non-streaming paths.
     ///
     /// The non-streaming path (`run_react_loop`) creates a channel and runs this
@@ -235,5 +421,133 @@ impl AgentSnapshot {
 
         // ── Post-loop: max iterations exceeded ───────────────────────
         phases::finalize::finalize_max_iterations(&self, &context, &state, tx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::config::AgentConfig;
+    use echo_core::guard::{Guard, GuardDirection, GuardResult};
+    use futures::StreamExt;
+    use futures::future::BoxFuture;
+    use std::sync::Arc;
+
+    /// A guard that blocks every input with a fixed reason.
+    struct BlockingGuard;
+    impl Guard for BlockingGuard {
+        fn name(&self) -> &str {
+            "test-blocking-guard"
+        }
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            Box::pin(async move {
+                if matches!(direction, GuardDirection::Input) {
+                    Ok(GuardResult::Block {
+                        reason: "test-input-blocked".into(),
+                    })
+                } else {
+                    Ok(GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    /// Build a minimal agent with a blocking input guard.
+    fn agent_with_blocking_guard() -> ReactAgent {
+        let mut agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        let mut gm = echo_core::guard::GuardManager::new();
+        gm.add(Arc::new(BlockingGuard));
+        agent.set_guard_manager(gm);
+        agent
+    }
+
+    /// A blocked input guard yields a stream containing exactly one terminal
+    /// FinalAnswer carrying the block reason — mirroring the non-streaming
+    /// path's `Ok("Request blocked...")` semantics — and must NOT enter the
+    /// core loop (no ThinkStart/Token events).
+    #[tokio::test]
+    async fn stream_guard_block_yields_single_final_answer() {
+        let agent = agent_with_blocking_guard();
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "anything".into(),
+                    message: None,
+                    label: String::new(),
+                },
+                StreamMode::Chat,
+            )
+            .await
+            .expect("run_stream_channel must return a stream even when blocked");
+
+        let events: Vec<_> = stream.collect().await;
+
+        // Exactly one event, and it is a terminal FinalAnswer.
+        assert_eq!(
+            events.len(),
+            1,
+            "blocked stream should have exactly one event"
+        );
+        match events[0].as_ref().expect("event is Ok") {
+            AgentEvent::FinalAnswer(text) => {
+                assert!(
+                    text.starts_with("Request blocked by safety guard:"),
+                    "expected block message, got: {text:?}",
+                );
+                assert!(text.contains("test-input-blocked"));
+            }
+            other => panic!("expected FinalAnswer, got {other:?}"),
+        }
+    }
+
+    /// After a guard blocks one stream, the execution mutex must be released so
+    /// the very next call can proceed. This guards against the lock-leak
+    /// regression where a short-circuited branch forgets to drop the owned
+    /// `execution_guard` (the agent would then deadlock forever).
+    #[tokio::test]
+    async fn stream_guard_block_releases_execution_mutex() {
+        let agent = agent_with_blocking_guard();
+
+        // First call: blocked, must release the lock.
+        let s1 = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "first".into(),
+                    message: None,
+                    label: String::new(),
+                },
+                StreamMode::Chat,
+            )
+            .await
+            .expect("first stream");
+        let _: Vec<_> = s1.collect().await;
+
+        // Second call must not hang — if the lock leaked, this await never
+        // completes and the test times out.
+        let s2 = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_stream_channel(
+                StreamInit {
+                    text: "second".into(),
+                    message: None,
+                    label: String::new(),
+                },
+                StreamMode::Chat,
+            ),
+        )
+        .await
+        .expect("second run_stream_channel must not hang (execution_guard leaked?)")
+        .expect("second stream");
+
+        let events: Vec<_> = s2.collect().await;
+        assert_eq!(events.len(), 1, "second blocked stream also has one event");
+        assert!(matches!(
+            events[0].as_ref().unwrap(),
+            AgentEvent::FinalAnswer(_)
+        ));
     }
 }

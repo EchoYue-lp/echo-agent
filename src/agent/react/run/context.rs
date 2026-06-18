@@ -470,6 +470,10 @@ impl ReactAgent {
     /// Decides whether to reset context or restore from checkpoint based on the mode.
     /// Returns the number of recalled long-term memories (0 means no memories were injected).
     pub(crate) async fn prepare_stream_context(&self, mode: StreamMode, input: &str) -> usize {
+        // Clear read-before-edit tracking for the new conversation turn
+        // (converged with prepare_react_context; the entry layer no longer
+        // clears it separately to avoid a double clear).
+        self.clear_read_files();
         match mode {
             StreamMode::Execute => {
                 self.restore_thread_context().await;
@@ -530,6 +534,8 @@ impl ReactAgent {
         mode: StreamMode,
         message: &Message,
     ) -> usize {
+        // Clear read-before-edit tracking (see prepare_stream_context).
+        self.clear_read_files();
         match mode {
             StreamMode::Execute => {
                 self.restore_thread_context().await;
