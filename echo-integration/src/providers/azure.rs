@@ -155,7 +155,7 @@ impl LlmClient for AzureOpenAiClient {
     fn chat_stream(
         &self,
         request: ChatRequest,
-    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
+    ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
         let model = self.config.model.clone();
         let url = self.endpoint_url.clone();
         Box::pin(

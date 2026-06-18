@@ -245,7 +245,7 @@ impl LlmClient for MockLlmClient {
     fn chat_stream(
         &self,
         request: ChatRequest,
-    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
+    ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
         Box::pin(async move {
             // Record this call
             self.calls

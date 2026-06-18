@@ -51,10 +51,17 @@ pub trait LlmClient: Send + Sync {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>>;
 
     /// Execute a streaming chat request.
+    ///
+    /// The returned stream is `'static` (does not borrow `&self`): all
+    /// provider implementations produce an owned, boxed stream so the caller
+    /// can move it across awaits / into spawned tasks. This also lets the
+    /// streaming core loop route through a trait object (`Arc<dyn LlmClient>`)
+    /// and have the resulting stream outlive the trait-method borrow — which
+    /// is what makes the loop testable with a mock client.
     fn chat_stream(
         &self,
         request: ChatRequest,
-    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>>;
+    ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>>;
 
     /// Convenience helper for simple text-only calls.
     ///

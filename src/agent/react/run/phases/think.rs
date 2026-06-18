@@ -175,7 +175,11 @@ pub(crate) async fn run_think(
 pub(crate) async fn create_llm_stream(
     snap: &AgentRunSnapshot,
     messages: Vec<Message>,
-) -> Result<impl futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>>> {
+) -> Result<
+    std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
+    >,
+> {
     let tools = if snap.config.enable_tool {
         let t = snap.tools.tool_manager.get_openai_tools();
         if t.is_empty() { None } else { Some(t) }
@@ -183,7 +187,63 @@ pub(crate) async fn create_llm_stream(
         None
     };
     let cancel = snap.cancel_token.clone();
-    super::super::retry::retry_llm_call(
+
+    // ── Trait path: when an LlmClient trait object is attached (production
+    // OpenAiClient / test MockLlmClient), route through it. This avoids the
+    // per-call model-resolve (Config::get_model) of the legacy reqwest path,
+    // which is what makes the core loop testable with a mock and removes the
+    // NotFindModelError dependency on echo-agent-models.yaml.
+    if let Some(llm_client) = snap.llm_client.clone() {
+        type ChunkStream = std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
+        >;
+        let stream: ChunkStream = super::super::retry::retry_llm_call(
+            &snap.config.agent_name,
+            snap.config.llm_max_retries,
+            snap.config.llm_retry_delay_ms,
+            &snap.guard.circuit_breaker,
+            || {
+                let llm_client = llm_client.clone();
+                let ms = messages.clone();
+                let t = tools.clone();
+                let temp = snap.config.temperature;
+                let max_tokens = snap.config.max_tokens;
+                async move {
+                    let request = crate::llm::ChatRequest {
+                        messages: ms,
+                        temperature: temp,
+                        max_tokens,
+                        tools: t,
+                        tool_choice: None,
+                        response_format: None,
+                        cancel_token: None,
+                    };
+                    let inner = llm_client.chat_stream(request).await?;
+                    // Adapt the trait's flattened ChatChunk back into the
+                    // ChatCompletionChunk shape consumed downstream (think
+                    // phase, direct_answer_stream). Both originate from the
+                    // same OpenAI stream, so no information is lost.
+                    let mapped = inner.map(|chunk_result| {
+                        chunk_result.map(|c| crate::llm::types::ChatCompletionChunk {
+                            id: String::new(),
+                            choices: vec![crate::llm::types::ChunkChoice {
+                                delta: c.delta,
+                                finish_reason: c.finish_reason,
+                                index: 0,
+                            }],
+                            usage: c.usage,
+                        })
+                    });
+                    Ok(Box::pin(mapped) as ChunkStream)
+                }
+            },
+        )
+        .await?;
+        return Ok(stream);
+    }
+
+    // ── Legacy reqwest fallback (no LlmClient injected) ──
+    let stream = super::super::retry::retry_llm_call(
         &snap.config.agent_name,
         snap.config.llm_max_retries,
         snap.config.llm_retry_delay_ms,
@@ -195,7 +255,7 @@ pub(crate) async fn create_llm_stream(
             let t = tools.clone();
             let ct = cancel.clone();
             async move {
-                crate::llm::stream_chat(
+                let s = crate::llm::stream_chat(
                     c,
                     &m,
                     ms,
@@ -206,9 +266,18 @@ pub(crate) async fn create_llm_stream(
                     None,
                     ct,
                 )
-                .await
+                .await?;
+                Ok(Box::pin(s)
+                    as std::pin::Pin<
+                        Box<
+                            dyn futures::Stream<
+                                    Item = Result<crate::llm::types::ChatCompletionChunk>,
+                                > + Send,
+                        >,
+                    >)
             }
         },
     )
-    .await
+    .await?;
+    Ok(stream)
 }

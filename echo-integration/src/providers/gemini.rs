@@ -125,7 +125,7 @@ impl LlmClient for GeminiClient {
     fn chat_stream(
         &self,
         request: ChatRequest,
-    ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
+    ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
         let model = self.config.model.clone();
         Box::pin(
             async move {

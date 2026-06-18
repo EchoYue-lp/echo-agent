@@ -191,6 +191,14 @@ pub struct AgentRunSnapshot {
     pub snapshot_manager: Arc<std::sync::RwLock<Option<SnapshotManager>>>,
     /// HTTP client.
     pub client: Arc<reqwest::Client>,
+    /// Optional trait-level LLM client. When present, the streaming core loop
+    /// (`create_llm_stream`) and `direct_answer_stream` route LLM calls through
+    /// this trait object instead of the raw `client` + model-resolve path —
+    /// enabling test doubles (MockLlmClient) to drive the full ReAct loop
+    /// without `echo-agent-models.yaml`. Production agents inject a real
+    /// `LlmClient` impl (OpenAiClient, …); when `None`, the legacy reqwest
+    /// fallback path is used (behavior unchanged).
+    pub llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
     /// Cancellation token (set after construction).
     pub cancel_token: Option<crate::agent::CancellationToken>,
     /// Recently read files for read-before-edit enforcement (path → read instant).
@@ -233,6 +241,7 @@ impl AgentRunSnapshot {
             guard: Arc::new(GuardRuntime::from_agent(agent)),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             client: agent.client().clone(),
+            llm_client: agent.llm_client().cloned(),
             cancel_token: agent.cancel_token.try_lock().ok().and_then(|g| g.clone()),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),

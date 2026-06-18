@@ -550,4 +550,133 @@ mod tests {
             AgentEvent::FinalAnswer(_)
         ));
     }
+
+    // ── End-to-end run_core_loop tests driven by MockLlmClient ─────────────
+    // These exercise the shared core loop (the one ReAct loop) through the
+    // public streaming entrypoint `run_stream_channel`, with a scripted mock
+    // LLM. No guard / no intent router on these agents, so the stream falls
+    // straight through to run_core_loop.
+
+    use crate::agent::react::builder::ReactAgentBuilder;
+    use crate::testing::{MockLlmClient, MockTool};
+
+    /// Build a streaming-capable agent backed by a scripted mock LLM, with
+    /// no guard and no intent router (so requests reach run_core_loop).
+    fn agent_with_mock_llm(llm: MockLlmClient) -> ReactAgent {
+        ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("You are a test assistant.")
+            .build()
+            .expect("agent builds")
+    }
+
+    /// Collect the AgentEvents emitted by one streaming turn.
+    async fn collect_events(agent: &ReactAgent, text: &str) -> Vec<AgentEvent> {
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: text.into(),
+                    message: None,
+                    label: String::new(),
+                },
+                StreamMode::Chat,
+            )
+            .await
+            .expect("stream starts");
+        let results: Vec<_> = stream.collect().await;
+        results
+            .into_iter()
+            .map(|r| r.expect("event is Ok"))
+            .collect()
+    }
+
+    /// A single-turn text answer: the mock LLM replies with plain content, so
+    /// the loop should emit a Token + a terminal FinalAnswer and stop (no tool
+    /// phase). Guards the core-loop text branch.
+    #[tokio::test]
+    async fn run_core_loop_text_only_yields_final_answer() {
+        let llm = MockLlmClient::new().with_response("Paris is the capital of France.");
+        let agent = agent_with_mock_llm(llm);
+
+        let events = collect_events(&agent, "What is the capital of France?").await;
+
+        // Must end with a FinalAnswer carrying the mock content.
+        let last = events.last().expect("at least one event");
+        match last {
+            AgentEvent::FinalAnswer(text) => {
+                assert!(
+                    text.contains("Paris"),
+                    "final answer should contain the mock text, got: {text:?}"
+                );
+            }
+            other => panic!("expected FinalAnswer as last event, got {other:?}"),
+        }
+    }
+
+    /// A full ReAct cycle: the mock LLM first requests a tool call, the tool
+    /// returns a scripted result, then the LLM produces a final text answer.
+    /// Guards the core-loop tool-call branch (think → tools → think → finalize).
+    #[tokio::test]
+    async fn run_core_loop_tool_call_cycle_completes() {
+        // The mock tool returns a fixed result; the LLM script is:
+        //   1. request tool_call "mock_calc" with args {"x": 6, "y": 7}
+        //   2. after seeing the tool result, emit a final text answer.
+        let llm = MockLlmClient::new()
+            .then_tool_call("call_1", "mock_calc", r#"{"x":6,"y":7}"#)
+            .with_response("The result is 42.");
+
+        let tool = MockTool::new("mock_calc").with_response("42");
+
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("You are a test assistant. Use tools when asked.")
+            .tool(Box::new(tool))
+            .build()
+            .expect("agent builds");
+
+        let events = collect_events(&agent, "What is 6 times 7?").await;
+
+        // The last event must be a FinalAnswer.
+        let last = events.last().expect("at least one event");
+        assert!(
+            matches!(last, AgentEvent::FinalAnswer(t) if t.contains("42")),
+            "expected FinalAnswer with 42, got: {last:?}"
+        );
+    }
+
+    /// When the mock LLM exhausts its response queue (returns EmptyResponse
+    /// error), the loop must terminate gracefully with an Error event rather
+    /// than hanging or panicking. Guards the empty-response / error branch.
+    #[tokio::test]
+    async fn run_core_loop_empty_llm_response_terminates_gracefully() {
+        // No preset responses — first LLM call yields EmptyResponse error.
+        let llm = MockLlmClient::new();
+        let agent = agent_with_mock_llm(llm);
+
+        // Collect raw results (may include Err — the point of this test is
+        // graceful termination, not a specific event shape).
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "anything".into(),
+                    message: None,
+                    label: String::new(),
+                },
+                StreamMode::Chat,
+            )
+            .await
+            .expect("stream starts");
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.collect::<Vec<_>>(),
+        )
+        .await;
+
+        // The loop must TERMINATE within the timeout — not hang forever on
+        // repeated retries of an empty mock queue.
+        assert!(
+            results.is_ok(),
+            "stream must terminate, not hang, on empty LLM response"
+        );
+    }
 }
