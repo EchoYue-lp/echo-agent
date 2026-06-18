@@ -117,8 +117,8 @@ pub fn extract_observations(
                 "make sure to ",
             ] {
                 if let Some(pos) = lower.find(keyword) {
-                    let end = content.len().min(pos + 200);
-                    let snippet = &content[pos..end];
+                    let end = lower.floor_char_boundary((pos + 200).min(lower.len()));
+                    let snippet = &lower[pos..end];
                     let obs = Observation {
                         category: ObservationCategory::User,
                         text: snippet.trim().to_string(),
@@ -148,8 +148,8 @@ pub fn extract_observations(
                 "this repo uses",
             ] {
                 if let Some(pos) = lower.find(keyword) {
-                    let end = content.len().min(pos + 200);
-                    let snippet = &content[pos..end];
+                    let end = lower.floor_char_boundary((pos + 200).min(lower.len()));
+                    let snippet = &lower[pos..end];
                     let obs = Observation {
                         category: ObservationCategory::Project,
                         text: snippet.trim().to_string(),
@@ -174,8 +174,8 @@ pub fn extract_observations(
                 "resolved by",
             ] {
                 if let Some(pos) = lower.find(keyword) {
-                    let end = content.len().min(pos + 300);
-                    let snippet = &content[pos..end];
+                    let end = lower.floor_char_boundary((pos + 300).min(lower.len()));
+                    let snippet = &lower[pos..end];
                     let obs = Observation {
                         category: ObservationCategory::Bug,
                         text: snippet.trim().to_string(),
@@ -199,8 +199,8 @@ pub fn extract_observations(
                 "architecture decision",
             ] {
                 if let Some(pos) = lower.find(keyword) {
-                    let end = content.len().min(pos + 200);
-                    let snippet = &content[pos..end];
+                    let end = lower.floor_char_boundary((pos + 200).min(lower.len()));
+                    let snippet = &lower[pos..end];
                     let obs = Observation {
                         category: ObservationCategory::Decision,
                         text: snippet.trim().to_string(),
@@ -451,8 +451,8 @@ mod tests {
             "Should extract at least one project pattern"
         );
         assert!(
-            project_obs.iter().any(|o| o.text.contains("Rust 2024")),
-            "Should detect Rust edition"
+            project_obs.iter().any(|o| o.text.contains("rust 2024")),
+            "Should detect Rust edition (text is lowercased after P0-2 fix — slicing on lower)"
         );
     }
 

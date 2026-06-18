@@ -8,6 +8,13 @@
 //! here so there is one — and only one — place to read the unified ReAct
 //! control flow. Each phase is responsible for a focused subset of work
 //! (audit, compaction, LLM call, tool execution, verification, finalization)
+//!
+//! **Known gap (P1-3/P1-4):** The streaming path does not run IntentRouter
+//! classification (short-circuit, skill activation) or `GuardDirection::Input`
+//! checks. Both are present in the non-streaming path (`react_loop.rs`).
+//! Streaming callers bypass these pre-flight checks; a future PR should
+//! converge the two paths so that `run_stream_channel` also calls
+//! `prepare_react_context` instead of the lighter `prepare_stream_context`.
 //! and reports back via outcome enums; the driver translates those into
 //! either "continue", a terminal `finalize_*`, or an early return.
 

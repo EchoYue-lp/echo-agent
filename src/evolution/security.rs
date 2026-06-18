@@ -449,10 +449,11 @@ impl EvolutionSecurityGuard {
     pub fn check_memory_write(&self, content: &str, trust: InputTrustLevel) -> SecurityVerdict {
         use std::sync::atomic::Ordering;
 
-        // 1. Rate limit
+        // 1. Rate limit (approximate — fetch_add + fetch_sub is not atomic
+        //    across the check, but under contention we err on the side of
+        //    denying writes, which is safe for a rate limiter).
         let current = self.session_writes.fetch_add(1, Ordering::Relaxed);
         if current >= self.config.max_writes_per_session {
-            // Roll back the increment since it was denied.
             self.session_writes.fetch_sub(1, Ordering::Relaxed);
             return SecurityVerdict::deny(format!(
                 "Rate limit exceeded: {} writes per session",

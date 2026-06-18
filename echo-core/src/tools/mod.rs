@@ -573,7 +573,10 @@ pub struct ToolContext {
 
 impl ToolContext {
     /// 解析路径：有绑定且为相对路径则 join；绝对路径或无绑定则原样返回。
-    pub fn resolve_path<'a>(&self, path: &'a std::path::Path) -> std::borrow::Cow<'a, std::path::Path> {
+    pub fn resolve_path<'a>(
+        &self,
+        path: &'a std::path::Path,
+    ) -> std::borrow::Cow<'a, std::path::Path> {
         match &self.working_dir {
             Some(base) if !path.is_absolute() => std::borrow::Cow::Owned(base.join(path)),
             _ => std::borrow::Cow::Borrowed(path),
@@ -601,21 +604,33 @@ mod tool_context_tests {
             conversation_id: Some("conv-1".into()),
             run_id: Some("run-1".into()),
         };
-        assert_eq!(ctx.working_dir.as_deref(), Some(std::path::Path::new("/tmp/wt")));
+        assert_eq!(
+            ctx.working_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/wt"))
+        );
         assert_eq!(ctx.conversation_id.as_deref(), Some("conv-1"));
         assert_eq!(ctx.run_id.as_deref(), Some("run-1"));
     }
 
     #[test]
     fn test_resolve_path_relative_joins() {
-        let ctx = ToolContext { working_dir: Some(PathBuf::from("/repo/wt")), ..Default::default() };
+        let ctx = ToolContext {
+            working_dir: Some(PathBuf::from("/repo/wt")),
+            ..Default::default()
+        };
         let resolved = ctx.resolve_path(std::path::Path::new("src/main.rs"));
-        assert_eq!(resolved.as_ref(), std::path::Path::new("/repo/wt/src/main.rs"));
+        assert_eq!(
+            resolved.as_ref(),
+            std::path::Path::new("/repo/wt/src/main.rs")
+        );
     }
 
     #[test]
     fn test_resolve_path_absolute_not_joined() {
-        let ctx = ToolContext { working_dir: Some(PathBuf::from("/repo/wt")), ..Default::default() };
+        let ctx = ToolContext {
+            working_dir: Some(PathBuf::from("/repo/wt")),
+            ..Default::default()
+        };
         let resolved = ctx.resolve_path(std::path::Path::new("/etc/hosts"));
         assert_eq!(resolved.as_ref(), std::path::Path::new("/etc/hosts"));
     }
@@ -647,10 +662,7 @@ mod execute_with_context_tests {
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
-        fn execute<'a>(
-            &'a self,
-            params: ToolParameters,
-        ) -> BoxFuture<'a, Result<ToolResult>> {
+        fn execute<'a>(&'a self, params: ToolParameters) -> BoxFuture<'a, Result<ToolResult>> {
             Box::pin(async move {
                 let msg = format!(
                     "echo: {}",

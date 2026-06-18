@@ -499,12 +499,7 @@ impl Tool for ShellTool {
                 if let Some(dir) = &ctx.working_dir {
                     command_builder.current_dir(dir);
                 }
-                match tokio::time::timeout(
-                    timeout_duration,
-                    command_builder.output(),
-                )
-                .await
-                {
+                match tokio::time::timeout(timeout_duration, command_builder.output()).await {
                     Ok(Ok(output)) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1006,10 +1001,10 @@ mod tests {
         // Compare via canonicalize to handle macOS /var -> /private/var symlink.
         let got = std::path::Path::new(result.output.trim());
         let got_canonical = std::fs::canonicalize(got).unwrap_or_else(|_| got.to_path_buf());
-        let want_canonical =
-            std::fs::canonicalize(&wt_dir).unwrap_or_else(|_| wt_dir.clone());
+        let want_canonical = std::fs::canonicalize(&wt_dir).unwrap_or_else(|_| wt_dir.clone());
         assert_eq!(
-            got_canonical, want_canonical,
+            got_canonical,
+            want_canonical,
             "pwd output {:?} should match working_dir {:?}",
             result.output.trim(),
             wt_dir

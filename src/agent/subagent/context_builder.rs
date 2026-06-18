@@ -337,7 +337,10 @@ impl SubagentOutput {
             map.insert(
                 "confidence".to_string(),
                 serde_json::Value::Number(
-                    serde_json::Number::from_f64(self.confidence as f64).unwrap(),
+                    // confidence is clamped to [0.0, 1.0]; from_f64 only fails on
+                    // NaN/Inf, which are unreachable here. Fall back to 0.
+                    serde_json::Number::from_f64(self.confidence as f64)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
                 ),
             );
         }

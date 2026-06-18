@@ -408,7 +408,7 @@ impl BackgroundReviewer {
             // writes receive security checks, audit log, promotion, and write
             // counter handling.
             if let Some(ref layer_manager) = layer_manager
-                && !content.contains("Nothing to save")
+                && !content.to_lowercase().contains("nothing to save")
             {
                 // Classify the memory type based on review content
                 let (memory_type, topic) = classify_review_content(&content);
@@ -424,7 +424,7 @@ impl BackgroundReviewer {
                 {
                     actions.push("Review saved to memory".to_string());
                 }
-            } else if !content.contains("Nothing to save") {
+            } else if !content.to_lowercase().contains("nothing to save") {
                 actions
                     .push("Review memory write skipped: layer manager not configured".to_string());
             }

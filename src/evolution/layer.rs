@@ -53,10 +53,10 @@ type Result<T> = std::result::Result<T, ReactError>;
 // ── Constants ──────────────────────────────────────────────────────────
 
 /// Namespace for warm-layer typed memories.
-const WARM_NAMESPACE: &[&str] = &["agent", "typed_memories"];
+pub const WARM_NAMESPACE: &[&str] = &["agent", "typed_memories"];
 
 /// Namespace for cold-layer archived memories.
-const COLD_NAMESPACE: &[&str] = &["agent", "cold_memories"];
+pub const COLD_NAMESPACE: &[&str] = &["agent", "cold_memories"];
 
 /// Maximum token budget for the hot layer (MEMORY.md body).
 const HOT_TOKEN_BUDGET: usize = 2000;
@@ -720,13 +720,21 @@ impl MemoryLayerManager {
         self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
 
         // Add to hot layer. If this fails, the entry is already deleted from warm
-        // but we can recover it from the error context; the caller should retry.
+        // but we attempt recovery by writing it back. If recovery also fails,
+        // the entry is lost — log at error level so operators can detect it.
         if let Err(e) = self.add_to_hot(&entry) {
-            // Best-effort recovery: write the entry back to warm.
-            let _ = self
+            if let Err(recovery_err) = self
                 .typed_store
                 .put_typed(WARM_NAMESPACE, key, &entry.content, entry.meta.clone())
-                .await;
+                .await
+            {
+                tracing::error!(
+                    key = %key,
+                    promotion_error = %e,
+                    recovery_error = %recovery_err,
+                    "promote_warm_to_hot: entry LOST — add_to_hot failed and warm recovery also failed"
+                );
+            }
             return Err(ReactError::from(e));
         }
 

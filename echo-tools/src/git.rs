@@ -35,7 +35,7 @@ pub struct GitStatusTool {
 impl ToolRunner<GitStatusToolParams> for GitStatusTool {
     async fn run(&self, params: GitStatusToolParams) -> Result<ToolResult> {
         let repo_path = params.repo_path.as_deref().unwrap_or(".");
-        let output = run_git(&repo_path,&["status", "--short"])?;
+        let output = run_git(&repo_path, &["status", "--short"])?;
         if output.is_empty() {
             Ok(ToolResult::success("Working directory clean, no changes"))
         } else {
@@ -125,7 +125,7 @@ impl Tool for GitDiffTool {
                 args.push(fp);
             }
 
-            let output = run_git(&repo_path,&args)?;
+            let output = run_git(&repo_path, &args)?;
             if output.is_empty() {
                 Ok(ToolResult::success("No differences".to_string()))
             } else {
@@ -224,7 +224,7 @@ impl Tool for GitLogTool {
             let extra_strs: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
             args.extend(&extra_strs);
 
-            let output = run_git(&repo_path,&args)?;
+            let output = run_git(&repo_path, &args)?;
             if output.is_empty() {
                 Ok(ToolResult::success(
                     "Repository has no commit history".to_string(),
@@ -305,7 +305,7 @@ impl Tool for GitBlameTool {
             args.push(file_path.to_string());
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(&repo_path,&str_args)?;
+            let output = run_git(&repo_path, &str_args)?;
             Ok(ToolResult::success(output))
         })
     }
@@ -386,7 +386,7 @@ impl Tool for GitBranchTool {
             }
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(&repo_path,&str_args)?;
+            let output = run_git(&repo_path, &str_args)?;
             Ok(ToolResult::success(format!("{}:\n{}", action, output)))
         })
     }
@@ -455,13 +455,13 @@ impl Tool for GitCommitTool {
                 for f_val in files {
                     if let Some(f) = f_val.as_str() {
                         let add_args = ["add", f];
-                        run_git(&repo_path,&add_args)?;
+                        run_git(&repo_path, &add_args)?;
                     }
                 }
             }
 
             let commit_args = ["commit", "-m", message];
-            let output = run_git(&repo_path,&commit_args)?;
+            let output = run_git(&repo_path, &commit_args)?;
             Ok(ToolResult::success(format!(
                 "Commit succeeded:\n{}",
                 output

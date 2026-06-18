@@ -69,7 +69,12 @@ impl Tool for CreateFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
-            let path = resolve_path("create_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "create_file",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -166,7 +171,12 @@ impl Tool for DeleteFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
-            let path = resolve_path("delete_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "delete_file",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -315,7 +325,12 @@ impl Tool for ReadFileTool {
 
             let _encoding = parameters.get("encoding").and_then(|v| v.as_str());
 
-            let path = resolve_path("read_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "read_file",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -460,7 +475,12 @@ impl Tool for WriteFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
 
-            let path = resolve_path("write_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "write_file",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             // Auto-create parent directory
             if let Some(parent) = path.parent() {
@@ -579,7 +599,12 @@ impl Tool for AppendFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
 
-            let path = resolve_path("append_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "append_file",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -695,7 +720,12 @@ impl Tool for UpdateFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("new_content".to_string()))?;
 
-            let path = resolve_path("update_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "update_file",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -804,8 +834,18 @@ impl Tool for MoveFileTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("new_path".to_string()))?;
 
-            let old_path = resolve_path("move_file", old_path_str, &self.base_dir, ctx.working_dir.as_deref())?;
-            let new_path = resolve_path("move_file", new_path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let old_path = resolve_path(
+                "move_file",
+                old_path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
+            let new_path = resolve_path(
+                "move_file",
+                new_path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if !old_path.exists() {
                 return Ok(ToolResult::error(format!(
@@ -920,7 +960,12 @@ impl Tool for ListDirTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
 
-            let path = resolve_path("list_dir", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "list_dir",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(

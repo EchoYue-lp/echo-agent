@@ -138,7 +138,7 @@ pub struct ReactAgent {
     /// `create_llm_stream` reads this field and passes it to the HTTP layer
     /// to support request-level stream cancellation.
     /// Uses `tokio::sync::Mutex` to support `&self` streaming methods.
-    cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
+    pub(crate) cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
 
     /// Optional run store for persisting execution traces.
     /// When set, each streaming execution records a [`Run`](crate::trace::Run)

@@ -233,7 +233,7 @@ impl AgentRunSnapshot {
             guard: Arc::new(GuardRuntime::from_agent(agent)),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             client: agent.client().clone(),
-            cancel_token: None,
+            cancel_token: agent.cancel_token.try_lock().ok().and_then(|g| g.clone()),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
             current_run_id: None, // set by run_stream_channel

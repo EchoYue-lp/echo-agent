@@ -184,7 +184,12 @@ impl Tool for CodeSearchTool {
                 .unwrap_or(50) as usize;
 
             // Resolve search path
-            let search_path = super::resolve_path("code_search", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let search_path = super::resolve_path(
+                "code_search",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if !search_path.exists() {
                 return Err(ToolError::ExecutionFailed {

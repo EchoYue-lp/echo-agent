@@ -33,9 +33,6 @@ use super::curator::{Curator, CuratorConfig};
 /// Namespace for skill candidate proposals in the Store.
 pub const CANDIDATE_NAMESPACE: &[&str] = &["agent", "skill_candidates"];
 
-/// Warm-layer namespace (must match `layer::WARM_NAMESPACE`).
-const WARM_NAMESPACE: &[&str] = &["agent", "typed_memories"];
-
 // ── SkillCandidate ─────────────────────────────────────────────────────
 
 /// A proposed skill candidate, derived from repeated memory observations.
@@ -185,11 +182,15 @@ impl SkillCandidateDetector {
         let wf_filter = MemoryFilter::new()
             .with_type(MemoryType::WorkflowPattern)
             .with_source(MemorySource::RepeatedWorkflow);
-        let workflow_entries = typed_store.list_typed(WARM_NAMESPACE, &wf_filter).await?;
+        let workflow_entries = typed_store
+            .list_typed(crate::evolution::layer::WARM_NAMESPACE, &wf_filter)
+            .await?;
 
         // 2. Query for DebuggingLesson entries (any source).
         let dl_filter = MemoryFilter::new().with_type(MemoryType::DebuggingLesson);
-        let debugging_entries = typed_store.list_typed(WARM_NAMESPACE, &dl_filter).await?;
+        let debugging_entries = typed_store
+            .list_typed(crate::evolution::layer::WARM_NAMESPACE, &dl_filter)
+            .await?;
 
         // 3. Group by (topic, memory_type).
         let mut groups: HashMap<(String, MemoryType), Vec<TypedMemoryEntry>> = HashMap::new();
@@ -346,7 +347,7 @@ fn extract_tool_names(entries: &[TypedMemoryEntry]) -> Vec<String> {
         let lower = content.to_lowercase();
         // Scan for "tool" mentions and extract the following name.
         for (idx, _) in lower.match_indices("tool") {
-            let after = &content[idx + 4..]; // skip "tool"
+            let after = &lower[idx + 4..]; // skip "tool"
             let name = extract_tool_name_after_keyword(after);
             if !name.is_empty() && seen.insert(name.to_string()) && tools.len() < 8 {
                 tools.push(name.to_string());
@@ -489,7 +490,7 @@ mod tests {
         for i in 0..3 {
             typed
                 .put_typed(
-                    WARM_NAMESPACE,
+                    crate::evolution::layer::WARM_NAMESPACE,
                     &format!("wf_{}", i),
                     &format!(
                         "Repeated workflow pattern: tool 'cargo' used {} times across sessions",
@@ -523,7 +524,7 @@ mod tests {
         for i in 0..2 {
             typed
                 .put_typed(
-                    WARM_NAMESPACE,
+                    crate::evolution::layer::WARM_NAMESPACE,
                     &format!("wf_{}", i),
                     "Some workflow",
                     wf_meta("build"),
@@ -548,7 +549,7 @@ mod tests {
         for i in 0..3 {
             typed
                 .put_typed(
-                    WARM_NAMESPACE,
+                    crate::evolution::layer::WARM_NAMESPACE,
                     &format!("wf_{}", i),
                     "Build pattern",
                     wf_meta("build"),
@@ -586,7 +587,7 @@ mod tests {
         for i in 0..3 {
             typed
                 .put_typed(
-                    WARM_NAMESPACE,
+                    crate::evolution::layer::WARM_NAMESPACE,
                     &format!("dl_{}", i),
                     &format!(
                         "Lesson: always run cargo check before cargo build (attempt {})",

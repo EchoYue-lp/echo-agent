@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use echo_core::memory::store::Store;
-use echo_state::skill_telemetry::SkillTelemetryStore;
+use echo_state::skill_telemetry::{SkillTelemetry, SkillTelemetryStore};
 use serde::{Deserialize, Serialize};
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
@@ -194,14 +194,15 @@ impl SkillSimilarityDetector {
             .ok()
             .flatten();
 
-        let score_a = telem_a
-            .as_ref()
-            .map(|t| t.activation_count as f64 + t.last_used as f64 / 1e12)
-            .unwrap_or(0.0);
-        let score_b = telem_b
-            .as_ref()
-            .map(|t| t.activation_count as f64 + t.last_used as f64 / 1e12)
-            .unwrap_or(0.0);
+        // Normalised scoring: 50% activation_count (≤1.0) + 50% recency
+        // (last_used normalised to [0, 1] via approximate epoch→now window).
+        // Previously `last_used / 1e12` ≈ 1.77 dominated activation_count ≤ 1.0.
+        fn usage_score(t: &SkillTelemetry) -> f64 {
+            let recency = (t.last_used as f64 / 1.7e12 - 1.0).clamp(0.0, 1.0);
+            t.activation_count as f64 * 0.5 + recency * 0.5
+        }
+        let score_a = telem_a.as_ref().map(usage_score).unwrap_or(0.0);
+        let score_b = telem_b.as_ref().map(usage_score).unwrap_or(0.0);
 
         if score_a >= score_b {
             (desc_a.name.clone(), desc_b.name.clone())

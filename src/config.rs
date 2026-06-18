@@ -106,14 +106,15 @@ impl AppConfig {
         };
         // TokenBudget 只在显式配置了 context_window 时设置 total_window，
         // 否则保持 Default（None → 走自动检测），避免强制启用 budget。
-        let token_budget_config = if self.model.context_window.is_some() || self.agent.token_limit > 0 {
-            TokenBudgetConfig {
-                total_window: Some(context_window),
-                ..Default::default()
-            }
-        } else {
-            TokenBudgetConfig::default()
-        };
+        let token_budget_config =
+            if self.model.context_window.is_some() || self.agent.token_limit > 0 {
+                TokenBudgetConfig {
+                    total_window: Some(context_window),
+                    ..Default::default()
+                }
+            } else {
+                TokenBudgetConfig::default()
+            };
 
         AgentConfig::standard(
             &self.model.name,
@@ -135,9 +136,12 @@ impl AppConfig {
         })
     }
 
-    /// Whether auto-compression is configured (token_limit > 0).
+    /// Whether auto-compression is configured.
+    ///
+    /// Matches `apply_compressor` predicate: a compressor is active when either
+    /// `token_limit > 0` (explicit) or `context_window` is set (inferred limit).
     pub fn has_compressor(&self) -> bool {
-        self.agent.token_limit > 0
+        self.agent.token_limit > 0 || self.model.context_window.is_some()
     }
 
     /// Apply a sliding-window compressor to the agent based on config.

@@ -495,22 +495,26 @@ impl SubagentExecutor {
         let start = Instant::now();
         let agent = agent_arc.as_ref();
 
-        // Check cancellation
-        if req.cancel.is_cancelled() {
-            return Ok(SubagentResult {
-                agent_name: req.agent_name.clone(),
-                output: "Cancelled before execution".into(),
-                duration: start.elapsed(),
-                iterations: 0,
-                tokens_used: None,
-                was_truncated: false,
-                mode: ExecutionMode::Sync,
-            });
-        }
-
-        let output = agent
-            .execute(&Self::enhance_task(&req.task, req.parent_context.as_ref()))
-            .await?;
+        // Race execution against cancellation (matches dispatch_fork pattern).
+        // Previously only checked cancel once before execute(); mid-execution
+        // cancel was not detected until the LLM call returned (P1-5).
+        let cancel = req.cancel.clone();
+        let task = Self::enhance_task(&req.task, req.parent_context.as_ref());
+        let output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Ok(SubagentResult {
+                    agent_name: req.agent_name.clone(),
+                    output: "Cancelled during execution".into(),
+                    duration: start.elapsed(),
+                    iterations: 0,
+                    tokens_used: None,
+                    was_truncated: false,
+                    mode: ExecutionMode::Sync,
+                });
+            }
+            r = agent.execute(&task) => r?,
+        };
 
         Ok(SubagentResult {
             agent_name: req.agent_name.clone(),

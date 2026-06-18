@@ -328,10 +328,17 @@ impl ChangeEntryBuilder {
     }
 
     /// Build the change entry, assigning a new ID and timestamp.
-    pub fn build(self, log: &dyn ChangeLog) -> ChangeEntry {
+    ///
+    /// Uses nanosecond-precision timestamp for the ID to avoid the TOCTOU race
+    /// that existed with `log.len() + 1` (which was read outside the lock).
+    pub fn build(self, _log: &dyn ChangeLog) -> ChangeEntry {
+        let now = Utc::now();
+        // timestamp_nanos_opt() returns None only on extreme overflow; fall back
+        // to 0 so the id stays well-formed (uniqueness is still backed by `now`).
+        let nanos = now.timestamp_nanos_opt().unwrap_or(0);
         ChangeEntry {
-            change_id: format!("chg_{:06}", log.len() + 1),
-            timestamp: Utc::now(),
+            change_id: format!("chg_{:016x}", nanos),
+            timestamp: now,
             entity_type: self.entity_type,
             entity_key: self.entity_key,
             change_type: self.change_type,

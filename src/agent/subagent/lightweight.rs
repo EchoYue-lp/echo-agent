@@ -245,20 +245,15 @@ impl LightweightSubagent {
             }
 
             // Check for tool calls (clone to avoid borrow conflict with push)
-            let has_tool_calls = assistant_msg
-                .tool_calls
-                .as_ref()
-                .map(|tcs| !tcs.is_empty())
-                .unwrap_or(false);
-
-            if has_tool_calls {
-                let tool_calls = assistant_msg.tool_calls.clone().unwrap();
-
+            let tool_calls = assistant_msg.tool_calls.clone();
+            if let Some(ref tcs) = tool_calls
+                && !tcs.is_empty()
+            {
                 // Push assistant message
                 self.messages.write().await.push(assistant_msg);
 
                 // Execute tool calls
-                for tc in &tool_calls {
+                for tc in tcs {
                     // Check cancel
                     if cancel.is_cancelled() {
                         return Err(ReactError::Agent(Box::new(

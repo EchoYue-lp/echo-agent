@@ -44,12 +44,6 @@ use crate::error::Result;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-/// Warm-layer namespace (must match `layer::WARM_NAMESPACE`).
-const WARM_NAMESPACE: &[&str] = &["agent", "typed_memories"];
-
-/// Cold-layer namespace (must match `layer::COLD_NAMESPACE`).
-const COLD_NAMESPACE: &[&str] = &["agent", "cold_memories"];
-
 /// Staleness threshold below which an entry stays Active.
 ///
 /// Calibrated to the formula's dynamic range (max ≈ 0.83), not the full `[0,1]`.
@@ -373,7 +367,7 @@ impl<'a> MemoryMerger<'a> {
         };
         self.typed_store
             .put_typed(
-                WARM_NAMESPACE,
+                crate::evolution::layer::WARM_NAMESPACE,
                 &primary.key,
                 &merged_content,
                 primary_meta.clone(),
@@ -400,7 +394,11 @@ impl<'a> MemoryMerger<'a> {
                 ..secondary.meta.clone()
             };
             self.typed_store
-                .update_meta(WARM_NAMESPACE, &secondary.key, secondary_meta)
+                .update_meta(
+                    crate::evolution::layer::WARM_NAMESPACE,
+                    &secondary.key,
+                    secondary_meta,
+                )
                 .await?;
             superseded_keys.push(secondary.key.clone());
 
@@ -557,7 +555,10 @@ impl MemoryReviewer {
 
         // ── 1. Scan warm layer ──
         let entries = typed_store
-            .list_typed(WARM_NAMESPACE, &MemoryFilter::new())
+            .list_typed(
+                crate::evolution::layer::WARM_NAMESPACE,
+                &MemoryFilter::new(),
+            )
             .await?;
         report.total_scanned = entries.len();
         if entries.is_empty() {
@@ -623,7 +624,11 @@ impl MemoryReviewer {
                             ..entry.meta.clone()
                         };
                         let _ = typed_store
-                            .update_meta(COLD_NAMESPACE, &report_entry.key, archived_meta)
+                            .update_meta(
+                                crate::evolution::layer::COLD_NAMESPACE,
+                                &report_entry.key,
+                                archived_meta,
+                            )
                             .await;
                     }
                     report.archives_applied += 1;
@@ -935,18 +940,31 @@ mod tests {
         )
         .with_confidence(0.50);
         typed
-            .put_typed(WARM_NAMESPACE, "high", "Build uses cargo 1.80", meta_high)
+            .put_typed(
+                crate::evolution::layer::WARM_NAMESPACE,
+                "high",
+                "Build uses cargo 1.80",
+                meta_high,
+            )
             .await
             .unwrap();
         typed
-            .put_typed(WARM_NAMESPACE, "low", "Build uses cargo 1.70", meta_low)
+            .put_typed(
+                crate::evolution::layer::WARM_NAMESPACE,
+                "low",
+                "Build uses cargo 1.70",
+                meta_low,
+            )
             .await
             .unwrap();
 
         let group = ConflictDetector::new()
             .detect(
                 &typed
-                    .list_typed(WARM_NAMESPACE, &MemoryFilter::new())
+                    .list_typed(
+                        crate::evolution::layer::WARM_NAMESPACE,
+                        &MemoryFilter::new(),
+                    )
                     .await
                     .unwrap(),
             )
@@ -963,7 +981,7 @@ mod tests {
 
         // Primary content should carry the merge annotation.
         let primary = typed
-            .get_typed(WARM_NAMESPACE, "high")
+            .get_typed(crate::evolution::layer::WARM_NAMESPACE, "high")
             .await
             .unwrap()
             .unwrap();
@@ -971,7 +989,7 @@ mod tests {
 
         // Secondary should be Superseded with superseded_by pointing at the primary.
         let secondary = typed
-            .get_typed(WARM_NAMESPACE, "low")
+            .get_typed(crate::evolution::layer::WARM_NAMESPACE, "low")
             .await
             .unwrap()
             .unwrap();
@@ -1022,13 +1040,22 @@ mod tests {
             .with_confidence(0.30)
             .with_stability(0.20);
         typed
-            .put_typed(WARM_NAMESPACE, "stale", "Long-forgotten fact", stale_meta)
+            .put_typed(
+                crate::evolution::layer::WARM_NAMESPACE,
+                "stale",
+                "Long-forgotten fact",
+                stale_meta,
+            )
             .await
             .unwrap();
         // Force the underlying item's timestamp into the distant past.
         // We use `put_raw` so the Store doesn't overwrite updated_at with now().
         {
-            let item = store.get(WARM_NAMESPACE, "stale").await.unwrap().unwrap();
+            let item = store
+                .get(crate::evolution::layer::WARM_NAMESPACE, "stale")
+                .await
+                .unwrap()
+                .unwrap();
             let mut past = item;
             past.created_at = days_ago_secs(200);
             past.updated_at = days_ago_secs(200);
@@ -1045,11 +1072,21 @@ mod tests {
         )
         .with_confidence(0.55);
         typed
-            .put_typed(WARM_NAMESPACE, "build_a", "Build uses cargo 1.80", c1)
+            .put_typed(
+                crate::evolution::layer::WARM_NAMESPACE,
+                "build_a",
+                "Build uses cargo 1.80",
+                c1,
+            )
             .await
             .unwrap();
         typed
-            .put_typed(WARM_NAMESPACE, "build_b", "Build uses cargo 1.70", c2)
+            .put_typed(
+                crate::evolution::layer::WARM_NAMESPACE,
+                "build_b",
+                "Build uses cargo 1.70",
+                c2,
+            )
             .await
             .unwrap();
 
@@ -1062,7 +1099,12 @@ mod tests {
         .with_confidence(0.95)
         .with_stability(0.90);
         typed
-            .put_typed(WARM_NAMESPACE, "good", "User prefers concise output", good)
+            .put_typed(
+                crate::evolution::layer::WARM_NAMESPACE,
+                "good",
+                "User prefers concise output",
+                good,
+            )
             .await
             .unwrap();
 
@@ -1087,7 +1129,10 @@ mod tests {
         assert!(matches!(loc, Some((MemoryLayer::Cold, _))));
 
         // The lower-confidence conflict entry should be superseded.
-        let build_b = typed.get_typed(WARM_NAMESPACE, "build_b").await.unwrap();
+        let build_b = typed
+            .get_typed(crate::evolution::layer::WARM_NAMESPACE, "build_b")
+            .await
+            .unwrap();
         if let Some(entry) = build_b {
             assert_eq!(entry.meta.status, MemoryStatus::Superseded);
             assert_eq!(entry.meta.superseded_by.as_deref(), Some("build_a"));

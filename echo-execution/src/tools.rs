@@ -453,7 +453,9 @@ mod execute_with_context_tests {
     async fn test_execute_tool_with_context_forwards_ctx() {
         let tm = ToolManager::new();
         let captured = Arc::new(Mutex::new(None));
-        tm.register(Box::new(CtxCapturingTool { captured: captured.clone() }));
+        tm.register(Box::new(CtxCapturingTool {
+            captured: captured.clone(),
+        }));
 
         let ctx = ToolContext {
             working_dir: Some(PathBuf::from("/wt/x")),
@@ -465,7 +467,10 @@ mod execute_with_context_tests {
             .unwrap();
 
         let got = captured.lock().unwrap().clone().expect("ctx not captured");
-        assert_eq!(got.working_dir.as_deref(), Some(std::path::Path::new("/wt/x")));
+        assert_eq!(
+            got.working_dir.as_deref(),
+            Some(std::path::Path::new("/wt/x"))
+        );
         assert_eq!(got.conversation_id.as_deref(), Some("c"));
         assert_eq!(got.run_id.as_deref(), Some("r"));
     }
@@ -476,9 +481,13 @@ mod execute_with_context_tests {
         // inner path with a default (all-None) ctx.
         let tm = ToolManager::new();
         let captured = Arc::new(Mutex::new(None));
-        tm.register(Box::new(CtxCapturingTool { captured: captured.clone() }));
+        tm.register(Box::new(CtxCapturingTool {
+            captured: captured.clone(),
+        }));
 
-        tm.execute_tool("capture", ToolParameters::new()).await.unwrap();
+        tm.execute_tool("capture", ToolParameters::new())
+            .await
+            .unwrap();
 
         let got = captured.lock().unwrap().clone().expect("ctx not captured");
         assert!(got.working_dir.is_none());
@@ -504,7 +513,9 @@ mod execute_with_context_tests {
         // "sessions" strictly sequentially and assert after each, which is
         // enough to prove the ctx comes from the caller, not ToolManager state.
         let captured = Arc::new(Mutex::new(None));
-        tm.register(Box::new(CtxCapturingTool { captured: captured.clone() }));
+        tm.register(Box::new(CtxCapturingTool {
+            captured: captured.clone(),
+        }));
 
         // "Session A" binds worktree /wt/a.
         let ctx_a = ToolContext {
@@ -515,7 +526,11 @@ mod execute_with_context_tests {
         tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_a)
             .await
             .unwrap();
-        let got_a = captured.lock().unwrap().clone().expect("A: ctx not captured");
+        let got_a = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("A: ctx not captured");
         assert_eq!(got_a.working_dir.as_deref(), Some(Path::new("/wt/a")));
         assert_eq!(got_a.conversation_id.as_deref(), Some("conv-a"));
 
@@ -528,7 +543,11 @@ mod execute_with_context_tests {
         tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_b)
             .await
             .unwrap();
-        let got_b = captured.lock().unwrap().clone().expect("B: ctx not captured");
+        let got_b = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("B: ctx not captured");
         assert_eq!(got_b.working_dir.as_deref(), Some(Path::new("/wt/b")));
         assert_eq!(got_b.conversation_id.as_deref(), Some("conv-b"));
 
@@ -537,7 +556,11 @@ mod execute_with_context_tests {
         tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_a)
             .await
             .unwrap();
-        let got_a2 = captured.lock().unwrap().clone().expect("A2: ctx not captured");
+        let got_a2 = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("A2: ctx not captured");
         assert_eq!(
             got_a2.working_dir.as_deref(),
             Some(Path::new("/wt/a")),

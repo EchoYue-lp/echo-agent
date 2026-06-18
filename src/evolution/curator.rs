@@ -136,6 +136,14 @@ impl CuratorState {
 /// - Deprecated → Archived (after `archive_days` of inactivity)
 ///
 /// Only operates on agent-created skills. Pinned skills are exempt.
+/// Skill lifecycle curator backed by a JSON state file.
+///
+/// **Concurrency note**: each `Curator` instance independently reads and writes
+/// the state file (`load_state` → mutate → `save_state`). Callers that create
+/// multiple `Curator` instances sharing the same state path (e.g. `candidate.rs`
+/// and `draft.rs` both calling `Curator::default_path()`) risk lost-update races.
+/// Intent: a future PR should introduce a shared `Arc<Mutex<Curator>>` or
+/// file-level advisory lock to serialise access.
 pub struct Curator {
     config: CuratorConfig,
     state_path: PathBuf,

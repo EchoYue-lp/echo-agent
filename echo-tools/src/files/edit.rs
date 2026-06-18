@@ -119,7 +119,12 @@ impl Tool for EditFileTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let path = resolve_path("edit_file", path_str, &self.base_dir, ctx.working_dir.as_deref())?;
+            let path = resolve_path(
+                "edit_file",
+                path_str,
+                &self.base_dir,
+                ctx.working_dir.as_deref(),
+            )?;
 
             if !path.exists() {
                 return Ok(ToolResult::error(format!(
