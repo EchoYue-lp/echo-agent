@@ -190,6 +190,13 @@ pub struct LlmConfig {
     /// LLM 供应商
     #[serde(default)]
     pub provider: LlmProvider,
+    /// 原始 provider 标识(如 "openai"/"deepseek"/"dashscope"/"moonshot"/"zhipu"/
+    /// "azure"/"gemini"/"ollama"/"anthropic")。`LlmProvider` 枚举把所有 OpenAI
+    /// 兼容供应商折叠成 `OpenAi`,`provider_name` 保留原始身份用于 thinking
+    /// 协议解析(同一模型走 deepseek 官方用 reasoning_effort,走百炼用
+    /// enable_thinking)。`None` 时退回按模型名推断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
     /// Chat Completions 接口完整 URL
     pub base_url: String,
     /// API 密钥
@@ -226,6 +233,7 @@ impl LlmConfig {
     ) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
+            provider_name: Some("new".to_string()),
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
@@ -243,6 +251,7 @@ impl LlmConfig {
         let config = Config::get_model(model_name)?;
         Ok(Self {
             provider: config.provider,
+            provider_name: config.provider_name,
             base_url: config.baseurl,
             api_key: config.apikey,
             model: config.model,
@@ -259,6 +268,7 @@ impl LlmConfig {
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
+            provider_name: Some("openai".to_string()),
             base_url: provider_urls::OPENAI.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -270,6 +280,7 @@ impl LlmConfig {
     pub fn anthropic(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::Anthropic,
+            provider_name: Some("anthropic".to_string()),
             base_url: provider_urls::ANTHROPIC.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -281,6 +292,7 @@ impl LlmConfig {
     pub fn ollama(model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::Ollama,
+            provider_name: Some("ollama".to_string()),
             base_url: provider_urls::OLLAMA.to_string(),
             api_key: String::new(),
             model: model.into(),
@@ -292,6 +304,7 @@ impl LlmConfig {
     pub fn deepseek(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
+            provider_name: Some("deepseek".to_string()),
             base_url: provider_urls::DEEPSEEK.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -303,6 +316,7 @@ impl LlmConfig {
     pub fn dashscope(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::OpenAi,
+            provider_name: Some("dashscope".to_string()),
             base_url: provider_urls::DASHSCOPE.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -314,6 +328,7 @@ impl LlmConfig {
     pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             provider: LlmProvider::Gemini,
+            provider_name: Some("gemini".to_string()),
             base_url: provider_urls::GEMINI.to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -331,6 +346,7 @@ impl LlmConfig {
     ) -> Self {
         Self {
             provider: LlmProvider::Azure,
+            provider_name: Some("azure".to_string()),
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: deployment.into(),
@@ -385,6 +401,7 @@ impl LlmConfig {
             baseurl: self.base_url.clone(),
             apikey: self.api_key.clone(),
             provider: self.provider.clone(),
+            provider_name: self.provider_name.clone(),
             thinking: None,
         }
     }
@@ -480,6 +497,7 @@ impl ProviderFactory {
 
         let config = LlmConfig {
             provider: llm_provider,
+            provider_name: Some(provider.to_string()),
             base_url: base_url.to_string(),
             api_key,
             model: model.to_string(),
@@ -573,6 +591,37 @@ fn detect_provider_from_url(url: &str) -> LlmProvider {
     }
 }
 
+/// Return the original provider id string inferred from a base_url (mirror of
+/// [`detect_provider_from_url`], but preserving the textual identity needed for
+/// thinking-protocol resolution). Returns `None` when no strong signal exists
+/// (generic OpenAI-compatible endpoints defer to model-name inference).
+fn provider_name_from_url(url: &str) -> Option<String> {
+    let lower = url.to_lowercase();
+    if lower.contains(provider_urls::ANTHROPIC) || lower.contains("anthropic") {
+        Some("anthropic".into())
+    } else if lower.contains("ollama") {
+        Some("ollama".into())
+    } else if lower.contains(provider_urls::GEMINI)
+        || lower.contains("generativelanguage.googleapis")
+    {
+        Some("gemini".into())
+    } else if lower.contains(".openai.azure.com") {
+        Some("azure".into())
+    } else if lower.contains("dashscope.aliyuncs") {
+        Some("dashscope".into())
+    } else if lower.contains("api.deepseek.com") {
+        Some("deepseek".into())
+    } else if lower.contains("moonshot") || lower.contains("kimi") {
+        Some("moonshot".into())
+    } else if lower.contains("bigmodel") || lower.contains("zhipu") || lower.contains("z.ai") {
+        Some("zhipu".into())
+    } else if lower.contains("openai.com") {
+        Some("openai".into())
+    } else {
+        None
+    }
+}
+
 // ── YAML 配置文件类型 ────────────────────────────────────────────────────────
 
 /// 配置文件根结构
@@ -655,6 +704,9 @@ pub struct ModelConfig {
     /// LLM 供应商类型（用于自动选择客户端实现）
     #[serde(default)]
     pub provider: LlmProvider,
+    /// 原始 provider 标识(见 [`LlmConfig::provider_name`])。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
     /// 思考深度 / reasoning-depth 控制（可选）。
     ///
     /// 配置文件里可写成字符串形式,自动解析:`"auto"`/`""`(默认,不发字段)、
@@ -841,7 +893,7 @@ impl Config {
         let mut invalid_models = HashMap::new();
 
         for (key, entry) in file.models {
-            let parsed: Result<(String, String, String, LlmProvider)> = (|| {
+            let parsed: Result<(String, String, String, LlmProvider, Option<String>)> = (|| {
                 // 解析 base_url：显式指定 > provider 快捷方式
                 let base_url = match (entry.base_url.as_deref(), entry.provider.as_deref()) {
                     (Some(url), _) => resolve_env_ref(url),
@@ -879,20 +931,29 @@ impl Config {
                     .unwrap_or_else(|| key.clone());
 
                 // 确定 provider：显式指定 > 从 base_url 推断
-                let provider = match entry.provider.as_deref() {
-                    Some(p) => parse_provider(&resolve_env_ref(p)),
-                    None => detect_provider_from_url(&base_url),
+                let (provider, provider_name) = match entry.provider.as_deref() {
+                    Some(p) => {
+                        let raw = resolve_env_ref(p);
+                        let parsed = parse_provider(&raw);
+                        (parsed, Some(raw))
+                    }
+                    None => {
+                        let detected = detect_provider_from_url(&base_url);
+                        (detected, provider_name_from_url(&base_url))
+                    }
                 };
-                Ok((base_url, api_key, model_name, provider))
-            })();
+                Ok((base_url, api_key, model_name, provider, provider_name))
+            })(
+            );
 
             match parsed {
-                Ok((base_url, api_key, model_name, provider)) => {
+                Ok((base_url, api_key, model_name, provider, provider_name)) => {
                     let mc = ModelConfig {
                         model: model_name.clone(),
                         baseurl: base_url,
                         apikey: api_key,
                         provider,
+                        provider_name,
                         thinking: None,
                     };
 
@@ -1118,6 +1179,7 @@ fn builtin_model_config(model: &str) -> Option<ModelConfig> {
         baseurl,
         apikey,
         provider: parse_provider(provider),
+        provider_name: Some(provider.to_string()),
         thinking: None,
     })
 }

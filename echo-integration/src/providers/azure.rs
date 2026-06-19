@@ -82,6 +82,7 @@ impl AzureOpenAiClient {
             baseurl: base_url,
             apikey: api_key.to_string(),
             provider: LlmProvider::Azure,
+            provider_name: Some("azure".to_string()),
             thinking: None,
         };
 

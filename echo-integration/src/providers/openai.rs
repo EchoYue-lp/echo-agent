@@ -168,9 +168,15 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                // Resolve the thinking protocol from the REAL provider (e.g.
+                // "dashscope"), not the LlmProvider enum (which collapses all
+                // OpenAI-compatible providers into "openai"). The same model
+                // (e.g. deepseek-v4-pro) uses reasoning_effort via
+                // api.deepseek.com but enable_thinking via Bailian/DashScope.
+                let provider_str = self.config.provider_name.as_deref().unwrap_or("openai");
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
-                    "openai",
+                    provider_str,
                     &request.thinking,
                     ProviderCapabilities::openai_compatible(),
                 );
@@ -222,9 +228,10 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                let provider_str = self.config.provider_name.as_deref().unwrap_or("openai");
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
-                    "openai",
+                    provider_str,
                     &request.thinking,
                     ProviderCapabilities::openai_compatible(),
                 );

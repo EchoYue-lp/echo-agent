@@ -170,6 +170,38 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_via_dashscope_uses_enable_thinking() {
+        // CRITICAL: the SAME deepseek-v4-pro model, hosted on Alibaba Cloud
+        // Model Studio (Bailian / DashScope), uses `enable_thinking` — NOT
+        // reasoning_effort. Provider takes precedence over model name.
+        // Verified: https://help.aliyun.com/zh/model-studio/deep-thinking
+        let r = translate(
+            "deepseek-v4-pro",
+            "dashscope",
+            Some(ThinkingConfig::Level(ThinkingLevel::High)),
+        );
+        assert_eq!(r.enable_thinking, Some(true));
+        assert!(
+            r.reasoning_effort.is_none(),
+            "DeepSeek via DashScope must use enable_thinking, not reasoning_effort"
+        );
+        assert!(!r.drop_temperature);
+    }
+
+    #[test]
+    fn qwen_via_aliyun_provider_alias_uses_enable_thinking() {
+        // Any alias of the Bailian provider must resolve to enable_thinking.
+        let r = translate(
+            "qwen3-max",
+            "aliyun",
+            Some(ThinkingConfig::BudgetTokens(4096)),
+        );
+        assert_eq!(r.enable_thinking, Some(true));
+        assert_eq!(r.thinking_budget, Some(4096));
+        assert!(r.reasoning_effort.is_none());
+    }
+
+    #[test]
     fn qwen3_enable_thinking_flag() {
         let r = translate(
             "qwen3-235b-a22b",

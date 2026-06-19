@@ -52,6 +52,7 @@ impl GeminiClient {
             baseurl: base_url.to_string(),
             apikey: api_key.to_string(),
             provider: LlmProvider::Gemini,
+            provider_name: Some("gemini".to_string()),
             thinking: None,
         };
         let header_map = build_headers(&model_config)?;

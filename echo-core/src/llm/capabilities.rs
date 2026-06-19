@@ -283,6 +283,21 @@ fn resolve_thinking_protocol(lower_model: &str, provider: &str) -> ThinkingProto
     use ThinkingProtocol as T;
     let provider_lower = provider.to_ascii_lowercase();
 
+    // ── Alibaba Cloud Model Studio (Bailian / DashScope) ──
+    // IMPORTANT: on Bailian, ALL thinking-capable models (Qwen3+, AND DeepSeek
+    // hosted on Bailian) use `enable_thinking` + `thinking_budget` — regardless
+    // of the model family. This is the OpenAI-compatible Chat Completions entry.
+    // DeepSeek hosted on api.deepseek.com (the `deepseek` provider) is the ONLY
+    // path that uses `reasoning_effort`. So provider takes precedence over model
+    // name here.
+    // Verified: https://help.aliyun.com/zh/model-studio/deep-thinking
+    if matches!(
+        provider_lower.as_str(),
+        "dashscope" | "qwen" | "aliyun" | "alibaba" | "modelstudio" | "bailian"
+    ) {
+        return T::EnableThinkingFlag;
+    }
+
     // ── Anthropic family ──
     if provider_lower == "anthropic" || lower_model.starts_with("claude-") {
         // Claude names put the version in varied positions
