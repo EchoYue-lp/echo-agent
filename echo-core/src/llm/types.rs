@@ -560,6 +560,17 @@ pub struct ChatCompletionRequest {
     /// `enable_thinking` for Qwen3 models that accept an explicit budget.
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinking_budget")]
     pub thinking_budget: Option<u32>,
+    /// GLM-4.5/4.6 `thinking:{type:"enabled"|"disabled"}` block. Only emitted
+    /// for models that speak [`ThinkingProtocol::GlmThinkingType`].
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thinking")]
+    pub glm_thinking: Option<GlmThinkingBlock>,
+}
+
+/// GLM `thinking:{type:"enabled"|"disabled"}` wire block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlmThinkingBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
 }
 
 /// Tool definition sent to the LLM

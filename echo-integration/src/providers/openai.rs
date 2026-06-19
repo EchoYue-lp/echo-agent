@@ -68,6 +68,7 @@ pub async fn chat(
         reasoning_effort: None,
         enable_thinking: None,
         thinking_budget: None,
+        glm_thinking: None,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -101,6 +102,7 @@ pub async fn stream_chat(
         reasoning_effort: None,
         enable_thinking: None,
         thinking_budget: None,
+        glm_thinking: None,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -166,27 +168,31 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
-                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
-                    translate_thinking_openai_compat(
-                        &self.config.model,
-                        "openai",
-                        &request.thinking,
-                        ProviderCapabilities::openai_compatible(),
-                    );
+                let t = translate_thinking_openai_compat(
+                    &self.config.model,
+                    "openai",
+                    &request.thinking,
+                    ProviderCapabilities::openai_compatible(),
+                );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
                     // o-series / GPT-5 reasoning models reject temperature.
-                    temperature: if drop_temp { None } else { request.temperature },
+                    temperature: if t.drop_temperature {
+                        None
+                    } else {
+                        request.temperature
+                    },
                     max_tokens: request.max_tokens,
                     stream: None,
                     stream_options: None,
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
-                    reasoning_effort,
-                    enable_thinking,
-                    thinking_budget,
+                    reasoning_effort: t.reasoning_effort,
+                    enable_thinking: t.enable_thinking,
+                    thinking_budget: t.thinking_budget,
+                    glm_thinking: t.glm_thinking,
                 };
 
                 let raw = post(
@@ -216,26 +222,30 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
-                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
-                    translate_thinking_openai_compat(
-                        &self.config.model,
-                        "openai",
-                        &request.thinking,
-                        ProviderCapabilities::openai_compatible(),
-                    );
+                let t = translate_thinking_openai_compat(
+                    &self.config.model,
+                    "openai",
+                    &request.thinking,
+                    ProviderCapabilities::openai_compatible(),
+                );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
-                    temperature: if drop_temp { None } else { request.temperature },
+                    temperature: if t.drop_temperature {
+                        None
+                    } else {
+                        request.temperature
+                    },
                     max_tokens: request.max_tokens,
                     stream: Some(true),
                     stream_options: Some(serde_json::json!({"include_usage": true})),
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
-                    reasoning_effort,
-                    enable_thinking,
-                    thinking_budget,
+                    reasoning_effort: t.reasoning_effort,
+                    enable_thinking: t.enable_thinking,
+                    thinking_budget: t.thinking_budget,
+                    glm_thinking: t.glm_thinking,
                 };
 
                 let stream = stream_post(

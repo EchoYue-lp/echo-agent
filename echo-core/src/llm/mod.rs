@@ -8,7 +8,8 @@ use crate::error::Result;
 pub use thinking::{ThinkingConfig, ThinkingLevel, ThinkingProtocol};
 pub use types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, DeltaMessage, FunctionCall,
-    FunctionSpec, JsonSchemaSpec, Message, ResponseFormat, Role, ToolCall, ToolDefinition,
+    FunctionSpec, GlmThinkingBlock, JsonSchemaSpec, Message, ResponseFormat, Role, ToolCall,
+    ToolDefinition,
 };
 
 use futures::future::BoxFuture;

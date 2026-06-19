@@ -172,7 +172,8 @@ impl AnthropicClient {
         // 4.6+/4.7+ use adaptive thinking and reject it — resolve the protocol
         // from the model name so we never send a block the API will 400 on.
         let max_tokens = request.max_tokens.unwrap_or(4096);
-        let thinking = build_anthropic_thinking(&self.model, &request.thinking, max_tokens);
+        let (thinking, effort) =
+            build_anthropic_thinking(&self.model, &request.thinking, max_tokens);
 
         AnthropicRequest {
             model: self.model.clone(),
@@ -183,6 +184,7 @@ impl AnthropicClient {
             tools,
             stream: None,
             thinking,
+            effort,
         }
     }
 
@@ -569,57 +571,83 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
-    /// Extended-thinking block (`thinking: {type:"enabled", budget_tokens}`).
+    /// Extended-thinking block.
     ///
-    /// Only emitted when (a) the request carries a [`ThinkingConfig`] and (b)
-    /// the resolved model speaks [`ThinkingProtocol::AnthropicThinkingBudget`]
-    /// (Claude 3.7–4.5). Claude 4.6+ / 4.7+ use adaptive thinking and reject
-    /// this block with a 400, so for those models the field is left `None`
-    /// even when a thinking config is supplied (logged as a warning).
+    /// - Claude 3.7–4.5 (`AnthropicThinkingBudget`): `{type:"enabled", budget_tokens:N}`.
+    /// - Claude 4.6 (`AnthropicEffort`): `{type:"adaptive"}` (the model decides
+    ///   depth based on the `effort` field); budget_tokens is rejected here.
+    /// - Claude Opus 4.7+ (`AnthropicAdaptive`): the block is dropped entirely
+    ///   (sending it returns a 400).
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
+    /// Effort control (Claude 4.5+, primarily 4.6). One of
+    /// `low`/`medium`/`high`/`xhigh`/`max`. Replaces `budget_tokens` as the
+    /// recommended depth knob on newer models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
 }
 
-/// `{"type":"enabled","budget_tokens":N}` block for Anthropic extended thinking.
+/// Anthropic `thinking` block. For 3.7–4.5 this is
+/// `{type:"enabled", budget_tokens}`; for 4.6 it's `{type:"adaptive"}`.
 #[derive(Serialize)]
 struct AnthropicThinking {
     #[serde(rename = "type")]
     block_type: &'static str,
-    budget_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<u32>,
 }
 
-/// Resolve the Anthropic extended-thinking block for a request, or `None` if
-/// none should be sent.
+/// Resolve the Anthropic thinking fields for a request.
 ///
-/// - Claude 3.7–4.5 (`AnthropicThinkingBudget`): translate the config to a
-///   `budget_tokens` value via [`ThinkingConfig::to_anthropic_budget`].
-/// - Claude 4.6+/4.7+ (`AnthropicAdaptive`): the legacy block is deprecated
-///   and returns a 400 — drop any config with a `warn!`.
-/// - Other protocols / `None`: no block.
+/// Returns `(thinking_block, effort)`:
+/// - Claude 3.7–4.5 (`AnthropicThinkingBudget`): `{type:"enabled", budget_tokens:N}`
+///   + optional `effort` (4.5 accepts effort alongside budget).
+/// - Claude 4.6 (`AnthropicEffort`): `{type:"adaptive"}` + `effort`. budget_tokens
+///   is rejected on 4.6, so it is NOT emitted.
+/// - Claude Opus 4.7+ (`AnthropicAdaptive`): both fields dropped (legacy block
+///   returns a 400; the model decides its own depth).
+/// - Other protocols / `None`: no fields.
 fn build_anthropic_thinking(
     model: &str,
     thinking: &Option<echo_core::llm::ThinkingConfig>,
     max_tokens: u32,
-) -> Option<AnthropicThinking> {
+) -> (Option<AnthropicThinking>, Option<String>) {
     use echo_core::llm::ThinkingProtocol as T;
-    let cfg = thinking.as_ref()?;
+    let Some(cfg) = thinking.as_ref() else {
+        return (None, None);
+    };
     let profile = ModelProfile::new(model, "anthropic", ProviderCapabilities::anthropic());
     match profile.thinking_protocol {
         T::AnthropicThinkingBudget => {
-            cfg.to_anthropic_budget(max_tokens)
+            // 3.7–4.5: budget_tokens (effort is also accepted on 4.5).
+            let block = cfg
+                .to_anthropic_budget(max_tokens)
                 .map(|budget| AnthropicThinking {
                     block_type: "enabled",
-                    budget_tokens: budget,
+                    budget_tokens: Some(budget),
+                });
+            (block, None)
+        }
+        T::AnthropicEffort => {
+            // Claude 4.6: adaptive thinking block + effort. budget_tokens 400s.
+            let block = if matches!(cfg, echo_core::llm::ThinkingConfig::Disabled) {
+                None
+            } else {
+                Some(AnthropicThinking {
+                    block_type: "adaptive",
+                    budget_tokens: None,
                 })
+            };
+            (block, cfg.to_anthropic_effort().map(str::to_string))
         }
         T::AnthropicAdaptive => {
             warn!(
                 model = model,
-                "thinking config ignored: Claude 4.6+/4.7+ use adaptive thinking (legacy block would 400)"
+                "thinking config ignored: Claude Opus 4.7+ use adaptive-only thinking (any field would 400)"
             );
-            None
+            (None, None)
         }
-        _ => None,
+        _ => (None, None),
     }
 }
 

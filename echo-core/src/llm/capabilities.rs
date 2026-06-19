@@ -268,40 +268,59 @@ impl ModelProfile {
 /// Resolve the thinking wire-protocol from a (lowercased) model name and
 /// provider. Pure function so it can be unit-tested without a runtime.
 ///
-/// Naming conventions as of mid-2026:
-/// - GPT-5 / 5-mini / 5-nano, o3 / o4-mini → `reasoning_effort`
-///   (note: GPT-5-nano reportedly ignores `reasoning_effort`; callers should
-///   still treat the protocol as `OpenaiReasoningEffort` and let the API warn)
-/// - Claude 3.7 / 4 Sonnet & Opus (≤ 4.5) → `thinking.budget_tokens`
-/// - Claude 4.6 / 4.7+ → adaptive (legacy `thinking` block returns 400)
-/// - Qwen3, GLM-4.6+/GLM-5, DeepSeek-R1 → `enable_thinking` (+ `thinking_budget`
-///   for Qwen3)
+/// Verified against each vendor's official API docs (mid-2026):
+/// - **OpenAI** GPT-5 / 5-mini (NOT 5-nano), o3 / o4-mini → `reasoning_effort`
+/// - **DeepSeek** V3.2+ / R1 → `reasoning_effort` (OpenAI-compatible, NOT enable_thinking)
+/// - **Claude 4.6** Sonnet/Opus → `effort` + `thinking:{type:"adaptive"}`
+/// - **Claude 3.7 / 4 / 4.5** → `thinking:{type:"enabled",budget_tokens}` (+ effort on 4.5)
+/// - **Claude Opus 4.7+** → adaptive-only (budget_tokens returns 400)
+/// - **Qwen3** → `enable_thinking` + `thinking_budget`
+/// - **GLM-4.5/4.6** → `thinking:{type:"enabled"|"disabled"}` (on/off ONLY, no depth)
+/// - **GLM-5.x** → `reasoning_effort` (5.2 confirmed in official OpenAPI; max/xhigh/high/...)
+/// - **Kimi** kimi-k2.7-* → thinking always on for k2.7-code; NO request-side
+///   depth knob → `None` (depth is chosen by model selection, not a parameter)
 fn resolve_thinking_protocol(lower_model: &str, provider: &str) -> ThinkingProtocol {
     use ThinkingProtocol as T;
     let provider_lower = provider.to_ascii_lowercase();
 
     // ── Anthropic family ──
     if provider_lower == "anthropic" || lower_model.starts_with("claude-") {
-        // Claude model names put the version in different positions
-        // (`claude-4.5-sonnet`, `claude-opus-4.7`, `claude-3.7-sonnet`). Scan
-        // every dash-segment for the first one that looks like X.Y.
+        // Claude names put the version in varied positions
+        // (`claude-4.5-sonnet`, `claude-opus-4.7`, `claude-5-sonnet`). Scan
+        // every dash-segment for the first one that parses as a version.
         if let Some(rest) = lower_model.strip_prefix("claude-") {
             for seg in rest.split('-') {
+                // Try X.Y form first (e.g. "4.7").
                 if let Some((maj_s, min_s)) = seg.split_once('.') {
                     if let (Ok(maj), Ok(min)) = (maj_s.parse::<u32>(), min_s.parse::<u32>()) {
-                        // 4.6+ and beyond use adaptive thinking.
-                        if maj > 4 || (maj == 4 && min >= 6) {
+                        if maj > 4 || (maj == 4 && min >= 7) {
                             return T::AnthropicAdaptive;
                         }
-                        // 3.7–4.5 use the budget block; stop scanning.
+                        if maj == 4 && min == 6 {
+                            return T::AnthropicEffort;
+                        }
+                        break;
+                    }
+                }
+                // Bare integer major (e.g. "5" in `claude-5-sonnet`).
+                if let Ok(maj) = seg.parse::<u32>() {
+                    if maj > 4 {
+                        return T::AnthropicAdaptive;
+                    }
+                    if maj == 4 {
+                        // `claude-4-sonnet` (no minor) → treat as 4.0 (budget).
                         break;
                     }
                 }
             }
         }
-        // Claude 3.7 through 4.5 (or unparseable versions) accept the
-        // budget_tokens block.
         return T::AnthropicThinkingBudget;
+    }
+
+    // ── DeepSeek (OpenAI-compatible reasoning_effort, NOT enable_thinking) ──
+    // DeepSeek-V3.2+ and deepseek-reasoner expose `reasoning_effort`.
+    if lower_model.starts_with("deepseek-") {
+        return T::OpenaiReasoningEffort;
     }
 
     // ── OpenAI reasoning family (GPT-5, o-series) ──
@@ -312,12 +331,22 @@ fn resolve_thinking_protocol(lower_model: &str, provider: &str) -> ThinkingProto
         return T::OpenaiReasoningEffort;
     }
 
-    // ── OpenAI-compatible CN reasoning models ──
-    if lower_model.starts_with("qwen3-")
-        || lower_model.starts_with("qwen-")
-        || lower_model.starts_with("glm-")
-        || lower_model.starts_with("deepseek-r")
+    // ── GLM family ──
+    // GLM-5.x (5.2 confirmed in the official OpenAPI) exposes
+    // `reasoning_effort` (values include `max`, server maps low/medium→high).
+    // GLM-4.5/4.6 only have an on/off `thinking:{type}` toggle — NO depth knob.
+    if lower_model.starts_with("glm-5") || lower_model.starts_with("glm-5.") {
+        return T::GlmReasoningEffort;
+    }
+    if lower_model.starts_with("glm-4.")
+        || lower_model.starts_with("glm-4-")
+        || lower_model == "glm-4"
     {
+        return T::GlmThinkingType;
+    }
+
+    // ── Qwen3 (enable_thinking + thinking_budget) ──
+    if lower_model.starts_with("qwen3-") || lower_model.starts_with("qwen-") {
         return T::EnableThinkingFlag;
     }
 
@@ -355,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_anthropic_thinking_budget_vs_adaptive() {
-        // Claude 3.7 / 4 / 4.5 → legacy budget block.
+        // Claude 3.7 / 4 / 4.5 → legacy budget block (+ effort on 4.5).
         assert_eq!(
             resolve_thinking_protocol("claude-3.7-sonnet", "anthropic"),
             T::AnthropicThinkingBudget
@@ -368,30 +397,59 @@ mod tests {
             resolve_thinking_protocol("claude-4.5-sonnet", "anthropic"),
             T::AnthropicThinkingBudget
         );
-        // Claude 4.6+ / 4.7+ / 5.x → adaptive (no request field).
+        // Claude 4.6 → effort + adaptive thinking block.
         assert_eq!(
             resolve_thinking_protocol("claude-4.6-sonnet", "anthropic"),
+            T::AnthropicEffort
+        );
+        assert_eq!(
+            resolve_thinking_protocol("claude-opus-4.6", "anthropic"),
+            T::AnthropicEffort
+        );
+        // Claude 4.7+ → adaptive-only (budget_tokens 400s).
+        assert_eq!(
+            resolve_thinking_protocol("claude-opus-4.7", "anthropic"),
             T::AnthropicAdaptive
         );
         assert_eq!(
-            resolve_thinking_protocol("claude-opus-4.7", "anthropic"),
+            resolve_thinking_protocol("claude-5-sonnet", "anthropic"),
             T::AnthropicAdaptive
         );
     }
 
     #[test]
     fn test_cn_reasoning_models() {
+        // Qwen3 → enable_thinking + thinking_budget.
         assert_eq!(
             resolve_thinking_protocol("qwen3-235b-a22b", "dashscope"),
             T::EnableThinkingFlag
         );
         assert_eq!(
-            resolve_thinking_protocol("glm-4.6", "zhipu"),
+            resolve_thinking_protocol("qwen3-max", "dashscope"),
             T::EnableThinkingFlag
         );
+        // GLM-4.5/4.6 → thinking:{type:enabled|disabled} (on/off ONLY, no depth).
+        assert_eq!(
+            resolve_thinking_protocol("glm-4.6", "zhipu"),
+            T::GlmThinkingType
+        );
+        assert_eq!(
+            resolve_thinking_protocol("glm-4.5", "zhipu"),
+            T::GlmThinkingType
+        );
+        // GLM-5.x → reasoning_effort (depth knob; 5.2 confirmed in OpenAPI).
+        assert_eq!(
+            resolve_thinking_protocol("glm-5.2", "zhipu"),
+            T::GlmReasoningEffort
+        );
+        // DeepSeek → OpenAI-compatible reasoning_effort (NOT enable_thinking!).
         assert_eq!(
             resolve_thinking_protocol("deepseek-r1", "deepseek"),
-            T::EnableThinkingFlag
+            T::OpenaiReasoningEffort
+        );
+        assert_eq!(
+            resolve_thinking_protocol("deepseek-v3.2", "deepseek"),
+            T::OpenaiReasoningEffort
         );
     }
 
@@ -400,5 +458,10 @@ mod tests {
         assert_eq!(resolve_thinking_protocol("gpt-4o", "openai"), T::None);
         assert_eq!(resolve_thinking_protocol("gpt-4-turbo", "openai"), T::None);
         assert_eq!(resolve_thinking_protocol("llama-3", "ollama"), T::None);
+        // Kimi K2 Thinking has no request-side depth knob (always on).
+        assert_eq!(
+            resolve_thinking_protocol("kimi-k2-thinking", "moonshot"),
+            T::None
+        );
     }
 }
