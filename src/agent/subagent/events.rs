@@ -41,6 +41,10 @@ pub enum SubagentEvent {
         agent: String,
         /// Duration of the dispatch in milliseconds.
         duration_ms: u64,
+        /// Total tokens consumed (input + output), if available.
+        tokens_used: Option<u64>,
+        /// Number of ReAct iterations executed.
+        iterations: Option<u64>,
     },
     /// Dispatch failed.
     DispatchFailed {

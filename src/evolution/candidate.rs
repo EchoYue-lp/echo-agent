@@ -272,7 +272,9 @@ impl SkillCandidateDetector {
                 #[cfg(feature = "improve")]
                 {
                     let curator = Curator::default_path(CuratorConfig::default());
-                    let _ = curator.register_candidate(&key);
+                    if let Err(e) = curator.register_candidate(&key) {
+                        tracing::warn!("Failed to register candidate '{}': {}", key, e);
+                    }
                 }
 
                 // Record in audit log.

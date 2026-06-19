@@ -310,6 +310,8 @@ impl ReactAgent {
                 {
                     let wd = config
                         .working_dir
+                        .lock()
+                        .unwrap()
                         .clone()
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
                     echo_core::project_rules::rules_injection(&wd)
@@ -560,6 +562,8 @@ impl ReactAgent {
         if config.auto_project_rules {
             let wd = config
                 .working_dir
+                .lock()
+                .unwrap()
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             prompt = echo_core::project_rules::inject_rules(&prompt, &wd);
@@ -729,8 +733,8 @@ impl ReactAgent {
     /// `ExecuteStage` → `ToolContext`, the cwd of every tool call (shell,
     /// file, git) — so binding a worktree path here isolates that agent's
     /// file operations. Pass `None` to clear (fall back to process cwd).
-    pub fn set_working_dir(&mut self, path: Option<std::path::PathBuf>) {
-        self.config.working_dir = path;
+    pub fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
+        *self.config.working_dir.lock().unwrap() = path;
     }
 
     /// Get the current LLM configuration.
@@ -977,13 +981,13 @@ impl ReactAgent {
     /// Clear the working directory binding (e.g. `/worktree exit`). Subsequent
     /// tool calls fall back to the process cwd. (Setting it uses
     /// [`set_working_dir`](Self::set_working_dir) with `Some(path)`.)
-    pub fn clear_working_dir(&mut self) {
-        self.config.working_dir = None;
+    pub fn clear_working_dir(&self) {
+        *self.config.working_dir.lock().unwrap() = None;
     }
 
     /// The current working directory binding, if any.
-    pub fn working_dir(&self) -> Option<&std::path::Path> {
-        self.config.working_dir.as_deref()
+    pub fn working_dir(&self) -> Option<std::path::PathBuf> {
+        self.config.working_dir.lock().unwrap().clone()
     }
 
     /// Get the current conversation history messages (read-only).
@@ -1170,6 +1174,13 @@ impl ReactAgent {
     /// Replace the tool manager with a shared instance (for AgentPool).
     pub fn set_tool_manager(&mut self, tm: Arc<echo_execution::tools::ToolManager>) {
         self.tools.tool_manager = tm;
+    }
+
+    /// Get the subagent registry (for the Tauri subagent-event bridge to
+    /// forward dispatch lifecycle events to the frontend).
+    #[cfg(feature = "subagent")]
+    pub fn subagent_registry(&self) -> &Arc<crate::agent::subagent::SubagentRegistry> {
+        &self.tools.subagent_registry
     }
 
     /// Replace the hook registry with a shared instance (for AgentPool).
@@ -1443,6 +1454,12 @@ impl ReactAgent {
             // Hydrate any Running TaskNodes (mark them as Hydrated for resume)
             let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
             snapshot.hydrate_running_nodes().await;
+
+            // Restore working directory for worktree-isolated sessions (N-P1-7, BUG-3)
+            if let Some(ref wd) = cp.working_dir {
+                self.set_working_dir(Some(wd.clone()));
+                tracing::debug!(?wd, "Restored working_dir from checkpoint");
+            }
 
             // Log blocked reason if any
             if let Some(ref reason) = cp.blocked_reason {

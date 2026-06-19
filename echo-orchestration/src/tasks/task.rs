@@ -355,6 +355,7 @@ impl TaskStatus {
                     | TaskStatus::Failed(_)
                     | TaskStatus::TimedOut { .. }
                     | TaskStatus::Retrying { .. }
+                    | TaskStatus::Blocked(_)
             ),
             TaskStatus::Retrying { .. } => matches!(
                 target,

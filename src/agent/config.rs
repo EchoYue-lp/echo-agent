@@ -108,8 +108,9 @@ pub struct AgentConfig {
     pub(crate) max_tokens: Option<u32>,
     /// Whether to automatically load project rules file (`.echo-agent/AGENT.md`), default true
     pub(crate) auto_project_rules: bool,
-    /// Working directory (for searching project rules files), None means use current directory
-    pub(crate) working_dir: Option<PathBuf>,
+    /// Working directory (for searching project rules files), None means use current directory.
+    /// Mutex enables `&self` updates during resume (BUG-3).
+    pub(crate) working_dir: std::sync::Mutex<Option<PathBuf>>,
     /// Token budget configuration for fine-grained context window management
     pub(crate) token_budget_config: TokenBudgetConfig,
     /// Whether to enable notebook tracking for reproducibility (default false).
@@ -184,7 +185,7 @@ impl AgentConfig {
             temperature: None,
             max_tokens: None,
             auto_project_rules: true,
-            working_dir: None,
+            working_dir: std::sync::Mutex::new(None),
             token_budget_config: TokenBudgetConfig::default(),
             enable_notebook: false,
             loop_detector_config: LoopDetectorConfig::default(),
@@ -753,8 +754,8 @@ impl AgentConfig {
     ///
     /// # Parameters
     /// * `path` - Working directory path, None means use current directory
-    pub fn working_dir(mut self, path: Option<PathBuf>) -> Self {
-        self.working_dir = path;
+    pub fn working_dir(self, path: Option<PathBuf>) -> Self {
+        *self.working_dir.lock().unwrap() = path;
         self
     }
 

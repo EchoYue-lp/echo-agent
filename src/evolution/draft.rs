@@ -105,7 +105,9 @@ impl<'a> SkillDraftGenerator<'a> {
         #[cfg(feature = "improve")]
         {
             let curator = Curator::default_path(CuratorConfig::default());
-            let _ = curator.promote_to_draft(name);
+            if let Err(e) = curator.promote_to_draft(name) {
+                tracing::warn!("Failed to promote '{}' to draft: {}", name, e);
+            }
         }
 
         // 5. Record in audit log.

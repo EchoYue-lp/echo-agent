@@ -287,7 +287,7 @@ impl Tool for ImageFetchTool {
                 content_type,
                 bytes.len(),
                 base64_data.len(),
-                &data_uri[..data_uri.len().min(200)]
+                &data_uri[..data_uri.floor_char_boundary(data_uri.len().min(200))]
             );
             output.push_str("...\n\nTip: Use data_uri as the url field of ContentPart::ImageUrl.");
 

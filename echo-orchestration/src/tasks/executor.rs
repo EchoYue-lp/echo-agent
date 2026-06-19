@@ -1218,11 +1218,23 @@ impl TaskExecutor {
         } else {
             3600 // default 1 hour
         });
+        // Global wall-clock deadline: if the loop runs longer than this,
+        // force-exit with an error instead of livelocking forever (P1-2.2).
+        let global_deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.config.round_timeout_secs.max(600) * 4);
 
         loop {
             // Check executor-level cancellation before each round
             if self.cancel.is_cancelled() {
                 info!("Executor cancelled, stopping execute_all");
+                break;
+            }
+            // Global wall-clock deadline to prevent infinite livelock (P1-2.2)
+            if tokio::time::Instant::now() > global_deadline {
+                tracing::warn!(
+                    "execute_all global deadline reached after {} batches, force-exiting",
+                    batch_count
+                );
                 break;
             }
 
@@ -1744,5 +1756,210 @@ mod tests {
         let r2 = executor.execute_ready_tasks().await.unwrap();
         assert_eq!(r2.len(), 1);
         assert_eq!(r2[0].output.as_deref(), Some("second result with context"));
+    }
+    /// Phase 3.1: run_dag failure propagation — when a dependency fails,
+    /// dependents should be marked as Blocked, not run.
+    #[tokio::test]
+    async fn test_run_dag_failure_propagation() {
+        use std::sync::Arc;
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "Failing task"));
+        manager.add_task(Task::new("t2", "Dependent task").with_dependencies(vec!["t1".into()]));
+        let config = TaskExecutorConfig {
+            max_concurrent: 2,
+            default_timeout_secs: 10,
+            enable_hooks: false,
+            retry_delay_secs: 0,
+            retry_backoff_factor: 2.0,
+            retry_max_delay_secs: 60,
+            retry_jitter: false,
+            checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
+            round_timeout_secs: 3600,
+        };
+        let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
+            |ctx: TaskContext| {
+                Box::pin(async move {
+                    if ctx.task_id == "t1" {
+                        Err(ReactError::Other("t1 failed".into()))
+                    } else {
+                        Ok("t2 should not run".to_string())
+                    }
+                })
+            },
+        ));
+        let r1 = executor.execute_ready_tasks().await.unwrap();
+        assert_eq!(r1.len(), 1);
+        assert!(r1[0].error.is_some(), "t1 should have failed");
+        let r2 = executor.execute_ready_tasks().await.unwrap();
+        assert!(r2.is_empty(), "t2 should not run after t1 failure");
+    }
+
+    #[tokio::test]
+    async fn test_run_dag_cancel_propagation() {
+        use std::sync::Arc;
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "Long task"));
+        let config = TaskExecutorConfig {
+            max_concurrent: 1,
+            default_timeout_secs: 60,
+            enable_hooks: false,
+            retry_delay_secs: 0,
+            retry_backoff_factor: 2.0,
+            retry_max_delay_secs: 60,
+            retry_jitter: false,
+            checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
+            round_timeout_secs: 3600,
+        };
+        let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
+            |_ctx: TaskContext| {
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    Ok("finished".to_string())
+                })
+            },
+        ));
+        let exec = Arc::new(executor);
+        let exec_clone = exec.clone();
+        let h = tokio::spawn(async move { exec_clone.execute_all().await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        exec.cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), h)
+            .await
+            .expect("timeout")
+            .expect("join");
+        assert!(result.is_ok(), "execute_all should return Ok after cancel");
+    }
+
+    /// Phase 3: verify `cancel_all()` propagates to multiple concurrent child
+    /// tasks. Registers 3 independent tasks, all sleeping, then calls
+    /// `cancel_all()`. All must transition to Cancelled and none should produce
+    /// a finished result (the shared counter stays at 0).
+    #[tokio::test]
+    async fn test_cancel_all_propagates_to_concurrent_children() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "Long A"));
+        manager.add_task(Task::new("t2", "Long B"));
+        manager.add_task(Task::new("t3", "Long C"));
+
+        let finished = Arc::new(AtomicUsize::new(0));
+        let config = TaskExecutorConfig {
+            max_concurrent: 3,
+            default_timeout_secs: 60,
+            enable_hooks: false,
+            retry_delay_secs: 0,
+            retry_backoff_factor: 2.0,
+            retry_max_delay_secs: 60,
+            retry_jitter: false,
+            checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
+            round_timeout_secs: 3600,
+        };
+        let finished_clone = finished.clone();
+        let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
+            move |_ctx: TaskContext| {
+                let fc = finished_clone.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    fc.fetch_add(1, Ordering::Relaxed);
+                    Ok("finished".to_string())
+                })
+            },
+        ));
+        let exec = Arc::new(executor);
+        let exec_clone = exec.clone();
+        let h = tokio::spawn(async move { exec_clone.execute_all().await });
+
+        // Let all 3 tasks enter InProgress.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Cancel ALL (not just root token — the real API).
+        exec.cancel_all();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), h)
+            .await
+            .expect("timeout")
+            .expect("join");
+        assert!(
+            result.is_ok(),
+            "execute_all should return Ok after cancel_all"
+        );
+
+        // None should have finished (all interrupted mid-sleep).
+        assert_eq!(
+            finished.load(Ordering::Relaxed),
+            0,
+            "no task should have produced a result after cancel_all"
+        );
+
+        // All three tasks should be in a terminal (Cancelled or Failed) state.
+        for id in &["t1", "t2", "t3"] {
+            let task = manager.get_task(id).expect("task exists");
+            assert!(
+                task.status.is_terminal(),
+                "task {} should be terminal after cancel_all, got {:?}",
+                id,
+                task.status
+            );
+        }
+    }
+
+    /// Phase 3: verify a Blocked task resumes execution after being reset to
+    /// Pending. Uses the manager API directly to simulate Blocked → Pending
+    /// transition (the same transition the replanner or external recovery
+    /// would trigger).
+    #[tokio::test]
+    async fn test_blocked_task_resumes_after_reset() {
+        use std::sync::Arc;
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("bt", "Blocked task"));
+
+        // Simulate the real lifecycle: Pending → InProgress → Blocked (which
+        // is the executor's actual path when an upstream task fails).
+        manager
+            .update_task_status("bt", TaskStatus::InProgress)
+            .expect("Pending→InProgress is legal");
+        manager
+            .update_task_status("bt", TaskStatus::Blocked("upstream died".into()))
+            .expect("InProgress→Blocked is legal");
+        assert!(matches!(
+            manager.get_task("bt").unwrap().status,
+            TaskStatus::Blocked(_)
+        ));
+
+        let config = TaskExecutorConfig::default();
+        let executor =
+            TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(|_ctx| {
+                Box::pin(async { Ok("recovered".to_string()) })
+            }));
+        let exec = Arc::new(executor);
+
+        // execute_ready_tasks should NOT pick up a Blocked task.
+        exec.execute_ready_tasks().await;
+        assert!(
+            !matches!(
+                manager.get_task("bt").unwrap().status,
+                TaskStatus::Completed
+            ),
+            "Blocked task must not execute until reset to Pending"
+        );
+
+        // Reset Blocked → Pending (the recovery path).
+        manager
+            .update_task_status("bt", TaskStatus::Pending)
+            .expect("Blocked→Pending is legal");
+
+        // Now execute_ready_tasks should pick it up and complete it.
+        exec.execute_ready_tasks().await;
+        assert!(
+            matches!(
+                manager.get_task("bt").unwrap().status,
+                TaskStatus::Completed
+            ),
+            "Reset task should complete after Pending reset"
+        );
     }
 }

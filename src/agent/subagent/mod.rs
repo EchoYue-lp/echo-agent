@@ -23,7 +23,7 @@ pub mod types;
 pub use builder::SubagentBuilder;
 pub use context::{ContextInheritance, MemoryScope, OutputSchema, SubagentContext};
 pub use context_builder::{ContextBuilder, SubagentOutput};
-pub use events::SubagentEventBus;
+pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig, TeammateHandle};
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use registry::SubagentRegistry;

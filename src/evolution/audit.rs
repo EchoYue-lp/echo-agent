@@ -10,8 +10,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::Result;
+
+/// Per-process counter to disambiguate change_ids that share the same nanosecond.
+static CHANGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ── ChangeType ──────────────────────────────────────────────────────────
 
@@ -405,7 +409,11 @@ impl ChangeEntryBuilder {
         // to 0 so the id stays well-formed (uniqueness is still backed by `now`).
         let nanos = now.timestamp_nanos_opt().unwrap_or(0);
         ChangeEntry {
-            change_id: format!("chg_{:016x}", nanos),
+            change_id: format!(
+                "chg_{:016x}_{}",
+                nanos,
+                CHANGE_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ),
             timestamp: now,
             entity_type: self.entity_type,
             entity_key: self.entity_key,

@@ -46,7 +46,7 @@ use echo_core::error::{ReactError, Result};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -115,8 +115,17 @@ pub struct BackgroundTask<T: Send + 'static> {
     pub name: String,
     /// Current lifecycle status (shared, readable without blocking).
     status: Arc<RwLock<BackgroundTaskStatus>>,
-    /// Oneshot receiver for the final result. `None` after it has been consumed.
-    result_rx: Mutex<Option<oneshot::Receiver<Result<T>>>>,
+    /// Result cell: `None` until the task finishes, then `Some(result)`.
+    /// Guarded by a Mutex so `wait()` can `take()` it only once. The paired
+    /// `Notify` wakes waiters when a result arrives.
+    ///
+    /// **Retry-safe (N-P2-5)**: unlike the old oneshot design, a timeout does
+    /// NOT consume the cell. `wait()` only calls `take()` once it observes the
+    /// result is present, so a timed-out `wait()` can be retried and still
+    /// receive the result.
+    result: Arc<Mutex<Option<Result<T>>>>,
+    /// Notifier fired when the result cell is filled.
+    result_notify: Arc<Notify>,
     /// Token to request cancellation of the running task.
     cancel: CancellationToken,
     /// Inner join handle (for detecting panics).
@@ -198,48 +207,44 @@ impl<T: Send + 'static> BackgroundTask<T> {
     ///
     /// If `timeout` is `Some`, returns an error if the task doesn't complete
     /// within the given duration. If `None`, waits indefinitely.
+    ///
+    /// **Retry-safe**: unlike the old oneshot implementation, a timeout does
+    /// NOT consume the receiver. The caller may call `wait()` again (possibly
+    /// with a longer timeout) and still receive the result once the task
+    /// completes. The result is stored in a `watch` channel that survives
+    /// timeouts (N-P2-5).
     pub async fn wait(&self, timeout: Option<Duration>) -> Result<T> {
-        let mut rx_guard = self.result_rx.lock().await;
+        loop {
+            // Check if the result is already present (non-blocking).
+            {
+                let mut cell = self.result.lock().await;
+                if cell.is_some() {
+                    // Take and return. Only the first observer gets it; later
+                    // callers fall through to status-based reporting.
+                    return cell.take().unwrap();
+                }
+            }
 
-        if let Some(rx) = rx_guard.take() {
-            let result = if let Some(dur) = timeout {
-                match tokio::time::timeout(dur, rx).await {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(_)) => Err(ReactError::Other(
-                        "Background task result channel closed unexpectedly".into(),
-                    )),
+            // Not ready yet — wait for the Notify (with optional timeout).
+            let notified = self.result_notify.notified();
+            if let Some(dur) = timeout {
+                match tokio::time::timeout(dur, notified).await {
+                    Ok(()) => {
+                        // Notified — loop back and check the cell again.
+                        continue;
+                    }
                     Err(_) => {
-                        // Timeout — put the receiver back so caller can retry
-                        // (we can't easily put it back, so just error)
-                        Err(ReactError::Other(format!(
-                            "Background task '{}' timed out after {:?}",
+                        // Timeout: the cell is untouched, so the result is NOT
+                        // lost. The caller may retry wait() (possibly longer).
+                        return Err(ReactError::Other(format!(
+                            "Background task '{}' timed out after {:?} (retry-safe: call wait() again)",
                             self.name, dur
-                        )))
+                        )));
                     }
                 }
             } else {
-                rx.await.map_err(|_| {
-                    ReactError::Other("Background task result channel closed unexpectedly".into())
-                })?
-            };
-
-            result
-        } else {
-            // Result already consumed — check status for the outcome
-            let status = self.status.read().await.clone();
-            match status {
-                BackgroundTaskStatus::Completed { .. } => Err(ReactError::Other(
-                    "Task completed but result already consumed".into(),
-                )),
-                BackgroundTaskStatus::Failed { error, .. } => {
-                    Err(ReactError::Other(format!("Task failed: {error}")))
-                }
-                BackgroundTaskStatus::Cancelled => {
-                    Err(ReactError::Other("Task was cancelled".into()))
-                }
-                BackgroundTaskStatus::Pending | BackgroundTaskStatus::Running { .. } => {
-                    Err(ReactError::Other("Task still running".into()))
-                }
+                notified.await;
+                // Loop back and check the cell.
             }
         }
     }
@@ -417,7 +422,11 @@ impl TaskSpawner {
         let name = name.to_string();
         let cancel = CancellationToken::new();
         let status = Arc::new(RwLock::new(BackgroundTaskStatus::Pending));
-        let (tx, rx) = oneshot::channel();
+        // Retry-safe result delivery: a Mutex<Option> cell + a Notify. The cell
+        // is only `take()`n once a waiter observes it's filled, so a timeout
+        // leaves the cell intact for the next wait() call (N-P2-5).
+        let result: Arc<Mutex<Option<Result<T>>>> = Arc::new(Mutex::new(None));
+        let result_notify = Arc::new(Notify::new());
         let terminal_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let permit = self.semaphore.clone();
@@ -431,15 +440,34 @@ impl TaskSpawner {
             None
         };
 
+        let result_cell = result.clone();
+        let notify = result_notify.clone();
         let terminal_flag_inner = terminal_flag.clone();
+
+        /// Fill the result cell and wake any waiters. Used at every early-return
+        /// and normal-completion path in the spawn closure.
+        async fn deliver<T>(
+            cell: &Arc<Mutex<Option<Result<T>>>>,
+            notify: &Arc<Notify>,
+            r: Result<T>,
+        ) {
+            *cell.lock().await = Some(r);
+            notify.notify_waiters();
+        }
+
         let join_handle = tokio::spawn(async move {
             // Acquire semaphore permit (may block if at capacity)
             let _permit = match permit.acquire().await {
                 Ok(p) => p,
                 Err(_) => {
-                    let _ = tx.send(Err(ReactError::Other(
-                        "Semaphore closed — cannot acquire permit".into(),
-                    )));
+                    deliver(
+                        &result_cell,
+                        &notify,
+                        Err(ReactError::Other(
+                            "Semaphore closed — cannot acquire permit".into(),
+                        )),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -447,7 +475,12 @@ impl TaskSpawner {
             // Check cancellation before starting
             if cancel_inner.is_cancelled() {
                 *status_inner.write().await = BackgroundTaskStatus::Cancelled;
-                let _ = tx.send(Err(ReactError::Other("Task cancelled before start".into())));
+                deliver(
+                    &result_cell,
+                    &notify,
+                    Err(ReactError::Other("Task cancelled before start".into())),
+                )
+                .await;
                 return;
             }
 
@@ -509,8 +542,8 @@ impl TaskSpawner {
                 std::sync::atomic::Ordering::Relaxed,
             );
 
-            // Send result (ignore if receiver dropped)
-            let _ = tx.send(result);
+            // Deliver result to the cell and wake waiters.
+            deliver(&result_cell, &notify, result).await;
 
             let status_text = final_status.as_str();
             info!(task_id = %id_inner, name = %name_inner, status = %status_text, "Background task finished");
@@ -530,7 +563,8 @@ impl TaskSpawner {
             id,
             name,
             status,
-            result_rx: Mutex::new(Some(rx)),
+            result,
+            result_notify,
             cancel,
             join_handle: Mutex::new(Some(join_handle)),
         }
@@ -673,6 +707,30 @@ mod tests {
 
         // Cancel to clean up
         handle.cancel();
+    }
+
+    /// Regression for N-P2-5: a timeout must NOT consume the result. After a
+    /// timeout, calling `wait()` again with a longer timeout must still return
+    /// the real result once the task completes. The old oneshot impl lost the
+    /// result permanently on timeout.
+    #[tokio::test]
+    async fn test_background_task_timeout_then_retry_recovers_result() {
+        let spawner = TaskSpawner::new(TaskSpawnerConfig {
+            default_timeout_secs: 0,
+            ..Default::default()
+        });
+        let handle = spawner.spawn("retry-safe-task", async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok("recovered")
+        });
+
+        // First wait: timeout too short → error, but result NOT lost.
+        let r1 = handle.wait(Some(Duration::from_millis(50))).await;
+        assert!(r1.is_err(), "first wait should time out");
+
+        // Second wait: long enough → must get the real result (not "already consumed").
+        let r2 = handle.wait(Some(Duration::from_secs(5))).await;
+        assert_eq!(r2.unwrap(), "recovered");
     }
 
     #[tokio::test]

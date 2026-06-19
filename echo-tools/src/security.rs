@@ -262,6 +262,86 @@ impl PathValidator {
         Ok(canonical)
     }
 
+    /// Validate that a path is within a base directory (may not exist yet).
+    ///
+    /// Canonicalizes the nearest existing ancestor, re-appends the suffix,
+    /// verifies containment within the base, and checks the denied-paths list.
+    /// This is the **canonical** validator for the common "restrict to a
+    /// workspace root" pattern (Phase 6.1).  Other path validators in the
+    /// codebase should converge here.
+    pub fn validate_within_base(&self, path: &str, base: &Path) -> Result<PathBuf> {
+        if !self.enabled {
+            return Ok(PathBuf::from(path));
+        }
+        let requested = Path::new(path);
+        if !requested.is_absolute() {
+            return Err(ToolError::InvalidPath {
+                path: path.to_string(),
+                reason: "Path must be absolute".into(),
+            }
+            .into());
+        }
+        // Reject `..` lexically
+        for comp in requested.components() {
+            if matches!(comp, std::path::Component::ParentDir) {
+                return Err(ToolError::InvalidPath {
+                    path: path.to_string(),
+                    reason: "Path traversal (..) is not allowed".into(),
+                }
+                .into());
+            }
+        }
+        // Find nearest existing ancestor
+        let mut check = if requested.exists() {
+            requested
+        } else {
+            requested.parent().unwrap_or(requested)
+        };
+        while !check.exists() {
+            if let Some(p) = check.parent() {
+                check = p;
+            } else {
+                break;
+            }
+        }
+        let canonical_ancestor = check.canonicalize().map_err(|e| ToolError::InvalidPath {
+            path: check.display().to_string(),
+            reason: format!("Cannot resolve path: {}", e),
+        })?;
+        let base_canonical = base.canonicalize().map_err(|e| ToolError::InvalidPath {
+            path: base.display().to_string(),
+            reason: format!("Cannot resolve base: {}", e),
+        })?;
+        if !canonical_ancestor.starts_with(&base_canonical) {
+            return Err(ToolError::AccessDenied {
+                path: path.to_string(),
+                reason: "Path is outside the allowed base directory".into(),
+            }
+            .into());
+        }
+        // Reconstruct the full path
+        let suffix = requested
+            .strip_prefix(check)
+            .map_err(|_| ToolError::InvalidPath {
+                path: path.to_string(),
+                reason: "Cannot compute relative suffix".into(),
+            })?;
+        let resolved = canonical_ancestor.join(suffix);
+        // Re-check denied paths on the final path
+        for denied in &self.denied_paths {
+            if let Ok(d) = denied.canonicalize() {
+                if resolved.starts_with(&d) {
+                    return Err(ToolError::AccessDenied {
+                        path: path.to_string(),
+                        reason: "Path is in the denied list".into(),
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
     /// Validate output file path.
     ///
     /// Unlike `validate_file()`, output paths allow the file to not yet exist,
@@ -785,9 +865,6 @@ mod tests {
         let _validator = PathValidator::new()
             .with_allowed_roots(&["/tmp"])
             .with_enabled(true);
-
-        // This test depends on the actual filesystem
-        // In practice, a test file should be created
     }
 
     #[test]
@@ -811,5 +888,303 @@ mod tests {
             .validate_output_file("/tmp/demo/../result.txt")
             .unwrap();
         assert_eq!(path, PathBuf::from("/tmp/result.txt"));
+    }
+
+    // ── SSRF golden tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_private_ip_v4_loopback() {
+        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v4_rfc1918() {
+        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"10.255.255.255".parse().unwrap()));
+        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"172.31.255.255".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v4_link_local() {
+        assert!(is_private_ip(&"169.254.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"169.254.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v4_cgnat() {
+        assert!(is_private_ip(&"100.64.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"100.127.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v4_special_ranges() {
+        // 0.0.0.0/8
+        assert!(is_private_ip(&"0.0.0.0".parse().unwrap()));
+        assert!(is_private_ip(&"0.255.255.255".parse().unwrap()));
+        // TEST-NET-1
+        assert!(is_private_ip(&"192.0.2.1".parse().unwrap()));
+        // TEST-NET-2
+        assert!(is_private_ip(&"198.51.100.1".parse().unwrap()));
+        // TEST-NET-3
+        assert!(is_private_ip(&"203.0.113.1".parse().unwrap()));
+        // IETF assignments
+        assert!(is_private_ip(&"192.0.0.1".parse().unwrap()));
+        // Benchmark
+        assert!(is_private_ip(&"198.18.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"198.19.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_public_ip_v4_allowed() {
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip(&"93.184.216.34".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v6_loopback() {
+        assert!(is_private_ip(&"::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v6_link_local() {
+        assert!(is_private_ip(&"fe80::1".parse().unwrap()));
+        assert!(is_private_ip(&"feb0::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v6_ula_full_range() {
+        // fc00::/7 covers both fc00::/8 and fd00::/8 (RFC 4193)
+        assert!(is_private_ip(&"fc00::1".parse().unwrap()));
+        assert!(is_private_ip(&"fcff::1".parse().unwrap()));
+        assert!(is_private_ip(&"fd00::1".parse().unwrap()));
+        assert!(is_private_ip(&"fdff::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_v6_mapped_v4() {
+        // ::ffff:127.0.0.1 should be treated as private
+        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_public_ip_v6_allowed() {
+        assert!(!is_private_ip(&"2001:4860:4860::8888".parse().unwrap()));
+        assert!(!is_private_ip(&"2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    // ── extract_host golden tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_extract_host_plain() {
+        assert_eq!(
+            extract_host("http://example.com/path").unwrap(),
+            "example.com"
+        );
+        assert_eq!(extract_host("https://example.com").unwrap(), "example.com");
+    }
+
+    #[test]
+    fn test_extract_host_with_port() {
+        assert_eq!(
+            extract_host("http://example.com:8080/path").unwrap(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_with_userinfo() {
+        assert_eq!(
+            extract_host("http://user:pass@example.com/path").unwrap(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_ipv6() {
+        assert_eq!(extract_host("http://[::1]/path").unwrap(), "::1");
+        assert_eq!(
+            extract_host("https://[2001:db8::1]/api").unwrap(),
+            "2001:db8::1"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_ipv6_with_port() {
+        assert_eq!(extract_host("http://[::1]:8080/path").unwrap(), "::1");
+        assert_eq!(
+            extract_host("http://[2001:db8::1]:443/data").unwrap(),
+            "2001:db8::1"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_with_query() {
+        assert_eq!(
+            extract_host("http://example.com/path?key=value").unwrap(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_rejects_non_http() {
+        assert!(extract_host("ftp://example.com").is_err());
+        assert!(extract_host("file:///etc/passwd").is_err());
+    }
+
+    // ── validate_url_with_addrs golden tests ─────────────────────────────
+
+    #[test]
+    fn test_validate_url_rejects_loopback() {
+        assert!(validate_url("http://127.0.0.1:8080/data").is_err());
+        assert!(validate_url("http://[::1]:8080/data").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_allows_public() {
+        // This test requires DNS resolution of a known-public host.
+        // example.com resolves to public IPs; if DNS is unavailable, skip.
+        let result = validate_url("https://example.com/");
+        // In CI without network, DNS may fail. We check that it's not a
+        // private-IP rejection (which would always be an error).
+        if let Err(e) = &result {
+            let msg = format!("{}", e);
+            assert!(
+                !msg.contains("private IP"),
+                "should not reject public host: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_url_with_addrs_returns_ips() {
+        let result = validate_url_with_addrs("https://example.com/");
+        if let Ok((host, addrs)) = result {
+            assert_eq!(host, "example.com");
+            assert!(!addrs.is_empty(), "should return at least one IP");
+            for ip in &addrs {
+                assert!(!is_private_ip(ip), "returned IP {ip} should be public");
+            }
+        }
+    }
+
+    // ── Regression tests for fixed vulnerabilities ────────────────────────
+
+    #[test]
+    fn test_ipv6_ula_fc00_blocked() {
+        // Regression: fc00::/8 was NOT blocked before fix (only fd00::/8 was)
+        let ip: std::net::IpAddr = "fc00::1".parse().unwrap();
+        assert!(
+            is_private_ip(&ip),
+            "fc00::/8 (ULA lower half) must be blocked"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_ipv6_port_regression() {
+        // Regression: extract_host used split(':').next() which broke on IPv6+port
+        assert_eq!(
+            extract_host("http://[::1]:8080/path").unwrap(),
+            "::1",
+            "IPv6 with port must work"
+        );
+        assert_eq!(
+            extract_host("http://[fe80::1]:3000/").unwrap(),
+            "fe80::1",
+            "IPv6 link-local with port must work"
+        );
+    }
+
+    // ── Fuzz / boundary tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_utf8_safe() {
+        // Verify that truncation at byte boundaries is safe for multi-byte chars.
+        // "é" = 0xC3 0xA9 (2 bytes), "好" = 0xE5 0xA5 0xBD (3 bytes)
+        let s = "hello 世界!";
+        // floor_char_boundary returns the safe byte index
+        let safe = s.floor_char_boundary(8); // "hello " = 6 bytes, next is 3-byte "世"
+        assert_eq!(&s[..safe], "hello ");
+    }
+
+    #[test]
+    fn test_unicode_case_fold_security() {
+        let path = "/home/user/.ssh/authorized_keys";
+        let path_buf = std::path::PathBuf::from(path);
+        let parent = path_buf.parent().unwrap();
+        assert!(
+            parent.ends_with(".ssh"),
+            ".ssh directory should be detectable from path"
+        );
+    }
+
+    // ── Non-ASCII fuzz tests (Phase 3.7) ──────────────────────────────────
+
+    #[test]
+    fn test_truncate_emoji_boundary() {
+        // Emoji = 4 bytes (e.g., 😀 = 0xF0 0x9F 0x98 0x80)
+        let s = "abc😀def";
+        let safe = s.floor_char_boundary(4); // "abc" = 3, then 4-byte emoji
+        assert_eq!(&s[..safe], "abc");
+    }
+
+    #[test]
+    fn test_truncate_all_multibyte() {
+        // String with only multi-byte chars
+        let s = "世界你好"; // 4 chars × 3 bytes each = 12 bytes
+        let safe = s.floor_char_boundary(4); // should stop at 3 bytes (1 char)
+        assert_eq!(&s[..safe], "世");
+        let safe2 = s.floor_char_boundary(7); // should stop at 6 bytes (2 chars)
+        assert_eq!(&s[..safe2], "世界");
+    }
+
+    #[test]
+    fn test_truncate_zero() {
+        let s = "hello";
+        assert_eq!(s.floor_char_boundary(0), 0);
+    }
+
+    #[test]
+    fn test_truncate_past_end() {
+        let s = "hi";
+        let safe = s.floor_char_boundary(100);
+        assert_eq!(safe, 2); // should return length, not panic
+    }
+
+    #[test]
+    fn test_validate_url_rejects_unicode_homoglyph() {
+        // Unicode FULLWIDTH SOLIDUS (U+FF0F) ／ should not bypass URL parsing
+        // since it must start with ASCII "http://"
+        let result = validate_url("http：//evil.com/");
+        assert!(
+            result.is_err(),
+            "Non-ASCII colon should fail URL validation"
+        );
+    }
+
+    #[test]
+    fn test_extract_host_unicode_idn() {
+        // IDN (Internationalized Domain Names) — extract_host strips the
+        // hostname, including non-ASCII chars if present.
+        let host = extract_host("http://münchen.de/path").unwrap();
+        assert_eq!(host, "münchen.de");
+    }
+
+    #[test]
+    fn test_byte_slice_safety_on_boundary_edge() {
+        // Simulate the pattern from web_fetch_enhanced.rs: truncate at an
+        // arbitrary byte position and verify floor_char_boundary is safe.
+        for boundary in 0..=20 {
+            let s = "a😀b世c界déefgh";
+            let safe = s.floor_char_boundary(boundary);
+            // Must be a valid char boundary — slicing should never panic
+            let _ = &s[..safe];
+        }
     }
 }

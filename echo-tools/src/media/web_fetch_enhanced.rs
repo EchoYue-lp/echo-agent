@@ -320,7 +320,11 @@ impl Tool for WebFetchToolEnhanced {
 
                 // Truncate base64 if too long
                 let data_uri_display = if data_uri.len() > 1000 {
-                    format!("{}... ({} chars total)", &data_uri[..1000], data_uri.len())
+                    format!(
+                        "{}... ({} chars total)",
+                        &data_uri[..data_uri.floor_char_boundary(1000)],
+                        data_uri.len()
+                    )
                 } else {
                     data_uri.clone()
                 };

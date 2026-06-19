@@ -232,8 +232,12 @@ impl BackgroundReviewer {
         // the conversation content (P1 — prompt injection).
         let nonce = uuid::Uuid::new_v4();
         let review_message = format!(
-            "{transcript}\n\n=== SYSTEM INSTRUCTION DELIMITER {nonce} ===\n\n{prompt}\n\nYou can only call memory management tools. \
-             Other tools will be denied at runtime — do not attempt them."
+            "{transcript}\n\n=== SYSTEM INSTRUCTION DELIMITER {nonce} ===\n\n{prompt}\n\n\
+             Analyze the transcript and decide whether any knowledge or skill should be \
+             saved or updated.  Respond with a specific action description (e.g. \"Save \
+             memory: the user prefers X\") or exactly \"Nothing to save.\" if nothing is \
+             worth persisting.  You are running in text-only mode without tool access — \
+             your response text will be parsed for action keywords."
         );
 
         // Spawn background task — return handle immediately (non-blocking)
@@ -330,8 +334,10 @@ impl BackgroundReviewer {
             // cannot inject "---" from within the conversation content.
             let nonce = uuid::Uuid::new_v4();
             let review_message = format!(
-                "{transcript}\n\n=== SYSTEM INSTRUCTION DELIMITER {nonce} ===\n\n{prompt}\n\nYou can only call memory management tools. \
-                 Other tools will be denied at runtime — do not attempt them."
+                "{transcript}\n\n=== SYSTEM INSTRUCTION DELIMITER {nonce} ===\n\n{prompt}\n\n\
+                 Analyze the transcript and decide whether any knowledge or skill should be \
+                 saved or updated.  Respond with a specific action description or exactly \
+                 \"Nothing to save.\" if nothing is worth persisting."
             );
 
             BackgroundReviewer::run_review(

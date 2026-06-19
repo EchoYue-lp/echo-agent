@@ -248,6 +248,8 @@ impl SubagentExecutor {
                             parent: req_parent_agent.clone(),
                             agent: req_agent_name.clone(),
                             duration_ms: duration.as_millis() as u64,
+                            tokens_used: sub_result.tokens_used.map(|t| t as u64),
+                            iterations: Some(sub_result.iterations as u64),
                         });
 
                     if self.config.enable_hooks {
