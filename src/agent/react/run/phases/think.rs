@@ -216,6 +216,7 @@ pub(crate) async fn create_llm_stream(
                         tools: t,
                         tool_choice: None,
                         response_format: None,
+                        thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
                     };
                     let inner = llm_client.chat_stream(request).await?;

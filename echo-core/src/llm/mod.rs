@@ -1,9 +1,11 @@
 //! LLM client core trait and request/response types
 
 pub mod capabilities;
+pub mod thinking;
 pub mod types;
 
 use crate::error::Result;
+pub use thinking::{ThinkingConfig, ThinkingLevel, ThinkingProtocol};
 pub use types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, DeltaMessage, FunctionCall,
     FunctionSpec, JsonSchemaSpec, Message, ResponseFormat, Role, ToolCall, ToolDefinition,
@@ -163,6 +165,14 @@ pub struct ChatRequest {
     pub tool_choice: Option<String>,
     /// Optional structured output format hint.
     pub response_format: Option<ResponseFormat>,
+    /// Optional reasoning-depth / "thinking" control.
+    ///
+    /// When set, providers translate it to their native thinking wire field
+    /// (`reasoning_effort` for OpenAI reasoning models, `thinking.budget_tokens`
+    /// for Claude 3.7–4.5, `enable_thinking` for Qwen3/GLM). Models that do not
+    /// support a thinking control silently drop it (with a `warn!`). `None`
+    /// (the default) means "use the model's default behavior" — no field sent.
+    pub thinking: Option<ThinkingConfig>,
     /// Optional cancellation token for aborting in-flight requests.
     /// When set and cancelled, streaming responses will stop at the next SSE boundary.
     pub cancel_token: Option<CancellationToken>,

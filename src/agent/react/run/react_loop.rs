@@ -40,6 +40,7 @@ impl ReactAgent {
                 tools: Some(tools.clone()),
                 tool_choice: None,
                 response_format: response_format.clone(),
+                thinking: self.thinking.clone(),
                 cancel_token: None,
             };
             let msg_count = request.messages.len();

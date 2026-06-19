@@ -177,6 +177,12 @@ impl OllamaClient {
 impl LlmClient for OllamaClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
         let model = self.model.clone();
+        if request.thinking.is_some() {
+            tracing::warn!(
+                model = %self.model,
+                "Ollama does not support a thinking-depth control; config ignored"
+            );
+        }
         Box::pin(
             async move {
                 let body = self.convert_request(&request);
@@ -228,6 +234,12 @@ impl LlmClient for OllamaClient {
         request: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
         let model = self.model.clone();
+        if request.thinking.is_some() {
+            tracing::warn!(
+                model = %self.model,
+                "Ollama does not support a thinking-depth control; config ignored"
+            );
+        }
         Box::pin(
             async move {
                 let mut body = self.convert_request(&request);

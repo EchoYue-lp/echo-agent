@@ -4,6 +4,7 @@
 //! System messages are sent as a top-level `system` field (not in the messages array).
 
 use echo_core::error::{LlmError, Result};
+use echo_core::llm::capabilities::{ModelProfile, ProviderCapabilities};
 use echo_core::llm::types::{
     ChatCompletionResponse, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
     FunctionCall, Message, MessageContent, Role, ToolCall, Usage,
@@ -16,7 +17,7 @@ use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{Instrument, info_span};
+use tracing::{Instrument, info_span, warn};
 
 fn is_retryable(err: &LlmError) -> bool {
     match err {
@@ -167,14 +168,21 @@ impl AnthropicClient {
             }])
         });
 
+        // Translate thinking config. Claude 3.7–4.5 accept the budget block;
+        // 4.6+/4.7+ use adaptive thinking and reject it — resolve the protocol
+        // from the model name so we never send a block the API will 400 on.
+        let max_tokens = request.max_tokens.unwrap_or(4096);
+        let thinking = build_anthropic_thinking(&self.model, &request.thinking, max_tokens);
+
         AnthropicRequest {
             model: self.model.clone(),
-            max_tokens: request.max_tokens.unwrap_or(4096),
+            max_tokens,
             system,
             messages,
             temperature: request.temperature,
             tools,
             stream: None,
+            thinking,
         }
     }
 
@@ -561,6 +569,58 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// Extended-thinking block (`thinking: {type:"enabled", budget_tokens}`).
+    ///
+    /// Only emitted when (a) the request carries a [`ThinkingConfig`] and (b)
+    /// the resolved model speaks [`ThinkingProtocol::AnthropicThinkingBudget`]
+    /// (Claude 3.7–4.5). Claude 4.6+ / 4.7+ use adaptive thinking and reject
+    /// this block with a 400, so for those models the field is left `None`
+    /// even when a thinking config is supplied (logged as a warning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinking>,
+}
+
+/// `{"type":"enabled","budget_tokens":N}` block for Anthropic extended thinking.
+#[derive(Serialize)]
+struct AnthropicThinking {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    budget_tokens: u32,
+}
+
+/// Resolve the Anthropic extended-thinking block for a request, or `None` if
+/// none should be sent.
+///
+/// - Claude 3.7–4.5 (`AnthropicThinkingBudget`): translate the config to a
+///   `budget_tokens` value via [`ThinkingConfig::to_anthropic_budget`].
+/// - Claude 4.6+/4.7+ (`AnthropicAdaptive`): the legacy block is deprecated
+///   and returns a 400 — drop any config with a `warn!`.
+/// - Other protocols / `None`: no block.
+fn build_anthropic_thinking(
+    model: &str,
+    thinking: &Option<echo_core::llm::ThinkingConfig>,
+    max_tokens: u32,
+) -> Option<AnthropicThinking> {
+    use echo_core::llm::ThinkingProtocol as T;
+    let cfg = thinking.as_ref()?;
+    let profile = ModelProfile::new(model, "anthropic", ProviderCapabilities::anthropic());
+    match profile.thinking_protocol {
+        T::AnthropicThinkingBudget => {
+            cfg.to_anthropic_budget(max_tokens)
+                .map(|budget| AnthropicThinking {
+                    block_type: "enabled",
+                    budget_tokens: budget,
+                })
+        }
+        T::AnthropicAdaptive => {
+            warn!(
+                model = model,
+                "thinking config ignored: Claude 4.6+/4.7+ use adaptive thinking (legacy block would 400)"
+            );
+            None
+        }
+        _ => None,
+    }
 }
 
 #[derive(Serialize)]

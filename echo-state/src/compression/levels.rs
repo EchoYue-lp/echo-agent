@@ -518,6 +518,7 @@ impl AdaptiveCompressor {
                     tools: None,
                     tool_choice: None,
                     response_format: Some(echo_core::llm::types::ResponseFormat::JsonObject),
+                    thinking: None,
                     cancel_token: None,
                 })
                 .await

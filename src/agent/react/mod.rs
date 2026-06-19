@@ -133,6 +133,11 @@ pub struct ReactAgent {
     llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
     /// LLM configuration (optional; falls back to environment variables when not set)
     llm_config: Option<LlmConfig>,
+    /// Per-agent thinking-depth / reasoning config, applied to every chat
+    /// request issued by this agent (think phase, react loop). `None` means
+    /// "use the model's default" — no thinking field is sent. Set from config
+    /// (`ModelConfig.thinking`) at agent construction.
+    thinking: Option<crate::llm::ThinkingConfig>,
     /// Cancellation token for the current streaming request, set in
     /// `chat_stream_with_cancel` / `execute_stream_with_cancel`.
     /// `create_llm_stream` reads this field and passes it to the HTTP layer
@@ -450,6 +455,7 @@ impl ReactAgent {
             client: Arc::new(client),
             llm_client: None,
             llm_config: None,
+            thinking: None,
             cancel_token: tokio::sync::Mutex::new(None),
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
@@ -714,6 +720,18 @@ impl ReactAgent {
     /// Get a reference to the LLM client (if set).
     pub fn llm_client(&self) -> Option<&Arc<dyn crate::llm::LlmClient>> {
         self.llm_client.as_ref()
+    }
+
+    /// Get the agent's thinking-depth config (if any).
+    pub fn thinking(&self) -> Option<&crate::llm::ThinkingConfig> {
+        self.thinking.as_ref()
+    }
+
+    /// Set the agent's thinking-depth config. Applied to every chat request
+    /// issued by this agent. Set from `ModelConfig.thinking` at construction
+    /// or when the user changes the model's reasoning depth at runtime.
+    pub fn set_thinking(&mut self, thinking: Option<crate::llm::ThinkingConfig>) {
+        self.thinking = thinking;
     }
 
     // ── Accessors & setters ──────────────────────────────────────────────────────
@@ -2275,6 +2293,7 @@ impl ReactAgent {
                     tools: None,
                     tool_choice: None,
                     response_format: None,
+                    thinking: self.thinking.clone(),
                     cancel_token: None,
                 })
                 .await?;

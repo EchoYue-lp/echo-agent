@@ -14,6 +14,8 @@
 //! Combines provider capabilities with model-specific knowledge (context window,
 //! reasoning support, multimodal support, etc.).
 
+use crate::llm::thinking::ThinkingProtocol;
+
 // ── ProviderCapabilities ─────────────────────────────────────────────
 
 /// Protocol-level features that differ across LLM providers.
@@ -144,6 +146,12 @@ pub struct ModelProfile {
     /// Whether this model is known to support `reasoning_content` / thinking.
     pub supports_reasoning: bool,
 
+    /// Which thinking wire-protocol this model speaks, if any. Drives the
+    /// translation of `ChatRequest::thinking` in each provider implementation,
+    /// and prevents sending a thinking field to a model that would reject it
+    /// with a 400 (e.g. GPT-5-nano, Claude Opus 4.7+).
+    pub thinking_protocol: crate::llm::thinking::ThinkingProtocol,
+
     /// Whether this model is multimodal-capable (accepts images).
     pub supports_images: bool,
 
@@ -200,25 +208,25 @@ impl ModelProfile {
     /// Model-specific overrides are applied based on known model name patterns.
     pub fn new(model_name: &str, provider: &str, capabilities: ProviderCapabilities) -> Self {
         let lower = model_name.to_ascii_lowercase();
+        let thinking_protocol = resolve_thinking_protocol(&lower, provider);
 
-        // Model-specific reasoning detection
-        let supports_reasoning = capabilities.reasoning_content
-            && (lower.starts_with("qwen3-")
-                || lower.starts_with("qwen-")
-                || lower.starts_with("deepseek-")
-                || lower.starts_with("gpt-5.5")
-                || lower.starts_with("o3")
-                || lower.starts_with("o4"));
+        // Model-specific reasoning detection: a model "supports reasoning" if it
+        // both speaks a thinking protocol AND its provider emits reasoning_content
+        // in responses. (Adaptive-thinking Claude models still report reasoning
+        // content; they just don't accept a request field.)
+        let supports_reasoning =
+            !matches!(thinking_protocol, ThinkingProtocol::None) && capabilities.reasoning_content;
 
         // Model-specific image detection
         let supports_images = capabilities.image_input
-            && !lower.starts_with("gpt-5.5") // o1 doesn't support images
-            && !lower.starts_with("o3"); // o3-mini doesn't support images
+            && !lower.starts_with("o3-mini") // o3-mini doesn't support images
+            && !lower.starts_with("o1-mini")
+            && !lower.starts_with("o1-preview");
 
         // Known max output tokens
         let max_output_tokens = if lower.contains("qwen3-235b") {
             Some(131_072)
-        } else if lower.starts_with("gpt-5.5") {
+        } else if lower.starts_with("gpt-5") || lower.starts_with("o3") || lower.starts_with("o4") {
             Some(16_384)
         } else if lower.starts_with("claude-") {
             Some(8_192)
@@ -227,7 +235,7 @@ impl ModelProfile {
         };
 
         // Tokenizer name mapping
-        let tokenizer_name = if lower.starts_with("gpt-5.5") || lower.starts_with("gpt-4.5") {
+        let tokenizer_name = if lower.starts_with("gpt-5") || lower.starts_with("gpt-4.5") {
             Some("o200k_base")
         } else if lower.starts_with("gpt-4") || lower.starts_with("gpt-3") {
             Some("cl100k_base")
@@ -240,6 +248,7 @@ impl ModelProfile {
             model_name: model_name.to_string(),
             capabilities,
             supports_reasoning,
+            thinking_protocol,
             supports_images,
             supports_tools: capabilities.tool_support,
             max_output_tokens,
@@ -253,5 +262,143 @@ impl ModelProfile {
     pub fn from_provider_name(model_name: &str, provider: &str) -> Self {
         let capabilities = ProviderCapabilities::from_provider_name(provider);
         Self::new(model_name, provider, capabilities)
+    }
+}
+
+/// Resolve the thinking wire-protocol from a (lowercased) model name and
+/// provider. Pure function so it can be unit-tested without a runtime.
+///
+/// Naming conventions as of mid-2026:
+/// - GPT-5 / 5-mini / 5-nano, o3 / o4-mini → `reasoning_effort`
+///   (note: GPT-5-nano reportedly ignores `reasoning_effort`; callers should
+///   still treat the protocol as `OpenaiReasoningEffort` and let the API warn)
+/// - Claude 3.7 / 4 Sonnet & Opus (≤ 4.5) → `thinking.budget_tokens`
+/// - Claude 4.6 / 4.7+ → adaptive (legacy `thinking` block returns 400)
+/// - Qwen3, GLM-4.6+/GLM-5, DeepSeek-R1 → `enable_thinking` (+ `thinking_budget`
+///   for Qwen3)
+fn resolve_thinking_protocol(lower_model: &str, provider: &str) -> ThinkingProtocol {
+    use ThinkingProtocol as T;
+    let provider_lower = provider.to_ascii_lowercase();
+
+    // ── Anthropic family ──
+    if provider_lower == "anthropic" || lower_model.starts_with("claude-") {
+        // Claude model names put the version in different positions
+        // (`claude-4.5-sonnet`, `claude-opus-4.7`, `claude-3.7-sonnet`). Scan
+        // every dash-segment for the first one that looks like X.Y.
+        if let Some(rest) = lower_model.strip_prefix("claude-") {
+            for seg in rest.split('-') {
+                if let Some((maj_s, min_s)) = seg.split_once('.') {
+                    if let (Ok(maj), Ok(min)) = (maj_s.parse::<u32>(), min_s.parse::<u32>()) {
+                        // 4.6+ and beyond use adaptive thinking.
+                        if maj > 4 || (maj == 4 && min >= 6) {
+                            return T::AnthropicAdaptive;
+                        }
+                        // 3.7–4.5 use the budget block; stop scanning.
+                        break;
+                    }
+                }
+            }
+        }
+        // Claude 3.7 through 4.5 (or unparseable versions) accept the
+        // budget_tokens block.
+        return T::AnthropicThinkingBudget;
+    }
+
+    // ── OpenAI reasoning family (GPT-5, o-series) ──
+    if lower_model.starts_with("gpt-5")
+        || lower_model.starts_with("o3")
+        || lower_model.starts_with("o4")
+    {
+        return T::OpenaiReasoningEffort;
+    }
+
+    // ── OpenAI-compatible CN reasoning models ──
+    if lower_model.starts_with("qwen3-")
+        || lower_model.starts_with("qwen-")
+        || lower_model.starts_with("glm-")
+        || lower_model.starts_with("deepseek-r")
+    {
+        return T::EnableThinkingFlag;
+    }
+
+    T::None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ThinkingProtocol as T;
+
+    #[test]
+    fn test_openai_reasoning_models() {
+        assert_eq!(
+            resolve_thinking_protocol("gpt-5", "openai"),
+            T::OpenaiReasoningEffort
+        );
+        assert_eq!(
+            resolve_thinking_protocol("gpt-5-mini", "openai"),
+            T::OpenaiReasoningEffort
+        );
+        assert_eq!(
+            resolve_thinking_protocol("gpt-5-nano", "openai"),
+            T::OpenaiReasoningEffort
+        );
+        assert_eq!(
+            resolve_thinking_protocol("o3-mini", "openai"),
+            T::OpenaiReasoningEffort
+        );
+        assert_eq!(
+            resolve_thinking_protocol("o4-mini", "openai"),
+            T::OpenaiReasoningEffort
+        );
+    }
+
+    #[test]
+    fn test_anthropic_thinking_budget_vs_adaptive() {
+        // Claude 3.7 / 4 / 4.5 → legacy budget block.
+        assert_eq!(
+            resolve_thinking_protocol("claude-3.7-sonnet", "anthropic"),
+            T::AnthropicThinkingBudget
+        );
+        assert_eq!(
+            resolve_thinking_protocol("claude-4-sonnet", "anthropic"),
+            T::AnthropicThinkingBudget
+        );
+        assert_eq!(
+            resolve_thinking_protocol("claude-4.5-sonnet", "anthropic"),
+            T::AnthropicThinkingBudget
+        );
+        // Claude 4.6+ / 4.7+ / 5.x → adaptive (no request field).
+        assert_eq!(
+            resolve_thinking_protocol("claude-4.6-sonnet", "anthropic"),
+            T::AnthropicAdaptive
+        );
+        assert_eq!(
+            resolve_thinking_protocol("claude-opus-4.7", "anthropic"),
+            T::AnthropicAdaptive
+        );
+    }
+
+    #[test]
+    fn test_cn_reasoning_models() {
+        assert_eq!(
+            resolve_thinking_protocol("qwen3-235b-a22b", "dashscope"),
+            T::EnableThinkingFlag
+        );
+        assert_eq!(
+            resolve_thinking_protocol("glm-4.6", "zhipu"),
+            T::EnableThinkingFlag
+        );
+        assert_eq!(
+            resolve_thinking_protocol("deepseek-r1", "deepseek"),
+            T::EnableThinkingFlag
+        );
+    }
+
+    #[test]
+    fn test_non_reasoning_models() {
+        assert_eq!(resolve_thinking_protocol("gpt-4o", "openai"), T::None);
+        assert_eq!(resolve_thinking_protocol("gpt-4-turbo", "openai"), T::None);
+        assert_eq!(resolve_thinking_protocol("llama-3", "ollama"), T::None);
     }
 }

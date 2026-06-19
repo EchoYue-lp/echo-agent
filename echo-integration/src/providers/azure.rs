@@ -19,6 +19,7 @@ use tracing::{Instrument, info_span};
 
 use super::client::{post, stream_post};
 use super::config::{LlmConfig, LlmProvider, ModelConfig};
+use super::thinking_translate::translate_thinking_openai_compat;
 
 const DEFAULT_API_VERSION: &str = "2024-10-21";
 
@@ -81,6 +82,7 @@ impl AzureOpenAiClient {
             baseurl: base_url,
             apikey: api_key.to_string(),
             provider: LlmProvider::Azure,
+            thinking: None,
         };
 
         let header_map = build_azure_headers(&model_config)?;
@@ -125,16 +127,26 @@ impl LlmClient for AzureOpenAiClient {
         let url = self.endpoint_url.clone();
         Box::pin(
             async move {
+                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
+                    translate_thinking_openai_compat(
+                        &self.config.model,
+                        "azure",
+                        &request.thinking,
+                        ProviderCapabilities::openai_compatible(),
+                    );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
-                    temperature: request.temperature,
+                    temperature: if drop_temp { None } else { request.temperature },
                     max_tokens: request.max_tokens,
                     stream: None,
                     stream_options: None,
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
+                    reasoning_effort,
+                    enable_thinking,
+                    thinking_budget,
                 };
 
                 let raw: ChatCompletionResponse =
@@ -160,16 +172,26 @@ impl LlmClient for AzureOpenAiClient {
         let url = self.endpoint_url.clone();
         Box::pin(
             async move {
+                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
+                    translate_thinking_openai_compat(
+                        &self.config.model,
+                        "azure",
+                        &request.thinking,
+                        ProviderCapabilities::openai_compatible(),
+                    );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
-                    temperature: request.temperature,
+                    temperature: if drop_temp { None } else { request.temperature },
                     max_tokens: request.max_tokens,
                     stream: Some(true),
                     stream_options: Some(serde_json::json!({"include_usage": true})),
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
+                    reasoning_effort,
+                    enable_thinking,
+                    thinking_budget,
                 };
 
                 let stream = stream_post(

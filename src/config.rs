@@ -227,6 +227,14 @@ pub struct ModelConfig {
     /// Optional model context window size in tokens.
     /// When None, falls back to name-based inference.
     pub context_window: Option<u32>,
+    /// 思考深度 / reasoning-depth 控制(可选)。
+    ///
+    /// 用户可设置:`"auto"`/`""`(默认)、`"disabled"`、`"minimal"`/`"low"`/
+    /// `"medium"`/`"high"`、或裸数字(精确 token 预算,主要给 Claude)。
+    /// 运行时翻译成 `ThinkingConfig` 注入到 agent 的每个 ChatRequest。
+    /// 不支持的模型静默忽略(见 `ModelProfile.thinking_protocol`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 impl Default for ModelConfig {
@@ -240,6 +248,7 @@ impl Default for ModelConfig {
             max_tokens: None,
             temperature: None,
             context_window: None,
+            thinking: None,
         }
     }
 }
@@ -311,6 +320,11 @@ pub struct ConfiguredModel {
     /// TokenBudget allocation, and adaptive compression tuning.
     /// When None, falls back to name-based inference.
     pub context_window: Option<u32>,
+    /// Optional thinking-depth / reasoning control for this model.
+    /// See [`ModelConfig::thinking`] for accepted values. Forwarded to the
+    /// agent at runtime via `agent.set_thinking()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 impl Default for ConfiguredModel {
@@ -324,6 +338,7 @@ impl Default for ConfiguredModel {
             max_tokens: None,
             temperature: None,
             context_window: None,
+            thinking: None,
         }
     }
 }

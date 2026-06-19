@@ -1,4 +1,5 @@
 use echo_core::error::{LlmError, ReactError, Result};
+use echo_core::llm::capabilities::ProviderCapabilities;
 use echo_core::llm::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message, ResponseFormat,
     ToolDefinition,
@@ -14,6 +15,7 @@ use tracing::{Instrument, info_span};
 
 use super::client::{post, stream_post};
 use super::config::{Config, LlmConfig, ModelConfig};
+use super::thinking_translate::translate_thinking_openai_compat;
 
 // ── Convenience Functions ─────────────────────────────────────────────────────
 
@@ -63,6 +65,9 @@ pub async fn chat(
         tool_choice,
         response_format,
         stream_options: None,
+        reasoning_effort: None,
+        enable_thinking: None,
+        thinking_budget: None,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -93,6 +98,9 @@ pub async fn stream_chat(
         tools,
         tool_choice,
         response_format,
+        reasoning_effort: None,
+        enable_thinking: None,
+        thinking_budget: None,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -158,16 +166,27 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
+                    translate_thinking_openai_compat(
+                        &self.config.model,
+                        "openai",
+                        &request.thinking,
+                        ProviderCapabilities::openai_compatible(),
+                    );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
-                    temperature: request.temperature,
+                    // o-series / GPT-5 reasoning models reject temperature.
+                    temperature: if drop_temp { None } else { request.temperature },
                     max_tokens: request.max_tokens,
                     stream: None,
                     stream_options: None,
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
+                    reasoning_effort,
+                    enable_thinking,
+                    thinking_budget,
                 };
 
                 let raw = post(
@@ -197,16 +216,26 @@ impl LlmClient for OpenAiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
+                    translate_thinking_openai_compat(
+                        &self.config.model,
+                        "openai",
+                        &request.thinking,
+                        ProviderCapabilities::openai_compatible(),
+                    );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
-                    temperature: request.temperature,
+                    temperature: if drop_temp { None } else { request.temperature },
                     max_tokens: request.max_tokens,
                     stream: Some(true),
                     stream_options: Some(serde_json::json!({"include_usage": true})),
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
+                    reasoning_effort,
+                    enable_thinking,
+                    thinking_budget,
                 };
 
                 let stream = stream_post(
@@ -256,6 +285,12 @@ impl DefaultLlmClient {
 impl LlmClient for DefaultLlmClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
         Box::pin(async move {
+            if request.thinking.is_some() {
+                tracing::warn!(
+                    model = %self.model_name,
+                    "DefaultLlmClient does not translate thinking config; use a configured OpenAiClient/AnthropicClient to apply it"
+                );
+            }
             let raw = chat(
                 self.client.clone(),
                 &self.model_name,
@@ -284,6 +319,12 @@ impl LlmClient for DefaultLlmClient {
         request: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
         Box::pin(async move {
+            if request.thinking.is_some() {
+                tracing::warn!(
+                    model = %self.model_name,
+                    "DefaultLlmClient does not translate thinking config; use a configured OpenAiClient/AnthropicClient to apply it"
+                );
+            }
             let stream = stream_chat(
                 self.client.clone(),
                 &self.model_name,

@@ -18,6 +18,7 @@ use tracing::{Instrument, info_span};
 
 use super::client::{post, stream_post};
 use super::config::{LlmConfig, LlmProvider, ModelConfig};
+use super::thinking_translate::translate_thinking_openai_compat;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
 
@@ -51,6 +52,7 @@ impl GeminiClient {
             baseurl: base_url.to_string(),
             apikey: api_key.to_string(),
             provider: LlmProvider::Gemini,
+            thinking: None,
         };
         let header_map = build_headers(&model_config)?;
         Ok(Self {
@@ -90,16 +92,26 @@ impl LlmClient for GeminiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
+                    translate_thinking_openai_compat(
+                        &self.config.model,
+                        "gemini",
+                        &request.thinking,
+                        ProviderCapabilities::openai_compatible(),
+                    );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
-                    temperature: request.temperature,
+                    temperature: if drop_temp { None } else { request.temperature },
                     max_tokens: request.max_tokens,
                     stream: None,
                     stream_options: None,
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
+                    reasoning_effort,
+                    enable_thinking,
+                    thinking_budget,
                 };
 
                 let raw: ChatCompletionResponse = post(
@@ -129,16 +141,26 @@ impl LlmClient for GeminiClient {
         let model = self.config.model.clone();
         Box::pin(
             async move {
+                let (reasoning_effort, enable_thinking, thinking_budget, drop_temp) =
+                    translate_thinking_openai_compat(
+                        &self.config.model,
+                        "gemini",
+                        &request.thinking,
+                        ProviderCapabilities::openai_compatible(),
+                    );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
                     messages: request.messages,
-                    temperature: request.temperature,
+                    temperature: if drop_temp { None } else { request.temperature },
                     max_tokens: request.max_tokens,
                     stream: Some(true),
                     stream_options: Some(serde_json::json!({"include_usage": true})),
                     tools: request.tools,
                     tool_choice: request.tool_choice,
                     response_format: request.response_format,
+                    reasoning_effort,
+                    enable_thinking,
+                    thinking_budget,
                 };
 
                 let stream = stream_post(

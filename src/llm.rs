@@ -91,7 +91,10 @@ use tokio_util::sync::CancellationToken;
 
 // Core traits from echo-core
 pub use echo_core::llm::capabilities::{ModelProfile, ProviderCapabilities};
-pub use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient, SimpleChatOptions};
+pub use echo_core::llm::{
+    ChatChunk, ChatRequest, ChatResponse, LlmClient, SimpleChatOptions, ThinkingConfig,
+    ThinkingLevel, ThinkingProtocol,
+};
 
 // Provider implementations from echo_integration::providers
 pub use echo_integration::providers::anthropic::AnthropicClient;

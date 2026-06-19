@@ -545,6 +545,21 @@ pub struct ChatCompletionRequest {
     /// Response format control
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
+    /// OpenAI reasoning-effort for reasoning models (GPT-5 family, o-series).
+    ///
+    /// One of `"minimal"`, `"low"`, `"medium"`, `"high"`. Only emitted when the
+    /// resolved model speaks [`ThinkingProtocol::OpenaiReasoningEffort`];
+    /// sending it to a non-reasoning model returns a 400.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "reasoning_effort")]
+    pub reasoning_effort: Option<String>,
+    /// Qwen3/GLM `enable_thinking` toggle. Only emitted for models that speak
+    /// [`ThinkingProtocol::EnableThinkingFlag`].
+    #[serde(skip_serializing_if = "Option::is_none", rename = "enable_thinking")]
+    pub enable_thinking: Option<bool>,
+    /// Qwen3 `thinking_budget` (integer token budget). Optional companion to
+    /// `enable_thinking` for Qwen3 models that accept an explicit budget.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thinking_budget")]
+    pub thinking_budget: Option<u32>,
 }
 
 /// Tool definition sent to the LLM

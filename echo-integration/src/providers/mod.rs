@@ -5,6 +5,7 @@ pub mod config;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod thinking_translate;
 
 pub use anthropic::AnthropicClient;
 pub use azure::AzureOpenAiClient;

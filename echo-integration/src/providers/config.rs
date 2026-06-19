@@ -196,6 +196,14 @@ pub struct LlmConfig {
     pub api_key: String,
     /// 模型名称
     pub model: String,
+    /// 思考深度 / reasoning-depth 控制(可选)。
+    ///
+    /// 可写成 `"auto"`/`""`(默认)、`"disabled"`、`"low"`/`"medium"`/`"high"`/
+    /// `"minimal"`、或裸数字(精确 token 预算)。运行时由 agent 创建路径
+    /// 解析成 `ThinkingConfig` 并通过 `agent.set_thinking()` 注入。
+    /// 实际生效与否取决于模型是否支持该思考协议。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 impl std::fmt::Debug for LlmConfig {
@@ -221,6 +229,7 @@ impl LlmConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
+            thinking: None,
         }
     }
 
@@ -237,6 +246,7 @@ impl LlmConfig {
             base_url: config.baseurl,
             api_key: config.apikey,
             model: config.model,
+            thinking: None,
         })
     }
 
@@ -252,6 +262,7 @@ impl LlmConfig {
             base_url: provider_urls::OPENAI.to_string(),
             api_key: api_key.into(),
             model: model.into(),
+            thinking: None,
         }
     }
 
@@ -262,6 +273,7 @@ impl LlmConfig {
             base_url: provider_urls::ANTHROPIC.to_string(),
             api_key: api_key.into(),
             model: model.into(),
+            thinking: None,
         }
     }
 
@@ -272,6 +284,7 @@ impl LlmConfig {
             base_url: provider_urls::OLLAMA.to_string(),
             api_key: String::new(),
             model: model.into(),
+            thinking: None,
         }
     }
 
@@ -282,6 +295,7 @@ impl LlmConfig {
             base_url: provider_urls::DEEPSEEK.to_string(),
             api_key: api_key.into(),
             model: model.into(),
+            thinking: None,
         }
     }
 
@@ -292,6 +306,7 @@ impl LlmConfig {
             base_url: provider_urls::DASHSCOPE.to_string(),
             api_key: api_key.into(),
             model: model.into(),
+            thinking: None,
         }
     }
 
@@ -302,6 +317,7 @@ impl LlmConfig {
             base_url: provider_urls::GEMINI.to_string(),
             api_key: api_key.into(),
             model: model.into(),
+            thinking: None,
         }
     }
 
@@ -318,6 +334,7 @@ impl LlmConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: deployment.into(),
+            thinking: None,
         }
     }
 
@@ -368,6 +385,7 @@ impl LlmConfig {
             baseurl: self.base_url.clone(),
             apikey: self.api_key.clone(),
             provider: self.provider.clone(),
+            thinking: None,
         }
     }
 }
@@ -465,6 +483,7 @@ impl ProviderFactory {
             base_url: base_url.to_string(),
             api_key,
             model: model.to_string(),
+            thinking: None,
         };
         config.build_client()
     }
@@ -636,6 +655,17 @@ pub struct ModelConfig {
     /// LLM 供应商类型（用于自动选择客户端实现）
     #[serde(default)]
     pub provider: LlmProvider,
+    /// 思考深度 / reasoning-depth 控制（可选）。
+    ///
+    /// 配置文件里可写成字符串形式,自动解析:`"auto"`/`""`(默认,不发字段)、
+    /// `"disabled"`、`"low"`/`"medium"`/`"high"`/`"minimal"`、或裸数字(如
+    /// `"4000"`,精确 token 预算)。运行时由 `ProviderFactory` 翻译成
+    /// `ThinkingConfig` 并注入到 agent 的每个 ChatRequest。
+    ///
+    /// 注意:实际是否生效取决于模型是否支持该思考协议(见
+    /// `ModelProfile.thinking_protocol`);不支持的模型会静默忽略并 warn。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 impl std::fmt::Debug for ModelConfig {
@@ -863,6 +893,7 @@ impl Config {
                         baseurl: base_url,
                         apikey: api_key,
                         provider,
+                        thinking: None,
                     };
 
                     models.insert(key.clone(), mc.clone());
@@ -1087,6 +1118,7 @@ fn builtin_model_config(model: &str) -> Option<ModelConfig> {
         baseurl,
         apikey,
         provider: parse_provider(provider),
+        thinking: None,
     })
 }
 

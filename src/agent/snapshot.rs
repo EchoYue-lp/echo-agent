@@ -199,6 +199,10 @@ pub struct AgentRunSnapshot {
     /// `LlmClient` impl (OpenAiClient, …); when `None`, the legacy reqwest
     /// fallback path is used (behavior unchanged).
     pub llm_client: Option<Arc<dyn crate::llm::LlmClient>>,
+    /// Per-agent thinking-depth config, propagated to the think phase and react
+    /// loop so each LLM request carries the configured reasoning depth. `None`
+    /// means "use the model's default" (no thinking field sent).
+    pub thinking: Option<crate::llm::ThinkingConfig>,
     /// Cancellation token (set after construction).
     pub cancel_token: Option<crate::agent::CancellationToken>,
     /// Recently read files for read-before-edit enforcement (path → read instant).
@@ -242,6 +246,7 @@ impl AgentRunSnapshot {
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             client: agent.client().clone(),
             llm_client: agent.llm_client().cloned(),
+            thinking: agent.thinking().cloned(),
             cancel_token: agent.cancel_token.try_lock().ok().and_then(|g| g.clone()),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
