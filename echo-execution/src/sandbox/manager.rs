@@ -129,8 +129,18 @@ impl SandboxManager {
     }
 
     /// 设置是否允许降级
-    pub fn set_allow_fallback(&mut self, allow: bool) {
-        self.allow_fallback = allow;
+    pub fn set_allow_fallback(&mut self, allow_fallback: bool) {
+        self.allow_fallback = allow_fallback;
+    }
+
+    /// True iff a containerized sandbox (Docker or k8s) is configured.
+    ///
+    /// The Tauri `execute_sandbox` IPC uses this to gate frontend-driven code
+    /// execution: without a real container, executing LLM-/frontend-supplied
+    /// code runs it directly on the host (the `local_only()` fallback),
+    /// which is an RCE primitive for any XSS that reaches the IPC surface.
+    pub fn has_container_sandbox(&self) -> bool {
+        self.docker.is_some() || self.k8s.is_some()
     }
 
     /// 设置安全策略
