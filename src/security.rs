@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_stripe_live_key() {
-        assert!(contains_secrets(&format!("{}{}", "sk_live_", "51AbCdEfGhIjKlMnOpQrStUvWxYz")));
+        assert!(contains_secrets(concat!("sk_", "live_51AbCdEfGhIjKlMnOpQrStUvWxYz")));
     }
 
     #[test]

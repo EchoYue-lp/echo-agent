@@ -1176,6 +1176,13 @@ impl ReactAgent {
         self.tools.tool_manager = tm;
     }
 
+    /// Get the subagent registry (for the Tauri subagent-event bridge to
+    /// forward dispatch lifecycle events to the frontend).
+    #[cfg(feature = "subagent")]
+    pub fn subagent_registry(&self) -> &Arc<crate::agent::subagent::SubagentRegistry> {
+        &self.tools.subagent_registry
+    }
+
     /// Replace the hook registry with a shared instance (for AgentPool).
     pub fn set_hook_registry(
         &mut self,
