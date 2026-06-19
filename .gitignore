@@ -6,7 +6,6 @@
 .env
 .env1
 mcp.json
-/Cargo.lock
 /echo-agent.yaml
 .DS_Store
 .ISSUES.md
