@@ -8,21 +8,8 @@ use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
-use std::sync::OnceLock;
 
 const TOOL_NAME: &str = "pdf_fetch";
-
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn shared_client() -> &'static reqwest::Client {
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .redirect(crate::security::ssrf_safe_redirect_policy())
-            .build()
-            .unwrap_or_default()
-    })
-}
 
 pub struct PdfFetchTool;
 
