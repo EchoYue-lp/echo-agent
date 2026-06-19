@@ -460,7 +460,10 @@ impl Tool for GitCommitTool {
             if let Some(files) = parameters.get("files").and_then(|v| v.as_array()) {
                 for f_val in files {
                     if let Some(f) = f_val.as_str() {
-                        let add_args = ["add", f];
+                        // `--` separates paths from options so a filename
+                        // starting with `-` (e.g. `--upload-pack=...`) can't be
+                        // interpreted as a git flag (P1-2 argument injection).
+                        let add_args = ["add", "--", f];
                         run_git(&repo_path, &add_args)?;
                     }
                 }

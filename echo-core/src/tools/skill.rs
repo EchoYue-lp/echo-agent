@@ -112,6 +112,16 @@ pub fn minimal_env(
         env.insert("PATH".to_string(), path);
     }
 
+    // Forward safe, non-secret functional vars so skill scripts behave sanely
+    // under the env_cleared environment (P1-12): LANG/LC_ALL for correct UTF-8
+    // handling (otherwise the C locale mangles non-ASCII), TMPDIR for tools
+    // that write temp files, TZ for correct timestamps.
+    for var in ["LANG", "LC_ALL", "TMPDIR", "TZ"] {
+        if let Ok(val) = std::env::var(var) {
+            env.insert(var.to_string(), val);
+        }
+    }
+
     // Skill-specific variables
     env.insert("SKILL_DIR".to_string(), skill_dir.to_string());
     env.insert("SESSION_ID".to_string(), session_id.to_string());
@@ -132,6 +142,12 @@ pub fn minimal_hook_env(skill_dir: &str, session_id: &str) -> HashMap<String, St
     let mut env = HashMap::new();
     if let Ok(path) = std::env::var("PATH") {
         env.insert("PATH".to_string(), path);
+    }
+    // Same safe functional vars as minimal_env (P1-12).
+    for var in ["LANG", "LC_ALL", "TMPDIR", "TZ"] {
+        if let Ok(val) = std::env::var(var) {
+            env.insert(var.to_string(), val);
+        }
     }
     env.insert("SKILL_DIR".to_string(), skill_dir.to_string());
     env.insert("SESSION_ID".to_string(), session_id.to_string());

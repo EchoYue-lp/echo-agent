@@ -368,8 +368,11 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
                 message: format!("Query execution failed: {}", e),
             }
         })?;
-        // Best-effort commit (read-only, so nothing to write); rollback on drop otherwise.
-        tx.commit().await.ok();
+        // Read-only transaction — explicitly rollback (nothing to write). The
+        // comment previously said "rollback on drop otherwise" but the code
+        // committed; align the two (P1-1). For a read-only tx commit/rollback
+        // are equivalent, but rollback is unambiguous about intent.
+        tx.rollback().await.ok();
         format_db_rows(&rows)
     }
 }

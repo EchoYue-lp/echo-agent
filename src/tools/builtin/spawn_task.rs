@@ -143,13 +143,19 @@ impl Tool for SpawnBackgroundTaskTool {
 
                     // Use tokio::process::Command for safe async execution.
                     // env_clear + allowlist: prevent leaking API keys/tokens to
-                    // background processes. Only PATH and HOME are needed.
-                    let output = tokio::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd_for_task)
-                        .env_clear()
-                        .env("PATH", std::env::var("PATH").unwrap_or_default())
-                        .env("HOME", std::env::var("HOME").unwrap_or_default())
+                    // background processes. PATH/HOME are required; LANG/LC_ALL
+                    // (so UTF-8 output isn't mojibake'd under the C locale),
+                    // TMPDIR (tools that write temp files fail without it), and
+                    // TZ (correct timestamps) are safe, non-secret functional
+                    // vars forwarded from the parent (P1-12).
+                    let mut cmd = tokio::process::Command::new("sh");
+                    cmd.arg("-c").arg(&cmd_for_task).env_clear();
+                    for var in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TZ"] {
+                        if let Ok(val) = std::env::var(var) {
+                            cmd.env(var, val);
+                        }
+                    }
+                    let output = cmd
                         .process_group(0)
                         .kill_on_drop(true)
                         .output()

@@ -197,9 +197,10 @@ pub fn merge_worktree(
 ) -> Result<String, String> {
     let git_root = find_git_root(repo_path)?;
 
-    // First checkout target branch
+    // First checkout target branch. `--` separates the branch from any
+    // pathspec and guards against a branch name shaped like a flag (P1-2).
     let co = Command::new("git")
-        .args(["checkout", target_branch])
+        .args(["checkout", target_branch, "--"])
         .current_dir(&git_root)
         .output()
         .map_err(|e| format!("Failed to checkout target branch: {e}"))?;
@@ -212,9 +213,10 @@ pub fn merge_worktree(
         ));
     }
 
-    // Merge the worktree branch
+    // Merge the worktree branch. Trailing `--` separates revs from pathspec
+    // (P1-2).
     let merge = Command::new("git")
-        .args(["merge", "--no-edit", &worktree.branch])
+        .args(["merge", "--no-edit", &worktree.branch, "--"])
         .current_dir(&git_root)
         .output()
         .map_err(|e| format!("Failed to merge: {e}"))?;

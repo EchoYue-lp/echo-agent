@@ -606,7 +606,21 @@ pub fn save_config(config: &AppConfig) -> std::result::Result<(), String> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create directory failed: {e}"))?;
     }
-    std::fs::write(target, content).map_err(|e| format!("write failed: {e}"))
+    std::fs::write(target, content).map_err(|e| format!("write failed: {e}"))?;
+    // P1-4: the config file holds plaintext secrets (channel app_secret /
+    // client_secret, and is the on-disk source for MCP env/headers tokens).
+    // Restrict it to owner-only (0600) so other users on the host can't read
+    // credentials. (Full at-rest encryption would need an OS keychain to store
+    // the key; file permissions are the standard local-app mitigation and the
+    // scope of this fix.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("Failed to set config file permissions to 0600: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// Load configuration (searches default paths).

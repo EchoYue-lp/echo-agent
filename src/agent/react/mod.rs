@@ -145,6 +145,14 @@ pub struct ReactAgent {
     /// Uses `tokio::sync::Mutex` to support `&self` streaming methods.
     pub(crate) cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
 
+    /// Shared handle to the `AgentDispatchTool`'s cancel token (P1-11).
+    ///
+    /// Mirrors [`cancel_token`] into the LLM-callable dispatch tool so that a
+    /// subagent dispatched via the `agent_tool` is cancelled when the parent
+    /// run is. Updated alongside `cancel_token` at run start. `None` when
+    /// subagents are disabled (`AgentDispatchTool` never registered).
+    pub(crate) dispatch_cancel_handle: Option<Arc<tokio::sync::Mutex<Option<CancellationToken>>>>,
+
     /// Optional run store for persisting execution traces.
     /// When set, each streaming execution records a [`Run`](crate::trace::Run)
     /// with events, token usage, and timings.
@@ -393,6 +401,12 @@ impl ReactAgent {
 
         // ── AgentDispatch tool (after all other tools + store are ready) ──
         // Context inheritance factory needs the final tool_manager Arc and store.
+        // Shared cancel handle so the parent run can push its token into the
+        // LLM-callable dispatch tool (P1-11). `None` when subagents disabled.
+        #[cfg(feature = "subagent")]
+        let mut dispatch_cancel_handle: Option<
+            Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
+        > = None;
         #[cfg(feature = "subagent")]
         if config.enable_subagent {
             let factory = Arc::new(
@@ -409,6 +423,9 @@ impl ReactAgent {
                 CancellationToken::new(),
             )
             .with_parent_context(factory);
+            // Capture the shared handle before the tool is moved into the
+            // tool_manager, so the agent can update it at run start.
+            dispatch_cancel_handle = Some(dispatch_tool.cancel_handle());
             tool_manager.register(Box::new(dispatch_tool));
         }
 
@@ -457,6 +474,10 @@ impl ReactAgent {
             llm_config: None,
             thinking: None,
             cancel_token: tokio::sync::Mutex::new(None),
+            #[cfg(feature = "subagent")]
+            dispatch_cancel_handle,
+            #[cfg(not(feature = "subagent"))]
+            dispatch_cancel_handle: None,
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
@@ -1748,7 +1769,18 @@ impl ReactAgent {
                 agent_name,
                 task: task.to_string(),
                 mode_override: Some(ExecutionMode::Fork),
-                cancel: CancellationToken::new(),
+                // Inherit the parent run's cancel token (P1-11): a bare
+                // `CancellationToken::new()` here would detach the subagent
+                // from the parent, so cancelling the parent run would not
+                // propagate to the delegated subagent. Fall back to a fresh
+                // token only if no run is active (cancel_token not set).
+                cancel: self
+                    .cancel_token
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|t| t.child_token())
+                    .unwrap_or_else(CancellationToken::new),
                 parent_agent: self.config.agent_name.clone(),
                 parent_context: self.build_parent_context(&ExecutionMode::Fork).await,
                 delegate_depth: 0,
@@ -1792,7 +1824,14 @@ impl ReactAgent {
             agent_name: target.to_string(),
             task: task.to_string(),
             mode_override: Some(mode.clone()),
-            cancel: CancellationToken::new(),
+            // Inherit the parent run's cancel token (P1-11) — see delegate_task.
+            cancel: self
+                .cancel_token
+                .lock()
+                .await
+                .as_ref()
+                .map(|t| t.child_token())
+                .unwrap_or_else(CancellationToken::new),
             parent_agent: self.config.agent_name.clone(),
             parent_context: self.build_parent_context(&mode).await,
             delegate_depth: 0,
@@ -2035,7 +2074,13 @@ impl Agent for ReactAgent {
         let model = self.config.model_name.clone();
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel);
+                *self.cancel_token.lock().await = Some(cancel.clone());
+                // Mirror the active run's token into the LLM-callable dispatch
+                // tool (P1-11): subagents dispatched via `agent_tool` derive a
+                // child_token from this, so they're cancelled with the parent.
+                if let Some(handle) = &self.dispatch_cancel_handle {
+                    *handle.lock().await = Some(cancel);
+                }
                 self.run_stream_entry(_message, run::StreamMode::Chat).await
             }
             .instrument(info_span!("agent_chat_stream_with_cancel", agent.name = %agent, agent.model = %model)),
@@ -2051,7 +2096,13 @@ impl Agent for ReactAgent {
         let model = self.config.model_name.clone();
         Box::pin(
             async move {
-                *self.cancel_token.lock().await = Some(cancel);
+                *self.cancel_token.lock().await = Some(cancel.clone());
+                // Mirror the active run's token into the LLM-callable dispatch
+                // tool (P1-11): subagents dispatched via `agent_tool` derive a
+                // child_token from this, so they're cancelled with the parent.
+                if let Some(handle) = &self.dispatch_cancel_handle {
+                    *handle.lock().await = Some(cancel);
+                }
                 self.run_stream_entry(_task, run::StreamMode::Execute).await
             }
             .instrument(info_span!("agent_execute_stream_with_cancel", agent.name = %agent, agent.model = %model)),

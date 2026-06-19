@@ -50,7 +50,17 @@ impl ParentContextFactory {
 pub struct AgentDispatchTool {
     executor: Arc<SubagentExecutor>,
     parent_agent: String,
-    cancel: CancellationToken,
+    /// Shared, updatable handle to the parent run's cancel token (P1-11).
+    ///
+    /// The tool is constructed during agent build, before any run starts, so
+    /// the parent's cancel token is not known yet. We hold an `Arc<Mutex<..>>`
+    /// that the parent run updates when it begins; `execute` reads the latest
+    /// value and derives a `child_token` so a subagent dispatched via this tool
+    /// is cancelled when the parent run is. Previously this was a fixed
+    /// `CancellationToken::new()` captured at build time — an inert token that
+    /// could never fire, so LLM-initiated dispatches were detached from the
+    /// parent's cancellation entirely.
+    cancel: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
     /// Optional factory for building parent context at dispatch time.
     /// When set, subagents in Fork mode inherit conversation history,
     /// system prompt, and tools from the parent agent.
@@ -66,7 +76,7 @@ impl AgentDispatchTool {
         Self {
             executor,
             parent_agent: parent_agent.into(),
-            cancel,
+            cancel: Arc::new(tokio::sync::Mutex::new(Some(cancel))),
             parent_context_factory: None,
         }
     }
@@ -75,6 +85,15 @@ impl AgentDispatchTool {
     pub fn with_parent_context(mut self, factory: Arc<ParentContextFactory>) -> Self {
         self.parent_context_factory = Some(factory);
         self
+    }
+
+    /// Shared updatable cancel handle for the parent run (P1-11).
+    ///
+    /// Returns a clone of the inner `Arc<Mutex<..>>`; the caller (the parent
+    /// agent) writes the active run's token into it each time a run starts, so
+    /// dispatches issued by this tool inherit cancellation.
+    pub fn cancel_handle(&self) -> Arc<tokio::sync::Mutex<Option<CancellationToken>>> {
+        self.cancel.clone()
     }
 }
 
@@ -116,7 +135,7 @@ impl Tool for AgentDispatchTool {
     ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
         let executor = self.executor.clone();
         let parent_agent = self.parent_agent.clone();
-        let cancel = self.cancel.clone();
+        let cancel_handle = self.cancel.clone();
         let factory = self.parent_context_factory.clone();
 
         Box::pin(async move {
@@ -156,6 +175,16 @@ impl Tool for AgentDispatchTool {
             } else {
                 None
             };
+
+            // Derive the subagent's cancel token from the parent run's current
+            // token (P1-11). If the parent run hasn't started (no token set),
+            // fall back to a fresh token so dispatch still works standalone.
+            let cancel = cancel_handle
+                .lock()
+                .await
+                .as_ref()
+                .map(|t| t.child_token())
+                .unwrap_or_else(CancellationToken::new);
 
             let req = crate::agent::subagent::DispatchRequest {
                 agent_name: agent_name.to_string(),

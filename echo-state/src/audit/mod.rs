@@ -67,10 +67,18 @@ impl AuditCallback {
         }
     }
 
-    /// 为工具调用生成唯一的 tool_call_id（全局单调递增）。
-    fn make_tool_call_id(&self, _tool: &str) -> String {
+    /// 为工具调用生成唯一的 map key。
+    ///
+    /// Key 格式为 `"{tool}#{n}"`：以工具名为前缀 + 全局单调递增序号。前缀让
+    /// [`pop_tool_call`] 能按工具名做前缀匹配（一个工具名下可能有多个并发
+    /// in-flight 调用），全局序号保证 key 唯一、且可比较出最旧的调用。
+    ///
+    /// 之前实现返回 `call_{n}`，而 [`pop_tool_call`] 按 `"{tool}#"` 前缀查 ——
+    /// 两者格式不匹配，pop 永远命中不了，导致 on_tool_end/on_tool_error 的
+    /// duration_ms 恒为 0、input 恒为 Null（P1-13）。统一为 `tool#N` 修复。
+    fn make_tool_call_id(&self, tool: &str) -> String {
         let n = self.next_call_id.fetch_add(1, Ordering::Relaxed);
-        format!("call_{}", n)
+        format!("{}#{}", tool, n)
     }
 
     fn make_event(&self, event_type: AuditEventType) -> AuditEvent {
@@ -85,8 +93,7 @@ impl AuditCallback {
     /// even when concurrent calls share a tool name.
     fn pop_tool_call(&self, tool: &str) -> Option<ToolCallInfo> {
         let mut map = self.tool_calls.lock().ok()?;
-        // Collect all keys matching this tool's tracking prefix.
-        // Previous format: "tool#N" — fallback for entries still using that pattern.
+        // Collect all keys matching this tool's tracking prefix ("{tool}#N").
         let candidates: Vec<String> = map
             .keys()
             .filter(|k| k.starts_with(&format!("{}#", tool)))

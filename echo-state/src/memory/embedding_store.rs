@@ -268,12 +268,61 @@ impl Drop for EmbeddingStore {
     fn drop(&mut self) {
         // Best-effort flush on drop so vector index changes are not silently
         // lost when the store is dropped without an explicit flush_vector_index().
-        if self.vec_path.is_some() {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let _ = handle.block_on(self.flush_index());
+        //
+        // P1-10: the previous implementation called `handle.block_on(self
+        // .flush_index())` directly. If `drop` runs on a runtime worker thread
+        // that is currently driving a future holding this store (a common case
+        // when the store is owned by an agent task), `block_on` deadlocks the
+        // runtime — the worker blocks waiting for a future that needs the very
+        // worker it just parked. Instead, snapshot the index data under a
+        // non-blocking `try_read` and spawn a detached task that owns only the
+        // cloned snapshot + path (no `&self`), so `drop` returns immediately
+        // without blocking or holding the runtime. If the lock is contended or
+        // no runtime exists, we give up — this is best-effort by design.
+        let Some(path) = self.vec_path.clone() else {
+            return;
+        };
+        let Ok(index) = self.index.try_read() else {
+            // Lock contended during drop — skip; data remains in memory only.
+            return;
+        };
+        let data = index.data.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        // Detached: fire-and-forget. The task owns `data` and `path` by value,
+        // so it is safe to run after `self` is freed.
+        handle.spawn(async move {
+            let json = match serde_json::to_string(&data) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!(error = %e, "embedding store drop-flush serialize failed");
+                    return;
+                }
+            };
+            // Atomic write: tmp + sync_all + rename.
+            let tmp_path = path.with_extension("json.tmp");
+            match write_and_rename(&tmp_path, &path, json.as_bytes()).await {
+                Ok(()) => tracing::debug!(path = %path.display(), "💾 向量索引已持久化(drop)"),
+                Err(e) => tracing::warn!(error = %e, path = %path.display(), "embedding store drop-flush failed"),
             }
-        }
+        });
     }
+}
+
+/// Atomically write `bytes` to `tmp`, fsync, then rename over `dest`.
+async fn write_and_rename(tmp: &Path, dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    {
+        let mut file = tokio::fs::File::create(tmp).await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+    }
+    if let Err(e) = tokio::fs::rename(tmp, dest).await {
+        let _ = tokio::fs::remove_file(tmp).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 impl Store for EmbeddingStore {
