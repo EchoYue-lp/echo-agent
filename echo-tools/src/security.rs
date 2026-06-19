@@ -4,6 +4,7 @@
 //! - Path sandbox: prevents path traversal attacks
 //! - Resource limits: prevents DoS and OOM
 
+use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -647,18 +648,64 @@ pub async fn ssrf_safe_request(
     max_redirects: usize,
     method: reqwest::Method,
 ) -> Result<reqwest::Response> {
+    ssrf_safe_request_full(url, timeout, max_redirects, method, None, None).await
+}
+
+/// SSRF-safe request with an optional JSON body and extra headers.
+///
+/// Used by HTTP hooks that POST a payload to an operator-configured URL.
+/// Reuses the same resolve-once → pin-IP → per-redirect-revalidate pipeline
+/// as [`ssrf_safe_request`]; the body and headers are attached to each hop's
+/// request. The body is consumed on the first hop (a JSON body cannot be
+/// re-sent across redirects in reqwest without re-serializing), so redirects
+/// drop the body — which is the conservative choice for an SSRF-sensitive
+/// outbound POST (we never want to replay secrets to a redirect target).
+pub async fn ssrf_safe_request_with_body(
+    url: &str,
+    timeout: Duration,
+    max_redirects: usize,
+    method: reqwest::Method,
+    body: &serde_json::Value,
+    headers: Option<&HashMap<String, String>>,
+) -> Result<reqwest::Response> {
+    ssrf_safe_request_full(url, timeout, max_redirects, method, Some(body), headers).await
+}
+
+/// Core SSRF-safe pipeline shared by the body and bodyless variants.
+///
+/// `body` and `headers` are only applied on the first hop. Redirects are
+/// followed bodyless to avoid replaying a (possibly secret-laden) payload to
+/// a redirect destination the validator may not have seen.
+async fn ssrf_safe_request_full(
+    url: &str,
+    timeout: Duration,
+    max_redirects: usize,
+    method: reqwest::Method,
+    body: Option<&serde_json::Value>,
+    headers: Option<&HashMap<String, String>>,
+) -> Result<reqwest::Response> {
     let mut current = url.to_string();
+    let mut first_hop = true;
     for _ in 0..=max_redirects {
         let (host, addrs) = validate_url_with_addrs(&current)?;
         let client = pinned_client(&host, &addrs, timeout)?;
-        let response = client
-            .request(method.clone(), &current)
-            .send()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: "security".to_string(),
-                message: format!("SSRF-safe request failed: {}", e),
-            })?;
+        let mut req = client.request(method.clone(), &current);
+        // Attach body + headers only on the first hop; see fn doc.
+        if first_hop {
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+            if let Some(h) = headers {
+                for (k, v) in h {
+                    req = req.header(k, v);
+                }
+            }
+            first_hop = false;
+        }
+        let response = req.send().await.map_err(|e| ToolError::ExecutionFailed {
+            tool: "security".to_string(),
+            message: format!("SSRF-safe request failed: {}", e),
+        })?;
 
         if response.status().is_redirection() {
             // Re-resolve and re-validate the redirect target independently.
@@ -678,6 +725,8 @@ pub async fn ssrf_safe_request(
                     .find("://")
                     .and_then(|i| current[i + 3..].find('/').map(|j| i + 3 + j))
                     .unwrap_or(current.len());
+                // origin_end indexes into a `&str` derived from a URL that is
+                // ASCII up to the first path separator; byte index is safe.
                 format!("{}{}", &current[..origin_end], location)
             };
             continue;

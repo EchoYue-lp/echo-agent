@@ -107,6 +107,7 @@ use tracing::{debug, info, warn};
 
 use crate::sandbox::{SandboxCommand, SandboxManager};
 use crate::skills::minimal_hook_env_with_context;
+use echo_tools::security::ssrf_safe_request_with_body;
 
 // ── (HookEvent, HookContext, HookResult, CompressHookStats, HookSource are now in echo-core) ──
 
@@ -973,6 +974,80 @@ async fn execute_command_hook(
 
 // -- HTTP hook execution --
 
+/// Minimal secret-redaction applied to a hook payload before it leaves the
+/// process. Covers the highest-risk token shapes (API keys, bearer tokens,
+/// connection strings). The full scanner lives in `echo_agent::security`, but
+/// `echo-execution` cannot depend on the root crate (cycle); this local guard
+/// is defense-in-depth on top of the operator's responsibility to configure
+/// hook URLs responsibly.
+fn redact_hook_payload(value: &mut Value) {
+    // Recursively walk the JSON and redact string leaves that look like
+    // secrets, plus the VALUES of map entries whose KEY names a secret field.
+    match value {
+        Value::Object(map) => {
+            // Collect keys first to avoid borrow issues while mutating.
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let is_secret_key = {
+                    let lk = k.to_ascii_lowercase();
+                    lk.contains("secret")
+                        || lk.contains("token")
+                        || lk.contains("password")
+                        || lk.contains("passwd")
+                        || lk.contains("api_key")
+                        || lk.contains("apikey")
+                        || lk.contains("auth")
+                        || lk.contains("credential")
+                };
+                if let Some(v) = map.get_mut(&k) {
+                    if is_secret_key && v.is_string() {
+                        *v = Value::String("[REDACTED]".to_string());
+                    } else {
+                        redact_hook_payload(v);
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                redact_hook_payload(v);
+            }
+        }
+        Value::String(s) => {
+            *s = redact_string_secrets(s);
+        }
+        _ => {}
+    }
+}
+
+/// Redact well-known secret patterns within a single string.
+fn redact_string_secrets(s: &str) -> String {
+    use std::sync::OnceLock;
+    // Possessive quantifiers prevent ReDoS backtracking.
+    static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        vec![
+            // Bearer tokens
+            regex::Regex::new(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+").unwrap(),
+            // OpenAI keys
+            regex::Regex::new(r"sk-(?:proj-|ant-)?[A-Za-z0-9]{20,}").unwrap(),
+            // GitHub tokens
+            regex::Regex::new(r"gh[posur]_[A-Za-z0-9]{20,}").unwrap(),
+            // HuggingFace tokens
+            regex::Regex::new(r"hf_[A-Za-z0-9]{20,}").unwrap(),
+            // Anthropic keys
+            regex::Regex::new(r"sk-ant-[A-Za-z0-9\-_]{20,}").unwrap(),
+            // DB connection strings with embedded creds
+            regex::Regex::new(r"(?i)(postgres|mysql|mongodb|redis)://[^@\s]+:[^@\s]+@").unwrap(),
+        ]
+    });
+    let mut out = s.to_string();
+    for p in patterns {
+        out = p.replace_all(&out, "[REDACTED]").to_string();
+    }
+    out
+}
+
 async fn execute_http_hook(
     url: &str,
     method: Option<&str>,
@@ -981,50 +1056,51 @@ async fn execute_http_hook(
     context: &HookContext,
     client: Option<&reqwest::Client>,
 ) -> HookResult {
-    let client = match client {
-        Some(c) => c.clone(),
-        None => reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .build()
-            .unwrap_or_default(),
-    };
+    // P0-6: route every HTTP hook through the SSRF-safe pipeline. The hook URL
+    // is operator/SKILL.md-controlled and previously POSTed the full HookContext
+    // (tool inputs/outputs, prompts, session id) to an arbitrary address with
+    // NO validation and NO allowlist — a clean SSRF + data-exfil primitive.
+    // `ssrf_safe_request_with_body` resolves once, pins the IP, and re-validates
+    // each redirect hop, closing both the DNS-rebinding window and the
+    // `302 → 169.254.169.254` redirect bypass. An externally-supplied `client`
+    // is ignored for SSRF purposes (it cannot be trusted to carry the policy).
+    let _ = client; // intentionally unused; SSRF safety must not be optional.
 
     let method = reqwest::Method::from_bytes(method.unwrap_or("POST").as_bytes())
         .unwrap_or(reqwest::Method::POST);
 
-    let mut req = client.request(method, url).json(context);
+    // Serialize the context, then redact secrets before it leaves the process.
+    // The hook receiver gets the structure minus any obvious secret values.
+    let mut payload = serde_json::to_value(context).unwrap_or_else(|_| json!({}));
+    redact_hook_payload(&mut payload);
 
-    if let Some(h) = headers {
-        for (k, v) in h {
-            req = req.header(k, v);
-        }
-    }
+    // Redact the same patterns from any caller-supplied headers (e.g. an
+    // `Authorization` header set by config).
+    let safe_headers: Option<HashMap<String, String>> = headers.map(|h| {
+        h.iter()
+            .map(|(k, v)| (k.clone(), redact_string_secrets(v)))
+            .collect()
+    });
 
-    // Always respect the hook's timeout, even when an external client is provided.
-    let send_fut = req.send();
-    let result = if timeout_secs > 0 {
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), send_fut).await {
-            Ok(res) => res,
-            Err(_) => {
-                warn!(url = %url, timeout_secs, "Http hook timed out");
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let result =
+        match ssrf_safe_request_with_body(url, timeout, 5, method, &payload, safe_headers.as_ref())
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(url = %url, error = %e, "Http hook SSRF-safe request rejected/failed");
                 return HookResult::default();
             }
-        }
-    } else {
-        send_fut.await
-    };
+        };
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            let text = resp.text().await.unwrap_or_default();
+    match result.status().is_success() {
+        true => {
+            let text = result.text().await.unwrap_or_default();
             parse_hook_output(&text, 0)
         }
-        Ok(resp) => {
-            warn!(status = %resp.status(), url = %url, "Http hook non-2xx response");
-            HookResult::default()
-        }
-        Err(e) => {
-            warn!(error = %e, url = %url, "Http hook request failed");
+        false => {
+            warn!(status = %result.status(), url = %url, "Http hook non-2xx response");
             HookResult::default()
         }
     }
