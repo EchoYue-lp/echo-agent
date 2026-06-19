@@ -37,6 +37,7 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Enum of preset responses (text, tool calls, or errors)
 enum MockLlmResponse {
@@ -56,6 +57,11 @@ pub struct MockLlmClient {
     responses: Arc<Mutex<VecDeque<MockLlmResponse>>>,
     /// The list of messages received on each call, recorded in order
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
+    /// Optional delay before returning each response. When set, `chat` and
+    /// `chat_stream` sleep for this duration, but will return early with a
+    /// Cancelled error if the request's `cancel_token` is triggered. This lets
+    /// tests simulate "running" LLM calls that can be interrupted (Phase 3).
+    delay: Option<Duration>,
 }
 
 impl Default for MockLlmClient {
@@ -71,7 +77,15 @@ impl MockLlmClient {
             model_name: "mock-model".to_string(),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
+            delay: None,
         }
+    }
+
+    /// Set a delay before each response. When combined with a request
+    /// `cancel_token`, this lets tests verify mid-flight cancellation (Phase 3).
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
+        self
     }
 
     /// Set the model name
@@ -227,6 +241,18 @@ impl LlmClient for MockLlmClient {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(request.messages);
 
+            // Optional delay with cancel-awareness (Phase 3: lets tests verify
+            // mid-flight cancellation).
+            if let Some(d) = self.delay {
+                let token = request.cancel_token.unwrap_or_default();
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        return Err(ReactError::Other("mock LLM call cancelled".into()));
+                    }
+                    _ = tokio::time::sleep(d) => {}
+                }
+            }
+
             match self.pop_response()? {
                 PopResult::Content(text) => Ok(ChatResponse {
                     message: Message::assistant(text),
@@ -252,6 +278,17 @@ impl LlmClient for MockLlmClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(request.messages);
+
+            // Optional delay with cancel-awareness (Phase 3).
+            if let Some(d) = self.delay {
+                let token = request.cancel_token.unwrap_or_default();
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        return Err(ReactError::Other("mock LLM stream cancelled".into()));
+                    }
+                    _ = tokio::time::sleep(d) => {}
+                }
+            }
 
             match self.pop_response()? {
                 PopResult::Content(text) => {

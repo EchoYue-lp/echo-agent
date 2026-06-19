@@ -679,4 +679,73 @@ mod tests {
             "stream must terminate, not hang, on empty LLM response"
         );
     }
+
+    /// Phase 3: verify that a running LLM call responds to cancellation.
+    /// Uses `MockLlmClient::with_delay` to simulate a slow LLM (30s), then
+    /// cancels the agent's token mid-flight. The stream must terminate well
+    /// before the 30s delay — proving the cancel propagated to the LLM layer.
+    #[tokio::test]
+    async fn test_run_stream_cancelled_mid_llm_call() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::agent::CancellationToken;
+
+        // A mock LLM that sleeps 30s before responding, but honors cancel.
+        let llm = MockLlmClient::new()
+            .with_response("slow answer")
+            .with_delay(Duration::from_secs(30));
+        let agent = agent_with_mock_llm(llm);
+
+        // Set a cancel token on the agent so the think phase picks it up via
+        // the snapshot and passes it to the LLM client.
+        let cancel = CancellationToken::new();
+        {
+            let mut guard = agent.cancel_token.lock().await;
+            *guard = Some(cancel.clone());
+        }
+
+        // Start streaming — the LLM call will block for 30s unless cancelled.
+        let stream_fut = agent.run_stream_channel(
+            StreamInit {
+                text: "hello".into(),
+                message: None,
+                label: String::new(),
+            },
+            StreamMode::Chat,
+        );
+
+        // Give the stream a moment to reach the LLM call.
+        let stream = tokio::time::timeout(Duration::from_secs(2), stream_fut)
+            .await
+            .expect("stream init should not hang")
+            .expect("stream should start");
+
+        // Cancel after a short delay.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+
+        // Collect events with a short timeout — must terminate WAY before 30s.
+        let mut events = Vec::new();
+        let collect_result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = stream;
+            use futures::StreamExt;
+            while let Some(ev) = stream.next().await {
+                events.push(ev);
+            }
+        })
+        .await;
+
+        assert!(
+            collect_result.is_ok(),
+            "stream must terminate within 5s after cancel (not wait for 30s delay)"
+        );
+
+        // The stream should NOT have produced a FinalAnswer (it was cancelled
+        // before the LLM could respond).
+        let has_final = events
+            .iter()
+            .any(|e| matches!(e, Ok(AgentEvent::FinalAnswer { .. })));
+        assert!(!has_final, "cancelled stream must not emit FinalAnswer");
+    }
 }
