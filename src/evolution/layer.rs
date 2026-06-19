@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::Mutex;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
 use super::security::{EvolutionSecurityGuard, InputTrustLevel};
@@ -160,6 +161,11 @@ pub struct LayerChangeResult {
 pub struct MemoryLayerManager {
     /// Path to the MEMORY.md file.
     hot_path: PathBuf,
+    /// In-process lock serializing all MEMORY.md read-modify-write so two
+    /// calls on the same `MemoryLayerManager` cannot interleave and lose
+    /// updates (P0-3). Cross-process safety is provided by the fs2 advisory
+    /// lock in `with_locked_hot_file`.
+    hot_lock: Mutex<()>,
     /// Typed store for warm/cold layers.
     typed_store: TypedMemoryStore,
     /// Change log for audit trail.
@@ -180,6 +186,35 @@ pub trait MemoryWriteObserver: Send + Sync {
     fn on_memory_write<'a>(&'a self) -> BoxFuture<'a, ()>;
 }
 
+/// Guard holding an exclusive lock on the MEMORY.md hot layer plus the
+/// freshly-loaded `MemoryFile`.
+///
+/// Created by [`MemoryLayerManager::lock_hot_file`]. Hold it across async
+/// work, then call [`commit`](Self::commit) to persist or drop to discard. The
+/// in-process Mutex and the cross-process flock are released on drop (the
+/// flock also auto-releases if the process dies, so a kill -9 cannot wedge a
+/// peer).
+struct HotFileGuard<'a> {
+    manager: &'a MemoryLayerManager,
+    file: MemoryFile,
+    /// In-process Mutex guard (`tokio::sync::MutexGuard`, which is `Send`, so
+    /// the guard can be held across `.await`s). Keeps other tasks on the same
+    /// manager out of the critical section until this guard drops.
+    _inproc: tokio::sync::MutexGuard<'a, ()>,
+    /// Holds the cross-process advisory lock; dropped to release. The flock is
+    /// also released by the OS on fd close (kill-safe).
+    _lock_file: std::fs::File,
+}
+
+impl<'a> HotFileGuard<'a> {
+    /// Persist the (possibly mutated) `MemoryFile` back to disk, still under
+    /// the held locks.
+    fn commit(self) -> std::io::Result<()> {
+        self.manager.write_memory_file(&self.file)
+        // self drops here: inproc guard + lock file fd dropped → both released.
+    }
+}
+
 impl MemoryLayerManager {
     /// Create a new layer manager.
     ///
@@ -195,6 +230,7 @@ impl MemoryLayerManager {
         let hot_path = echo_agent_dir.join("MEMORY.md");
         Self {
             hot_path,
+            hot_lock: Mutex::new(()),
             typed_store: TypedMemoryStore::new(store),
             change_log,
             security_guard: EvolutionSecurityGuard::default_config(),
@@ -344,78 +380,96 @@ impl MemoryLayerManager {
     ///
     /// Called after every hot-layer write. Returns a list of demotion results.
     pub async fn enforce_hot_budget(&self) -> Result<Vec<LayerChangeResult>> {
-        let file = self.parse_memory_file();
-        let tokens = estimate_tokens(&file.body);
+        // Hold the hot-file lock across the whole demotion pass: we read the
+        // body, demote entries to the warm Store (async), and rewrite the file,
+        // all of which must be one atomic critical section so a concurrent
+        // writer cannot interleave and lose entries (P0-3).
+        let mut guard = self.lock_hot_file().await.map_err(ReactError::from)?;
 
+        let tokens = estimate_tokens(&guard.file.body);
         if tokens <= HOT_TOKEN_BUDGET {
             return Ok(Vec::new());
         }
 
         // Sort entries by demotion score (highest = demote first)
-        let mut scored: Vec<(f32, &HotEntryMeta)> = file
+        let mut scored: Vec<(f32, HotEntryMeta)> = guard
+            .file
             .entries
             .iter()
-            .map(|e| (Self::demotion_score(e), e))
+            .map(|e| (Self::demotion_score(e), e.clone()))
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut results = Vec::new();
-        let mut current_body = file.body.clone();
         let mut removed_keys: Vec<String> = Vec::new();
 
+        // Demote in-place on the guard's body until within budget.
         for (_, meta) in scored {
-            if estimate_tokens(&current_body) <= HOT_TOKEN_BUDGET {
+            if estimate_tokens(&guard.file.body) <= HOT_TOKEN_BUDGET {
                 break;
             }
 
-            // Remove this entry from hot
-            if let Some((removed_entry, new_body)) =
-                self.remove_from_hot_body(&current_body, &meta.key)
-            {
-                current_body = new_body;
-                removed_keys.push(meta.key.clone());
+            // Capture the entry's content BEFORE we strip its bullet from the
+            // body (extract_hot_entry_content scans the body text).
+            let removed_content = extract_hot_entry_content(&guard.file.body, &meta.key);
 
-                // Write the removed entry to warm layer
-                let warm_meta = meta.to_memory_meta();
-                self.typed_store
-                    .put_typed(WARM_NAMESPACE, &meta.key, &removed_entry.content, warm_meta)
-                    .await?;
-
-                // Record the change
-                self.record_change(
-                    &meta.key,
-                    ChangeType::Demote,
-                    Some("hot"),
-                    Some("warm"),
-                    "hot layer budget enforcement",
-                    "enforce_hot_budget",
-                )?;
-
-                results.push(LayerChangeResult {
-                    key: meta.key.clone(),
-                    from_layer: MemoryLayer::Hot,
-                    to_layer: MemoryLayer::Warm,
-                    reason: "hot layer budget enforcement".to_string(),
-                });
+            // Remove this entry's bullet from the body.
+            let pattern = format!("- **[{}]**", meta.key);
+            guard.file.body = guard
+                .file
+                .body
+                .lines()
+                .filter(|line| !line.starts_with(&pattern))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !guard.file.body.ends_with('\n') {
+                guard.file.body.push('\n');
             }
+
+            let warm_meta = meta.to_memory_meta();
+            let removed_entry = TypedMemoryEntry {
+                key: meta.key.clone(),
+                content: removed_content,
+                meta: warm_meta.clone(),
+                raw: echo_core::memory::store::StoreItem::new(
+                    WARM_NAMESPACE.iter().map(|s| s.to_string()).collect(),
+                    meta.key.clone(),
+                    serde_json::Value::Null,
+                ),
+            };
+
+            removed_keys.push(meta.key.clone());
+
+            // Write the removed entry to warm layer (async, but still under lock).
+            self.typed_store
+                .put_typed(WARM_NAMESPACE, &meta.key, &removed_entry.content, warm_meta)
+                .await?;
+
+            // Record the change
+            self.record_change(
+                &meta.key,
+                ChangeType::Demote,
+                Some("hot"),
+                Some("warm"),
+                "hot layer budget enforcement",
+                "enforce_hot_budget",
+            )?;
+
+            results.push(LayerChangeResult {
+                key: meta.key.clone(),
+                from_layer: MemoryLayer::Hot,
+                to_layer: MemoryLayer::Warm,
+                reason: "hot layer budget enforcement".to_string(),
+            });
         }
 
-        // Write the modified file back to disk — only keep entries still in the body.
+        // Drop the demoted entries from the frontmatter.
         if !removed_keys.is_empty() {
-            let remaining_entries: Vec<HotEntryMeta> = file
+            guard
+                .file
                 .entries
-                .into_iter()
-                .filter(|e| {
-                    let pattern = format!("- **[{key}]**", key = e.key);
-                    current_body.lines().any(|line| line.starts_with(&pattern))
-                })
-                .collect();
-            let new_file = MemoryFile {
-                entries: remaining_entries,
-                body: current_body,
-            };
-            self.write_memory_file(&new_file)
-                .map_err(ReactError::from)?;
+                .retain(|e| !removed_keys.contains(&e.key));
+            guard.commit().map_err(ReactError::from)?;
         }
 
         Ok(results)
@@ -564,17 +618,33 @@ impl MemoryLayerManager {
 
     /// Parse MEMORY.md into structured form.
     ///
-    /// Returns a default (empty) MemoryFile if the file doesn't exist or can't be parsed.
+    /// Returns a default (empty) MemoryFile if the file doesn't exist or can't
+    /// be parsed.
+    ///
+    /// Note: this performs an unlocked read. For any read-modify-write that
+    /// must be atomic, use [`with_locked_hot_file`] instead.
     fn parse_memory_file(&self) -> MemoryFile {
         let raw = match std::fs::read_to_string(&self.hot_path) {
             Ok(content) => content,
-            Err(_) => return MemoryFile::default(),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        path = ?self.hot_path,
+                        error = %e,
+                        "MEMORY.md could not be read; falling back to default"
+                    );
+                }
+                return MemoryFile::default();
+            }
         };
 
         parse_memory_md(&raw)
     }
 
     /// Write the MemoryFile back to disk.
+    ///
+    /// Atomic (temp + rename) and `fsync`-ed so a crash cannot leave a torn
+    /// or empty MEMORY.md.
     fn write_memory_file(&self, file: &MemoryFile) -> std::io::Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = self.hot_path.parent() {
@@ -582,18 +652,96 @@ impl MemoryLayerManager {
         }
 
         let content = format_memory_md(file);
-        // Atomic write: write to temp file, then rename
+        // Atomic write: write to temp file, fsync, then rename.
         let tmp_path = self.hot_path.with_extension("md.tmp");
-        std::fs::write(&tmp_path, &content)?;
+        {
+            use std::io::Write;
+            let mut tmp = std::fs::File::create(&tmp_path)?;
+            tmp.write_all(content.as_bytes())?;
+            // fsync before rename so a crash after rename cannot expose an
+            // empty file (the prior version had no fsync).
+            let _ = tmp.sync_all();
+        }
         std::fs::rename(&tmp_path, &self.hot_path)?;
 
         Ok(())
     }
 
-    /// Add an entry to the MEMORY.md hot layer.
-    fn add_to_hot(&self, entry: &TypedMemoryEntry) -> std::io::Result<()> {
-        let mut file = self.parse_memory_file();
+    /// Run a synchronous closure with exclusive access to the MEMORY.md hot
+    /// layer. Holds both the in-process Mutex and a cross-process flock for
+    /// the full load → mutate → save.
+    ///
+    /// For async callers that need to `.await` between mutate and save (e.g.
+    /// `enforce_hot_budget`, which writes to the warm Store mid-critical
+    /// section), use [`lock_hot_file`] to get a guard and hold it across the
+    /// awaits instead.
+    /// Acquire both the in-process Mutex and a cross-process flock on the
+    /// MEMORY.md file, returning a guard holding the freshly-loaded
+    /// `MemoryFile`.
+    ///
+    /// The guard can be held across `.await` points (it contains only
+    /// `tokio::sync::MutexGuard` + a `File`, both `Send`), which lets
+    /// `enforce_hot_budget`-style functions do async Store writes inside the
+    /// critical section. Call [`HotFileGuard::commit`] to persist, or drop to
+    /// discard.
+    ///
+    /// Note: the flock acquisition below blocks the worker thread. This is
+    /// acceptable because curator/memory writes are infrequent and
+    /// low-contention; the bounded retry loop prevents indefinite wedging.
+    async fn lock_hot_file(&self) -> std::io::Result<HotFileGuard<'_>> {
+        // In-process serialization first. tokio::sync::Mutex so the guard is
+        // `Send` and can cross `.await`s.
+        let inproc = self.hot_lock.lock().await;
 
+        // Cross-process advisory lock on a sidecar file.
+        let lock_path = self.hot_path.with_extension("md.lock");
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path);
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "hot-file lock sidecar open failed; continuing lockless");
+                e
+            })?;
+        // Bounded flock attempt. flock blocks per call; cap total attempts so
+        // a wedged peer cannot hang us forever.
+        use fs2::FileExt;
+        const MAX_ATTEMPTS: u32 = 600;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+        let mut got_lock = false;
+        for _ in 0..MAX_ATTEMPTS {
+            if lock_file.lock_exclusive().is_ok() {
+                got_lock = true;
+                break;
+            }
+            tokio::time::sleep(BACKOFF).await;
+        }
+        if !got_lock {
+            tracing::error!(
+                attempts = MAX_ATTEMPTS,
+                "MEMORY.md lock unavailable after retries; proceeding WITHOUT cross-process lock (TOCTOU risk across processes)"
+            );
+        }
+
+        let file = self.parse_memory_file();
+        Ok(HotFileGuard {
+            manager: self,
+            file,
+            _inproc: inproc,
+            _lock_file: lock_file,
+        })
+    }
+
+    /// Add an entry to the MEMORY.md hot layer.
+    async fn add_to_hot(&self, entry: &TypedMemoryEntry) -> std::io::Result<()> {
+        let mut guard = self.lock_hot_file().await?;
         let hot_meta = HotEntryMeta {
             key: entry.key.clone(),
             memory_type: entry.meta.memory_type,
@@ -606,55 +754,13 @@ impl MemoryLayerManager {
         };
 
         // Add to frontmatter
-        file.entries.push(hot_meta);
+        guard.file.entries.push(hot_meta);
 
         // Add to body
         let bullet = format!("- **[{}]** {}\n", entry.key, entry.content.trim());
-        file.body.push_str(&bullet);
+        guard.file.body.push_str(&bullet);
 
-        self.write_memory_file(&file)
-    }
-
-    /// Remove an entry from the MEMORY.md hot layer by key.
-    ///
-    /// Returns the removed entry (reconstructed) and the new body.
-    fn remove_from_hot_body(
-        &self,
-        current_body: &str,
-        key: &str,
-    ) -> Option<(TypedMemoryEntry, String)> {
-        let mut file = self.parse_memory_file();
-
-        // Find and remove from entries
-        let idx = file.entries.iter().position(|e| e.key == key)?;
-        let meta = file.entries.remove(idx);
-
-        // Remove the bullet line from body
-        let pattern = format!("- **[{key}]**");
-        let new_body: String = current_body
-            .lines()
-            .filter(|line| !line.starts_with(&pattern))
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Preserve trailing newline
-        let new_body = if current_body.ends_with('\n') && !new_body.ends_with('\n') {
-            new_body + "\n"
-        } else {
-            new_body
-        };
-
-        let entry = TypedMemoryEntry {
-            key: key.to_string(),
-            content: extract_hot_entry_content(current_body, key),
-            meta: meta.to_memory_meta(),
-            raw: echo_core::memory::store::StoreItem::new(
-                WARM_NAMESPACE.iter().map(|s| s.to_string()).collect(),
-                key.to_string(),
-                serde_json::Value::Null,
-            ),
-        };
-
-        Some((entry, new_body))
+        guard.commit()
     }
 
     /// Find a hot entry by key in the parsed file.
@@ -715,28 +821,14 @@ impl MemoryLayerManager {
         key: &str,
         entry: TypedMemoryEntry,
     ) -> Result<Option<LayerChangeResult>> {
-        // Delete from warm first — if this fails, nothing was modified in hot,
-        // so we avoid the cross-layer inconsistency.
-        self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
-
-        // Add to hot layer. If this fails, the entry is already deleted from warm
-        // but we attempt recovery by writing it back. If recovery also fails,
-        // the entry is lost — log at error level so operators can detect it.
-        if let Err(e) = self.add_to_hot(&entry) {
-            if let Err(recovery_err) = self
-                .typed_store
-                .put_typed(WARM_NAMESPACE, key, &entry.content, entry.meta.clone())
-                .await
-            {
-                tracing::error!(
-                    key = %key,
-                    promotion_error = %e,
-                    recovery_error = %recovery_err,
-                    "promote_warm_to_hot: entry LOST — add_to_hot failed and warm recovery also failed"
-                );
-            }
+        // Write to the DESTINATION (hot) FIRST. If this fails, the warm entry
+        // is untouched — at worst we have a duplicate, never a loss (P0-2).
+        if let Err(e) = self.add_to_hot(&entry).await {
             return Err(ReactError::from(e));
         }
+
+        // Only after hot write succeeds, remove from warm.
+        self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
 
         // Enforce budget (may demote other entries)
         self.enforce_hot_budget().await?;
@@ -764,25 +856,27 @@ impl MemoryLayerManager {
         entry: TypedMemoryEntry,
         reason: &str,
     ) -> Result<LayerChangeResult> {
-        // Remove from hot layer file
-        let mut file = self.parse_memory_file();
-        file.entries.retain(|e| e.key != key);
+        // Write to warm layer FIRST. If this fails, the hot entry is untouched
+        // — at worst we have a duplicate, never a loss (P0-2).
+        self.typed_store
+            .put_typed(WARM_NAMESPACE, key, &entry.content, entry.meta.clone())
+            .await?;
 
-        // Rebuild body without this entry's bullet
+        // Only after warm write succeeds, remove from hot layer file — under
+        // the lock so a concurrent writer cannot interleave (P0-3).
+        let mut guard = self.lock_hot_file().await.map_err(ReactError::from)?;
+        guard.file.entries.retain(|e| e.key != key);
+
         let pattern = format!("- **[{key}]**");
-        file.body = file
+        guard.file.body = guard
+            .file
             .body
             .lines()
             .filter(|line| !line.starts_with(&pattern))
             .collect::<Vec<_>>()
             .join("\n");
 
-        self.write_memory_file(&file).map_err(ReactError::from)?;
-
-        // Write to warm layer
-        self.typed_store
-            .put_typed(WARM_NAMESPACE, key, &entry.content, entry.meta.clone())
-            .await?;
+        guard.commit().map_err(ReactError::from)?;
 
         self.record_change(
             key,
@@ -1113,8 +1207,8 @@ entries:
         assert!(manager.read_hot_content().is_empty());
     }
 
-    #[test]
-    fn test_add_to_hot_under_budget() {
+    #[tokio::test]
+    async fn test_add_to_hot_under_budget() {
         let manager = make_manager();
         let entry = TypedMemoryEntry {
             key: "test_key".to_string(),
@@ -1131,7 +1225,7 @@ entries:
             ),
         };
 
-        manager.add_to_hot(&entry).expect("add to hot");
+        manager.add_to_hot(&entry).await.expect("add to hot");
 
         let content = manager.read_hot_content();
         assert!(content.contains("**[test_key]**"));
@@ -1297,7 +1391,7 @@ entries:
             ),
         };
 
-        manager.add_to_hot(&entry).expect("add to hot");
+        manager.add_to_hot(&entry).await.expect("add to hot");
         assert!(manager.read_hot_content().contains("**[demote_test]**"));
 
         let result = manager
@@ -1338,7 +1432,7 @@ entries:
                 serde_json::Value::Null,
             ),
         };
-        manager.add_to_hot(&hot_entry).expect("add to hot");
+        manager.add_to_hot(&hot_entry).await.expect("add to hot");
 
         // Add to warm
         let warm_meta = MemoryMeta::new(
@@ -1369,5 +1463,59 @@ entries:
         assert_eq!(MemoryLayer::Hot.to_string(), "hot");
         assert_eq!(MemoryLayer::Warm.to_string(), "warm");
         assert_eq!(MemoryLayer::Cold.to_string(), "cold");
+    }
+
+    /// Regression for P0-3 (MEMORY.md no lock): two concurrent `add_to_hot`
+    /// calls on the same `MemoryLayerManager` must both land. Before locking,
+    /// each read the file, pushed its entry, and renamed — the second rename
+    /// silently dropped the first writer's entry.
+    #[tokio::test]
+    async fn test_concurrent_add_to_hot_does_not_lose_entries() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.keep();
+        let store = Arc::new(InMemoryStore::new());
+        let manager = Arc::new(MemoryLayerManager::new(
+            dir_path,
+            store,
+            Box::new(NullChangeLog),
+        ));
+
+        let mk_entry = |key: &'static str| TypedMemoryEntry {
+            key: key.to_string(),
+            content: format!("memory {key}"),
+            meta: MemoryMeta::new(
+                MemoryType::UserPreference,
+                MemorySource::ExplicitSave,
+                "topic",
+            ),
+            raw: echo_core::memory::store::StoreItem::new(
+                vec!["agent".to_string()],
+                key.to_string(),
+                serde_json::Value::Null,
+            ),
+        };
+
+        // Fire both adds concurrently.
+        let m1 = manager.clone();
+        let m2 = manager.clone();
+        let e1 = mk_entry("concurrent-a");
+        let e2 = mk_entry("concurrent-b");
+        let (r1, r2) = tokio::join!(async move { m1.add_to_hot(&e1).await }, async move {
+            m2.add_to_hot(&e2).await
+        },);
+        r1.expect("add a");
+        r2.expect("add b");
+
+        let content = manager.read_hot_content();
+        assert!(
+            content.contains("**[concurrent-a]**"),
+            "concurrent-a lost (MEMORY.md TOCTOU regression)"
+        );
+        assert!(
+            content.contains("**[concurrent-b]**"),
+            "concurrent-b lost (MEMORY.md TOCTOU regression)"
+        );
+        assert_eq!(manager.read_hot_meta().len(), 2);
     }
 }

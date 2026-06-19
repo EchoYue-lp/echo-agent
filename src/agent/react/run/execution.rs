@@ -335,9 +335,9 @@ impl ReactAgent {
     /// Returns `None` if LLM is unavailable or summarization fails.
     async fn summarize_tool_output(&self, output: &str) -> Option<String> {
         let llm_client = self.llm_client.as_ref()?;
+        let snippet: String = output.chars().take(4000).collect();
         let prompt = format!(
-            "Summarize the following tool output in 1-2 sentences. Focus on key results, errors, or actionable findings:\n\n{}",
-            &output[..output.len().min(4000)]
+            "Summarize the following tool output in 1-2 sentences. Focus on key results, errors, or actionable findings:\n\n{snippet}"
         );
         let request = ChatRequest {
             messages: vec![Message::user(prompt)],

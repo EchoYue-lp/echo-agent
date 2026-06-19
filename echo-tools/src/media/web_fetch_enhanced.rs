@@ -1,6 +1,6 @@
 //! Enhanced web fetch tool with image support.
 
-use crate::security::{ssrf_safe_redirect_policy, validate_url};
+use crate::security::ssrf_safe_redirect_policy;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
@@ -228,11 +228,6 @@ impl Tool for WebFetchToolEnhanced {
                 return Ok(ToolResult::error("URL must start with http:// or https://"));
             }
 
-            // SSRF protection: validate target address
-            if let Err(e) = validate_url(url) {
-                return Ok(ToolResult::error(format!("URL validation failed: {}", e)));
-            }
-
             let mode = parameters
                 .get("mode")
                 .and_then(|v| v.as_str())
@@ -244,20 +239,56 @@ impl Tool for WebFetchToolEnhanced {
 
             tracing::info!("WebFetchEnhanced: url='{}', mode='{}'", url, mode);
 
-            let client = &self.client;
-
             // Check if URL points to an image (regardless of mode)
             let is_image_url = Self::is_image_url(url);
 
             // If mode is explicitly "image" or URL looks like an image
             if mode == "image" || is_image_url {
-                // Verify it's actually an image
-                let response = client.head(url).send().await.map_err(|e| {
-                    echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
-                        tool: "web_fetch_enhanced".into(),
-                        message: format!("HEAD request failed: {}", e),
-                    }))
-                })?;
+                // Verify content type via SSRF-safe HEAD request
+                match crate::security::ssrf_safe_request(
+                    url,
+                    std::time::Duration::from_secs(30),
+                    5,
+                    reqwest::Method::HEAD,
+                )
+                .await
+                {
+                    Ok(response) if response.status().is_success() => {
+                        let content_type = response
+                            .headers()
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("application/octet-stream");
+                        if !Self::is_image_content_type(content_type) {
+                            return Ok(ToolResult::error(format!(
+                                "URL is not an image, Content-Type: {}",
+                                content_type
+                            )));
+                        }
+                    }
+                    Ok(response) => {
+                        return Ok(ToolResult::error(format!(
+                            "HTTP error: {}",
+                            response.status()
+                        )));
+                    }
+                    Err(_) => {
+                        // HEAD failed — proceed to download (GET also validates SSRF)
+                    }
+                }
+
+                // Download image (SSRF-safe: resolve + validate + connect on pinned IPs)
+                let response =
+                    crate::security::ssrf_safe_get(url, std::time::Duration::from_secs(30), 5)
+                        .await
+                        .map_err(|e| {
+                            echo_core::error::ReactError::Tool(Box::new(
+                                ToolError::ExecutionFailed {
+                                    tool: "web_fetch_enhanced".into(),
+                                    message: format!("Failed to download image: {}", e),
+                                },
+                            ))
+                        })?;
 
                 if !response.status().is_success() {
                     return Ok(ToolResult::error(format!(
@@ -266,67 +297,26 @@ impl Tool for WebFetchToolEnhanced {
                     )));
                 }
 
-                let content_type = response
+                let ct = response
                     .headers()
                     .get("content-type")
                     .and_then(|v| v.to_str().ok())
-                    .unwrap_or("application/octet-stream");
+                    .unwrap_or("image/jpeg")
+                    .to_string();
 
-                if !Self::is_image_content_type(content_type) {
-                    return Ok(ToolResult::error(format!(
-                        "URL is not an image, Content-Type: {}",
-                        content_type
-                    )));
-                }
+                let mime_subtype = ct.split('/').nth(1).unwrap_or("png");
 
-                // Download image
-                let result: std::result::Result<(String, String, usize), ToolError> =
-                    async {
-                        let response = client.get(url).send().await.map_err(|e| {
-                            ToolError::ExecutionFailed {
-                                tool: "web_fetch_enhanced".into(),
-                                message: format!("Failed to download image: {}", e),
-                            }
-                        })?;
+                let bytes = response.bytes().await.map_err(|e| {
+                    echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
+                        tool: "web_fetch_enhanced".into(),
+                        message: format!("Failed to read image data: {}", e),
+                    }))
+                })?;
 
-                        if !response.status().is_success() {
-                            return Err(ToolError::ExecutionFailed {
-                                tool: "web_fetch_enhanced".into(),
-                                message: format!("HTTP error: {}", response.status()),
-                            });
-                        }
-
-                        let content_type = response
-                            .headers()
-                            .get("content-type")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or("image/jpeg")
-                            .to_string();
-
-                        let mime_subtype = content_type.split('/').nth(1).unwrap_or("png");
-
-                        let bytes =
-                            response
-                                .bytes()
-                                .await
-                                .map_err(|e| ToolError::ExecutionFailed {
-                                    tool: "web_fetch_enhanced".into(),
-                                    message: format!("Failed to read image data: {}", e),
-                                })?;
-
-                        let size = bytes.len();
-                        use base64::Engine;
-                        let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        Ok((
-                            format!("data:image/{};base64,{}", mime_subtype, base64_data),
-                            content_type,
-                            size,
-                        ))
-                    }
-                    .await;
-
-                let (data_uri, ct, size) =
-                    result.map_err(|e| echo_core::error::ReactError::Tool(Box::new(e)))?;
+                let size = bytes.len();
+                use base64::Engine;
+                let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let data_uri = format!("data:image/{};base64,{}", mime_subtype, base64_data);
 
                 // Truncate base64 if too long
                 let data_uri_display = if data_uri.len() > 1000 {
@@ -343,13 +333,16 @@ impl Tool for WebFetchToolEnhanced {
                 return Ok(ToolResult::success(output));
             }
 
-            // Text mode (default) or JSON mode
-            let response = client.get(url).send().await.map_err(|e| {
-                echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
-                    tool: "web_fetch_enhanced".into(),
-                    message: format!("Request failed: {}", e),
-                }))
-            })?;
+            // Text mode (default) or JSON mode (SSRF-safe)
+            let response =
+                crate::security::ssrf_safe_get(url, std::time::Duration::from_secs(30), 5)
+                    .await
+                    .map_err(|e| {
+                        echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
+                            tool: "web_fetch_enhanced".into(),
+                            message: format!("Request failed: {}", e),
+                        }))
+                    })?;
 
             let status = response.status();
             if !status.is_success() {

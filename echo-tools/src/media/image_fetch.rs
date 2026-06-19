@@ -171,9 +171,6 @@ impl Tool for ImageFetchTool {
                 return Ok(ToolResult::error("URL must start with http:// or https://"));
             }
 
-            // SSRF protection
-            crate::security::validate_url(url)?;
-
             let max_size_mb = parameters
                 .get("max_size_mb")
                 .and_then(|v| v.as_u64())
@@ -194,26 +191,44 @@ impl Tool for ImageFetchTool {
                 || url.to_lowercase().ends_with(".svg");
 
             if !is_image {
-                // Try to check via HEAD request
-                if let Ok(response) = self.client.head(url).send().await
-                    && let Some(ct) = response.headers().get("content-type")
-                    && let Ok(content_type) = ct.to_str()
-                    && !content_type.starts_with("image/")
+                // Try to check via HEAD request (SSRF-safe: resolves + pins IPs)
+                match crate::security::ssrf_safe_request(
+                    url,
+                    Duration::from_secs(self.timeout_secs),
+                    5,
+                    reqwest::Method::HEAD,
+                )
+                .await
                 {
-                    return Ok(ToolResult::error(format!(
-                        "URL does not point to an image file, Content-Type: {}",
-                        content_type
-                    )));
+                    Ok(response) => {
+                        if let Some(ct) = response.headers().get("content-type")
+                            && let Ok(content_type) = ct.to_str()
+                            && !content_type.starts_with("image/")
+                        {
+                            return Ok(ToolResult::error(format!(
+                                "URL does not point to an image file, Content-Type: {}",
+                                content_type
+                            )));
+                        }
+                    }
+                    Err(_) => {
+                        // HEAD request failed (network error, SSRF block, etc.).
+                        // Fall through to GET which also validates SSRF.
+                    }
                 }
             }
 
-            // Download image
-            let response = self.client.get(url).send().await.map_err(|e| {
-                echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
-                    tool: "image_fetch".into(),
-                    message: format!("Failed to download image: {}", e),
-                }))
-            })?;
+            // Download image (SSRF-safe: resolve + validate + connect on pinned IPs,
+            // closing the DNS-rebinding TOCTOU window)
+            let response =
+                crate::security::ssrf_safe_get(url, Duration::from_secs(self.timeout_secs), 5)
+                    .await
+                    .map_err(|e| {
+                        echo_core::error::ReactError::Tool(Box::new(ToolError::ExecutionFailed {
+                            tool: "image_fetch".into(),
+                            message: format!("Failed to download image: {}", e),
+                        }))
+                    })?;
 
             if !response.status().is_success() {
                 return Ok(ToolResult::error(format!(

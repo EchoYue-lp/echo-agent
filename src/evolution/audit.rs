@@ -200,36 +200,104 @@ impl JsonlChangeLog {
     }
 
     /// Load entries from the JSONL file.
+    ///
+    /// Corrupt/unparseable lines are skipped but logged with a `warn!` and a
+    /// running count, so silent audit loss (e.g. a torn final line from a
+    /// crash mid-append) is observable rather than invisible.
     fn load_from_disk(path: &PathBuf) -> std::io::Result<Vec<ChangeEntry>> {
         if !path.exists() {
             return Ok(Vec::new());
         }
         let content = std::fs::read_to_string(path)?;
         let mut entries = Vec::new();
+        let mut skipped = 0usize;
         for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(entry) = serde_json::from_str::<ChangeEntry>(line) {
-                entries.push(entry);
+            match serde_json::from_str::<ChangeEntry>(line) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    skipped += 1;
+                    // Log once per line at trace, but aggregate at warn so we
+                    // don't spam; a single load with N bad lines still warns N
+                    // times, which is acceptable for an audit log.
+                    tracing::warn!(
+                        path = ?path,
+                        error = %e,
+                        line_preview = %line.chars().take(120).collect::<String>(),
+                        "audit log: skipping unparseable JSONL line (possible torn write from a prior crash)"
+                    );
+                }
             }
+        }
+        if skipped > 0 {
+            tracing::warn!(path = ?path, skipped = skipped, "audit log: loaded with {skipped} corrupt line(s) skipped");
         }
         Ok(entries)
     }
 
     /// Append an entry to the JSONL file.
+    ///
+    /// Holds a cross-process advisory `flock` on a sidecar file and calls
+    /// `sync_all` before returning, so:
+    /// - concurrent appenders (this process or another) cannot interleave two
+    ///   large JSON lines into a single corrupt line;
+    /// - a power-loss crash cannot lose the just-appended line (the OS flushes
+    ///   the durable write before we report success).
+    ///
+    /// `sync_all` per append is the durability/cost trade-off appropriate for
+    /// an *audit* log whose entire purpose is a complete, durable record.
     fn append_to_disk(&self, entry: &ChangeEntry) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let line = serde_json::to_string(entry)?;
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
+
+        // Cross-process advisory lock on a sidecar file. Kill-safe (flock
+        // auto-releases on fd close), bounded retry so a wedged peer cannot
+        // hang us forever.
+        let lock_path = self.path.with_extension("jsonl.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
             .create(true)
-            .append(true)
-            .open(&self.path)?;
-        writeln!(file, "{line}")?;
-        Ok(())
+            .truncate(false)
+            .open(&lock_path)?;
+        use fs2::FileExt;
+        const MAX_ATTEMPTS: u32 = 600;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+        let mut got_lock = false;
+        for _ in 0..MAX_ATTEMPTS {
+            if lock_file.lock_exclusive().is_ok() {
+                got_lock = true;
+                break;
+            }
+            std::thread::sleep(BACKOFF);
+        }
+        if !got_lock {
+            tracing::error!(
+                attempts = MAX_ATTEMPTS,
+                "audit log lock unavailable; appending WITHOUT cross-process lock (risk of line interleaving)"
+            );
+        }
+
+        use std::io::Write;
+        let result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            writeln!(file, "{line}")?;
+            // Durability: flush + fsync so a crash after record() returns
+            // cannot lose this audit line.
+            file.flush()?;
+            let _ = file.sync_all();
+            Ok(())
+        })();
+
+        let _ = lock_file.unlock();
+        result
     }
 }
 
@@ -362,6 +430,31 @@ impl ChangeEntryBuilder {
             reason: self.reason,
             trigger: self.trigger,
         }
+    }
+}
+
+// ── Shared test/mock implementations ──────────────────────────────────
+
+/// A no-op `ChangeLog` for tests and feature-disabled builds. Use this
+/// instead of defining per-module copies (P1 — nullChangeLog dedup).
+pub struct NullChangeLog;
+
+impl ChangeLog for NullChangeLog {
+    fn record(&self, _entry: ChangeEntry) -> Result<()> {
+        Ok(())
+    }
+    fn query(&self, _filter: &ChangeFilter) -> Result<Vec<ChangeEntry>> {
+        Ok(vec![])
+    }
+    fn latest_for(
+        &self,
+        _entity_type: EntityType,
+        _entity_key: &str,
+    ) -> Result<Option<ChangeEntry>> {
+        Ok(None)
+    }
+    fn len(&self) -> usize {
+        0
     }
 }
 

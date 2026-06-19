@@ -242,6 +242,12 @@ Confidence: {confidence:.0}%.
 ///
 /// Replaces characters that would break YAML parsing or inject additional frontmatter
 /// fields (`: `, `"`, `\`, newlines, `---`).
+/// Escape a value for inclusion inside a **double-quoted** YAML string.
+///
+/// The YAML template wraps values in `"..."`, so escaping `\`, `"`, newlines,
+/// `\r`, and `---` (frontmatter delimiter) is sufficient. Additional characters
+/// (`:`, `#`, `[`, `]`, `{`, `}`) are harmless inside double quotes per the
+/// YAML 1.2 spec §7.3.1.
 fn yaml_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")

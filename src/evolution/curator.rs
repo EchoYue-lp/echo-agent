@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::error::Result;
+use fs2::FileExt;
 
 // ── SkillLifecycle ─────────────────────────────────────────────────
 
@@ -105,21 +106,61 @@ pub struct CuratorState {
 }
 
 impl CuratorState {
-    /// Load state from a JSON file, or return default if not found.
+    /// Load state from a JSON file.
+    ///
+    /// - Missing file → returns default (fresh start). This is the only case
+    ///   treated as "empty".
+    /// - Present but unparseable / unreadable → also returns default, but logs
+    ///   a `warn!` so silent corruption does not get overwritten by the next
+    ///   save (which would destroy potentially-recoverable data). The caller
+    ///   (a curator method) will proceed and rewrite, but at least the loss is
+    ///   observable in logs.
     pub fn load(path: &PathBuf) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|data| serde_json::from_str(&data).ok())
-            .unwrap_or_default()
+        match std::fs::read_to_string(path) {
+            Ok(data) => match serde_json::from_str(&data) {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!(
+                        path = ?path,
+                        error = %e,
+                        "curator state file is present but unparseable; falling back to default (existing file will be overwritten on next save)"
+                    );
+                    Self::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                tracing::warn!(
+                    path = ?path,
+                    error = %e,
+                    "curator state file could not be read; falling back to default"
+                );
+                Self::default()
+            }
+        }
     }
 
-    /// Save state to a JSON file.
+    /// Save state to a JSON file atomically.
+    ///
+    /// Writes to a temp sibling then `rename`s over the target. `rename` is
+    /// atomic on POSIX, so a crash mid-write never leaves a truncated or
+    /// partially-written state file — readers either see the old or the new
+    /// file in full, never a torn mix.
     pub fn save(&self, path: &PathBuf) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let data = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, data)?;
+        let tmp_path = path.with_extension("json.tmp");
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            use std::io::Write;
+            file.write_all(data.as_bytes())?;
+            // fsync the data before rename so a crash after rename cannot
+            // expose an empty file.
+            let _ = file.sync_all();
+        }
+        std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
 }
@@ -167,139 +208,246 @@ impl Curator {
         Self::new(config, path)
     }
 
-    /// Load the current state.
+    /// Load the current state under an advisory file lock.
+    ///
+    /// Holds an exclusive `flock` on the sidecar lock file for the duration of
+    /// the read only. For read-modify-write that must be atomic, use
+    /// [`with_locked_state`] instead — that holds the lock across load, mutate,
+    /// and save in a single critical section.
+    ///
+    /// The lock is an OS advisory lock (`fs2::FileExt::lock_exclusive`) on a
+    /// sidecar file. It is **kill-safe**: if this process dies (kill -9, panic,
+    /// power loss), the OS closes the fd and the lock is released automatically.
+    /// This is the critical difference from the previous `create_new` sidecar
+    /// design, whose lock file survived a crash and deadlocked every future
+    /// locker forever (P0 — Curator TOCTOU).
     pub fn load_state(&self) -> CuratorState {
+        let _guard = self.acquire_lock();
         CuratorState::load(&self.state_path)
     }
 
-    /// Save the state.
+    /// Save the state under an advisory file lock.
+    ///
+    /// Holds an exclusive lock for the duration of the write only. Callers that
+    /// need load-mutate-save atomicity must use [`with_locked_state`].
     pub fn save_state(&self, state: &CuratorState) -> Result<()> {
+        let _guard = self.acquire_lock();
         state.save(&self.state_path)
+    }
+
+    /// Atomically read-modify-write the curator state under a single held lock.
+    ///
+    /// The closure receives the freshly-loaded state and may mutate it. On
+    /// success, the state is saved back while the lock is still held; on
+    /// error, the in-memory change is discarded and the on-disk file is left
+    /// untouched. This closes the TOCTOU window where two `Curator` instances
+    /// interleaved load → mutate → save and clobbered each other.
+    ///
+    /// The closure returns `(T, bool)`: the value to return to the caller,
+    /// plus a `dirty` flag. When `dirty` is false the save is skipped
+    /// (read-only path) — this avoids a needless rewrite on every call.
+    fn with_locked_state<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut CuratorState) -> Result<(T, bool)>,
+    {
+        let _guard = self.acquire_lock();
+        let mut state = CuratorState::load(&self.state_path);
+        let (result, dirty) = f(&mut state)?;
+        if dirty {
+            state.save(&self.state_path)?;
+        }
+        Ok(result)
+    }
+
+    /// Acquire an exclusive advisory lock on a sidecar `.lock` file.
+    ///
+    /// Blocks until the lock is available (with a bounded number of retries
+    /// before giving up — see `MAX_ATTEMPTS`). Returns a guard whose `Drop`
+    /// releases the lock. Because the lock is `flock`-based, it is released
+    /// automatically on process death; the sidecar file is best-effort cleaned
+    /// up on drop and is not relied upon for correctness.
+    fn acquire_lock(&self) -> CuratorLockGuard {
+        let lock_path = self.state_path.with_extension("json.lock");
+
+        // Ensure the sidecar file exists (does not fail if already present).
+        // `truncate(false)` keeps any existing content (irrelevant for flock,
+        // but avoids clobbering a file another process just created).
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                // Non-fatal: fall back to an unnamed temp file so the guard
+                // type is uniform. flock on such a handle is a no-op, which
+                // preserves single-process correctness (no deadlock) while
+                // degrading to lockless under concurrency.
+                tracing::warn!(error = %e, path = ?lock_path, "curator: failed to open lock sidecar; continuing lockless");
+                tempfile::tempfile().unwrap_or_else(|_| {
+                    std::fs::File::create("/dev/null")
+                        .unwrap_or_else(|_| panic!("curator: could not open any lock file"))
+                })
+            }
+        };
+
+        // Bounded retry loop. `flock(LOCK_EX)` blocks per call; we cap total
+        // attempts so a wedged peer can't hang the executor indefinitely (the
+        // prior implementation spun forever on a stale sidecar file).
+        const MAX_ATTEMPTS: u32 = 600; // ~10 min at 1s backoff
+        const BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
+        let mut last_err = None;
+        for _ in 0..MAX_ATTEMPTS {
+            match file.lock_exclusive() {
+                Ok(()) => {
+                    return CuratorLockGuard {
+                        file: Some(file),
+                        path: Some(lock_path),
+                    };
+                }
+                Err(e) => {
+                    // Any error here means retry after backoff.
+                    last_err = Some(e);
+                    std::thread::sleep(BACKOFF);
+                }
+            }
+        }
+
+        // Exhausted retries: log and proceed lockless rather than panic. This
+        // is bounded — the process is not wedged forever (unlike before).
+        tracing::error!(
+            error = ?last_err,
+            attempts = MAX_ATTEMPTS,
+            "curator: could not acquire lock after retries; proceeding WITHOUT a lock (TOCTOU risk under concurrency)"
+        );
+        CuratorLockGuard {
+            file: Some(file),
+            path: Some(lock_path),
+        }
     }
 
     /// Register a new skill or update an existing one's last-used timestamp.
     pub fn touch_skill(&self, name: &str, agent_created: bool) -> Result<()> {
-        let mut state = self.load_state();
-        let now = chrono::Utc::now();
-
-        if let Some(meta) = state.skills.get_mut(name) {
-            meta.last_used_at = now;
-        } else {
-            state.skills.insert(
-                name.to_string(),
-                SkillMeta {
-                    name: name.to_string(),
-                    lifecycle: SkillLifecycle::Active,
-                    created_at: now,
-                    last_used_at: now,
-                    last_modified_at: now,
-                    pinned: false,
-                    agent_created,
-                    superseded_by: None,
-                },
-            );
-        }
-
-        self.save_state(&state)
+        self.with_locked_state(|state| {
+            let now = chrono::Utc::now();
+            if let Some(meta) = state.skills.get_mut(name) {
+                meta.last_used_at = now;
+            } else {
+                state.skills.insert(
+                    name.to_string(),
+                    SkillMeta {
+                        name: name.to_string(),
+                        lifecycle: SkillLifecycle::Active,
+                        created_at: now,
+                        last_used_at: now,
+                        last_modified_at: now,
+                        pinned: false,
+                        agent_created,
+                        superseded_by: None,
+                    },
+                );
+            }
+            Ok(((), true))
+        })
     }
 
     /// Register a new skill candidate (discovered from memory patterns).
     pub fn register_candidate(&self, name: &str) -> Result<()> {
-        let mut state = self.load_state();
-        let now = chrono::Utc::now();
-
-        if state.skills.contains_key(name) {
-            // Already registered, skip
-            return Ok(());
-        }
-
-        state.skills.insert(
-            name.to_string(),
-            SkillMeta {
-                name: name.to_string(),
-                lifecycle: SkillLifecycle::Candidate,
-                created_at: now,
-                last_used_at: now,
-                last_modified_at: now,
-                pinned: false,
-                agent_created: true,
-                superseded_by: None,
-            },
-        );
-
-        self.save_state(&state)
+        self.with_locked_state(|state| {
+            if state.skills.contains_key(name) {
+                // Already registered, skip.
+                return Ok(((), false));
+            }
+            let now = chrono::Utc::now();
+            state.skills.insert(
+                name.to_string(),
+                SkillMeta {
+                    name: name.to_string(),
+                    lifecycle: SkillLifecycle::Candidate,
+                    created_at: now,
+                    last_used_at: now,
+                    last_modified_at: now,
+                    pinned: false,
+                    agent_created: true,
+                    superseded_by: None,
+                },
+            );
+            Ok(((), true))
+        })
     }
 
     /// Promote a Candidate skill to Draft.
     pub fn promote_to_draft(&self, name: &str) -> Result<bool> {
-        let mut state = self.load_state();
-        let now = chrono::Utc::now();
-
-        if let Some(meta) = state.skills.get_mut(name)
-            && meta.lifecycle == SkillLifecycle::Candidate
-        {
-            meta.lifecycle = SkillLifecycle::Draft;
-            meta.last_modified_at = now;
-            self.save_state(&state)?;
-            return Ok(true);
-        }
-        Ok(false)
+        self.with_locked_state(|state| {
+            let now = chrono::Utc::now();
+            if let Some(meta) = state.skills.get_mut(name)
+                && meta.lifecycle == SkillLifecycle::Candidate
+            {
+                meta.lifecycle = SkillLifecycle::Draft;
+                meta.last_modified_at = now;
+                return Ok((true, true));
+            }
+            Ok((false, false))
+        })
     }
 
     /// Promote a Draft skill to Active.
     pub fn promote_to_active(&self, name: &str) -> Result<bool> {
-        let mut state = self.load_state();
-        let now = chrono::Utc::now();
-
-        if let Some(meta) = state.skills.get_mut(name)
-            && meta.lifecycle == SkillLifecycle::Draft
-        {
-            meta.lifecycle = SkillLifecycle::Active;
-            meta.last_modified_at = now;
-            self.save_state(&state)?;
-            return Ok(true);
-        }
-        Ok(false)
+        self.with_locked_state(|state| {
+            let now = chrono::Utc::now();
+            if let Some(meta) = state.skills.get_mut(name)
+                && meta.lifecycle == SkillLifecycle::Draft
+            {
+                meta.lifecycle = SkillLifecycle::Active;
+                meta.last_modified_at = now;
+                return Ok((true, true));
+            }
+            Ok((false, false))
+        })
     }
 
     /// Deprecate a skill, optionally specifying which skill supersedes it.
     pub fn deprecate_skill(&self, name: &str, superseded_by: Option<&str>) -> Result<bool> {
-        let mut state = self.load_state();
-        let now = chrono::Utc::now();
-
-        if let Some(meta) = state.skills.get_mut(name)
-            && matches!(
-                meta.lifecycle,
-                SkillLifecycle::Active | SkillLifecycle::Stale
-            )
-        {
-            meta.lifecycle = SkillLifecycle::Deprecated;
-            meta.superseded_by = superseded_by.map(|s| s.to_string());
-            meta.last_modified_at = now;
-            self.save_state(&state)?;
-            return Ok(true);
-        }
-        Ok(false)
+        self.with_locked_state(|state| {
+            let now = chrono::Utc::now();
+            if let Some(meta) = state.skills.get_mut(name)
+                && matches!(
+                    meta.lifecycle,
+                    SkillLifecycle::Active | SkillLifecycle::Stale
+                )
+            {
+                meta.lifecycle = SkillLifecycle::Deprecated;
+                meta.superseded_by = superseded_by.map(|s| s.to_string());
+                meta.last_modified_at = now;
+                return Ok((true, true));
+            }
+            Ok((false, false))
+        })
     }
 
     /// Pin a skill (exempt from auto-transitions).
     pub fn pin_skill(&self, name: &str) -> Result<()> {
-        let mut state = self.load_state();
-        if let Some(meta) = state.skills.get_mut(name) {
-            meta.pinned = true;
-            self.save_state(&state)?;
-        }
-        Ok(())
+        self.with_locked_state(|state| {
+            if let Some(meta) = state.skills.get_mut(name) {
+                meta.pinned = true;
+                return Ok(((), true));
+            }
+            Ok(((), false))
+        })
     }
 
     /// Unpin a skill.
     pub fn unpin_skill(&self, name: &str) -> Result<()> {
-        let mut state = self.load_state();
-        if let Some(meta) = state.skills.get_mut(name) {
-            meta.pinned = false;
-            self.save_state(&state)?;
-        }
-        Ok(())
+        self.with_locked_state(|state| {
+            if let Some(meta) = state.skills.get_mut(name) {
+                meta.pinned = false;
+                return Ok(((), true));
+            }
+            Ok(((), false))
+        })
     }
 
     /// Apply automatic lifecycle transitions based on inactivity.
@@ -310,49 +458,53 @@ impl Curator {
             return Ok(vec![]);
         }
 
-        let mut state = self.load_state();
-        let now = chrono::Utc::now();
-        let mut transitions = Vec::new();
+        self.with_locked_state(|state| {
+            let now = chrono::Utc::now();
+            let mut transitions = Vec::new();
 
-        for meta in state.skills.values_mut() {
-            // Skip pinned and non-agent-created skills
-            if meta.pinned || !meta.agent_created {
-                continue;
+            for meta in state.skills.values_mut() {
+                // Skip pinned and non-agent-created skills.
+                if meta.pinned || !meta.agent_created {
+                    continue;
+                }
+
+                // Candidates and Drafts don't auto-transition based on inactivity.
+                if matches!(
+                    meta.lifecycle,
+                    SkillLifecycle::Candidate | SkillLifecycle::Draft
+                ) {
+                    continue;
+                }
+
+                // `num_days()` is i64 and can be negative under clock skew
+                // (last_used_at later than now). `.max(0)` prevents the `as u64`
+                // cast from wrapping a negative into a huge value, which would
+                // instantly satisfy every idle threshold and wrongly archive
+                // freshly-used skills (N9).
+                let idle_days = (now - meta.last_used_at).num_days().max(0) as u64;
+
+                let new_lifecycle = match meta.lifecycle {
+                    SkillLifecycle::Active if idle_days >= self.config.stale_days => {
+                        Some(SkillLifecycle::Stale)
+                    }
+                    SkillLifecycle::Stale if idle_days >= self.config.deprecate_days => {
+                        Some(SkillLifecycle::Deprecated)
+                    }
+                    SkillLifecycle::Deprecated if idle_days >= self.config.archive_days => {
+                        Some(SkillLifecycle::Archived)
+                    }
+                    _ => None,
+                };
+
+                if let Some(new_lc) = new_lifecycle {
+                    transitions.push((meta.name.clone(), meta.lifecycle, new_lc));
+                    meta.lifecycle = new_lc;
+                }
             }
 
-            // Candidates and Drafts don't auto-transition based on inactivity
-            if matches!(
-                meta.lifecycle,
-                SkillLifecycle::Candidate | SkillLifecycle::Draft
-            ) {
-                continue;
-            }
-
-            let idle_days = (now - meta.last_used_at).num_days() as u64;
-
-            let new_lifecycle = match meta.lifecycle {
-                SkillLifecycle::Active if idle_days >= self.config.stale_days => {
-                    Some(SkillLifecycle::Stale)
-                }
-                SkillLifecycle::Stale if idle_days >= self.config.deprecate_days => {
-                    Some(SkillLifecycle::Deprecated)
-                }
-                SkillLifecycle::Deprecated if idle_days >= self.config.archive_days => {
-                    Some(SkillLifecycle::Archived)
-                }
-                _ => None,
-            };
-
-            if let Some(new_lc) = new_lifecycle {
-                transitions.push((meta.name.clone(), meta.lifecycle, new_lc));
-                meta.lifecycle = new_lc;
-            }
-        }
-
-        state.last_run_at = Some(now);
-        self.save_state(&state)?;
-
-        Ok(transitions)
+            state.last_run_at = Some(now);
+            Ok((transitions, true))
+        })
     }
 
     /// Get a summary of the curator state.
@@ -406,6 +558,37 @@ pub struct CuratorStatus {
     pub archived: usize,
     pub pinned: usize,
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// RAII guard that holds an exclusive advisory lock on the sidecar file.
+///
+/// Created by `Curator::acquire_lock()`. On drop, the lock is explicitly
+/// released (`unlock`) and the fd closed — which also releases the OS advisory
+/// lock as a safety net. The sidecar file is best-effort removed.
+///
+/// Kill-safety relies on the OS releasing the flock when the fd is closed
+/// (including on process death), NOT on the Drop running. So even if a process
+/// is killed with SIGKILL mid-critical-section, no other curator is left
+/// blocked.
+struct CuratorLockGuard {
+    file: Option<std::fs::File>,
+    path: Option<std::path::PathBuf>,
+}
+
+impl Drop for CuratorLockGuard {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            // Explicit unlock first (best effort); closing the fd below also
+            // releases the OS advisory lock.
+            let _ = file.unlock();
+            drop(file);
+        }
+        // Best-effort sidecar cleanup. Failure here is harmless: the file is
+        // just an empty marker; its existence does not imply a held lock.
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -637,5 +820,92 @@ mod tests {
 
         let state = curator.load_state();
         assert_eq!(state.skills.len(), 1);
+    }
+
+    /// Regression for P0-1 (Curator TOCTOU): two `Curator` instances over the
+    /// same state path, each registering a *different* skill, must both land.
+    /// Under the pre-fix design (separate load/save locks), the second writer
+    /// clobbered the first and one skill silently disappeared.
+    #[test]
+    fn test_concurrent_curators_do_not_lose_updates() {
+        // Shared state path (simulates two modules calling default_path()).
+        let dir = std::env::temp_dir().join(format!("echo_curator_conc_{}", uuid::Uuid::new_v4()));
+        let path = dir.join("curator_state.json");
+
+        let a = Curator::new(CuratorConfig::default(), path.clone());
+        let b = Curator::new(CuratorConfig::default(), path.clone());
+
+        // Interleave the two instances as a race would.
+        a.register_candidate("skill-a").unwrap();
+        b.register_candidate("skill-b").unwrap();
+
+        let state = a.load_state();
+        assert!(
+            state.skills.contains_key("skill-a"),
+            "skill-a lost (TOCTOU regression)"
+        );
+        assert!(
+            state.skills.contains_key("skill-b"),
+            "skill-b lost (TOCTOU regression)"
+        );
+    }
+
+    /// Regression for the kill-9 deadlock (R1): acquiring the lock, dropping
+    /// the guard without running normal cleanup (simulating a process that
+    /// died but whose fd was closed by the OS), must NOT wedge the next
+    /// locker. This holds because flock auto-releases on fd close; the stale
+    /// sidecar file is not an obstacle since we never require `create_new`.
+    #[test]
+    fn test_lock_survives_abandoned_sidecar() {
+        let dir = std::env::temp_dir().join(format!("echo_curator_stale_{}", uuid::Uuid::new_v4()));
+        let path = dir.join("curator_state.json");
+
+        // Pre-create a stale sidecar lock file (as if a prior process crashed).
+        let lock_path = path.with_extension("json.lock");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&lock_path, b"").unwrap();
+        assert!(lock_path.exists(), "precondition: stale sidecar exists");
+
+        // A new curator must still succeed — the stale file is not a barrier.
+        let curator = Curator::new(CuratorConfig::default(), path.clone());
+        curator
+            .register_candidate("after-stale")
+            .expect("curator must not deadlock on a stale sidecar file");
+        assert!(curator.load_state().skills.contains_key("after-stale"));
+    }
+
+    /// `with_locked_state` must not persist when the closure errors — the
+    /// on-disk file stays at its pre-call state.
+    #[test]
+    fn test_with_locked_state_rollback_on_error() {
+        let curator = temp_curator();
+        curator.register_candidate("keep-me").unwrap();
+
+        use crate::error::ReactError;
+        let result: Result<()> = curator.with_locked_state(|state| {
+            // Mutate in memory, then fail.
+            state.skills.insert(
+                "should-not-persist".to_string(),
+                SkillMeta {
+                    name: "should-not-persist".to_string(),
+                    lifecycle: SkillLifecycle::Candidate,
+                    created_at: chrono::Utc::now(),
+                    last_used_at: chrono::Utc::now(),
+                    last_modified_at: chrono::Utc::now(),
+                    pinned: false,
+                    agent_created: true,
+                    superseded_by: None,
+                },
+            );
+            Err(ReactError::Other("simulated failure".to_string()))
+        });
+        assert!(result.is_err());
+
+        let state = curator.load_state();
+        assert!(state.skills.contains_key("keep-me"));
+        assert!(
+            !state.skills.contains_key("should-not-persist"),
+            "failed mutation must not be persisted"
+        );
     }
 }

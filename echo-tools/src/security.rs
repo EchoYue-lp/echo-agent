@@ -502,16 +502,22 @@ fn extract_host(url_str: &str) -> Result<&str> {
     let authority = rest.split('/').next().unwrap_or(rest);
     // Remove ?query
     let authority = authority.split('?').next().unwrap_or(authority);
-    // Remove :port
-    let authority = authority.split(':').next().unwrap_or(authority);
     // Remove userinfo@ -- take everything after the last @
-    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
 
-    // Handle IPv6: [::1] → ::1
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.split(']').next())
-        .unwrap_or(host);
+    // Extract host, handling IPv6 bracket notation [::1]:port
+    let host = if authority.starts_with('[') {
+        // IPv6 literal: find the closing bracket
+        if let Some(close) = authority.find(']') {
+            &authority[1..close]
+        } else {
+            // Malformed — treat the whole thing as host (will likely fail DNS)
+            authority
+        }
+    } else {
+        // Plain host:port — strip port by splitting on first colon
+        authority.split(':').next().unwrap_or(authority)
+    };
 
     if host.is_empty() {
         return Err(ToolError::InvalidParameter {
@@ -538,8 +544,8 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
             let octets = v6.octets();
             // ::1 (localhost)
             *v6 == std::net::Ipv6Addr::LOCALHOST
-                // fd00::/8 (ULA)
-                || octets[0] == 0xfd
+                // fc00::/7 (ULA, RFC 4193) — covers both fc00::/8 and fd00::/8
+                || (octets[0] & 0xFE) == 0xFC
                 // fe80::/10 (link-local)
                 || (octets[0] == 0xfe && (octets[1] & 0xC0) == 0x80)
         }

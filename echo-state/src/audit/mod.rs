@@ -16,6 +16,7 @@ pub use echo_core::audit::*;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 存储工具调用开始时的信息
@@ -45,8 +46,10 @@ pub struct AuditCallback {
     session_id: Option<String>,
     /// tool_call_id → ToolCallInfo（args + start time）
     tool_calls: Mutex<HashMap<String, ToolCallInfo>>,
-    /// 按 tool_name 维护调用序列号，用于生成 tool_call_id
-    tool_seq: Mutex<HashMap<String, u64>>,
+    /// Monotonic counter for generating unique tool_call_ids.
+    /// Using a global counter instead of a per-tool-name sequence avoids
+    /// prefix-collision in the lookup when concurrent calls share a tool name.
+    next_call_id: AtomicU64,
 }
 
 impl AuditCallback {
@@ -60,20 +63,46 @@ impl AuditCallback {
             agent_name: agent_name.into(),
             session_id,
             tool_calls: Mutex::new(HashMap::new()),
-            tool_seq: Mutex::new(HashMap::new()),
+            next_call_id: AtomicU64::new(1),
         }
     }
 
-    /// 为工具调用生成唯一的 tool_call_id
-    fn make_tool_call_id(&self, tool: &str) -> String {
-        let mut seq = self.tool_seq.lock().unwrap_or_else(|e| e.into_inner());
-        let n = seq.entry(tool.to_string()).or_insert(0);
-        *n += 1;
-        format!("{}#{}", tool, n)
+    /// 为工具调用生成唯一的 tool_call_id（全局单调递增）。
+    fn make_tool_call_id(&self, _tool: &str) -> String {
+        let n = self.next_call_id.fetch_add(1, Ordering::Relaxed);
+        format!("call_{}", n)
     }
 
     fn make_event(&self, event_type: AuditEventType) -> AuditEvent {
         AuditEvent::now(self.session_id.clone(), self.agent_name.clone(), event_type)
+    }
+
+    /// Look up and remove the oldest in-flight tool call by tool name.
+    ///
+    /// Uses an exact-prefix match on the tool-in-key pattern (not
+    /// iteration-order-dependent), then removes and returns the entry
+    /// with the smallest embedded sequence number.  This is deterministic
+    /// even when concurrent calls share a tool name.
+    fn pop_tool_call(&self, tool: &str) -> Option<ToolCallInfo> {
+        let mut map = self.tool_calls.lock().ok()?;
+        // Collect all keys matching this tool's tracking prefix.
+        // Previous format: "tool#N" — fallback for entries still using that pattern.
+        let candidates: Vec<String> = map
+            .keys()
+            .filter(|k| k.starts_with(&format!("{}#", tool)))
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        // Remove the entry with the smallest sequence number (oldest).
+        let key = candidates.into_iter().min_by_key(|k| {
+            k.split('#')
+                .nth(1)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(u64::MAX)
+        })?;
+        map.remove(&key)
     }
 }
 
@@ -106,17 +135,7 @@ impl echo_core::agent::AgentCallback for AuditCallback {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let (duration_ms, input) = self
-                .tool_calls
-                .lock()
-                .ok()
-                .and_then(|mut m| {
-                    // Try to find by tool_call_id pattern first (tool#N)
-                    let key = m
-                        .keys()
-                        .find(|k| k.starts_with(&format!("{}#", tool)))
-                        .cloned();
-                    key.and_then(|k| m.remove(&k))
-                })
+                .pop_tool_call(tool)
                 .map(|info| (info.started_at.elapsed().as_millis() as u64, info.args))
                 .unwrap_or((0, Value::Null));
 
@@ -139,16 +158,7 @@ impl echo_core::agent::AgentCallback for AuditCallback {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let (duration_ms, input) = self
-                .tool_calls
-                .lock()
-                .ok()
-                .and_then(|mut m| {
-                    let key = m
-                        .keys()
-                        .find(|k| k.starts_with(&format!("{}#", tool)))
-                        .cloned();
-                    key.and_then(|k| m.remove(&k))
-                })
+                .pop_tool_call(tool)
                 .map(|info| (info.started_at.elapsed().as_millis() as u64, info.args))
                 .unwrap_or((0, Value::Null));
 

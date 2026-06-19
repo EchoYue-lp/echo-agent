@@ -7,7 +7,7 @@
 use futures::future::BoxFuture;
 use serde_json::Value;
 
-use crate::security::{ResourceLimits, SecurityConfig, create_safe_http_client, validate_url};
+use crate::security::{ResourceLimits, SecurityConfig};
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
@@ -127,20 +127,18 @@ fn read_image_from_file(path: &str, security: &SecurityConfig) -> Result<(String
 
 /// Fetch image from URL and convert to base64
 async fn fetch_image_from_url(url: &str, limits: &ResourceLimits) -> Result<(String, String)> {
-    // SSRF protection: validate target address
-    validate_url(url)?;
-
-    // Use securely-configured HTTP client
-    let client = create_safe_http_client(limits)?;
-
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: "analyze_image".to_string(),
-            message: format!("Failed to request image: {}", e),
-        })?;
+    // SSRF protection: ssrf_safe_get resolves DNS once, validates addresses,
+    // and connects on pinned IPs — closing the DNS-rebinding TOCTOU window.
+    let response = crate::security::ssrf_safe_get(
+        url,
+        std::time::Duration::from_secs(limits.http_timeout_secs),
+        5,
+    )
+    .await
+    .map_err(|e| ToolError::ExecutionFailed {
+        tool: "analyze_image".to_string(),
+        message: format!("Failed to request image: {}", e),
+    })?;
 
     // Check response status
     if !response.status().is_success() {

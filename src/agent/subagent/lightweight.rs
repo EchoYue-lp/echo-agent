@@ -261,14 +261,38 @@ impl LightweightSubagent {
                         )));
                     }
 
-                    let params: ToolParameters =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let params: ToolParameters = match serde_json::from_str(&tc.function.arguments)
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            // Malformed JSON from LLM — feed error back so it can self-correct
+                            let tool_result = ToolResult::error(format!(
+                                "Invalid JSON arguments for tool '{}': {e}",
+                                tc.function.name
+                            ));
+                            let tool_msg = Message {
+                                role: Role::Tool,
+                                content: MessageContent::Text(tool_result.output.clone()),
+                                tool_calls: None,
+                                name: Some(tc.function.name.clone()),
+                                tool_call_id: Some(tc.id.clone()),
+                                ..Default::default()
+                            };
+                            self.messages.write().await.push(tool_msg);
+                            continue;
+                        }
+                    };
 
                     let tool_result = self
                         .tool_manager
                         .execute_tool(&tc.function.name, params)
                         .await
-                        .unwrap_or_else(|e| ToolResult::error(format!("Tool error: {}", e)));
+                        .unwrap_or_else(|e| {
+                            ToolResult::error(format!(
+                                "Tool execution failed for '{}': {e}",
+                                tc.function.name
+                            ))
+                        });
 
                     // Push tool result as a message
                     let tool_msg = Message {

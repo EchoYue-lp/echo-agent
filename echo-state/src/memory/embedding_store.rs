@@ -264,6 +264,18 @@ impl EmbeddingStore {
     }
 }
 
+impl Drop for EmbeddingStore {
+    fn drop(&mut self) {
+        // Best-effort flush on drop so vector index changes are not silently
+        // lost when the store is dropped without an explicit flush_vector_index().
+        if self.vec_path.is_some() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let _ = handle.block_on(self.flush_index());
+            }
+        }
+    }
+}
+
 impl Store for EmbeddingStore {
     fn put<'a>(
         &'a self,

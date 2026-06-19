@@ -103,7 +103,9 @@ impl ReactAgent {
             }
         }
 
-        unreachable!()
+        Err(ReactError::Other(format!(
+            "JSON extraction exhausted {max_retries} retries without finding valid JSON"
+        )))
     }
 
     /// One-shot structured extraction, automatically deserializes the JSON result into the specified type `T`.

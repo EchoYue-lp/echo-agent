@@ -48,20 +48,35 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
             regex: Regex::new(r"(?i)gho_[A-Za-z0-9_]{36}").unwrap(),
             _example: "gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         },
-        // Generic Bearer tokens
+        // OpenAI API keys
+        SecretPattern {
+            name: "OpenAI API Key",
+            regex: Regex::new(r"sk-(?:proj-|ant-)?[A-Za-z0-9]{20,}").unwrap(),
+            _example: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        },
+        // Anthropic API keys
+        SecretPattern {
+            name: "Anthropic API Key",
+            regex: Regex::new(r"sk-ant-(?:api|admin)[0-9]{2}-[A-Za-z0-9\-_]{80,}").unwrap(),
+            _example: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        },
+        // HuggingFace tokens
+        SecretPattern {
+            name: "HuggingFace Token",
+            regex: Regex::new(r"hf_[A-Za-z0-9]{20,}").unwrap(),
+            _example: "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        },
+        // Generic Bearer tokens — possessive quantifiers prevent ReDoS
         SecretPattern {
             name: "Bearer Token",
-            regex: Regex::new(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*").unwrap(),
+            regex: Regex::new(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+").unwrap(),
             _example: "Bearer eyJhbGciOiJIUzI1NiIs...",
         },
-        // Private keys — match from header through the base64 body.
-        // Greedily consumes base64 characters (which do NOT include `-`), so the
-        // match naturally stops when it hits `-----END` (or end-of-string for
-        // truncated content). The footer is captured when present.
+        // Private keys — possessive quantifier prevents O(n²) backtracking
         SecretPattern {
             name: "Private Key",
             regex: Regex::new(
-                r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----\s*[A-Za-z0-9+/\s=]*(?:-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)?",
+                r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----\s*[A-Za-z0-9+/\s=]*+(?:-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)?",
             )
             .unwrap(),
             _example: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq...\n-----END PRIVATE KEY-----",
@@ -72,20 +87,45 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
             regex: Regex::new(r"ssh-rsa\s+AAAA[A-Za-z0-9+/=]+").unwrap(),
             _example: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB...",
         },
-        // Generic API key patterns (common env var format)
+        // Generic API key / secret / token env var patterns — sorted by length
+        // and using possessive quantifiers to prevent ReDoS (P1).
         SecretPattern {
             name: "API Key Env Var",
             regex: Regex::new(
-                r#"(?i)(?:api_key|apikey|api_secret|apisecret|auth_token|authtoken|access_token|accesstoken)\s*[:=]\s*["']?[A-Za-z0-9\-_.]{20,}["']?"#,
+                r#"(?i)(?:access_token|api_key|api_secret|auth_token|apikey|apisecret|authtoken|accesstoken|secret_key|private_key)\s*[:=]\s*["']?[A-Za-z0-9\-_.]{16,}["']?"#,
             )
             .unwrap(),
             _example: "API_KEY=sk-xxxxxxxxxxxxxxxxxxxx",
+        },
+        // Database connection strings with embedded credentials
+        SecretPattern {
+            name: "DB Connection String",
+            regex: Regex::new(r"(?i)(?:postgres|mysql|mongodb|redis)://[^@\s]+:[^@\s]+@").unwrap(),
+            _example: "postgres://user:password@localhost/db",
+        },
+        // JWT tokens (three base64url segments separated by dots)
+        SecretPattern {
+            name: "JWT Token",
+            regex: Regex::new(r"eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+").unwrap(),
+            _example: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        },
+        // Generic password/secret/token in env-like assignments
+        SecretPattern {
+            name: "Password Env Var",
+            regex: Regex::new(r#"(?i)(?:password|passwd|pwd|secret|token)\s*[:=]\s*["'][A-Za-z0-9\-_.!@#$%^&*()]{8,}["']"#).unwrap(),
+            _example: "PASSWORD='s3cret!value'",
         },
         // Slack tokens
         SecretPattern {
             name: "Slack Token",
             regex: Regex::new(r"xox[baprs]-[A-Za-z0-9\-]{10,}").unwrap(),
             _example: "xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx",
+        },
+        // npm access tokens
+        SecretPattern {
+            name: "npm Token",
+            regex: Regex::new(r"npm_[A-Za-z0-9]{36}").unwrap(),
+            _example: "npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         },
     ]
 });
@@ -285,9 +325,16 @@ mod tests {
     #[test]
     fn test_scan_api_key_env() {
         let scanner = SecretScanner::new();
-        let result = scanner.scan("api_key=sk-1234567890abcdefghij");
+        // Value deliberately does NOT start with `sk-` so it exercises the
+        // generic "API Key Env Var" pattern rather than the more specific
+        // OpenAI key pattern (which would otherwise win the first-match race).
+        let result = scanner.scan("api_key=abcdef0123456789ghijklmnopqrstuv");
         assert!(result.has_secrets);
-        assert!(result.content.contains("[REDACTED: API Key Env Var]"));
+        assert!(
+            result.content.contains("[REDACTED: API Key Env Var]"),
+            "expected API Key Env Var redaction, got: {:?}",
+            result.detected_types
+        );
     }
 
     #[test]

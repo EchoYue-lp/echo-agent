@@ -372,13 +372,19 @@ impl Tool for GitBranchTool {
             let args: Vec<String>;
 
             if let Some(name) = parameters.get("name").and_then(|v| v.as_str()) {
-                args = vec!["branch".to_string(), name.to_string()];
+                // -- separator: branch names starting with - are treated as names, not options
+                args = vec!["branch".to_string(), "--".to_string(), name.to_string()];
                 action = format!("Create branch '{}'", name);
             } else if let Some(target) = parameters.get("switch").and_then(|v| v.as_str()) {
-                args = vec!["checkout".to_string(), target.to_string()];
+                args = vec!["checkout".to_string(), "--".to_string(), target.to_string()];
                 action = format!("Switch to branch '{}'", target);
             } else if let Some(target) = parameters.get("delete").and_then(|v| v.as_str()) {
-                args = vec!["branch".to_string(), "-d".to_string(), target.to_string()];
+                args = vec![
+                    "branch".to_string(),
+                    "-d".to_string(),
+                    "--".to_string(),
+                    target.to_string(),
+                ];
                 action = format!("Delete branch '{}'", target);
             } else {
                 args = vec!["branch".to_string(), "-a".to_string()];

@@ -592,7 +592,7 @@ impl TaskExecutor {
             let verifier = self.verifier.clone();
             let replanner = self.replanner.clone();
             let task_id = task.id.clone();
-            let cancel = CancellationToken::new();
+            let cancel = self.cancel.child_token();
             let cancel_clone = cancel.clone();
             running_tasks.insert(task_id.clone(), cancel);
 
@@ -671,7 +671,7 @@ impl TaskExecutor {
         let _permit = permit;
         let start = Instant::now();
         let task_id = task.id.clone();
-        let cancel = CancellationToken::new();
+        let cancel = self.cancel.child_token();
         let cancel_clone = cancel.clone();
         self.running_tasks.insert(task_id.clone(), cancel);
 
@@ -1399,6 +1399,7 @@ impl TaskExecutor {
             let semaphore = self.semaphore.clone();
             let task_store = self.task_store.clone();
             let verifier = self.verifier.clone();
+            let parent_cancel = self.cancel.clone();
 
             let handle = spawner.spawn(&task_name, async move {
                 let _permit = semaphore
@@ -1412,7 +1413,7 @@ impl TaskExecutor {
                     config,
                     execute_fn,
                     hooks,
-                    CancellationToken::new(),
+                    parent_cancel.child_token(),
                     task_store,
                     verifier,
                     None, // replanner

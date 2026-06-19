@@ -392,6 +392,7 @@ mod tests {
                 m
             },
             common_failures: Vec::new(),
+            recent_records: std::collections::VecDeque::new(),
             last_used: epoch_millis(),
             first_used: epoch_millis() - 86400000,
         }

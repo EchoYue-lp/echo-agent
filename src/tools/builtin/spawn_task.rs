@@ -124,20 +124,33 @@ impl Tool for SpawnBackgroundTaskTool {
                     }
 
                     // Security gate: every command sourced from the LLM must pass
-                    // the same safety policy as the synchronous ShellTool. We use
-                    // the strict default classifier so dangerous commands and shell
-                    // metacharacters are rejected here too (closing a bypass that
-                    // previously ran arbitrary `sh -c` outside the defended path).
+                    // the same safety policy as the synchronous ShellTool. The
+                    // classifier rejects dangerous commands and shell metacharacters,
+                    // closing the bypass that previously ran arbitrary `sh -c`
+                    // outside the defended path.
+                    //
+                    // NOTE (P0-5): This tool does NOT route through HITL approval
+                    // because it lacks a reference to the HITL provider at this
+                    // layer. The safety classifier is the primary defense; full
+                    // HITL integration requires plumbing `HitlProvider` through
+                    // the SpawnTaskTool constructor. See also: executor.rs hitrisk
+                    // fail-closed path for the TaskRuntime equivalent.
                     if let Err(reason) = check_command_allowed(&cmd_for_task) {
                         return Err(crate::error::ReactError::Other(format!(
                             "Background command rejected by safety policy: {reason}"
                         )));
                     }
 
-                    // Use tokio::process::Command for safe async execution
+                    // Use tokio::process::Command for safe async execution.
+                    // env_clear + allowlist: prevent leaking API keys/tokens to
+                    // background processes. Only PATH and HOME are needed.
                     let output = tokio::process::Command::new("sh")
                         .arg("-c")
                         .arg(&cmd_for_task)
+                        .env_clear()
+                        .env("PATH", std::env::var("PATH").unwrap_or_default())
+                        .env("HOME", std::env::var("HOME").unwrap_or_default())
+                        .process_group(0)
                         .kill_on_drop(true)
                         .output()
                         .await
@@ -147,8 +160,15 @@ impl Tool for SpawnBackgroundTaskTool {
                             ))
                         })?;
 
-                    let stdout = truncate_output(&output.stdout);
-                    let stderr = truncate_output(&output.stderr);
+                    // Redact secrets from output before storing/returning
+                    let stdout = truncate_output(
+                        crate::security::redact_secrets(&String::from_utf8_lossy(&output.stdout))
+                            .as_bytes(),
+                    );
+                    let stderr = truncate_output(
+                        crate::security::redact_secrets(&String::from_utf8_lossy(&output.stderr))
+                            .as_bytes(),
+                    );
                     let exit_code = output.status.code().unwrap_or(-1);
 
                     let mut result = format!(

@@ -324,8 +324,8 @@ fn validate_db_url(url_str: &str) -> Result<()> {
 
 /// Execute a read-only query and return structured JSON.
 ///
-/// Defense-in-depth: uses SET TRANSACTION READ ONLY (PostgreSQL/MySQL) to enforce
-/// read-only at the database level, in addition to keyword filtering at the tool level.
+/// Defense-in-depth: wraps non-SQLite queries in an explicit READ ONLY transaction,
+/// so the database itself rejects any mutation attempt (not just our keyword filter).
 async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_json::Value> {
     let pool = AnyPoolOptions::new()
         .max_connections(1)
@@ -336,25 +336,46 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
             message: format!("Database connection failed: {}", e),
         })?;
 
-    // Defense-in-depth layer 2: enforce read-only at the database level.
-    // SET TRANSACTION READ ONLY prevents any data modification within this transaction.
-    // Silently ignored on SQLite (which doesn't enforce this), but provides real
-    // protection on PostgreSQL and MySQL.
-    if !conn_url.starts_with("sqlite") {
-        let _ = sqlx::query("SET TRANSACTION READ ONLY")
-            .execute(&pool)
-            .await;
-    }
-
-    let rows =
-        sqlx::query(query)
-            .fetch_all(&pool)
+    if conn_url.starts_with("sqlite") {
+        // SQLite does not support SET TRANSACTION READ ONLY — skip.
+        let rows =
+            sqlx::query(query)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "database".to_string(),
+                    message: format!("Query execution failed: {}", e),
+                })?;
+        format_db_rows(&rows)
+    } else {
+        // PostgreSQL/MySQL: wrap in an explicit READ ONLY transaction.
+        // Using pool.begin() starts an explicit transaction; SET TRANSACTION READ ONLY
+        // then applies to this transaction (not just an autocommit-internal one).
+        let mut tx = pool.begin().await.map_err(|e| ToolError::ExecutionFailed {
+            tool: "database".to_string(),
+            message: format!("Failed to begin transaction: {}", e),
+        })?;
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *tx)
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: "database".to_string(),
-                message: format!("Query execution failed: {}", e),
+                message: format!("Failed to set read-only mode: {}", e),
             })?;
+        let rows = sqlx::query(query).fetch_all(&mut *tx).await.map_err(|e| {
+            ToolError::ExecutionFailed {
+                tool: "database".to_string(),
+                message: format!("Query execution failed: {}", e),
+            }
+        })?;
+        // Best-effort commit (read-only, so nothing to write); rollback on drop otherwise.
+        tx.commit().await.ok();
+        format_db_rows(&rows)
+    }
+}
 
+/// Format sqlx query result rows into structured JSON.
+fn format_db_rows(rows: &[sqlx::any::AnyRow]) -> Result<serde_json::Value> {
     let columns: Vec<String> = if rows.is_empty() {
         vec![]
     } else {
@@ -368,7 +389,7 @@ async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_jso
     let col_count = columns.len();
     let mut row_values: Vec<Vec<serde_json::Value>> = Vec::with_capacity(rows.len());
 
-    for row in &rows {
+    for row in rows {
         let mut values: Vec<serde_json::Value> = Vec::with_capacity(col_count);
         for i in 0..col_count {
             let val = match row.try_get::<Option<String>, _>(i) {

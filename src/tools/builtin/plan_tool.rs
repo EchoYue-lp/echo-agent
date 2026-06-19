@@ -306,7 +306,8 @@ Example:
             });
 
             Ok(ToolResult::success(
-                serde_json::to_string_pretty(&result).unwrap(),
+                serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|e| format!("Plan generated but serialization failed: {e}")),
             ))
         })
     }

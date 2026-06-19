@@ -147,6 +147,9 @@ impl SubagentExecutor {
     pub async fn dispatch(&self, mut req: DispatchRequest) -> Result<SubagentResult> {
         let mut retry_count: u32 = 0;
         let max_retries: u32 = 3; // Prevent infinite retry loops
+        // Save parent cancel token so retry/delegate paths propagate cancellation
+        // instead of creating independent tokens (P1 — CancellationToken propagation).
+        let parent_cancel = req.cancel.clone();
 
         loop {
             // Guard against infinite delegation chains
@@ -291,7 +294,7 @@ impl SubagentExecutor {
                                     agent_name: alternative_agent,
                                     task: hook_ctx.task.clone(),
                                     mode_override: Some(hook_ctx.execution_mode.clone()),
-                                    cancel: CancellationToken::new(),
+                                    cancel: parent_cancel.child_token(),
                                     parent_agent: hook_ctx.parent_agent.clone(),
                                     parent_context: None,
                                     delegate_depth: delegate_depth + 1,
@@ -311,7 +314,7 @@ impl SubagentExecutor {
                                     agent_name: hook_ctx.subagent_name.clone(),
                                     task: hook_ctx.task.clone(),
                                     mode_override: Some(hook_ctx.execution_mode.clone()),
-                                    cancel: CancellationToken::new(),
+                                    cancel: parent_cancel.child_token(),
                                     parent_agent: hook_ctx.parent_agent.clone(),
                                     parent_context: None,
                                     delegate_depth,

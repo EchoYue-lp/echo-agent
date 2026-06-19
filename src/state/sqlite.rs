@@ -92,8 +92,11 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let conn = self.open_conn()?;
-            let deps = serde_json::to_string(&node.dependencies).unwrap_or_default();
-            let outputs = serde_json::to_string(&node.outputs).unwrap_or_default();
+            let deps = serde_json::to_string(&node.dependencies).map_err(|e| {
+                crate::error::ReactError::Other(format!("serialize dependencies: {e}"))
+            })?;
+            let outputs = serde_json::to_string(&node.outputs)
+                .map_err(|e| crate::error::ReactError::Other(format!("serialize outputs: {e}")))?;
             conn.execute(
                 r#"
                 INSERT INTO task_nodes (id, conversation_id, name, status, dependencies, outputs, created_at, updated_at)
@@ -109,7 +112,8 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     &node.id,
                     conversation_id,
                     &node.name,
-                    serde_json::to_string(&node.status).unwrap_or_default(),
+                serde_json::to_string(&node.status)
+                    .map_err(|e| crate::error::ReactError::Other(format!("serialize status: {e}")))?,
                     deps,
                     outputs,
                     node.created_at.to_rfc3339(),

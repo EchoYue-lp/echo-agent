@@ -77,24 +77,15 @@ impl Tool for PdfFetchTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(50_000) as usize;
 
-            // Validate URL (SSRF protection)
-            crate::security::validate_url(url)?;
-
-            // Download PDF
-            let client = shared_client();
-
-            let response = client
-                .get(url)
-                .header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                )
-                .send()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: TOOL_NAME.to_string(),
-                    message: format!("Failed to download PDF: {}", e),
-                })?;
+            // Download PDF (SSRF-safe: resolve + validate + connect on pinned IPs,
+            // closing the DNS-rebinding TOCTOU window)
+            let response =
+                crate::security::ssrf_safe_get(url, std::time::Duration::from_secs(60), 5)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: TOOL_NAME.to_string(),
+                        message: format!("Failed to download PDF: {}", e),
+                    })?;
 
             if !response.status().is_success() {
                 return Err(ToolError::ExecutionFailed {

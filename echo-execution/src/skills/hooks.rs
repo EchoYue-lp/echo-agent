@@ -744,35 +744,58 @@ async fn execute_action(
             tool,
             arguments,
             timeout,
-        } => match mcp_executor {
-            Some(executor) => {
-                let fut = executor(server.clone(), tool.clone(), arguments.clone());
-                if *timeout > 0 {
-                    match tokio::time::timeout(Duration::from_secs(*timeout), fut).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!(
-                                server = %server,
-                                tool = %tool,
-                                timeout_secs = *timeout,
-                                "McpTool hook timed out"
-                            );
-                            HookResult::default()
-                        }
-                    }
-                } else {
-                    fut.await
-                }
-            }
-            None => {
+        } => {
+            // Blocklist for dangerous MCP tools that hooks must not call
+            // (P1 — MCP tool execution without allowlist in execution layer).
+            const BLOCKED_MCP_TOOLS: &[&str] = &[
+                "execute_command",
+                "shell",
+                "bash",
+                "sh",
+                "write_file",
+                "delete_file",
+                "remove_file",
+                "run_script",
+                "spawn_task",
+            ];
+            if BLOCKED_MCP_TOOLS.contains(&tool.as_str()) {
                 warn!(
                     server = %server,
                     tool = %tool,
-                    "McpTool hook action configured but no mcp_executor registered"
+                    "McpTool hook blocked: tool is on the execution deny-list"
                 );
-                HookResult::default()
+                return HookResult::default();
             }
-        },
+            match mcp_executor {
+                Some(executor) => {
+                    let fut = executor(server.clone(), tool.clone(), arguments.clone());
+                    if *timeout > 0 {
+                        match tokio::time::timeout(Duration::from_secs(*timeout), fut).await {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!(
+                                    server = %server,
+                                    tool = %tool,
+                                    timeout_secs = *timeout,
+                                    "McpTool hook timed out"
+                                );
+                                HookResult::default()
+                            }
+                        }
+                    } else {
+                        fut.await
+                    }
+                }
+                None => {
+                    warn!(
+                        server = %server,
+                        tool = %tool,
+                        "McpTool hook action configured but no mcp_executor registered"
+                    );
+                    HookResult::default()
+                }
+            }
+        }
         HookAction::Agent {
             name,
             task,
@@ -809,6 +832,19 @@ async fn execute_command_hook(
     context: &HookContext,
     sandbox: Option<&Arc<SandboxManager>>,
 ) -> HookResult {
+    // Reject source_dir containing shell-special characters that could break
+    // out of the substituted position when passed to bash -c (P1 — shell injection).
+    if source_dir
+        .contains(|c: char| matches!(c, '$' | '`' | '(' | ')' | ';' | '|' | '&' | '<' | '>'))
+    {
+        return HookResult {
+            block: true,
+            block_reason: Some(format!(
+                "source_dir contains shell-special characters: {source_dir}"
+            )),
+            ..Default::default()
+        };
+    }
     // Variable substitution in command
     let command = command
         .replace("${SKILL_DIR}", source_dir)

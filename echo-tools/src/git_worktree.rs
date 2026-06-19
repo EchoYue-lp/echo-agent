@@ -61,7 +61,14 @@ pub fn create_worktree(
     cmd.args(["worktree", "add"]).current_dir(&git_root);
 
     if let Some(ref base) = config.base {
-        cmd.args(["-b", &config.branch, &worktree_dir.to_string_lossy(), base]);
+        // -- prevents base from being interpreted as a git option
+        cmd.args([
+            "-b",
+            &config.branch,
+            &worktree_dir.to_string_lossy(),
+            "--",
+            base,
+        ]);
     } else {
         cmd.args(["-b", &config.branch, &worktree_dir.to_string_lossy()]);
     }
@@ -79,6 +86,7 @@ pub fn create_worktree(
                     "worktree",
                     "add",
                     &worktree_dir.to_string_lossy(),
+                    "--",
                     &config.branch,
                 ])
                 .current_dir(&git_root)
@@ -130,7 +138,7 @@ pub fn remove_worktree(repo_path: &Path, worktree: &ManagedWorktree) -> Result<(
     // Delete the branch if it was managed
     if worktree.managed {
         let _ = Command::new("git")
-            .args(["branch", "-D", &worktree.branch])
+            .args(["branch", "-D", "--", &worktree.branch])
             .current_dir(&git_root)
             .output();
     }

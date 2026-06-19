@@ -227,9 +227,12 @@ impl BackgroundReviewer {
         let typed_store = self.typed_store.clone();
         let layer_manager = self.layer_manager.clone();
 
-        // Build the full review message
+        // Use a random nonce delimiter between transcript and instructions so
+        // an attacker cannot inject "---" / "Nothing to save." from within
+        // the conversation content (P1 — prompt injection).
+        let nonce = uuid::Uuid::new_v4();
         let review_message = format!(
-            "{transcript}\n\n---\n\n{prompt}\n\nYou can only call memory management tools. \
+            "{transcript}\n\n=== SYSTEM INSTRUCTION DELIMITER {nonce} ===\n\n{prompt}\n\nYou can only call memory management tools. \
              Other tools will be denied at runtime — do not attempt them."
         );
 
@@ -323,8 +326,11 @@ impl BackgroundReviewer {
             }
 
             let transcript = BackgroundReviewer::build_transcript(&run);
+            // Use a random nonce delimiter (same pattern as review()) so an attacker
+            // cannot inject "---" from within the conversation content.
+            let nonce = uuid::Uuid::new_v4();
             let review_message = format!(
-                "{transcript}\n\n---\n\n{prompt}\n\nYou can only call memory management tools. \
+                "{transcript}\n\n=== SYSTEM INSTRUCTION DELIMITER {nonce} ===\n\n{prompt}\n\nYou can only call memory management tools. \
                  Other tools will be denied at runtime — do not attempt them."
             );
 

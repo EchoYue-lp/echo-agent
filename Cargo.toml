@@ -52,7 +52,10 @@ human-loop = ["echo_orchestration/websocket"]
 handoff = []
 topology = []
 tasks = []
-subagent = []
+# `subagent` builds `src/agent/subagent/`, which imports `crate::tasks`
+# (Evidence type). Without `tasks` the `subagent` feature fails to compile on
+# its own — declare the dependency so `--features subagent` works standalone.
+subagent = ["tasks"]
 web = ["dep:scraper", "dep:html2text", "dep:url", "echo_tools/web"]
 media = ["dep:pdf-extract", "dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "echo_tools/media"]
 data = ["dep:polars", "echo_tools/data"]
@@ -107,11 +110,20 @@ async-trait = "0.1"
 tempfile = "3"
 fastrand = "2"
 base64 = "0.22"
+# Advisory file locks (cross-process, kill-safe: the lock is released when the
+# fd is closed by the OS on process death, unlike a sidecar lock file which
+# survives a kill -9 and deadlocks all future lockers). Used by the Curator
+# and memory-layer state files.
+fs2 = "0.4"
 opentelemetry = { version = "0.27", features = ["trace", "metrics"], optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["tonic", "metrics"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
 axum = { version = "0.7", optional = true }
+# SECURITY: jsonwebtoken v9 has known CVE (algorithm confusion, JWT forgery).
+# Only enabled behind the optional "a2a" feature. Before enabling in production,
+# migrate to v10+ or an alternative (josekit, biscuit).
+# See: RUSTSEC-2022-0080 / CVE-2022-23529
 jsonwebtoken = { version = "9", optional = true }
 scraper = { version = "0.22", optional = true }
 html2text = { version = "0.14", optional = true }
