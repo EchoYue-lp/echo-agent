@@ -152,9 +152,15 @@ pub struct TaskEventBus {
     tx: broadcast::Sender<Arc<TaskEvent>>,
     // Keep sync listeners for backward compatibility (wrapped in Arc for safe sharing)
     sync_listeners: Vec<Arc<dyn TaskEventListener>>,
+    // Bounds the number of concurrently executing sync listeners to prevent
+    // unbounded tokio::spawn when tasks pile up (P1-2.4).
+    sync_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl TaskEventBus {
+    /// Maximum concurrent sync listener invocations.
+    const MAX_SYNC_CONCURRENCY: usize = 32;
+
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CHANNEL_CAPACITY)
     }
@@ -164,6 +170,7 @@ impl TaskEventBus {
         Self {
             tx,
             sync_listeners: Vec::new(),
+            sync_semaphore: Arc::new(tokio::sync::Semaphore::new(Self::MAX_SYNC_CONCURRENCY)),
         }
     }
 
@@ -187,15 +194,17 @@ impl TaskEventBus {
     /// Emit an event to all listeners
     ///
     /// Sync listeners are offloaded to background tasks via `tokio::spawn`
-    /// to prevent blocking the caller.
+    /// to prevent blocking the caller, but bounded by a semaphore (P1-2.4).
     /// Async subscribers receive the event through their receiver.
     pub fn emit(&self, event: TaskEvent) {
-        // Offload sync listeners to background tasks to avoid blocking
+        // Offload sync listeners to background tasks (bounded)
         let event_for_async = Arc::new(event.clone());
         for listener in &self.sync_listeners {
             let listener = listener.clone();
             let event = event.clone();
+            let sem = self.sync_semaphore.clone();
             tokio::spawn(async move {
+                let _permit = sem.acquire().await;
                 listener.on_event(&event);
             });
         }
@@ -216,6 +225,7 @@ impl Clone for TaskEventBus {
         Self {
             tx: self.tx.clone(),
             sync_listeners: Vec::new(), // Don't clone sync listeners
+            sync_semaphore: self.sync_semaphore.clone(),
         }
     }
 }

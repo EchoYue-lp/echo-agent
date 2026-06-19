@@ -231,10 +231,15 @@ impl LlmConfig {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        let base_url = base_url.into();
         Self {
             provider: LlmProvider::OpenAi,
-            provider_name: Some("new".to_string()),
-            base_url: base_url.into(),
+            // Infer the provider id from the base_url so the thinking-protocol
+            // resolver can pick the right field (e.g. enable_thinking for
+            // dashscope vs reasoning_effort for deepseek). Falls back to None
+            // (model-name-based inference) for generic OpenAI-compatible URLs.
+            provider_name: provider_name_from_url(&base_url),
+            base_url,
             api_key: api_key.into(),
             model: model.into(),
             thinking: None,

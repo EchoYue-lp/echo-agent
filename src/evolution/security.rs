@@ -127,6 +127,24 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
             regex: Regex::new(r"npm_[A-Za-z0-9]{36}").unwrap(),
             _example: "npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         },
+        // Google API key (AIza) — synced from runtime scanner for parity (P1-16).
+        SecretPattern {
+            name: "Google API Key",
+            regex: Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(),
+            _example: "AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        },
+        // GitLab PAT — synced from runtime scanner for parity (P1-16).
+        SecretPattern {
+            name: "GitLab Token",
+            regex: Regex::new(r"glpat-[A-Za-z0-9\-_]{20,}").unwrap(),
+            _example: "glpat-xxxxxxxxxxxxxxxxxxxx",
+        },
+        // Stripe secret key — synced from runtime scanner for parity (P1-16).
+        SecretPattern {
+            name: "Stripe Secret Key",
+            regex: Regex::new(concat!("sk_", "live_[0-9a-zA-Z]{24,}")).unwrap(),
+            _example: concat!("sk_", "live_xxxxxxxxxxxxxxxxxxxxxxxx"),
+        },
     ]
 });
 

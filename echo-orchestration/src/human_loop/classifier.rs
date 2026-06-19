@@ -841,7 +841,7 @@ mod tests {
             fn chat_stream(
                 &self,
                 _request: ChatRequest,
-            ) -> BoxFuture<'_, Result<BoxStream<'_, Result<ChatChunk>>>> {
+            ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
                 Box::pin(async move {
                     Err(echo_core::error::ReactError::Other(
                         "not implemented".to_string(),

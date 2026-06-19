@@ -49,13 +49,14 @@ impl SqliteRuntimeStateStore {
                 PRIMARY KEY (id, conversation_id)
             );
 
-            -- Agent checkpoints table
+            -- Agent checkpoints table (working_dir added in migration below)
             CREATE TABLE IF NOT EXISTS agent_checkpoints (
                 conversation_id TEXT PRIMARY KEY,
                 messages_json   TEXT NOT NULL,
                 current_plan    TEXT,
                 active_skills   TEXT NOT NULL,
                 blocked_reason  TEXT,
+                working_dir     TEXT,
                 timestamp       TEXT NOT NULL
             );
 
@@ -64,6 +65,23 @@ impl SqliteRuntimeStateStore {
             "#,
         )
         .map_err(|e| RuntimeStateError::Io(format!("failed to init tables: {}", e)))?;
+
+        // Migration: add working_dir column for databases created before this
+        // column was added (P1-6).  ALTER TABLE ADD COLUMN does not support
+        // IF NOT EXISTS; we catch "duplicate column name" for databases that
+        // already have it (e.g. created fresh above).
+        if let Err(e) = conn.execute(
+            "ALTER TABLE agent_checkpoints ADD COLUMN working_dir TEXT",
+            [],
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(RuntimeStateError::Io(format!(
+                    "failed to add working_dir column: {msg}"
+                ))
+                .into());
+            }
+        }
         Ok(())
     }
 
@@ -206,7 +224,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
             let conn = self.open_conn()?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT messages_json, current_plan, active_skills, blocked_reason, timestamp
+                    "SELECT messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp
                  FROM agent_checkpoints WHERE conversation_id = ?1",
                 )
                 .map_err(|e| RuntimeStateError::Io(format!("failed to prepare query: {}", e)))?;
@@ -216,7 +234,8 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                 let current_plan: Option<String> = row.get(1)?;
                 let active_skills_str: String = row.get(2)?;
                 let blocked_reason: Option<String> = row.get(3)?;
-                let timestamp_str: String = row.get(4)?;
+                let working_dir: Option<String> = row.get(4).ok(); // nullable; may not exist in old rows
+                let timestamp_str: String = row.get(5)?;
 
                 let active_skills: Vec<String> =
                     serde_json::from_str(&active_skills_str).unwrap_or_default();
@@ -230,9 +249,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     current_plan,
                     active_skills,
                     blocked_reason,
-                    // working_dir column not yet in the sqlite schema; default
-                    // to None on read (full persistence tracked as follow-up).
-                    working_dir: None,
+                    working_dir: working_dir.map(std::path::PathBuf::from),
                     timestamp,
                 })
             });
@@ -254,13 +271,14 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                 serde_json::to_string(&checkpoint.active_skills).unwrap_or_default();
             conn.execute(
                 r#"
-                INSERT INTO agent_checkpoints (conversation_id, messages_json, current_plan, active_skills, blocked_reason, timestamp)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                INSERT INTO agent_checkpoints (conversation_id, messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 ON CONFLICT(conversation_id) DO UPDATE SET
                     messages_json = excluded.messages_json,
                     current_plan = excluded.current_plan,
                     active_skills = excluded.active_skills,
                     blocked_reason = excluded.blocked_reason,
+                    working_dir = excluded.working_dir,
                     timestamp = excluded.timestamp
                 "#,
                 params![
@@ -269,6 +287,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     checkpoint.current_plan.as_deref(),
                     active_skills_str,
                     checkpoint.blocked_reason.as_deref(),
+                    checkpoint.working_dir.as_ref().and_then(|p| p.to_str()),
                     checkpoint.timestamp.to_rfc3339(),
                 ],
             )

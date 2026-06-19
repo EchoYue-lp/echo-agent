@@ -45,6 +45,16 @@ static SECRET_PATTERNS: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
             "GitHub PAT",
             Regex::new(r"github_pat_[A-Za-z0-9_]{22,}").unwrap(),
         ),
+        // SSH private/public key material — synced from evolution scanner (P1-16).
+        (
+            "SSH Key",
+            Regex::new(r"ssh-rsa\s+AAAA[A-Za-z0-9+/=]+").unwrap(),
+        ),
+        // Bearer tokens (possessive to avoid ReDoS) — synced from evolution.
+        (
+            "Bearer Token",
+            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+").unwrap(),
+        ),
         (
             "Anthropic API Key",
             Regex::new(r"sk-ant-[A-Za-z0-9_-]{20,}").unwrap(),
@@ -74,6 +84,28 @@ static SECRET_PATTERNS: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
             "Generic Token",
             Regex::new(r"(?i)(token|secret|password|passwd)[\s:=]+[A-Za-z0-9_\-!@#$%^&*]{8,}")
                 .unwrap(),
+        ),
+        // Patterns missing in the original scanner (P1-16 / 2.7):
+        (
+            "HuggingFace Token",
+            Regex::new(r"hf_[A-Za-z0-9]{34}").unwrap(),
+        ),
+        (
+            "Google API Key",
+            Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(),
+        ),
+        (
+            "GitLab PAT",
+            Regex::new(r"glpat-[A-Za-z0-9\-_]{26}").unwrap(),
+        ),
+        (
+            "Stripe Live Key",
+            Regex::new(concat!("sk_", "live_[0-9a-zA-Z]{24,}")).unwrap(),
+        ),
+        ("npm Token", Regex::new(r"npm_[A-Za-z0-9]{36}").unwrap()),
+        (
+            "DB Connection String",
+            Regex::new(r"(?i)(postgres(ql)?|mysql)://[^@\s]+:[^@\s]+@").unwrap(),
         ),
     ]
 });
@@ -193,5 +225,48 @@ mod tests {
         let text =
             "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0B\n-----END PRIVATE KEY-----";
         assert!(contains_secrets(text));
+    }
+
+    // ── Regression: newly-added patterns (P1-16 / 2.7) ────────────────────
+
+    #[test]
+    fn test_huggingface_token() {
+        assert!(contains_secrets(
+            "HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz123456789"
+        ));
+    }
+
+    #[test]
+    fn test_google_api_key() {
+        assert!(contains_secrets(
+            "key=AIzaSyDkLmNpQrStUvWxYz1234567890abcdefg"
+        ));
+    }
+
+    #[test]
+    fn test_gitlab_pat() {
+        assert!(contains_secrets(
+            "GITLAB_TOKEN=glpat-abcdefghijklmnopqrstuvwx"
+        ));
+    }
+
+    #[test]
+    fn test_stripe_live_key() {
+        assert!(contains_secrets(&format!("{}{}", "sk_live_", "51AbCdEfGhIjKlMnOpQrStUvWxYz")));
+    }
+
+    #[test]
+    fn test_npm_token() {
+        assert!(contains_secrets(
+            "NPM_TOKEN=npm_abcdefghijklmnopqrstuvwxyz123456789"
+        ));
+    }
+
+    #[test]
+    fn test_db_connection_string() {
+        assert!(contains_secrets(
+            "postgresql://user:secret_password@db.internal:5432/mydb"
+        ));
+        assert!(contains_secrets("mysql://root:pass123@localhost/mydb"));
     }
 }

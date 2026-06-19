@@ -51,16 +51,21 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 // ── SqliteStore ─────────────────────────────────────────────────────────────
 
-/// SQLite persistent Store with FTS5 full-text search and optional vector search
+/// SQLite persistent Store with FTS5 full-text search and optional vector search.
+///
+/// Uses a single `Mutex<Connection>` to avoid opening a new connection on every
+/// put/get/delete/search (P1-2.5).  SQLite serialises all writes anyway, so a
+/// single connection eliminates `SQLITE_BUSY` storms under concurrent access.
 pub struct SqliteStore {
     embedder: Option<Arc<dyn Embedder>>,
     path: PathBuf,
+    conn: Mutex<Connection>,
 }
 
 impl SqliteStore {
@@ -82,7 +87,6 @@ impl SqliteStore {
         }
 
         let conn = Self::open_connection_at(&path)?;
-
         Self::init_tables(&conn)?;
 
         let item_count: i64 = conn
@@ -96,7 +100,11 @@ impl SqliteStore {
             "SqliteStore initialized"
         );
 
-        Ok(Self { embedder, path })
+        Ok(Self {
+            embedder,
+            path,
+            conn: Mutex::new(conn),
+        })
     }
 
     fn open_connection_at(path: &Path) -> Result<Connection> {
@@ -113,8 +121,12 @@ impl SqliteStore {
         Ok(conn)
     }
 
-    fn open_connection(&self) -> Result<Connection> {
-        Self::open_connection_at(&self.path)
+    /// Lock the shared connection and return the guard (replaces opening a new
+    /// connection every time — P1-2.5).
+    fn open_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        Ok(self.conn.lock().map_err(|e| {
+            echo_core::error::MemoryError::IoError(format!("SqliteStore lock poisoned: {e}"))
+        })?)
     }
 
     fn init_tables(conn: &Connection) -> Result<()> {
@@ -243,6 +255,8 @@ impl SqliteStore {
 
 impl SqliteStore {
     /// Fetch complete items from the main table by key list (unified score)
+    /// Fetch complete items from the main table by key list (unified score).
+    /// Uses a single `WHERE key IN (...)` instead of N individual SELECTs (P1-2.6).
     fn fetch_items(
         &self,
         conn: &Connection,
@@ -251,29 +265,54 @@ impl SqliteStore {
         keys: &[String],
         default_score: Option<f32>,
     ) -> Result<Vec<StoreItem>> {
-        let mut results = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
-            let row = conn.query_row(
-                "SELECT value, created_at, updated_at FROM store_items
-                 WHERE namespace = ?1 AND key = ?2",
-                params![ns_key, key],
-                |row| {
-                    let value_str: String = row.get(0)?;
-                    let created_at: i64 = row.get(1)?;
-                    let updated_at: i64 = row.get(2)?;
-                    Ok((value_str, created_at, updated_at))
-                },
-            );
-            if let Ok((value_str, created_at, updated_at)) = row
-                && let Ok(value) = serde_json::from_str::<Value>(&value_str)
-            {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<String> = (2..=keys.len() + 1).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT key, value, created_at, updated_at FROM store_items              WHERE namespace = ?1 AND key IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            echo_core::error::MemoryError::IoError(format!("prepare batch fetch: {}", e))
+        })?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(keys.len() + 1);
+        params.push(Box::new(ns_key.to_string()));
+        for k in keys {
+            params.push(Box::new(k.clone()));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(params_ref.as_slice(), |row| {
+                let key: String = row.get(0)?;
+                let value_str: String = row.get(1)?;
+                let created_at: i64 = row.get(2)?;
+                let updated_at: i64 = row.get(3)?;
+                Ok((key, value_str, created_at, updated_at))
+            })
+            .map_err(|e| echo_core::error::MemoryError::IoError(format!("batch fetch: {}", e)))?;
+        let mut raw: Vec<(String, String, i64, i64)> = Vec::with_capacity(keys.len());
+        for r in rows {
+            if let Ok(item) = r {
+                raw.push(item);
+            }
+        }
+        let score_map: std::collections::HashMap<&str, f32> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.as_str(), default_score.unwrap_or(1.0 / (i as f32 + 1.0))))
+            .collect();
+        let mut results = Vec::with_capacity(raw.len());
+        for (key, value_str, created_at, updated_at) in &raw {
+            if let Ok(value) = serde_json::from_str::<Value>(value_str) {
                 results.push(StoreItem {
                     namespace: namespace.iter().map(|s| s.to_string()).collect(),
                     key: key.clone(),
                     value,
-                    created_at: created_at as u64,
-                    updated_at: updated_at as u64,
-                    score: default_score.or(Some(1.0 / (i as f32 + 1.0))),
+                    created_at: *created_at as u64,
+                    updated_at: *updated_at as u64,
+                    score: score_map.get(key.as_str()).copied(),
                     importance: 5.0,
                     last_accessed: None,
                     expires_at: None,
@@ -286,7 +325,8 @@ impl SqliteStore {
         Ok(results)
     }
 
-    /// Fetch complete items from the main table by (key, score) list
+    /// Fetch complete items from the main table by (key, score) list.
+    /// Uses a single `WHERE key IN (...)` instead of N individual SELECTs (P1-2.6).
     fn fetch_items_with_scores(
         &self,
         conn: &Connection,
@@ -294,29 +334,58 @@ impl SqliteStore {
         ns_key: &str,
         keys_with_scores: &[(String, Option<f32>)],
     ) -> Result<Vec<StoreItem>> {
-        let mut results = Vec::with_capacity(keys_with_scores.len());
-        for (key, score) in keys_with_scores {
-            let row = conn.query_row(
-                "SELECT value, created_at, updated_at FROM store_items
-                 WHERE namespace = ?1 AND key = ?2",
-                params![ns_key, key],
-                |row| {
-                    let value_str: String = row.get(0)?;
-                    let created_at: i64 = row.get(1)?;
-                    let updated_at: i64 = row.get(2)?;
-                    Ok((value_str, created_at, updated_at))
-                },
-            );
-            if let Ok((value_str, created_at, updated_at)) = row
-                && let Ok(value) = serde_json::from_str::<Value>(&value_str)
-            {
+        if keys_with_scores.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys: Vec<&String> = keys_with_scores.iter().map(|(k, _)| k).collect();
+        let placeholders: Vec<String> = (2..=keys.len() + 1).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT key, value, created_at, updated_at FROM store_items              WHERE namespace = ?1 AND key IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            echo_core::error::MemoryError::IoError(format!("prepare batch fetch: {}", e))
+        })?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(keys.len() + 1);
+        params.push(Box::new(ns_key.to_string()));
+        for k in &keys {
+            params.push(Box::new((*k).clone()));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(params_ref.as_slice(), |row| {
+                let key: String = row.get(0)?;
+                let value_str: String = row.get(1)?;
+                let created_at: i64 = row.get(2)?;
+                let updated_at: i64 = row.get(3)?;
+                Ok((key, value_str, created_at, updated_at))
+            })
+            .map_err(|e| echo_core::error::MemoryError::IoError(format!("batch fetch: {}", e)))?;
+        let mut raw: Vec<(String, String, i64, i64)> = Vec::with_capacity(keys.len());
+        for r in rows {
+            if let Ok(item) = r {
+                raw.push(item);
+            }
+        }
+        let score_map: std::collections::HashMap<&str, Option<f32>> = keys_with_scores
+            .iter()
+            .map(|(k, s)| (k.as_str(), *s))
+            .collect();
+        let mut results = Vec::with_capacity(raw.len());
+        for (key, value_str, created_at, updated_at) in &raw {
+            if let Ok(value) = serde_json::from_str::<Value>(value_str) {
                 results.push(StoreItem {
                     namespace: namespace.iter().map(|s| s.to_string()).collect(),
                     key: key.clone(),
                     value,
-                    created_at: created_at as u64,
-                    updated_at: updated_at as u64,
-                    score: *score,
+                    created_at: *created_at as u64,
+                    updated_at: *updated_at as u64,
+                    score: score_map
+                        .get(key.as_str())
+                        .copied()
+                        .flatten()
+                        .or(Some(1.0 / (results.len() as f32 + 1.0))),
                     importance: 5.0,
                     last_accessed: None,
                     expires_at: None,
@@ -332,95 +401,106 @@ impl SqliteStore {
     async fn semantic_search_impl(
         &self,
         namespace: &[&str],
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<StoreItem>> {
+        let ns_key = namespace.join("/");
+        let embedder = match &self.embedder {
+            Some(e) => e,
+            None => return self.inner_search(namespace, query_text, limit),
+        };
+        let query_vec = embedder
+            .embed(query_text)
+            .await
+            .map_err(|e| echo_core::error::MemoryError::IoError(format!("embed failed: {}", e)))?;
+        let conn = self.open_connection()?;
+        let rows: Vec<(String, Vec<u8>)> = {
+            let mut stmt = conn
+                .prepare("SELECT key, vector FROM store_vectors WHERE namespace = ?1")
+                .map_err(|e| {
+                    echo_core::error::MemoryError::IoError(format!("prepare vectors: {}", e))
+                })?;
+            let mut rows = Vec::new();
+            let mut q = stmt.query(params![&ns_key]).map_err(|e| {
+                echo_core::error::MemoryError::IoError(format!("query vectors: {}", e))
+            })?;
+            while let Some(row) = q.next().map_err(|e| {
+                echo_core::error::MemoryError::IoError(format!("next vector: {}", e))
+            })? {
+                let key: String = row.get(0).map_err(|e| {
+                    echo_core::error::MemoryError::IoError(format!("get key: {}", e))
+                })?;
+                let blob: Vec<u8> = row.get(1).map_err(|e| {
+                    echo_core::error::MemoryError::IoError(format!("get blob: {}", e))
+                })?;
+                rows.push((key, blob));
+            }
+            rows
+        };
+        let mut scored: Vec<(f32, String)> = rows
+            .iter()
+            .take(Self::max_candidates())
+            .filter_map(|(key, blob)| {
+                let vec = Self::bytes_to_vec(blob);
+                if vec.is_empty() {
+                    return None;
+                }
+                let sim = Self::cosine_similarity(&query_vec, &vec);
+                Some((sim, key.clone()))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        let keys: Vec<String> = scored.iter().map(|(_s, k)| k.clone()).collect();
+        drop(conn);
+        let conn2 = self.open_connection()?;
+        self.fetch_items(&conn2, namespace, &ns_key, &keys, None)
+    }
+
+    fn inner_search(
+        &self,
+        namespace: &[&str],
         query: &str,
         limit: usize,
     ) -> Result<Vec<StoreItem>> {
-        let Some(ref embedder) = self.embedder else {
-            return Err(MemoryError::Unsupported(
-                "semantic search requires an embedder-backed SqliteStore".to_string(),
-            )
-            .into());
-        };
-
-        let ns_key = namespace.join("/");
-
-        let query_vec = match embedder.embed(query).await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "Query embedding calculation failed, falling back to FTS5 search");
-                return self.search(namespace, query, limit).await;
-            }
-        };
-
-        let scored = {
-            let conn = self.open_connection()?;
-            let mut stmt = conn
-                .prepare("SELECT key, vector FROM store_vectors WHERE namespace = ?1")
-                .map_err(|e| memory_io_error("failed to query vector table", e))?;
-
-            let mut scored: Vec<(f32, String)> = stmt
-                .query_map(params![ns_key], |row| {
-                    let key: String = row.get(0)?;
-                    let bytes: Vec<u8> = row.get(1)?;
-                    Ok((key, bytes))
-                })
-                .map_err(|e| memory_io_error("failed to query vectors", e))?
-                .filter_map(|r| r.ok())
-                .map(|(key, bytes)| {
-                    let vec = Self::bytes_to_vec(&bytes);
-                    let score = Self::cosine_similarity(&query_vec, &vec);
-                    (score, key)
-                })
-                .collect();
-
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(limit);
-            scored
-        };
-
-        if scored.is_empty() {
-            debug!(ns = %ns_key, "Vector index is empty, falling back to FTS5 search");
-            return self.search(namespace, query, limit).await;
-        }
-
-        debug!(ns = %ns_key, query = %query, hits = scored.len(), "Semantic search completed");
-
         let conn = self.open_connection()?;
-        let mut results = Vec::with_capacity(scored.len());
-        for (score, key) in scored {
-            let row = conn.query_row(
-                "SELECT value, created_at, updated_at FROM store_items
-                 WHERE namespace = ?1 AND key = ?2",
-                params![ns_key, key],
-                |row| {
-                    let value_str: String = row.get(0)?;
-                    let created_at: i64 = row.get(1)?;
-                    let updated_at: i64 = row.get(2)?;
-                    Ok((value_str, created_at, updated_at))
-                },
-            );
-
-            if let Ok((value_str, created_at, updated_at)) = row
-                && let Ok(value) = serde_json::from_str::<Value>(&value_str)
-            {
+        let ns_key = namespace.join("/");
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, value, created_at, updated_at FROM store_items \
+             WHERE namespace = ?1 ORDER BY updated_at DESC LIMIT ?2",
+            )
+            .map_err(|e| {
+                echo_core::error::MemoryError::IoError(format!("prepare inner search: {}", e))
+            })?;
+        let rows: Vec<(String, String, i64, i64)> = stmt
+            .query_map(params![&ns_key, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| echo_core::error::MemoryError::IoError(format!("inner search: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut results = Vec::with_capacity(rows.len());
+        for (i, (key, value_str, created_at, updated_at)) in rows.iter().enumerate() {
+            if let Ok(value) = serde_json::from_str::<Value>(value_str) {
                 results.push(StoreItem {
                     namespace: namespace.iter().map(|s| s.to_string()).collect(),
-                    key,
+                    key: key.clone(),
                     value,
-                    created_at: created_at as u64,
-                    updated_at: updated_at as u64,
-                    score: Some(score),
+                    created_at: *created_at as u64,
+                    updated_at: *updated_at as u64,
+                    score: Some(1.0 / (i as f32 + 1.0)),
                     importance: 5.0,
                     last_accessed: None,
                     expires_at: None,
                 });
-                if let Some(last) = results.last_mut() {
-                    apply_json_metadata(last);
-                }
             }
         }
-
         Ok(results)
+    }
+
+    fn max_candidates() -> usize {
+        10_000
     }
 }
 

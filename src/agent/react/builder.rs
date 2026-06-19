@@ -739,7 +739,7 @@ impl ReactAgentBuilder {
             config = config.conversation_id(conversation_id);
         }
         if let Some(working_dir) = &self.working_dir {
-            config.working_dir = Some(working_dir.clone());
+            *config.working_dir.lock().unwrap() = Some(working_dir.clone());
         }
         if self.react_checkpoint_interval > 0 {
             config = config.react_checkpoint_interval(self.react_checkpoint_interval);

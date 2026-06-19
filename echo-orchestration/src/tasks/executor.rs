@@ -1218,11 +1218,23 @@ impl TaskExecutor {
         } else {
             3600 // default 1 hour
         });
+        // Global wall-clock deadline: if the loop runs longer than this,
+        // force-exit with an error instead of livelocking forever (P1-2.2).
+        let global_deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.config.round_timeout_secs.max(600) * 4);
 
         loop {
             // Check executor-level cancellation before each round
             if self.cancel.is_cancelled() {
                 info!("Executor cancelled, stopping execute_all");
+                break;
+            }
+            // Global wall-clock deadline to prevent infinite livelock (P1-2.2)
+            if tokio::time::Instant::now() > global_deadline {
+                tracing::warn!(
+                    "execute_all global deadline reached after {} batches, force-exiting",
+                    batch_count
+                );
                 break;
             }
 
@@ -1744,5 +1756,79 @@ mod tests {
         let r2 = executor.execute_ready_tasks().await.unwrap();
         assert_eq!(r2.len(), 1);
         assert_eq!(r2[0].output.as_deref(), Some("second result with context"));
+    }
+    /// Phase 3.1: run_dag failure propagation — when a dependency fails,
+    /// dependents should be marked as Blocked, not run.
+    #[tokio::test]
+    async fn test_run_dag_failure_propagation() {
+        use std::sync::Arc;
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "Failing task"));
+        manager.add_task(Task::new("t2", "Dependent task").with_dependencies(vec!["t1".into()]));
+        let config = TaskExecutorConfig {
+            max_concurrent: 2,
+            default_timeout_secs: 10,
+            enable_hooks: false,
+            retry_delay_secs: 0,
+            retry_backoff_factor: 2.0,
+            retry_max_delay_secs: 60,
+            retry_jitter: false,
+            checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
+            round_timeout_secs: 3600,
+        };
+        let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
+            |ctx: TaskContext| {
+                Box::pin(async move {
+                    if ctx.task_id == "t1" {
+                        Err(ReactError::Other("t1 failed".into()))
+                    } else {
+                        Ok("t2 should not run".to_string())
+                    }
+                })
+            },
+        ));
+        let r1 = executor.execute_ready_tasks().await.unwrap();
+        assert_eq!(r1.len(), 1);
+        assert!(r1[0].error.is_some(), "t1 should have failed");
+        let r2 = executor.execute_ready_tasks().await.unwrap();
+        assert!(r2.is_empty(), "t2 should not run after t1 failure");
+    }
+
+    #[tokio::test]
+    async fn test_run_dag_cancel_propagation() {
+        use std::sync::Arc;
+        let manager = Arc::new(TaskManager::new());
+        manager.add_task(Task::new("t1", "Long task"));
+        let config = TaskExecutorConfig {
+            max_concurrent: 1,
+            default_timeout_secs: 60,
+            enable_hooks: false,
+            retry_delay_secs: 0,
+            retry_backoff_factor: 2.0,
+            retry_max_delay_secs: 60,
+            retry_jitter: false,
+            checkpoint_interval_secs: 0,
+            unified_hook_executor: None,
+            round_timeout_secs: 3600,
+        };
+        let executor = TaskExecutor::new(manager.clone(), config).with_execute_fn(Arc::new(
+            |_ctx: TaskContext| {
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    Ok("finished".to_string())
+                })
+            },
+        ));
+        let exec = Arc::new(executor);
+        let exec_clone = exec.clone();
+        let h = tokio::spawn(async move { exec_clone.execute_all().await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        exec.cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), h)
+            .await
+            .expect("timeout")
+            .expect("join");
+        assert!(result.is_ok(), "execute_all should return Ok after cancel");
     }
 }
