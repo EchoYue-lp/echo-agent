@@ -4,7 +4,8 @@
 //! execution strategy based on the definition's [`ExecutionMode`].
 
 use crate::error::{AgentError, ReactError, Result};
-use echo_core::agent::CancellationToken;
+use echo_core::agent::{Agent, AgentEvent, CancellationToken};
+use futures::StreamExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -368,6 +369,8 @@ impl SubagentExecutor {
         let child_token = req.cancel.child_token();
         let task = req.task.clone();
         let agent_name = req.agent_name.clone();
+        let parent_agent = req.parent_agent.clone();
+        let registry = self.registry.clone();
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
         } else {
@@ -382,22 +385,7 @@ impl SubagentExecutor {
 
             let agent = agent_arc.as_ref();
 
-            // Check cancellation before execution
-            if child_token.is_cancelled() {
-                return Ok(SubagentResult {
-                    agent_name: agent_name.clone(),
-                    output: "Cancelled before execution".into(),
-                    duration: start.elapsed(),
-                    iterations: 0,
-                    tokens_used: None,
-                    was_truncated: false,
-                    mode: ExecutionMode::Teammate,
-                });
-            }
-
-            let execute_future = agent.execute(&task);
-
-            let result = if timeout_secs > 0 {
+            if timeout_secs > 0 {
                 // Race between timeout, cancellation, and execution
                 tokio::select! {
                     biased; // Check cancellation first
@@ -410,7 +398,16 @@ impl SubagentExecutor {
                             agent_name, timeout_secs
                         )))
                     }
-                    r = execute_future => r,
+                    r = Self::execute_agent_streaming(
+                        registry,
+                        agent,
+                        &task,
+                        child_token.clone(),
+                        &parent_agent,
+                        &agent_name,
+                        ExecutionMode::Teammate,
+                        start,
+                    ) => r,
                 }
             } else {
                 // Race between cancellation and execution
@@ -419,21 +416,17 @@ impl SubagentExecutor {
                     _ = child_token.cancelled() => {
                         Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
                     }
-                    r = execute_future => r,
+                    r = Self::execute_agent_streaming(
+                        registry,
+                        agent,
+                        &task,
+                        child_token.clone(),
+                        &parent_agent,
+                        &agent_name,
+                        ExecutionMode::Teammate,
+                        start,
+                    ) => r,
                 }
-            };
-
-            match result {
-                Ok(output) => Ok(SubagentResult {
-                    agent_name,
-                    output,
-                    duration: start.elapsed(),
-                    iterations: 1,
-                    tokens_used: None,
-                    was_truncated: false,
-                    mode: ExecutionMode::Teammate,
-                }),
-                Err(e) => Err(e),
             }
         });
 
@@ -484,6 +477,140 @@ impl SubagentExecutor {
         }
     }
 
+    async fn execute_agent_streaming(
+        registry: Arc<SubagentRegistry>,
+        agent: &(dyn Agent + Send + Sync),
+        task: &str,
+        cancel: CancellationToken,
+        parent: &str,
+        subagent: &str,
+        mode: ExecutionMode,
+        start: Instant,
+    ) -> Result<SubagentResult> {
+        let mut stream = agent.execute_stream_with_cancel(task, cancel).await?;
+        let mut output = String::new();
+        let mut in_thinking = false;
+        let mut prompt_tokens: usize = 0;
+        let mut completion_tokens: usize = 0;
+        let mut cancelled = false;
+
+        while let Some(event_result) = stream.next().await {
+            let event = event_result?;
+            match event {
+                AgentEvent::Token(content) => {
+                    if in_thinking {
+                        registry
+                            .event_bus()
+                            .emit(SubagentEvent::DispatchThinkingDelta {
+                                parent: parent.to_string(),
+                                agent: subagent.to_string(),
+                                content,
+                            });
+                    } else {
+                        output.push_str(&content);
+                        registry
+                            .event_bus()
+                            .emit(SubagentEvent::DispatchTokenDelta {
+                                parent: parent.to_string(),
+                                agent: subagent.to_string(),
+                                content,
+                            });
+                    }
+                }
+                AgentEvent::ThinkStart => {
+                    in_thinking = true;
+                    registry
+                        .event_bus()
+                        .emit(SubagentEvent::DispatchThinkingStarted {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                        });
+                }
+                AgentEvent::ThinkEnd {
+                    prompt_tokens: pt,
+                    completion_tokens: ct,
+                } => {
+                    in_thinking = false;
+                    prompt_tokens = prompt_tokens.saturating_add(pt);
+                    completion_tokens = completion_tokens.saturating_add(ct);
+                    registry
+                        .event_bus()
+                        .emit(SubagentEvent::DispatchThinkingEnded {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            prompt_tokens: pt,
+                            completion_tokens: ct,
+                        });
+                }
+                AgentEvent::ToolCall { name, args } => {
+                    registry
+                        .event_bus()
+                        .emit(SubagentEvent::DispatchToolStarted {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            name,
+                            args,
+                        });
+                }
+                AgentEvent::ToolResult { name, output } => {
+                    registry
+                        .event_bus()
+                        .emit(SubagentEvent::DispatchToolCompleted {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            name,
+                            result: output,
+                            success: true,
+                        });
+                }
+                AgentEvent::ToolError { name, error } => {
+                    registry
+                        .event_bus()
+                        .emit(SubagentEvent::DispatchToolCompleted {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            name,
+                            result: error,
+                            success: false,
+                        });
+                }
+                AgentEvent::FinalAnswer(answer) => {
+                    if !answer.is_empty() {
+                        output = answer;
+                    }
+                }
+                AgentEvent::Cancelled => {
+                    cancelled = true;
+                    registry.event_bus().emit(SubagentEvent::DispatchCancelled {
+                        parent: parent.to_string(),
+                        agent: subagent.to_string(),
+                    });
+                    break;
+                }
+                AgentEvent::Error { source, message } => {
+                    return Err(ReactError::Other(format!("{source}: {message}")));
+                }
+                _ => {}
+            }
+        }
+
+        if cancelled {
+            output = "Cancelled during execution".to_string();
+        }
+
+        let tokens_used = Some(prompt_tokens.saturating_add(completion_tokens));
+
+        Ok(SubagentResult {
+            agent_name: subagent.to_string(),
+            output,
+            duration: start.elapsed(),
+            iterations: 1,
+            tokens_used,
+            was_truncated: false,
+            mode,
+        })
+    }
+
     /// Sync mode: lock the agent, execute, return.
     async fn dispatch_sync(&self, req: &DispatchRequest) -> Result<SubagentResult> {
         let agent_arc = self
@@ -498,38 +625,18 @@ impl SubagentExecutor {
             })?;
 
         let start = Instant::now();
-        let agent = agent_arc.as_ref();
-
-        // Race execution against cancellation (matches dispatch_fork pattern).
-        // Previously only checked cancel once before execute(); mid-execution
-        // cancel was not detected until the LLM call returned (P1-5).
-        let cancel = req.cancel.clone();
         let task = Self::enhance_task(&req.task, req.parent_context.as_ref());
-        let output = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                return Ok(SubagentResult {
-                    agent_name: req.agent_name.clone(),
-                    output: "Cancelled during execution".into(),
-                    duration: start.elapsed(),
-                    iterations: 0,
-                    tokens_used: None,
-                    was_truncated: false,
-                    mode: ExecutionMode::Sync,
-                });
-            }
-            r = agent.execute(&task) => r?,
-        };
-
-        Ok(SubagentResult {
-            agent_name: req.agent_name.clone(),
-            output,
-            duration: start.elapsed(),
-            iterations: 1,
-            tokens_used: None,
-            was_truncated: false,
-            mode: ExecutionMode::Sync,
-        })
+        Self::execute_agent_streaming(
+            self.registry.clone(),
+            agent_arc.as_ref(),
+            &task,
+            req.cancel.clone(),
+            &req.parent_agent,
+            &req.agent_name,
+            ExecutionMode::Sync,
+            start,
+        )
+        .await
     }
 
     /// Fork mode: acquire semaphore, spawn task, await with timeout.
@@ -565,7 +672,9 @@ impl SubagentExecutor {
 
         let task = req.task.clone();
         let agent_name = req.agent_name.clone();
+        let parent_agent = req.parent_agent.clone();
         let cancel = req.cancel.clone();
+        let registry = self.registry.clone();
         let enhanced_task = Self::enhance_task(&task, req.parent_context.as_ref());
 
         let result = tokio::spawn(async move {
@@ -587,20 +696,25 @@ impl SubagentExecutor {
 
             let agent = agent_arc.as_ref();
 
-            // Race the (non-cancel-aware) agent.execute against BOTH the
-            // caller's cancel token and the timeout. Previously only the
-            // timeout was honored and cancel was checked once before entry —
-            // so a long-running fork kept going after the parent cancelled.
-            // tokio::select! drops the losing branches' futures, winding down
-            // the worker as far as the executor cooperatively allows.
-            let exec_fut = agent.execute(&enhanced_task);
             let result = if timeout_secs > 0 {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(ReactError::Other(format!(
                         "Fork subagent '{}' cancelled", agent_name
                     ))),
-                    r = tokio::time::timeout(Duration::from_secs(timeout_secs), exec_fut) => {
+                    r = tokio::time::timeout(
+                        Duration::from_secs(timeout_secs),
+                        Self::execute_agent_streaming(
+                            registry,
+                            agent,
+                            &enhanced_task,
+                            cancel.clone(),
+                            &parent_agent,
+                            &agent_name,
+                            ExecutionMode::Fork,
+                            start,
+                        )
+                    ) => {
                         match r {
                             Ok(r) => r,
                             Err(_) => Err(ReactError::Other(format!(
@@ -616,19 +730,19 @@ impl SubagentExecutor {
                     _ = cancel.cancelled() => Err(ReactError::Other(format!(
                         "Fork subagent '{}' cancelled", agent_name
                     ))),
-                    r = exec_fut => r,
+                    r = Self::execute_agent_streaming(
+                        registry,
+                        agent,
+                        &enhanced_task,
+                        cancel.clone(),
+                        &parent_agent,
+                        &agent_name,
+                        ExecutionMode::Fork,
+                        start,
+                    ) => r,
                 }
             };
-
-            result.map(|output| SubagentResult {
-                agent_name,
-                output,
-                duration: start.elapsed(),
-                iterations: 1,
-                tokens_used: None,
-                was_truncated: false,
-                mode: ExecutionMode::Fork,
-            })
+            result
         })
         .await
         .map_err(|e| ReactError::Other(format!("Fork task join error: {}", e)))??;

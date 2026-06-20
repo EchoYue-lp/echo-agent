@@ -62,6 +62,66 @@ pub enum SubagentEvent {
         /// Name of the subagent whose dispatch was cancelled.
         agent: String,
     },
+    /// Subagent reasoning started.
+    DispatchThinkingStarted {
+        /// Name of the parent agent that initiated the dispatch.
+        parent: String,
+        /// Name of the subagent that is reasoning.
+        agent: String,
+    },
+    /// Subagent reasoning emitted incremental content.
+    DispatchThinkingDelta {
+        /// Name of the parent agent that initiated the dispatch.
+        parent: String,
+        /// Name of the subagent that is reasoning.
+        agent: String,
+        /// Incremental reasoning text.
+        content: String,
+    },
+    /// Subagent reasoning ended.
+    DispatchThinkingEnded {
+        /// Name of the parent agent that initiated the dispatch.
+        parent: String,
+        /// Name of the subagent that finished reasoning.
+        agent: String,
+        /// Number of prompt tokens consumed.
+        prompt_tokens: usize,
+        /// Number of completion tokens consumed.
+        completion_tokens: usize,
+    },
+    /// Subagent emitted final-answer text.
+    DispatchTokenDelta {
+        /// Name of the parent agent that initiated the dispatch.
+        parent: String,
+        /// Name of the subagent producing output.
+        agent: String,
+        /// Incremental final-answer text.
+        content: String,
+    },
+    /// Subagent started a tool call.
+    DispatchToolStarted {
+        /// Name of the parent agent that initiated the dispatch.
+        parent: String,
+        /// Name of the subagent invoking a tool.
+        agent: String,
+        /// Tool name.
+        name: String,
+        /// Tool arguments.
+        args: serde_json::Value,
+    },
+    /// Subagent completed a tool call.
+    DispatchToolCompleted {
+        /// Name of the parent agent that initiated the dispatch.
+        parent: String,
+        /// Name of the subagent that invoked a tool.
+        agent: String,
+        /// Tool name.
+        name: String,
+        /// Tool result or error text.
+        result: String,
+        /// Whether the tool call succeeded.
+        success: bool,
+    },
     /// A team was created.
     TeamCreated {
         /// Unique identifier for the team.

@@ -1896,6 +1896,28 @@ impl ReactAgent {
         task: &str,
         cancel: CancellationToken,
     ) -> Result<String> {
+        self.delegate_to_agent_with_parent_and_cancel(
+            target,
+            task,
+            self.config.agent_name.as_str(),
+            cancel,
+        )
+        .await
+    }
+
+    /// Delegate a task to a specific subagent with caller-supplied parent
+    /// label and cancellation.
+    ///
+    /// Product-layer runtimes use `parent_label` to correlate subagent events
+    /// with a top-level run id, instead of the static parent agent name.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_to_agent_with_parent_and_cancel(
+        &self,
+        target: &str,
+        task: &str,
+        parent_label: &str,
+        cancel: CancellationToken,
+    ) -> Result<String> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -1915,7 +1937,7 @@ impl ReactAgent {
             task: task.to_string(),
             mode_override: Some(mode.clone()),
             cancel,
-            parent_agent: self.config.agent_name.clone(),
+            parent_agent: parent_label.to_string(),
             parent_context: self.build_parent_context(&mode).await,
             delegate_depth: 0,
         };
