@@ -47,7 +47,7 @@ impl std::fmt::Display for ToolPermission {
 ///
 /// Referenced from Claude Code's PermissionMode design:
 /// - Default: require user confirmation for dangerous operations
-/// - Plan: read-only mode
+/// - Plan: internal read-only execution mode (not a user-facing approval mode)
 /// - AcceptEdits: automatically accept edits
 /// - BypassPermissions: bypass all checks (can be disabled by bypass_disabled)
 /// - Auto: AI classifier auto-decides
@@ -60,7 +60,8 @@ pub enum PermissionMode {
     /// Default mode: require user confirmation for dangerous operations
     #[default]
     Default,
-    /// Plan mode: read-only, disallow writes and executes
+    /// Internal read-only execution mode: disallow writes and executes.
+    /// User-facing planning/task routing should use interaction mode instead.
     Plan,
     /// Automatically accept file edit operations
     AcceptEdits,

@@ -810,9 +810,9 @@ impl AgentConfig {
         &self.loop_detector_config
     }
 
-    /// Set the permission mode (default, plan, auto-edit, full-auto, auto, strict).
+    /// Set the permission mode (default, auto-edit, full-auto, auto, strict).
     pub fn permission_mode(mut self, mode: &str) -> Self {
-        self.permission_mode = mode.to_string();
+        self.permission_mode = normalize_permission_mode(mode).to_string();
         self
     }
 
@@ -823,7 +823,14 @@ impl AgentConfig {
 
     /// Set the permission mode at runtime (mutable reference).
     pub fn set_permission_mode(&mut self, mode: &str) {
-        self.permission_mode = mode.to_string();
+        self.permission_mode = normalize_permission_mode(mode).to_string();
+    }
+}
+
+fn normalize_permission_mode(mode: &str) -> &str {
+    match mode {
+        "plan" => "default",
+        _ => mode,
     }
 }
 

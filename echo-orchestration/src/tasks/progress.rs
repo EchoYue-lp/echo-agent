@@ -315,7 +315,7 @@ mod tests {
     async fn test_progress_reporter_subscribe() {
         let plan = sample_plan();
         let mut reporter = ProgressReporter::new("task-1".into(), plan);
-        let mut sub = reporter.subscribe();
+        let sub = reporter.subscribe();
 
         reporter.enter_phase(1, Some("Starting analysis".into()));
 

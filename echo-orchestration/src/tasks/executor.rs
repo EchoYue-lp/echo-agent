@@ -1938,7 +1938,11 @@ mod tests {
         let exec = Arc::new(executor);
 
         // execute_ready_tasks should NOT pick up a Blocked task.
-        exec.execute_ready_tasks().await;
+        let result = exec.execute_ready_tasks().await;
+        assert!(
+            result.is_ok(),
+            "blocked task scan should succeed: {result:?}"
+        );
         assert!(
             !matches!(
                 manager.get_task("bt").unwrap().status,
@@ -1953,7 +1957,11 @@ mod tests {
             .expect("Blocked→Pending is legal");
 
         // Now execute_ready_tasks should pick it up and complete it.
-        exec.execute_ready_tasks().await;
+        let result = exec.execute_ready_tasks().await;
+        assert!(
+            result.is_ok(),
+            "pending task execution should succeed: {result:?}"
+        );
         assert!(
             matches!(
                 manager.get_task("bt").unwrap().status,

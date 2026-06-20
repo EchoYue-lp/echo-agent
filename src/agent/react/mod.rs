@@ -1726,21 +1726,22 @@ impl ReactAgent {
 
     /// Set the permission mode at runtime.
     ///
-    /// Accepted values: "default", "plan", "auto-edit", "full-auto", "auto", "strict".
-    /// When "plan" is set, write operations are rejected (equivalent to plan_mode).
+    /// Accepted values: "default", "auto-edit", "full-auto", "auto", "strict".
+    /// Read-only planning is controlled separately via `set_plan_mode`.
     /// Also propagates to `PermissionService` if wired (sync, non-blocking).
     pub fn set_permission_mode(&mut self, mode: &str) {
-        self.config.permission_mode = mode.to_string();
-        // Sync plan_mode flag for consistency
-        self.config.plan_mode = mode == "plan";
+        let normalized_mode = match mode {
+            "plan" => "default",
+            _ => mode,
+        };
+        self.config.permission_mode = normalized_mode.to_string();
 
         // Propagate to PermissionService (if wired)
         #[cfg(feature = "human-loop")]
         if let Some(ref service) = self.approval.permission_service {
             use echo_core::tools::permission::PermissionMode;
-            let pm = match mode {
+            let pm = match normalized_mode {
                 "full-auto" => PermissionMode::BypassPermissions,
-                "plan" => PermissionMode::Plan,
                 "auto-edit" | "accept-edits" => PermissionMode::AcceptEdits,
                 "auto" => PermissionMode::Auto,
                 "strict" | "strict-confirm" | "strict-confirmation" => {

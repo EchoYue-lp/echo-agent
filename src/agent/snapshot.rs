@@ -738,7 +738,7 @@ impl AgentRunSnapshot {
     /// byte-identical to the pre-refactor implementation).
     #[cfg(feature = "human-loop")]
     pub(crate) async fn tool_needs_approval(&self, tool_name: &str) -> bool {
-        use crate::tools::permission::{PermissionDecision, PermissionMode};
+        use crate::tools::permission::PermissionMode;
         if let Some(svc) = &self.permission_service {
             let mode = svc.mode().await;
             if matches!(
@@ -754,10 +754,8 @@ impl AgentRunSnapshot {
                 .map(|t| t.permissions())
                 .unwrap_or_default();
             return svc
-                .check_with_permissions(tool_name, &serde_json::json!({}), &perms)
-                .await
-                .unwrap_or(PermissionDecision::RequireApproval)
-                .requires_approval();
+                .would_request_human_for_permissions(tool_name, &perms)
+                .await;
         }
         false
     }

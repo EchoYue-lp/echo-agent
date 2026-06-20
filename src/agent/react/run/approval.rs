@@ -40,13 +40,9 @@ impl ReactAgent {
                 .map(|t| t.permissions())
                 .unwrap_or_default();
 
-            // Use check_with_permissions with real perms instead of empty JSON
-            let decision = service
-                .check_with_permissions(tool_name, &serde_json::json!({}), &tool_perms)
-                .await
-                .unwrap_or(crate::tools::permission::PermissionDecision::RequireApproval);
-
-            return decision.requires_approval();
+            return service
+                .would_request_human_for_permissions(tool_name, &tool_perms)
+                .await;
         }
 
         false

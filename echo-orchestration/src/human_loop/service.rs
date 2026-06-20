@@ -164,6 +164,19 @@ pub struct PermissionService {
 }
 
 impl PermissionService {
+    fn default_confirmation_required(permissions: &[ToolPermission]) -> bool {
+        permissions.contains(&ToolPermission::Write)
+            || permissions.contains(&ToolPermission::Execute)
+            || permissions.contains(&ToolPermission::Network)
+            || permissions.contains(&ToolPermission::Sensitive)
+    }
+
+    fn accept_edits_confirmation_required(permissions: &[ToolPermission]) -> bool {
+        permissions.contains(&ToolPermission::Execute)
+            || permissions.contains(&ToolPermission::Network)
+            || permissions.contains(&ToolPermission::Sensitive)
+    }
+
     fn strict_confirmation_required(permissions: &[ToolPermission]) -> bool {
         permissions.contains(&ToolPermission::Write)
             || permissions.contains(&ToolPermission::Execute)
@@ -351,6 +364,49 @@ impl PermissionService {
         self.config.read().await.mode
     }
 
+    /// Pure, side-effect-free prediction used only to split tool batches into
+    /// concurrent vs approval-serialized groups.
+    ///
+    /// This must never call the request handler: batch planning does not have
+    /// the real tool arguments and must not show a human approval dialog.
+    /// The execution path still calls [`check_with_permissions`] with the real
+    /// input before running the tool.
+    pub async fn would_request_human_for_permissions(
+        &self,
+        tool_name: &str,
+        permissions: &[ToolPermission],
+    ) -> bool {
+        let config = self.config.read().await;
+
+        if matches!(
+            config.mode,
+            PermissionMode::BypassPermissions
+                | PermissionMode::Auto
+                | PermissionMode::DontAsk
+                | PermissionMode::Plan
+        ) {
+            return false;
+        }
+
+        {
+            let rules = self.rules.read().await;
+            if let Some(behavior) = rules.check(tool_name, permissions) {
+                return matches!(
+                    behavior.to_decision(),
+                    PermissionDecision::RequireApproval | PermissionDecision::Ask { .. }
+                );
+            }
+        }
+
+        match config.mode {
+            PermissionMode::Default => Self::default_confirmation_required(permissions),
+            PermissionMode::AcceptEdits => Self::accept_edits_confirmation_required(permissions),
+            PermissionMode::StrictConfirm => Self::strict_confirmation_required(permissions),
+            PermissionMode::Bubble => true,
+            _ => false,
+        }
+    }
+
     /// 取出最近一次审批中用户修改的参数
     ///
     /// 返回 `Some(modified_args)` 表示用户在审批时修改了参数，
@@ -516,11 +572,12 @@ impl PermissionService {
         }
 
         // 5.5 未配置 handler 时直接返回 RequireApproval（而非静默拒绝）
-        let needs_handler = matches!(
-            config.mode,
-            PermissionMode::Default | PermissionMode::AcceptEdits
-        ) || (config.mode == PermissionMode::StrictConfirm
-            && Self::strict_confirmation_required(permissions));
+        let needs_handler = match config.mode {
+            PermissionMode::Default => Self::default_confirmation_required(permissions),
+            PermissionMode::AcceptEdits => Self::accept_edits_confirmation_required(permissions),
+            PermissionMode::StrictConfirm => Self::strict_confirmation_required(permissions),
+            _ => false,
+        };
         if needs_handler && !self.has_real_handler() {
             audit_return!(
                 PermissionDecision::RequireApproval,
@@ -533,19 +590,23 @@ impl PermissionService {
         let decision = match config.mode {
             PermissionMode::Auto => self.check_with_classifier(tool_name, tool_input).await?,
             PermissionMode::Default => {
-                self.check_with_handler(tool_name, tool_input, permissions)
-                    .await?
+                if Self::default_confirmation_required(permissions) {
+                    self.check_with_handler(tool_name, tool_input, permissions)
+                        .await?
+                } else {
+                    PermissionDecision::Allow
+                }
             }
             PermissionMode::Plan => {
                 // Plan 已在步骤 2 处理，此处不应到达
                 PermissionDecision::Allow
             }
             PermissionMode::AcceptEdits => {
-                if permissions.contains(&ToolPermission::Write) {
-                    PermissionDecision::Allow
-                } else {
+                if Self::accept_edits_confirmation_required(permissions) {
                     self.check_with_handler(tool_name, tool_input, permissions)
                         .await?
+                } else {
+                    PermissionDecision::Allow
                 }
             }
             PermissionMode::StrictConfirm => {
@@ -990,6 +1051,85 @@ mod tests {
             .await
             .unwrap();
         assert!(decision.is_denied());
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_allows_read_without_handler() -> EchoResult<()> {
+        let service = PermissionService::new();
+        service.set_mode(PermissionMode::Default).await;
+
+        let decision = service
+            .check_with_permissions("Read", &serde_json::json!({}), &[ToolPermission::Read])
+            .await?;
+
+        assert!(decision.is_allowed());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_requires_handler_for_execute() -> EchoResult<()> {
+        let service = PermissionService::new();
+        service.set_mode(PermissionMode::Default).await;
+
+        let decision = service
+            .check_with_permissions("Bash", &serde_json::json!({}), &[ToolPermission::Execute])
+            .await?;
+
+        assert!(matches!(decision, PermissionDecision::RequireApproval));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_prediction_does_not_call_handler() -> EchoResult<()> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let service =
+            PermissionService::new().with_request_handler(Arc::new(CountingAllowHandler {
+                count: count.clone(),
+                response: PermissionResponse::allowed(),
+            }));
+        service.set_mode(PermissionMode::Default).await;
+
+        let needs_human = service
+            .would_request_human_for_permissions("Bash", &[ToolPermission::Execute])
+            .await;
+
+        assert!(needs_human);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "batch prediction must not show approval UI"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_accept_edits_allows_read_and_write_without_handler() -> EchoResult<()> {
+        let service = PermissionService::new();
+        service.set_mode(PermissionMode::AcceptEdits).await;
+
+        let read = service
+            .check_with_permissions("Read", &serde_json::json!({}), &[ToolPermission::Read])
+            .await?;
+        let write = service
+            .check_with_permissions("Write", &serde_json::json!({}), &[ToolPermission::Write])
+            .await?;
+
+        assert!(read.is_allowed());
+        assert!(write.is_allowed());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_accept_edits_still_requires_handler_for_execute() -> EchoResult<()> {
+        let service = PermissionService::new();
+        service.set_mode(PermissionMode::AcceptEdits).await;
+
+        let decision = service
+            .check_with_permissions("Bash", &serde_json::json!({}), &[ToolPermission::Execute])
+            .await?;
+
+        assert!(matches!(decision, PermissionDecision::RequireApproval));
+        Ok(())
     }
 
     #[tokio::test]

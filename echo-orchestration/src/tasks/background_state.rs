@@ -436,7 +436,6 @@ mod tests {
         assert_eq!(state.exit_code, Some(0));
         assert_eq!(state.stdout, "success");
         assert!(state.completed_at.is_some());
-        assert!(state.duration_ms >= 0);
     }
 
     #[test]

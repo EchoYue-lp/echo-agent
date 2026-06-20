@@ -184,8 +184,11 @@ fn extract_paths(tool_name: &str, input: &Value) -> Vec<String> {
             }
         }
         _ => {
-            // 通用：提取所有可能是路径的字符串值
-            extract_paths_from_value(input, &mut paths);
+            // Generic tools often carry natural-language fields such as
+            // `task`, `prompt`, or `description`. Scanning every string makes
+            // text like ".env.example" look like a protected path and blocks
+            // harmless delegation. Only inspect explicit path/command fields.
+            extract_explicit_path_fields_from_value(input, &mut paths);
         }
     }
 
@@ -315,28 +318,41 @@ fn extract_direct_paths_from_command(cmd: &str) -> Vec<String> {
 }
 
 /// 从 JSON Value 中递归提取可能是路径的字符串
-fn extract_paths_from_value(value: &Value, paths: &mut Vec<String>) {
+fn extract_explicit_path_fields_from_value(value: &Value, paths: &mut Vec<String>) {
     match value {
-        // 简单启发式：包含 / 或以 . 开头的字符串可能是路径
-        Value::String(s) if s.contains('/') || s.starts_with('.') => {
-            paths.push(s.clone());
-        }
         Value::String(_) => {}
         Value::Object(map) => {
             for (key, v) in map {
                 if matches!(
                     key.as_str(),
-                    "path" | "file_path" | "directory" | "dir" | "dest" | "destination"
+                    "path"
+                        | "file_path"
+                        | "file"
+                        | "directory"
+                        | "dir"
+                        | "cwd"
+                        | "root"
+                        | "source"
+                        | "src"
+                        | "dest"
+                        | "destination"
+                        | "target"
+                        | "output"
+                        | "command"
                 ) && let Some(s) = v.as_str()
                 {
-                    paths.push(s.to_string());
+                    if key == "command" {
+                        paths.extend(extract_paths_from_bash_command(s));
+                    } else {
+                        paths.push(s.to_string());
+                    }
                 }
-                extract_paths_from_value(v, paths);
+                extract_explicit_path_fields_from_value(v, paths);
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                extract_paths_from_value(v, paths);
+                extract_explicit_path_fields_from_value(v, paths);
             }
         }
         _ => {}
@@ -387,6 +403,45 @@ mod tests {
     fn test_bash_with_protected_path() {
         let checker = ProtectedPathChecker::new();
         let result = checker.check("Bash", &json!({"command": "rm -rf .git"}));
+        assert!(matches!(result, ProtectedPathResult::Protected { .. }));
+    }
+
+    #[test]
+    fn test_unknown_tool_does_not_scan_natural_language_task() {
+        let checker = ProtectedPathChecker::new();
+        let result = checker.check(
+            "agent_tool",
+            &json!({
+                "agent_name": "project_explorer",
+                "task": "探索项目结构，关注 README.md、Cargo.toml、.env.example 和配置说明"
+            }),
+        );
+        assert!(matches!(result, ProtectedPathResult::Safe));
+    }
+
+    #[test]
+    fn test_unknown_tool_still_checks_explicit_path_fields() {
+        let checker = ProtectedPathChecker::new();
+        let result = checker.check(
+            "custom_file_tool",
+            &json!({
+                "path": ".env.production",
+                "task": "read config"
+            }),
+        );
+        assert!(matches!(result, ProtectedPathResult::Protected { .. }));
+    }
+
+    #[test]
+    fn test_unknown_tool_still_checks_explicit_command_fields() {
+        let checker = ProtectedPathChecker::new();
+        let result = checker.check(
+            "custom_shell_tool",
+            &json!({
+                "command": "rm -rf .git",
+                "task": "cleanup"
+            }),
+        );
         assert!(matches!(result, ProtectedPathResult::Protected { .. }));
     }
 
