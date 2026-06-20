@@ -53,11 +53,25 @@ pub fn translate_thinking_openai_compat(
             );
             OpenAiCompatThinking::default()
         }
-        (Some(cfg), ThinkingProtocol::OpenaiReasoningEffort) => OpenAiCompatThinking {
-            reasoning_effort: cfg.to_reasoning_effort().map(str::to_string),
-            drop_temperature: true,
-            ..Default::default()
-        },
+        (Some(cfg), ThinkingProtocol::OpenaiReasoningEffort) => {
+            // DeepSeek only supports `high`/`max` (and compat-maps `low`/`medium`→`high`,
+            // `xhigh`→`max`). It does NOT support `minimal`/`none` — so when the
+            // provider is `deepseek`, clamp Minimal/None/Disabled to `"low"` (the
+            // lowest valid DeepSeek effort) instead of `"minimal"` (which would 400).
+            let is_deepseek = provider == "deepseek";
+            let effort = cfg.to_reasoning_effort().map(|e| {
+                if is_deepseek && (e == "minimal" || e == "none") {
+                    "low".to_string()
+                } else {
+                    e.to_string()
+                }
+            });
+            OpenAiCompatThinking {
+                reasoning_effort: effort,
+                drop_temperature: true,
+                ..Default::default()
+            }
+        }
         (Some(cfg), ThinkingProtocol::GlmReasoningEffort) => {
             // GLM-5.x: reasoning_effort + the thinking.type toggle (enabled).
             OpenAiCompatThinking {

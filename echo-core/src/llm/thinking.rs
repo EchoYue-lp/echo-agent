@@ -21,6 +21,12 @@
 //! control. We still let users pick a level everywhere (harmless when ignored),
 //! but translate faithfully per protocol.
 //!
+//! "最低"档(Minimal)的语义:**关闭思考,极速响应,最省成本**——而非"最轻量
+//! 推理"。对 Qwen3/GLM 映射为 `enable_thinking:false` / `thinking.type:
+//! disabled`;对 Claude 映射为不发 thinking 字段(=关闭);对 OpenAI 仍可发
+//! `minimal`(GPT-5.1+ 支持);对 DeepSeek 收敛为 `low`(DeepSeek 不支持
+//! `minimal`)。
+//!
 //! Rather than leak vendor dialects through the framework, we expose ONE
 //! semantic knob ([`ThinkingConfig`]) and translate per-provider in the LLM
 //! client implementation. This keeps call sites portable across models.
@@ -114,14 +120,17 @@ impl ThinkingConfig {
     }
 
     /// The Anthropic `effort` string (Claude 4.6+) this config maps to, or
-    /// `None` when disabled (4.6+ models treat absence as model-decided).
+    /// `None` when thinking is disabled.
     ///
     /// Claude 4.6 accepts: `low`/`medium`/`high`/`xhigh`/`max`.
+    ///
+    /// `Minimal` → `None` (关闭思考,不是 `low`),与"最低档 = 极速响应"定位一致。
+    /// `Disabled` → `None` (不发 effort 字段 + 不发 thinking block = 完全关闭)。
     pub fn to_anthropic_effort(&self) -> Option<&'static str> {
         match self {
             Self::Disabled => None,
-            Self::Level(ThinkingLevel::None) => Some("low"),
-            Self::Level(ThinkingLevel::Minimal) => Some("low"),
+            Self::Level(ThinkingLevel::None) => None,
+            Self::Level(ThinkingLevel::Minimal) => None,
             Self::Level(ThinkingLevel::Low) => Some("low"),
             Self::Level(ThinkingLevel::Medium) => Some("medium"),
             Self::Level(ThinkingLevel::High) => Some("high"),
@@ -141,20 +150,22 @@ impl ThinkingConfig {
     /// Anthropic `budget_tokens` (Claude 3.7–4.5), given the request's
     /// `max_tokens` (the budget MUST be strictly less than `max_tokens`).
     ///
-    /// Returns `None` when thinking is disabled, or when the resolved budget
-    /// would be >= max_tokens (which Anthropic rejects with a 400).
+    /// `Disabled` / `None` / `Minimal` → `None` (关闭思考,极速响应)。
+    /// Returns `None` when the resolved budget would be >= max_tokens.
     pub fn to_anthropic_budget(&self, max_tokens: u32) -> Option<u32> {
         let budget = match self {
             Self::Disabled => return None,
+            Self::Level(ThinkingLevel::None) => return None,
+            Self::Level(ThinkingLevel::Minimal) => return None,
             Self::BudgetTokens(n) => *n,
             Self::Level(level) => {
                 let frac = match level {
-                    ThinkingLevel::None => 0.05,
-                    ThinkingLevel::Minimal => 0.1,
                     ThinkingLevel::Low => 0.25,
                     ThinkingLevel::Medium => 0.5,
                     ThinkingLevel::High => 0.8,
                     ThinkingLevel::Xhigh => 0.95,
+                    // None / Minimal unreachable (returned above)
+                    ThinkingLevel::None | ThinkingLevel::Minimal => return None,
                 };
                 ((max_tokens as f64) * frac).round() as u32
             }
@@ -165,14 +176,25 @@ impl ThinkingConfig {
         Some(budget.min(max_tokens - 1))
     }
 
-    /// The Qwen3 `enable_thinking` boolean this config maps to.
+    /// The Qwen3/GLM `enable_thinking` boolean this config maps to.
+    ///
+    /// `Minimal` returns `false` because "最低档" = 关闭思考(极速响应,最省
+    /// 成本),与 `Disabled` 一致。只有 Low/Medium/High/Xhigh 才开启思考。
     pub fn to_enable_thinking(&self) -> bool {
-        !matches!(self, Self::Disabled)
+        !matches!(
+            self,
+            Self::Disabled | Self::Level(ThinkingLevel::None) | Self::Level(ThinkingLevel::Minimal)
+        )
     }
 
     /// The GLM `thinking.type` value (`"enabled"` or `"disabled"`).
+    ///
+    /// `Minimal` → `"disabled"` (最低档 = 关闭思考,极速响应)。
     pub fn to_glm_thinking_type(&self) -> &'static str {
-        if matches!(self, Self::Disabled) {
+        if matches!(
+            self,
+            Self::Disabled | Self::Level(ThinkingLevel::None) | Self::Level(ThinkingLevel::Minimal)
+        ) {
             "disabled"
         } else {
             "enabled"
