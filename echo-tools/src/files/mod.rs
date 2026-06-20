@@ -58,7 +58,12 @@ fn resolve_path(
         if !normalized.starts_with(&normalized_base) {
             return Err(ToolError::ExecutionFailed {
                 tool: tool.to_string(),
-                message: format!("Path '{}' is outside the allowed directory scope", path_str),
+                message: format!(
+                    "Path '{}' is outside the allowed working directory '{}'. \
+                     Use a relative path, or an absolute path under the working directory.",
+                    path_str,
+                    normalized_base.display()
+                ),
             }
             .into());
         }

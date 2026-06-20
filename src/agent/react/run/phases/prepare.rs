@@ -86,6 +86,25 @@ pub(crate) async fn prepare_turn(
         }
     }
 
+    // Inject the working directory into the conversation context so the LLM
+    // knows where it is operating. Without this, models tend to hallucinate a
+    // working directory (e.g. `/data/workspace/`, a common sandbox path in
+    // training data) and issue tool calls against paths that don't exist,
+    // producing empty "File does not exist" results repeatedly. This is
+    // injected as a system message each turn because the cwd can change
+    // between turns (e.g. worktree switches) and the message is short.
+    let cwd = snap
+        .config
+        .working_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(wd) = cwd {
+        context.lock().await.push(Message::system(format!(
+            "Current working directory: {}",
+            wd.display()
+        )));
+    }
+
     // Create TaskNode for this execution turn (DAG tracking)
     let task_node_id = snap.create_execution_node(text).await;
     Ok(PrepareOutcome::Continue { task_node_id })
