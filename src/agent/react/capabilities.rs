@@ -8,6 +8,8 @@
 use super::ReactAgent;
 #[cfg(feature = "subagent")]
 use crate::agent::Agent;
+#[cfg(feature = "subagent")]
+use crate::agent::subagent::SubagentDefinition;
 use crate::compression::{CompressionCheckpoint, ContextCompressor, ForceCompressStats};
 use crate::error::Result;
 #[cfg(feature = "mcp")]
@@ -20,6 +22,8 @@ use crate::skills::external::resource_tool::ReadSkillResourceTool;
 use crate::skills::external::run_script_tool::RunSkillScriptTool;
 use crate::skills::{Skill, SkillInfo};
 use crate::tools::Tool;
+#[cfg(feature = "subagent")]
+use crate::tools::builtin::agent_dispatch::SubagentCatalogEntry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -273,18 +277,64 @@ impl ReactAgent {
     /// For more control, use `register_subagent_with_definition()`.
     #[cfg(feature = "subagent")]
     pub fn register_agent(&mut self, agent: Box<dyn Agent>) {
+        let name = agent.name().to_string();
+        let def = SubagentDefinition::simple_sync(&name);
+        self.register_subagent_with_definition(def, agent);
+    }
+
+    /// Register a subagent with an explicit definition.
+    ///
+    /// The definition is exposed to the orchestrator through `agent_tool`, so
+    /// descriptions should be concise and task-oriented.
+    #[cfg(feature = "subagent")]
+    pub fn register_subagent_with_definition(
+        &mut self,
+        def: SubagentDefinition,
+        agent: Box<dyn Agent>,
+    ) {
         if !self.config.enable_subagent {
             warn!(
                 agent = %self.config.agent_name,
-                subagent = %agent.name(),
+                subagent = %def.name,
                 "subagent capability disabled, ignoring registration"
             );
             return;
         }
-        let name = agent.name().to_string();
-        let def = crate::agent::subagent::SubagentDefinition::simple_sync(&name);
-        if self.tools.subagent_registry.register_sync(def, agent) {
+        let name = def.name.clone();
+        if self
+            .tools
+            .subagent_registry
+            .register_sync(def.clone(), agent)
+        {
+            self.update_dispatch_catalog(&def);
             info!(agent = %self.config.agent_name, subagent = %name, "Subagent registered");
+        }
+    }
+
+    #[cfg(feature = "subagent")]
+    fn update_dispatch_catalog(&self, def: &SubagentDefinition) {
+        if let Some(handle) = &self.dispatch_catalog_handle {
+            match handle.write() {
+                Ok(mut catalog) => {
+                    if let Some(entry) = catalog.iter_mut().find(|entry| entry.name == def.name) {
+                        entry.description = def.description.clone();
+                    } else {
+                        catalog.push(SubagentCatalogEntry {
+                            name: def.name.clone(),
+                            description: def.description.clone(),
+                        });
+                    }
+                    catalog.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+                Err(err) => {
+                    warn!(
+                        agent = %self.config.agent_name,
+                        error = %err,
+                        "failed to update subagent dispatch catalog"
+                    );
+                }
+            }
+            self.tools.tool_manager.invalidate_definition_cache();
         }
     }
 

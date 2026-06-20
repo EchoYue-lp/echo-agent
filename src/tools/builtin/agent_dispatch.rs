@@ -65,6 +65,15 @@ pub struct AgentDispatchTool {
     /// When set, subagents in Fork mode inherit conversation history,
     /// system prompt, and tools from the parent agent.
     parent_context_factory: Option<Arc<ParentContextFactory>>,
+    /// Snapshot of available subagents exposed to the LLM through the tool schema.
+    catalog: Arc<std::sync::RwLock<Vec<SubagentCatalogEntry>>>,
+}
+
+/// Compact subagent metadata exposed in `agent_tool` parameters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentCatalogEntry {
+    pub name: String,
+    pub description: String,
 }
 
 impl AgentDispatchTool {
@@ -78,6 +87,7 @@ impl AgentDispatchTool {
             parent_agent: parent_agent.into(),
             cancel: Arc::new(tokio::sync::Mutex::new(Some(cancel))),
             parent_context_factory: None,
+            catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -95,6 +105,12 @@ impl AgentDispatchTool {
     pub fn cancel_handle(&self) -> Arc<tokio::sync::Mutex<Option<CancellationToken>>> {
         self.cancel.clone()
     }
+
+    /// Shared catalog handle. The parent agent updates this when subagents are
+    /// registered so cached tool definitions can expose concrete worker names.
+    pub fn catalog_handle(&self) -> Arc<std::sync::RwLock<Vec<SubagentCatalogEntry>>> {
+        self.catalog.clone()
+    }
 }
 
 impl Tool for AgentDispatchTool {
@@ -103,21 +119,46 @@ impl Tool for AgentDispatchTool {
     }
 
     fn description(&self) -> &str {
-        "Dispatch a task to a specialized SubAgent for execution. As the orchestrator, prefer using this tool to delegate computation, data fetching, etc. to professional SubAgents rather than answering directly."
+        "Dispatch tasks to specialized SubAgents. For complex read-only investigation, architecture review, or validation planning, prefer issuing multiple agent_tool calls in the same assistant turn so independent SubAgents run in parallel. Use only agent_name values listed in the schema."
     }
 
     fn parameters(&self) -> Value {
-        // NOTE: agent_names would require async, so we provide a generic description
+        let catalog = self
+            .catalog
+            .read()
+            .map(|entries| entries.clone())
+            .unwrap_or_default();
+        let agent_names: Vec<String> = catalog.iter().map(|entry| entry.name.clone()).collect();
+        let catalog_text = if catalog.is_empty() {
+            "No SubAgents are currently registered.".to_string()
+        } else {
+            let lines: Vec<String> = catalog
+                .iter()
+                .map(|entry| format!("{}: {}", entry.name, entry.description))
+                .collect();
+            format!("Available SubAgents: {}", lines.join("; "))
+        };
+
+        let agent_name_schema = if agent_names.is_empty() {
+            json!({
+                "type": "string",
+                "description": catalog_text
+            })
+        } else {
+            json!({
+                "type": "string",
+                "enum": agent_names,
+                "description": catalog_text
+            })
+        };
+
         json!({
             "type": "object",
             "properties": {
-                "agent_name": {
-                    "type": "string",
-                    "description": "SubAgent name"
-                },
+                "agent_name": agent_name_schema,
                 "task": {
                     "type": "string",
-                    "description": "Specific task description to assign to the SubAgent, should include necessary context"
+                    "description": "Specific task description to assign to the SubAgent. Include relevant paths, scope, constraints, and what result format you need."
                 },
                 "mode": {
                     "type": "string",

@@ -73,6 +73,14 @@ impl ToolManager {
         // No need to clear cached_definitions — version mismatch will trigger
         // a lazy rebuild on the next access.
     }
+
+    /// Force the cached tool definitions to be rebuilt on the next read.
+    ///
+    /// This is useful when a tool's JSON schema depends on external runtime
+    /// metadata while the registered tool set itself has not changed.
+    pub fn invalidate_definition_cache(&self) {
+        self.invalidate_cache();
+    }
 }
 
 impl Default for ToolManager {

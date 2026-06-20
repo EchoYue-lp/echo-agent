@@ -152,6 +152,10 @@ pub struct ReactAgent {
     /// run is. Updated alongside `cancel_token` at run start. `None` when
     /// subagents are disabled (`AgentDispatchTool` never registered).
     pub(crate) dispatch_cancel_handle: Option<Arc<tokio::sync::Mutex<Option<CancellationToken>>>>,
+    #[cfg(feature = "subagent")]
+    pub(crate) dispatch_catalog_handle: Option<
+        Arc<std::sync::RwLock<Vec<crate::tools::builtin::agent_dispatch::SubagentCatalogEntry>>>,
+    >,
 
     /// Optional run store for persisting execution traces.
     /// When set, each streaming execution records a [`Run`](crate::trace::Run)
@@ -410,6 +414,12 @@ impl ReactAgent {
             Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
         > = None;
         #[cfg(feature = "subagent")]
+        let mut dispatch_catalog_handle: Option<
+            Arc<
+                std::sync::RwLock<Vec<crate::tools::builtin::agent_dispatch::SubagentCatalogEntry>>,
+            >,
+        > = None;
+        #[cfg(feature = "subagent")]
         if config.enable_subagent {
             let factory = Arc::new(
                 crate::tools::builtin::agent_dispatch::ParentContextFactory {
@@ -428,6 +438,7 @@ impl ReactAgent {
             // Capture the shared handle before the tool is moved into the
             // tool_manager, so the agent can update it at run start.
             dispatch_cancel_handle = Some(dispatch_tool.cancel_handle());
+            dispatch_catalog_handle = Some(dispatch_tool.catalog_handle());
             tool_manager.register(Box::new(dispatch_tool));
         }
 
@@ -480,6 +491,8 @@ impl ReactAgent {
             dispatch_cancel_handle,
             #[cfg(not(feature = "subagent"))]
             dispatch_cancel_handle: None,
+            #[cfg(feature = "subagent")]
+            dispatch_catalog_handle,
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,

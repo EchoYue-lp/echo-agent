@@ -686,7 +686,6 @@ mod tests {
     /// before the 30s delay — proving the cancel propagated to the LLM layer.
     #[tokio::test]
     async fn test_run_stream_cancelled_mid_llm_call() {
-        use std::sync::Arc;
         use std::time::Duration;
 
         use crate::agent::CancellationToken;

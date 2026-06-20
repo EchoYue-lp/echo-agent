@@ -1,6 +1,8 @@
 use super::ReactAgent;
 use crate::agent::Agent;
 use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
+#[cfg(feature = "subagent")]
+use crate::agent::subagent::SubagentBuilder;
 use crate::llm::types::{Message, Role};
 use crate::sandbox::SandboxManager;
 use crate::skills::builtin::ShellSkill;
@@ -819,6 +821,58 @@ fn react_agent_register_agent_dispatch_tool() {
     // When subagent is enabled, agent_tool should be registered
     let tool_names = agent.tool_names();
     assert!(tool_names.contains(&String::from("agent_tool")));
+}
+
+#[cfg(feature = "subagent")]
+#[test]
+fn agent_dispatch_tool_schema_lists_registered_subagents() {
+    let config = AgentConfig::minimal("test-model", "main_agent").enable_subagent(true);
+    let mut agent = ReactAgent::new(config);
+
+    let def = SubagentBuilder::new("code_reviewer")
+        .description("Reviews code for bugs and test gaps")
+        .fork_mode()
+        .tag("readonly")
+        .build();
+    agent.register_subagent_with_definition(def, Box::new(MockAgent::new("code_reviewer")));
+
+    let definitions = <ReactAgent as Agent>::tool_definitions(&agent);
+    let maybe_dispatch = definitions
+        .iter()
+        .find(|definition| definition.function.name == "agent_tool");
+    let Some(dispatch) = maybe_dispatch else {
+        assert!(
+            maybe_dispatch.is_some(),
+            "agent_tool should be registered when subagent is enabled"
+        );
+        return;
+    };
+
+    let agent_name_schema = dispatch
+        .function
+        .parameters
+        .get("properties")
+        .and_then(|properties| properties.get("agent_name"));
+    let Some(agent_name_schema) = agent_name_schema else {
+        assert!(
+            agent_name_schema.is_some(),
+            "agent_name schema should exist"
+        );
+        return;
+    };
+
+    let enum_values = agent_name_schema
+        .get("enum")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(enum_values.iter().any(|value| value == "code_reviewer"));
+
+    let description = agent_name_schema
+        .get("description")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(description.contains("Reviews code for bugs and test gaps"));
 }
 
 #[cfg(feature = "subagent")]

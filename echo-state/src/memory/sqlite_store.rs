@@ -50,7 +50,7 @@ use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
@@ -64,7 +64,6 @@ use tracing::{debug, info, warn};
 /// single connection eliminates `SQLITE_BUSY` storms under concurrent access.
 pub struct SqliteStore {
     embedder: Option<Arc<dyn Embedder>>,
-    path: PathBuf,
     conn: Mutex<Connection>,
 }
 
@@ -102,7 +101,6 @@ impl SqliteStore {
 
         Ok(Self {
             embedder,
-            path,
             conn: Mutex::new(conn),
         })
     }
@@ -460,7 +458,7 @@ impl SqliteStore {
     fn inner_search(
         &self,
         namespace: &[&str],
-        query: &str,
+        _query: &str,
         limit: usize,
     ) -> Result<Vec<StoreItem>> {
         let conn = self.open_connection()?;
