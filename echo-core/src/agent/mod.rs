@@ -43,6 +43,28 @@ pub enum AgentEvent {
         /// Number of completion tokens consumed
         completion_tokens: usize,
     },
+    /// Provider-reported LLM usage for a single request.
+    ///
+    /// `ThinkEnd` is kept as a compact, backward-compatible UI event. This
+    /// richer event carries cache observability. When `usage_reported` is
+    /// false, the provider or gateway did not return usage metadata; callers
+    /// must treat cache fields as unknown instead of a zero-percent cache hit.
+    LlmUsage {
+        /// Model used for the request.
+        model: String,
+        /// Prompt/input tokens reported by the provider.
+        prompt_tokens: usize,
+        /// Completion/output tokens reported by the provider.
+        completion_tokens: usize,
+        /// Total tokens reported by the provider, or prompt + completion when absent.
+        total_tokens: usize,
+        /// Prompt/input tokens served from provider-side cache.
+        cached_prompt_tokens: usize,
+        /// Prompt/input tokens written into provider-side cache.
+        cache_creation_prompt_tokens: usize,
+        /// Whether the provider response contained usage metadata.
+        usage_reported: bool,
+    },
 
     // ── Tool Invocation ──────────────────────────────────────────────────────────
     /// Preparing to invoke a tool
@@ -175,6 +197,7 @@ impl AgentEvent {
     pub fn prompt_tokens(&self) -> Option<usize> {
         match self {
             AgentEvent::ThinkEnd { prompt_tokens, .. } => Some(*prompt_tokens),
+            AgentEvent::LlmUsage { prompt_tokens, .. } => Some(*prompt_tokens),
             _ => None,
         }
     }
@@ -183,6 +206,9 @@ impl AgentEvent {
     pub fn completion_tokens(&self) -> Option<usize> {
         match self {
             AgentEvent::ThinkEnd {
+                completion_tokens, ..
+            } => Some(*completion_tokens),
+            AgentEvent::LlmUsage {
                 completion_tokens, ..
             } => Some(*completion_tokens),
             _ => None,
@@ -196,6 +222,7 @@ impl AgentEvent {
                 prompt_tokens,
                 completion_tokens,
             } => Some(prompt_tokens + completion_tokens),
+            AgentEvent::LlmUsage { total_tokens, .. } => Some(*total_tokens),
             _ => None,
         }
     }
@@ -225,6 +252,7 @@ impl AgentEvent {
             AgentEvent::Token(_)
             | AgentEvent::ThinkStart
             | AgentEvent::ThinkEnd { .. }
+            | AgentEvent::LlmUsage { .. }
             | AgentEvent::MemoryRecalled { .. }
             | AgentEvent::ContextCompressed { .. }
             | AgentEvent::Chart { .. } => AgentPhase::Thinking,

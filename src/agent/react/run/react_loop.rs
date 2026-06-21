@@ -350,6 +350,30 @@ impl ReactAgent {
         if let Some(ref u) = usage {
             self.token_tracker.record_usage(u);
         }
+        let cached_prompt_tokens = usage
+            .as_ref()
+            .map(|u| u.cached_prompt_tokens())
+            .unwrap_or(0);
+        let cache_creation_prompt_tokens = usage
+            .as_ref()
+            .map(|u| u.cache_creation_prompt_tokens())
+            .unwrap_or(0);
+        let total_tokens = usage
+            .as_ref()
+            .and_then(|u| u.total_tokens)
+            .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+        tracing::debug!(
+            target: "echo_agent::llm_usage",
+            agent = %agent,
+            model = %self.config.model_name,
+            prompt_tokens = prompt_tokens,
+            completion_tokens = completion_tokens,
+            total_tokens = total_tokens,
+            cached_prompt_tokens = cached_prompt_tokens,
+            cache_creation_prompt_tokens = cache_creation_prompt_tokens,
+            usage_reported = usage.is_some(),
+            "LLM usage recorded"
+        );
 
         // Record trace event
         self.record_trace_event(crate::trace::RunEvent::LlmCall {

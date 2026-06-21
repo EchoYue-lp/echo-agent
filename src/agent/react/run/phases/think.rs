@@ -105,6 +105,20 @@ pub(crate) async fn run_think(
         .as_ref()
         .and_then(|u| u.completion_tokens)
         .unwrap_or(0) as usize;
+    let total_tokens = last_usage
+        .as_ref()
+        .and_then(|u| u.total_tokens)
+        .map(|t| t as usize)
+        .unwrap_or_else(|| pt.saturating_add(ct));
+    let cached_prompt_tokens = last_usage
+        .as_ref()
+        .map(|u| u.cached_prompt_tokens() as usize)
+        .unwrap_or(0);
+    let cache_creation_prompt_tokens = last_usage
+        .as_ref()
+        .map(|u| u.cache_creation_prompt_tokens() as usize)
+        .unwrap_or(0);
+    let usage_reported = last_usage.is_some();
 
     // Feed the actual prompt-token count back into the CalibratedTokenizer so
     // future context-window / compression estimates converge to the model's
@@ -126,6 +140,31 @@ pub(crate) async fn run_think(
     if let Some(ref u) = last_usage {
         snap.token_tracker.record_usage(u);
     }
+    tracing::debug!(
+        target: "echo_agent::llm_usage",
+        agent = %snap.config.agent_name,
+        model = %snap.config.model_name,
+        prompt_tokens = pt,
+        completion_tokens = ct,
+        total_tokens = total_tokens,
+        cached_prompt_tokens = cached_prompt_tokens,
+        cache_creation_prompt_tokens = cache_creation_prompt_tokens,
+        usage_reported = usage_reported,
+        "LLM usage recorded"
+    );
+    yield_event_or!(
+        tx,
+        AgentEvent::LlmUsage {
+            model: snap.config.model_name.clone(),
+            prompt_tokens: pt,
+            completion_tokens: ct,
+            total_tokens,
+            cached_prompt_tokens,
+            cache_creation_prompt_tokens,
+            usage_reported,
+        },
+        ThinkOutcome::Abandoned
+    );
 
     if in_reasoning {
         yield_event_or!(

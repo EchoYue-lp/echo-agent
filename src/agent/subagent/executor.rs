@@ -542,6 +542,7 @@ impl SubagentExecutor {
                             completion_tokens: ct,
                         });
                 }
+                AgentEvent::LlmUsage { .. } => {}
                 AgentEvent::ToolCall { name, args } => {
                     registry
                         .event_bus()
