@@ -1112,6 +1112,70 @@ async fn discover_skills_refreshes_activate_skill_registry() {
 }
 
 #[tokio::test]
+async fn intent_router_skill_activation_survives_compression_markers() -> Result<(), String> {
+    let base =
+        std::env::temp_dir().join(format!("echo-agent-skill-protected-{}", std::process::id()));
+    let skill_dir = base.join("skills").join("skill-protected");
+    let _ = tokio::fs::remove_dir_all(&base).await;
+    tokio::fs::create_dir_all(&skill_dir)
+        .await
+        .map_err(|error| format!("create skill dir: {error}"))?;
+    tokio::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: skill-protected\ndescription: protected skill\n---\n\nProtected instructions survive compression.\n",
+    )
+    .await
+    .map_err(|error| format!("write skill file: {error}"))?;
+
+    let config = AgentConfig::minimal("model", "agent");
+    let mut agent = ReactAgent::new(config);
+    agent
+        .discover_skills(&[DiscoveryScope::Custom(base.join("skills"))])
+        .await
+        .map_err(|error| format!("discover skill: {error}"))?;
+    agent
+        .activate_skill_for_context("skill-protected")
+        .await
+        .map_err(|error| format!("activate skill: {error}"))?;
+
+    {
+        let mut ctx = agent.memory.context.lock().await;
+        ctx.push(Message::user("old user message".to_string()));
+        ctx.push(Message::assistant("old assistant message".to_string()));
+        ctx.push(Message::user("latest user message".to_string()));
+    }
+
+    let compressor = crate::compression::compressor::SlidingWindowCompressor::new(1);
+    agent
+        .force_compress_with(&compressor)
+        .await
+        .map_err(|error| format!("force compress: {error}"))?;
+
+    let messages = agent.memory.context.lock().await.messages().to_vec();
+    assert!(
+        messages.iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("<skill_content"))
+        }),
+        "activated skill block should retain the protected marker after compression"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("Protected instructions survive compression."))
+        }),
+        "activated skill instructions should remain after compression"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&base).await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn execute_tool_injects_pre_and_post_hook_messages_into_context() {
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);
