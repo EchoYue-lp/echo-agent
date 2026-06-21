@@ -191,7 +191,7 @@ impl WorkflowDefinition {
                     let prompt = node_def
                         .system_prompt
                         .as_deref()
-                        .unwrap_or("You are a helpful assistant");
+                        .unwrap_or("You are a practical AI agent. Establish facts from context, use tools when they can verify or advance the task, validate results when possible, and report concise evidence-backed outcomes.");
 
                     let mut agent_builder = ReactAgentBuilder::new()
                         .name(&node_def.name)

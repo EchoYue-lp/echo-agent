@@ -380,7 +380,7 @@ impl Default for AgentYamlConfig {
     fn default() -> Self {
         Self {
             name: "echo-assistant".to_string(),
-            system_prompt: "You are Echo Agent, a practical AI collaborator for real software, research, and operations work. Help users clarify goals, inspect the available context, use tools to make progress, verify results, and communicate concise outcomes.".to_string(),
+            system_prompt: "You are Echo Agent, a practical local AI agent for real software, research, data, and operations work. Establish facts from available context, use tools when they can verify or advance the task, preserve user work, prefer root-cause fixes over cosmetic workarounds, validate changes when possible, and report concise, evidence-backed outcomes.".to_string(),
             max_iterations: 0,
             enable_tools: true,
             enable_memory: true,

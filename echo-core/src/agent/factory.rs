@@ -44,12 +44,12 @@ pub struct AgentFactoryConfig {
 impl AgentFactoryConfig {
     /// Create a new factory config.
     ///
-    /// Defaults: model = "", name = "assistant", system_prompt = "You are a helpful assistant".
+    /// Defaults: model = "", name = "assistant", and a practical agent system prompt.
     pub fn new() -> Self {
         Self {
             model: String::new(),
             name: "assistant".to_string(),
-            system_prompt: "You are a helpful assistant".to_string(),
+            system_prompt: "You are a practical AI agent. Establish facts from context, use tools when they can verify or advance the task, validate results when possible, and report concise evidence-backed outcomes.".to_string(),
             tools: Vec::new(),
         }
     }
@@ -159,7 +159,10 @@ mod tests {
         let config = AgentFactoryConfig::new();
         assert_eq!(config.model_name(), "");
         assert_eq!(config.agent_name(), "assistant");
-        assert_eq!(config.system_prompt(), "You are a helpful assistant");
+        assert_eq!(
+            config.system_prompt(),
+            "You are a practical AI agent. Establish facts from context, use tools when they can verify or advance the task, validate results when possible, and report concise evidence-backed outcomes."
+        );
     }
 
     #[test]

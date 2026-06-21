@@ -91,7 +91,7 @@ impl ReactAgentBuilder {
         Self {
             name: "assistant".to_string(),
             model: String::new(),
-            system_prompt: "You are a helpful assistant".to_string(),
+            system_prompt: "You are a practical AI agent. Establish facts from context, use tools when they can verify or advance the task, protect user work, validate results when possible, and report concise evidence-backed outcomes.".to_string(),
             role: AgentRole::default(),
             llm_client: None,
             llm_config: None,

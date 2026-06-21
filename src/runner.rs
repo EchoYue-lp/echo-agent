@@ -55,7 +55,7 @@ impl AgentRunner {
     pub fn new() -> Self {
         Self {
             model: String::new(),
-            system_prompt: "You are a helpful assistant".into(),
+            system_prompt: "You are a practical AI agent. Establish facts from context, use tools when they can verify or advance the task, validate results when possible, and report concise evidence-backed outcomes.".into(),
             agent_name: "echo-agent".into(),
             tool_pipeline: None,
             run_store: None,
