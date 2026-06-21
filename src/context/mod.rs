@@ -173,12 +173,11 @@ impl ContextAssembler {
         // 6. Memory recall (budget-aware truncation)
         if let Some(mem) = &sources.memory_recall {
             let mem_text = if let Some(ref budget) = self.budget {
-                if mem.len() > budget.memory_max {
-                    let cut = (0..=budget.memory_max)
-                        .rev()
-                        .find(|i| mem.is_char_boundary(*i))
-                        .unwrap_or(budget.memory_max);
-                    format!("{}...", &mem[..cut])
+                if mem.chars().count() > budget.memory_max {
+                    format!(
+                        "{}...",
+                        mem.chars().take(budget.memory_max).collect::<String>()
+                    )
                 } else {
                     mem.clone()
                 }

@@ -485,43 +485,26 @@ impl ReactAgent {
 
         self.detect_and_write_memory_triggers(input).await;
 
-        // Inject relevant long-term memories
+        // Inject relevant long-term memories into the current user turn rather
+        // than as extra system messages. Dynamic memory changes every turn; if
+        // it is appended as `system`, provider-side prompt caching diverges
+        // before the stable tool/policy prefix can be reused.
         let mut recalled = 0usize;
+        let mut memory_context = None;
         if let Ok(items) = self.recall_long_term_memories(input).await
             && !items.is_empty()
         {
             recalled = items.len();
-            let mut lines = vec!["[memory_context] Relevant historical memories:".to_string()];
-            for (i, item) in items.iter().enumerate() {
-                let content_str = item
-                    .value
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_else(|| item.value.to_string());
-                lines.push(format!("{}. {}", i + 1, content_str));
-            }
-            lines.push(
-                "[The above memories are for reference; answer the user's CURRENT question.]"
-                    .to_string(),
-            );
-            // Inject as a system message — long-term memories are background context,
-            // not new user input. Pushing them as `Message::user` produced two
-            // consecutive user turns and confused the model into treating the
-            // recalled memory as a fresh request.
-            self.memory
-                .context
-                .lock()
-                .await
-                .push(Message::system(lines.join("\n")));
+            memory_context = Some(format_memory_context(&items));
         }
 
         // Push user message
+        let user_text = merge_memory_context_with_user_input(memory_context.as_deref(), input);
         self.memory
             .context
             .lock()
             .await
-            .push(Message::user(input.to_string()));
+            .push(Message::user(user_text));
         recalled
     }
 
@@ -550,35 +533,71 @@ impl ReactAgent {
         }
 
         let mut recalled = 0usize;
+        let mut memory_context = None;
         if !text.is_empty()
             && let Ok(items) = self.recall_long_term_memories(&text).await
             && !items.is_empty()
         {
             recalled = items.len();
-            let mut lines = vec!["[memory_context] Relevant historical memories:".to_string()];
-            for (i, item) in items.iter().enumerate() {
-                let content_str = item
-                    .value
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_else(|| item.value.to_string());
-                lines.push(format!("{}. {}", i + 1, content_str));
-            }
-            lines.push(
-                "[The above memories are for reference; answer the user's CURRENT question.]"
-                    .to_string(),
-            );
-            // System role — see prepare_stream_context for rationale.
-            self.memory
-                .context
-                .lock()
-                .await
-                .push(Message::system(lines.join("\n")));
+            memory_context = Some(format_memory_context(&items));
         }
 
         // Push multimodal user message
-        self.memory.context.lock().await.push(message.clone());
+        let user_message =
+            merge_memory_context_with_user_message(memory_context.as_deref(), message);
+        self.memory.context.lock().await.push(user_message);
         recalled
     }
+}
+
+fn format_memory_context(items: &[crate::memory::store::StoreItem]) -> String {
+    let mut lines = vec!["[memory_context] Relevant historical memories:".to_string()];
+    for (i, item) in items.iter().enumerate() {
+        let content_str = item
+            .value
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| item.value.to_string());
+        lines.push(format!("{}. {}", i + 1, content_str));
+    }
+    lines.push(
+        "[The above memories are for reference; answer the user's CURRENT question.]".to_string(),
+    );
+    lines.join("\n")
+}
+
+fn merge_memory_context_with_user_input(memory_context: Option<&str>, input: &str) -> String {
+    match memory_context {
+        Some(memory_context) => format!("{memory_context}\n\n[current_user_request]\n{input}"),
+        None => input.to_string(),
+    }
+}
+
+fn merge_memory_context_with_user_message(
+    memory_context: Option<&str>,
+    message: &Message,
+) -> Message {
+    let Some(memory_context) = memory_context else {
+        return message.clone();
+    };
+    let mut merged = message.clone();
+    match &mut merged.content {
+        echo_core::llm::types::MessageContent::Text(text) => {
+            *text = merge_memory_context_with_user_input(Some(memory_context), text);
+        }
+        echo_core::llm::types::MessageContent::Parts(parts) => {
+            parts.insert(
+                0,
+                echo_core::llm::types::ContentPart::Text {
+                    text: format!("{memory_context}\n\n[current_user_request]"),
+                },
+            );
+        }
+        echo_core::llm::types::MessageContent::Empty => {
+            merged.content =
+                echo_core::llm::types::MessageContent::Text(memory_context.to_string());
+        }
+    }
+    merged
 }

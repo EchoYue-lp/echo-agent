@@ -332,6 +332,7 @@ fn log_prompt_cache_shape(messages: &[Message], tools: Option<&[ToolDefinition]>
         message_count = shape.message_count,
         leading_system_messages = shape.leading_system_messages,
         cwd_system_messages = shape.cwd_system_messages,
+        memory_system_messages = shape.memory_system_messages,
         tool_count = shape.tool_count,
         "LLM prompt cache shape"
     );
@@ -342,6 +343,13 @@ fn log_prompt_cache_shape(messages: &[Message], tools: Option<&[ToolDefinition]>
             "Multiple cwd system messages found; prompt-cache prefix is likely unstable"
         );
     }
+    if shape.memory_system_messages > 0 {
+        tracing::warn!(
+            target: "echo_agent::prompt_cache",
+            memory_system_messages = shape.memory_system_messages,
+            "Dynamic memory context is present as a system message; prompt-cache prefix is likely unstable"
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,6 +358,7 @@ struct PromptCacheShape {
     message_count: usize,
     leading_system_messages: usize,
     cwd_system_messages: usize,
+    memory_system_messages: usize,
     tool_count: usize,
 }
 
@@ -366,6 +375,15 @@ impl PromptCacheShape {
                     && message
                         .text_content()
                         .is_some_and(|text| text.contains("Current working directory:"))
+            })
+            .count();
+        let memory_system_messages = messages
+            .iter()
+            .filter(|message| {
+                matches!(message.role, Role::System)
+                    && message
+                        .text_content()
+                        .is_some_and(|text| text.contains("[memory_context]"))
             })
             .count();
         let tool_count = tools.map(|defs| defs.len()).unwrap_or(0);
@@ -386,6 +404,7 @@ impl PromptCacheShape {
             message_count: messages.len(),
             leading_system_messages,
             cwd_system_messages,
+            memory_system_messages,
             tool_count,
         }
     }

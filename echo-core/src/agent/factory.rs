@@ -20,6 +20,22 @@
 use crate::error::Result;
 use crate::tools::Tool;
 
+pub const DEFAULT_CORE_AGENT_SYSTEM_PROMPT: &str = r#"You are a practical local AI agent for real coding, research, data analysis, and task execution.
+
+Core operating model:
+- Establish facts from context before making claims.
+- Use tools when they can verify, inspect, execute, or make progress.
+- Preserve user work and avoid unrelated changes.
+- Prefer root-cause fixes over cosmetic workarounds.
+- Validate results when possible and report remaining risk.
+- Keep stable policy separate from dynamic per-turn context such as memories, tool results, hooks, and task state.
+- For high-stakes or time-sensitive topics, verify with available reliable sources before presenting precise claims.
+
+Response style:
+- Use the user's language.
+- Lead with findings for reviews.
+- For implementation, summarize changed behavior and verification."#;
+
 // ── Agent Factory Config ────────────────────────────────────────────────────
 
 /// Configuration for creating an agent via an [`AgentFactory`].
@@ -49,7 +65,7 @@ impl AgentFactoryConfig {
         Self {
             model: String::new(),
             name: "assistant".to_string(),
-            system_prompt: "You are a practical AI agent. Establish facts from context, use tools when they can verify or advance the task, validate results when possible, and report concise evidence-backed outcomes.".to_string(),
+            system_prompt: DEFAULT_CORE_AGENT_SYSTEM_PROMPT.to_string(),
             tools: Vec::new(),
         }
     }
@@ -159,10 +175,7 @@ mod tests {
         let config = AgentFactoryConfig::new();
         assert_eq!(config.model_name(), "");
         assert_eq!(config.agent_name(), "assistant");
-        assert_eq!(
-            config.system_prompt(),
-            "You are a practical AI agent. Establish facts from context, use tools when they can verify or advance the task, validate results when possible, and report concise evidence-backed outcomes."
-        );
+        assert_eq!(config.system_prompt(), DEFAULT_CORE_AGENT_SYSTEM_PROMPT);
     }
 
     #[test]

@@ -1569,14 +1569,14 @@ fn replace_tool_when_not_exists() {
     );
 }
 
-// ── recall_long_term_memories injects as system role ─────────────────────────
+// ── recall_long_term_memories injects into the current user turn ─────────────
 
-/// Regression test for review finding: prior code pushed recalled memories as
-/// `Message::user`, producing two consecutive user turns and confusing the
-/// model into treating historical memories as a fresh user request. The fix
-/// is to inject them as `Message::system` with a `[memory_context]` marker.
+/// Recalled memories are dynamic per turn, so they must not be appended as
+/// extra system messages where they destabilize the provider's prompt-cache
+/// prefix. They are merged into the current user turn, which also avoids the
+/// older consecutive-user-message failure mode.
 #[tokio::test]
-async fn recall_injects_memories_as_system_message_not_user() {
+async fn recall_injects_memories_into_current_user_message() {
     use crate::agent::react::run::types::StreamMode;
     use crate::memory::InMemoryStore;
     use serde_json::json;
@@ -1604,8 +1604,8 @@ async fn recall_injects_memories_as_system_message_not_user() {
         "expected at least one memory to be recalled, got {recalled}"
     );
 
-    // The context now must contain a system message carrying the [memory_context]
-    // marker — and crucially, no two adjacent user messages from the recall path.
+    // The context now must contain one user message carrying the [memory_context]
+    // marker and the current request — and no extra system message from recall.
     let ctx = agent.memory.context.lock().await;
     let messages = ctx.messages();
 
@@ -1619,20 +1619,40 @@ async fn recall_injects_memories_as_system_message_not_user() {
         .collect();
     assert_eq!(
         memory_systems.len(),
-        1,
-        "expected exactly one system message with [memory_context] marker, found: {:?}",
+        0,
+        "memory_context should not be injected as system message, found: {:?}",
         messages
             .iter()
             .map(|m| format!("{:?}: {:?}", m.role, m.text_content()))
             .collect::<Vec<_>>()
     );
 
-    // The seeded content must appear in that system message.
+    let memory_users: Vec<&Message> = messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.text_content()
+                    .is_some_and(|c| c.contains("[memory_context]"))
+        })
+        .collect();
+    assert_eq!(
+        memory_users.len(),
+        1,
+        "expected exactly one user message with [memory_context] marker"
+    );
+
+    // The seeded content and current request must appear in that one user turn.
     assert!(
-        memory_systems[0]
+        memory_users[0]
             .text_content()
             .is_some_and(|c| c.contains("user prefers Rust over Python")),
-        "memory_context system message should contain seeded fact"
+        "memory_context user message should contain seeded fact"
+    );
+    assert!(
+        memory_users[0]
+            .text_content()
+            .is_some_and(|c| c.contains("[current_user_request]\nRust")),
+        "memory_context user message should contain current request"
     );
 
     // No adjacent user-user pair from the recall injection.
