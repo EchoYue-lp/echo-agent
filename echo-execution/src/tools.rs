@@ -146,7 +146,9 @@ impl ToolManager {
     }
 
     pub fn list_tools(&self) -> Vec<String> {
-        self.tools.iter().map(|e| e.key().clone()).collect()
+        let mut tools: Vec<String> = self.tools.iter().map(|e| e.key().clone()).collect();
+        tools.sort();
+        tools
     }
 
     /// Get a reference to a tool (via DashMap's Ref).
@@ -158,10 +160,13 @@ impl ToolManager {
     }
 
     pub fn get_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let mut definitions: Vec<ToolDefinition> = self
+            .tools
             .iter()
             .map(|entry| ToolDefinition::from_tool(&**entry.value()))
-            .collect()
+            .collect();
+        definitions.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+        definitions
     }
 
     /// 执行工具
@@ -428,6 +433,31 @@ mod execute_with_context_tests {
         captured: Arc<Mutex<Option<ToolContext>>>,
     }
 
+    struct NamedTool {
+        name: &'static str,
+    }
+
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _p: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
     impl Tool for CtxCapturingTool {
         fn name(&self) -> &str {
             "capture"
@@ -481,6 +511,30 @@ mod execute_with_context_tests {
         );
         assert_eq!(got.conversation_id.as_deref(), Some("c"));
         assert_eq!(got.run_id.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn test_tool_lists_are_deterministically_sorted() {
+        let tm = ToolManager::new();
+        tm.register(Box::new(NamedTool { name: "zeta" }));
+        tm.register(Box::new(NamedTool { name: "alpha" }));
+        tm.register(Box::new(NamedTool { name: "middle" }));
+
+        assert_eq!(tm.list_tools(), vec!["alpha", "middle", "zeta"]);
+
+        let definition_names: Vec<String> = tm
+            .get_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect();
+        assert_eq!(definition_names, vec!["alpha", "middle", "zeta"]);
+
+        let openai_names: Vec<String> = tm
+            .get_openai_tools()
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect();
+        assert_eq!(openai_names, vec!["alpha", "middle", "zeta"]);
     }
 
     #[tokio::test]

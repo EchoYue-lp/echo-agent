@@ -86,25 +86,6 @@ pub(crate) async fn prepare_turn(
         }
     }
 
-    // Inject the working directory into the conversation context so the LLM
-    // knows where it is operating. Without this, models tend to hallucinate a
-    // working directory (e.g. `/data/workspace/`, a common sandbox path in
-    // training data) and issue tool calls against paths that don't exist,
-    // producing empty "File does not exist" results repeatedly. This is
-    // injected as a system message each turn because the cwd can change
-    // between turns (e.g. worktree switches) and the message is short.
-    let cwd = snap
-        .config
-        .working_dir
-        .clone()
-        .or_else(|| std::env::current_dir().ok());
-    if let Some(wd) = cwd {
-        context.lock().await.push(Message::system(format!(
-            "Current working directory: {}",
-            wd.display()
-        )));
-    }
-
     // Create TaskNode for this execution turn (DAG tracking)
     let task_node_id = snap.create_execution_node(text).await;
     Ok(PrepareOutcome::Continue { task_node_id })
@@ -204,6 +185,56 @@ mod tests {
             AgentEvent::MemoryRecalled { count } => assert_eq!(count, 7),
             other => panic!("expected MemoryRecalled, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn prepare_turn_does_not_append_cwd_system_message_each_turn() {
+        let config = AgentConfig::new("test-model", "agent", "sys")
+            .working_dir(Some(std::path::PathBuf::from("/tmp/eko-cache-test")));
+        let agent = ReactAgent::new(config);
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+
+        let _ = prepare_turn(
+            &snap,
+            &agent.memory.context,
+            &tx,
+            "first",
+            "",
+            StreamMode::Chat,
+            0,
+        )
+        .await
+        .expect("first prepare_turn must succeed");
+        let _ = prepare_turn(
+            &snap,
+            &agent.memory.context,
+            &tx,
+            "second",
+            "",
+            StreamMode::Chat,
+            0,
+        )
+        .await
+        .expect("second prepare_turn must succeed");
+
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        let system_messages = messages
+            .iter()
+            .filter(|message| matches!(message.role, echo_core::llm::types::Role::System))
+            .count();
+        let cwd_system_messages = messages
+            .iter()
+            .filter(|message| {
+                matches!(message.role, echo_core::llm::types::Role::System)
+                    && message.text_content().is_some_and(|text| {
+                        text.contains("Current working directory: /tmp/eko-cache-test")
+                    })
+            })
+            .count();
+
+        assert_eq!(system_messages, 1);
+        assert_eq!(cwd_system_messages, 1);
     }
 
     /// `UserPromptSubmit` hook returns `block: true` (via a Permission

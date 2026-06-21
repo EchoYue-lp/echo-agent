@@ -645,7 +645,7 @@ pub struct Choice {
 }
 
 /// Token usage statistics
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Usage {
     /// Prompt token count
     #[serde(default)]
@@ -656,6 +656,47 @@ pub struct Usage {
     /// Total token count
     #[serde(default)]
     pub total_tokens: Option<u32>,
+    /// OpenAI-compatible prompt token details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<TokenUsageDetails>,
+    /// Some compatible providers report input-token details instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_details: Option<TokenUsageDetails>,
+    /// Anthropic cache writes for this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    /// Anthropic cache reads for this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
+}
+
+impl Usage {
+    /// Provider-normalized prompt tokens read from cache.
+    pub fn cached_prompt_tokens(&self) -> u32 {
+        self.prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+            .or_else(|| {
+                self.input_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.cached_tokens)
+            })
+            .or(self.cache_read_input_tokens)
+            .unwrap_or(0)
+    }
+
+    /// Provider-normalized prompt tokens written into cache.
+    pub fn cache_creation_prompt_tokens(&self) -> u32 {
+        self.cache_creation_input_tokens.unwrap_or(0)
+    }
+}
+
+/// Provider-specific token details nested under usage.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct TokenUsageDetails {
+    /// Tokens served from provider-side prompt cache.
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
 }
 
 // ── Streaming Response Types ───────────────────────────────────────────────────
@@ -938,5 +979,36 @@ mod tests {
         });
         let msg: Message = serde_json::from_value(json).unwrap();
         assert_eq!(msg.content.as_text(), Some("I am a response".to_string()));
+    }
+
+    #[test]
+    fn usage_reads_openai_compatible_cached_tokens() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "total_tokens": 1020,
+            "prompt_tokens_details": {
+                "cached_tokens": 980
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(usage.cached_prompt_tokens(), 980);
+        assert_eq!(usage.cache_creation_prompt_tokens(), 0);
+    }
+
+    #[test]
+    fn usage_reads_anthropic_cache_tokens() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "total_tokens": 1020,
+            "cache_creation_input_tokens": 64,
+            "cache_read_input_tokens": 900
+        }))
+        .unwrap();
+
+        assert_eq!(usage.cached_prompt_tokens(), 900);
+        assert_eq!(usage.cache_creation_prompt_tokens(), 64);
     }
 }

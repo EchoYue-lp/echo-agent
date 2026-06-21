@@ -19,14 +19,14 @@
 //! ## 运行方式
 //!
 //! ```bash
-//! # 基础运行（需要 LLM API Key + sqlite feature）
-//! QWEN_API_KEY=your_key cargo run --example demo45_customer_service --features sqlite
+//! # 基础运行（需要 LLM API Key + sqlite + human-loop feature）
+//! QWEN_API_KEY=your_key cargo run --example demo45_customer_service --features sqlite,human-loop
 //!
 //! # 带流式输出和彩色日志
-//! RUST_LOG=info QWEN_API_KEY=your_key cargo run --example demo45_customer_service --features sqlite
+//! RUST_LOG=info QWEN_API_KEY=your_key cargo run --example demo45_customer_service --features sqlite,human-loop
 //!
 //! # 若要验证图片输入，请先在 echo-agent.yaml 中把 model.name 设为视觉模型
-//! cargo run --example demo45_customer_service --features sqlite
+//! cargo run --example demo45_customer_service --features sqlite,human-loop
 //! ```
 
 use echo_agent::human_loop::{

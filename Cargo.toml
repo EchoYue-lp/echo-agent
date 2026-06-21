@@ -143,11 +143,11 @@ required-features = ["sqlite"]
 
 [[example]]
 name = "demo45_customer_service"
-required-features = ["sqlite"]
+required-features = ["sqlite", "human-loop"]
 
 [[example]]
 name = "demo48_personal_assistant"
-required-features = ["sqlite"]
+required-features = ["sqlite", "tasks", "subagent"]
 
 [[example]]
 name = "demo46_data_analyst"
@@ -335,7 +335,7 @@ required-features = ["tasks"]
 
 [[example]]
 name = "demo68_human_gate"
-required-features = ["tasks"]
+required-features = ["tasks", "subagent", "human-loop"]
 
 [[example]]
 name = "demo69_composite"

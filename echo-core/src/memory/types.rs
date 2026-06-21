@@ -446,7 +446,7 @@ mod tests {
             "content": "Some old memory"
         });
         // This should still parse — meta will get serde defaults
-        let parsed: Result<TypedMemoryValue, _> = serde_json::from_value(old_format);
+        let _parsed: Result<TypedMemoryValue, _> = serde_json::from_value(old_format);
         // If meta is required, this will fail — that's expected.
         // The TypedMemoryStore handles backward compat by catching parse errors.
     }

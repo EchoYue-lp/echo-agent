@@ -241,6 +241,9 @@ impl AnthropicClient {
                 prompt_tokens: Some(prompt),
                 completion_tokens: Some(completion),
                 total_tokens: Some(prompt + completion),
+                cache_creation_input_tokens: u.cache_creation_input_tokens,
+                cache_read_input_tokens: u.cache_read_input_tokens,
+                ..Default::default()
             }
         });
 
@@ -367,6 +370,8 @@ impl LlmClient for AnthropicClient {
             // Track cumulative usage across streaming events
             let mut stream_input_tokens: u32 = 0;
             let mut stream_output_tokens: u32 = 0;
+            let mut stream_cache_creation_input_tokens: Option<u32> = None;
+            let mut stream_cache_read_input_tokens: Option<u32> = None;
 
             let stream = async_stream::stream! {
                 let mut byte_stream = std::pin::pin!(byte_stream);
@@ -406,6 +411,8 @@ impl LlmClient for AnthropicClient {
                                         // Capture initial usage (input_tokens) from message_start
                                         if let Some(u) = message.usage {
                                             stream_input_tokens = u.input_tokens;
+                                            stream_cache_creation_input_tokens = u.cache_creation_input_tokens;
+                                            stream_cache_read_input_tokens = u.cache_read_input_tokens;
                                         }
                                     }
                                     AnthropicStreamEvent::ContentBlockStart {
@@ -488,6 +495,9 @@ impl LlmClient for AnthropicClient {
                                                 prompt_tokens: Some(stream_input_tokens),
                                                 completion_tokens: Some(stream_output_tokens),
                                                 total_tokens: Some(stream_input_tokens + stream_output_tokens),
+                                                cache_creation_input_tokens: stream_cache_creation_input_tokens,
+                                                cache_read_input_tokens: stream_cache_read_input_tokens,
+                                                ..Default::default()
                                             })
                                         } else {
                                             None

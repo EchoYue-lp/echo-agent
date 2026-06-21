@@ -224,6 +224,8 @@ pub struct TokenUsageTracker {
     total_prompt_tokens: AtomicU64,
     total_completion_tokens: AtomicU64,
     total_tokens: AtomicU64,
+    total_cached_prompt_tokens: AtomicU64,
+    total_cache_creation_prompt_tokens: AtomicU64,
     request_count: AtomicU64,
 }
 
@@ -234,6 +236,8 @@ impl TokenUsageTracker {
             total_prompt_tokens: AtomicU64::new(0),
             total_completion_tokens: AtomicU64::new(0),
             total_tokens: AtomicU64::new(0),
+            total_cached_prompt_tokens: AtomicU64::new(0),
+            total_cache_creation_prompt_tokens: AtomicU64::new(0),
             request_count: AtomicU64::new(0),
         }
     }
@@ -254,6 +258,12 @@ impl TokenUsageTracker {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let completion = usage.completion_tokens.unwrap_or(0);
         self.record(prompt, completion, usage.total_tokens);
+        self.total_cached_prompt_tokens
+            .fetch_add(usage.cached_prompt_tokens() as u64, Ordering::Relaxed);
+        self.total_cache_creation_prompt_tokens.fetch_add(
+            usage.cache_creation_prompt_tokens() as u64,
+            Ordering::Relaxed,
+        );
     }
 
     /// Get usage summary.
@@ -261,6 +271,10 @@ impl TokenUsageTracker {
         let total_prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
         let total_completion = self.total_completion_tokens.load(Ordering::Relaxed);
         let total = self.total_tokens.load(Ordering::Relaxed);
+        let total_cached_prompt = self.total_cached_prompt_tokens.load(Ordering::Relaxed);
+        let total_cache_creation_prompt = self
+            .total_cache_creation_prompt_tokens
+            .load(Ordering::Relaxed);
         let requests = self.request_count.load(Ordering::Relaxed);
 
         UsageSummary {
@@ -268,6 +282,8 @@ impl TokenUsageTracker {
             total_prompt_tokens: total_prompt,
             total_completion_tokens: total_completion,
             total_tokens: total,
+            total_cached_prompt_tokens: total_cached_prompt,
+            total_cache_creation_prompt_tokens: total_cache_creation_prompt,
             request_count: requests,
         }
     }
@@ -277,6 +293,9 @@ impl TokenUsageTracker {
         self.total_prompt_tokens.store(0, Ordering::Relaxed);
         self.total_completion_tokens.store(0, Ordering::Relaxed);
         self.total_tokens.store(0, Ordering::Relaxed);
+        self.total_cached_prompt_tokens.store(0, Ordering::Relaxed);
+        self.total_cache_creation_prompt_tokens
+            .store(0, Ordering::Relaxed);
         self.request_count.store(0, Ordering::Relaxed);
     }
 }
@@ -288,6 +307,8 @@ pub struct UsageSummary {
     pub total_prompt_tokens: u64,
     pub total_completion_tokens: u64,
     pub total_tokens: u64,
+    pub total_cached_prompt_tokens: u64,
+    pub total_cache_creation_prompt_tokens: u64,
     pub request_count: u64,
 }
 
@@ -298,11 +319,15 @@ impl std::fmt::Display for UsageSummary {
             "Token Usage [{model}]:
   Requests:   {requests}
   Input tokens:  {prompt}
+  Cached input:  {cached_prompt}
+  Cache writes:  {cache_creation_prompt}
   Output tokens: {completion}
   Total tokens:  {total}",
             model = self.model_name,
             requests = self.request_count,
             prompt = self.total_prompt_tokens,
+            cached_prompt = self.total_cached_prompt_tokens,
+            cache_creation_prompt = self.total_cache_creation_prompt_tokens,
             completion = self.total_completion_tokens,
             total = self.total_tokens,
         )
@@ -420,5 +445,24 @@ mod tests {
         calibrated.calibrate(100, 0);
         assert!((calibrated.calibration_factor() - 1.0).abs() < f64::EPSILON);
         assert_eq!(calibrated.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_token_usage_tracker_records_prompt_cache_tokens() {
+        let tracker = TokenUsageTracker::new("test-model");
+        tracker.record_usage(&crate::llm::types::Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(20),
+            total_tokens: Some(1020),
+            prompt_tokens_details: Some(crate::llm::types::TokenUsageDetails {
+                cached_tokens: Some(980),
+            }),
+            ..Default::default()
+        });
+
+        let summary = tracker.summary();
+        assert_eq!(summary.total_prompt_tokens, 1000);
+        assert_eq!(summary.total_cached_prompt_tokens, 980);
+        assert_eq!(summary.total_cache_creation_prompt_tokens, 0);
     }
 }

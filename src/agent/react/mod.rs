@@ -556,7 +556,7 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
-        let prompt = if config.enable_tool && config.enable_cot {
+        let mut prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -565,6 +565,19 @@ impl ReactAgent {
         } else {
             config.system_prompt.clone()
         };
+
+        if let Some(wd) = config
+            .working_dir
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+        {
+            prompt = format!(
+                "{}\n\nCurrent working directory: {}",
+                prompt.trim_end(),
+                wd.display()
+            );
+        }
 
         // Project rules are only injected when the feature is enabled; the `mut`
         // binding is therefore also gated to avoid an unused-`mut` warning when
@@ -576,9 +589,10 @@ impl ReactAgent {
             let wd = config
                 .working_dir
                 .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                .ok()
+                .and_then(|guard| guard.clone())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_default();
             prompt = echo_core::project_rules::inject_rules(&prompt, &wd);
         }
 
@@ -747,7 +761,44 @@ impl ReactAgent {
     /// file, git) — so binding a worktree path here isolates that agent's
     /// file operations. Pass `None` to clear (fall back to process cwd).
     pub fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
-        *self.config.working_dir.lock().unwrap() = path;
+        let updated = match self.config.working_dir.lock() {
+            Ok(mut working_dir) => {
+                *working_dir = path;
+                true
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "Could not update agent working directory");
+                false
+            }
+        };
+        if updated {
+            self.refresh_root_system_prompt();
+        }
+    }
+
+    fn refresh_root_system_prompt(&self) {
+        let system_prompt = Self::build_system_prompt(&self.config);
+        if let Ok(mut ctx) = self.memory.context.try_lock() {
+            let mut messages = ctx.messages().to_vec();
+            if let Some(system) = messages
+                .iter_mut()
+                .find(|message| matches!(message.role, echo_core::llm::types::Role::System))
+            {
+                *system = echo_core::llm::types::Message::system(system_prompt.clone());
+            } else {
+                messages.insert(
+                    0,
+                    echo_core::llm::types::Message::system(system_prompt.clone()),
+                );
+            }
+            ctx.set_messages(messages);
+            ctx.set_canonical_system_prompt(Some(system_prompt));
+        } else {
+            tracing::warn!(
+                "Could not acquire ContextManager lock to refresh working-dir system prompt; \
+                 the next agent rebuild will include the updated cwd"
+            );
+        }
     }
 
     /// Get the current LLM configuration.
@@ -995,7 +1046,7 @@ impl ReactAgent {
     /// tool calls fall back to the process cwd. (Setting it uses
     /// [`set_working_dir`](Self::set_working_dir) with `Some(path)`.)
     pub fn clear_working_dir(&self) {
-        *self.config.working_dir.lock().unwrap() = None;
+        self.set_working_dir(None);
     }
 
     /// The current working directory binding, if any.

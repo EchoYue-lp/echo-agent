@@ -596,6 +596,13 @@ impl ContextManager {
         self.canonical_context = Some(context);
     }
 
+    /// Update only the canonical system prompt while preserving rules and skills.
+    pub fn set_canonical_system_prompt(&mut self, system_prompt: Option<String>) {
+        if let Some(context) = &mut self.canonical_context {
+            context.system_prompt = system_prompt;
+        }
+    }
+
     /// Remove the canonical context.
     pub fn remove_canonical_context(&mut self) {
         self.canonical_context = None;

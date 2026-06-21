@@ -154,6 +154,7 @@ impl OllamaClient {
                 prompt_tokens: Some(prompt),
                 completion_tokens: Some(completion),
                 total_tokens: Some(prompt + completion),
+                ..Default::default()
             })
         } else {
             None
@@ -331,6 +332,7 @@ impl LlmClient for OllamaClient {
                                             prompt_tokens: Some(prompt),
                                             completion_tokens: Some(completion),
                                             total_tokens: Some(prompt + completion),
+                                            ..Default::default()
                                         })
                                     } else {
                                         None

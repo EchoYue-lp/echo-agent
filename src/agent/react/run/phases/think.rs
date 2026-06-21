@@ -7,9 +7,10 @@ use super::{LoopState, ThinkOutcome, ThinkOutput};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{ReactError, Result};
-use crate::llm::types::Message;
+use crate::llm::types::{Message, Role, ToolDefinition};
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -186,6 +187,7 @@ pub(crate) async fn create_llm_stream(
     } else {
         None
     };
+    log_prompt_cache_shape(&messages, tools.as_deref());
     let cancel = snap.cancel_token.clone();
 
     // ── Trait path: when an LlmClient trait object is attached (production
@@ -281,4 +283,134 @@ pub(crate) async fn create_llm_stream(
     )
     .await?;
     Ok(stream)
+}
+
+fn log_prompt_cache_shape(messages: &[Message], tools: Option<&[ToolDefinition]>) {
+    let shape = PromptCacheShape::from_messages(messages, tools);
+    tracing::debug!(
+        target: "echo_agent::prompt_cache",
+        prefix_hash = %shape.prefix_hash,
+        message_count = shape.message_count,
+        leading_system_messages = shape.leading_system_messages,
+        cwd_system_messages = shape.cwd_system_messages,
+        tool_count = shape.tool_count,
+        "LLM prompt cache shape"
+    );
+    if shape.cwd_system_messages > 1 {
+        tracing::warn!(
+            target: "echo_agent::prompt_cache",
+            cwd_system_messages = shape.cwd_system_messages,
+            "Multiple cwd system messages found; prompt-cache prefix is likely unstable"
+        );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptCacheShape {
+    prefix_hash: String,
+    message_count: usize,
+    leading_system_messages: usize,
+    cwd_system_messages: usize,
+    tool_count: usize,
+}
+
+impl PromptCacheShape {
+    fn from_messages(messages: &[Message], tools: Option<&[ToolDefinition]>) -> Self {
+        let leading_system_messages = messages
+            .iter()
+            .take_while(|message| matches!(message.role, Role::System))
+            .count();
+        let cwd_system_messages = messages
+            .iter()
+            .filter(|message| {
+                matches!(message.role, Role::System)
+                    && message
+                        .text_content()
+                        .is_some_and(|text| text.contains("Current working directory:"))
+            })
+            .count();
+        let tool_count = tools.map(|defs| defs.len()).unwrap_or(0);
+        let mut hasher = StableFnv64::new();
+        for message in messages.iter().take(leading_system_messages) {
+            hasher.write_str(message.role.as_str());
+            if let Some(text) = message.text_content() {
+                hasher.write_str(&text);
+            }
+        }
+        if let Some(defs) = tools
+            && let Ok(serialized) = serde_json::to_string(defs)
+        {
+            hasher.write_str(&serialized);
+        }
+        Self {
+            prefix_hash: format!("{:016x}", hasher.finish()),
+            message_count: messages.len(),
+            leading_system_messages,
+            cwd_system_messages,
+            tool_count,
+        }
+    }
+}
+
+struct StableFnv64(u64);
+
+impl StableFnv64 {
+    fn new() -> Self {
+        Self(0xcbf29ce484222325)
+    }
+
+    fn write_str(&mut self, value: &str) {
+        self.write(value.as_bytes());
+    }
+}
+
+impl Hasher for StableFnv64 {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_cache_shape_hash_ignores_non_prefix_user_turns() {
+        let first = vec![
+            Message::system("stable system".to_string()),
+            Message::user("first request".to_string()),
+        ];
+        let second = vec![
+            Message::system("stable system".to_string()),
+            Message::user("second request".to_string()),
+        ];
+
+        let first_shape = PromptCacheShape::from_messages(&first, None);
+        let second_shape = PromptCacheShape::from_messages(&second, None);
+
+        assert_eq!(first_shape.prefix_hash, second_shape.prefix_hash);
+        assert_eq!(first_shape.leading_system_messages, 1);
+        assert_eq!(second_shape.leading_system_messages, 1);
+    }
+
+    #[test]
+    fn prompt_cache_shape_counts_duplicate_cwd_system_messages() {
+        let messages = vec![
+            Message::system("Current working directory: /tmp/a".to_string()),
+            Message::system("Current working directory: /tmp/a".to_string()),
+            Message::user("hello".to_string()),
+        ];
+
+        let shape = PromptCacheShape::from_messages(&messages, None);
+
+        assert_eq!(shape.leading_system_messages, 2);
+        assert_eq!(shape.cwd_system_messages, 2);
+    }
 }
