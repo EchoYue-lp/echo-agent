@@ -177,6 +177,10 @@ pub struct ChatRequest {
     /// Optional cancellation token for aborting in-flight requests.
     /// When set and cancelled, streaming responses will stop at the next SSE boundary.
     pub cancel_token: Option<CancellationToken>,
+    /// Optional user identifier for KVCache isolation (DeepSeek, etc.).
+    /// A stable, session-scoped ID enables the provider to reuse prompt cache
+    /// entries across requests. Without this, cache hit rate can drop to <1%.
+    pub user_id: Option<String>,
 }
 
 impl ChatRequest {

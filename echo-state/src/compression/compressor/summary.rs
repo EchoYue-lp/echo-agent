@@ -237,6 +237,7 @@ impl SummaryCompressor {
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
                     cancel_token: None,
+                    user_id: None,
                 })
                 .await
             {
@@ -464,6 +465,7 @@ impl IncrementalSummaryCompressor {
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
                     cancel_token: None,
+                    user_id: None,
                 })
                 .await
             {
@@ -531,6 +533,7 @@ impl IncrementalSummaryCompressor {
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
                     cancel_token: None,
+                    user_id: None,
                 })
                 .await
             {

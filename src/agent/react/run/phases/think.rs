@@ -264,6 +264,7 @@ pub(crate) async fn create_llm_stream(
                         response_format: None,
                         thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
+                        user_id: snap.config.cache_user_id.clone(),
                     };
                     let inner = llm_client.chat_stream(request).await?;
                     // Adapt the trait's flattened ChatChunk back into the

@@ -69,6 +69,7 @@ pub async fn chat(
         enable_thinking: None,
         thinking_budget: None,
         glm_thinking: None,
+        user_id: None,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -103,6 +104,7 @@ pub async fn stream_chat(
         enable_thinking: None,
         thinking_budget: None,
         glm_thinking: None,
+        user_id: None,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -199,6 +201,7 @@ impl LlmClient for OpenAiClient {
                     enable_thinking: t.enable_thinking,
                     thinking_budget: t.thinking_budget,
                     glm_thinking: t.glm_thinking,
+                    user_id: request.user_id.clone(),
                 };
 
                 let raw = post(
@@ -253,6 +256,7 @@ impl LlmClient for OpenAiClient {
                     enable_thinking: t.enable_thinking,
                     thinking_budget: t.thinking_budget,
                     glm_thinking: t.glm_thinking,
+                    user_id: request.user_id.clone(),
                 };
 
                 let stream = stream_post(

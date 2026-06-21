@@ -85,9 +85,22 @@ fn parse_sse_chunk(data: &str) -> Option<Result<ChatCompletionChunk>> {
         .into()));
     }
     match serde_json::from_str::<ChatCompletionChunk>(trimmed) {
-        Ok(chunk) => Some(Ok(chunk)),
+        Ok(chunk) => {
+            // Log when the final chunk includes usage so we can verify
+            // the provider's stream_options.include_usage support.
+            if chunk.usage.is_some() {
+                tracing::debug!(
+                    has_choices = !chunk.choices.is_empty(),
+                    "SSE chunk with usage parsed successfully"
+                );
+            }
+            Some(Ok(chunk))
+        }
         Err(e) => {
-            tracing::debug!(error = %e, data = %trimmed, "skip non-standard SSE data");
+            // Warn-level so the user can see if the provider returns
+            // non-standard chunks that fail to parse as ChatCompletionChunk
+            // (e.g. usage-only chunks with unexpected field types).
+            tracing::warn!(error = %e, data = %trimmed, "SSE chunk failed to parse — provider may use non-standard format");
             None
         }
     }

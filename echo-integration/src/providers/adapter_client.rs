@@ -1,106 +1,87 @@
-//! Google Gemini API client.
-//!
-//! Uses the OpenAI-compatible endpoint provided by Google's Generative AI API.
-//! Base URL: `https://generativelanguage.googleapis.com/v1beta/openai/`
-//!
-//! Auth: `x-goog-api-key: {api_key}` header.
+//! OpenAI-compatible client that delegates vendor-specific behaviour to a
+//! [`ProviderAdapter`]. This avoids duplicating the HTTP/SSE layer across
+//! DeepSeek, GLM, Kimi, Qwen while still letting each provider own its
+//! thinking protocol, cache policy, and request customisation.
 
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::capabilities::ProviderCapabilities;
-use echo_core::llm::types::{ChatCompletionRequest, ChatCompletionResponse};
+use echo_core::llm::types::ChatCompletionRequest;
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
-use tracing::{Instrument, info_span};
+use tracing::Instrument;
+use tracing::info_span;
 
 use super::client::{post, stream_post};
-use super::config::{LlmConfig, LlmProvider, ModelConfig};
 use super::thinking_translate::translate_thinking_openai_compat;
+use super::traits::ProviderAdapter;
 
-const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
-
-/// Google Gemini client (OpenAI-compatible endpoint).
-pub struct GeminiClient {
+/// An OpenAI-compatible LLM client whose per-vendor differences are captured
+/// in a [`ProviderAdapter`]. The HTTP layer is shared; the adapter controls
+/// request customisation, thinking fields, and cache policy.
+pub struct AdapterClient<A: ProviderAdapter> {
     client: Arc<Client>,
-    config: ModelConfig,
     header_map: HeaderMap,
+    base_url: String,
+    model: String,
+    adapter: A,
+    /// Resolved cache policy (cached so we don't recompute on every call).
+    cache_policy: echo_core::llm::capabilities::CachePolicy,
 }
 
-impl GeminiClient {
-    /// Create from an LlmConfig.
-    pub fn new(config: LlmConfig) -> Result<Self> {
-        let mut model_config = config.to_model_config();
-        // Default base URL for Gemini
-        if model_config.baseurl.is_empty() {
-            model_config.baseurl = DEFAULT_BASE_URL.to_string();
-        }
-        let header_map = build_headers(&model_config)?;
+impl<A: ProviderAdapter> AdapterClient<A> {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        adapter: A,
+    ) -> Result<Self> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            format!("Bearer {}", api_key.into())
+                .parse()
+                .map_err(|e| LlmError::NetworkError(format!("Invalid auth header: {e}")))?,
+        );
+        headers.insert("Content-Type", "application/json".parse().unwrap());
+        let cache_policy = adapter.cache_policy();
         Ok(Self {
-            client: Arc::new(Self::build_http_client()),
-            config: model_config,
-            header_map,
+            client: Arc::new(
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .unwrap_or_default(),
+            ),
+            header_map: headers,
+            base_url: base_url.into(),
+            model: model.into(),
+            adapter,
+            cache_policy,
         })
     }
 
-    /// Create with explicit parameters.
-    pub fn with_base_url(api_key: &str, model: &str, base_url: &str) -> Result<Self> {
-        let model_config = ModelConfig {
-            model: model.to_string(),
-            baseurl: base_url.to_string(),
-            apikey: api_key.to_string(),
-            provider: LlmProvider::Gemini,
-            provider_name: Some("gemini".to_string()),
-            thinking: None,
-        };
-        let header_map = build_headers(&model_config)?;
-        Ok(Self {
-            client: Arc::new(Self::build_http_client()),
-            config: model_config,
-            header_map,
-        })
-    }
-
-    fn build_http_client() -> Client {
-        Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_default()
+    pub fn cache_policy(&self) -> &echo_core::llm::capabilities::CachePolicy {
+        &self.cache_policy
     }
 }
 
-fn build_headers(config: &ModelConfig) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "x-goog-api-key",
-        config.apikey.parse().map_err(|e| {
-            echo_core::error::ReactError::Other(format!("Invalid API key header: {}", e))
-        })?,
-    );
-    headers.insert(
-        "Content-Type",
-        "application/json".parse().map_err(|e| {
-            echo_core::error::ReactError::Other(format!("Invalid Content-Type: {}", e))
-        })?,
-    );
-    Ok(headers)
-}
-
-impl LlmClient for GeminiClient {
+impl<A: ProviderAdapter + 'static> LlmClient for AdapterClient<A> {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
-        let model = self.config.model.clone();
+        let model = self.model.clone();
         Box::pin(
             async move {
+                let provider_str = self.adapter.provider_name();
                 let t = translate_thinking_openai_compat(
-                    &self.config.model,
-                    "gemini",
+                    &self.model,
+                    provider_str,
                     &request.thinking,
                     ProviderCapabilities::openai_compatible(),
                 );
-                let req = ChatCompletionRequest {
-                    model: self.config.model.clone(),
+                let mut req = ChatCompletionRequest {
+                    model: self.model.clone(),
                     messages: request.messages,
                     temperature: if t.drop_temperature {
                         None
@@ -119,24 +100,24 @@ impl LlmClient for GeminiClient {
                     glm_thinking: t.glm_thinking,
                     user_id: request.user_id.clone(),
                 };
+                // Let the adapter customise the request
+                self.adapter.prepare_request(&mut req);
 
-                let raw: ChatCompletionResponse = post(
+                let raw = post(
                     self.client.clone(),
                     &req,
                     self.header_map.clone(),
-                    &self.config.baseurl,
+                    &self.base_url,
                 )
                 .await?;
-
                 let choice = raw.choices.first().ok_or(LlmError::EmptyResponse)?;
-
                 Ok(ChatResponse {
                     message: choice.message.clone(),
                     finish_reason: choice.finish_reason.clone(),
                     raw,
                 })
             }
-            .instrument(info_span!("gemini_chat", model = %model)),
+            .instrument(info_span!("adapter_chat", model = %model)),
         )
     }
 
@@ -144,17 +125,18 @@ impl LlmClient for GeminiClient {
         &self,
         request: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
-        let model = self.config.model.clone();
+        let model = self.model.clone();
         Box::pin(
             async move {
+                let provider_str = self.adapter.provider_name();
                 let t = translate_thinking_openai_compat(
-                    &self.config.model,
-                    "gemini",
+                    &self.model,
+                    provider_str,
                     &request.thinking,
                     ProviderCapabilities::openai_compatible(),
                 );
-                let req = ChatCompletionRequest {
-                    model: self.config.model.clone(),
+                let mut req = ChatCompletionRequest {
+                    model: self.model.clone(),
                     messages: request.messages,
                     temperature: if t.drop_temperature {
                         None
@@ -173,16 +155,16 @@ impl LlmClient for GeminiClient {
                     glm_thinking: t.glm_thinking,
                     user_id: request.user_id.clone(),
                 };
+                self.adapter.prepare_request(&mut req);
 
                 let stream = stream_post(
                     self.client.clone(),
                     req,
                     self.header_map.clone(),
-                    self.config.baseurl.clone(),
+                    self.base_url.clone(),
                     request.cancel_token,
                 )
                 .await?;
-
                 Ok(Box::pin(futures::StreamExt::map(stream, |result| {
                     result.map(|chunk| {
                         let choice = chunk.choices.first();
@@ -194,15 +176,11 @@ impl LlmClient for GeminiClient {
                     })
                 })) as BoxStream<'_, Result<ChatChunk>>)
             }
-            .instrument(info_span!("gemini_stream", model = %model)),
+            .instrument(info_span!("adapter_chat_stream", model = %model)),
         )
     }
 
     fn model_name(&self) -> &str {
-        &self.config.model
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::openai_compatible()
+        &self.model
     }
 }

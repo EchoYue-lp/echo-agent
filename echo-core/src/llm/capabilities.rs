@@ -368,6 +368,89 @@ fn resolve_thinking_protocol(lower_model: &str, provider: &str) -> ThinkingProto
     T::None
 }
 
+// ── Cache Policy ──────────────────────────────────────────────────────
+
+/// Provider-specific cache behaviour that affects how we structure prompts.
+///
+/// Different providers key their prompt cache on different parts of the
+/// request. This policy tells the prompt assembler what to stabilize.
+#[derive(Debug, Clone)]
+pub struct CachePolicy {
+    /// Whether sending a stable `user_id` enables KVCache partition reuse.
+    /// True for DeepSeek, false for providers that don't support it.
+    pub stable_user_id_enables_cache: bool,
+    /// Whether the provider reports cache hit tokens in usage metadata.
+    /// False means we can't measure cache effectiveness.
+    pub reports_cache_metrics: bool,
+    /// Whether tool definitions are part of the cache key. When true,
+    /// tool list order and content must be deterministic across requests.
+    pub cache_key_includes_tools: bool,
+    /// Whether the system message is part of the cache key prefix.
+    /// When true, any change to the system message invalidates cache.
+    pub cache_key_includes_system_prompt: bool,
+    /// Recommended minimum stable prefix length in tokens. Content after
+    /// this point in the system prompt can vary without breaking cache.
+    /// 0 = entire system prompt must be stable.
+    pub recommended_stable_prefix_tokens: usize,
+}
+
+impl Default for CachePolicy {
+    fn default() -> Self {
+        Self {
+            stable_user_id_enables_cache: false,
+            reports_cache_metrics: true,
+            cache_key_includes_tools: true,
+            cache_key_includes_system_prompt: true,
+            recommended_stable_prefix_tokens: 0,
+        }
+    }
+}
+
+impl CachePolicy {
+    /// Cache policy for DeepSeek (KVCache, user_id-based isolation).
+    pub fn deepseek() -> Self {
+        Self {
+            stable_user_id_enables_cache: true,
+            reports_cache_metrics: true,
+            cache_key_includes_tools: true,
+            cache_key_includes_system_prompt: true,
+            recommended_stable_prefix_tokens: 2000,
+        }
+    }
+
+    /// Cache policy for Anthropic (prompt caching, explicit cache breakpoints).
+    pub fn anthropic() -> Self {
+        Self {
+            stable_user_id_enables_cache: false,
+            reports_cache_metrics: true,
+            cache_key_includes_tools: true,
+            cache_key_includes_system_prompt: true,
+            recommended_stable_prefix_tokens: 1024,
+        }
+    }
+
+    /// Cache policy for OpenAI (prefix caching, automatic).
+    pub fn openai() -> Self {
+        Self {
+            stable_user_id_enables_cache: false,
+            reports_cache_metrics: true,
+            cache_key_includes_tools: true,
+            cache_key_includes_system_prompt: true,
+            recommended_stable_prefix_tokens: 1024,
+        }
+    }
+
+    /// Resolve cache policy from the provider name.
+    pub fn from_provider(provider: &str) -> Self {
+        match provider.to_ascii_lowercase().as_str() {
+            "deepseek" => Self::deepseek(),
+            "anthropic" => Self::anthropic(),
+            "openai" => Self::openai(),
+            _ => Self::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -499,8 +499,18 @@ impl ReactAgent {
             memory_context = Some(format_memory_context(&items));
         }
 
-        // Push user message
-        let user_text = merge_memory_context_with_user_input(memory_context.as_deref(), input);
+        // Push user message with workspace context prefix (keeps system prompt cache-stable)
+        let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
+        let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
+        let user_text = if ws_block.is_empty() {
+            merge_memory_context_with_user_input(memory_context.as_deref(), input)
+        } else {
+            format!(
+                "{}\n{}",
+                ws_block,
+                merge_memory_context_with_user_input(memory_context.as_deref(), input)
+            )
+        };
         self.memory
             .context
             .lock()

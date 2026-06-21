@@ -152,6 +152,7 @@ impl LlmClient for AzureOpenAiClient {
                     enable_thinking: t.enable_thinking,
                     thinking_budget: t.thinking_budget,
                     glm_thinking: t.glm_thinking,
+                    user_id: request.user_id.clone(),
                 };
 
                 let raw: ChatCompletionResponse =
@@ -201,6 +202,7 @@ impl LlmClient for AzureOpenAiClient {
                     enable_thinking: t.enable_thinking,
                     thinking_budget: t.thinking_budget,
                     glm_thinking: t.glm_thinking,
+                    user_id: request.user_id.clone(),
                 };
 
                 let stream = stream_post(

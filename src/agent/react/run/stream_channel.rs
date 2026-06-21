@@ -231,6 +231,7 @@ impl AgentSnapshot {
         let stream = super::phases::think::create_llm_stream(self, messages).await?;
         let mut stream = std::pin::pin!(stream);
         let mut content = String::new();
+        let mut last_usage: Option<echo_core::llm::types::Usage> = None;
         use futures::StreamExt;
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -245,6 +246,11 @@ impl AgentSnapshot {
                     return Ok(content);
                 }
             };
+            // Capture usage from the final streaming chunk (when
+            // stream_options.include_usage is supported by the provider).
+            if chunk.usage.is_some() {
+                last_usage = chunk.usage.clone();
+            }
             // DirectAnswer is plain text — only forward content deltas, ignore
             // reasoning/tool_call deltas (no tools are attached).
             if let Some(choice) = chunk.choices.first()
@@ -258,6 +264,42 @@ impl AgentSnapshot {
                 }
             }
         }
+
+        // Emit LlmUsage so the observability system records token counts.
+        // This mirrors what run_think() does for the full ReAct path.
+        let pt = last_usage
+            .as_ref()
+            .and_then(|u| u.prompt_tokens)
+            .unwrap_or(0) as usize;
+        let ct = last_usage
+            .as_ref()
+            .and_then(|u| u.completion_tokens)
+            .unwrap_or(0) as usize;
+        let total_tokens = last_usage
+            .as_ref()
+            .and_then(|u| u.total_tokens)
+            .map(|t| t as usize)
+            .unwrap_or_else(|| pt.saturating_add(ct));
+        let cached_prompt_tokens = last_usage
+            .as_ref()
+            .map(|u| u.cached_prompt_tokens() as usize)
+            .unwrap_or(0);
+        let cache_creation_prompt_tokens = last_usage
+            .as_ref()
+            .map(|u| u.cache_creation_prompt_tokens() as usize)
+            .unwrap_or(0);
+        let usage_reported = last_usage.is_some();
+        let _ = tx
+            .send(Ok(AgentEvent::LlmUsage {
+                model: self.config.model_name.clone(),
+                prompt_tokens: pt,
+                completion_tokens: ct,
+                total_tokens,
+                cached_prompt_tokens,
+                cache_creation_prompt_tokens,
+                usage_reported,
+            }))
+            .await;
 
         // Terminal event — frontend treats FinalAnswer as end-of-stream.
         let _ = tx.send(Ok(AgentEvent::FinalAnswer(content.clone()))).await;

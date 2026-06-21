@@ -87,6 +87,8 @@ pub struct RuntimeConfig {
     pub verifier_max_retries: usize,
     /// Whether plan mode is enabled (read-only tools only).
     pub plan_mode: bool,
+    /// Stable user identifier for KVCache isolation (DeepSeek, etc.).
+    pub cache_user_id: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -114,6 +116,7 @@ impl RuntimeConfig {
             verifier_min_score: config.verifier_min_score,
             verifier_max_retries: config.verifier_max_retries,
             plan_mode: config.plan_mode,
+            cache_user_id: config.cache_user_id.clone(),
         }
     }
 

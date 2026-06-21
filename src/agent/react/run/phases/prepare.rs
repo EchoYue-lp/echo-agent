@@ -224,6 +224,8 @@ mod tests {
             .iter()
             .filter(|message| matches!(message.role, echo_core::llm::types::Role::System))
             .count();
+        // CWD is now injected into user messages (not system) so the system prefix
+        // stays cache-stable across workspace changes.
         let cwd_system_messages = messages
             .iter()
             .filter(|message| {
@@ -233,9 +235,16 @@ mod tests {
                     })
             })
             .count();
-
-        assert_eq!(system_messages, 1);
-        assert_eq!(cwd_system_messages, 1);
+        assert_eq!(
+            system_messages, 1,
+            "only one system message (the base prompt)"
+        );
+        assert_eq!(
+            cwd_system_messages, 0,
+            "CWD must NOT be in system messages — it breaks prompt cache"
+        );
+        // CWD is now injected into user messages via prepare_stream_context
+        // (tested separately). This test only verifies system message stability.
     }
 
     /// `UserPromptSubmit` hook returns `block: true` (via a Permission

@@ -372,8 +372,49 @@ impl LlmConfig {
     pub fn build_client(&self) -> Result<Box<dyn echo_core::llm::LlmClient>> {
         match self.provider {
             LlmProvider::OpenAi => {
-                let client = super::openai::OpenAiClient::new(self.clone())?;
-                Ok(Box::new(client))
+                let provider_name = self
+                    .provider_name
+                    .as_deref()
+                    .unwrap_or("openai")
+                    .to_ascii_lowercase();
+                match provider_name.as_str() {
+                    "deepseek" => {
+                        let client = super::deepseek::DeepSeekClient::with_base_url(
+                            &self.api_key,
+                            &self.model,
+                            &self.base_url,
+                        )?;
+                        Ok(Box::new(client))
+                    }
+                    "dashscope" | "qwen" | "aliyun" => {
+                        let client = super::qwen::QwenClient::with_base_url(
+                            &self.api_key,
+                            &self.model,
+                            &self.base_url,
+                        )?;
+                        Ok(Box::new(client))
+                    }
+                    "zhipu" | "glm" | "bigmodel" => {
+                        let client = super::glm::GlmClient::with_base_url(
+                            &self.api_key,
+                            &self.model,
+                            &self.base_url,
+                        )?;
+                        Ok(Box::new(client))
+                    }
+                    "moonshot" | "kimi" => {
+                        let client = super::kimi::KimiClient::with_base_url(
+                            &self.api_key,
+                            &self.model,
+                            &self.base_url,
+                        )?;
+                        Ok(Box::new(client))
+                    }
+                    _ => {
+                        let client = super::openai::OpenAiClient::new(self.clone())?;
+                        Ok(Box::new(client))
+                    }
+                }
             }
             LlmProvider::Anthropic => {
                 let client = super::anthropic::AnthropicClient::with_base_url(

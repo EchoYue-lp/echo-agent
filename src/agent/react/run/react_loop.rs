@@ -42,6 +42,7 @@ impl ReactAgent {
                 response_format: response_format.clone(),
                 thinking: self.thinking.clone(),
                 cancel_token: None,
+                user_id: None,
             };
             let msg_count = request.messages.len();
             let tool_count = request.tools.as_ref().map_or(0, |t| t.len());

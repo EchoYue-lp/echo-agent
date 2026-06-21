@@ -564,6 +564,12 @@ pub struct ChatCompletionRequest {
     /// for models that speak [`ThinkingProtocol::GlmThinkingType`].
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinking")]
     pub glm_thinking: Option<GlmThinkingBlock>,
+    /// User identifier for KVCache isolation (DeepSeek, etc.).
+    /// When set, the provider uses this to partition prompt cache entries.
+    /// Without it, every request may be treated as from a different user,
+    /// preventing cache reuse across requests in the same session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// GLM `thinking:{type:"enabled"|"disabled"}` wire block.
@@ -668,10 +674,23 @@ pub struct Usage {
     /// Anthropic cache reads for this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u32>,
+    /// DeepSeek: prompt tokens served from context cache (KV cache hit).
+    /// `prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_hit_tokens: Option<u32>,
+    /// DeepSeek: prompt tokens NOT served from cache (cache miss).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_miss_tokens: Option<u32>,
 }
 
 impl Usage {
     /// Provider-normalized prompt tokens read from cache.
+    ///
+    /// Checks in priority order:
+    /// 1. OpenAI `prompt_tokens_details.cached_tokens`
+    /// 2. Compatible providers `input_tokens_details.cached_tokens`
+    /// 3. Anthropic `cache_read_input_tokens`
+    /// 4. DeepSeek `prompt_cache_hit_tokens`
     pub fn cached_prompt_tokens(&self) -> u32 {
         self.prompt_tokens_details
             .as_ref()
@@ -682,6 +701,7 @@ impl Usage {
                     .and_then(|details| details.cached_tokens)
             })
             .or(self.cache_read_input_tokens)
+            .or(self.prompt_cache_hit_tokens)
             .unwrap_or(0)
     }
 
@@ -715,10 +735,28 @@ pub struct ChatCompletionChunk {
     pub usage: Option<Usage>,
 }
 
+/// Deserialize `null` as `T::default()` for use with `#[serde(deserialize_with)]`.
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
+}
+
 /// Streaming candidate response
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChunkChoice {
-    /// Incremental message content
+    /// Incremental message content.
+    ///
+    /// `deserialize_with = "deserialize_null_as_default"` is critical: when
+    /// `stream_options.include_usage` is set and the provider returns the
+    /// final chunk with usage, the `choices` array may contain an item where
+    /// `delta` is `null` (e.g. `{"delta":null,"finish_reason":"stop"}`).
+    /// Without this deserializer, null delta fails to parse, the entire chunk
+    /// is dropped, and the `usage` field is silently lost — making every LLM
+    /// call show `usage_reported: false` in observability.
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub delta: DeltaMessage,
     /// Finish reason
     #[serde(default)]
@@ -1010,5 +1048,83 @@ mod tests {
 
         assert_eq!(usage.cached_prompt_tokens(), 900);
         assert_eq!(usage.cache_creation_prompt_tokens(), 64);
+    }
+
+    #[test]
+    fn usage_reads_deepseek_cache_hit_tokens() {
+        // DeepSeek uses top-level `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+        // instead of the OpenAI `prompt_tokens_details.cached_tokens` pattern.
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "total_tokens": 1020,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200
+        }))
+        .unwrap();
+
+        assert_eq!(usage.prompt_tokens, Some(1000));
+        assert_eq!(usage.completion_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(1020));
+        assert_eq!(usage.cached_prompt_tokens(), 800);
+        assert_eq!(
+            usage.prompt_cache_hit_tokens,
+            Some(800),
+            "should preserve the raw field for direct access"
+        );
+        assert_eq!(
+            usage.prompt_cache_miss_tokens,
+            Some(200),
+            "should preserve the raw field for direct access"
+        );
+    }
+
+    #[test]
+    fn chunk_choice_handles_null_delta_in_usage_chunk() {
+        // When stream_options.include_usage is set, some providers (DeepSeek,
+        // OpenAI, etc.) send a final chunk where `delta` is null because the
+        // model has stopped producing content. The chunk still carries `usage`.
+        let json = serde_json::json!({
+            "id": "chatcmpl-xxx",
+            "choices": [{
+                "delta": null,
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 80,
+                "total_tokens": 580,
+                "prompt_cache_hit_tokens": 400
+            }
+        });
+        let chunk: ChatCompletionChunk = serde_json::from_value(json).unwrap();
+        assert!(
+            chunk.usage.is_some(),
+            "usage must be parsed even when delta is null"
+        );
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, Some(500));
+        assert_eq!(usage.cached_prompt_tokens(), 400);
+    }
+
+    #[test]
+    fn chunk_choice_handles_missing_delta_in_usage_chunk() {
+        // Some providers send a usage-only chunk with choices omitted or empty.
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 80,
+                "total_tokens": 580,
+                "prompt_cache_hit_tokens": 50
+            }
+        });
+        let chunk: ChatCompletionChunk = serde_json::from_value(json).unwrap();
+        assert!(
+            chunk.usage.is_some(),
+            "usage-only chunk without choices must parse"
+        );
+        assert!(chunk.choices.is_empty());
+        assert_eq!(chunk.usage.unwrap().cached_prompt_tokens(), 50);
     }
 }

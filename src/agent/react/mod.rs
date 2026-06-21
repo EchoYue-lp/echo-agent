@@ -556,7 +556,13 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
-        let mut prompt = if config.enable_tool && config.enable_cot {
+        // ── Stable prefix: NEVER include per-request or per-session data ──
+        // CWD, workspace info, timestamps, run_id, memory recall etc. belong
+        // in the user message, not the system prompt. The system prefix is
+        // what provider-side prompt caching (DeepSeek KVCache, Anthropic
+        // prompt cache, OpenAI prefix cache) keys on — any change to it
+        // invalidates the entire cache.
+        let prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -566,22 +572,9 @@ impl ReactAgent {
             config.system_prompt.clone()
         };
 
-        if let Some(wd) = config
-            .working_dir
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-        {
-            prompt = format!(
-                "{}\n\nCurrent working directory: {}",
-                prompt.trim_end(),
-                wd.display()
-            );
-        }
-
-        // Project rules are only injected when the feature is enabled; the `mut`
-        // binding is therefore also gated to avoid an unused-`mut` warning when
-        // the feature is off.
+        // Project rules are loaded from the workspace and are stable per
+        // project. They can stay in the system prompt since they don't
+        // change between requests within the same workspace.
         #[cfg(feature = "project-rules")]
         let mut prompt = prompt;
         #[cfg(feature = "project-rules")]
@@ -597,6 +590,21 @@ impl ReactAgent {
         }
 
         prompt
+    }
+
+    /// Build a workspace context block to be injected into the first user message
+    /// (NOT the system prompt). This keeps the system prefix cache-stable across
+    /// workspace changes.
+    pub fn build_workspace_context_block(working_dir: Option<&std::path::PathBuf>) -> String {
+        let mut parts = Vec::new();
+        if let Some(wd) = working_dir {
+            parts.push(format!("- root: {}", wd.display()));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("[workspace]\n{}\n[/workspace]\n", parts.join("\n"))
+        }
     }
 
     fn register_feature_gated_tools(config: &AgentConfig, tool_manager: &mut ToolManager) {
@@ -828,6 +836,11 @@ impl ReactAgent {
     /// Get a read-only reference to the AgentConfig.
     pub fn config(&self) -> &AgentConfig {
         &self.config
+    }
+
+    /// Mutable reference to the agent config for runtime adjustments.
+    pub fn config_mut(&mut self) -> &mut AgentConfig {
+        &mut self.config
     }
 
     /// Get the cumulative token usage summary for this agent.
@@ -2451,6 +2464,7 @@ impl ReactAgent {
                     response_format: None,
                     thinking: self.thinking.clone(),
                     cancel_token: None,
+                    user_id: None,
                 })
                 .await?;
             response.content().unwrap_or_default()

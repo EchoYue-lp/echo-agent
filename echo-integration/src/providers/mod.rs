@@ -1,15 +1,26 @@
+pub mod adapter_client;
 pub mod anthropic;
 pub mod azure;
 pub mod client;
 pub mod config;
+pub mod deepseek;
 pub mod gemini;
+pub mod glm;
+pub mod kimi;
 pub mod ollama;
 pub mod openai;
+pub mod qwen;
 pub mod thinking_translate;
+pub mod traits;
 
+pub use adapter_client::AdapterClient;
 pub use anthropic::AnthropicClient;
 pub use azure::AzureOpenAiClient;
 pub use config::{Config, LlmConfig, LlmProvider, ModelConfig, ProviderFactory};
+pub use deepseek::DeepSeekClient;
 pub use gemini::GeminiClient;
+pub use glm::GlmClient;
+pub use kimi::KimiClient;
 pub use ollama::OllamaClient;
 pub use openai::{DefaultLlmClient, OpenAiClient};
+pub use qwen::QwenClient;

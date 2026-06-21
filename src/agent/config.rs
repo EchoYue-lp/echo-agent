@@ -106,6 +106,10 @@ pub struct AgentConfig {
     pub(crate) temperature: Option<f32>,
     /// Maximum generation token count (None means use model default)
     pub(crate) max_tokens: Option<u32>,
+    /// Stable user identifier sent to providers for KVCache isolation.
+    /// DeepSeek etc. use this to partition prompt cache. A stable, session-scoped
+    /// value enables >90% cache hit rate; without it, every request caches separately.
+    pub(crate) cache_user_id: Option<String>,
     /// Whether to automatically load project rules file (`.echo-agent/AGENT.md`), default true
     pub(crate) auto_project_rules: bool,
     /// Working directory (for searching project rules files), None means use current directory.
@@ -184,6 +188,7 @@ impl AgentConfig {
             compress_threshold_ratio: 0.2,
             temperature: None,
             max_tokens: None,
+            cache_user_id: None,
             auto_project_rules: true,
             working_dir: std::sync::Mutex::new(None),
             token_budget_config: TokenBudgetConfig::default(),
@@ -396,6 +401,19 @@ impl AgentConfig {
     /// Set model name at runtime (mutable reference version)
     pub fn set_model_name(&mut self, model_name: &str) {
         self.model_name = model_name.to_string();
+    }
+
+    /// Set a stable cache user_id for KVCache isolation (DeepSeek, etc.).
+    /// A stable session-scoped id enables the provider to reuse prompt cache
+    /// across requests. Without this, cache hit rate can drop to <1%.
+    pub fn cache_user_id(mut self, id: impl Into<String>) -> Self {
+        self.cache_user_id = Some(id.into());
+        self
+    }
+
+    /// Set cache_user_id at runtime.
+    pub fn set_cache_user_id(&mut self, id: impl Into<String>) {
+        self.cache_user_id = Some(id.into());
     }
 
     /// Set system prompt

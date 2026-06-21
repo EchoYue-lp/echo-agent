@@ -58,18 +58,54 @@ pub fn translate_thinking_openai_compat(
             // `xhigh`→`max`). It does NOT support `minimal`/`none` — so when the
             // provider is `deepseek`, clamp Minimal/None/Disabled to `"low"` (the
             // lowest valid DeepSeek effort) instead of `"minimal"` (which would 400).
+            //
+            // DeepSeek ALSO supports `thinking:{type:"enabled"|"disabled"}` as an
+            // on/off toggle. When the user explicitly disables thinking, we must
+            // send `thinking:{type:"disabled"}` WITHOUT reasoning_effort — because
+            // even `reasoning_effort:"low"` engages the thinking loop (server maps
+            // low→high). For enabled modes, we send both `reasoning_effort` AND
+            // `thinking:{type:"enabled"}` to match the official API spec.
             let is_deepseek = provider == "deepseek";
-            let effort = cfg.to_reasoning_effort().map(|e| {
-                if is_deepseek && (e == "minimal" || e == "none") {
-                    "low".to_string()
-                } else {
-                    e.to_string()
+            if is_deepseek {
+                match cfg {
+                    ThinkingConfig::Disabled => OpenAiCompatThinking {
+                        // DeepSeek: disable thinking completely via the toggle.
+                        // Do NOT send reasoning_effort — any value engages thinking.
+                        glm_thinking: Some(GlmThinkingBlock {
+                            block_type: "disabled".to_string(),
+                        }),
+                        // Keep temperature: deepseek non-thinking mode accepts it.
+                        drop_temperature: false,
+                        ..Default::default()
+                    },
+                    _ => {
+                        // Clamp reasoning_effort to deepseek's valid set: only
+                        // `high` and `max`. low/medium/minimal → high, xhigh → max.
+                        let raw = cfg.to_reasoning_effort().unwrap_or("high");
+                        let clamped = match raw {
+                            "max" | "xhigh" => "max",
+                            _ => "high", // low/medium/minimal/high all → high
+                        };
+                        OpenAiCompatThinking {
+                            reasoning_effort: Some(clamped.to_string()),
+                            // DeepSeek requires thinking.type alongside reasoning_effort
+                            // per the official API spec (defaults to "enabled", but
+                            // sending it explicitly avoids ambiguity).
+                            glm_thinking: Some(GlmThinkingBlock {
+                                block_type: "enabled".to_string(),
+                            }),
+                            drop_temperature: true,
+                            ..Default::default()
+                        }
+                    }
                 }
-            });
-            OpenAiCompatThinking {
-                reasoning_effort: effort,
-                drop_temperature: true,
-                ..Default::default()
+            } else {
+                let effort = cfg.to_reasoning_effort().map(|e| e.to_string());
+                OpenAiCompatThinking {
+                    reasoning_effort: effort,
+                    drop_temperature: true,
+                    ..Default::default()
+                }
             }
         }
         (Some(cfg), ThinkingProtocol::GlmReasoningEffort) => {
@@ -167,9 +203,10 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_uses_reasoning_effort_not_enable_thinking() {
-        // DeepSeek-V3.2+ / R1 are OpenAI-compatible: reasoning_effort, NOT
-        // enable_thinking. Correctness regression for the original impl bug.
+    fn deepseek_uses_reasoning_effort_and_thinking_type_enabled() {
+        // DeepSeek-V3.2+ uses BOTH reasoning_effort AND thinking:{type:"enabled"}
+        // per the official API spec. The thinking.type toggle is the on/off
+        // switch; reasoning_effort controls intensity (high/max only).
         let r = translate(
             "deepseek-r1",
             "deepseek",
@@ -177,10 +214,92 @@ mod tests {
         );
         assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
         assert!(
-            r.enable_thinking.is_none(),
-            "DeepSeek must NOT use enable_thinking (no such param)"
+            r.glm_thinking.is_some(),
+            "DeepSeek must send thinking.type alongside reasoning_effort"
         );
+        assert_eq!(
+            r.glm_thinking.as_ref().unwrap().block_type,
+            "enabled",
+            "thinking.type must be 'enabled' for high effort"
+        );
+        assert!(r.enable_thinking.is_none());
         assert!(r.drop_temperature);
+    }
+
+    #[test]
+    fn deepseek_disabled_sends_thinking_type_disabled_no_reasoning_effort() {
+        // When thinking is disabled, DeepSeek must use thinking:{type:"disabled"}
+        // WITHOUT reasoning_effort. Sending ANY reasoning_effort value (even
+        // "low") engages the thinking loop because the server maps low→high.
+        let r = translate(
+            "deepseek-v4-pro",
+            "deepseek",
+            Some(ThinkingConfig::Disabled),
+        );
+        assert!(
+            r.reasoning_effort.is_none(),
+            "DeepSeek disabled: must NOT send reasoning_effort (any value engages thinking)"
+        );
+        assert!(
+            r.glm_thinking.is_some(),
+            "DeepSeek disabled: must send thinking.type"
+        );
+        assert_eq!(
+            r.glm_thinking.as_ref().unwrap().block_type,
+            "disabled",
+            "thinking.type must be 'disabled'"
+        );
+        assert!(
+            !r.drop_temperature,
+            "non-thinking mode must keep temperature"
+        );
+    }
+
+    #[test]
+    fn deepseek_xhigh_clamps_to_max_with_thinking_enabled() {
+        let r = translate(
+            "deepseek-v4-pro",
+            "deepseek",
+            Some(ThinkingConfig::Level(ThinkingLevel::Xhigh)),
+        );
+        assert_eq!(r.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(r.glm_thinking.as_ref().unwrap().block_type, "enabled");
+        assert!(r.drop_temperature);
+    }
+
+    #[test]
+    fn deepseek_low_clamps_to_high() {
+        // DeepSeek only supports high/max; low→high server-side, but we clamp
+        // client-side to avoid relying on server compat mapping.
+        let r = translate(
+            "deepseek-v4-pro",
+            "deepseek",
+            Some(ThinkingConfig::Level(ThinkingLevel::Low)),
+        );
+        assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(r.glm_thinking.as_ref().unwrap().block_type, "enabled");
+    }
+
+    #[test]
+    fn deepseek_medium_clamps_to_high() {
+        let r = translate(
+            "deepseek-v4-pro",
+            "deepseek",
+            Some(ThinkingConfig::Level(ThinkingLevel::Medium)),
+        );
+        assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(r.glm_thinking.as_ref().unwrap().block_type, "enabled");
+    }
+
+    #[test]
+    fn deepseek_budget_tokens_low_uses_high() {
+        let r = translate(
+            "deepseek-v4-pro",
+            "deepseek",
+            Some(ThinkingConfig::BudgetTokens(2000)),
+        );
+        assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(r.glm_thinking.as_ref().unwrap().block_type, "enabled");
     }
 
     #[test]

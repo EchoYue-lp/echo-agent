@@ -520,6 +520,7 @@ impl AdaptiveCompressor {
                     response_format: Some(echo_core::llm::types::ResponseFormat::JsonObject),
                     thinking: None,
                     cancel_token: None,
+                    user_id: None,
                 })
                 .await
             {

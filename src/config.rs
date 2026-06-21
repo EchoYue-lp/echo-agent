@@ -226,7 +226,7 @@ impl AppConfig {
 ///
 /// Authentication and base URL can be set via:
 /// - Config file: auth_token and base_url fields (highest priority)
-/// - Environment variables: ECHOCOWORK_AUTH_TOKEN, ECHOCOWORK_BASE_URL, ECHOCOWORK_MODEL
+/// - Environment variables: EKO_AUTH_TOKEN, EKO_BASE_URL, EKO_MODEL
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -236,9 +236,9 @@ pub struct ModelConfig {
     pub provider: String,
     /// Model name (e.g. "deepseek-v4-flash", "gpt-5.5", "claude-3.5-sonnet").
     pub name: String,
-    /// API authentication token (optional, can be set via ECHOCOWORK_AUTH_TOKEN env var).
+    /// API authentication token (optional, can be set via EKO_AUTH_TOKEN env var).
     pub auth_token: Option<String>,
-    /// API base URL (optional, can be set via ECHOCOWORK_BASE_URL env var).
+    /// API base URL (optional, can be set via EKO_BASE_URL env var).
     pub base_url: Option<String>,
     /// Maximum tokens to generate (None means use model default).
     pub max_tokens: Option<u32>,
@@ -275,32 +275,31 @@ impl Default for ModelConfig {
 
 impl ModelConfig {
     /// Get the effective authentication token.
-    /// Priority: config file auth_token field > ECHOCOWORK_AUTH_TOKEN env var
+    /// Priority: config file auth_token field > EKO_AUTH_TOKEN env var
     pub fn get_auth_token(&self) -> Option<String> {
         self.auth_token
             .clone()
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                std::env::var("ECHOCOWORK_AUTH_TOKEN")
+                std::env::var("EKO_AUTH_TOKEN")
                     .ok()
                     .filter(|s| !s.is_empty())
             })
     }
 
     /// Get the effective base URL.
-    /// Priority: config file base_url field > ECHOCOWORK_BASE_URL env var
+    /// Priority: config file base_url field > EKO_BASE_URL env var
     pub fn get_base_url(&self) -> Option<String> {
-        self.base_url.clone().filter(|s| !s.is_empty()).or_else(|| {
-            std::env::var("ECHOCOWORK_BASE_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
+        self.base_url
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("EKO_BASE_URL").ok().filter(|s| !s.is_empty()))
     }
 
     /// Get the effective model name.
-    /// Priority: ECHOCOWORK_MODEL env var > config file name field
+    /// Priority: EKO_MODEL env var > config file name field
     pub fn get_model_name(&self) -> String {
-        std::env::var("ECHOCOWORK_MODEL")
+        std::env::var("EKO_MODEL")
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| self.name.clone())
@@ -766,8 +765,8 @@ mod tests {
 
     #[test]
     fn test_model_config_values_override_echo_cowork_env() {
-        let _token_guard = EnvGuard::set("ECHOCOWORK_AUTH_TOKEN", "env-token");
-        let _base_url_guard = EnvGuard::set("ECHOCOWORK_BASE_URL", "https://env.example/v1");
+        let _token_guard = EnvGuard::set("EKO_AUTH_TOKEN", "env-token");
+        let _base_url_guard = EnvGuard::set("EKO_BASE_URL", "https://env.example/v1");
 
         let config = ModelConfig {
             auth_token: Some("config-token".to_string()),
