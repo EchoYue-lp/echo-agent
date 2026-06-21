@@ -749,22 +749,8 @@ impl ReactAgent {
                         confidence = confidence,
                         "🎯 IntentRouter: activating skill"
                     );
-                    // Activate skill via the SkillRegistry
-                    if self.tools.skill_registry.is_installed(&skill_name)
-                        && !self.tools.skill_registry.is_activated(&skill_name)
-                    {
-                        match self.tools.skill_registry.activate(&skill_name).await {
-                            Ok(content) => {
-                                self.memory
-                                    .context
-                                    .lock()
-                                    .await
-                                    .push(crate::llm::types::Message::system(content.instructions));
-                            }
-                            Err(e) => {
-                                tracing::warn!(skill = %skill_name, error = %e, "IntentRouter: failed to activate skill");
-                            }
-                        }
+                    if let Err(e) = self.activate_skill_for_context(&skill_name).await {
+                        tracing::warn!(skill = %skill_name, error = %e, "IntentRouter: failed to activate skill");
                     }
                 }
                 crate::intent::Intent::WorkflowRequired {

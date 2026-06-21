@@ -1726,12 +1726,14 @@ impl ReactAgent {
 
     /// Set the permission mode at runtime.
     ///
-    /// Accepted values: "default", "auto-edit", "full-auto", "auto", "strict".
+    /// Accepted values: "default", "auto-edit", "full-auto", "strict".
+    /// Legacy aliases "plan" and "auto" normalize to "default"; read-only
+    /// planning and Auto routing are controlled by separate runtime modes.
     /// Read-only planning is controlled separately via `set_plan_mode`.
     /// Also propagates to `PermissionService` if wired (sync, non-blocking).
     pub fn set_permission_mode(&mut self, mode: &str) {
         let normalized_mode = match mode {
-            "plan" => "default",
+            "plan" | "auto" => "default",
             _ => mode,
         };
         self.config.permission_mode = normalized_mode.to_string();
@@ -1743,7 +1745,6 @@ impl ReactAgent {
             let pm = match normalized_mode {
                 "full-auto" => PermissionMode::BypassPermissions,
                 "auto-edit" | "accept-edits" => PermissionMode::AcceptEdits,
-                "auto" => PermissionMode::Auto,
                 "strict" | "strict-confirm" | "strict-confirmation" => {
                     PermissionMode::StrictConfirm
                 }

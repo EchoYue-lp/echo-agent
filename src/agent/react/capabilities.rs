@@ -693,6 +693,29 @@ impl ReactAgent {
             .await
     }
 
+    pub(crate) async fn activate_skill_for_context(&self, skill_name: &str) -> Result<()> {
+        if !self.tools.skill_registry.is_installed(skill_name)
+            || self.tools.skill_registry.is_activated(skill_name)
+        {
+            return Ok(());
+        }
+
+        let content = self.tools.skill_registry.activate(skill_name).await?;
+        let block = content.to_prompt_block();
+        {
+            let mut ctx = self.memory.context.lock().await;
+            ctx.add_protected_marker("<skill_content".to_string());
+            ctx.push(crate::llm::types::Message::system(block));
+        }
+
+        tracing::info!(
+            agent = %self.config.agent_name,
+            skill = %skill_name,
+            "Skill activated and injected as protected skill_content"
+        );
+        Ok(())
+    }
+
     /// List all installed code-based skills.
     pub fn list_skills(&self) -> Vec<SkillInfo> {
         self.tools
