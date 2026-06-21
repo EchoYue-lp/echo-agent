@@ -7,7 +7,6 @@ use super::PrepareOutcome;
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::Result;
-use crate::llm::types::Message;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::info;
@@ -79,10 +78,12 @@ pub(crate) async fn prepare_turn(
             return Ok(PrepareOutcome::BlockedAndDone);
         }
         if let Some(ctx) = &result.injected_context {
-            context.lock().await.push(Message::system(ctx.clone()));
+            super::super::context::push_runtime_context_note(context, "Hook:UserPromptSubmit", ctx)
+                .await;
         }
         for msg in &result.messages {
-            context.lock().await.push(Message::system(msg.clone()));
+            super::super::context::push_runtime_context_note(context, "Hook:UserPromptSubmit", msg)
+                .await;
         }
     }
 

@@ -79,7 +79,12 @@ pub(crate) async fn verify_answer(
                     max = snap.config.verifier_max_retries,
                     "Verifier rejected answer, injecting feedback for self-correction"
                 );
-                context.lock().await.push(Message::system(feedback));
+                super::super::context::push_runtime_context_note(
+                    context,
+                    "VerifierFeedback",
+                    &feedback,
+                )
+                .await;
                 false
             }
         }
@@ -190,8 +195,9 @@ mod tests {
             .and_then(|m| m.content.as_text().map(|s| s.to_string()))
             .unwrap_or_default();
         assert!(
-            text.starts_with("[Verifier feedback]"),
-            "injected message should be tagged with [Verifier feedback], got: {text:?}",
+            text.starts_with("[runtime_context:VerifierFeedback]")
+                && text.contains("[Verifier feedback]"),
+            "injected feedback should be runtime context, got: {text:?}",
         );
     }
 

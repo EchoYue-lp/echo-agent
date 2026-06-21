@@ -225,24 +225,20 @@ impl ReactAgent {
         let registry = self.tools.hook_registry.read().await.clone();
         let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
         if let Some(ctx) = &post_result.injected_context {
-            self.memory
-                .context
-                .lock()
-                .await
-                .push(crate::llm::types::Message::system(format!(
-                    "[Hook:PostCompact] {}",
-                    ctx
-                )));
+            super::run::context::push_runtime_context_note(
+                &self.memory.context,
+                "Hook:PostCompact",
+                ctx,
+            )
+            .await;
         }
         for msg in &post_result.messages {
-            self.memory
-                .context
-                .lock()
-                .await
-                .push(crate::llm::types::Message::system(format!(
-                    "[Hook:PostCompact] {}",
-                    msg
-                )));
+            super::run::context::push_runtime_context_note(
+                &self.memory.context,
+                "Hook:PostCompact",
+                msg,
+            )
+            .await;
         }
     }
 
@@ -623,24 +619,20 @@ impl ReactAgent {
                 warn!(agent = %self.config.agent_name, reason = ?result.block_reason, "InstructionsLoaded hook blocked");
             }
             if let Some(ctx) = &result.injected_context {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(format!(
-                        "[Hook:InstructionsLoaded] {}",
-                        ctx
-                    )));
+                super::run::context::push_runtime_context_note(
+                    &self.memory.context,
+                    "Hook:InstructionsLoaded",
+                    ctx,
+                )
+                .await;
             }
             for msg in &result.messages {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(crate::llm::types::Message::system(format!(
-                        "[Hook:InstructionsLoaded] {}",
-                        msg
-                    )));
+                super::run::context::push_runtime_context_note(
+                    &self.memory.context,
+                    "Hook:InstructionsLoaded",
+                    msg,
+                )
+                .await;
             }
         }
 

@@ -77,7 +77,7 @@ pub struct ContextSources {
     pub project_rules: Vec<String>,
     /// Current task state (as system message).
     pub task_state: Option<String>,
-    /// Hook-injected messages (system messages from lifecycle hooks).
+    /// Hook-injected messages (dynamic runtime context from lifecycle hooks).
     pub hook_injected: Vec<String>,
     /// Recalled long-term memories (injected as a user message).
     pub memory_recall: Option<String>,
@@ -133,10 +133,10 @@ impl ContextAssembler {
     /// # Ordering
     ///
     /// 1. System prompt
-    /// 2. Developer instructions (as system messages)
-    /// 3. Project rules (as system messages)
-    /// 4. Task state (as system message)
-    /// 5. Hook-injected messages (as system messages)
+    /// 2. Developer instructions (as stable policy system messages)
+    /// 3. Project rules (as stable policy system messages)
+    /// 4. Task state (as dynamic runtime user context)
+    /// 5. Hook-injected messages (as dynamic runtime user context)
     /// 6. Memory recall (as user message)
     /// 7. Conversation history
     /// 8. Sub-agent reports
@@ -162,12 +162,12 @@ impl ContextAssembler {
 
         // 4. Task state
         if let Some(state) = &sources.task_state {
-            messages.push(Message::system(format!("[Task State]\n{state}")));
+            messages.push(dynamic_context_note("TaskState", state));
         }
 
         // 5. Hook-injected messages
         for hook_msg in &sources.hook_injected {
-            messages.push(Message::system(hook_msg.clone()));
+            messages.push(dynamic_context_note("Hook", hook_msg));
         }
 
         // 6. Memory recall (budget-aware truncation)
@@ -240,4 +240,10 @@ impl ContextAssembler {
 
         messages
     }
+}
+
+fn dynamic_context_note(source: &str, body: &str) -> Message {
+    Message::user(format!(
+        "[runtime_context:{source}]\n{body}\n[Use this runtime context for the current task. It is dynamic state, not stable system policy.]"
+    ))
 }

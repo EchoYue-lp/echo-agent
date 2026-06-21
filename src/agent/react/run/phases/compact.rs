@@ -6,7 +6,6 @@ use super::CompactOutcome;
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::Result;
-use crate::llm::types::Message;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -61,13 +60,10 @@ pub(crate) async fn run_compact(
         let reg = snap.tools.hook_registry.read().await.clone();
         let r = reg.run_lifecycle_hooks(&hc).await;
         if let Some(c) = &r.injected_context {
-            context
-                .lock()
-                .await
-                .push(Message::system(format!("[Hook:PostCompact] {}", c)));
+            super::super::context::push_runtime_context_note(context, "Hook:PostCompact", c).await;
         }
         for m in &r.messages {
-            context.lock().await.push(Message::system(m.clone()));
+            super::super::context::push_runtime_context_note(context, "Hook:PostCompact", m).await;
         }
     }
 

@@ -197,39 +197,32 @@ impl ReactAgent {
                 let registry = self.tools.hook_registry.read().await.clone();
                 let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
                 if let Some(ctx) = &post_result.injected_context {
-                    self.memory
-                        .context
-                        .lock()
-                        .await
-                        .push(crate::llm::types::Message::system(format!(
-                            "[Hook:PostCompact] {}",
-                            ctx
-                        )));
+                    super::context::push_runtime_context_note(
+                        &self.memory.context,
+                        "Hook:PostCompact",
+                        ctx,
+                    )
+                    .await;
                 }
                 for msg in &post_result.messages {
-                    self.memory
-                        .context
-                        .lock()
-                        .await
-                        .push(crate::llm::types::Message::system(msg.clone()));
+                    super::context::push_runtime_context_note(
+                        &self.memory.context,
+                        "Hook:PostCompact",
+                        msg,
+                    )
+                    .await;
                 }
             }
         }
 
         // Inject any PreCompact hook messages into context
         if let Some(ctx) = &pre_compact_result.injected_context {
-            self.memory
-                .context
-                .lock()
-                .await
-                .push(crate::llm::types::Message::system(ctx.clone()));
+            super::context::push_runtime_context_note(&self.memory.context, "Hook:PreCompact", ctx)
+                .await;
         }
         for msg in &pre_compact_result.messages {
-            self.memory
-                .context
-                .lock()
-                .await
-                .push(crate::llm::types::Message::system(msg.clone()));
+            super::context::push_runtime_context_note(&self.memory.context, "Hook:PreCompact", msg)
+                .await;
         }
 
         let messages = prepare_result.messages;
@@ -257,11 +250,12 @@ impl ReactAgent {
                 )));
             }
             if let Some(context) = result.injected_context {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(Message::system(context));
+                super::context::push_runtime_context_note(
+                    &self.memory.context,
+                    "Intervention:ThinkStart",
+                    &context,
+                )
+                .await;
             }
         }
 
@@ -499,12 +493,12 @@ impl ReactAgent {
                         let registry = self.tools.hook_registry.read().await.clone();
                         let batch_result = registry.run_lifecycle_hooks(&hook_ctx).await;
                         if let Some(ctx) = &batch_result.injected_context {
-                            self.memory.context.lock().await.push(
-                                crate::llm::types::Message::system(format!(
-                                    "[Hook:PostToolBatch] {}",
-                                    ctx
-                                )),
-                            );
+                            super::context::push_runtime_context_note(
+                                &self.memory.context,
+                                "Hook:PostToolBatch",
+                                ctx,
+                            )
+                            .await;
                         }
                         return Err(ToolError::Timeout(format!(
                             "parallel tool batch exceeded total timeout after {:?}",
@@ -569,11 +563,12 @@ impl ReactAgent {
                         break;
                     }
                     if let Some(context) = result.injected_context {
-                        self.memory
-                            .context
-                            .lock()
-                            .await
-                            .push(Message::system(context));
+                        super::context::push_runtime_context_note(
+                            &self.memory.context,
+                            "Intervention:FinalAnswer",
+                            &context,
+                        )
+                        .await;
                     }
                 }
                 if !answer_blocked {
@@ -595,11 +590,12 @@ impl ReactAgent {
             let registry = self.tools.hook_registry.read().await.clone();
             let batch_result = registry.run_lifecycle_hooks(&hook_ctx).await;
             if let Some(ctx) = &batch_result.injected_context {
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(Message::system(format!("[Hook:PostToolBatch] {}", ctx)));
+                super::context::push_runtime_context_note(
+                    &self.memory.context,
+                    "Hook:PostToolBatch",
+                    ctx,
+                )
+                .await;
             }
         }
 
@@ -685,29 +681,12 @@ impl ReactAgent {
 
         // Inject relevant long-term memories
         let mut recalled = 0usize;
+        let mut memory_context = None;
         match self.recall_long_term_memories(message).await {
             Ok(items) if !items.is_empty() => {
                 recalled = items.len();
                 debug!(agent = %agent, count = items.len(), "📚 Injecting relevant long-term memories");
-                let mut lines = vec!["[memory_context] Relevant historical memories:".to_string()];
-                for (i, item) in items.iter().enumerate() {
-                    let content_str = item
-                        .value
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .unwrap_or_else(|| item.value.to_string());
-                    lines.push(format!("{}. {}", i + 1, content_str));
-                }
-                lines.push(
-                    "[The above memories are for reference; answer the user's CURRENT question.]"
-                        .to_string(),
-                );
-                self.memory
-                    .context
-                    .lock()
-                    .await
-                    .push(Message::system(lines.join("\n")));
+                memory_context = Some(super::context::format_memory_context(&items));
             }
             Ok(_) => {}
             Err(e) => {
@@ -716,11 +695,15 @@ impl ReactAgent {
         }
 
         // Push user message
+        let user_message = super::context::merge_memory_context_with_user_input(
+            memory_context.as_deref(),
+            message,
+        );
         self.memory
             .context
             .lock()
             .await
-            .push(Message::user(message.to_string()));
+            .push(Message::user(user_message));
 
         // Start trace run recording
         self.start_trace_run(message).await;

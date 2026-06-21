@@ -67,7 +67,12 @@ pub(crate) async fn run_think(
             return Ok(ThinkOutcome::Blocked);
         }
         if let Some(injected) = result.injected_context {
-            context.lock().await.push(Message::system(injected));
+            super::super::context::push_runtime_context_note(
+                context,
+                "Intervention:ThinkStart",
+                &injected,
+            )
+            .await;
         }
     }
 

@@ -53,7 +53,12 @@ pub(crate) async fn finalize_completed_run(
             )));
         }
         if let Some(injected) = result.injected_context {
-            context.lock().await.push(Message::system(injected));
+            super::super::context::push_runtime_context_note(
+                &context,
+                "Intervention:FinalAnswer",
+                &injected,
+            )
+            .await;
         }
     }
 
@@ -91,10 +96,12 @@ pub(crate) async fn finalize_completed_run(
     if let Some(reason) = &sr.continue_reason
         && !state.stop_hook_continued
     {
-        context
-            .lock()
-            .await
-            .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
+        super::super::context::push_runtime_context_note(
+            &context,
+            "Hook:Stop",
+            &format!("Continue: {}", reason),
+        )
+        .await;
     }
     snap.fire_hook(
         crate::skills::hooks::HookEvent::SessionEnd,
@@ -182,10 +189,12 @@ pub(crate) async fn emit_final_text(
     if let Some(reason) = &sr.continue_reason
         && !state.stop_hook_continued
     {
-        context
-            .lock()
-            .await
-            .push(Message::system(format!("[Hook:Stop] Continue: {}", reason)));
+        super::super::context::push_runtime_context_note(
+            context,
+            "Hook:Stop",
+            &format!("Continue: {}", reason),
+        )
+        .await;
         state.stop_hook_continued = true;
         return Ok(ControlFlow::Continue(()));
     }

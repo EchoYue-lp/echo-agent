@@ -295,9 +295,10 @@ impl ReactAgent {
     ) {
         let mut ctx = self.memory.context.lock().await;
         for message in messages {
-            ctx.push(Message::system(format!(
-                "[{source}:{phase}:{identifier}]\n{message}"
-            )));
+            ctx.push(runtime_context_note(
+                &format!("{source}:{phase}:{identifier}"),
+                message,
+            ));
         }
     }
 
@@ -452,13 +453,13 @@ impl ReactAgent {
         if result.injected_context.is_some() || !result.messages.is_empty() {
             let mut ctx = self.memory.context.lock().await;
             if let Some(ctx_text) = &result.injected_context {
-                ctx.push(Message::system(format!(
-                    "[Hook:{}] {}",
-                    event_name, ctx_text
-                )));
+                ctx.push(runtime_context_note(
+                    &format!("Hook:{event_name}"),
+                    ctx_text,
+                ));
             }
             for msg in &result.messages {
-                ctx.push(Message::system(format!("[Hook:{}] {}", event_name, msg)));
+                ctx.push(runtime_context_note(&format!("Hook:{event_name}"), msg));
             }
         }
 
@@ -550,7 +551,24 @@ impl ReactAgent {
     }
 }
 
-fn format_memory_context(items: &[crate::memory::store::StoreItem]) -> String {
+pub(crate) async fn push_runtime_context_note(
+    context: &tokio::sync::Mutex<crate::compression::ContextManager>,
+    source: &str,
+    body: &str,
+) {
+    context
+        .lock()
+        .await
+        .push(runtime_context_note(source, body));
+}
+
+pub(crate) fn runtime_context_note(source: &str, body: &str) -> Message {
+    Message::user(format!(
+        "[runtime_context:{source}]\n{body}\n[Use this runtime context to continue the current task. It is dynamic turn state, not stable system policy.]"
+    ))
+}
+
+pub(crate) fn format_memory_context(items: &[crate::memory::store::StoreItem]) -> String {
     let mut lines = vec!["[memory_context] Relevant historical memories:".to_string()];
     for (i, item) in items.iter().enumerate() {
         let content_str = item
@@ -567,14 +585,17 @@ fn format_memory_context(items: &[crate::memory::store::StoreItem]) -> String {
     lines.join("\n")
 }
 
-fn merge_memory_context_with_user_input(memory_context: Option<&str>, input: &str) -> String {
+pub(crate) fn merge_memory_context_with_user_input(
+    memory_context: Option<&str>,
+    input: &str,
+) -> String {
     match memory_context {
         Some(memory_context) => format!("{memory_context}\n\n[current_user_request]\n{input}"),
         None => input.to_string(),
     }
 }
 
-fn merge_memory_context_with_user_message(
+pub(crate) fn merge_memory_context_with_user_message(
     memory_context: Option<&str>,
     message: &Message,
 ) -> Message {
