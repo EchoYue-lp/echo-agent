@@ -1952,15 +1952,15 @@ impl ReactAgent {
     /// (`parent_cancel.child_token()`); cancelling the parent then cancels
     /// every worker dispatched via this method.
     ///
-    /// Returns the worker's output string, or an error if the target agent
-    /// is not registered.
+    /// Returns the worker's full [`SubagentResult`] (including usage data),
+    /// or an error if the target agent is not registered.
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent_with_cancel(
         &self,
         target: &str,
         task: &str,
         cancel: CancellationToken,
-    ) -> Result<String> {
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         self.delegate_to_agent_with_parent_and_cancel(
             target,
             task,
@@ -1982,7 +1982,7 @@ impl ReactAgent {
         task: &str,
         parent_label: &str,
         cancel: CancellationToken,
-    ) -> Result<String> {
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2008,7 +2008,7 @@ impl ReactAgent {
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
-        Ok(result.output)
+        Ok(result)
     }
 
     /// Build parent context for subagent dispatch based on execution mode.

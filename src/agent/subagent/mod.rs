@@ -18,6 +18,7 @@ pub mod registry;
 pub mod specs;
 pub mod team;
 pub mod types;
+pub mod usage;
 
 // Re-export the most commonly used types
 pub use builder::SubagentBuilder;

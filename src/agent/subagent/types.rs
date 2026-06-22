@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::usage::LlmUsageStats;
+
 // ── Execution Mode ────────────────────────────────────────────────────────────
 
 /// How a subagent executes relative to its parent.
@@ -154,6 +156,10 @@ pub struct SubagentResult {
     pub was_truncated: bool,
     /// Execution mode that was used.
     pub mode: ExecutionMode,
+    /// Cumulative LLM usage across all calls in this dispatch.
+    /// `None` when the agent produced no `LlmUsage` events (e.g. cancelled
+    /// before first LLM call, or the provider never returned usage).
+    pub usage: Option<LlmUsageStats>,
 }
 
 impl SubagentResult {
@@ -172,6 +178,7 @@ impl SubagentResult {
             tokens_used: None,
             was_truncated: false,
             mode: ExecutionMode::Sync,
+            usage: None,
         }
     }
 
@@ -196,6 +203,7 @@ impl SubagentResult {
             tokens_used: None,
             was_truncated: false,
             mode: ExecutionMode::Fork,
+            usage: None,
         }
     }
 }

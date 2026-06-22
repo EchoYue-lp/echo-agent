@@ -493,6 +493,7 @@ impl SubagentExecutor {
         let mut prompt_tokens: usize = 0;
         let mut completion_tokens: usize = 0;
         let mut cancelled = false;
+        let mut usage_stats = super::usage::LlmUsageStats::default();
 
         while let Some(event_result) = stream.next().await {
             let event = event_result?;
@@ -542,7 +543,17 @@ impl SubagentExecutor {
                             completion_tokens: ct,
                         });
                 }
-                AgentEvent::LlmUsage { .. } => {}
+                AgentEvent::LlmUsage {
+                    model,
+                    prompt_tokens: pt,
+                    completion_tokens: ct,
+                    total_tokens: tt,
+                    cached_prompt_tokens: cpt,
+                    cache_creation_prompt_tokens: ccpt,
+                    usage_reported,
+                } => {
+                    usage_stats.record(&model, pt, ct, tt, cpt, ccpt, usage_reported);
+                }
                 AgentEvent::ToolCall { name, args } => {
                     registry
                         .event_bus()
@@ -600,6 +611,12 @@ impl SubagentExecutor {
         }
 
         let tokens_used = Some(prompt_tokens.saturating_add(completion_tokens));
+        let usage = if usage_stats.call_count > 0 {
+            // Also update tokens_used from real usage stats for consistency.
+            Some(usage_stats)
+        } else {
+            None
+        };
 
         Ok(SubagentResult {
             agent_name: subagent.to_string(),
@@ -609,6 +626,7 @@ impl SubagentExecutor {
             tokens_used,
             was_truncated: false,
             mode,
+            usage,
         })
     }
 
@@ -692,6 +710,7 @@ impl SubagentExecutor {
                     tokens_used: None,
                     was_truncated: false,
                     mode: ExecutionMode::Fork,
+                    usage: None,
                 });
             }
 
