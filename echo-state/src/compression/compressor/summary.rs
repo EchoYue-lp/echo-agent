@@ -238,6 +238,7 @@ impl SummaryCompressor {
                     thinking: None,
                     cancel_token: None,
                     user_id: None,
+                    cache_hints: None,
                 })
                 .await
             {
@@ -466,6 +467,7 @@ impl IncrementalSummaryCompressor {
                     thinking: None,
                     cancel_token: None,
                     user_id: None,
+                    cache_hints: None,
                 })
                 .await
             {
@@ -534,6 +536,7 @@ impl IncrementalSummaryCompressor {
                     thinking: None,
                     cancel_token: None,
                     user_id: None,
+                    cache_hints: None,
                 })
                 .await
             {

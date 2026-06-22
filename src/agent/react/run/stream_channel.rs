@@ -289,6 +289,24 @@ impl AgentSnapshot {
             .map(|u| u.cache_creation_prompt_tokens() as usize)
             .unwrap_or(0);
         let usage_reported = last_usage.is_some();
+
+        // Log cache hit rate for observability (non-streaming / direct path).
+        let total_prompt_tokens = pt.saturating_add(cached_prompt_tokens);
+        let cache_hit_rate = if total_prompt_tokens > 0 {
+            cached_prompt_tokens as f64 / total_prompt_tokens as f64
+        } else {
+            0.0
+        };
+        tracing::info!(
+            target: "echo_agent::cache",
+            agent = %self.config.agent_name,
+            prompt_tokens = pt,
+            cached_prompt_tokens = cached_prompt_tokens,
+            cache_creation_prompt_tokens = cache_creation_prompt_tokens,
+            cache_hit_rate = format!("{:.1}%", cache_hit_rate * 100.0),
+            "💰 prompt cache stats"
+        );
+
         let _ = tx
             .send(Ok(AgentEvent::LlmUsage {
                 model: self.config.model_name.clone(),

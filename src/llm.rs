@@ -130,6 +130,7 @@ pub async fn chat(
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<String>,
     response_format: Option<ResponseFormat>,
+    user_id: Option<String>,
 ) -> echo_core::error::Result<ChatCompletionResponse> {
     echo_integration::providers::openai::chat(
         client,
@@ -141,6 +142,7 @@ pub async fn chat(
         tools,
         tool_choice,
         response_format,
+        user_id,
     )
     .await
 }
@@ -157,6 +159,7 @@ pub async fn stream_chat(
     tool_choice: Option<String>,
     response_format: Option<ResponseFormat>,
     cancel_token: Option<CancellationToken>,
+    user_id: Option<String>,
 ) -> echo_core::error::Result<
     impl Stream<Item = echo_core::error::Result<ChatCompletionChunk>> + use<>,
 > {
@@ -170,6 +173,7 @@ pub async fn stream_chat(
         tool_choice,
         response_format,
         cancel_token,
+        user_id,
     )
     .await
 }

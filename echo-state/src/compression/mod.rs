@@ -631,21 +631,38 @@ impl ContextManager {
             }
         }
 
-        // Inject canonical context messages (system prompt, rules, skills)
+        // Inject canonical context messages (system prompt, rules, skills).
+        //
+        // IMPORTANT: insert at the end of the system region (sys_end), NOT at a
+        // fixed position like 1. Inserting at pos=1 shifts the entire conversation
+        // history, which invalidates the prompt cache prefix on every compression
+        // cycle. By inserting at sys_end (the boundary between system messages and
+        // history), we keep the history segment's byte positions stable, preserving
+        // both Anthropic explicit cache breakpoints and OpenAI automatic prefix
+        // caches.
         if let Some(msgs) = canonical.to_reinjection_messages() {
-            // Insert after the first system message
-            let pos = if self
+            // Find the end of the system message region (first non-System role).
+            let sys_end = self
                 .messages
-                .first()
-                .map(|m| m.role == Role::System)
-                .unwrap_or(false)
-            {
-                1
-            } else {
-                0
-            };
-            for msg in msgs.into_iter().rev() {
-                self.messages.insert(pos, Message::system(msg));
+                .iter()
+                .position(|m| m.role != Role::System)
+                .unwrap_or(self.messages.len());
+
+            // Dedup: skip canonical messages whose text already exists in the
+            // current system region (prevents accumulation on repeated compression).
+            let existing_texts: std::collections::HashSet<String> = self.messages[..sys_end]
+                .iter()
+                .filter_map(|m| m.content.as_text())
+                .collect();
+            let to_insert: Vec<String> = msgs
+                .into_iter()
+                .filter(|msg| !existing_texts.contains(msg.as_str()))
+                .collect();
+
+            // Insert at sys_end (tight against history), keeping history stable.
+            // Iterate in reverse so each message lands at the correct offset.
+            for msg in to_insert.into_iter().rev() {
+                self.messages.insert(sys_end, Message::system(msg));
             }
         }
     }

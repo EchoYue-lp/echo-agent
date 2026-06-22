@@ -349,6 +349,7 @@ impl ReactAgent {
             thinking: None,
             cancel_token: None,
             user_id: None,
+            cache_hints: None,
         };
         match llm_client.chat(request).await {
             Ok(response) => {

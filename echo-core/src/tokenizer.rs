@@ -242,6 +242,11 @@ impl TokenUsageTracker {
         }
     }
 
+    /// Number of requests recorded so far.
+    pub fn request_count(&self) -> u64 {
+        self.request_count.load(Ordering::Relaxed)
+    }
+
     /// Record token usage for a single request.
     pub fn record(&self, prompt: u32, completion: u32, total: Option<u32>) {
         self.total_prompt_tokens
@@ -285,6 +290,39 @@ impl TokenUsageTracker {
             total_cached_prompt_tokens: total_cached_prompt,
             total_cache_creation_prompt_tokens: total_cache_creation_prompt,
             request_count: requests,
+        }
+    }
+
+    /// Cumulative prompt cache hit rate (0.0–1.0).
+    ///
+    /// Computed as `cached_prompt / (prompt + cached_prompt)` across all requests.
+    /// Returns `None` if no requests with prompt tokens have been recorded.
+    pub fn cumulative_cache_hit_rate(&self) -> Option<f64> {
+        let prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
+        let cached = self.total_cached_prompt_tokens.load(Ordering::Relaxed);
+        let total_prompt = prompt.saturating_add(cached);
+        if total_prompt == 0 {
+            None
+        } else {
+            Some(cached as f64 / total_prompt as f64)
+        }
+    }
+
+    /// Log cumulative cache stats at `info` level (for periodic observability).
+    pub fn log_cumulative_cache_stats(&self, agent: &str) {
+        let requests = self.request_count.load(Ordering::Relaxed);
+        if let Some(rate) = self.cumulative_cache_hit_rate() {
+            let cached = self.total_cached_prompt_tokens.load(Ordering::Relaxed);
+            let creation = self.total_cache_creation_prompt_tokens.load(Ordering::Relaxed);
+            tracing::info!(
+                target: "echo_agent::cache",
+                agent = %agent,
+                requests,
+                cumulative_cache_hit_rate = format!("{:.1}%", rate * 100.0),
+                total_cached_prompt_tokens = cached,
+                total_cache_creation_prompt_tokens = creation,
+                "📊 cumulative cache performance"
+            );
         }
     }
 

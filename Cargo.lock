@@ -1090,6 +1090,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

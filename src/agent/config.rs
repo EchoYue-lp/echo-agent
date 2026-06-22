@@ -416,6 +416,11 @@ impl AgentConfig {
         self.cache_user_id = Some(id.into());
     }
 
+    /// Read the current cache_user_id (accessor; distinct from the builder method).
+    pub fn get_cache_user_id(&self) -> Option<&str> {
+        self.cache_user_id.as_deref()
+    }
+
     /// Set system prompt
     ///
     /// # Parameters

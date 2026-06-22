@@ -1,5 +1,6 @@
 pub mod adapter_client;
 pub mod anthropic;
+pub mod anthropic_cache;
 pub mod azure;
 pub mod client;
 pub mod config;
@@ -9,12 +10,14 @@ pub mod glm;
 pub mod kimi;
 pub mod ollama;
 pub mod openai;
+pub mod openai_cache;
 pub mod qwen;
 pub mod thinking_translate;
 pub mod traits;
 
 pub use adapter_client::AdapterClient;
 pub use anthropic::AnthropicClient;
+pub use anthropic_cache::AnthropicCachePlan;
 pub use azure::AzureOpenAiClient;
 pub use config::{Config, LlmConfig, LlmProvider, ModelConfig, ProviderFactory};
 pub use deepseek::DeepSeekClient;

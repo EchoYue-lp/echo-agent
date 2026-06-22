@@ -154,6 +154,7 @@ impl Critic for LlmCritic {
                 None,
                 None,
                 response_format,
+                None,
             )
             .await
             .map_err(|e| ReactError::Other(format!("LLM critique call failed: {}", e)))?;

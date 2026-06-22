@@ -521,6 +521,7 @@ impl AdaptiveCompressor {
                     thinking: None,
                     cancel_token: None,
                     user_id: None,
+                    cache_hints: None,
                 })
                 .await
             {

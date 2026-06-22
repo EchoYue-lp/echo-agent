@@ -233,6 +233,7 @@ impl ReactAgent {
         let agent_name = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
         let client = self.client.clone(); // Reuse Agent's HTTP client
+        let cache_user_id = self.config.cache_user_id.clone();
         let is_orchestrator = self.config.role == AgentRole::Orchestrator;
         let subagent_names: Vec<String> = if is_orchestrator {
             // Use blocking read from the registry since we're in sync context
@@ -255,6 +256,7 @@ impl ReactAgent {
             let agent_name = agent_name.clone();
             let model = model.clone();
             let client = client.clone();
+            let cache_user_id = cache_user_id.clone();
             let _subagent_names = subagent_names.clone();
 
             Box::pin(async move {
@@ -290,6 +292,7 @@ impl ReactAgent {
                     None,
                     None,
                     None,
+                    cache_user_id.clone(),
                 )
                 .await
                 .map_err(|e| ReactError::Other(format!("LLM execution failed: {}", e)))?;

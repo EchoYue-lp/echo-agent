@@ -1604,8 +1604,9 @@ async fn recall_injects_memories_into_current_user_message() {
         "expected at least one memory to be recalled, got {recalled}"
     );
 
-    // The context now must contain one user message carrying the [memory_context]
-    // marker and the current request — and no extra system message from recall.
+    // The context now keeps the user's request stable and places recalled memory
+    // in a following runtime-context user message so cacheable request/history
+    // prefixes are not mixed with volatile retrieval results.
     let ctx = agent.memory.context.lock().await;
     let messages = ctx.messages();
 
@@ -1641,7 +1642,6 @@ async fn recall_injects_memories_into_current_user_message() {
         "expected exactly one user message with [memory_context] marker"
     );
 
-    // The seeded content and current request must appear in that one user turn.
     assert!(
         memory_users[0]
             .text_content()
@@ -1649,29 +1649,23 @@ async fn recall_injects_memories_into_current_user_message() {
         "memory_context user message should contain seeded fact"
     );
     assert!(
-        memory_users[0]
+        !memory_users[0]
             .text_content()
-            .is_some_and(|c| c.contains("[current_user_request]\nRust")),
-        "memory_context user message should contain current request"
+            .is_some_and(|c| c.contains("[current_user_request]") || c.contains("\nRust")),
+        "memory_context user message must not duplicate the current request"
     );
 
-    // No adjacent user-user pair from the recall injection.
-    let mut prev_user = false;
-    let mut adjacent_user_pair = false;
-    for m in messages {
-        if m.role == Role::User {
-            if prev_user {
-                adjacent_user_pair = true;
-                break;
-            }
-            prev_user = true;
-        } else {
-            prev_user = false;
-        }
-    }
+    let request_then_context = messages.windows(2).any(|pair| {
+        pair[0].role == Role::User
+            && pair[0].text_content().is_some_and(|c| c == "Rust")
+            && pair[1].role == Role::User
+            && pair[1]
+                .text_content()
+                .is_some_and(|c| c.starts_with("[runtime_context:turn]"))
+    });
     assert!(
-        !adjacent_user_pair,
-        "found two adjacent Role::User messages — recall must not push a user-role memory before the actual user input"
+        request_then_context,
+        "expected stable request user message followed by volatile runtime context"
     );
 }
 

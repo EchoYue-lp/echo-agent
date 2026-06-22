@@ -53,6 +53,7 @@ pub async fn chat(
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<String>,
     response_format: Option<ResponseFormat>,
+    user_id: Option<String>,
 ) -> Result<ChatCompletionResponse> {
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
@@ -69,7 +70,7 @@ pub async fn chat(
         enable_thinking: None,
         thinking_budget: None,
         glm_thinking: None,
-        user_id: None,
+        user_id,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -88,6 +89,7 @@ pub async fn stream_chat(
     tool_choice: Option<String>,
     response_format: Option<ResponseFormat>,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
+    user_id: Option<String>,
 ) -> Result<impl Stream<Item = Result<ChatCompletionChunk>> + use<>> {
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
@@ -104,7 +106,7 @@ pub async fn stream_chat(
         enable_thinking: None,
         thinking_budget: None,
         glm_thinking: None,
-        user_id: None,
+        user_id,
     };
 
     let header_map = assemble_req_header(&model)?;
@@ -322,6 +324,7 @@ impl LlmClient for DefaultLlmClient {
                 request.tools,
                 request.tool_choice,
                 request.response_format,
+                request.user_id,
             )
             .await?;
 
@@ -356,6 +359,7 @@ impl LlmClient for DefaultLlmClient {
                 request.tool_choice,
                 request.response_format,
                 request.cancel_token,
+                request.user_id,
             )
             .await?;
 
@@ -395,6 +399,7 @@ impl LlmClient for DefaultLlmClient {
                 options.temperature,
                 options.max_tokens,
                 Some(false),
+                None,
                 None,
                 None,
                 None,

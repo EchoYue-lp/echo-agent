@@ -145,6 +145,12 @@ pub(crate) async fn run_think(
     if let Some(ref u) = last_usage {
         snap.token_tracker.record_usage(u);
     }
+    // Log cumulative cache stats every 10 requests for observability.
+    let request_count = snap.token_tracker.request_count();
+    if request_count > 0 && request_count % 10 == 0 {
+        snap.token_tracker
+            .log_cumulative_cache_stats(&snap.config.agent_name);
+    }
     tracing::debug!(
         target: "echo_agent::llm_usage",
         agent = %snap.config.agent_name,
@@ -156,6 +162,23 @@ pub(crate) async fn run_think(
         cache_creation_prompt_tokens = cache_creation_prompt_tokens,
         usage_reported = usage_reported,
         "LLM usage recorded"
+    );
+
+    // Log cache hit rate for observability.
+    let total_prompt_tokens = pt.saturating_add(cached_prompt_tokens);
+    let cache_hit_rate = if total_prompt_tokens > 0 {
+        cached_prompt_tokens as f64 / total_prompt_tokens as f64
+    } else {
+        0.0
+    };
+    tracing::info!(
+        target: "echo_agent::cache",
+        agent = %snap.config.agent_name,
+        prompt_tokens = pt,
+        cached_prompt_tokens = cached_prompt_tokens,
+        cache_creation_prompt_tokens = cache_creation_prompt_tokens,
+        cache_hit_rate = format!("{:.1}%", cache_hit_rate * 100.0),
+        "💰 prompt cache stats"
     );
     yield_event_or!(
         tx,
@@ -255,6 +278,13 @@ pub(crate) async fn create_llm_stream(
                 let temp = snap.config.temperature;
                 let max_tokens = snap.config.max_tokens;
                 async move {
+                    // Build cache hints before moving ownership into ChatRequest.
+                    let tools_ref: &[ToolDefinition] = t.as_deref().unwrap_or(&[]);
+                    let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(&ms, tools_ref);
+                    let prefix_hash = echo_core::llm::cache::diagnostic::stable_prefix_hash(
+                        layout.system, layout.canonical, layout.tools, layout.history,
+                    );
+                    let segments = layout.segment_ranges();
                     let request = crate::llm::ChatRequest {
                         messages: ms,
                         temperature: temp,
@@ -265,6 +295,11 @@ pub(crate) async fn create_llm_stream(
                         thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
                         user_id: snap.config.cache_user_id.clone(),
+                        cache_hints: Some(echo_core::llm::cache::CacheHints {
+                            breakpoints: vec![],
+                            stable_prefix_hash: Some(prefix_hash),
+                            segments,
+                        }),
                     };
                     let inner = llm_client.chat_stream(request).await?;
                     // Adapt the trait's flattened ChatChunk back into the
@@ -313,6 +348,7 @@ pub(crate) async fn create_llm_stream(
                     None,
                     None,
                     ct,
+                    None,
                 )
                 .await?;
                 Ok(Box::pin(s)

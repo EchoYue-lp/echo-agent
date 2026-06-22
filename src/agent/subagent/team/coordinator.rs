@@ -292,6 +292,7 @@ mod tests {
             tokens_used: None,
             was_truncated: false,
             mode: crate::agent::subagent::types::ExecutionMode::Teammate,
+            usage: None,
         };
 
         coord.record_result("t1", result).await;

@@ -1,5 +1,6 @@
 //! LLM client core trait and request/response types
 
+pub mod cache;
 pub mod capabilities;
 pub mod thinking;
 pub mod types;
@@ -181,6 +182,9 @@ pub struct ChatRequest {
     /// A stable, session-scoped ID enables the provider to reuse prompt cache
     /// entries across requests. Without this, cache hit rate can drop to <1%.
     pub user_id: Option<String>,
+    /// Optional cache hints (breakpoint targets, stable prefix hash, segment ranges).
+    /// Providers consume this to place cache breakpoints and log diagnostics.
+    pub cache_hints: Option<crate::llm::cache::CacheHints>,
 }
 
 impl ChatRequest {

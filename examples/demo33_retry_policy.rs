@@ -300,6 +300,7 @@ async fn demo_llm_retry() -> Result<()> {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .map_err(|e| format!("LLM 调用失败: {}", e))

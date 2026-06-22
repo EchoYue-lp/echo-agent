@@ -2465,6 +2465,7 @@ impl ReactAgent {
                     thinking: self.thinking.clone(),
                     cancel_token: None,
                     user_id: None,
+                    cache_hints: None,
                 })
                 .await?;
             response.content().unwrap_or_default()
@@ -2479,6 +2480,7 @@ impl ReactAgent {
                 None,        // tools
                 None,        // tool_choice
                 None,        // response_format
+                None,        // user_id
             )
             .await?;
 

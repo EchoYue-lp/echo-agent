@@ -486,10 +486,7 @@ impl ReactAgent {
 
         self.detect_and_write_memory_triggers(input).await;
 
-        // Inject relevant long-term memories into the current user turn rather
-        // than as extra system messages. Dynamic memory changes every turn; if
-        // it is appended as `system`, provider-side prompt caching diverges
-        // before the stable tool/policy prefix can be reused.
+        // Recall relevant long-term memories for this turn.
         let mut recalled = 0usize;
         let mut memory_context = None;
         if let Ok(items) = self.recall_long_term_memories(input).await
@@ -499,23 +496,16 @@ impl ReactAgent {
             memory_context = Some(format_memory_context(&items));
         }
 
-        // Push user message with workspace context prefix (keeps system prompt cache-stable)
         let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
-        let user_text = if ws_block.is_empty() {
-            merge_memory_context_with_user_input(memory_context.as_deref(), input)
-        } else {
-            format!(
-                "{}\n{}",
-                ws_block,
-                merge_memory_context_with_user_input(memory_context.as_deref(), input)
-            )
-        };
-        self.memory
-            .context
-            .lock()
-            .await
-            .push(Message::user(user_text));
+
+        let mut context = self.memory.context.lock().await;
+        context.push(Message::user(input.to_string()));
+        if let Some(runtime_context) =
+            format_turn_runtime_context(memory_context.as_deref(), ws_block.as_str())
+        {
+            context.push(runtime_context_note("turn", &runtime_context));
+        }
         recalled
     }
 
@@ -553,10 +543,16 @@ impl ReactAgent {
             memory_context = Some(format_memory_context(&items));
         }
 
-        // Push multimodal user message
-        let user_message =
-            merge_memory_context_with_user_message(memory_context.as_deref(), message);
-        self.memory.context.lock().await.push(user_message);
+        let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
+        let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
+
+        let mut context = self.memory.context.lock().await;
+        context.push(message.clone());
+        if let Some(runtime_context) =
+            format_turn_runtime_context(memory_context.as_deref(), ws_block.as_str())
+        {
+            context.push(runtime_context_note("turn", &runtime_context));
+        }
         recalled
     }
 }
@@ -595,40 +591,22 @@ pub(crate) fn format_memory_context(items: &[crate::memory::store::StoreItem]) -
     lines.join("\n")
 }
 
-pub(crate) fn merge_memory_context_with_user_input(
+pub(crate) fn format_turn_runtime_context(
     memory_context: Option<&str>,
-    input: &str,
-) -> String {
-    match memory_context {
-        Some(memory_context) => format!("{memory_context}\n\n[current_user_request]\n{input}"),
-        None => input.to_string(),
+    workspace_context: &str,
+) -> Option<String> {
+    let mut blocks = Vec::new();
+    if !workspace_context.trim().is_empty() {
+        blocks.push(workspace_context.trim().to_string());
     }
-}
-
-pub(crate) fn merge_memory_context_with_user_message(
-    memory_context: Option<&str>,
-    message: &Message,
-) -> Message {
-    let Some(memory_context) = memory_context else {
-        return message.clone();
-    };
-    let mut merged = message.clone();
-    match &mut merged.content {
-        echo_core::llm::types::MessageContent::Text(text) => {
-            *text = merge_memory_context_with_user_input(Some(memory_context), text);
-        }
-        echo_core::llm::types::MessageContent::Parts(parts) => {
-            parts.insert(
-                0,
-                echo_core::llm::types::ContentPart::Text {
-                    text: format!("{memory_context}\n\n[current_user_request]"),
-                },
-            );
-        }
-        echo_core::llm::types::MessageContent::Empty => {
-            merged.content =
-                echo_core::llm::types::MessageContent::Text(memory_context.to_string());
-        }
+    if let Some(memory_context) = memory_context
+        && !memory_context.trim().is_empty()
+    {
+        blocks.push(memory_context.trim().to_string());
     }
-    merged
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n\n"))
+    }
 }

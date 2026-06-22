@@ -13,6 +13,8 @@ use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use echo_core::retry::{RetryPolicy, with_retry_if};
 use futures::StreamExt;
 use futures::future::BoxFuture;
+
+use super::anthropic_cache::AnthropicCachePlan;
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -80,6 +82,7 @@ impl AnthropicClient {
                     content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
                         tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
                         content: msg.content.as_text().unwrap_or_default(),
+                        cache_control: None,
                     }]),
                 });
                 continue;
@@ -92,7 +95,10 @@ impl AnthropicClient {
                 if let Some(ref text) = msg.content.as_text()
                     && !text.is_empty()
                 {
-                    blocks.push(ContentBlock::Text { text: text.clone() });
+                    blocks.push(ContentBlock::Text {
+                        text: text.clone(),
+                        cache_control: None,
+                    });
                 }
                 for tc in tool_calls {
                     let input: serde_json::Value =
@@ -115,12 +121,17 @@ impl AnthropicClient {
                     let blocks: Vec<ContentBlock> = parts
                         .iter()
                         .map(|part| match part {
-                            ContentPart::Text { text } => ContentBlock::Text { text: text.clone() },
+                            ContentPart::Text { text } => ContentBlock::Text {
+                                text: text.clone(),
+                                cache_control: None,
+                            },
                             ContentPart::ImageUrl { image_url } => ContentBlock::Image {
                                 source: data_url_to_image_source(&image_url.url),
+                                cache_control: None,
                             },
                             ContentPart::File { name, .. } => ContentBlock::Text {
                                 text: format!("\n[Attachment: {name}]"),
+                                cache_control: None,
                             },
                         })
                         .collect();
@@ -139,7 +150,35 @@ impl AnthropicClient {
             });
         }
 
-        // Build tools with cache_control on the last tool for prompt caching
+        // ── Cache breakpoint strategy (delegated to AnthropicCachePlan) ──
+        //
+        // Build a read-only layout view from the request messages + tools, then
+        // let `AnthropicCachePlan` decide which breakpoints to place. This
+        // consolidates the strategy in one place and makes it unit-testable.
+        //
+        // When `cache_hints` is present on the request, the agent layer has
+        // pre-computed the layout; we build a plan from those hints.
+        // Otherwise we build the layout here and apply the default plan.
+
+        let tools_ref: &[echo_core::llm::types::ToolDefinition] =
+            request.tools.as_deref().unwrap_or(&[]);
+        let cache_plan = if let Some(ref hints) = request.cache_hints {
+            // Agent layer provided pre-computed breakpoints via CacheHints.
+            use echo_core::llm::cache::BreakpointTarget as BT;
+            AnthropicCachePlan {
+                breakpoints: hints.breakpoints.clone(),
+                has_system_breakpoint: hints.breakpoints.iter().any(|b| matches!(b, BT::SystemLastBlock)),
+                has_tool_breakpoint: hints.breakpoints.iter().any(|b| matches!(b, BT::ToolsLastTool)),
+            }
+        } else {
+            // Backward compat: compute layout here.
+            let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(
+                &request.messages, tools_ref,
+            );
+            AnthropicCachePlan::from_layout(&layout)
+        };
+
+        // Build tools with cache_control on the last tool.
         let tools: Option<Vec<AnthropicToolDef>> = request.tools.as_ref().map(|tools| {
             let count = tools.len();
             tools
@@ -149,8 +188,7 @@ impl AnthropicClient {
                     name: t.function.name.clone(),
                     description: Some(t.function.description.clone()),
                     input_schema: t.function.parameters.clone(),
-                    // Mark the last tool with cache_control for prefix caching
-                    cache_control: if i == count - 1 {
+                    cache_control: if cache_plan.has_tool_breakpoint && i == count - 1 {
                         Some(CacheControl::ephemeral())
                     } else {
                         None
@@ -159,14 +197,53 @@ impl AnthropicClient {
                 .collect()
         });
 
-        // Convert system prompt to blocks format with cache_control on the last block
+        // Convert system prompt to blocks format with cache_control.
         let system = system.map(|text| {
             AnthropicSystem::Blocks(vec![SystemBlock {
                 block_type: "text".to_string(),
                 text,
-                cache_control: Some(CacheControl::ephemeral()),
+                cache_control: if cache_plan.has_system_breakpoint {
+                    Some(CacheControl::ephemeral())
+                } else {
+                    None
+                },
             }])
         });
+
+        // Place cache breakpoints on conversation messages.
+        if cache_plan.history_breakpoint_count() > 0 {
+            let used_breakpoints =
+                usize::from(cache_plan.has_system_breakpoint)
+                    + usize::from(cache_plan.has_tool_breakpoint && tools.is_some());
+            let remaining_breakpoints = 4usize.saturating_sub(used_breakpoints);
+
+            if remaining_breakpoints > 0 {
+                if cache_plan.breakpoints.is_empty() {
+                    // Default fallback (no explicit history indices).
+                    apply_conversation_cache_breakpoints(&mut messages, remaining_breakpoints);
+                } else {
+                    // Map BreakpointTarget to concrete message indices and apply.
+                    let mut msg_indices: Vec<usize> = cache_plan
+                        .breakpoints
+                        .iter()
+                        .filter_map(|bp| match bp {
+                            echo_core::llm::cache::BreakpointTarget::HistoryIndex(i) => Some(*i),
+                            echo_core::llm::cache::BreakpointTarget::HistoryLastStable => {
+                                messages.iter().rposition(|msg| !msg.is_runtime_context())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    msg_indices.sort_unstable();
+                    msg_indices.dedup();
+                    for &idx in msg_indices.iter().take(remaining_breakpoints) {
+                        if let Some(msg) = messages.get_mut(idx) {
+                            msg.add_cache_control_ephemeral();
+                        }
+                    }
+                }
+            }
+        }
 
         // Translate thinking config. Claude 3.7–4.5 accept the budget block;
         // 4.6+/4.7+ use adaptive thinking and reject it — resolve the protocol
@@ -194,7 +271,7 @@ impl AnthropicClient {
 
         for block in &resp.content {
             match block {
-                ContentBlock::Text { text } => content_parts.push(text.clone()),
+                ContentBlock::Text { text, .. } => content_parts.push(text.clone()),
                 ContentBlock::ToolUse { id, name, input } => {
                     tool_calls.push(ToolCall {
                         id: id.clone(),
@@ -535,7 +612,7 @@ impl LlmClient for AnthropicClient {
 // ── Anthropic API types ──────────────────────────────────────────────────────
 
 /// Cache control marker for Anthropic prompt caching
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct CacheControl {
     #[serde(rename = "type")]
     cache_type: String,
@@ -667,6 +744,16 @@ struct AnthropicMessage {
     content: AnthropicContent,
 }
 
+impl AnthropicMessage {
+    fn add_cache_control_ephemeral(&mut self) {
+        self.content.add_cache_control_ephemeral();
+    }
+
+    fn is_runtime_context(&self) -> bool {
+        self.content.is_runtime_context()
+    }
+}
+
 #[derive(Serialize)]
 #[serde(untagged)]
 enum AnthropicContent {
@@ -674,13 +761,47 @@ enum AnthropicContent {
     Blocks(Vec<ContentBlock>),
 }
 
+impl AnthropicContent {
+    fn add_cache_control_ephemeral(&mut self) {
+        match self {
+            AnthropicContent::Text(text) => {
+                let text = std::mem::take(text);
+                *self = AnthropicContent::Blocks(vec![ContentBlock::Text {
+                    text,
+                    cache_control: Some(CacheControl::ephemeral()),
+                }]);
+            }
+            AnthropicContent::Blocks(blocks) => {
+                if let Some(block) = blocks.iter_mut().rev().find(|block| block.is_cacheable()) {
+                    block.set_cache_control(CacheControl::ephemeral());
+                }
+            }
+        }
+    }
+
+    fn is_runtime_context(&self) -> bool {
+        match self {
+            AnthropicContent::Text(text) => is_runtime_context_text(text),
+            AnthropicContent::Blocks(blocks) => blocks.iter().any(ContentBlock::is_runtime_context),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 enum ContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "image")]
-    Image { source: ImageSource },
+    Image {
+        source: ImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -691,7 +812,82 @@ enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
+}
+
+impl ContentBlock {
+    fn is_cacheable(&self) -> bool {
+        matches!(
+            self,
+            ContentBlock::Text { .. }
+                | ContentBlock::Image { .. }
+                | ContentBlock::ToolResult { .. }
+        )
+    }
+
+    fn set_cache_control(&mut self, cache_control: CacheControl) {
+        match self {
+            ContentBlock::Text {
+                cache_control: field,
+                ..
+            }
+            | ContentBlock::Image {
+                cache_control: field,
+                ..
+            }
+            | ContentBlock::ToolResult {
+                cache_control: field,
+                ..
+            } => *field = Some(cache_control),
+            ContentBlock::ToolUse { .. } => {}
+        }
+    }
+
+    fn is_runtime_context(&self) -> bool {
+        match self {
+            ContentBlock::Text { text, .. } => is_runtime_context_text(text),
+            ContentBlock::ToolResult { content, .. } => is_runtime_context_text(content),
+            _ => false,
+        }
+    }
+}
+
+fn apply_conversation_cache_breakpoints(
+    messages: &mut [AnthropicMessage],
+    remaining_breakpoints: usize,
+) {
+    if remaining_breakpoints == 0 || messages.is_empty() {
+        return;
+    }
+
+    let stable_end = messages
+        .iter()
+        .rposition(|message| !message.is_runtime_context())
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    if stable_end == 0 {
+        return;
+    }
+
+    let mut indexes = Vec::new();
+    if remaining_breakpoints >= 2 && stable_end >= 4 {
+        indexes.push((stable_end - 1) * 3 / 4);
+    }
+    indexes.push(stable_end - 1);
+    indexes.sort_unstable();
+    indexes.dedup();
+
+    for index in indexes.into_iter().take(remaining_breakpoints) {
+        if let Some(message) = messages.get_mut(index) {
+            message.add_cache_control_ephemeral();
+        }
+    }
+}
+
+fn is_runtime_context_text(text: &str) -> bool {
+    text.trim_start().starts_with("[runtime_context:")
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -802,4 +998,43 @@ struct ContentDelta {
 #[derive(Deserialize)]
 struct MessageDeltaBody {
     stop_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_message(text: &str) -> AnthropicMessage {
+        AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text(text.to_string()),
+        }
+    }
+
+    fn has_cache_control(message: &AnthropicMessage) -> bool {
+        match &message.content {
+            AnthropicContent::Text(_) => false,
+            AnthropicContent::Blocks(blocks) => blocks.iter().any(|block| match block {
+                ContentBlock::Text { cache_control, .. }
+                | ContentBlock::Image { cache_control, .. }
+                | ContentBlock::ToolResult { cache_control, .. } => cache_control.is_some(),
+                ContentBlock::ToolUse { .. } => false,
+            }),
+        }
+    }
+
+    #[test]
+    fn conversation_cache_breakpoints_skip_trailing_runtime_context() {
+        let mut messages = vec![
+            text_message("older turn"),
+            text_message("middle turn"),
+            text_message("current request"),
+            text_message("[runtime_context:turn]\nvolatile cwd and memory"),
+        ];
+
+        apply_conversation_cache_breakpoints(&mut messages, 2);
+
+        assert!(has_cache_control(&messages[2]));
+        assert!(!has_cache_control(&messages[3]));
+    }
 }

@@ -66,6 +66,7 @@ impl ReactAgent {
                 None,
                 None,
                 Some(schema.clone()),
+                None,
             )
             .await?;
 

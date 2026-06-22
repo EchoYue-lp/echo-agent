@@ -224,8 +224,8 @@ mod tests {
             .iter()
             .filter(|message| matches!(message.role, echo_core::llm::types::Role::System))
             .count();
-        // CWD is now injected into user messages (not system) so the system prefix
-        // stays cache-stable across workspace changes.
+        // CWD is now injected as runtime context (not system) so the system
+        // prefix stays cache-stable across workspace changes.
         let cwd_system_messages = messages
             .iter()
             .filter(|message| {
@@ -243,7 +243,7 @@ mod tests {
             cwd_system_messages, 0,
             "CWD must NOT be in system messages — it breaks prompt cache"
         );
-        // CWD is now injected into user messages via prepare_stream_context
+        // CWD is injected via runtime context by prepare_stream_context
         // (tested separately). This test only verifies system message stability.
     }
 

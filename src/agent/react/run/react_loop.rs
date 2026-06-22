@@ -33,16 +33,29 @@ impl ReactAgent {
         let response_format = self.config.response_format.clone();
 
         if let Some(llm_client) = self.llm_client.clone() {
+            let ms = messages.to_vec();
+            let t = tools.clone();
+            // Build cache hints from the stable message layout (before moving into request).
+            let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(&ms, &t);
+            let prefix_hash = echo_core::llm::cache::diagnostic::stable_prefix_hash(
+                layout.system, layout.canonical, layout.tools, layout.history,
+            );
+            let cache_hints = echo_core::llm::cache::CacheHints {
+                breakpoints: vec![],
+                stable_prefix_hash: Some(prefix_hash),
+                segments: layout.segment_ranges(),
+            };
             let request = ChatRequest {
-                messages: messages.to_vec(),
+                messages: ms,
                 temperature,
                 max_tokens,
-                tools: Some(tools.clone()),
+                tools: Some(t),
                 tool_choice: None,
                 response_format: response_format.clone(),
                 thinking: self.thinking.clone(),
                 cancel_token: None,
-                user_id: None,
+                user_id: self.config.cache_user_id.clone(),
+                cache_hints: Some(cache_hints),
             };
             let msg_count = request.messages.len();
             let tool_count = request.tools.as_ref().map_or(0, |t| t.len());
@@ -86,6 +99,7 @@ impl ReactAgent {
         } else {
             let client = self.client.clone();
             let model_name = self.config.model_name.clone();
+            let cache_user_id = self.config.cache_user_id.clone();
             let msg_count = messages.len();
             let tool_count = tools.len();
             let last_msg_preview = messages.last().map(|m| {
@@ -114,6 +128,7 @@ impl ReactAgent {
                     let messages = messages.to_vec();
                     let tools = tools.clone();
                     let response_format = response_format.clone();
+                    let user_id = cache_user_id.clone();
                     async move {
                         chat(
                             client,
@@ -125,6 +140,7 @@ impl ReactAgent {
                             Some(tools),
                             None,
                             response_format,
+                            user_id,
                         )
                         .await
                     }
@@ -695,16 +711,19 @@ impl ReactAgent {
             }
         }
 
-        // Push user message
-        let user_message = super::context::merge_memory_context_with_user_input(
+        let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
+        let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
+        let mut context = self.memory.context.lock().await;
+        context.push(Message::user(message.to_string()));
+        if let Some(runtime_context) = super::context::format_turn_runtime_context(
             memory_context.as_deref(),
-            message,
-        );
-        self.memory
-            .context
-            .lock()
-            .await
-            .push(Message::user(user_message));
+            ws_block.as_str(),
+        ) {
+            context.push(super::context::runtime_context_note(
+                "turn",
+                &runtime_context,
+            ));
+        }
 
         // Start trace run recording
         self.start_trace_run(message).await;
