@@ -709,6 +709,35 @@ impl Usage {
     pub fn cache_creation_prompt_tokens(&self) -> u32 {
         self.cache_creation_input_tokens.unwrap_or(0)
     }
+
+    /// Prompt cache hit rate in [0.0, 1.0].
+    ///
+    /// Provider semantics differ on whether `prompt_tokens` includes cached tokens:
+    /// - OpenAI / DeepSeek / compatible: `prompt_tokens` is the **total** (includes cached).
+    ///   Per DeepSeek docs: `prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens`.
+    ///   → rate = cached / prompt_tokens
+    /// - Anthropic: `input_tokens` (mapped to `prompt_tokens`) **excludes** `cache_read_input_tokens`.
+    ///   → rate = cached / (prompt_tokens + cached)
+    ///
+    /// We detect the Anthropic path by presence of `cache_read_input_tokens`;
+    /// all other providers use the inclusive-total formula.
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        let cached = self.cached_prompt_tokens();
+        // Anthropic semantics: input_tokens excludes cache reads.
+        if self.cache_read_input_tokens.is_some() {
+            let total = self.prompt_tokens.unwrap_or(0).saturating_add(cached);
+            if total == 0 {
+                return None;
+            }
+            return Some(cached as f64 / total as f64);
+        }
+        // OpenAI / DeepSeek / compatible: prompt_tokens is the total (includes cached).
+        let total = self.prompt_tokens.unwrap_or(0);
+        if total == 0 {
+            return None;
+        }
+        Some(cached as f64 / total as f64)
+    }
 }
 
 /// Provider-specific token details nested under usage.
@@ -1077,6 +1106,59 @@ mod tests {
             Some(200),
             "should preserve the raw field for direct access"
         );
+    }
+
+    #[test]
+    fn cache_hit_rate_deepseek_prompt_tokens_includes_cached() {
+        // DeepSeek: prompt_tokens = cache_hit + cache_miss (inclusive total).
+        // hit_rate = 800 / 1000 = 0.8 (NOT 800/1800).
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200
+        }))
+        .unwrap();
+        assert_eq!(usage.cache_hit_rate(), Some(0.8));
+    }
+
+    #[test]
+    fn cache_hit_rate_openai_prompt_tokens_includes_cached() {
+        // OpenAI: prompt_tokens is the total (includes cached_tokens).
+        // hit_rate = 900 / 1000 = 0.9 (NOT 900/1900).
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000,
+            "prompt_tokens_details": { "cached_tokens": 900 }
+        }))
+        .unwrap();
+        assert_eq!(usage.cache_hit_rate(), Some(0.9));
+    }
+
+    #[test]
+    fn cache_hit_rate_anthropic_input_tokens_excludes_cached() {
+        // Anthropic: input_tokens (mapped to prompt_tokens) EXCLUDES cache_read.
+        // hit_rate = 900 / (100 + 900) = 0.9.
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "cache_read_input_tokens": 900,
+            "cache_creation_input_tokens": 0
+        }))
+        .unwrap();
+        assert_eq!(usage.cache_hit_rate(), Some(0.9));
+    }
+
+    #[test]
+    fn cache_hit_rate_none_when_no_prompt_tokens() {
+        let usage = Usage::default();
+        assert_eq!(usage.cache_hit_rate(), None);
+    }
+
+    #[test]
+    fn cache_hit_rate_zero_when_no_cache() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1000
+        }))
+        .unwrap();
+        assert_eq!(usage.cache_hit_rate(), Some(0.0));
     }
 
     #[test]

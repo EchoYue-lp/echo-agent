@@ -165,12 +165,12 @@ pub(crate) async fn run_think(
     );
 
     // Log cache hit rate for observability.
-    let total_prompt_tokens = pt.saturating_add(cached_prompt_tokens);
-    let cache_hit_rate = if total_prompt_tokens > 0 {
-        cached_prompt_tokens as f64 / total_prompt_tokens as f64
-    } else {
-        0.0
-    };
+    // Uses Usage::cache_hit_rate() which handles provider semantics
+    // (OpenAI/DeepSeek: prompt_tokens includes cached; Anthropic: excludes).
+    let cache_hit_rate = last_usage
+        .as_ref()
+        .and_then(|u| u.cache_hit_rate())
+        .unwrap_or(0.0);
     tracing::info!(
         target: "echo_agent::cache",
         agent = %snap.config.agent_name,
