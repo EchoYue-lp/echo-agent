@@ -9,7 +9,6 @@
 //! |--------|---------|---------|
 //! | [`OpenAiClient`] / [`DefaultLlmClient`] | OpenAI & compatible APIs | default |
 //! | [`AnthropicClient`] | Native Claude API | `a2a` |
-//! | [`OllamaClient`] | Local Ollama | default |
 //! | [`ProviderFactory`] | Dynamic provider selection from config | default |
 //!
 //! # Quick Start
@@ -79,7 +78,6 @@ pub mod config {
 pub mod providers {
     //! Compatibility re-export of provider implementations from `echo_integration`.
     pub use echo_integration::providers::anthropic::AnthropicClient;
-    pub use echo_integration::providers::ollama::OllamaClient;
     pub use echo_integration::providers::openai::{DefaultLlmClient, OpenAiClient};
 }
 
@@ -98,7 +96,6 @@ pub use echo_core::llm::{
 
 // Provider implementations from echo_integration::providers
 pub use echo_integration::providers::anthropic::AnthropicClient;
-pub use echo_integration::providers::ollama::OllamaClient;
 pub use echo_integration::providers::openai::{DefaultLlmClient, OpenAiClient};
 
 // Config & Factory

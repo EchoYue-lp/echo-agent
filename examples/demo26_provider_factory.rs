@@ -1,7 +1,7 @@
 //! demo26_provider_factory.rs —— ProviderFactory 动态 Provider 演示
 //!
 //! 展示三种方式通过配置字符串自动实例化 LLM 客户端：
-//! 1. `provider:model` 简写格式（如 `"ollama:llama3"`）
+//! 1. `provider:model` 简写格式（如 `"openai:gpt-5.5"`）
 //! 2. 从配置文件/环境变量加载模型名称
 //! 3. 从 `LlmConfig` 手动构建
 //!
@@ -65,7 +65,7 @@ fn demo_provider_model_shorthand() -> echo_agent::error::Result<()> {
 
     // 演示各种 provider:model 组合（仅构造，不实际发请求）
     let configs = [
-        ("ollama:llama3", "Ollama 本地推理"),
+        ("openai:gpt-5.5", "OpenAI（OpenAI 兼容）"),
         ("deepseek:deepseek-v4-flash", "DeepSeek（OpenAI 兼容）"),
         ("dashscope:qwen3.7-max", "通义千问（OpenAI 兼容）"),
     ];
@@ -129,7 +129,6 @@ fn demo_from_llm_config() -> echo_agent::error::Result<()> {
             LlmConfig::anthropic("sk-ant-demo", "claude-sonnet-4-6"),
             "LlmConfig::anthropic()",
         ),
-        (LlmConfig::ollama("llama3"), "LlmConfig::ollama()"),
         (
             LlmConfig::deepseek("sk-ds-demo", "deepseek-v4-flash"),
             "LlmConfig::deepseek()",
@@ -162,7 +161,6 @@ fn demo_auto_provider_detection() -> echo_agent::error::Result<()> {
 
     let url_examples = [
         ("https://api.anthropic.com/v1/messages", "→ Anthropic"),
-        ("http://localhost:11434/api/chat", "→ Ollama"),
         ("https://api.openai.com/v1/chat/completions", "→ OpenAI"),
         (
             "https://api.deepseek.com/chat/completions",
@@ -187,17 +185,6 @@ fn demo_auto_provider_detection() -> echo_agent::error::Result<()> {
     println!(
         "  LlmConfig::anthropic() → provider = {:?}",
         anthropic_config.provider
-    );
-
-    let ollama_config = LlmConfig::ollama("llama3");
-    if ollama_config.provider != LlmProvider::Ollama {
-        return Err(echo_agent::error::ReactError::Other(
-            "demo26 验收失败：ollama provider 自动检测错误".to_string(),
-        ));
-    }
-    println!(
-        "  LlmConfig::ollama()    → provider = {:?}",
-        ollama_config.provider
     );
 
     println!();

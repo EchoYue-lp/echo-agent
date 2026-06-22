@@ -33,11 +33,9 @@ use std::sync::OnceLock;
 pub mod provider_urls {
     pub const OPENAI: &str = "https://api.openai.com/v1/chat/completions";
     pub const ANTHROPIC: &str = "https://api.anthropic.com/v1/messages";
-    pub const OLLAMA: &str = "http://localhost:11434/api/chat";
     pub const DEEPSEEK: &str = "https://api.deepseek.com/chat/completions";
     pub const DASHSCOPE: &str =
         "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
-    pub const GEMINI: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
     pub const MOONSHOT: &str = "https://api.moonshot.cn/v1/chat/completions";
     pub const ZHIPU: &str = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 }
@@ -89,14 +87,6 @@ pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
         requires_api_key: true,
     },
     ProviderMetadata {
-        id: "gemini",
-        name: "Gemini",
-        base_url: provider_urls::GEMINI,
-        env_vars: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        default_models: &["gemini-3.5-flash"],
-        requires_api_key: true,
-    },
-    ProviderMetadata {
         id: "moonshot",
         name: "Moonshot",
         base_url: provider_urls::MOONSHOT,
@@ -112,14 +102,6 @@ pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
         default_models: &["glm-5.1"],
         requires_api_key: true,
     },
-    ProviderMetadata {
-        id: "ollama",
-        name: "Ollama",
-        base_url: provider_urls::OLLAMA,
-        env_vars: &[],
-        default_models: &["llama3.1", "qwen2.5", "deepseek-r1", "codellama", "mistral"],
-        requires_api_key: false,
-    },
 ];
 
 pub fn all_provider_metadata() -> &'static [ProviderMetadata] {
@@ -132,7 +114,6 @@ pub fn provider_metadata(provider: &str) -> Option<ProviderMetadata> {
         "qwen" | "aliyun" => "dashscope",
         "kimi" => "moonshot",
         "glm" => "zhipu",
-        "google" => "gemini",
         other => other,
     };
     BUILTIN_PROVIDER_METADATA
@@ -144,17 +125,11 @@ pub fn provider_metadata(provider: &str) -> Option<ProviderMetadata> {
 /// LLM 供应商类型
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum LlmProvider {
-    /// OpenAI 兼容 API（默认，适用于 OpenAI、DashScope、DeepSeek 等）
+    /// OpenAI 兼容 API（默认，适用于 OpenAI、DashScope、DeepSeek、Moonshot、智谱 等）
     #[default]
     OpenAi,
     /// Anthropic Messages API
     Anthropic,
-    /// Ollama 本地推理
-    Ollama,
-    /// Google Gemini (OpenAI-compatible endpoint)
-    Gemini,
-    /// Azure OpenAI
-    Azure,
 }
 
 /// LLM 运行时配置（依赖注入模式）
@@ -179,10 +154,7 @@ pub enum LlmProvider {
 /// // 方式三：Anthropic
 /// let config = LlmConfig::anthropic("sk-ant-...", "claude-sonnet-4-6");
 ///
-/// // 方式四：Ollama 本地
-/// let config = LlmConfig::ollama("llama3");
-///
-/// // 方式五：从配置文件/环境变量加载
+/// // 方式四：从配置文件/环境变量加载
 /// // let config = LlmConfig::from_model("qwen3-max").unwrap();
 /// ```
 #[derive(Clone, Serialize, Deserialize)]
@@ -191,10 +163,10 @@ pub struct LlmConfig {
     #[serde(default)]
     pub provider: LlmProvider,
     /// 原始 provider 标识(如 "openai"/"deepseek"/"dashscope"/"moonshot"/"zhipu"/
-    /// "azure"/"gemini"/"ollama"/"anthropic")。`LlmProvider` 枚举把所有 OpenAI
-    /// 兼容供应商折叠成 `OpenAi`,`provider_name` 保留原始身份用于 thinking
-    /// 协议解析(同一模型走 deepseek 官方用 reasoning_effort,走百炼用
-    /// enable_thinking)。`None` 时退回按模型名推断。
+    /// "anthropic")。`LlmProvider` 枚举把所有 OpenAI 兼容供应商折叠成
+    /// `OpenAi`,`provider_name` 保留原始身份用于 thinking 协议解析(同一模型走
+    /// deepseek 官方用 reasoning_effort,走百炼用 enable_thinking)。`None` 时退回
+    /// 按模型名推断。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_name: Option<String>,
     /// Chat Completions 接口完整 URL
@@ -251,7 +223,7 @@ impl LlmConfig {
     /// 查找顺序：YAML 配置文件
     ///
     /// 自动识别 provider 类型：如果配置中指定了 `provider` 字段则直接使用，
-    /// 否则根据 `base_url` 自动推断（Anthropic / Ollama / OpenAI 兼容）。
+    /// 否则根据 `base_url` 自动推断（Anthropic / OpenAI 兼容）。
     pub fn from_model(model_name: &str) -> Result<Self> {
         let config = Config::get_model(model_name)?;
         Ok(Self {
@@ -293,18 +265,6 @@ impl LlmConfig {
         }
     }
 
-    /// 创建 Ollama 本地推理配置
-    pub fn ollama(model: impl Into<String>) -> Self {
-        Self {
-            provider: LlmProvider::Ollama,
-            provider_name: Some("ollama".to_string()),
-            base_url: provider_urls::OLLAMA.to_string(),
-            api_key: String::new(),
-            model: model.into(),
-            thinking: None,
-        }
-    }
-
     /// 创建 DeepSeek 配置
     pub fn deepseek(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
@@ -329,36 +289,6 @@ impl LlmConfig {
         }
     }
 
-    /// 创建 Google Gemini 配置
-    pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            provider: LlmProvider::Gemini,
-            provider_name: Some("gemini".to_string()),
-            base_url: provider_urls::GEMINI.to_string(),
-            api_key: api_key.into(),
-            model: model.into(),
-            thinking: None,
-        }
-    }
-
-    /// 创建 Azure OpenAI 配置
-    ///
-    /// `base_url` 格式: `https://{resource}.openai.azure.com`
-    pub fn azure(
-        api_key: impl Into<String>,
-        base_url: impl Into<String>,
-        deployment: impl Into<String>,
-    ) -> Self {
-        Self {
-            provider: LlmProvider::Azure,
-            provider_name: Some("azure".to_string()),
-            base_url: base_url.into(),
-            api_key: api_key.into(),
-            model: deployment.into(),
-            thinking: None,
-        }
-    }
-
     /// 创建自定义端点的配置（`new` 的别名）
     pub fn custom(
         base_url: impl Into<String>,
@@ -372,49 +302,8 @@ impl LlmConfig {
     pub fn build_client(&self) -> Result<Box<dyn echo_core::llm::LlmClient>> {
         match self.provider {
             LlmProvider::OpenAi => {
-                let provider_name = self
-                    .provider_name
-                    .as_deref()
-                    .unwrap_or("openai")
-                    .to_ascii_lowercase();
-                match provider_name.as_str() {
-                    "deepseek" => {
-                        let client = super::deepseek::DeepSeekClient::with_base_url(
-                            &self.api_key,
-                            &self.model,
-                            &self.base_url,
-                        )?;
-                        Ok(Box::new(client))
-                    }
-                    "dashscope" | "qwen" | "aliyun" => {
-                        let client = super::qwen::QwenClient::with_base_url(
-                            &self.api_key,
-                            &self.model,
-                            &self.base_url,
-                        )?;
-                        Ok(Box::new(client))
-                    }
-                    "zhipu" | "glm" | "bigmodel" => {
-                        let client = super::glm::GlmClient::with_base_url(
-                            &self.api_key,
-                            &self.model,
-                            &self.base_url,
-                        )?;
-                        Ok(Box::new(client))
-                    }
-                    "moonshot" | "kimi" => {
-                        let client = super::kimi::KimiClient::with_base_url(
-                            &self.api_key,
-                            &self.model,
-                            &self.base_url,
-                        )?;
-                        Ok(Box::new(client))
-                    }
-                    _ => {
-                        let client = super::openai::OpenAiClient::new(self.clone())?;
-                        Ok(Box::new(client))
-                    }
-                }
+                let client = super::openai::OpenAiClient::new(self.clone())?;
+                Ok(Box::new(client))
             }
             LlmProvider::Anthropic => {
                 let client = super::anthropic::AnthropicClient::with_base_url(
@@ -422,19 +311,6 @@ impl LlmConfig {
                     &self.api_key,
                     &self.model,
                 );
-                Ok(Box::new(client))
-            }
-            LlmProvider::Ollama => {
-                let client =
-                    super::ollama::OllamaClient::with_base_url(&self.base_url, &self.model);
-                Ok(Box::new(client))
-            }
-            LlmProvider::Gemini => {
-                let client = super::gemini::GeminiClient::new(self.clone())?;
-                Ok(Box::new(client))
-            }
-            LlmProvider::Azure => {
-                let client = super::azure::AzureOpenAiClient::new(self.clone())?;
                 Ok(Box::new(client))
             }
         }
@@ -460,7 +336,7 @@ impl LlmConfig {
 /// 支持三种配置方式：
 ///
 /// 1. **模型名称**：从内置 provider/env 规则或配置文件加载（如 `"qwen3.6-plus"`）
-/// 2. **Provider:Model 格式**：自动匹配内置 Provider（如 `"anthropic:claude-sonnet-4-6"`、`"ollama:llama3"`）
+/// 2. **Provider:Model 格式**：自动匹配内置 Provider（如 `"anthropic:claude-sonnet-4-6"`、`"deepseek:deepseek-v4-flash"`）
 /// 3. **完整 LlmConfig**：手动构造配置后调用 `from_config()`
 ///
 /// # 示例
@@ -475,7 +351,6 @@ impl LlmConfig {
 ///
 /// // 方式二：Provider:Model 简写
 /// let client = ProviderFactory::create("anthropic:claude-sonnet-4-6")?;
-/// let client = ProviderFactory::create("ollama:llama3")?;
 /// let client = ProviderFactory::create("deepseek:deepseek-v4-flash")?;
 ///
 /// // 方式三：从已有配置构建
@@ -516,7 +391,6 @@ impl ProviderFactory {
     /// - `dashscope`/`qwen` → `DASHSCOPE_API_KEY` / `QWEN_API_KEY`
     /// - `moonshot` → `MOONSHOT_API_KEY`
     /// - `zhipu` → `ZHIPU_API_KEY`
-    /// - `ollama` → 无需 API key
     fn from_provider_model(
         provider: &str,
         model: &str,
@@ -524,12 +398,12 @@ impl ProviderFactory {
         let base_url = provider_base_url(provider).ok_or_else(|| {
             ConfigError::ConfigFileError(format!(
                 "未知的 provider: '{provider}'，\
-                 支持: openai, anthropic, deepseek, dashscope, moonshot, zhipu, ollama"
+                 支持: openai, anthropic, deepseek, dashscope, moonshot, zhipu"
             ))
         })?;
 
         let api_key = Self::env_api_key(provider);
-        if api_key.trim().is_empty() && !matches!(provider.to_lowercase().as_str(), "ollama") {
+        if api_key.trim().is_empty() {
             return Err(ConfigError::MissingConfig(
                 format!("{provider}:{model}"),
                 format!(
@@ -561,9 +435,6 @@ impl ProviderFactory {
             "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
             "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
             "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
-            "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-            "azure" | "azure_openai" => &["AZURE_OPENAI_API_KEY"],
-            "ollama" => return String::new(),
             _ => return String::new(),
         };
         first_present_env(env_vars).unwrap_or_default()
@@ -581,11 +452,6 @@ impl ProviderFactory {
             "kimi",
             "zhipu",
             "glm",
-            "ollama",
-            "gemini",
-            "google",
-            "azure",
-            "azure_openai",
         ]
     }
 }
@@ -603,8 +469,6 @@ pub fn provider_base_url(provider: &str) -> Option<&'static str> {
         }
         "moonshot" | "kimi" => Some("https://api.moonshot.cn/v1/chat/completions"),
         "zhipu" | "glm" => Some("https://open.bigmodel.cn/api/paas/v4/chat/completions"),
-        "ollama" => Some("http://localhost:11434/v1/chat/completions"),
-        "gemini" | "google" => Some("https://generativelanguage.googleapis.com/v1beta/openai/"),
         _ => None,
     }
 }
@@ -613,10 +477,7 @@ pub fn provider_base_url(provider: &str) -> Option<&'static str> {
 fn parse_provider(provider: &str) -> LlmProvider {
     match provider.to_lowercase().as_str() {
         "anthropic" => LlmProvider::Anthropic,
-        "ollama" => LlmProvider::Ollama,
-        "gemini" | "google" => LlmProvider::Gemini,
-        "azure" | "azure_openai" => LlmProvider::Azure,
-        // OpenAI 兼容类（openai、deepseek、dashscope 等）统一走 OpenAI 实现
+        // OpenAI 兼容类（openai、deepseek、dashscope、moonshot、zhipu 等）统一走 OpenAI 实现
         _ => LlmProvider::OpenAi,
     }
 }
@@ -626,12 +487,6 @@ fn detect_provider_from_url(url: &str) -> LlmProvider {
     let lower = url.to_lowercase();
     if lower.contains(provider_urls::ANTHROPIC) {
         LlmProvider::Anthropic
-    } else if lower.contains(provider_urls::OLLAMA) || lower.contains("ollama") {
-        LlmProvider::Ollama
-    } else if lower.contains(provider_urls::GEMINI) {
-        LlmProvider::Gemini
-    } else if lower.contains(".openai.azure.com") {
-        LlmProvider::Azure
     } else {
         LlmProvider::OpenAi
     }
@@ -645,14 +500,6 @@ fn provider_name_from_url(url: &str) -> Option<String> {
     let lower = url.to_lowercase();
     if lower.contains(provider_urls::ANTHROPIC) || lower.contains("anthropic") {
         Some("anthropic".into())
-    } else if lower.contains("ollama") {
-        Some("ollama".into())
-    } else if lower.contains(provider_urls::GEMINI)
-        || lower.contains("generativelanguage.googleapis")
-    {
-        Some("gemini".into())
-    } else if lower.contains(".openai.azure.com") {
-        Some("azure".into())
     } else if lower.contains("dashscope.aliyuncs") {
         Some("dashscope".into())
     } else if lower.contains("api.deepseek.com") {
@@ -949,7 +796,7 @@ impl Config {
                             .ok_or_else(|| {
                                 ConfigError::ConfigFileError(format!(
                                     "模型 '{}' 指定了未知的 provider: '{}'，\
-                                     支持的 provider: openai, anthropic, deepseek, dashscope, moonshot, zhipu, ollama",
+                                     支持的 provider: openai, anthropic, deepseek, dashscope, moonshot, zhipu",
                                     key, resolved_provider
                                 ))
                             })?
@@ -1100,7 +947,6 @@ impl Config {
                 "qwen" | "dashscope" | "aliyun" => "DASHSCOPE_API_KEY",
                 "moonshot" | "kimi" => "MOONSHOT_API_KEY",
                 "zhipu" | "glm" => "ZHIPU_API_KEY",
-                "ollama" => "", // ollama doesn't need a key
                 _ => "",
             };
             if !env_vars.is_empty() {
@@ -1216,7 +1062,7 @@ fn builtin_model_config(model: &str) -> Option<ModelConfig> {
     let baseurl = provider_base_url(provider)?.to_string();
     let apikey = ProviderFactory::env_api_key(provider);
 
-    if apikey.trim().is_empty() && !matches!(provider, "ollama") {
+    if apikey.trim().is_empty() {
         return None;
     }
 
@@ -1239,7 +1085,6 @@ fn infer_builtin_provider(model: &str) -> Option<(&'static str, String)> {
             "dashscope" | "qwen" | "aliyun" => "qwen",
             "moonshot" | "kimi" => "moonshot",
             "zhipu" | "glm" => "zhipu",
-            "ollama" => "ollama",
             _ => return None,
         };
         let raw_model = raw_model.trim();
@@ -1357,9 +1202,6 @@ pub fn provider_env_var_names(provider: &str) -> &'static [&'static str] {
         "dashscope" | "qwen" | "aliyun" => &["DASHSCOPE_API_KEY", "QWEN_API_KEY"],
         "moonshot" | "kimi" => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         "zhipu" | "glm" => &["ZHIPU_API_KEY", "GLM_API_KEY"],
-        "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        "azure" | "azure_openai" => &["AZURE_OPENAI_API_KEY"],
-        "ollama" => &[],
         _ => &[],
     }
 }
@@ -1508,7 +1350,6 @@ mod tests {
         assert!(provider_base_url("deepseek").is_some());
         assert!(provider_base_url("dashscope").is_some());
         assert!(provider_base_url("qwen").is_some());
-        assert!(provider_base_url("ollama").is_some());
         assert!(provider_base_url("unknown_provider").is_none());
     }
 
@@ -1686,7 +1527,6 @@ embedding:
     fn test_parse_provider() {
         assert_eq!(parse_provider("anthropic"), LlmProvider::Anthropic);
         assert_eq!(parse_provider("Anthropic"), LlmProvider::Anthropic);
-        assert_eq!(parse_provider("ollama"), LlmProvider::Ollama);
         assert_eq!(parse_provider("openai"), LlmProvider::OpenAi);
         assert_eq!(parse_provider("deepseek"), LlmProvider::OpenAi);
         assert_eq!(parse_provider("unknown"), LlmProvider::OpenAi);
@@ -1697,10 +1537,6 @@ embedding:
         assert_eq!(
             detect_provider_from_url("https://api.anthropic.com/v1/messages"),
             LlmProvider::Anthropic,
-        );
-        assert_eq!(
-            detect_provider_from_url("http://localhost:11434/api/chat"),
-            LlmProvider::Ollama,
         );
         assert_eq!(
             detect_provider_from_url("https://api.openai.com/v1/chat/completions"),
@@ -1717,13 +1553,11 @@ embedding:
         let providers = ProviderFactory::supported_providers();
         assert!(providers.contains(&"openai"));
         assert!(providers.contains(&"anthropic"));
-        assert!(providers.contains(&"ollama"));
         assert!(providers.contains(&"deepseek"));
     }
 
     #[test]
     fn test_provider_factory_parse_config_str() {
-        assert_eq!(ProviderFactory::env_api_key("ollama"), "");
         assert_eq!(ProviderFactory::env_api_key("unknown"), "");
     }
 
@@ -1734,14 +1568,11 @@ models:
   claude-test:
     base_url: https://api.anthropic.com/v1/messages
     api_key: sk-test
-  ollama-test:
-    base_url: http://localhost:11434/api/chat
-    api_key: ""
   openai-test:
     provider: openai
     api_key: sk-test
 "#;
         let file: ConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(file.models.len(), 3);
+        assert_eq!(file.models.len(), 2);
     }
 }

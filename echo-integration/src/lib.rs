@@ -6,7 +6,7 @@
 //!
 //! | Module | Description | Feature |
 //! |--------|-------------|---------|
-//! | [`providers`] | LLM clients: `OpenAiClient`, `AnthropicClient`, `OllamaClient`, `ProviderFactory` | default |
+//! | [`providers`] | LLM clients: `OpenAiClient`, `AnthropicClient`, `ProviderFactory` | default |
 //! | [`mcp`] | MCP protocol: stdio, SSE, HTTP transports; `McpManager`, `McpServerConfig` | `mcp` |
 //! | [`channels`] | IM integrations: QQ Bot (WebSocket) and Feishu (Webhook) | `channels` |
 //!
