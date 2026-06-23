@@ -58,6 +58,13 @@ pub mod builtin;
 pub mod files {
     pub use echo_tools::files::*;
 }
+/// Path validation / confinement (re-export from echo_tools)
+///
+/// Re-exported here so downstream crates can depend on `echo_agent` alone
+/// instead of adding a direct dep on `echo_tools` for `PathValidator`.
+pub mod security {
+    pub use echo_tools::security::*;
+}
 pub mod permission;
 /// Shell tool (re-export from echo_tools)
 pub mod shell {

@@ -163,10 +163,7 @@ impl SubagentExecutor {
                 iterations: 0,
                 tokens_used: None,
                 was_truncated: false,
-                mode: req
-                    .mode_override
-                    .clone()
-                    .unwrap_or(ExecutionMode::Fork),
+                mode: req.mode_override.clone().unwrap_or(ExecutionMode::Fork),
                 usage: None,
             });
         }

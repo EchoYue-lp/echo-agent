@@ -226,7 +226,8 @@ impl AppConfig {
 ///
 /// Authentication and base URL can be set via:
 /// - Config file: auth_token and base_url fields (highest priority)
-/// - Environment variables: EKO_AUTH_TOKEN, EKO_BASE_URL, EKO_MODEL
+/// - Struct fields (the application layer is responsible for filling these
+///   from its own config file / env vars before constructing a `ModelConfig`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -236,9 +237,10 @@ pub struct ModelConfig {
     pub provider: String,
     /// Model name (e.g. "deepseek-v4-flash", "gpt-5.5", "claude-3.5-sonnet").
     pub name: String,
-    /// API authentication token (optional, can be set via EKO_AUTH_TOKEN env var).
+    /// API authentication token (optional; the application layer is responsible
+    /// for populating this from its own config/env before constructing the struct).
     pub auth_token: Option<String>,
-    /// API base URL (optional, can be set via EKO_BASE_URL env var).
+    /// API base URL (optional; populated by the application layer).
     pub base_url: Option<String>,
     /// Maximum tokens to generate (None means use model default).
     pub max_tokens: Option<u32>,
@@ -275,34 +277,23 @@ impl Default for ModelConfig {
 
 impl ModelConfig {
     /// Get the effective authentication token.
-    /// Priority: config file auth_token field > EKO_AUTH_TOKEN env var
+    ///
+    /// Reads only the struct field. Environment-variable fallback is the
+    /// application layer's responsibility (it constructs `ModelConfig` from
+    /// its own config + env before passing it to the framework). The framework
+    /// stays neutral and does not hardcode any env-var name.
     pub fn get_auth_token(&self) -> Option<String> {
-        self.auth_token
-            .clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("EKO_AUTH_TOKEN")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
+        self.auth_token.clone().filter(|s| !s.is_empty())
     }
 
-    /// Get the effective base URL.
-    /// Priority: config file base_url field > EKO_BASE_URL env var
+    /// Get the effective base URL (struct field only; env fallback is app-layer).
     pub fn get_base_url(&self) -> Option<String> {
-        self.base_url
-            .clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("EKO_BASE_URL").ok().filter(|s| !s.is_empty()))
+        self.base_url.clone().filter(|s| !s.is_empty())
     }
 
-    /// Get the effective model name.
-    /// Priority: EKO_MODEL env var > config file name field
+    /// Get the effective model name (struct field only; env fallback is app-layer).
     pub fn get_model_name(&self) -> String {
-        std::env::var("EKO_MODEL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.name.clone())
+        self.name.clone()
     }
 }
 
@@ -764,13 +755,16 @@ mod tests {
     }
 
     #[test]
-    fn test_model_config_values_override_echo_cowork_env() {
-        let _token_guard = EnvGuard::set("EKO_AUTH_TOKEN", "env-token");
-        let _base_url_guard = EnvGuard::set("EKO_BASE_URL", "https://env.example/v1");
+    fn test_model_config_getters_return_fields_only() {
+        // The framework does NOT read env vars for LLM credentials — that is
+        // the application layer's job. Getters return only struct fields.
+        // (Set an unrelated env var to prove the getter ignores env entirely.)
+        let _guard = EnvGuard::set("SOME_UNRELATED_AUTH_TOKEN", "env-token");
 
         let config = ModelConfig {
             auth_token: Some("config-token".to_string()),
             base_url: Some("https://config.example/v1".to_string()),
+            name: "deepseek-v4-flash".to_string(),
             ..Default::default()
         };
 
@@ -779,6 +773,12 @@ mod tests {
             config.get_base_url().as_deref(),
             Some("https://config.example/v1")
         );
+        assert_eq!(config.get_model_name(), "deepseek-v4-flash");
+
+        // Empty fields return None / default — no env fallback.
+        let empty = ModelConfig::default();
+        assert_eq!(empty.get_auth_token(), None);
+        assert_eq!(empty.get_base_url(), None);
     }
 
     #[test]
