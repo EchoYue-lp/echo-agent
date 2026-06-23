@@ -336,8 +336,12 @@ impl ReactAgent {
                 HookContext::for_notification(matcher.unwrap_or(""), &session_id, &agent_name)
             }
             HookEvent::UserPromptSubmit => {
-                // prompt is set by caller, use empty here
-                HookContext::for_user_prompt_submit("", None, &session_id, &agent_name)
+                // User input text is passed via the `matcher` parameter by the
+                // caller (prepare_stream_context / prepare_react_context).
+                // This enables content-based hook matchers (e.g. "\\.docx")
+                // to match against the actual user input via glob::Pattern.
+                let prompt_text = matcher.unwrap_or("");
+                HookContext::for_user_prompt_submit(prompt_text, matcher, &session_id, &agent_name)
             }
             HookEvent::PreCompact | HookEvent::PostCompact => {
                 // Compress stats are set by caller, use default here
@@ -446,7 +450,7 @@ impl ReactAgent {
         };
 
         let registry = self.tools.hook_registry.read().await.clone();
-        let result = registry.run_lifecycle_hooks(&context).await;
+        let mut result = registry.run_lifecycle_hooks(&context).await;
 
         // Inject context from hook results (single lock acquisition for batching)
         let event_name = event.as_str();
@@ -460,6 +464,26 @@ impl ReactAgent {
             }
             for msg in &result.messages {
                 ctx.push(runtime_context_note(&format!("Hook:{event_name}"), msg));
+            }
+        }
+
+        // ActivateSkill hook: directly activate the requested skill.
+        // On success, clear the field so callers (prepare phase → cache writer)
+        // don't also hand it to TriggerSupervisor for a double activation.
+        if let Some((ref skill, ref reason)) = result.activate_skill {
+            match self.activate_skill_for_context(skill).await {
+                Ok(()) => {
+                    let note = format!("已根据上下文自动激活技能 {skill}:{reason}");
+                    let mut ctx = self.memory.context.lock().await;
+                    ctx.push(runtime_context_note("Hook:ActivateSkill", &note));
+                    info!(skill = %skill, reason = %reason, "Hook activated skill");
+                    // Consumed — prevent double activation by supervisor (P4)
+                    result.activate_skill = None;
+                }
+                Err(e) => {
+                    warn!(skill = %skill, error = %e, "Hook-requested skill activation failed");
+                    // Leave activate_skill in result so supervisor (P4) can retry
+                }
             }
         }
 
@@ -506,6 +530,23 @@ impl ReactAgent {
         {
             context.push(runtime_context_note("turn", &runtime_context));
         }
+        // Drop context lock before hook execution (avoid deadlock with
+        // fire_lifecycle_hook's own context acquisition)
+        drop(context);
+
+        // Fire UserPromptSubmit hook: passes user input so content-based
+        // matchers (e.g. "\\.docx") can trigger ActivateSkill actions, and
+        // static "*" matchers inject the forced-checklist prompt every turn.
+        let hook_result = self
+            .fire_lifecycle_hook(HookEvent::UserPromptSubmit, Some(input))
+            .await;
+        // Cache hook activation result for TriggerSupervisor (P4) consumption
+        if hook_result.activate_skill.is_some()
+            && let Ok(mut cache) = self.hook_activation_cache.lock()
+        {
+            *cache = hook_result.activate_skill;
+        }
+
         recalled
     }
 
@@ -553,6 +594,20 @@ impl ReactAgent {
         {
             context.push(runtime_context_note("turn", &runtime_context));
         }
+        drop(context);
+
+        // Fire UserPromptSubmit hook (see prepare_stream_context for rationale)
+        if !text.is_empty() {
+            let hook_result = self
+                .fire_lifecycle_hook(HookEvent::UserPromptSubmit, Some(&text))
+                .await;
+            if hook_result.activate_skill.is_some()
+                && let Ok(mut cache) = self.hook_activation_cache.lock()
+            {
+                *cache = hook_result.activate_skill;
+            }
+        }
+
         recalled
     }
 }

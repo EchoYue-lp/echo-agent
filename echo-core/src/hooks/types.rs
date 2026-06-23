@@ -832,6 +832,10 @@ pub struct HookResult {
     pub retry: bool,
     /// Arbitrary metadata from hooks.
     pub metadata: Option<Value>,
+    /// For ActivateSkill hooks: skill to activate directly (name + reason).
+    /// Populated by `execute_action` when an `ActivateSkill` action matches;
+    /// consumed by `fire_lifecycle_hook` to call `activate_skill_for_context`.
+    pub activate_skill: Option<(String, String)>,
 }
 
 impl HookResult {
@@ -869,6 +873,14 @@ impl HookResult {
     /// Whether this result indicates the agent should continue working.
     pub fn should_continue(&self) -> bool {
         self.continue_reason.is_some()
+    }
+
+    /// Create a result requesting direct skill activation.
+    pub fn with_activate_skill(skill: String, reason: String) -> Self {
+        Self {
+            activate_skill: Some((skill, reason)),
+            ..Self::default()
+        }
     }
 }
 
@@ -1157,5 +1169,21 @@ mod tests {
         assert_eq!(ctx.memory_from_layer.as_deref(), Some("warm"));
         assert_eq!(ctx.memory_to_layer.as_deref(), Some("hot"));
         assert_eq!(ctx.matcher.as_deref(), Some("warm->hot"));
+    }
+
+    #[test]
+    fn activate_skill_defaults_to_none() {
+        let r = HookResult::default();
+        assert!(r.activate_skill.is_none());
+    }
+
+    #[test]
+    fn activate_skill_constructor_sets_field() {
+        let r =
+            HookResult::with_activate_skill("docx".to_string(), "检测到 .docx 文件".to_string());
+        assert_eq!(
+            r.activate_skill,
+            Some(("docx".to_string(), "检测到 .docx 文件".to_string()))
+        );
     }
 }

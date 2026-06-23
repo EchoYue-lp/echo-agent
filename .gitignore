@@ -20,3 +20,6 @@ echo-tools/target/
 
 # Worktree directories
 .worktrees/
+
+# Superpowers plan/spec 工作流文档(本地保留用于后续 P5-P8 执行,不进仓库分发)
+docs/superpowers/

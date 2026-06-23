@@ -219,6 +219,12 @@ pub struct ReactAgent {
 
     /// Runtime state consumed by TriggerDetector between turns.
     pub(crate) memory_trigger_state: Arc<std::sync::Mutex<MemoryTriggerRuntimeState>>,
+
+    /// Shared slot for hook→classifier communication.
+    /// Written by prepare phase after UserPromptSubmit hooks resolve
+    /// (fire_lifecycle_hook → activate_skill); read by TriggerSupervisor
+    /// during intent classification. Consumed once per turn (take).
+    pub(crate) hook_activation_cache: Arc<std::sync::Mutex<Option<(String, String)>>>,
 }
 
 #[derive(Default)]
@@ -512,6 +518,7 @@ impl ReactAgent {
             memory_trigger_state: Arc::new(std::sync::Mutex::new(
                 MemoryTriggerRuntimeState::default(),
             )),
+            hook_activation_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

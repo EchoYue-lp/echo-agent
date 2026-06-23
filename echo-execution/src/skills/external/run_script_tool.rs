@@ -46,7 +46,8 @@ use futures::future::BoxFuture;
 use serde_json::json;
 use tokio::sync::RwLock;
 
-use crate::sandbox::{SandboxCommand, SandboxManager};
+use crate::sandbox::{ResourceLimits, SandboxCommand, SandboxManager};
+use crate::skills::external::types::SkillSandboxPolicy;
 use crate::skills::minimal_env;
 use crate::skills::registry::SkillRegistry;
 use echo_core::error::{Result, ToolError};
@@ -62,6 +63,34 @@ pub struct RunSkillScriptTool {
     registry: Arc<RwLock<SkillRegistry>>,
     sandbox: Option<Arc<SandboxManager>>,
     timeout_secs: u64,
+}
+
+/// Apply SkillSandboxPolicy constraints to a SandboxCommand.
+///
+/// Standalone function (not a method) so it can be called from within
+/// the `execute` method's `BoxFuture` async block.
+fn apply_sandbox_policy(cmd: &mut SandboxCommand, policy: &SkillSandboxPolicy) {
+    if !policy.is_constraining() {
+        return;
+    }
+    if let Some(t) = policy.timeout_secs {
+        cmd.timeout = std::time::Duration::from_secs(t);
+    }
+}
+
+/// Build ResourceLimits from a SkillSandboxPolicy for `execute_with_limits`.
+/// When the policy declares network/path restrictions, they translate to
+/// sandbox resource limits enforced at the OS level (Seatbelt / Landlock).
+fn sandbox_limits_from_policy(policy: &SkillSandboxPolicy) -> ResourceLimits {
+    let mut limits = ResourceLimits::unrestricted(); // EKO local trust model
+    limits.network = policy.network.unwrap_or(true);
+    if !policy.allowed_paths.is_empty() {
+        limits.writable_paths = policy.allowed_paths.clone();
+    }
+    if let Some(t) = policy.timeout_secs {
+        limits.cpu_time_secs = Some(t);
+    }
+    limits
 }
 
 impl RunSkillScriptTool {
@@ -248,11 +277,24 @@ impl Tool for RunSkillScriptTool {
 
             // -- Sandbox execution path --
             if let Some(ref manager) = self.sandbox {
-                let sandbox_cmd = SandboxCommand::program(&invocation.program, all_args)
+                let mut sandbox_cmd = SandboxCommand::program(&invocation.program, all_args)
                     .with_working_dir(&canonical_skill_dir)
                     .with_timeout(timeout);
 
-                return match manager.execute(sandbox_cmd).await {
+                // Apply SkillSandboxPolicy from descriptor (if declared).
+                // Network / path restrictions go through ResourceLimits +
+                // execute_with_limits for OS-level enforcement.
+                let execution_result = if let Some(ref policy) = descriptor.sandbox
+                    && policy.is_constraining()
+                {
+                    apply_sandbox_policy(&mut sandbox_cmd, policy);
+                    let limits = sandbox_limits_from_policy(policy);
+                    manager.execute_with_limits(sandbox_cmd, limits).await
+                } else {
+                    manager.execute(sandbox_cmd).await
+                };
+
+                return match execution_result {
                     Ok(result) => format_execution_result(
                         &skill_name,
                         &script_path,
@@ -362,21 +404,28 @@ impl Invocation {
     }
 }
 
-/// Python: `python3` on Unix, `python` on Windows.
+/// Python: `uv run --script` first (auto PEP 723 ephemeral env),
+/// then `python3`, then `python`, Windows `py -3`.
 fn resolve_python() -> Invocation {
-    if cfg!(target_os = "windows") {
-        if which_exists("python") {
-            Invocation::simple("python")
-        } else {
-            Invocation::new("py", vec!["-3"])
-        }
-    } else {
-        if which_exists("python3") {
-            Invocation::simple("python3")
-        } else {
-            Invocation::simple("python")
-        }
+    // Tier 1: uv run --script (handles PEP 723 inline dependencies,
+    // auto ephemeral venv, no user pip install needed)
+    if which_exists("uv") {
+        return Invocation::new("uv", vec!["run", "--script"]);
     }
+    // Tier 2: bare python3 (stdlib scripts still work)
+    if which_exists("python3") {
+        return Invocation::simple("python3");
+    }
+    // Tier 3: python (macOS python3 not installed, or Windows)
+    if which_exists("python") {
+        return Invocation::simple("python");
+    }
+    // Windows fallback
+    if cfg!(target_os = "windows") && which_exists("py") {
+        return Invocation::new("py", vec!["-3"]);
+    }
+    // Last resort: assume python3 exists, let Command fail with clear error
+    Invocation::simple("python3")
 }
 
 /// TypeScript: `bun` -> `deno run` -> `npx tsx`.
@@ -519,8 +568,12 @@ mod tests {
     #[test]
     fn test_resolve_python() {
         let inv = resolve_python();
+        // uv 优先(P2):装了 uv 时返回 "uv",否则回退 python3/python/py
         assert!(
-            inv.program == "python3" || inv.program == "python" || inv.program == "py",
+            inv.program == "uv"
+                || inv.program == "python3"
+                || inv.program == "python"
+                || inv.program == "py",
             "unexpected python program: {}",
             inv.program
         );

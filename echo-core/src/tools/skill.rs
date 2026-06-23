@@ -115,8 +115,8 @@ pub fn minimal_env(
     // Forward safe, non-secret functional vars so skill scripts behave sanely
     // under the env_cleared environment (P1-12): LANG/LC_ALL for correct UTF-8
     // handling (otherwise the C locale mangles non-ASCII), TMPDIR for tools
-    // that write temp files, TZ for correct timestamps.
-    for var in ["LANG", "LC_ALL", "TMPDIR", "TZ"] {
+    // that write temp files, TZ for correct timestamps, HOME for ~/.config etc.
+    for var in ["LANG", "LC_ALL", "TMPDIR", "TZ", "HOME"] {
         if let Ok(val) = std::env::var(var) {
             env.insert(var.to_string(), val);
         }
@@ -214,6 +214,9 @@ mod tests {
         assert!(env.contains_key("PATH") || env.is_empty()); // PATH might not exist
         assert_eq!(env.get("SKILL_DIR").unwrap(), "/tmp/skill");
         assert_eq!(env.get("SESSION_ID").unwrap(), "sess-1");
-        assert!(!env.contains_key("HOME"));
+        assert!(
+            env.contains_key("HOME"),
+            "HOME must be present for local desktop agent scripts"
+        );
     }
 }

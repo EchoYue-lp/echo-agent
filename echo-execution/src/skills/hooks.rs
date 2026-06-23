@@ -183,6 +183,16 @@ pub enum HookAction {
         #[serde(default = "default_hook_timeout")]
         timeout: u64,
     },
+    /// Directly activate a skill without going through the LLM.
+    /// The hook engine calls `activate_skill_for_context(skill)` when matched.
+    /// `reason` is surfaced to the model as a system note explaining why.
+    ActivateSkill {
+        /// Name of the skill to activate (must match a discovered skill).
+        skill: String,
+        /// Human-readable reason shown to the model.
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 impl HookAction {
@@ -263,6 +273,11 @@ impl HookAction {
                         "Agent hook timeout {}s exceeds maximum {}s",
                         timeout, MAX_HOOK_TIMEOUT
                     ));
+                }
+            }
+            HookAction::ActivateSkill { skill, .. } => {
+                if skill.is_empty() {
+                    return Err("ActivateSkill hook has empty skill name".into());
                 }
             }
         }
@@ -819,6 +834,9 @@ async fn execute_action(
                 task.as_deref().unwrap_or("(none)")
             ));
             result
+        }
+        HookAction::ActivateSkill { skill, reason } => {
+            HookResult::with_activate_skill(skill.clone(), reason.clone())
         }
     }
 }
@@ -1385,6 +1403,13 @@ fn merge_result(combined: &mut HookResult, incoming: HookResult) {
     // retry: OR semantics (any true → combined true)
     if incoming.retry {
         combined.retry = true;
+    }
+
+    // activate_skill: first-wins (the first non-None activation request is kept;
+    // subsequent activate_skill results from other hooks are ignored to avoid
+    // conflicting multi-skill activation).
+    if combined.activate_skill.is_none() {
+        combined.activate_skill = incoming.activate_skill;
     }
 
     // metadata: deep merge
@@ -2460,5 +2485,55 @@ Notification:
             timeout: 99999,
         };
         assert!(action.validate().is_err());
+    }
+
+    // ── ActivateSkill tests ──
+
+    fn ctx() -> super::HookContext {
+        super::HookContext::for_user_prompt_submit("test input", None, "s1", "agent")
+    }
+
+    #[test]
+    fn validate_rejects_empty_skill_name() {
+        let a = HookAction::ActivateSkill {
+            skill: String::new(),
+            reason: "r".into(),
+        };
+        assert!(a.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_nonempty() {
+        let a = HookAction::ActivateSkill {
+            skill: "docx".into(),
+            reason: "r".into(),
+        };
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn merge_takes_first_activate_skill() {
+        let mut combined = HookResult::default();
+        let first = HookResult::with_activate_skill("docx".into(), "r1".into());
+        merge_result(&mut combined, first);
+        let second = HookResult::with_activate_skill("pdf".into(), "r2".into());
+        merge_result(&mut combined, second);
+        assert_eq!(
+            combined.activate_skill,
+            Some(("docx".to_string(), "r1".to_string()))
+        );
+    }
+
+    #[test]
+    fn merge_activate_skill_from_none() {
+        let mut combined = HookResult::default();
+        merge_result(
+            &mut combined,
+            HookResult::with_activate_skill("pdf".into(), "r".into()),
+        );
+        assert_eq!(
+            combined.activate_skill.as_ref().map(|(s, _)| s.clone()),
+            Some("pdf".into())
+        );
     }
 }

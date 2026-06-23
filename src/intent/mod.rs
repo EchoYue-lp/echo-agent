@@ -192,5 +192,7 @@ pub use self::classifier::{
     ChainedClassifier, KeywordClassifier, KeywordClassifierConfig, LlmIntentClassifier,
     SkillDescription,
 };
+pub use self::trigger_supervisor::TriggerSupervisor;
 
 mod classifier;
+mod trigger_supervisor;

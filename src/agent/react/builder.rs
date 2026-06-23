@@ -818,10 +818,11 @@ impl ReactAgentBuilder {
             agent.set_circuit_breaker(cb_config);
         }
 
-        // Set sandbox manager
-        if let Some(manager) = self.sandbox_manager {
-            agent.set_sandbox_manager(manager);
-        }
+        // Set sandbox manager (default: local_only, no Docker required)
+        let manager = self
+            .sandbox_manager
+            .unwrap_or_else(|| std::sync::Arc::new(SandboxManager::local_only()));
+        agent.set_sandbox_manager(manager);
 
         // Set run store
         if let Some(store) = self.run_store {

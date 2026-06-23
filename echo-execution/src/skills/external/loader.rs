@@ -21,8 +21,13 @@ use tracing::{debug, info, warn};
 use echo_core::error::{ReactError, Result};
 
 use super::types::{RawFrontmatter, SkillDescriptor};
+use crate::skills::hooks::HooksDefinition;
 
 const SKILL_FILE: &str = "SKILL.md";
+/// Hook definition file (EKO format) alongside SKILL.md.
+/// Distinct from superpowers' Claude-Code-format hooks.json; assets are
+/// transcribed to this format at integration time.
+const HOOKS_FILE: &str = "hooks.json";
 const MAX_SCAN_DEPTH: usize = 4;
 
 /// Directories to skip during scanning.
@@ -170,7 +175,37 @@ impl SkillLoader {
             let skill_file = path.join(SKILL_FILE);
             if skill_file.exists() {
                 match parse_skill_file(&skill_file, &dir_name).await {
-                    Ok((desc, legacy_instr)) => {
+                    Ok((mut desc, legacy_instr)) => {
+                        // Merge external hooks.json (EKO format) if present alongside SKILL.md.
+                        let hooks_path = path.join(HOOKS_FILE);
+                        if hooks_path.exists() {
+                            match tokio::fs::read_to_string(&hooks_path).await {
+                                Ok(text) => match serde_json::from_str::<HooksDefinition>(&text) {
+                                    Ok(extra) => {
+                                        info!(
+                                            "Merged hooks.json for skill '{}' from {}",
+                                            desc.name,
+                                            hooks_path.display()
+                                        );
+                                        match &mut desc.hooks {
+                                            Some(existing) => existing.merge(extra),
+                                            None => desc.hooks = Some(extra),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to parse '{}' for skill '{}': {}",
+                                            hooks_path.display(),
+                                            desc.name,
+                                            e
+                                        );
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("Cannot read '{}': {}", hooks_path.display(), e);
+                                }
+                            }
+                        }
                         info!(
                             "Discovered skill '{}' at {}",
                             desc.name,

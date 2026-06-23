@@ -59,7 +59,14 @@ pub struct SkillRegistry {
 
 impl SkillRegistry {
     pub fn new() -> Self {
-        let session_id = format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let session_id = format!(
+            "session-{}",
+            uuid::Uuid::new_v4()
+                .to_string()
+                .chars()
+                .take(8)
+                .collect::<String>()
+        );
         Self {
             session_id,
             descriptors: HashMap::new(),
@@ -455,6 +462,71 @@ impl SkillRegistry {
     pub fn get(&self, name: &str) -> Option<&SkillInfo> {
         self.code_skills.get(name)
     }
+
+    /// Core methodology skills that are injected directly into the system
+    /// prompt at session start (not just listed in the catalog).
+    pub const DEFAULT_BASELINE_SKILLS: &'static [&'static str] = &[
+        "brainstorming",
+        "systematic-debugging",
+        "verification-before-completion",
+        "writing-plans",
+    ];
+
+    /// Inject baseline methodology skill bodies into the system prompt.
+    ///
+    /// Reads the SKILL.md body from disk for each enabled baseline skill
+    /// whose metadata.category == "methodology", strips the YAML frontmatter,
+    /// and appends the body wrapped in a `<skill>` tag.
+    pub fn inject_methodology_baseline(
+        &self,
+        system_prompt: &mut String,
+        enabled_baseline: &[&str],
+    ) {
+        for desc in self.descriptors.values() {
+            let category = desc
+                .metadata
+                .get("category")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            if category != "methodology" {
+                continue;
+            }
+            if !enabled_baseline.iter().any(|name| *name == desc.name) {
+                continue;
+            }
+            // Read skill body from disk at {location}/SKILL.md
+            let skill_file = desc.location.join("SKILL.md");
+            let Ok(content) = std::fs::read_to_string(&skill_file) else {
+                continue;
+            };
+            let body = strip_frontmatter(&content).unwrap_or(&content).trim();
+            if body.is_empty() {
+                continue;
+            }
+            system_prompt.push_str("\n\n<skill name=\"");
+            system_prompt.push_str(&desc.name);
+            system_prompt.push_str("\">\n");
+            system_prompt.push_str(body);
+            system_prompt.push_str("\n</skill>");
+        }
+    }
+}
+
+/// Strip YAML frontmatter from SKILL.md content.
+/// Returns body after the closing `---`, or None if no frontmatter found.
+///
+/// Byte-index slicing on `---`/`\n---` is safe here because they are pure
+/// ASCII and never overlap with multi-byte UTF-8 boundary positions.
+fn strip_frontmatter(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    // SAFETY: "---" is 3 ASCII bytes, so byte-index 3 is a valid char boundary
+    let after_first = &trimmed[3..];
+    let end = after_first.find("\n---")?;
+    // SAFETY: "\n---" is 4 ASCII bytes
+    Some(&after_first[end + 4..])
 }
 
 impl Default for SkillRegistry {

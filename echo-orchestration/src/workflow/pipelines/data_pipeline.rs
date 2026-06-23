@@ -7,7 +7,10 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```ignore
+//! // 示例:从 echo_agent 入口调用本 pipeline。本 doctest 标为 ignore,因为
+//! // echo_orchestration 不能反向依赖 echo_agent(会循环依赖);真正的编译
+//! // 验证在 echo_agent 的测试中通过 path 依赖覆盖。
 //! use echo_agent::workflow::pipelines::data_pipeline::{
 //!     DataPipelineConfig, run_data_pipeline,
 //! };
