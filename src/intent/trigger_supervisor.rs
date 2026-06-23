@@ -16,7 +16,9 @@ const HIGH_CONFIDENCE: f32 = 0.7;
 /// Three-source fusion supervisor implementing [`IntentClassifier`].
 pub struct TriggerSupervisor {
     keyword_classifier: KeywordClassifier,
-    llm_classifier: LlmIntentClassifier,
+    /// Optional LLM fallback; when `None`, the fusion degrades to
+    /// keyword + hook only (keyword-only mode, no LLM tokens consumed).
+    llm_classifier: Option<LlmIntentClassifier>,
     /// Shared slot written by the prepare phase after UserPromptSubmit hooks
     /// resolve.  P1 writes `fire_lifecycle_hook().activate_skill` here; the
     /// supervisor reads (and consumes) it once per classification.
@@ -26,7 +28,7 @@ pub struct TriggerSupervisor {
 impl TriggerSupervisor {
     pub fn new(
         keyword_classifier: KeywordClassifier,
-        llm_classifier: LlmIntentClassifier,
+        llm_classifier: Option<LlmIntentClassifier>,
         hook_activation_slot: Arc<Mutex<Option<(String, String)>>>,
     ) -> Self {
         Self {
@@ -75,8 +77,11 @@ impl IntentClassifier for TriggerSupervisor {
                 return kw;
             }
 
-            // Second: LLM semantic classifier
-            let llm = self.llm_classifier.classify(user_input, context).await;
+            // Second: LLM semantic classifier (if available)
+            let llm = match &self.llm_classifier {
+                Some(clf) => clf.classify(user_input, context).await,
+                None => Intent::Fallback,
+            };
 
             // Third: hook activation from this turn's UserPromptSubmit
             let hook = self

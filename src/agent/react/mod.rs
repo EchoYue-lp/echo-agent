@@ -845,6 +845,27 @@ impl ReactAgent {
         &self.config
     }
 
+    /// Public read-only access to the hook activation cache.
+    /// Used by bootstrap (echo-agent-cli) to pass the slot to TriggerSupervisor
+    /// so the supervisor can read UserPromptSubmit hook activation requests.
+    pub fn hook_activation_cache(&self) -> Arc<std::sync::Mutex<Option<(String, String)>>> {
+        self.hook_activation_cache.clone()
+    }
+
+    /// Public read-only access to the effective system prompt.
+    /// Returns the runtime override (mutable_system_prompt) if set, else
+    /// config.system_prompt. Used by bootstrap (echo-agent-cli) to read the
+    /// current prompt before injecting methodology baseline bodies.
+    /// 返回 owned String 以避开 RwLock 借用问题。
+    pub fn current_system_prompt(&self) -> String {
+        if let Ok(guard) = self.mutable_system_prompt.read()
+            && let Some(ref override_prompt) = *guard
+        {
+            return override_prompt.clone();
+        }
+        self.config.system_prompt.clone()
+    }
+
     /// Mutable reference to the agent config for runtime adjustments.
     pub fn config_mut(&mut self) -> &mut AgentConfig {
         &mut self.config

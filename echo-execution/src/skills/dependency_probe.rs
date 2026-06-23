@@ -95,6 +95,30 @@ pub fn extract_dependencies(desc: &SkillDescriptor) -> Vec<SkillDependency> {
     deps
 }
 
+/// 探测单个二进制是否在 PATH 上(走 `which` 子进程,不引入 which crate)。
+/// 失败(无 which 命令等)返回 false —— 偏保守,把声明二进制当缺失显示,
+/// 这样用户至少能看到提示而非静默通过。
+fn binary_available(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// 探测一个 skill 声明的全部必需二进制,返回**缺失**的二进制名列表。
+/// 供 SkillsHub scan 调用,结果存进 SkillHubEntry.missing_dependencies,
+/// 前端据此显示 ⚠️ 提示。Python 包不探测(uv + PEP 723 运行时处理)。
+pub fn missing_binary_names(desc: &SkillDescriptor) -> Vec<String> {
+    extract_dependencies(desc)
+        .into_iter()
+        .filter(|d| d.required && matches!(d.kind, DepKind::Binary) && !binary_available(&d.name))
+        .map(|d| d.name)
+        .collect()
+}
+
 /// Return a human-readable install hint for common binaries.
 fn install_hint_for_binary(bin: &str) -> String {
     match bin {

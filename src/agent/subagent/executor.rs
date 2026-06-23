@@ -152,6 +152,25 @@ impl SubagentExecutor {
         // instead of creating independent tokens (P1 — CancellationToken propagation).
         let parent_cancel = req.cancel.clone();
 
+        // 入口取消检查:若 dispatch 前 token 已取消,立即返回,不进入执行 loop。
+        // (与 dispatch_teammate:704 的 "Cancelled before execution" 语义一致;
+        //  test_dispatch_cancelled 验证此行为。)
+        if parent_cancel.is_cancelled() {
+            return Ok(SubagentResult {
+                agent_name: req.agent_name.clone(),
+                output: "Cancelled before execution".into(),
+                duration: std::time::Duration::ZERO,
+                iterations: 0,
+                tokens_used: None,
+                was_truncated: false,
+                mode: req
+                    .mode_override
+                    .clone()
+                    .unwrap_or(ExecutionMode::Fork),
+                usage: None,
+            });
+        }
+
         loop {
             // Guard against infinite delegation chains
             if req.delegate_depth > MAX_DELEGATE_DEPTH {

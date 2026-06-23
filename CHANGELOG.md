@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **HookAction::ActivateSkill**: 声明式直接激活技能 hook 动作。frontmatter 可写
+  `type: activate_skill`，execute_action 产出 `HookResult.activate_skill`。
+- **fire_lifecycle_hook 接线**: 收到 `HookResult.activate_skill` 后调用
+  `activate_skill_for_context` 完成真实激活，reason 注入 runtime note。
+- **UserPromptSubmit 每轮触发**: `prepare_stream_context` /
+  `prepare_react_context` 每轮传用户输入触发 hook，支持 content-based
+  matcher（如 `\\.docx` glob 匹配）。
+- **hook_activation_cache**: `Arc<Mutex<Option<(String,String)>>>` 共享槽位，
+  由 P1 prepare 阶段写入、P4 TriggerSupervisor 消费。
+- **SkillLoader hooks.json 发现**: `scan_directory` 并列读取 SKILL.md 同级
+  `hooks.json`（EKO 格式），合并进 descriptor.hooks。
+- **resolve_python uv 优先**: `uv run --script` → python3 → python 三级回退，
+  PEP 723 内联依赖自动处理。
+- **minimal_env +HOME**: 白名单加 HOME，本地桌面 agent 脚本可读 `~/.config`。
+- **SkillSandboxPolicy 接线**: `apply_sandbox_policy` 翻译 timeout，
+  `sandbox_limits_from_policy` 翻译 network/allowed_paths 到 ResourceLimits，
+  通过 `execute_with_limits` 实现 OS 级隔离。
+- **默认 sandbox local_only**: `ReactAgentBuilder::build()` 默认装配
+  `SandboxManager::local_only()`，不再裸跑。
+- **dependency_probe 模块**: 从 SKILL.md metadata 提取 `requires-binaries` /
+  `requires-python-packages`，生成结构化 `ProbeReport`。
+- **SkillRegistry::inject_methodology_baseline()**: 对 category=methodology
+  且 enabled baseline 的技能，从磁盘读 SKILL.md 并注入 system prompt。
+- **DEFAULT_BASELINE_SKILLS**: brainstorming / systematic-debugging /
+  verification-before-completion / writing-plans。
+- **TriggerSupervisor 三源融合引擎**: 实现 `IntentClassifier` trait，
+  Keyword（0 token）+ LLM（可选）+ Hook slot 三源融合，`fuse()` 纯函数可单测。
+
+### Changed
+
+- `HookResult` 新增 `activate_skill: Option<(String, String)>` 字段 +
+  `with_activate_skill` 构造函数。
+- `HookAction` enum 新增 `ActivateSkill` 变体（validate/execute_action/merge）。
+- `minimal_env` 白名单 +HOME。
+- `ReactAgent` 新增 `hook_activation_cache` 字段 + public getter。
+- `SandboxManager` 默认 `local_only()`。
+
 ### Removed
 
 - **`Checkpointer` trait and its implementations** (`FileCheckpointer`,

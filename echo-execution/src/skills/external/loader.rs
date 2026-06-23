@@ -221,6 +221,14 @@ impl SkillLoader {
                         );
                     }
                 }
+            } else {
+                // No SKILL.md in this direct subdir: recurse into it to support
+                // nested category layouts (skills/<category>/<name>/SKILL.md).
+                // Without this, only flat skills/<name>/SKILL.md would be found.
+                // MAX_SCAN_DEPTH caps recursion to avoid infinite loops / huge trees.
+                // Box::pin because async fn cannot recurse directly (Rust constraint).
+                let nested = Box::pin(self.scan_directory(&path, depth + 1)).await?;
+                found.extend(nested);
             }
         }
 
@@ -583,6 +591,81 @@ resources:
             "---\nname: test\ndescription: Test\ninstructions: |\n  Do stuff.\n---\n\n# Body";
         let body = extract_instructions(content);
         assert_eq!(body.trim(), "Do stuff.");
+    }
+
+    /// 验证 scan_directory 递归:嵌套布局 skills/<category>/<name>/SKILL.md
+    /// 必须能被发现(B2 修复前只能找到扁平 skills/<name>/SKILL.md)。
+    #[tokio::test]
+    async fn scan_directory_finds_nested_category_skills() {
+        // 用 std 临时目录(不引入 tempfile dev-dep,因 echo_execution 非 workspace
+        // 成员,不能有 dev-dependencies)。用进程 id + 原子计数保证唯一,测试结束清理。
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uid = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "echo_b2_test_{}_{}_{}",
+            std::process::id(),
+            uid,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        // cleanup guard
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(root.clone());
+
+        // 扁平技能(直接 root/<name>/SKILL.md)
+        let flat = root.join("coding");
+        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::write(
+            flat.join("SKILL.md"),
+            "---\nname: coding\ndescription: flat skill\n---\nbody",
+        )
+        .unwrap();
+
+        // 嵌套技能(root/<category>/<name>/SKILL.md)——B2 修复前扫不到
+        let nested = root.join("methodology").join("brainstorming");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: brainstorming\ndescription: nested skill\n---\nbody",
+        )
+        .unwrap();
+        // 第二个嵌套,确保多个都能扫到
+        let nested2 = root.join("methodology").join("writing-plans");
+        std::fs::create_dir_all(&nested2).unwrap();
+        std::fs::write(
+            nested2.join("SKILL.md"),
+            "---\nname: writing-plans\ndescription: nested skill 2\n---\nbody",
+        )
+        .unwrap();
+
+        let mut loader = SkillLoader::new();
+        let descs = loader.discover_from_dir(root.clone()).await.unwrap();
+
+        let names: Vec<String> = descs.iter().map(|d| d.name.clone()).collect();
+        assert!(
+            names.contains(&"coding".to_string()),
+            "flat skill should be found: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"brainstorming".to_string()),
+            "nested methodology skill must be found (B2 recursion): {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"writing-plans".to_string()),
+            "second nested skill must be found: {:?}",
+            names
+        );
+        assert_eq!(descs.len(), 3, "expected 3 skills (1 flat + 2 nested)");
     }
 
     #[test]
