@@ -167,13 +167,20 @@ impl AnthropicClient {
             use echo_core::llm::cache::BreakpointTarget as BT;
             AnthropicCachePlan {
                 breakpoints: hints.breakpoints.clone(),
-                has_system_breakpoint: hints.breakpoints.iter().any(|b| matches!(b, BT::SystemLastBlock)),
-                has_tool_breakpoint: hints.breakpoints.iter().any(|b| matches!(b, BT::ToolsLastTool)),
+                has_system_breakpoint: hints
+                    .breakpoints
+                    .iter()
+                    .any(|b| matches!(b, BT::SystemLastBlock)),
+                has_tool_breakpoint: hints
+                    .breakpoints
+                    .iter()
+                    .any(|b| matches!(b, BT::ToolsLastTool)),
             }
         } else {
             // Backward compat: compute layout here.
             let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(
-                &request.messages, tools_ref,
+                &request.messages,
+                tools_ref,
             );
             AnthropicCachePlan::from_layout(&layout)
         };
@@ -212,9 +219,8 @@ impl AnthropicClient {
 
         // Place cache breakpoints on conversation messages.
         if cache_plan.history_breakpoint_count() > 0 {
-            let used_breakpoints =
-                usize::from(cache_plan.has_system_breakpoint)
-                    + usize::from(cache_plan.has_tool_breakpoint && tools.is_some());
+            let used_breakpoints = usize::from(cache_plan.has_system_breakpoint)
+                + usize::from(cache_plan.has_tool_breakpoint && tools.is_some());
             let remaining_breakpoints = 4usize.saturating_sub(used_breakpoints);
 
             if remaining_breakpoints > 0 {

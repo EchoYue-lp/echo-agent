@@ -181,6 +181,10 @@ name = "demo26_provider_factory"
 required-features = ["provider-factory"]
 
 [[example]]
+name = "smoke_usage_passthrough"
+required-features = ["sqlite", "tasks", "subagent"]
+
+[[example]]
 name = "demo28_workflow"
 required-features = ["workflow"]
 

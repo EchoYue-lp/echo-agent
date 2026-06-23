@@ -14,6 +14,24 @@ use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
 
+// sqlx 0.8 `any` mode requires drivers to be installed at runtime before the
+// first `AnyPool` connection. Without this, connecting panics with
+// "No drivers installed". We install all compiled-in drivers once, lazily on
+// first use, guarded by a OnceLock so repeated calls are cheap and safe.
+//
+// (sqlx 0.8 removed the automatic install that earlier versions did via
+// `AnyConnection::install_default_drivers` being called implicitly; the
+// explicit `install_default_drivers()` is the documented replacement.)
+fn ensure_drivers_installed() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // install_default_drivers installs every driver feature compiled into
+        // sqlx (sqlite/postgres/mysql as enabled in Cargo.toml). Idempotent.
+        let _ = sqlx::any::install_default_drivers();
+    });
+}
+
 // ── SQL Query (read-only) ─────────────────────────────────────────────────────────
 
 pub struct SqlQueryTool;
@@ -327,6 +345,7 @@ fn validate_db_url(url_str: &str) -> Result<()> {
 /// Defense-in-depth: wraps non-SQLite queries in an explicit READ ONLY transaction,
 /// so the database itself rejects any mutation attempt (not just our keyword filter).
 async fn execute_readonly_query(conn_url: &str, query: &str) -> Result<serde_json::Value> {
+    ensure_drivers_installed();
     let pool = AnyPoolOptions::new()
         .max_connections(1)
         .connect(conn_url)

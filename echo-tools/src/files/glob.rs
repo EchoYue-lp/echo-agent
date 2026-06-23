@@ -288,7 +288,13 @@ fn glob_match_advanced(pattern: &str, text: &str) -> bool {
                     return true;
                 }
                 for skip in ti..=t_chars.len() {
-                    if glob_match_advanced(&pattern[pi..], &text[skip..]) {
+                    // UTF-8-safe slicing: pi/skip are char indices (from
+                    // p_chars/t_chars), NOT byte indices. Using &pattern[pi..]
+                    // would panic on multibyte chars (e.g. paths like
+                    // screenshot_北京.png). Reconstruct via char iterators.
+                    let pat_rest: String = p_chars[pi..].iter().collect();
+                    let txt_rest: String = t_chars[skip..].iter().collect();
+                    if glob_match_advanced(&pat_rest, &txt_rest) {
                         return true;
                     }
                 }
@@ -400,5 +406,21 @@ mod tests {
     fn test_glob_match_exact() {
         assert!(glob_match_advanced("main.rs", "main.rs"));
         assert!(!glob_match_advanced("main.rs", "lib.rs"));
+    }
+
+    #[test]
+    fn test_glob_match_multibyte_path() {
+        // Regression: paths with multibyte UTF-8 chars (e.g. Chinese) must not
+        // panic. Previously `&pattern[pi..]` / `&text[skip..]` used byte slicing
+        // on char-index values, panicking on paths like screenshot_北京.png.
+        assert!(glob_match_advanced("*.png", "screenshot_北京.png"));
+        assert!(glob_match_advanced("screenshot_*", "screenshot_北京.png"));
+        assert!(glob_match_advanced(
+            "*/北京*",
+            "/Users/ls/照片/北京/景山.png"
+        ));
+        assert!(!glob_match_advanced("*.rs", "screenshot_北京.png"));
+        // Sanity: plain ASCII still works after the fix.
+        assert!(glob_match_advanced("*.png", "screenshot_shanghai.png"));
     }
 }

@@ -40,8 +40,8 @@ use echo_agent::llm::ChatRequest;
 /// appears in the builder chain.
 #[test]
 fn agent_config_accepts_cache_user_id() {
-    let config = AgentConfig::minimal("test-model", "test-prompt")
-        .cache_user_id("test-cache-user-001");
+    let config =
+        AgentConfig::minimal("test-model", "test-prompt").cache_user_id("test-cache-user-001");
     assert_eq!(config.get_cache_user_id(), Some("test-cache-user-001"));
 }
 
@@ -103,14 +103,18 @@ fn token_tracker_cumulative_cache_hit_rate() {
 
     // Cumulative: (50+180) / ((100)+(200)+(50+180)) = 230/530 ≈ 43.4%
     let rate = tracker.cumulative_cache_hit_rate().unwrap();
-    assert!((rate - 0.434).abs() < 0.02, "expected ~43.4%, got {:.1}%", rate * 100.0);
+    assert!(
+        (rate - 0.434).abs() < 0.02,
+        "expected ~43.4%, got {:.1}%",
+        rate * 100.0
+    );
 }
 
 /// Verify that the `stable_prefix_hash` is deterministic (same input → same output).
 #[test]
 fn stable_prefix_hash_is_deterministic() {
-    use echo_core::llm::cache::diagnostic::stable_prefix_hash;
     use echo_core::llm::Message;
+    use echo_core::llm::cache::diagnostic::stable_prefix_hash;
 
     let sys = &[Message::system("You are a helpful assistant.".to_string())];
     let history = &[Message::user("hello".to_string())];
@@ -123,8 +127,8 @@ fn stable_prefix_hash_is_deterministic() {
 /// Verify that `AnthropicCachePlan` produces sensible breakpoints.
 #[test]
 fn anthropic_cache_plan_is_sensible() {
-    use echo_core::llm::cache::layout::PromptCacheLayout;
     use echo_core::llm::Message;
+    use echo_core::llm::cache::layout::PromptCacheLayout;
     use echo_integration::providers::AnthropicCachePlan;
 
     let msgs = vec![

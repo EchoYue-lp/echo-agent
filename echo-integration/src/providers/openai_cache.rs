@@ -16,8 +16,8 @@
 //! - No protocol-level changes — these providers already have automatic prefix
 //!   caching; we just verify the conditions are met.
 
-use echo_core::llm::cache::layout::PromptCacheLayout;
 use echo_core::llm::cache::diagnostic::stable_prefix_hash;
+use echo_core::llm::cache::layout::PromptCacheLayout;
 
 /// Pre-request cache diagnostic for OpenAI-compatible providers.
 ///
@@ -47,9 +47,7 @@ impl OpenAICacheDiagnostic {
             layout.tools,
             layout.history,
         );
-        let stable_count = layout.system.len()
-            + layout.canonical.len()
-            + layout.history.len();
+        let stable_count = layout.system.len() + layout.canonical.len() + layout.history.len();
         let runtime_count = layout.runtime_context.len();
 
         // Verify runtime context is at the tail: stable prefix messages are
@@ -85,9 +83,7 @@ impl OpenAICacheDiagnostic {
     /// Returns `Err` with a description of what's wrong, or `Ok(())`.
     pub fn validate(&self) -> Result<(), String> {
         if !self.runtime_context_at_tail {
-            return Err(
-                "runtime context is NOT at the tail — will break prefix cache".to_string()
-            );
+            return Err("runtime context is NOT at the tail — will break prefix cache".to_string());
         }
         // Warn but don't fail for DeepSeek-like providers that need user_id:
         // the provider layer already handles filling it in; we just report.

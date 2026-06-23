@@ -163,10 +163,11 @@ mod tests {
         let layout = PromptCacheLayout::from_messages(&msgs, &tools);
         let plan = AnthropicCachePlan::from_layout(&layout);
         // runtime_context should not appear in breakpoints
-        assert!(!plan
-            .breakpoints
-            .iter()
-            .any(|b| matches!(b, BreakpointTarget::HistoryIndex(i) if *i >= layout.history.len())));
+        assert!(
+            !plan.breakpoints.iter().any(
+                |b| matches!(b, BreakpointTarget::HistoryIndex(i) if *i >= layout.history.len())
+            )
+        );
         assert!(plan.has_history_last_stable());
         assert!(!plan.has(BreakpointTarget::ToolsLastTool));
     }
@@ -188,10 +189,12 @@ mod tests {
         let layout = PromptCacheLayout::from_messages(&msgs, &tools);
         let plan = AnthropicCachePlan::from_layout(&layout);
         // only 1 history message → no history breakpoints
-        assert!(!plan
-            .breakpoints
-            .iter()
-            .any(|b| matches!(b, BreakpointTarget::HistoryIndex(_))));
+        assert!(
+            !plan
+                .breakpoints
+                .iter()
+                .any(|b| matches!(b, BreakpointTarget::HistoryIndex(_)))
+        );
         // HistoryLastStable should still be present (non-empty history)
         assert!(plan.has_history_last_stable());
     }

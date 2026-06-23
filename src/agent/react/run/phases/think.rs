@@ -147,7 +147,7 @@ pub(crate) async fn run_think(
     }
     // Log cumulative cache stats every 10 requests for observability.
     let request_count = snap.token_tracker.request_count();
-    if request_count > 0 && request_count % 10 == 0 {
+    if request_count > 0 && request_count.is_multiple_of(10) {
         snap.token_tracker
             .log_cumulative_cache_stats(&snap.config.agent_name);
     }
@@ -280,9 +280,13 @@ pub(crate) async fn create_llm_stream(
                 async move {
                     // Build cache hints before moving ownership into ChatRequest.
                     let tools_ref: &[ToolDefinition] = t.as_deref().unwrap_or(&[]);
-                    let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(&ms, tools_ref);
+                    let layout =
+                        echo_core::llm::cache::PromptCacheLayout::from_messages(&ms, tools_ref);
                     let prefix_hash = echo_core::llm::cache::diagnostic::stable_prefix_hash(
-                        layout.system, layout.canonical, layout.tools, layout.history,
+                        layout.system,
+                        layout.canonical,
+                        layout.tools,
+                        layout.history,
                     );
                     let segments = layout.segment_ranges();
                     let request = crate::llm::ChatRequest {

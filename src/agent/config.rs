@@ -58,6 +58,15 @@ pub struct AgentConfig {
     pub(crate) enable_human_in_loop: bool,
     /// Whether to enable subagent dispatch tool (agent_tool)
     pub(crate) enable_subagent: bool,
+    /// Whether to register the `agent_tool` LLM-callable dispatch tool.
+    ///
+    /// Decoupled from `enable_subagent` (which controls the subagent registry
+    /// infrastructure that `delegate_to_agent_with_parent_and_cancel` depends on).
+    /// When `false`, the LLM cannot call `agent_tool`; subagent dispatch still
+    /// works via the framework's `delegate_to_agent*` methods (TaskRuntime path A).
+    /// Default: `false` (product layers should opt in explicitly only if they
+    /// want the LLM-driven dispatch escape hatch).
+    pub(crate) register_agent_dispatch_tool: bool,
     /// Context token limit; auto-triggers compression when exceeded (`usize::MAX` means no limit)
     pub(crate) token_limit: usize,
     /// Streaming channel buffer size (default 256). When full, events are dropped with a warning.
@@ -168,6 +177,7 @@ impl AgentConfig {
             enable_task: false,
             enable_human_in_loop: false,
             enable_subagent: false,
+            register_agent_dispatch_tool: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
             stream_buffer_size: 256,
             callbacks: Vec::new(),
@@ -311,6 +321,17 @@ impl AgentConfig {
     /// When enabled, the Agent can use the `agent_tool` tool to dispatch other sub-agents for task execution
     pub fn enable_subagent(mut self, enabled: bool) -> Self {
         self.enable_subagent = enabled;
+        self
+    }
+
+    /// Set whether to register the `agent_tool` LLM-callable dispatch tool.
+    ///
+    /// Independent of `enable_subagent`. When `true`, the `AgentDispatchTool`
+    /// is registered into the tool manager so the LLM can call `agent_tool`.
+    /// When `false` (default), the LLM cannot call `agent_tool`, but the
+    /// framework's `delegate_to_agent*` methods still work (used by TaskRuntime).
+    pub fn register_agent_dispatch_tool(mut self, enabled: bool) -> Self {
+        self.register_agent_dispatch_tool = enabled;
         self
     }
 

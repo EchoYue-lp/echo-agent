@@ -420,7 +420,7 @@ impl ReactAgent {
             >,
         > = None;
         #[cfg(feature = "subagent")]
-        if config.enable_subagent {
+        if config.register_agent_dispatch_tool {
             let factory = Arc::new(
                 crate::tools::builtin::agent_dispatch::ParentContextFactory {
                     system_prompt: sp_for_subagent.clone(),

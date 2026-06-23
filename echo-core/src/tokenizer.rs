@@ -313,7 +313,9 @@ impl TokenUsageTracker {
         let requests = self.request_count.load(Ordering::Relaxed);
         if let Some(rate) = self.cumulative_cache_hit_rate() {
             let cached = self.total_cached_prompt_tokens.load(Ordering::Relaxed);
-            let creation = self.total_cache_creation_prompt_tokens.load(Ordering::Relaxed);
+            let creation = self
+                .total_cache_creation_prompt_tokens
+                .load(Ordering::Relaxed);
             tracing::info!(
                 target: "echo_agent::cache",
                 agent = %agent,

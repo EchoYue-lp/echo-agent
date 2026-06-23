@@ -38,7 +38,10 @@ impl ReactAgent {
             // Build cache hints from the stable message layout (before moving into request).
             let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(&ms, &t);
             let prefix_hash = echo_core::llm::cache::diagnostic::stable_prefix_hash(
-                layout.system, layout.canonical, layout.tools, layout.history,
+                layout.system,
+                layout.canonical,
+                layout.tools,
+                layout.history,
             );
             let cache_hints = echo_core::llm::cache::CacheHints {
                 breakpoints: vec![],

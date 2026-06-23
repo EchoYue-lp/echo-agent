@@ -36,6 +36,7 @@ pub struct ReactAgentBuilder {
     enable_task: bool,
     enable_human_in_loop: bool,
     enable_subagent: bool,
+    register_agent_dispatch_tool: bool,
     enable_cot: bool,
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
@@ -101,6 +102,7 @@ impl ReactAgentBuilder {
             enable_task: false,
             enable_human_in_loop: false,
             enable_subagent: false,
+            register_agent_dispatch_tool: false,
             enable_cot: true,
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
@@ -281,6 +283,17 @@ impl ReactAgentBuilder {
     /// Enable sub-Agent dispatch
     pub fn enable_subagent(mut self) -> Self {
         self.enable_subagent = true;
+        self
+    }
+
+    /// Register the `agent_tool` LLM-callable dispatch tool.
+    ///
+    /// Independent of `enable_subagent`. When called, the `AgentDispatchTool`
+    /// is registered so the LLM can invoke `agent_tool`. When not called
+    /// (default), the LLM cannot call `agent_tool`, but framework-level
+    /// dispatch via `delegate_to_agent*` still works.
+    pub fn register_agent_dispatch_tool(mut self) -> Self {
+        self.register_agent_dispatch_tool = true;
         self
     }
 
@@ -713,6 +726,7 @@ impl ReactAgentBuilder {
             .enable_task(self.enable_task)
             .enable_human_in_loop(self.enable_human_in_loop)
             .enable_subagent(self.enable_subagent)
+            .register_agent_dispatch_tool(self.register_agent_dispatch_tool)
             .enable_cot(self.enable_cot)
             .tool_error_feedback(self.tool_error_feedback)
             .tool_execution(self.tool_execution)

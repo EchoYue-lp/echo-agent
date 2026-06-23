@@ -815,10 +815,12 @@ async fn subagent_reset_independence() {
 #[cfg(feature = "subagent")]
 #[test]
 fn react_agent_register_agent_dispatch_tool() {
-    let config = AgentConfig::minimal("test-model", "main_agent").enable_subagent(true);
+    let config = AgentConfig::minimal("test-model", "main_agent")
+        .enable_subagent(true)
+        .register_agent_dispatch_tool(true);
     let agent = ReactAgent::new(config);
 
-    // When subagent is enabled, agent_tool should be registered
+    // When register_agent_dispatch_tool is enabled, agent_tool should be registered
     let tool_names = agent.tool_names();
     assert!(tool_names.contains(&String::from("agent_tool")));
 }
@@ -826,7 +828,9 @@ fn react_agent_register_agent_dispatch_tool() {
 #[cfg(feature = "subagent")]
 #[test]
 fn agent_dispatch_tool_schema_lists_registered_subagents() {
-    let config = AgentConfig::minimal("test-model", "main_agent").enable_subagent(true);
+    let config = AgentConfig::minimal("test-model", "main_agent")
+        .enable_subagent(true)
+        .register_agent_dispatch_tool(true);
     let mut agent = ReactAgent::new(config);
 
     let def = SubagentBuilder::new("code_reviewer")
