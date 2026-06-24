@@ -556,11 +556,42 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// 应用层注入的 run 级上下文（跨 spawn 安全，值传递）。
+///
+/// 由应用层（如 EKO 的 launch_unified_run）在每次 run 启动时构造，经
+/// `DispatchRequest.runtime_context` → `dispatch_fork` → `Agent::set_external_context`
+/// 注入到 worker agent 实例，最终由 pipeline 填入 [`ToolContext`]。
+///
+/// 为什么需要这个：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。worker 在框架
+/// 层的 `tokio::spawn`（subagent_executor.rs）里执行，task_local 全部丢失。而
+/// `ExternalRunContext` 是值传递（Clone），天然跨 spawn 安全，是传递 run_id /
+/// cancel / trace_sink / cache_user_id 的正确通路。
+///
+/// `trace_sink` 用 `serde_json::Value`（而非应用层的具体事件类型）以避免框架依赖
+/// 应用层类型——应用层在填入时把自己的事件序列化成 Value。
+pub type TraceSinkFn = std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct ExternalRunContext {
+    /// 当前 run 标识（应用层 run，如 EKO 的 TaskRuntime run_id）。
+    pub run_id: String,
+    /// 当前 run 的取消令牌。
+    pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
+    /// Worker trace 事件回传通道。
+    pub trace_sink: Option<TraceSinkFn>,
+    /// LLM prompt cache 用户标识。
+    pub cache_user_id: Option<String>,
+}
+
 /// 运行时上下文，工具执行时由 ExecuteStage 注入。
 ///
 /// 所有字段均为 `Option`，`None` = 回退默认行为（向后兼容老工具）。
 /// 工具 override `Tool::execute_with_context` 时可读取这些字段。
-#[derive(Debug, Clone, Default)]
+///
+/// `cancel` / `trace_sink` / `cache_user_id` 由应用层经
+/// [`ExternalRunContext`] 注入 worker agent，再由 pipeline 填入此处——
+/// 这是一条跨 `tokio::spawn` 安全的值传递通路（替代会跨 spawn 断裂的 task_local）。
+#[derive(Clone, Default)]
 pub struct ToolContext {
     /// 会话绑定的默认工作目录（通常是 worktree 路径）。
     /// None = 回退进程 `current_dir`。
@@ -569,6 +600,28 @@ pub struct ToolContext {
     pub conversation_id: Option<String>,
     /// 当前 run 标识（透传给 trace/audit）。
     pub run_id: Option<String>,
+    /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
+    pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
+    /// 跨 spawn 安全的 trace 回传（值传递）。
+    pub trace_sink: Option<TraceSinkFn>,
+    /// LLM cache key（避免空串导致 cache 失效）。
+    pub cache_user_id: Option<String>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("working_dir", &self.working_dir)
+            .field("conversation_id", &self.conversation_id)
+            .field("run_id", &self.run_id)
+            .field(
+                "cancel",
+                &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .field("trace_sink", &self.trace_sink.as_ref().map(|_| "<sink>"))
+            .field("cache_user_id", &self.cache_user_id)
+            .finish()
+    }
 }
 
 impl ToolContext {
@@ -603,6 +656,7 @@ mod tool_context_tests {
             working_dir: Some(PathBuf::from("/tmp/wt")),
             conversation_id: Some("conv-1".into()),
             run_id: Some("run-1".into()),
+            ..Default::default()
         };
         assert_eq!(
             ctx.working_dir.as_deref(),
@@ -681,6 +735,7 @@ mod execute_with_context_tests {
             working_dir: Some(std::path::PathBuf::from("/wt")),
             conversation_id: Some("c".into()),
             run_id: Some("r".into()),
+            ..Default::default()
         };
         let mut params = ToolParameters::new();
         params.insert("x".into(), serde_json::json!("hello"));

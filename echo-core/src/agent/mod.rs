@@ -485,6 +485,24 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    // ── External run context (跨 spawn 安全的值传递, 见 ExternalRunContext) ──
+
+    /// 注入应用层 run 级上下文（worker 场景）。
+    ///
+    /// **背景**：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。worker agent
+    /// 在框架层的 `tokio::spawn`（subagent_executor.rs 的 dispatch_fork）里执行，
+    /// 应用层经 task_local 注入的 run_id / cancel / trace_sink 全部丢失。本方法
+    /// 让应用层经值传递（`ExternalRunContext`，跨 spawn 安全）把 context 注入到
+    /// worker agent 实例——dispatch_fork 在 worker 执行前调用，pipeline 构造
+    /// `ToolContext` 时读取，工具 override `execute_with_context` 即可拿到。
+    ///
+    /// 默认 noop。ReactAgent override：把 ctx 写入自己的 external_* Mutex 字段。
+    fn set_external_context(&self, _ctx: &crate::tools::ExternalRunContext) {}
+
+    /// 清除外部上下文（worker 执行后调用，防止泄漏到下一个 run）。
+    /// 默认 noop。ReactAgent override。
+    fn clear_external_context(&self) {}
+
     // ── Dynamic capability methods (default noop) ────────────────────
 
     /// Dynamically register a tool at runtime.

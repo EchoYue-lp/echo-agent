@@ -215,6 +215,11 @@ pub struct AgentRunSnapshot {
     pub run_store: Option<Arc<dyn RunStore>>,
     /// Current run ID.
     pub current_run_id: Option<String>,
+    /// 外部 run 级上下文（跨 spawn 安全，从 ReactAgent.external_* 抓取）。
+    /// 与 current_run_id 同源、同生命周期（set/clear 在同一处）。
+    pub external_cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
+    pub external_trace_sink: Option<echo_core::tools::TraceSinkFn>,
+    pub external_cache_user_id: Option<String>,
     /// Permission service (human-in-the-loop).
     #[cfg(feature = "human-loop")]
     pub permission_service: Option<Arc<crate::human_loop::PermissionService>>,
@@ -253,7 +258,10 @@ impl AgentRunSnapshot {
             cancel_token: agent.cancel_token.try_lock().ok().and_then(|g| g.clone()),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
-            current_run_id: None, // set by run_stream_channel
+            current_run_id: None,  // set by run_stream_channel
+            external_cancel: None, // set alongside current_run_id
+            external_trace_sink: None,
+            external_cache_user_id: None,
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
             token_tracker: Arc::clone(&agent.token_tracker),

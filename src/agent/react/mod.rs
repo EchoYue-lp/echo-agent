@@ -167,6 +167,18 @@ pub struct ReactAgent {
     /// trace events with the correct run.
     pub current_run_id: std::sync::Mutex<Option<String>>,
 
+    /// 外部 run 级上下文（跨 spawn 安全，值传递）。
+    ///
+    /// `tokio::task_local!` 不会跨 `tokio::spawn` 继承——worker agent 在框架层
+    /// 的 dispatch_fork spawn 里执行时，应用层经 task_local 注入的 run_id /
+    /// cancel / trace_sink / cache_user_id 全部丢失。这里改用 Mutex 字段承载
+    /// （set_external_context 设置，pipeline 构造 ToolContext 时读取），是跨
+    /// spawn 安全的值传递通路。
+    pub external_cancel:
+        std::sync::Mutex<Option<std::sync::Arc<tokio_util::sync::CancellationToken>>>,
+    pub external_trace_sink: std::sync::Mutex<Option<echo_core::tools::TraceSinkFn>>,
+    pub external_cache_user_id: std::sync::Mutex<Option<String>>,
+
     /// Optional tool execution pipeline. When set, `execute_tool_feedback_raw`
     /// delegates to this pipeline instead of the inline implementation.
     pub(crate) tool_execution_pipeline: Option<Arc<run::pipeline::ToolExecutionPipeline>>,
@@ -501,6 +513,9 @@ impl ReactAgent {
             dispatch_catalog_handle,
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
+            external_cancel: std::sync::Mutex::new(None),
+            external_trace_sink: std::sync::Mutex::new(None),
+            external_cache_user_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
             prompt_template_engine: None,
             current_turn: std::sync::Mutex::new(None),
@@ -1916,6 +1931,7 @@ impl ReactAgent {
                 parent_agent: self.config.agent_name.clone(),
                 parent_context: self.build_parent_context(&ExecutionMode::Fork).await,
                 delegate_depth: depth,
+                runtime_context: self.build_runtime_context(),
             };
 
             // Reuse the stored executor (with hook configuration)
@@ -1978,6 +1994,7 @@ impl ReactAgent {
             parent_agent: self.config.agent_name.clone(),
             parent_context: self.build_parent_context(&mode).await,
             delegate_depth: depth,
+            runtime_context: self.build_runtime_context(),
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
@@ -2046,6 +2063,9 @@ impl ReactAgent {
         }
 
         let mode = ExecutionMode::Fork;
+        // 从当前 agent 的 external_* 构造 runtime_context 透传给 worker
+        // (主 agent → worker、worker → sub-worker 自动继承,嵌套自然)。
+        let runtime_context = self.build_runtime_context();
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
@@ -2054,6 +2074,7 @@ impl ReactAgent {
             parent_agent: parent_label.to_string(),
             parent_context: self.build_parent_context(&mode).await,
             delegate_depth: depth,
+            runtime_context,
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
@@ -2064,6 +2085,38 @@ impl ReactAgent {
     ///
     /// Shared by `delegate_task()`, `delegate_to_agent()`, and conceptually
     /// mirrors `ParentContextFactory::build()` (used by `AgentDispatchTool`).
+    #[cfg(feature = "subagent")]
+    /// 从当前 agent 的 external_* 字段构造 ExternalRunContext（透传给 worker）。
+    ///
+    /// 这样主 agent 委派 worker、worker 委派 sub-worker 时,run context 自动继承
+    /// （嵌套自然继承)。current_run_id 为 None 时返回 None（无 run 上下文,旧行为）。
+    #[cfg(feature = "subagent")]
+    fn build_runtime_context(&self) -> Option<echo_core::tools::ExternalRunContext> {
+        let run_id = self
+            .current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        Some(echo_core::tools::ExternalRunContext {
+            run_id,
+            cancel: self
+                .external_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            trace_sink: self
+                .external_trace_sink
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            cache_user_id: self
+                .external_cache_user_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        })
+    }
+
     #[cfg(feature = "subagent")]
     async fn build_parent_context(
         &self,
@@ -2136,6 +2189,44 @@ impl Agent for ReactAgent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    fn set_external_context(&self, ctx: &echo_core::tools::ExternalRunContext) {
+        *self
+            .current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(ctx.run_id.clone());
+        *self
+            .external_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.cancel.clone();
+        *self
+            .external_trace_sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.trace_sink.clone();
+        *self
+            .external_cache_user_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.cache_user_id.clone();
+    }
+
+    fn clear_external_context(&self) {
+        *self
+            .current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_trace_sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_cache_user_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     fn system_prompt(&self) -> &str {

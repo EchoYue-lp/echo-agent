@@ -20,7 +20,7 @@ use super::types::{ExecutionMode, SubagentResult};
 // ── Dispatch Request ──────────────────────────────────────────────────────────
 
 /// A request to dispatch a task to a subagent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DispatchRequest {
     /// Target subagent name.
     pub agent_name: String,
@@ -36,6 +36,29 @@ pub struct DispatchRequest {
     pub parent_context: Option<SubagentContext>,
     /// Current delegation depth (prevents infinite delegation chains).
     pub delegate_depth: u32,
+    /// 应用层 run 级上下文（跨 spawn 安全，值传递）。
+    ///
+    /// dispatch_fork 在 worker agent 执行前把它注入到 worker 实例
+    /// （`set_external_context`），使 worker 内的工具能经 ToolContext 读到
+    /// run_id/cancel/trace_sink/cache_user_id——绕开会跨 tokio::spawn 断裂的
+    /// task_local。`None` = 无外部 context（旧行为，工具读到 None）。
+    pub runtime_context: Option<echo_core::tools::ExternalRunContext>,
+}
+
+impl std::fmt::Debug for DispatchRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchRequest")
+            .field("agent_name", &self.agent_name)
+            .field("task", &self.task)
+            .field("mode_override", &self.mode_override)
+            .field("parent_agent", &self.parent_agent)
+            .field("delegate_depth", &self.delegate_depth)
+            .field(
+                "runtime_context",
+                &self.runtime_context.as_ref().map(|c| &c.run_id),
+            )
+            .finish()
+    }
 }
 
 /// Maximum delegation depth to prevent infinite chains.
@@ -309,6 +332,7 @@ impl SubagentExecutor {
                                     "Delegating to alternative subagent"
                                 );
                                 retry_count += 1;
+                                let rt_ctx = req.runtime_context.clone();
                                 req = DispatchRequest {
                                     agent_name: alternative_agent,
                                     task: hook_ctx.task.clone(),
@@ -317,6 +341,7 @@ impl SubagentExecutor {
                                     parent_agent: hook_ctx.parent_agent.clone(),
                                     parent_context: None,
                                     delegate_depth: delegate_depth + 1,
+                                    runtime_context: rt_ctx,
                                 };
                                 // Loop instead of recursing
                                 continue;
@@ -329,6 +354,7 @@ impl SubagentExecutor {
                                 );
                                 tokio::time::sleep(Duration::from_secs(delay_secs)).await;
                                 retry_count += 1;
+                                let rt_ctx = req.runtime_context.clone();
                                 req = DispatchRequest {
                                     agent_name: hook_ctx.subagent_name.clone(),
                                     task: hook_ctx.task.clone(),
@@ -337,6 +363,7 @@ impl SubagentExecutor {
                                     parent_agent: hook_ctx.parent_agent.clone(),
                                     parent_context: None,
                                     delegate_depth,
+                                    runtime_context: rt_ctx,
                                 };
                                 // Loop instead of recursing
                                 continue;
@@ -711,6 +738,12 @@ impl SubagentExecutor {
         let cancel = req.cancel.clone();
         let registry = self.registry.clone();
         let enhanced_task = Self::enhance_task(&task, req.parent_context.as_ref());
+        // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
+        // worker agent 是 registry 预注册的单例(fork 不 clone),其 current_run_id
+        // 初始为 None。dispatch_fork 在 worker 执行前显式 set_external_context,
+        // 使 pipeline 构造 ToolContext 时带上应用层的 run_id/cancel/trace_sink/
+        // cache_user_id——绕开会跨 tokio::spawn 断裂的 task_local。
+        let runtime_context = req.runtime_context.clone();
 
         let result = tokio::spawn(async move {
             let _permit = permit;
@@ -731,6 +764,14 @@ impl SubagentExecutor {
             }
 
             let agent = agent_arc.as_ref();
+
+            // 注入外部 run context(worker 执行前)。worker 跑完 clear,防泄漏到
+            // 同一 worker 实例的下一次 dispatch。worker 是单例,若不清,current_run_id
+            // 等会残留给下一个 run。
+            let has_ctx = runtime_context.is_some();
+            if let Some(ctx) = &runtime_context {
+                agent.set_external_context(ctx);
+            }
 
             let result = if timeout_secs > 0 {
                 tokio::select! {
@@ -778,6 +819,11 @@ impl SubagentExecutor {
                     ) => r,
                 }
             };
+
+            // worker 执行后清理外部 context(防泄漏)
+            if has_ctx {
+                agent.clear_external_context();
+            }
             result
         })
         .await
@@ -814,6 +860,7 @@ mod tests {
             parent_agent: "parent".into(),
             parent_context: None,
             delegate_depth: 0,
+            runtime_context: None,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -833,6 +880,7 @@ mod tests {
             parent_agent: "parent".into(),
             parent_context: None,
             delegate_depth: 0,
+            runtime_context: None,
         };
 
         let err = executor.dispatch(req).await.unwrap_err();
@@ -858,6 +906,7 @@ mod tests {
             parent_agent: "parent".into(),
             parent_context: None,
             delegate_depth: 0,
+            runtime_context: None,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -881,6 +930,7 @@ mod tests {
             parent_agent: "parent".into(),
             parent_context: None,
             delegate_depth: 0,
+            runtime_context: None,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -905,6 +955,7 @@ mod tests {
             parent_agent: "leader".into(),
             parent_context: None,
             delegate_depth: 0,
+            runtime_context: None,
         };
 
         let handle = executor.dispatch_teammate(req).await.unwrap();

@@ -235,6 +235,7 @@ impl Tool for AgentDispatchTool {
                 parent_agent: parent_agent.clone(),
                 parent_context,
                 delegate_depth: 0,
+                runtime_context: None,
             };
 
             match executor.dispatch(req).await {

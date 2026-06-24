@@ -407,6 +407,9 @@ impl PipelineStage for ExecuteStage {
             working_dir: snapshot.config.working_dir.clone(),
             conversation_id: snapshot.config.conversation_id.clone(),
             run_id: snapshot.current_run_id.clone(),
+            cancel: snapshot.external_cancel.clone(),
+            trace_sink: snapshot.external_trace_sink.clone(),
+            cache_user_id: snapshot.external_cache_user_id.clone(),
         };
         let result = match snapshot
             .tools

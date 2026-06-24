@@ -499,6 +499,7 @@ mod execute_with_context_tests {
             working_dir: Some(PathBuf::from("/wt/x")),
             conversation_id: Some("c".into()),
             run_id: Some("r".into()),
+            ..Default::default()
         };
         tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx)
             .await
@@ -584,6 +585,7 @@ mod execute_with_context_tests {
             working_dir: Some(PathBuf::from("/wt/a")),
             conversation_id: Some("conv-a".into()),
             run_id: Some("run-a".into()),
+            ..Default::default()
         };
         tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_a)
             .await
@@ -601,6 +603,7 @@ mod execute_with_context_tests {
             working_dir: Some(PathBuf::from("/wt/b")),
             conversation_id: Some("conv-b".into()),
             run_id: Some("run-b".into()),
+            ..Default::default()
         };
         tm.execute_tool_with_context("capture", ToolParameters::new(), &ctx_b)
             .await
