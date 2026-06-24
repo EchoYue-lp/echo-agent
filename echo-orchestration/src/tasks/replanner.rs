@@ -163,6 +163,8 @@ impl Replanner for LlmReplanner {
                             TaskStatus::Cancelled => "cancelled",
                             TaskStatus::TimedOut { .. } => "timed_out",
                             TaskStatus::Retrying { .. } => "retrying",
+                            TaskStatus::Skipped => "skipped",
+                            TaskStatus::Paused(_) => "paused",
                         },
                         t.description
                     )

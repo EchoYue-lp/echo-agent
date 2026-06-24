@@ -413,6 +413,68 @@ impl TaskManager {
         current_chain.pop();
     }
 
+    // ── EKO Run-Level Operations ──────────────────────────────────────────────
+
+    /// Get all tasks belonging to a specific run.
+    /// Tasks without a run_id are excluded.
+    pub fn get_tasks_by_run(&self, run_id: &str) -> Vec<Task> {
+        self.tasks
+            .iter()
+            .filter(|r| r.value().run_id.as_deref() == Some(run_id))
+            .map(|r| r.value().clone())
+            .collect()
+    }
+
+    /// Get pending (non-terminal) tasks for a run.
+    pub fn get_run_pending(&self, run_id: &str) -> Vec<Task> {
+        self.tasks
+            .iter()
+            .filter(|r| {
+                r.value().run_id.as_deref() == Some(run_id) && !r.value().status.is_terminal()
+            })
+            .map(|r| r.value().clone())
+            .collect()
+    }
+
+    /// Generate a progress summary for a specific run.
+    pub fn get_run_summary(&self, run_id: &str) -> String {
+        let tasks = self.get_tasks_by_run(run_id);
+        let total = tasks.len();
+        let completed = tasks.iter().filter(|t| t.status.is_terminal()).count();
+        format!("Run {run_id}: {completed}/{total} tasks completed")
+    }
+
+    /// Check if all tasks in a run have reached terminal state.
+    pub fn is_run_complete(&self, run_id: &str) -> bool {
+        self.tasks
+            .iter()
+            .filter(|r| r.value().run_id.as_deref() == Some(run_id))
+            .all(|r| r.value().status.is_terminal())
+    }
+
+    /// Pause all non-terminal tasks in a run (ComplexRuntime approval gate).
+    pub fn pause_run(&self, run_id: &str, reason: &str) {
+        let paused = TaskStatus::Paused(reason.to_string());
+        for mut entry in self.tasks.iter_mut() {
+            if entry.value().run_id.as_deref() == Some(run_id)
+                && !entry.value().status.is_terminal()
+            {
+                let _ = entry.value_mut().status.transition_to(paused.clone());
+            }
+        }
+    }
+
+    /// Resume all Paused tasks in a run back to Pending.
+    pub fn resume_run(&self, run_id: &str) {
+        for mut entry in self.tasks.iter_mut() {
+            if entry.value().run_id.as_deref() == Some(run_id)
+                && matches!(entry.value().status, TaskStatus::Paused(_))
+            {
+                entry.value_mut().status = TaskStatus::Pending;
+            }
+        }
+    }
+
     // ── Persistence ──────────────────────────────────────────────────────────
 
     /// Load all tasks from TaskStore into memory

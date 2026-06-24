@@ -328,6 +328,10 @@ pub enum TaskStatus {
     TimedOut { error: String },
     /// Retrying
     Retrying { attempt: u32, last_error: String },
+    /// Skipped (EKO extension — task is no longer relevant, soft-delete)
+    Skipped,
+    /// Paused waiting for user approval (EKO extension — ComplexRuntime approval gate)
+    Paused(String),
 }
 
 impl TaskStatus {
@@ -339,6 +343,7 @@ impl TaskStatus {
                 | TaskStatus::Cancelled
                 | TaskStatus::Failed(_)
                 | TaskStatus::TimedOut { .. }
+                | TaskStatus::Skipped
         )
     }
 
@@ -346,7 +351,13 @@ impl TaskStatus {
     pub fn can_transition_to(&self, target: &TaskStatus) -> bool {
         match self {
             TaskStatus::Pending => {
-                matches!(target, TaskStatus::InProgress | TaskStatus::Cancelled)
+                matches!(
+                    target,
+                    TaskStatus::InProgress
+                        | TaskStatus::Cancelled
+                        | TaskStatus::Skipped
+                        | TaskStatus::Paused(_)
+                )
             }
             TaskStatus::InProgress => matches!(
                 target,
@@ -356,6 +367,7 @@ impl TaskStatus {
                     | TaskStatus::TimedOut { .. }
                     | TaskStatus::Retrying { .. }
                     | TaskStatus::Blocked(_)
+                    | TaskStatus::Paused(_)
             ),
             TaskStatus::Retrying { .. } => matches!(
                 target,
@@ -366,6 +378,9 @@ impl TaskStatus {
                     | TaskStatus::Retrying { .. }
             ),
             TaskStatus::Blocked(_) => matches!(target, TaskStatus::Pending | TaskStatus::Cancelled),
+            TaskStatus::Paused(_) => {
+                matches!(target, TaskStatus::InProgress | TaskStatus::Cancelled)
+            }
             _ => false,
         }
     }
@@ -506,6 +521,38 @@ pub struct Task {
 
     /// Context summary for task resumption
     pub context_summary: Option<String>,
+
+    // ── Task metadata fields ────────────────────────────────────────────────
+    /// Run ID this task belongs to (run-level isolation).
+    /// When Some, this task is scoped to a specific run; when None, it's a
+    /// standalone framework-level task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+
+    /// Short display title (distinct from the longer `description`, which is
+    /// the full task prompt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Worker role assigned to execute this task (e.g. "project_explorer",
+    /// "code_reviewer"). Used by delegation dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
+
+    /// Task kind classification: "read_only_review" / "investigation" /
+    /// "test_plan" / "implementation" / "debugging" / "verification" /
+    /// "review" / "summary". Determines read-only vs mutating dispatch path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+
+    /// Target files for write tasks (file-level write lock conflict detection).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+
+    /// Execution result summary (concise, for display + answer composition).
+    /// Distinct from `result`, which is the full output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 impl std::fmt::Debug for Task {
@@ -547,6 +594,12 @@ impl std::fmt::Debug for Task {
             .field("started_at", &self.started_at)
             .field("completed_at", &self.completed_at)
             .field("error_code", &self.error_code)
+            .field("run_id", &self.run_id)
+            .field("title", &self.title)
+            .field("agent_role", &self.agent_role)
+            .field("kind", &self.kind)
+            .field("files", &self.files)
+            .field("summary", &self.summary)
             .finish()
     }
 }
@@ -584,6 +637,12 @@ impl PartialEq for Task {
             && self.started_at == other.started_at
             && self.completed_at == other.completed_at
             && self.error_code == other.error_code
+            && self.run_id == other.run_id
+            && self.title == other.title
+            && self.agent_role == other.agent_role
+            && self.kind == other.kind
+            && self.files == other.files
+            && self.summary == other.summary
         // execute_fn, metadata_json, metadata intentionally excluded — not comparable
     }
 }
@@ -636,6 +695,13 @@ impl Task {
             remaining_risks: Vec::new(),
             next_unblocked_tasks: Vec::new(),
             context_summary: None,
+            // EKO extension fields — all None/empty by default
+            run_id: None,
+            title: None,
+            agent_role: None,
+            kind: None,
+            files: Vec::new(),
+            summary: None,
         }
     }
 
