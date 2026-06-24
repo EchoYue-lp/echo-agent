@@ -1877,6 +1877,14 @@ impl ReactAgent {
     /// directly with `self.chat()`.
     #[cfg(feature = "subagent")]
     pub async fn delegate_task(&self, task: &str) -> Result<String> {
+        self.delegate_task_with_depth(task, 0).await
+    }
+
+    /// Like [`delegate_task`] but with an explicit delegation depth.
+    /// Called by the ReAct loop when processing internal delegate markers.
+    /// Top-level calls pass 0; nested subagent ReAct loops increment.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_task_with_depth(&self, task: &str, depth: u32) -> Result<String> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -1907,7 +1915,7 @@ impl ReactAgent {
                     .unwrap_or_else(CancellationToken::new),
                 parent_agent: self.config.agent_name.clone(),
                 parent_context: self.build_parent_context(&ExecutionMode::Fork).await,
-                delegate_depth: 0,
+                delegate_depth: depth,
             };
 
             // Reuse the stored executor (with hook configuration)
@@ -1930,6 +1938,17 @@ impl ReactAgent {
     /// based on the Fork mode default policy.
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent(&self, target: &str, task: &str) -> Result<String> {
+        self.delegate_to_agent_with_depth(target, task, 0).await
+    }
+
+    /// Like [`delegate_to_agent`] but with an explicit delegation depth.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_to_agent_with_depth(
+        &self,
+        target: &str,
+        task: &str,
+        depth: u32,
+    ) -> Result<String> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -1958,7 +1977,7 @@ impl ReactAgent {
                 .unwrap_or_else(CancellationToken::new),
             parent_agent: self.config.agent_name.clone(),
             parent_context: self.build_parent_context(&mode).await,
-            delegate_depth: 0,
+            delegate_depth: depth,
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
