@@ -260,4 +260,16 @@ impl AgentHandle {
         let mut guard = self.agent.try_write().ok()?;
         Some(f(&mut guard))
     }
+
+    /// Convert this handle into a `Box<dyn Agent>` that delegates through the
+    /// `RwLock` at runtime. Immutable fields (name, model_name, system_prompt)
+    /// are cached at conversion time; all other [`Agent`] trait methods acquire
+    /// a read lock for each call.
+    ///
+    /// This is useful when an agent must be both:
+    /// - accessible through an `AgentHandle` (for tool registration / lifecycle),
+    /// - passable as `Box<dyn Agent>` (e.g. to a subagent registry).
+    pub async fn to_boxed_agent(&self) -> Box<dyn Agent> {
+        Box::new(RwLockAgentWrapper::from_handle(self).await)
+    }
 }
