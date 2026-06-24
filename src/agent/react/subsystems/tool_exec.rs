@@ -13,8 +13,6 @@ use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 use crate::skills::registry::SharedRegistry;
-#[cfg(feature = "tasks")]
-use crate::tasks::TaskManager;
 use crate::tools::ToolManager;
 use std::sync::Arc;
 
@@ -33,8 +31,6 @@ pub(crate) struct ToolExecutionSubsystem {
     /// throwaway executors.
     #[cfg(feature = "subagent")]
     pub(crate) subagent_executor: Arc<crate::agent::subagent::SubagentExecutor>,
-    #[cfg(feature = "tasks")]
-    pub(crate) task_manager: Arc<TaskManager>,
     pub(crate) skill_registry: SkillRegistry,
     pub(crate) progressive_skill_registry: Option<SharedRegistry>,
     pub(crate) hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
@@ -63,12 +59,6 @@ impl ToolExecutionSubsystem {
     #[allow(dead_code)]
     pub(crate) fn subagent_registry(&self) -> Option<Arc<SubagentRegistry>> {
         Some(Arc::clone(&self.subagent_registry))
-    }
-
-    #[cfg(feature = "tasks")]
-    #[allow(dead_code)]
-    pub(crate) fn task_manager(&self) -> Option<Arc<TaskManager>> {
-        Some(Arc::clone(&self.task_manager))
     }
 
     #[allow(dead_code)]

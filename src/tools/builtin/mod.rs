@@ -12,11 +12,7 @@ pub(crate) mod check_task;
 pub(crate) mod human_in_loop;
 pub(crate) mod memory;
 #[cfg(feature = "tasks")]
-pub(crate) mod plan_tool;
-#[cfg(feature = "tasks")]
 pub(crate) mod spawn_task;
-#[cfg(feature = "tasks")]
-pub(crate) mod task;
 /// Think tool for reasoning and reflection.
 pub mod think;
 pub(crate) mod todo;

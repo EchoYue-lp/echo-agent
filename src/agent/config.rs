@@ -150,9 +150,6 @@ pub struct AgentConfig {
     pub(crate) verifier_min_score: f64,
     /// Maximum number of verifier retry attempts before accepting the answer.
     pub(crate) verifier_max_retries: usize,
-
-    /// Planning policy for framework-driven planning mode triggers.
-    pub(crate) planning_policy: echo_orchestration::planning::PlanningPolicy,
 }
 
 impl AgentConfig {
@@ -209,7 +206,6 @@ impl AgentConfig {
             verifier_enabled: false,
             verifier_min_score: 7.0,
             verifier_max_retries: 2,
-            planning_policy: echo_orchestration::planning::PlanningPolicy::default(),
         }
     }
 
@@ -717,12 +713,6 @@ impl AgentConfig {
     /// Set the maximum number of verifier retry attempts.
     pub fn verifier_max_retries(mut self, retries: usize) -> Self {
         self.verifier_max_retries = retries;
-        self
-    }
-
-    /// Set the planning policy for framework-driven planning mode triggers.
-    pub fn planning_policy(mut self, policy: echo_orchestration::planning::PlanningPolicy) -> Self {
-        self.planning_policy = policy;
         self
     }
 

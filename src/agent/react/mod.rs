@@ -29,8 +29,6 @@ use crate::sandbox::SandboxManager;
 use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 #[cfg(feature = "tasks")]
-use crate::tasks::TaskManager;
-#[cfg(feature = "tasks")]
 use crate::tasks::TaskSpawner;
 use crate::tools::ToolManager;
 #[cfg(feature = "subagent")]
@@ -46,10 +44,6 @@ use crate::tools::builtin::memory::{
 };
 #[cfg(feature = "tasks")]
 use crate::tools::builtin::spawn_task::SpawnBackgroundTaskTool;
-#[cfg(feature = "tasks")]
-use crate::tools::builtin::task::{
-    CreateTaskTool, GetExecutionOrderTool, ListTasksTool, UpdateTaskTool, VisualizeDependenciesTool,
-};
 use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -69,8 +63,6 @@ pub mod builder;
 mod capabilities;
 mod extract;
 pub mod loop_detector;
-#[cfg(feature = "tasks")]
-mod planning;
 pub mod run;
 pub mod structured;
 pub(crate) mod subsystems;
@@ -79,12 +71,6 @@ mod tests;
 // ── Built-in tool name constants ────────────────────────────────────────────────
 
 pub(crate) const TOOL_FINAL_ANSWER: &str = "final_answer";
-#[cfg(feature = "tasks")]
-pub(crate) const TOOL_CREATE_TASK: &str = "create_task";
-#[cfg(feature = "tasks")]
-pub(crate) const TOOL_PLAN: &str = "plan";
-#[cfg(feature = "tasks")]
-pub(crate) const TOOL_UPDATE_TASK: &str = "update_task";
 
 /// Returns `true` if the LLM error is worth retrying (network, timeout, rate-limit, server 5xx).
 pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
@@ -249,20 +235,6 @@ pub(crate) struct MemoryTriggerRuntimeState {
 // ── Construction & initialization ──────────────────────────────────────────────
 
 impl ReactAgent {
-    #[cfg(feature = "tasks")]
-    pub(crate) fn has_planning_tools(&self) -> bool {
-        self.config.enable_task
-            && [TOOL_PLAN, TOOL_CREATE_TASK, TOOL_UPDATE_TASK]
-                .iter()
-                .all(|name| self.tools.tool_manager.get_tool(name).is_some())
-    }
-
-    #[cfg(not(feature = "tasks"))]
-    #[allow(dead_code)]
-    pub(crate) fn has_planning_tools(&self) -> bool {
-        false
-    }
-
     /// Chain-of-thought preamble auto-injected before tool calls.
     const COT_INSTRUCTION: &'static str =
         "Before calling any tool, briefly describe your analysis and execution plan.";
@@ -360,8 +332,6 @@ impl ReactAgent {
 
         // ── Subsystem initialization ──────────────────────────────
         #[cfg(feature = "tasks")]
-        let task_manager = Arc::new(TaskManager::default());
-        #[cfg(feature = "tasks")]
         let task_spawner = Arc::new(TaskSpawner::new(crate::tasks::TaskSpawnerConfig::default()));
         #[cfg(feature = "subagent")]
         let subagent_registry = Arc::new(SubagentRegistry::new());
@@ -401,15 +371,6 @@ impl ReactAgent {
 
         #[cfg(feature = "tasks")]
         if config.enable_task {
-            // DAG planning tools
-            tool_manager.register(Box::new(CreateTaskTool::new(task_manager.clone())));
-            tool_manager.register(Box::new(UpdateTaskTool::new(task_manager.clone())));
-            tool_manager.register(Box::new(ListTasksTool::new(task_manager.clone())));
-            tool_manager.register(Box::new(VisualizeDependenciesTool::new(
-                task_manager.clone(),
-            )));
-            tool_manager.register(Box::new(GetExecutionOrderTool::new(task_manager.clone())));
-
             // Background task tools (long-running task support)
             tool_manager.register(Box::new(SpawnBackgroundTaskTool::new(task_spawner.clone())));
             tool_manager.register(Box::new(CheckTaskStatusTool::new(task_spawner.clone())));
@@ -470,8 +431,6 @@ impl ReactAgent {
                 subagent_registry,
                 #[cfg(feature = "subagent")]
                 subagent_executor,
-                #[cfg(feature = "tasks")]
-                task_manager,
                 skill_registry: SkillRegistry::new(),
                 progressive_skill_registry: None,
                 hook_registry,
@@ -2253,35 +2212,6 @@ impl Agent for ReactAgent {
         let model_for_span = model.clone();
         Box::pin(
             async move {
-                // Check planning policy to determine execution mode
-                #[cfg(feature = "tasks")]
-                if self.has_planning_tools() {
-                    use echo_orchestration::planning::{PlanningContext, ExecutionMode};
-
-                    // Create planning context and analyze the task
-                    let mut planning_context = PlanningContext::new(task);
-                    planning_context.analyze_goal();
-
-                    // Note: Context pressure estimation requires access to ContextManager internals
-                    // which are not exposed. For now, we skip this check and rely on other rules.
-                    // Future improvement: expose token_limit and token_estimate methods.
-
-                    // Check if policy recommends planning
-                    let decision = self.config.planning_policy.should_plan(&planning_context);
-                    match decision {
-                        ExecutionMode::Plan { reason } => {
-                            tracing::info!(
-                                agent = %agent_name,
-                                reason = %reason,
-                                "Planning policy triggered planning mode"
-                            );
-                            return self.execute_with_planning(task).await;
-                        }
-                        ExecutionMode::DirectExecute => {
-                            // Fall through to normal execution
-                        }
-                    }
-                }
                 self.run_direct(task).await
             }
             .instrument(info_span!("agent_execute", agent.name = %agent_name_for_span, agent.model = %model_for_span)),
