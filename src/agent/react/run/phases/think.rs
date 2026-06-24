@@ -262,6 +262,12 @@ pub(crate) async fn create_llm_stream(
     // per-call model-resolve (Config::get_model) of the legacy reqwest path,
     // which is what makes the core loop testable with a mock and removes the
     // NotFindModelError dependency on echo-agent-models.yaml.
+    tracing::info!(
+        agent = %snap.config.agent_name,
+        model = %snap.config.model_name,
+        has_llm_client = snap.llm_client.is_some(),
+        "think: LLM call path selection"
+    );
     if let Some(llm_client) = snap.llm_client.clone() {
         type ChunkStream = std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
