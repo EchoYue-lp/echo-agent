@@ -1994,6 +1994,7 @@ impl ReactAgent {
             task,
             self.config.agent_name.as_str(),
             cancel,
+            0,
         )
         .await
     }
@@ -2010,6 +2011,7 @@ impl ReactAgent {
         task: &str,
         parent_label: &str,
         cancel: CancellationToken,
+        depth: u32,
     ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
@@ -2032,7 +2034,7 @@ impl ReactAgent {
             cancel,
             parent_agent: parent_label.to_string(),
             parent_context: self.build_parent_context(&mode).await,
-            delegate_depth: 0,
+            delegate_depth: depth,
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;

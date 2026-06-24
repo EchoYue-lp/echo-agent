@@ -73,6 +73,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "Reply with: hello from smoke test",
             "smoke",
             cancel,
+            0,
         )
         .await?;
 
