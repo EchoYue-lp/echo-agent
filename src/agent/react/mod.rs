@@ -1695,8 +1695,28 @@ impl ReactAgent {
     }
 
     /// Start a new trace run and set it as the current run.
+    ///
+    /// **Does NOT overwrite** a run_id already set by `set_external_context`.
+    /// The product layer (e.g. `launch_unified_run`) calls
+    /// `set_external_context` to inject the TaskRuntime run_id BEFORE the
+    /// agent's ReAct loop starts. If we overwrote it here with a trace-only
+    /// `run_{uuid}`, downstream tools (`task_create`, `execute_plan`) would
+    /// read the trace id from `current_run_id` and operate on the wrong
+    /// TaskRuntime store entry (no matching `RunCreated` event → plan.json
+    /// never materialises → "stuck in executing" bug).
     pub(crate) async fn start_trace_run(&self, input: &str) {
         if let Some(ref store) = self.run_store {
+            // If the product layer already set a run_id via set_external_context,
+            // keep it — trace events will be recorded under that id, which is
+            // the correct TaskRuntime run_id.
+            let existing = self
+                .current_run_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if existing.is_some() {
+                return;
+            }
             let run_id = format!("run_{}", uuid::Uuid::new_v4());
             let run = crate::trace::Run {
                 run_id: run_id.clone(),
