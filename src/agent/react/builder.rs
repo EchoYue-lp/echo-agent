@@ -32,6 +32,7 @@ pub struct ReactAgentBuilder {
     llm_config: Option<LlmConfig>,
     tools: Vec<Box<dyn Tool>>,
     enable_builtin_tools: bool,
+    readonly_tools: bool,
     enable_memory: bool,
     enable_task: bool,
     enable_human_in_loop: bool,
@@ -98,6 +99,7 @@ impl ReactAgentBuilder {
             llm_config: None,
             tools: Vec::new(),
             enable_builtin_tools: false,
+            readonly_tools: false,
             enable_memory: false,
             enable_task: false,
             enable_human_in_loop: false,
@@ -245,6 +247,14 @@ impl ReactAgentBuilder {
     /// Disable built-in tools
     pub fn disable_tools(mut self) -> Self {
         self.enable_builtin_tools = false;
+        self
+    }
+
+    /// Restrict registered tools to read-only (no shell, no file writes).
+    /// Must be combined with `enable_tools()`. Used by read-only subagent
+    /// workers so readonly is enforced at the tool level, not just prompt.
+    pub fn readonly_tools(mut self) -> Self {
+        self.readonly_tools = true;
         self
     }
 
@@ -722,6 +732,7 @@ impl ReactAgentBuilder {
         let mut config = AgentConfig::new(&self.model, &self.name, &self.system_prompt)
             .role(self.role)
             .enable_tool(self.enable_builtin_tools)
+            .readonly_tools(self.readonly_tools)
             .enable_memory(self.enable_memory)
             .enable_task(self.enable_task)
             .enable_human_in_loop(self.enable_human_in_loop)

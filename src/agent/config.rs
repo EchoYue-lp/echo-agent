@@ -52,6 +52,10 @@ pub struct AgentConfig {
     pub(crate) role: AgentRole,
     /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
     pub(crate) enable_tool: bool,
+    /// When `enable_tool` is true, register only **read-only** tools (no shell,
+    /// no file writes, no git mutations). Used by read-only subagent workers so
+    /// that "readonly" is physically enforced at the tool level, not just prompt.
+    pub(crate) readonly_tools: bool,
     /// Whether to enable task planning capability (plan/create_task/update_task tools)
     pub(crate) enable_task: bool,
     /// Whether to enable human-in-loop tool
@@ -171,6 +175,7 @@ impl AgentConfig {
             allowed_tools: Vec::new(),
             role: AgentRole::default(),
             enable_tool: false,
+            readonly_tools: false,
             enable_task: false,
             enable_human_in_loop: false,
             enable_subagent: false,
@@ -282,6 +287,22 @@ impl AgentConfig {
     pub fn enable_tool(mut self, enabled: bool) -> Self {
         self.enable_tool = enabled;
         self
+    }
+
+    /// Restrict registered tools to **read-only** (no shell, no file writes).
+    ///
+    /// Only takes effect when `enable_tool(true)` is also set. The agent will
+    /// get read_file/list_dir/grep/glob/diff/web_search etc. but NOT
+    /// shell/write_file/delete_file/git-commit. Used by read-only subagent
+    /// workers so that "readonly" is enforced at the tool level.
+    pub fn readonly_tools(mut self, readonly: bool) -> Self {
+        self.readonly_tools = readonly;
+        self
+    }
+
+    /// Check if only read-only tools should be registered.
+    pub fn is_readonly_tools(&self) -> bool {
+        self.readonly_tools
     }
 
     /// Enable or disable task planning capability

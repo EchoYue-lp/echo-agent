@@ -15,7 +15,6 @@ pub mod isolated;
 pub mod lightweight;
 pub mod pool;
 pub mod registry;
-pub mod specs;
 pub mod team;
 pub mod types;
 pub mod usage;
@@ -28,7 +27,6 @@ pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig, TeammateHandle};
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use registry::SubagentRegistry;
-pub use specs::{ContextPolicy, SubAgentSpec};
 pub use types::{
     ExecutionMode, RegisteredSubagent, SubagentDefinition, SubagentKind, SubagentResult,
 };

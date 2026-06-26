@@ -590,7 +590,11 @@ impl ReactAgent {
 
     fn register_feature_gated_tools(config: &AgentConfig, tool_manager: &mut ToolManager) {
         if config.enable_tool {
-            echo_tools::register_all_tools(tool_manager);
+            if config.readonly_tools {
+                echo_tools::register_readonly_tools(tool_manager);
+            } else {
+                echo_tools::register_all_tools(tool_manager);
+            }
         }
     }
 

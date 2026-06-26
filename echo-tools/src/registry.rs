@@ -2,8 +2,195 @@
 //!
 //! Provides [`register_all_tools`] which registers every enabled domain tool
 //! into any type implementing [`ToolRegistrar`](echo_core::tools::ToolRegistrar).
+//! [`register_readonly_tools`] registers only read-only tools (no shell, no
+//! file writes) — used by read-only subagent workers.
 
 use echo_core::tools::ToolRegistrar;
+
+/// Register only **read-only** tools into the given registrar.
+///
+/// This excludes all mutating tools: shell, write/append/create/delete/move/
+/// update/edit files, git write operations (commit/branch/worktree-enter).
+/// Read-only tools include: read_file, list_dir, grep, glob, diff, repo_map,
+/// code_search, git read ops (status/diff/log/blame), web search/fetch,
+/// data read/profile, research search, media read/extract, statistics.
+///
+/// Used by `build_readonly_worker_agent` so that "readonly" workers are
+/// physically incapable of mutating state, not just prompt-constrained.
+#[allow(unused_variables)]
+pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
+    // ── files (read-only subset) ──────────────────────────────────────────
+    #[cfg(feature = "files")]
+    {
+        use crate::files::code_search::CodeSearchTool;
+        use crate::files::diff::DiffTool;
+        use crate::files::files::{ListDirTool, ReadFileTool};
+        use crate::files::glob::GlobTool;
+        use crate::files::grep::GrepTool;
+        use crate::files::repo_map::RepoMapTool;
+
+        tool_manager.register(Box::new(ReadFileTool::new()));
+        tool_manager.register(Box::new(ListDirTool::new()));
+        tool_manager.register(Box::new(GrepTool::new()));
+        tool_manager.register(Box::new(GlobTool::new()));
+        tool_manager.register(Box::new(DiffTool::new()));
+        tool_manager.register(Box::new(RepoMapTool::new()));
+        tool_manager.register(Box::new(CodeSearchTool::new()));
+    }
+
+    // ── git (read-only subset) ────────────────────────────────────────────
+    #[cfg(feature = "git")]
+    {
+        use crate::git::{GitBlameTool, GitDiffTool, GitLogTool, GitStatusTool};
+        // Deliberately EXCLUDED: GitBranchTool, GitCommitTool,
+        // EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool.
+        tool_manager.register(Box::new(GitStatusTool::default()));
+        tool_manager.register(Box::new(GitDiffTool));
+        tool_manager.register(Box::new(GitLogTool));
+        tool_manager.register(Box::new(GitBlameTool));
+    }
+
+    // ── rag (all read-only) ───────────────────────────────────────────────
+    #[cfg(feature = "rag")]
+    {
+        use crate::rag::{RagChunkDocumentTool, RagIndexTool, RagSearchTool};
+        tool_manager.register(Box::new(RagIndexTool));
+        tool_manager.register(Box::new(RagSearchTool));
+        tool_manager.register(Box::new(RagChunkDocumentTool));
+    }
+
+    // ── chart (read-only — generates charts but no file mutation) ─────────
+    #[cfg(feature = "chart")]
+    {
+        use crate::chart::GenerateChartTool;
+        tool_manager.register(Box::new(GenerateChartTool));
+    }
+
+    // ── database (read-only subset) ───────────────────────────────────────
+    #[cfg(feature = "database")]
+    {
+        use crate::database::{DescribeTableTool, ListTablesTool, SqlQueryTool};
+        // SqlQueryTool could mutate (INSERT/UPDATE), but in a local analysis
+        // context the risk is low and the read value is high. Keep it.
+        tool_manager.register(Box::new(SqlQueryTool));
+        tool_manager.register(Box::new(ListTablesTool));
+        tool_manager.register(Box::new(DescribeTableTool));
+    }
+
+    // ── web (all read-only) ───────────────────────────────────────────────
+    #[cfg(feature = "web")]
+    {
+        use crate::web::{WebExtractTool, WebFetchTool, WebSearchTool};
+        tool_manager.register(Box::new(WebFetchTool::new()));
+        tool_manager.register(Box::new(WebExtractTool));
+        tool_manager.register(Box::new(WebSearchTool::with_duckduckgo()));
+    }
+
+    // ── media (read-only subset) ──────────────────────────────────────────
+    #[cfg(feature = "media")]
+    {
+        use crate::image::ImageAnalysisTool;
+        use crate::media::image_fetch::ImageFetchTool;
+        use crate::media::web_fetch_enhanced::WebFetchToolEnhanced;
+        use crate::pdf::{PdfExtractTool, PdfInfoTool};
+        use crate::text::{TextExportTool, TextProcessTool, TextSearchTool, TextStatsTool};
+        use crate::word::{WordInfoTool, WordReadTool, WordStructureTool};
+        // Excel: EXCLUDED ExcelWriteTool; kept read/info/csv/profile.
+        use crate::excel::{ExcelInfoTool, ExcelProfileTool, ExcelReadTool, ExcelToCsvTool};
+
+        tool_manager.register(Box::new(ImageAnalysisTool));
+        if let Ok(tool) = ImageFetchTool::new() {
+            tool_manager.register(Box::new(tool));
+        }
+        tool_manager.register(Box::new(WebFetchToolEnhanced::new()));
+        tool_manager.register(Box::new(PdfExtractTool));
+        tool_manager.register(Box::new(PdfInfoTool));
+        tool_manager.register(Box::new(ExcelReadTool));
+        tool_manager.register(Box::new(ExcelInfoTool));
+        tool_manager.register(Box::new(ExcelToCsvTool));
+        tool_manager.register(Box::new(ExcelProfileTool));
+        tool_manager.register(Box::new(WordReadTool));
+        tool_manager.register(Box::new(WordInfoTool));
+        tool_manager.register(Box::new(WordStructureTool));
+        tool_manager.register(Box::new(TextSearchTool));
+        tool_manager.register(Box::new(TextStatsTool));
+        tool_manager.register(Box::new(TextProcessTool));
+        tool_manager.register(Box::new(TextExportTool));
+    }
+
+    // ── data (read-only subset) ───────────────────────────────────────────
+    #[cfg(feature = "data")]
+    {
+        // EXCLUDED: DataExportTool (writes files).
+        use crate::data::{
+            CorrelateTool, DataAggregateTool, DataBinTool, DataContributionTool, DataFilterTool,
+            DataJoinTool, DataMultiReadTool, DataProfileTool, DataRatioTool, DataReadTool,
+            DataStatsTool, DataTopNTool, DataTransformTool, PivotTool,
+        };
+        tool_manager.register(Box::new(DataReadTool));
+        tool_manager.register(Box::new(DataFilterTool));
+        tool_manager.register(Box::new(DataAggregateTool));
+        tool_manager.register(Box::new(DataStatsTool));
+        tool_manager.register(Box::new(DataTransformTool));
+        tool_manager.register(Box::new(DataProfileTool));
+        tool_manager.register(Box::new(DataTopNTool));
+        tool_manager.register(Box::new(DataContributionTool));
+        tool_manager.register(Box::new(DataBinTool));
+        tool_manager.register(Box::new(DataRatioTool));
+        tool_manager.register(Box::new(DataMultiReadTool));
+        tool_manager.register(Box::new(DataJoinTool));
+        tool_manager.register(Box::new(CorrelateTool));
+        tool_manager.register(Box::new(PivotTool));
+
+        use crate::data_quality::{
+            ConsistencyCheckTool, MissingValueAnalysisTool, OutlierDetectionTool,
+        };
+        tool_manager.register(Box::new(MissingValueAnalysisTool));
+        tool_manager.register(Box::new(OutlierDetectionTool));
+        tool_manager.register(Box::new(ConsistencyCheckTool));
+    }
+
+    #[cfg(feature = "statistics")]
+    {
+        use crate::statistics::{DescriptiveAdvancedTool, HypothesisTestTool, RegressionTool};
+        tool_manager.register(Box::new(HypothesisTestTool::default()));
+        tool_manager.register(Box::new(RegressionTool::default()));
+        tool_manager.register(Box::new(DescriptiveAdvancedTool::default()));
+    }
+
+    // ── research (all read-only) ──────────────────────────────────────────
+    #[cfg(feature = "research")]
+    {
+        use crate::research::{
+            ArxivSearchTool, BibtexGenerateTool, ClinicalTrialsSearchTool, PdfFetchTool,
+            PubMedSearchTool, ResearchRecallTool, ResearchRememberTool, SemanticScholarSearchTool,
+        };
+        tool_manager.register(Box::new(ArxivSearchTool));
+        tool_manager.register(Box::new(SemanticScholarSearchTool));
+        tool_manager.register(Box::new(PubMedSearchTool));
+        tool_manager.register(Box::new(ClinicalTrialsSearchTool));
+        tool_manager.register(Box::new(PdfFetchTool));
+        tool_manager.register(Box::new(BibtexGenerateTool));
+        tool_manager.register(Box::new(ResearchRememberTool));
+        tool_manager.register(Box::new(ResearchRecallTool));
+    }
+
+    #[cfg(not(any(
+        feature = "files",
+        feature = "git",
+        feature = "rag",
+        feature = "chart",
+        feature = "database",
+        feature = "web",
+        feature = "media",
+        feature = "data",
+        feature = "statistics",
+        feature = "research"
+    )))]
+    {
+        let _ = tool_manager; // Suppress unused warning when no feature-gated tools
+    }
+}
 
 /// Register all feature-gated domain tools into the given registrar.
 #[allow(unused_variables)]
@@ -55,8 +242,8 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         feature = "web",
         feature = "media",
         feature = "data",
-        feature = "research",
-        feature = "statistics"
+        feature = "statistics",
+        feature = "research"
     )))]
     {
         let _ = tool_manager; // Suppress unused warning when no feature-gated tools
