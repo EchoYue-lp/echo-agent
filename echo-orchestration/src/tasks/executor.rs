@@ -43,7 +43,6 @@ use super::hooks::{RetryDecision, TaskHookRegistry};
 use super::manager::TaskManager;
 use super::replanner::Replanner;
 use super::scheduler::TaskScheduler;
-use super::store::{CheckpointStore, ExecutionCheckpoint};
 use super::task::{Task, TaskStatus};
 use super::verifier::Verifier;
 use crate::tasks::BackgroundCheckpointStore;
@@ -71,8 +70,6 @@ pub struct TaskExecutorConfig {
     pub retry_jitter: bool,
     /// Enable task hooks
     pub enable_hooks: bool,
-    /// Checkpoint interval: seconds (0 = no checkpoint).
-    pub checkpoint_interval_secs: u64,
     /// Optional bridge to the unified lifecycle hook system (echo-core).
     /// When set, TaskCreated/TaskCompleted events are fired into the
     /// unified HookRegistry alongside the trait-based TaskHooks.
@@ -95,7 +92,6 @@ impl Clone for TaskExecutorConfig {
             retry_max_delay_secs: self.retry_max_delay_secs,
             retry_jitter: self.retry_jitter,
             enable_hooks: self.enable_hooks,
-            checkpoint_interval_secs: self.checkpoint_interval_secs,
             unified_hook_executor: self.unified_hook_executor.clone(),
             round_timeout_secs: self.round_timeout_secs,
         }
@@ -115,7 +111,6 @@ impl Default for TaskExecutorConfig {
             retry_max_delay_secs: 60,
             retry_jitter: true,
             enable_hooks: true,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600, // 1 hour
         }
@@ -320,7 +315,6 @@ pub struct TaskExecutor {
     semaphore: Arc<Semaphore>,
     execute_fn: Option<TaskExecuteFn>,
     hooks: Arc<TaskHookRegistry>,
-    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     /// Optional persistent task store for cross-restart resumption.
     task_store: Option<Arc<dyn super::store::TaskStore>>,
     /// Tracks cancellation tokens for running tasks.
@@ -357,7 +351,6 @@ impl TaskExecutor {
             semaphore,
             execute_fn: None,
             hooks,
-            checkpoint_store: None,
             task_store: None,
             running_tasks: Arc::new(DashMap::new()),
             shared_spawner: None,
@@ -390,12 +383,6 @@ impl TaskExecutor {
         if let Some(registry) = Arc::get_mut(&mut self.hooks) {
             registry.register(hook);
         }
-        self
-    }
-
-    /// Set checkpoint store for periodic saving during execute_all
-    pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
-        self.checkpoint_store = Some(store);
         self
     }
 
@@ -1290,19 +1277,8 @@ impl TaskExecutor {
 
             all_results.extend(results);
 
-            // Periodic checkpoint
             if batch_size > 0 {
                 batch_count += 1;
-                if self.config.checkpoint_interval_secs > 0
-                    && let Some(ref store) = self.checkpoint_store
-                {
-                    let ckpt = ExecutionCheckpoint::from_manager(None, &self.task_manager);
-                    if let Err(e) = store.save_checkpoint(&ckpt).await {
-                        warn!(error = %e, "Failed to save checkpoint after batch {}", batch_count);
-                    } else {
-                        debug!(batch = batch_count, "Checkpoint saved");
-                    }
-                }
             }
 
             if self.is_completed() {
@@ -1354,14 +1330,6 @@ impl TaskExecutor {
                 }
             } else {
                 empty_rounds = 0;
-            }
-        }
-
-        // Final checkpoint
-        if let Some(ref store) = self.checkpoint_store {
-            let ckpt = ExecutionCheckpoint::from_manager(None, &self.task_manager);
-            if let Err(e) = store.save_checkpoint(&ckpt).await {
-                warn!(error = %e, "Failed to save final checkpoint");
             }
         }
 
@@ -1603,7 +1571,6 @@ mod tests {
             retry_backoff_factor: 2.0,
             retry_max_delay_secs: 60,
             retry_jitter: false,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600,
         };
@@ -1632,7 +1599,6 @@ mod tests {
             retry_backoff_factor: 2.0,
             retry_max_delay_secs: 60,
             retry_jitter: false,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600,
         };
@@ -1670,7 +1636,6 @@ mod tests {
             retry_backoff_factor: 2.0,
             retry_max_delay_secs: 60,
             retry_jitter: false,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600,
         };
@@ -1723,7 +1688,6 @@ mod tests {
             retry_backoff_factor: 2.0,
             retry_max_delay_secs: 60,
             retry_jitter: false,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600,
         };
@@ -1773,7 +1737,6 @@ mod tests {
             retry_backoff_factor: 2.0,
             retry_max_delay_secs: 60,
             retry_jitter: false,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600,
         };
@@ -1808,7 +1771,6 @@ mod tests {
             retry_backoff_factor: 2.0,
             retry_max_delay_secs: 60,
             retry_jitter: false,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600,
         };
@@ -1854,7 +1816,6 @@ mod tests {
             retry_backoff_factor: 2.0,
             retry_max_delay_secs: 60,
             retry_jitter: false,
-            checkpoint_interval_secs: 0,
             unified_hook_executor: None,
             round_timeout_secs: 3600,
         };

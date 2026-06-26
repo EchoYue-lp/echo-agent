@@ -497,13 +497,6 @@ impl TaskManager {
         let tasks = self.get_all_tasks();
         store.save_all(&tasks).await
     }
-
-    /// Restore task state from checkpoint
-    pub async fn restore_from_checkpoint(&self, checkpoint: &super::store::ExecutionCheckpoint) {
-        for task in &checkpoint.tasks {
-            self.tasks.insert(task.id.clone(), task.clone());
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -40,9 +40,7 @@ pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, Rule
 pub use scheduler::{
     ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,
 };
-pub use store::{
-    CheckpointStore, ExecutionCheckpoint, SqliteCheckpointStore, SqliteTaskStore, TaskStore,
-};
+pub use store::{SqliteTaskStore, TaskStore};
 pub use task::{
     Artifact, ArtifactType, AttemptStatus, ChangeType, CheckpointPolicy, CommandRecord,
     ContextScope, Evidence, EvidenceType, FallbackStrategy, FileChange, InputType, OutputType,
