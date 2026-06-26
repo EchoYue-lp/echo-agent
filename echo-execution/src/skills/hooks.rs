@@ -362,6 +362,18 @@ pub type McpExecutorFn = Arc<
         + Sync,
 >;
 
+/// Type-erased callback for spawning a subagent from a hook.
+///
+/// The agent layer injects this via [`HookRegistry::set_agent_executor`]
+/// so that [`HookAction::Agent`] hooks can dispatch a subagent by name
+/// without echo-execution depending on the agent layer.
+/// Receives (agent_name, task_prompt) and returns the agent's output text.
+pub type AgentExecutorFn = Arc<
+    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 // ── Hook Registry ──────────────────────────────────────────────────────
 
 /// Registry of hooks from all sources (skills and user config).
@@ -376,6 +388,8 @@ pub struct HookRegistry {
     http_client: Option<reqwest::Client>,
     /// Optional MCP tool executor for McpTool hook actions.
     mcp_executor: Option<McpExecutorFn>,
+    /// Optional subagent executor for Agent hook actions.
+    agent_executor: Option<AgentExecutorFn>,
 }
 
 impl Clone for HookRegistry {
@@ -385,6 +399,7 @@ impl Clone for HookRegistry {
             sandbox: self.sandbox.clone(),
             http_client: self.http_client.clone(),
             mcp_executor: self.mcp_executor.clone(),
+            agent_executor: self.agent_executor.clone(),
         }
     }
 }
@@ -499,6 +514,14 @@ impl HookRegistry {
         self.mcp_executor = Some(executor);
     }
 
+    /// Set the subagent executor for Agent hook actions.
+    ///
+    /// The executor receives (agent_name, task_prompt) and should dispatch
+    /// the named subagent, returning its output text on success.
+    pub fn set_agent_executor(&mut self, executor: AgentExecutorFn) {
+        self.agent_executor = Some(executor);
+    }
+
     // -- Public execution methods --
 
     /// Execute all matching PreToolUse hooks.
@@ -587,6 +610,7 @@ impl HookRegistry {
                         self.sandbox.as_ref(),
                         self.http_client.as_ref(),
                         self.mcp_executor.as_ref(),
+                        self.agent_executor.as_ref(),
                     )
                     .await;
 
@@ -687,6 +711,7 @@ async fn execute_action(
     sandbox: Option<&Arc<SandboxManager>>,
     http_client: Option<&reqwest::Client>,
     mcp_executor: Option<&McpExecutorFn>,
+    agent_executor: Option<&AgentExecutorFn>,
 ) -> HookResult {
     match action {
         HookAction::Command {
@@ -815,25 +840,53 @@ async fn execute_action(
         HookAction::Agent {
             name,
             task,
-            timeout: _,
+            timeout,
             ..
         } => {
-            // Agent hook action: spawn a subagent to handle the task.
-            // This is a placeholder — actual agent spawning requires access
-            // to the agent registry which is not available in the execution layer.
-            // The facade layer should provide an agent_executor callback
-            // similar to mcp_executor.
-            warn!(
-                agent = %name,
-                task = ?task,
-                "Agent hook action triggered but no agent_executor registered (not yet implemented in execution layer)"
-            );
-            let mut result = HookResult::default();
-            result.messages.push(format!(
-                "Agent hook '{name}' would be spawned with task: {}",
-                task.as_deref().unwrap_or("(none)")
-            ));
-            result
+            // SK-1: Agent hook action — dispatch a subagent by name.
+            // Uses the injected agent_executor callback (same pattern as
+            // mcp_executor). If no executor is registered, warn and no-op.
+            let task_text = task.clone().unwrap_or_default();
+            match agent_executor {
+                Some(executor) => {
+                    let fut = executor(name.clone(), task_text.clone());
+                    let result = if *timeout > 0 {
+                        match tokio::time::timeout(Duration::from_secs(*timeout), fut).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                Err(format!("Agent hook '{name}' timed out after {timeout}s"))
+                            }
+                        }
+                    } else {
+                        fut.await
+                    };
+                    match result {
+                        Ok(output) => {
+                            let mut hr = HookResult::default();
+                            hr.messages.push(format!("Agent '{name}' output: {output}"));
+                            hr
+                        }
+                        Err(e) => {
+                            warn!(agent = %name, error = %e, "Agent hook failed");
+                            let mut hr = HookResult::default();
+                            hr.messages.push(format!("Agent hook '{name}' error: {e}"));
+                            hr
+                        }
+                    }
+                }
+                None => {
+                    warn!(
+                        agent = %name,
+                        task = ?task,
+                        "Agent hook action triggered but no agent_executor registered"
+                    );
+                    let mut result = HookResult::default();
+                    result.messages.push(format!(
+                        "Agent hook '{name}' skipped — no agent_executor registered"
+                    ));
+                    result
+                }
+            }
         }
         HookAction::ActivateSkill { skill, reason } => {
             HookResult::with_activate_skill(skill.clone(), reason.clone())
