@@ -4,7 +4,6 @@
 //! allowing them to be tracked, checkpointed, and resumed.
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use crate::tasks::{TaskState, TaskStatus};
 
@@ -128,7 +127,12 @@ impl BackgroundTaskState {
     }
 }
 
-/// Checkpoint store trait for persisting task states
+/// Checkpoint store trait for persisting task states.
+///
+/// The previous `SqliteCheckpointStore` impl was removed — EKO went
+/// SQLite-free and this was the only always-compiled sqlx usage in
+/// echo-orchestration. Non-SQLite implementations (memory/file) should
+/// implement this trait instead.
 pub trait CheckpointStore: Send + Sync {
     /// Save a task state
     fn save_task_state(
@@ -160,247 +164,6 @@ pub trait CheckpointStore: Send + Sync {
         &self,
         task_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>;
-}
-
-/// SQLite-based checkpoint store
-pub struct SqliteCheckpointStore {
-    pool: Arc<sqlx::SqlitePool>,
-}
-
-impl SqliteCheckpointStore {
-    /// Create a new SQLite checkpoint store
-    pub fn new(pool: Arc<sqlx::SqlitePool>) -> Self {
-        Self { pool }
-    }
-
-    /// Initialize the database schema
-    pub async fn initialize(&self) -> Result<(), String> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS background_task_states (
-                task_id TEXT PRIMARY KEY,
-                parent_task_id TEXT,
-                status TEXT NOT NULL,
-                command TEXT,
-                exit_code INTEGER,
-                stdout TEXT NOT NULL,
-                stderr TEXT NOT NULL,
-                started_at INTEGER NOT NULL,
-                completed_at INTEGER,
-                duration_ms INTEGER NOT NULL,
-                checkpoint_at INTEGER NOT NULL
-            )
-            "#,
-        )
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to create table: {}", e))?;
-
-        Ok(())
-    }
-}
-
-impl CheckpointStore for SqliteCheckpointStore {
-    fn save_task_state(
-        &self,
-        state: &BackgroundTaskState,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
-        let pool = self.pool.clone();
-        let state = state.clone();
-
-        Box::pin(async move {
-            let status_str = serde_json::to_string(&state.status)
-                .map_err(|e| format!("Failed to serialize status: {}", e))?;
-
-            sqlx::query(
-                r#"
-                INSERT OR REPLACE INTO background_task_states
-                (task_id, parent_task_id, status, command, exit_code, stdout, stderr,
-                 started_at, completed_at, duration_ms, checkpoint_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&state.task_id)
-            .bind(&state.parent_task_id)
-            .bind(&status_str)
-            .bind(&state.command)
-            .bind(state.exit_code)
-            .bind(&state.stdout)
-            .bind(&state.stderr)
-            .bind(state.started_at as i64)
-            .bind(state.completed_at.map(|t| t as i64))
-            .bind(state.duration_ms as i64)
-            .bind(state.checkpoint_at as i64)
-            .execute(&*pool)
-            .await
-            .map_err(|e| format!("Failed to save task state: {}", e))?;
-
-            Ok(())
-        })
-    }
-
-    fn load_task_state(
-        &self,
-        task_id: &str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Option<BackgroundTaskState>, String>>
-                + Send
-                + '_,
-        >,
-    > {
-        let pool = self.pool.clone();
-        let task_id = task_id.to_string();
-
-        Box::pin(async move {
-            let row: Option<(
-                String,
-                Option<String>,
-                String,
-                Option<String>,
-                Option<i32>,
-                String,
-                String,
-                i64,
-                Option<i64>,
-                i64,
-                i64,
-            )> = sqlx::query_as(
-                r#"
-                SELECT task_id, parent_task_id, status, command, exit_code, stdout, stderr,
-                       started_at, completed_at, duration_ms, checkpoint_at
-                FROM background_task_states
-                WHERE task_id = ?
-                "#,
-            )
-            .bind(&task_id)
-            .fetch_optional(&*pool)
-            .await
-            .map_err(|e| format!("Failed to load task state: {}", e))?;
-
-            match row {
-                Some((
-                    task_id,
-                    parent_task_id,
-                    status_str,
-                    command,
-                    exit_code,
-                    stdout,
-                    stderr,
-                    started_at,
-                    completed_at,
-                    duration_ms,
-                    checkpoint_at,
-                )) => {
-                    let status: TaskStatus = serde_json::from_str(&status_str)
-                        .map_err(|e| format!("Failed to deserialize status: {}", e))?;
-
-                    Ok(Some(BackgroundTaskState {
-                        task_id,
-                        parent_task_id,
-                        status,
-                        command,
-                        exit_code,
-                        stdout,
-                        stderr,
-                        started_at: started_at as u64,
-                        completed_at: completed_at.map(|t| t as u64),
-                        duration_ms: duration_ms as u64,
-                        checkpoint_at: checkpoint_at as u64,
-                    }))
-                }
-                None => Ok(None),
-            }
-        })
-    }
-
-    fn load_all_states(
-        &self,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Vec<BackgroundTaskState>, String>> + Send + '_>,
-    > {
-        let pool = self.pool.clone();
-
-        Box::pin(async move {
-            let rows: Vec<(
-                String,
-                Option<String>,
-                String,
-                Option<String>,
-                Option<i32>,
-                String,
-                String,
-                i64,
-                Option<i64>,
-                i64,
-                i64,
-            )> = sqlx::query_as(
-                r#"
-                SELECT task_id, parent_task_id, status, command, exit_code, stdout, stderr,
-                       started_at, completed_at, duration_ms, checkpoint_at
-                FROM background_task_states
-                ORDER BY started_at DESC
-                "#,
-            )
-            .fetch_all(&*pool)
-            .await
-            .map_err(|e| format!("Failed to load all task states: {}", e))?;
-
-            let mut states = Vec::new();
-            for (
-                task_id,
-                parent_task_id,
-                status_str,
-                command,
-                exit_code,
-                stdout,
-                stderr,
-                started_at,
-                completed_at,
-                duration_ms,
-                checkpoint_at,
-            ) in rows
-            {
-                let status: TaskStatus = serde_json::from_str(&status_str)
-                    .map_err(|e| format!("Failed to deserialize status: {}", e))?;
-
-                states.push(BackgroundTaskState {
-                    task_id,
-                    parent_task_id,
-                    status,
-                    command,
-                    exit_code,
-                    stdout,
-                    stderr,
-                    started_at: started_at as u64,
-                    completed_at: completed_at.map(|t| t as u64),
-                    duration_ms: duration_ms as u64,
-                    checkpoint_at: checkpoint_at as u64,
-                });
-            }
-
-            Ok(states)
-        })
-    }
-
-    fn delete_task_state(
-        &self,
-        task_id: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
-    {
-        let pool = self.pool.clone();
-        let task_id = task_id.to_string();
-
-        Box::pin(async move {
-            let result = sqlx::query("DELETE FROM background_task_states WHERE task_id = ?")
-                .bind(&task_id)
-                .execute(&*pool)
-                .await
-                .map_err(|e| format!("Failed to delete task state: {}", e))?;
-
-            Ok(result.rows_affected() > 0)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -457,41 +220,5 @@ mod tests {
         assert_eq!(task_state.task_id, "task1");
         assert_eq!(task_state.status, TaskStatus::Completed);
         assert!(task_state.parent_task_id.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_sqlite_checkpoint_store() {
-        // Create in-memory SQLite database
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-
-        let store = SqliteCheckpointStore::new(std::sync::Arc::new(pool));
-        store.initialize().await.unwrap();
-
-        // Test save and load
-        let mut state = BackgroundTaskState::new("task1");
-        state.mark_started();
-        state.mark_completed(0, "success".to_string(), String::new());
-
-        store.save_task_state(&state).await.unwrap();
-
-        let loaded = store.load_task_state("task1").await.unwrap();
-        assert!(loaded.is_some());
-        let loaded = loaded.unwrap();
-        assert_eq!(loaded.task_id, "task1");
-        assert_eq!(loaded.status, TaskStatus::Completed);
-
-        // Test load all
-        let all_states = store.load_all_states().await.unwrap();
-        assert_eq!(all_states.len(), 1);
-
-        // Test delete
-        let deleted = store.delete_task_state("task1").await.unwrap();
-        assert!(deleted);
-
-        let loaded = store.load_task_state("task1").await.unwrap();
-        assert!(loaded.is_none());
     }
 }

@@ -1175,7 +1175,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sqlx",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
