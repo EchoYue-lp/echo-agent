@@ -22,7 +22,7 @@ exclude = ["**/.DS_Store"]
 default = []
 mcp = ["dep:tokio-tungstenite", "echo_core/mcp"]
 lsp = ["echo_core/lsp"]
-channels = ["echo_core/channels", "dep:axum"]
+channels = ["echo_core/channels", "dep:axum", "dep:tokio-tungstenite"]
 
 [dependencies]
 echo_core = { version = "0.2.0", path = "../echo-core" }

@@ -20,6 +20,7 @@ use echo_agent::channels::{
     QqConfig, SessionConfig, SessionHandler,
 };
 use echo_agent::config::{apply_env_overrides, load_config};
+use echo_agent::prelude::AgentConfig;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -129,10 +130,14 @@ async fn main() -> echo_agent::error::Result<()> {
         Arc::new(SessionHandler::new(
             session_config,
             move || -> Box<dyn MessageHandler> {
-                Box::new(AgentChannelHandler::standard(
-                    &model,
-                    "im-assistant",
-                    "你是一个友好的助手，请用中文简洁回答。记住我们之前的对话内容。",
+                Box::new(AgentChannelHandler::from_config(
+                    AgentConfig::standard(
+                        &model,
+                        "im-assistant",
+                        "你是一个友好的助手，请用中文简洁回答。记住我们之前的对话内容。",
+                    )
+                    .enable_tool(true)
+                    .enable_memory(true),
                 ))
             },
         ))
