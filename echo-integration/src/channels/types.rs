@@ -4,6 +4,7 @@ use async_trait::async_trait;
 pub use echo_core::error::ChannelError;
 pub use echo_core::error::ReactError;
 use echo_core::error::Result;
+use futures::stream::{BoxStream, StreamExt};
 
 // ── Chat Type ────────────────────────────────────────────────────────────────
 
@@ -177,6 +178,18 @@ pub trait MessageHandler: Send + Sync {
 
     /// Send an outbound message back to the IM platform (implemented by the Channel itself)
     async fn reply(&self, msg: OutboundMessage) -> Result<()>;
+
+    /// 流式 handle:产出逐段 `OutboundMessage`。
+    ///
+    /// 默认实现:只 yield 一次 `handle` 的返回值(向后兼容,所有现有 impl 无需 override)。
+    /// 需要真流式(分段投递)的 handler override 此方法。
+    async fn handle_stream<'a>(
+        &'a self,
+        msg: InboundMessage,
+    ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
+        let out = self.handle(msg).await?;
+        Ok(futures::stream::once(async move { Ok(out) }).boxed())
+    }
 }
 
 /// Channel capability description
@@ -230,5 +243,53 @@ pub struct ChannelContext {
 impl ChannelContext {
     pub fn new(handler: Arc<dyn MessageHandler>) -> Self {
         Self { handler }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    /// 只 impl `handle` 的 dummy handler —— 验证默认 `handle_stream` 行为。
+    struct OnceHandler {
+        reply_text: String,
+    }
+
+    #[async_trait]
+    impl MessageHandler for OnceHandler {
+        async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage> {
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                &msg.sender_id,
+                msg.chat_type,
+                &self.reply_text,
+            ))
+        }
+        async fn reply(&self, _msg: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_handle_stream_yields_exactly_one_outbound() {
+        let handler = OnceHandler {
+            reply_text: "hello".into(),
+        };
+        let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "hi", "m1");
+        let mut stream = handler.handle_stream(msg).await.expect("stream ok");
+
+        // 第一条 = handle 的返回值
+        let first = stream
+            .next()
+            .await
+            .expect("at least one item")
+            .expect("item is ok");
+        assert_eq!(first.text, "hello");
+        assert_eq!(first.channel_id, "qq");
+        assert_eq!(first.to, "u1");
+
+        // 之后不再有(恰好 1 条)
+        assert!(stream.next().await.is_none(), "default yields exactly one");
     }
 }
