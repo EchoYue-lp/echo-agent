@@ -169,7 +169,7 @@ type SessionKey = (String, String);
 
 /// Single user session
 struct Session {
-    handler: Box<dyn MessageHandler>,
+    handler: Arc<dyn MessageHandler>,
     last_active: Instant,
 }
 
@@ -263,7 +263,7 @@ impl SessionHandler {
             .entry(key.clone())
             .or_insert_with(|| {
                 Arc::new(Mutex::new(Session {
-                    handler: handler.create(),
+                    handler: Arc::from(handler.create()),
                     last_active: Instant::now(),
                 }))
             })
@@ -279,14 +279,22 @@ impl SessionHandler {
             });
         }
     }
-}
 
-#[async_trait]
-impl MessageHandler for SessionHandler {
-    async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+    /// 共享 session 管理逻辑(reset/timeout/forward 准备),`handle` 和 `handle_stream` 共用。
+    ///
+    /// 返回:
+    /// - `Ok(Left(outbound))`:reset 命中,直接短路返回该 `OutboundMessage`。
+    /// - `Ok(Right(handler))`:正常路径,应 dispatch 给该 inner handler(handle 或 handle_stream)。
+    async fn resolve_session_dispatch(
+        &self,
+        msg: &InboundMessage,
+    ) -> echo_core::error::Result<futures::future::Either<OutboundMessage, Arc<dyn MessageHandler>>>
+    {
+        use futures::future::Either;
+
         let key = (msg.channel_id.clone(), msg.sender_id.clone());
 
-        // ── Keyword/Command Reset ──────────────────────────────────────────────
+        // ── Keyword/Command Reset ──
         if self.config.is_reset(&msg.text) {
             if let Some((old_key, _old_session)) = self.sessions.remove(&key) {
                 self.notify_session_end(old_key.0, old_key.1, SessionEndReason::CommandReset);
@@ -295,19 +303,19 @@ impl MessageHandler for SessionHandler {
                 "Session reset by command: ({}, {})",
                 msg.channel_id, msg.sender_id
             );
-            return Ok(OutboundMessage::new(
+            return Ok(Either::Left(OutboundMessage::new(
                 &msg.channel_id,
                 &msg.sender_id,
                 msg.chat_type,
                 &self.config.reset_reply,
-            ));
+            )));
         }
 
-        // ── Get or create session (atomic) ──────────────────────────────────
+        // ── Get or create session (atomic) ──
         let session = self.get_or_create(&key);
         let mut guard = session.lock().await;
 
-        // ── Timeout Reset ────────────────────────────────────────────────────
+        // ── Timeout Reset ──
         if guard.last_active.elapsed() >= self.config.timeout {
             info!(
                 "Session timeout for ({}, {}), elapsed {:?}",
@@ -320,18 +328,166 @@ impl MessageHandler for SessionHandler {
                 msg.sender_id.clone(),
                 SessionEndReason::TimeoutReplaced,
             );
-            guard.handler = self.factory.create();
+            guard.handler = Arc::from(self.factory.create());
         }
 
         guard.last_active = Instant::now();
 
-        // ── Forward to actual handler ────────────────────────────────────────
-        guard.handler.handle(msg).await
+        // 返回 inner handler 的 Arc clone(供调用方 dispatch,cheap clone)
+        Ok(Either::Right(guard.handler.clone()))
+    }
+}
+
+#[async_trait]
+impl MessageHandler for SessionHandler {
+    async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+        use futures::future::Either;
+        match self.resolve_session_dispatch(&msg).await? {
+            Either::Left(outbound) => Ok(outbound),
+            Either::Right(handler) => handler.handle(msg).await,
+        }
+    }
+
+    async fn handle_stream<'a>(
+        &'a self,
+        msg: InboundMessage,
+    ) -> echo_core::error::Result<
+        futures::stream::BoxStream<'a, echo_core::error::Result<OutboundMessage>>,
+    > {
+        use futures::future::Either;
+        use futures::stream::StreamExt;
+
+        match self.resolve_session_dispatch(&msg).await? {
+            Either::Left(outbound) => {
+                // reset 短路:只产 1 条 reset_reply
+                Ok(futures::stream::once(async move { Ok(outbound) }).boxed())
+            }
+            Either::Right(handler) => {
+                // 正常路径:透传给 inner handler 的 handle_stream(= AppChannel override)。
+                // handler(Arc<dyn MessageHandler>) 移进 async_stream 块,块持有的流借用 handler,
+                // 而 handler 由本块拥有、随 &self 的 'a 存活 —— 生命周期自洽。
+                let s = async_stream::stream! {
+                    let mut inner = match handler.handle_stream(msg).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    use futures::StreamExt;
+                    while let Some(item) = inner.next().await {
+                        yield item;
+                    }
+                };
+                Ok(s.boxed())
+            }
+        }
     }
 
     async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
         // reply is handled by the channel wrapper; passthrough here
         // No additional operations needed at the SessionHandler level
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream::{BoxStream, StreamExt};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 测试用 inner handler:override handle_stream 产 2 条分段,记录调用次数。
+    struct TwoChunkHandler {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for TwoChunkHandler {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                &msg.sender_id,
+                msg.chat_type,
+                "fallback",
+            ))
+        }
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+        async fn handle_stream<'a>(
+            &'a self,
+            msg: InboundMessage,
+        ) -> echo_core::error::Result<BoxStream<'a, echo_core::error::Result<OutboundMessage>>>
+        {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let (ch, to, ct) = (msg.channel_id, msg.sender_id, msg.chat_type);
+            let s = futures::stream::iter(vec![
+                Ok(OutboundMessage::new(&ch, &to, ct, "chunk1")),
+                Ok(OutboundMessage::new(&ch, &to, ct, "chunk2")),
+            ]);
+            Ok(s.boxed())
+        }
+    }
+
+    struct TwoChunkFactory {
+        counter: Arc<AtomicUsize>,
+    }
+    impl SessionFactory for TwoChunkFactory {
+        fn create(&self) -> Box<dyn MessageHandler> {
+            Box::new(TwoChunkHandler {
+                call_count: self.counter.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn session_handler_handle_stream_forwards_inner_chunks() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let sh = SessionHandler::new(
+            SessionConfig::default(),
+            TwoChunkFactory {
+                counter: counter.clone(),
+            },
+        );
+
+        // 正常消息:应透传到 inner 的 handle_stream,产 2 条
+        let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "hi", "m1");
+        let mut stream = sh.handle_stream(msg).await.expect("stream ok");
+        let c1 = stream.next().await.unwrap().unwrap();
+        let c2 = stream.next().await.unwrap().unwrap();
+        assert_eq!(c1.text, "chunk1");
+        assert_eq!(c2.text, "chunk2");
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "inner handle_stream called once"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_handler_handle_stream_reset_short_circuits() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let sh = SessionHandler::new(
+            SessionConfig::default(),
+            TwoChunkFactory {
+                counter: counter.clone(),
+            },
+        );
+
+        // reset 命令(默认 reset_keywords 含 "reset chat"):短路返 reset_reply,不调 inner
+        let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "reset chat", "m1");
+        let mut stream = sh.handle_stream(msg).await.expect("stream ok");
+        let only = stream.next().await.unwrap().unwrap();
+        assert_eq!(only.text, SessionConfig::default().reset_reply);
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "inner NOT called on reset"
+        );
     }
 }
