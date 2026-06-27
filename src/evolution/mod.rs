@@ -34,6 +34,7 @@ pub mod health;
 pub mod layer;
 pub mod merge;
 pub mod patch;
+pub mod recall;
 pub mod review;
 pub mod runtime_integration;
 pub mod security;
@@ -60,6 +61,7 @@ pub use layer::{
 };
 pub use merge::{SimilarityBreakdown, SkillMergeProposal, SkillMerger, SkillSimilarityDetector};
 pub use patch::{PatchType, SkillPatch, SkillPatcher};
+pub use recall::MemoryRecaller;
 pub use review::{
     ConflictDetector, ConflictGroup, MemoryMerger, MemoryReviewer, MergeResult, ReviewChange,
     ReviewConfig, ReviewReport, StalenessReport, StalenessScorer,

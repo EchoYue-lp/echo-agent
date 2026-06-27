@@ -599,21 +599,16 @@ impl MemoryLayerManager {
             }
         }
 
-        // Search warm layer (Store search)
+        // (stage4 D1) Warm layer via the unified composite-score recall entry —
+        // same ranking / Superseded filter / recall_count as the auto path.
         let remaining = limit.saturating_sub(results.len());
         if remaining > 0 {
-            match self
-                .typed_store
-                .search_typed(WARM_NAMESPACE, query, remaining, &MemoryFilter::new())
-                .await
-            {
-                Ok(warm_results) => {
-                    for entry in warm_results {
-                        results.push((MemoryLayer::Warm, entry));
-                    }
-                }
-                Err(_) => {
-                    // Warm search failed — return hot results only
+            let reca =
+                crate::evolution::recall::MemoryRecaller::new(self.typed_store.inner().clone());
+            if let Ok(warm_items) = reca.recall(query, remaining).await {
+                for item in warm_items {
+                    let entry = TypedMemoryEntry::from_store_item(item);
+                    results.push((MemoryLayer::Warm, entry));
                 }
             }
         }
