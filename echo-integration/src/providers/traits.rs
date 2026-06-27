@@ -76,15 +76,14 @@ pub trait ProviderAdapter: Send + Sync {
 /// specific endpoints or self-hosted deployments.
 pub fn resolve_base_url<A: ProviderAdapter + ?Sized>(adapter: &A) -> String {
     let env_var = adapter.base_url_env_var();
-    if !env_var.is_empty() {
-        if let Ok(url) = std::env::var(env_var) {
-            let trimmed = url.trim();
-            if !trimmed.is_empty() {
-                tracing::info!(%env_var, url = %trimmed, provider = %adapter.provider_name(),
-                    "using env-var-overridden base URL");
-                return trimmed.to_string();
-            }
-        }
+    if !env_var.is_empty()
+        && let Ok(url) = std::env::var(env_var)
+        && !url.trim().is_empty()
+    {
+        let trimmed = url.trim();
+        tracing::info!(%env_var, url = %trimmed, provider = %adapter.provider_name(),
+            "using env-var-overridden base URL");
+        return trimmed.to_string();
     }
     adapter.base_url().to_string()
 }

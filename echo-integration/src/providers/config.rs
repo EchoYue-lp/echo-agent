@@ -1413,6 +1413,7 @@ mod tests {
         assert!(format!("{err}").contains("QWEN_API_KEY"));
     }
 
+    #[test]
     fn test_builtin_model_config_uses_qwen_alias() {
         let _lock = env_test_lock();
         unsafe {

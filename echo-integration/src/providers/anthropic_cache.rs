@@ -98,7 +98,7 @@ impl AnthropicCachePlan {
 
     /// Whether a given [`BreakpointTarget`] is present in this plan.
     pub fn has(&self, target: BreakpointTarget) -> bool {
-        self.breakpoints.iter().any(|b| *b == target)
+        self.breakpoints.contains(&target)
     }
 
     /// Conversation-history breakpoints as message indices (relative to the
