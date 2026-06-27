@@ -418,17 +418,12 @@ impl MessageHandler for FeishuMessageHandler {
             warn!("Feishu: failed to add OK reaction: {:?}", e);
         }
 
-        // 调用 inner handler
-        self.inner.handle(msg).await
+        // 消费 inner 的流式分段,逐 chunk 经 send_tx 投递(真流式);返回空 text 占位
+        // (gateway 会再调 reply,reply 对空 text no-op 防双发,见 super::reply_with_empty_guard)。
+        super::super::dispatch_stream_to_send_tx(&self.inner, &self.send_tx, msg).await
     }
 
     async fn reply(&self, msg: OutboundMessage) -> Result<()> {
-        // 通过 send_tx 发送（会被后台任务处理）
-        self.send_tx.send(msg).await.map_err(|e| {
-            ReactError::Channel(Box::new(ChannelError::SendError(format!(
-                "Failed to send reply: {}",
-                e
-            ))))
-        })
+        super::super::reply_with_empty_guard(&self.send_tx, msg).await
     }
 }
