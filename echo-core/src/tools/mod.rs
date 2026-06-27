@@ -565,7 +565,7 @@ pub trait Tool: Send + Sync {
 /// 为什么需要这个：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。worker 在框架
 /// 层的 `tokio::spawn`（subagent_executor.rs）里执行，task_local 全部丢失。而
 /// `ExternalRunContext` 是值传递（Clone），天然跨 spawn 安全，是传递 run_id /
-/// cancel / trace_sink / cache_user_id 的正确通路。
+/// cancel / trace_sink 的正确通路。
 ///
 /// `trace_sink` 用 `serde_json::Value`（而非应用层的具体事件类型）以避免框架依赖
 /// 应用层类型——应用层在填入时把自己的事件序列化成 Value。
@@ -579,8 +579,6 @@ pub struct ExternalRunContext {
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// Worker trace 事件回传通道。
     pub trace_sink: Option<TraceSinkFn>,
-    /// LLM prompt cache 用户标识。
-    pub cache_user_id: Option<String>,
 }
 
 /// 运行时上下文，工具执行时由 ExecuteStage 注入。
@@ -588,9 +586,9 @@ pub struct ExternalRunContext {
 /// 所有字段均为 `Option`，`None` = 回退默认行为（向后兼容老工具）。
 /// 工具 override `Tool::execute_with_context` 时可读取这些字段。
 ///
-/// `cancel` / `trace_sink` / `cache_user_id` 由应用层经
-/// [`ExternalRunContext`] 注入 worker agent，再由 pipeline 填入此处——
-/// 这是一条跨 `tokio::spawn` 安全的值传递通路（替代会跨 spawn 断裂的 task_local）。
+/// `cancel` / `trace_sink` 由应用层经 [`ExternalRunContext`] 注入 worker agent，
+/// 再由 pipeline 填入此处——这是一条跨 `tokio::spawn` 安全的值传递通路（替代会跨
+/// spawn 断裂的 task_local）。
 #[derive(Clone, Default)]
 pub struct ToolContext {
     /// 会话绑定的默认工作目录（通常是 worktree 路径）。
@@ -604,8 +602,6 @@ pub struct ToolContext {
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
     pub trace_sink: Option<TraceSinkFn>,
-    /// LLM cache key（避免空串导致 cache 失效）。
-    pub cache_user_id: Option<String>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -619,7 +615,6 @@ impl std::fmt::Debug for ToolContext {
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
             )
             .field("trace_sink", &self.trace_sink.as_ref().map(|_| "<sink>"))
-            .field("cache_user_id", &self.cache_user_id)
             .finish()
     }
 }
@@ -648,6 +643,34 @@ mod tool_context_tests {
         assert!(ctx.working_dir.is_none());
         assert!(ctx.conversation_id.is_none());
         assert!(ctx.run_id.is_none());
+    }
+
+    // ── stage4 P4.1: cache_user_id single-source ────────────────────────────
+    // The external cache_user_id channel (ExternalRunContext.cache_user_id +
+    // ToolContext.cache_user_id) was dead — no tool ever read ToolContext's
+    // field. Removed in favor of the single config source. These compile-time
+    // assertions guard the removal: both structs must construct without it.
+
+    #[test]
+    fn external_run_context_constructs_without_cache_user_id() {
+        let _ctx = ExternalRunContext {
+            run_id: "run-1".to_string(),
+            cancel: None,
+            trace_sink: None,
+            // No cache_user_id field — if it still exists, this fails to compile.
+        };
+    }
+
+    #[test]
+    fn tool_context_constructs_without_cache_user_id() {
+        let _ctx = ToolContext {
+            working_dir: None,
+            conversation_id: None,
+            run_id: None,
+            cancel: None,
+            trace_sink: None,
+            // No cache_user_id field — if it still exists, this fails to compile.
+        };
     }
 
     #[test]

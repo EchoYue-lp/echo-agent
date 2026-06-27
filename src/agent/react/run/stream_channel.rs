@@ -127,11 +127,6 @@ impl ReactAgent {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .clone();
-                    snap.external_cache_user_id = self
-                        .external_cache_user_id
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
                     // DirectAnswer uses trimmed [system, user] messages and does
                     // not consume the recalled context, so the recall count is
                     // informational only.
@@ -202,11 +197,6 @@ impl ReactAgent {
             .clone();
         snap.external_trace_sink = self
             .external_trace_sink
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        snap.external_cache_user_id = self
-            .external_cache_user_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();

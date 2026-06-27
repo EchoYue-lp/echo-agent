@@ -219,7 +219,6 @@ pub struct AgentRunSnapshot {
     /// 与 current_run_id 同源、同生命周期（set/clear 在同一处）。
     pub external_cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     pub external_trace_sink: Option<echo_core::tools::TraceSinkFn>,
-    pub external_cache_user_id: Option<String>,
     /// Permission service (human-in-the-loop).
     #[cfg(feature = "human-loop")]
     pub permission_service: Option<Arc<crate::human_loop::PermissionService>>,
@@ -261,7 +260,6 @@ impl AgentRunSnapshot {
             current_run_id: None,  // set by run_stream_channel
             external_cancel: None, // set alongside current_run_id
             external_trace_sink: None,
-            external_cache_user_id: None,
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
             token_tracker: Arc::clone(&agent.token_tracker),
