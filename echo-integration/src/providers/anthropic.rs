@@ -268,6 +268,9 @@ impl AnthropicClient {
             stream: None,
             thinking,
             effort,
+            metadata: request.user_id.as_ref().map(|uid| AnthropicMetadata {
+                user_id: uid.clone(),
+            }),
         }
     }
 
@@ -678,6 +681,18 @@ struct AnthropicRequest {
     /// recommended depth knob on newer models.
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
+    /// `metadata:{user_id}` for prompt-cache (KVCache) isolation on the
+    /// DeepSeek/Anthropic endpoint. Filled from `ChatRequest.user_id` when set;
+    /// omitted entirely when `None` (stage4 P4.1: cache_user_id single-source).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<AnthropicMetadata>,
+}
+
+/// Anthropic endpoint metadata carrying `user_id` for prompt-cache isolation
+/// (DeepSeek requires this on its Anthropic-compatible endpoint).
+#[derive(Serialize)]
+struct AnthropicMetadata {
+    user_id: String,
 }
 
 /// Anthropic `thinking` block. For 3.7–4.5 this is
@@ -1042,5 +1057,38 @@ mod tests {
 
         assert!(has_cache_control(&messages[2]));
         assert!(!has_cache_control(&messages[3]));
+    }
+
+    // ── stage4 P4.1: cache_user_id single-source ────────────────────────────
+    // DeepSeek/Anthropic endpoint uses metadata:{user_id} for KVCache isolation.
+    // Verify AnthropicClient.convert_request fills metadata when ChatRequest.user_id
+    // is set, and omits it entirely when None.
+
+    fn chat_request_with_user(user: Option<&str>) -> ChatRequest {
+        let mut req = ChatRequest::default();
+        req.messages = vec![Message::user("hi".to_string())];
+        req.user_id = user.map(|s| s.to_string());
+        req
+    }
+
+    #[test]
+    fn metadata_user_id_present_when_set() {
+        let client = AnthropicClient::new("ds-xxx".to_string(), "deepseek-chat".to_string());
+        let body =
+            serde_json::to_value(client.convert_request(&chat_request_with_user(Some("user-7"))))
+                .expect("serialize AnthropicRequest");
+        assert_eq!(body["metadata"]["user_id"], "user-7");
+    }
+
+    #[test]
+    fn metadata_absent_when_user_id_none() {
+        let client = AnthropicClient::new("ds-xxx".to_string(), "deepseek-chat".to_string());
+        let body = serde_json::to_value(client.convert_request(&chat_request_with_user(None)))
+            .expect("serialize AnthropicRequest");
+        // metadata is skip_serializing_if Option::is_none → absent (not null).
+        assert!(
+            body.get("metadata").is_none(),
+            "metadata should be absent when user_id is None, got: {body}"
+        );
     }
 }
