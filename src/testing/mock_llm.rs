@@ -2,7 +2,7 @@
 //! real HTTP requests.
 //!
 //! Typical uses:
-//! - Testing [`SummaryCompressor`] and [`HybridCompressor`] (which call LLMs via `LlmClient`)
+//! - Testing [`SummaryCompressor`] (which calls LLMs via `LlmClient`)
 //! - Testing custom [`ContextCompressor`] implementations
 //! - Any component that has `Arc<dyn LlmClient>` injected as a dependency
 //!

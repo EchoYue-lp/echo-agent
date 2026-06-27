@@ -109,7 +109,7 @@ struct ToolGroup {
 /// Compresses tool traces beyond the active plan window into symbolic summaries.
 ///
 /// Implements [`ContextCompressor`] for composability with other strategies
-/// (e.g. via [`HybridCompressor`](crate::compression::compressor::HybridCompressor)).
+/// (e.g. composed with other compressors in a pipeline).
 pub struct VisibilityHorizonCompressor {
     config: VisibilityHorizonConfig,
     tokenizer: Box<dyn Tokenizer>,
