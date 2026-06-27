@@ -26,6 +26,11 @@ pub(crate) async fn run_compact(
 ) -> Result<CompactOutcome> {
     snap.fire_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
         .await;
+    // (stage4 E1) Flush durable facts to memory BEFORE compression runs.
+    // Best-effort: errors/timeouts never block compaction. Internally gated by
+    // `ContextManager::should_compress()` so it only fires when compaction is
+    // actually imminent (not every ReAct iteration).
+    let _ = snap.pre_compaction_flush(context).await;
     // Save checkpoint before compression (preserves full context)
     snap.save_runtime_checkpoint(context, None).await;
     let prepare_result = try_send_or!(
@@ -131,5 +136,129 @@ mod tests {
             .await
             .expect("run_compact must succeed for non-zero iteration");
         assert!(matches!(outcome, CompactOutcome::Continue(_)));
+    }
+}
+
+// ── stage4 E1: pre_compaction_flush ────────────────────────────────────
+
+#[cfg(test)]
+mod stage4_e1_tests {
+    use crate::agent::ReactAgent;
+    use crate::agent::ReactAgentBuilder;
+    use crate::agent::snapshot::AgentRunSnapshot;
+    use crate::evolution::MemoryLayerManager;
+    use crate::evolution::audit::NullChangeLog;
+    use crate::llm::types::Message;
+    use crate::testing::MockLlmClient;
+    use echo_core::memory::store::Store;
+    use echo_state::memory::store::InMemoryStore;
+    use std::sync::Arc;
+
+    /// Build an agent with a mock LLM + a shared `MemoryLayerManager` backed by
+    /// an `InMemoryStore`. Returns `(agent, store_handle, layer_manager)` so
+    /// tests can assert what landed in the unified `["agent","memories"]` ns.
+    /// `token_limit` controls whether `should_compress()` returns true.
+    fn agent_with_layer(
+        llm: MockLlmClient,
+        token_limit: usize,
+    ) -> (ReactAgent, Arc<dyn Store>, Arc<MemoryLayerManager>) {
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("test")
+            .token_limit(token_limit)
+            .build()
+            .expect("agent builds");
+        let store: Arc<InMemoryStore> = Arc::new(InMemoryStore::new());
+        let store_dyn: Arc<dyn Store> = store.clone();
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let lm = Arc::new(MemoryLayerManager::new(dir, store, Box::new(NullChangeLog)));
+        agent.install_memory_layer_manager(lm.clone());
+        (agent, store_dyn, lm)
+    }
+
+    /// Push `n` user messages into the agent's context so it exceeds the token
+    /// limit (each carries enough text for the tokenizer to register).
+    async fn push_messages(agent: &ReactAgent, n: usize) {
+        let mut ctx = agent.memory.context.lock().await;
+        for i in 0..n {
+            ctx.push(Message::user(format!(
+                "message {i} with enough words to count"
+            )));
+        }
+    }
+
+    /// When compression is imminent (low token_limit + messages), the flush
+    /// LLM call runs and durable facts land in the unified store (割裂点 1/7).
+    #[tokio::test]
+    async fn pre_compaction_flush_writes_durable_facts_when_compression_imminent() {
+        let llm = MockLlmClient::new().with_response(
+            r#"[{"content":"user prefers Rust over Python","type":"user_preference","recall_weight":0.9}]"#,
+        );
+        // token_limit=1 → ReactAgent installs SlidingWindow + should_compress()=true.
+        let (agent, store, _lm) = agent_with_layer(llm, 1);
+        push_messages(&agent, 8).await;
+        let snap = AgentRunSnapshot::from_agent(&agent);
+
+        snap.pre_compaction_flush(&agent.memory.context).await;
+
+        let results = store
+            .search(&["agent", "memories"], "Rust", 10)
+            .await
+            .expect("search");
+        assert!(
+            results.iter().any(|r| serde_json::to_string(&r.value)
+                .unwrap_or_default()
+                .contains("Rust")),
+            "flushed durable fact should be in the unified store, got: {:?}",
+            results
+        );
+    }
+
+    /// When compression is NOT imminent (no compressor / tokens under limit),
+    /// the flush is skipped — no LLM call, no memory written. Guards the
+    /// `should_compress()` gate so flush doesn't fire every ReAct iteration.
+    #[tokio::test]
+    async fn pre_compaction_flush_noops_when_compression_not_imminent() {
+        let llm = MockLlmClient::new()
+            .with_response(r#"[{"content":"x","type":"project_fact","recall_weight":0.5}]"#);
+        // token_limit=MAX → no compressor installed → should_compress()=false.
+        let (agent, store, _lm) = agent_with_layer(llm, usize::MAX);
+        push_messages(&agent, 8).await;
+        let snap = AgentRunSnapshot::from_agent(&agent);
+
+        snap.pre_compaction_flush(&agent.memory.context).await;
+
+        let results = store
+            .search(&["agent", "memories"], "x", 10)
+            .await
+            .expect("search");
+        assert!(
+            results.is_empty(),
+            "no flush should occur when compression is not imminent, got: {:?}",
+            results
+        );
+    }
+
+    /// Best-effort: an LLM error (empty mock queue → EmptyResponse) must not
+    /// panic or block — no memory is written.
+    #[tokio::test]
+    async fn pre_compaction_flush_best_effort_on_llm_error() {
+        let llm = MockLlmClient::new(); // empty queue → chat returns error
+        let (agent, store, _lm) = agent_with_layer(llm, 1);
+        push_messages(&agent, 8).await;
+        let snap = AgentRunSnapshot::from_agent(&agent);
+
+        // Must not panic / block:
+        snap.pre_compaction_flush(&agent.memory.context).await;
+
+        let results = store
+            .search(&["agent", "memories"], "message", 10)
+            .await
+            .expect("search");
+        assert!(
+            results.is_empty(),
+            "LLM error should not write any memory, got: {:?}",
+            results
+        );
     }
 }

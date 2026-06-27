@@ -400,8 +400,10 @@ impl AgentSnapshot {
                 "--- Streaming iteration{label} ---",
             );
 
-            // Compact: PreCompact hook → checkpoint → ContextManager.prepare
-            //          → PostCompact hook (if compression occurred)
+            // Compact: PreCompact hook → (stage4 E1) pre_compaction_flush →
+            //          checkpoint → ContextManager.prepare → PostCompact hook.
+            // The flush itself lives inside `run_compact` so every compaction
+            // path benefits and it is gated on `should_compress()`.
             let messages =
                 match phases::compact::run_compact(&self, &context, &tx, iteration).await? {
                     phases::CompactOutcome::Continue(m) => m,

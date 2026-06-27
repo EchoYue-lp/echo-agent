@@ -241,6 +241,9 @@ pub struct AgentRunSnapshot {
     /// Optional tool execution pipeline (15-stage middleware).
     pub tool_execution_pipeline:
         Option<Arc<crate::agent::react::run::pipeline::ToolExecutionPipeline>>,
+    /// (stage4 E1) Layered memory manager — used by `pre_compaction_flush` to
+    /// write durable facts before compression. Cloned from the parent ReactAgent.
+    pub memory_layer_manager: Option<Arc<crate::evolution::MemoryLayerManager>>,
 }
 
 impl AgentRunSnapshot {
@@ -268,6 +271,7 @@ impl AgentRunSnapshot {
             conversation_store: agent.memory.conversation_store.clone(),
             critic: agent.critic.clone(),
             tool_execution_pipeline: agent.tool_execution_pipeline.clone(),
+            memory_layer_manager: agent.memory_layer_manager.clone(),
         }
     }
 

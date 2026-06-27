@@ -418,6 +418,27 @@ impl ContextManager {
         &self.messages
     }
 
+    /// Whether compression is imminent on the next `prepare()` call — i.e. a
+    /// compressor is installed AND the token budget is exceeded.
+    ///
+    /// (stage4 E1) Used by `pre_compaction_flush` to gate the flush LLM call so
+    /// it only fires when compaction is actually about to happen, not on every
+    /// ReAct iteration. Mirrors `prepare()`'s `needs_compression` decision
+    /// (mod.rs:1017-1025) as a non-mutating pre-check. Slight over/under-fire
+    /// vs. the budget path is acceptable — the flush is best-effort.
+    pub fn should_compress(&self) -> bool {
+        if self.compressor.is_none() {
+            return false;
+        }
+        let estimated_tokens = Self::estimate_tokens(&self.messages, &*self.tokenizer);
+        if let Some(ref budget) = self.budget {
+            let allocation = budget.allocate(0, 0, estimated_tokens);
+            allocation.needs_compression()
+        } else {
+            estimated_tokens > self.token_limit
+        }
+    }
+
     /// Replace the internal message buffer (used to restore conversation from persistent storage)
     ///
     /// Messages should include the system prompt as the first entry (if needed).

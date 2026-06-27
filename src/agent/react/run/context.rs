@@ -4,7 +4,19 @@ use super::super::ReactAgent;
 use super::types::StreamMode;
 use crate::llm::types::{Message, Role};
 use crate::skills::hooks::{HookContext, HookEvent};
+use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
 use tracing::{debug, info, warn};
+
+/// (stage4 E1) Prompt for the pre-compaction flush LLM call.
+const PRE_COMPACTION_FLUSH_PROMPT: &str = "\
+You are a memory-compaction flusher. The conversation below is about to be \
+compressed (older messages will be summarized away). Identify DURABLE facts \
+worth persisting long-term: stable user preferences, project facts, \
+architecture decisions, debugging lessons, verified error resolutions. Do NOT \
+capture transient/session-specific details or task narratives.\n\
+Reply with a JSON array of items to persist, each: \
+{\"content\": \"<concise fact>\", \"type\": \"user_preference|project_fact|architecture_decision|debugging_lesson|error_resolution|command_pattern|tool_usage\", \"recall_weight\": <0.0-1.0>}.\n\
+If nothing is durable, reply exactly: NO_REPLY";
 
 #[derive(Clone, Default)]
 pub(crate) struct HookMessageBatches {
@@ -623,5 +635,140 @@ pub(crate) fn format_turn_runtime_context(
         None
     } else {
         Some(blocks.join("\n\n"))
+    }
+}
+
+impl crate::agent::snapshot::AgentRunSnapshot {
+    /// (stage4 E1) Pre-compaction flush — a bounded LLM call identifies durable
+    /// rules/skills/facts in the about-to-be-compressed conversation and persists
+    /// them to the unified memory store so they survive compaction (割裂点 1/7).
+    ///
+    /// Approach: pragmatic structured-return flush — the LLM decides what's
+    /// durable and returns a JSON array; the framework writes each item via the
+    /// shared `MemoryLayerManager` (typed memory, security checks, write counter).
+    /// This is the user-chosen variant (overrides D14-G1's "真 sub-agent" — a
+    /// sub-agent fork was judged higher-cost for equivalent durable-extraction
+    /// value on a local single-user assistant). Best-effort — errors/timeouts
+    /// never block compaction. Gated by `ContextManager::should_compress()` so it
+    /// only fires when compaction is imminent, not every ReAct iteration.
+    pub(crate) async fn pre_compaction_flush(
+        &self,
+        context: &std::sync::Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+    ) {
+        let (Some(llm_client), Some(layer_manager)) =
+            (self.llm_client.as_ref(), self.memory_layer_manager.as_ref())
+        else {
+            return; // no LLM or no layer manager — skip
+        };
+
+        // Snapshot the about-to-be-compressed messages (last ~40, chronological).
+        let transcript = {
+            let ctx = context.lock().await;
+            // (stage4 E1) Only flush when compression is imminent — mirrors
+            // `ContextManager::prepare`'s `needs_compression` decision. Avoids
+            // firing an LLM call every ReAct iteration when no compaction is due.
+            if !ctx.should_compress() {
+                return;
+            }
+            let msgs = ctx.messages();
+            if msgs.len() < 8 {
+                return; // too short to warrant a flush even if tokens say so
+            }
+            let mut buf = String::new();
+            for m in msgs
+                .iter()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                buf.push_str(&format!(
+                    "[{}] {}\n",
+                    m.role.as_str(),
+                    m.content.as_text_ref().unwrap_or("")
+                ));
+            }
+            buf
+        };
+        if transcript.trim().is_empty() {
+            return;
+        }
+
+        let request = crate::llm::ChatRequest {
+            messages: vec![
+                Message::system(PRE_COMPACTION_FLUSH_PROMPT.to_string()),
+                Message::user(transcript),
+            ],
+            temperature: Some(0.2),
+            max_tokens: Some(2048),
+            ..Default::default()
+        };
+
+        // Bounded 15s; errors/timeouts never block compaction.
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            llm_client.chat(request),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "pre_compaction_flush LLM call failed");
+                return;
+            }
+            Err(_) => {
+                tracing::debug!("pre_compaction_flush timed out (15s)");
+                return;
+            }
+        };
+        let content = response.content().unwrap_or_default();
+        if content.trim().is_empty() || content.trim().eq_ignore_ascii_case("no_reply") {
+            return;
+        }
+
+        // Parse a JSON array of {content, type, recall_weight}; write each.
+        let items: Vec<serde_json::Value> = match (content.find('['), content.rfind(']')) {
+            (Some(s), Some(e)) if e > s => {
+                serde_json::from_str(&content[s..=e]).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        for item in items {
+            let Some(fact) = item.get("content").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let ty = item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("project_fact");
+            let rw = item
+                .get("recall_weight")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5)
+                .clamp(0.0, 1.0);
+            let memory_type = match ty.to_lowercase().as_str() {
+                "user_preference" => MemoryType::UserPreference,
+                "project_fact" => MemoryType::ProjectFact,
+                "architecture_decision" => MemoryType::ArchitectureDecision,
+                "debugging_lesson" => MemoryType::DebuggingLesson,
+                "error_resolution" => MemoryType::ErrorResolution,
+                "command_pattern" => MemoryType::CommandPattern,
+                "tool_usage" => MemoryType::ToolUsage,
+                _ => MemoryType::ProjectFact,
+            };
+            let meta = MemoryMeta::new(memory_type, MemorySource::L3Promotion, "compaction_flush")
+                .with_recall_weight(rw as f32);
+            let key = format!(
+                "flush_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            if let Err(e) = layer_manager.write_memory(&key, fact, meta).await {
+                tracing::debug!(error = %e, "pre_compaction_flush write_memory failed");
+            }
+        }
     }
 }
