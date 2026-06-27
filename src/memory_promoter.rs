@@ -22,66 +22,28 @@
 
 use echo_core::llm::types::{Message, Role};
 use echo_core::memory::Store;
+use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
 use echo_state::compression::MemoryPromoter;
+use echo_state::memory::typed_store::TypedMemoryStore;
 use futures::future::BoxFuture;
-use serde_json::json;
 use std::sync::Arc;
-
-/// Namespace for L3 promoted memory items.
-const L3_NAMESPACE: &[&str] = &["l3_promoted"];
-
-/// Default TTL for promoted facts: 30 days in seconds.
-const DEFAULT_TTL_SECS: u64 = 30 * 24 * 3600;
 
 /// Store-backed memory promoter.
 ///
-/// Extracts key facts from evicted messages and writes them to a [`Store`]
-/// under the `l3_promoted` namespace.
+/// Extracts key facts from messages evicted during compression and writes them
+/// as typed memories (`MemoryMeta`) to the unified namespace
+/// (`crate::evolution::layer::WARM_NAMESPACE` = `["agent","memories"]`) for
+/// later recall. (stage4 A2: previously raw JSON to `["l3_promoted"]` —
+/// 割裂点1: promoter-written facts now flow through the same typed path as
+/// agent-written memories and are recallable by composite-score recall.)
 pub struct StoreMemoryPromoter {
     store: Arc<dyn Store>,
-    /// Whether content-based dedup is enabled.
-    dedup_enabled: bool,
-    /// TTL in seconds for promoted facts (None = never expire).
-    ttl_secs: Option<u64>,
-    /// Write counter for triggering periodic auto-prune.
-    write_count: std::sync::atomic::AtomicU64,
-    /// Auto-prune every N writes (default 100).
-    auto_prune_interval: u64,
 }
 
 impl StoreMemoryPromoter {
-    /// Create a new promoter with dedup enabled and 30-day TTL.
+    /// Create a new promoter (content-based dedup is always on).
     pub fn new(store: Arc<dyn Store>) -> Self {
-        Self {
-            store,
-            dedup_enabled: true,
-            ttl_secs: Some(DEFAULT_TTL_SECS),
-            write_count: std::sync::atomic::AtomicU64::new(0),
-            auto_prune_interval: 100,
-        }
-    }
-
-    /// Create a promoter without dedup (sequential keys, like old behavior).
-    pub fn without_dedup(store: Arc<dyn Store>) -> Self {
-        Self {
-            store,
-            dedup_enabled: false,
-            ttl_secs: Some(DEFAULT_TTL_SECS),
-            write_count: std::sync::atomic::AtomicU64::new(0),
-            auto_prune_interval: 100,
-        }
-    }
-
-    /// Set a custom TTL for promoted facts.
-    pub fn with_ttl_days(mut self, days: u64) -> Self {
-        self.ttl_secs = Some(days * 24 * 3600);
-        self
-    }
-
-    /// Disable TTL (facts never expire).
-    pub fn without_ttl(mut self) -> Self {
-        self.ttl_secs = None;
-        self
+        Self { store }
     }
 
     /// Compute a deterministic content-based key for deduplication.
@@ -97,61 +59,44 @@ impl StoreMemoryPromoter {
 impl MemoryPromoter for StoreMemoryPromoter {
     fn promote(&self, evicted: &[Message]) -> BoxFuture<'_, ()> {
         let facts = extract_key_facts(evicted);
-        let dedup_enabled = self.dedup_enabled;
-        let ttl_secs = self.ttl_secs;
-
-        let num_facts = facts.len() as u64;
-        let write_count = self
-            .write_count
-            .fetch_add(num_facts, std::sync::atomic::Ordering::Relaxed);
-        let auto_prune_interval = self.auto_prune_interval;
         let store = self.store.clone();
 
         Box::pin(async move {
-            let expires_at = ttl_secs.map(|ttl| chrono::Utc::now().timestamp() as u64 + ttl);
-
+            // (stage4 A2) Write promoted facts as TYPED memories (MemoryMeta) to
+            // the unified namespace — not raw JSON to ["l3_promoted"]. This
+            // closes 割裂点1: promoter-written facts are now recallable by the
+            // same composite-score recall path as agent-written memories.
+            let typed = TypedMemoryStore::new(store);
+            let ns = crate::evolution::layer::WARM_NAMESPACE;
             for (fact, fact_type) in facts.into_iter() {
-                let key = if dedup_enabled {
-                    Self::content_key(&fact)
+                let key = Self::content_key(&fact);
+                let memory_type = fact_type_to_memory_type(fact_type);
+                let recall_weight = if contains_signal_word(&fact) {
+                    0.7
                 } else {
-                    // Fallback: timestamp-based key
-                    format!("l3_{}", chrono::Utc::now().timestamp_millis())
+                    0.4
                 };
-                let mut value = json!({
-                    "content": fact,
-                    "type": fact_type,
-                    "source": "l3_memory_promotion",
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                });
-                if let Some(exp) = expires_at {
-                    value["expires_at"] = json!(exp);
-                }
-                if let Err(e) = store.put(L3_NAMESPACE, &key, value).await {
-                    tracing::debug!(
-                        error = %e,
-                        "Failed to write promoted memory item"
-                    );
-                }
-            }
-
-            // ── Periodic auto-prune ──
-            // Every `auto_prune_interval` cumulative writes, clean up expired facts.
-            if write_count > 0 && write_count % auto_prune_interval < num_facts {
-                match store.prune_expired(L3_NAMESPACE).await {
-                    Ok(removed) if removed > 0 => {
-                        tracing::debug!(
-                            removed = removed,
-                            total_writes = write_count + num_facts,
-                            "Auto-pruned expired L3 promoted facts"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "Auto-prune of L3 facts failed");
-                    }
-                    _ => {}
+                let meta = MemoryMeta::new(memory_type, MemorySource::L3Promotion, "l3_promotion")
+                    .with_recall_weight(recall_weight);
+                if let Err(e) = typed.put_typed(ns, &key, &fact, meta).await {
+                    tracing::debug!(error = %e, "Failed to write promoted memory item");
                 }
             }
         })
+    }
+}
+
+/// Map a promoter fact-type string to a `MemoryType`.
+fn fact_type_to_memory_type(fact_type: &str) -> MemoryType {
+    match fact_type {
+        "error" => MemoryType::ErrorResolution,
+        "decision" => MemoryType::ArchitectureDecision,
+        "user_preference" => MemoryType::UserPreference,
+        "pending_task" | "user_query" => MemoryType::WorkflowPattern,
+        "tool_output" | "file_reference" | "assistant_conclusion" | "general" => {
+            MemoryType::ProjectFact
+        }
+        _ => MemoryType::ProjectFact,
     }
 }
 
@@ -471,7 +416,7 @@ mod tests {
         promoter.promote(&messages).await;
 
         // Step 3: Verify facts are recallable via Store search
-        let results = store.search(L3_NAMESPACE, "PostgreSQL", 5).await;
+        let results = store.search(&["agent", "memories"], "PostgreSQL", 5).await;
         assert!(results.is_ok(), "Store search should succeed");
         let items = results.unwrap();
         assert!(

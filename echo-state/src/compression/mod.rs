@@ -1529,7 +1529,9 @@ impl ContextManagerBuilder {
             tokenizer: self
                 .tokenizer
                 .unwrap_or_else(|| Arc::new(HeuristicTokenizer)),
-            protected_markers: Vec::new(),
+            // (stage4 G1) `protected_memory` is a default marker so recalled
+            // memories (wrapped by `format_memory_context`) survive compaction.
+            protected_markers: vec!["protected_memory".to_string()],
             max_messages: self.max_messages.unwrap_or(200),
             budget: self.budget,
             metrics: CompressionMetrics::new(),

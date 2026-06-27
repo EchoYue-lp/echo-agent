@@ -710,7 +710,6 @@ fn format_memory_layer(layer: MemoryLayer) -> &'static str {
     match layer {
         MemoryLayer::Hot => "hot",
         MemoryLayer::Warm => "warm",
-        MemoryLayer::Cold => "cold",
     }
 }
 

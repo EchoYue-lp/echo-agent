@@ -157,6 +157,19 @@ impl MemorySource {
             Self::L3Promotion => 0.50,
         }
     }
+
+    /// (stage4) Default recall weight for memories from this source (0.0–1.0).
+    /// Used by composite score for recall ranking.
+    pub fn default_recall_weight(&self) -> f32 {
+        match self {
+            Self::ExplicitSave => 0.8,
+            Self::UserCorrection => 0.9,
+            Self::ErrorResolution => 0.7,
+            Self::RepeatedWorkflow => 0.6,
+            Self::AutoExtracted => 0.4,
+            Self::L3Promotion => 0.4,
+        }
+    }
 }
 
 // ── MemoryMeta ──────────────────────────────────────────────────────────
@@ -178,6 +191,13 @@ pub struct MemoryMeta {
     pub confidence: f32,
     /// How stable this memory is — resistance to becoming stale (0.0–1.0).
     pub stability: f32,
+    /// (stage4) Recall weight 0.0–1.0, by agent LLM at write time.
+    /// Used for composite-score recall ranking (hermes issue #677 calls it "importance").
+    /// Named `recall_weight` to avoid colliding with `StoreItem.importance`
+    /// (1.0–10.0, prune-resistance, store.rs:29) — same name, different
+    /// semantics/scale. Composite score MUST read this field, not StoreItem.importance.
+    #[serde(default = "default_recall_weight")]
+    pub recall_weight: f32,
     /// Risk level — determines review requirements.
     pub risk: MemoryRisk,
     /// Lifecycle status of this memory.
@@ -189,9 +209,19 @@ pub struct MemoryMeta {
     /// Number of times this memory has been revised.
     #[serde(default)]
     pub revision_count: u32,
+    /// (stage4) How many times this memory has been recalled. Drives Dreaming
+    /// self-evolution (recall-frequency-driven promotion).
+    #[serde(default)]
+    pub recall_count: u32,
     /// If this memory was superseded, key of the replacement memory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+}
+
+/// Serde default for `MemoryMeta::recall_weight` (used when deserializing
+/// entries written before the field existed).
+fn default_recall_weight() -> f32 {
+    0.5
 }
 
 impl MemoryMeta {
@@ -201,11 +231,13 @@ impl MemoryMeta {
             confidence: source.default_confidence(),
             stability: memory_type.default_stability(),
             memory_type,
+            recall_weight: source.default_recall_weight(),
             risk: MemoryRisk::default(),
             status: MemoryStatus::default(),
             source,
             topic: topic.into(),
             revision_count: 0,
+            recall_count: 0,
             superseded_by: None,
         }
     }
@@ -219,6 +251,12 @@ impl MemoryMeta {
     /// Create a MemoryMeta with explicit stability.
     pub fn with_stability(mut self, stability: f32) -> Self {
         self.stability = stability.clamp(0.0, 1.0);
+        self
+    }
+
+    /// (stage4) Create a MemoryMeta with explicit recall weight (0.0–1.0).
+    pub fn with_recall_weight(mut self, recall_weight: f32) -> Self {
+        self.recall_weight = recall_weight.clamp(0.0, 1.0);
         self
     }
 
@@ -279,11 +317,13 @@ impl Default for MemoryMeta {
             memory_type: MemoryType::ProjectFact,
             confidence: 0.5,
             stability: 0.5,
+            recall_weight: 0.5,
             risk: MemoryRisk::Low,
             status: MemoryStatus::Active,
             source: MemorySource::AutoExtracted,
             topic: String::new(),
             revision_count: 0,
+            recall_count: 0,
             superseded_by: None,
         }
     }
@@ -474,5 +514,27 @@ mod tests {
         .with_stability(0.2)
         .with_status(MemoryStatus::Archived);
         assert!(meta.base_staleness() > 0.5);
+    }
+
+    #[test]
+    fn stage4_p1_memory_meta_has_recall_weight_and_recall_count() {
+        // ExplicitSave source defaults to recall_weight 0.8; AutoExtracted to 0.4.
+        let m = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "test",
+        );
+        assert_eq!(m.recall_weight, 0.8);
+        assert_eq!(m.recall_count, 0);
+    }
+
+    #[test]
+    fn stage4_p1_with_recall_weight_clamps_to_unit_range() {
+        let m = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "t")
+            .with_recall_weight(1.5);
+        assert_eq!(m.recall_weight, 1.0);
+        let m2 = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "t")
+            .with_recall_weight(-0.3);
+        assert_eq!(m2.recall_weight, 0.0);
     }
 }

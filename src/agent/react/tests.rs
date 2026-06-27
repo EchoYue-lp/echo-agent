@@ -1590,10 +1590,12 @@ async fn recall_injects_memories_into_current_user_message() {
     let mut agent = ReactAgent::new(config);
 
     // Seed the long-term store with a fact that will be recalled by exact-text search.
+    // (stage4 A2) Seed the unified namespace ["agent","memories"] — recall no
+    // longer reads the legacy per-agent namespace.
     let store: Arc<dyn crate::memory::Store> = Arc::new(InMemoryStore::new());
     store
         .put(
-            &[agent_name, "memories"],
+            &["agent", "memories"],
             "fact-1",
             json!({ "content": "user prefers Rust over Python", "importance": 0.9 }),
         )

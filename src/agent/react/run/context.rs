@@ -5,7 +5,8 @@ use super::types::StreamMode;
 use crate::llm::types::{Message, Role};
 use crate::memory::SearchQuery;
 use crate::skills::hooks::{HookContext, HookEvent};
-use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryStore};
+use echo_core::memory::types::MemoryStatus;
+use echo_state::memory::typed_store::{TypedMemoryEntry, TypedMemoryStore};
 use tracing::{debug, info, warn};
 
 #[derive(Clone, Default)]
@@ -225,6 +226,10 @@ impl ReactAgent {
         }
     }
 
+    /// (stage4 A2/C1) Unified recall over the single `["agent","memories"]`
+    /// namespace with composite-score re-ranking. Replaces the old multi-
+    /// namespace reads (legacy + typed_memories + l3_promoted) and the
+    /// score-only sort. Superseded memories are filtered out (割裂点5).
     pub(crate) async fn recall_long_term_memories(
         &self,
         query: &str,
@@ -232,58 +237,46 @@ impl ReactAgent {
         let Some(store) = &self.memory.store else {
             return Ok(vec![]);
         };
-        let agent_name = self.config.agent_name.clone();
-        let ns = vec![agent_name.as_str(), "memories"];
+        let ns = crate::evolution::layer::WARM_NAMESPACE; // ["agent","memories"]
+        let top_k = 5;
 
-        // Search user memories
-        let mut results = match store.search_with(&ns, SearchQuery::hybrid(query, 5)).await {
-            Ok(items) => items,
-            Err(err) if format!("{err}").contains("hybrid search") => {
-                store.search(&ns, query, 5).await?
-            }
-            Err(err) => return Err(err),
-        };
-
-        // Also search typed layered memories written by remember, Auto Memory,
-        // and background review. This is the warm layer used by
-        // MemoryLayerManager, and is the main runtime recall path for new memory.
-        let typed_store = TypedMemoryStore::new(store.clone());
-        if let Ok(typed_items) = typed_store
-            .search_typed(&["agent", "typed_memories"], query, 5, &MemoryFilter::new())
+        // 1. Candidates via hybrid search; any hybrid error falls back to keyword
+        //    search (no string-matching on error text).
+        let candidates = match store
+            .search_with(ns, SearchQuery::hybrid(query, top_k * 3))
             .await
         {
-            let mut existing_keys: std::collections::HashSet<String> =
-                results.iter().map(|i| i.key.clone()).collect();
-            for entry in typed_items {
-                if existing_keys.insert(entry.key.clone()) {
-                    results.push(entry.raw);
-                }
-            }
-        }
+            Ok(items) => items,
+            Err(_) => store.search(ns, query, top_k * 3).await?,
+        };
 
-        // Also search L3 promoted facts (compression auto-promoted memories)
-        let l3_ns: &[&str] = &["l3_promoted"];
-        if let Ok(l3_items) = store.search(l3_ns, query, 3).await {
-            // Merge and deduplicate by key
-            let existing_keys: std::collections::HashSet<String> =
-                results.iter().map(|i| i.key.clone()).collect();
-            for item in l3_items {
-                if !existing_keys.contains(&item.key) {
-                    results.push(item);
+        // 2. Composite-score re-rank + status filter (Superseded dropped).
+        let mut scored: Vec<(f64, TypedMemoryEntry)> = candidates
+            .into_iter()
+            .filter_map(|item| {
+                let entry = TypedMemoryEntry::from_store_item(item);
+                if entry.meta.status == MemoryStatus::Superseded {
+                    return None;
                 }
-            }
-        }
+                let sim = entry.raw.score.unwrap_or(0.0) as f64;
+                let age = age_days_from_storeitem(&entry.raw);
+                let s = composite_score(sim, age, entry.meta.recall_weight as f64);
+                Some((s, entry))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
 
-        // Sort by score descending, limit to 5
-        results.sort_by(|a, b| {
-            b.score
-                .unwrap_or_default()
-                .partial_cmp(&a.score.unwrap_or_default())
-                .unwrap_or(std::cmp::Ordering::Equal)
+        // 3. recall_count +1 (fire-and-forget; Dreaming consumes it in stage 2).
+        let typed_for_count = TypedMemoryStore::new(store.clone());
+        let keys: Vec<String> = scored.iter().map(|(_, e)| e.raw.key.clone()).collect();
+        tokio::spawn(async move {
+            for key in keys {
+                let _ = incr_recall_count(&typed_for_count, &["agent", "memories"], &key).await;
+            }
         });
-        results.truncate(5);
 
-        Ok(results)
+        Ok(scored.into_iter().map(|(_, e)| e.raw).collect())
     }
 
     pub(crate) async fn inject_hook_messages(
@@ -643,7 +636,44 @@ pub(crate) fn format_memory_context(items: &[crate::memory::store::StoreItem]) -
     lines.push(
         "[The above memories are for reference; answer the user's CURRENT question.]".to_string(),
     );
-    lines.join("\n")
+    // (stage4 G1) Wrap in <protected_memory> so compression's protected_markers
+    // keeps recalled memories from being evicted (割裂点7 折中 fix; stage 2
+    // pre_compaction_flush is the thorough fix).
+    format!(
+        "<protected_memory>\n{}\n</protected_memory>",
+        lines.join("\n")
+    )
+}
+
+/// (stage4 C1) Composite recall score:
+/// `S = 0.5·sim + 0.3·decay(age, 30d) + 0.2·recall_weight`.
+fn composite_score(sim: f64, age_days: f64, recall_weight: f64) -> f64 {
+    0.5 * sim + 0.3 * 0.5_f64.powf(age_days / 30.0) + 0.2 * recall_weight
+}
+
+/// (stage4 C1) Age in days from `StoreItem::created_at` (Unix seconds).
+fn age_days_from_storeitem(item: &crate::memory::store::StoreItem) -> f64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.saturating_sub(item.created_at) as f64 / 86400.0
+}
+
+/// (stage4 C1) Increment `recall_count` for a recalled memory. `update_meta`
+/// takes a full `MemoryMeta` (not a closure), so get-modify-put. Fire-and-
+/// forget from recall; lost increments are acceptable (diagnostic counter).
+async fn incr_recall_count(
+    typed: &TypedMemoryStore,
+    ns: &[&str],
+    key: &str,
+) -> crate::error::Result<()> {
+    if let Some(entry) = typed.get_typed(ns, key).await? {
+        let mut meta = entry.meta;
+        meta.recall_count = meta.recall_count.saturating_add(1);
+        typed.update_meta(ns, key, meta).await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn format_turn_runtime_context(

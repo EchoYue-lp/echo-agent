@@ -1,12 +1,15 @@
-//! Memory layer manager — three-tier memory organization (hot/warm/cold).
+//! Memory layer manager — two-tier memory organization (hot/warm).
+//!
+//! (stage4) The cold layer was removed: staleness is now a recall-decay
+//! weight, not a separate namespace. Archived memories (`MemoryStatus::Archived`)
+//! stay in the warm/unified namespace and remain recallable (with decay).
 //!
 //! # Layers
 //!
 //! | Layer | Storage | Namespace | Purpose |
 //! |-------|---------|-----------|---------|
 //! | **Hot** | `.echo-agent/MEMORY.md` (YAML frontmatter + markdown body) | File | Always loaded into context, max ~2000 tokens |
-//! | **Warm** | Store KV | `["agent", "typed_memories"]` | Available on-demand via search |
-//! | **Cold** | Store KV | `["agent", "cold_memories"]` | Archive for old/low-confidence memories |
+//! | **Warm** | Store KV | `["agent", "memories"]` | Available on-demand via search; Archived entries stay here (stage4: cold removed) |
 //!
 //! # Hot layer MEMORY.md format
 //!
@@ -35,7 +38,7 @@
 //! are demoted back to warm based on a demotion score.
 
 use echo_core::memory::store::Store;
-use echo_core::memory::types::{MemoryMeta, MemoryRisk, MemorySource, MemoryType};
+use echo_core::memory::types::{MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType};
 use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -53,11 +56,9 @@ type Result<T> = std::result::Result<T, ReactError>;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-/// Namespace for warm-layer typed memories.
-pub const WARM_NAMESPACE: &[&str] = &["agent", "typed_memories"];
-
-/// Namespace for cold-layer archived memories.
-pub const COLD_NAMESPACE: &[&str] = &["agent", "cold_memories"];
+/// Namespace for the unified typed-memory store (stage4: warm+cold+L3 all
+/// merged here; Archived status replaces the former cold namespace).
+pub const WARM_NAMESPACE: &[&str] = &["agent", "memories"];
 
 /// Maximum token budget for the hot layer (MEMORY.md body).
 const HOT_TOKEN_BUDGET: usize = 2000;
@@ -70,10 +71,11 @@ const HOT_TOKEN_BUDGET: usize = 2000;
 pub enum MemoryLayer {
     /// Always loaded into context (MEMORY.md). Max ~2000 tokens.
     Hot,
-    /// Available on-demand via Store KV search.
+    /// Available on-demand via Store KV search. Archived memories
+    /// (`MemoryStatus::Archived`) also live here in the unified namespace —
+    /// stage4 removed the separate Cold layer; staleness is a recall-decay
+    /// weight, not a layer move.
     Warm,
-    /// Archive — rarely loaded, low confidence/stale.
-    Cold,
 }
 
 impl std::fmt::Display for MemoryLayer {
@@ -81,7 +83,6 @@ impl std::fmt::Display for MemoryLayer {
         match self {
             Self::Hot => write!(f, "hot"),
             Self::Warm => write!(f, "warm"),
-            Self::Cold => write!(f, "cold"),
         }
     }
 }
@@ -279,7 +280,8 @@ impl MemoryLayerManager {
 
     /// Determine which layer a memory key currently resides in.
     ///
-    /// Checks hot (MEMORY.md), then warm (Store), then cold (Store).
+    /// Checks hot (MEMORY.md), then warm (Store). Stage4 removed the cold
+    /// layer — Archived memories live on in the warm/unified namespace.
     /// Returns `None` if the key is not found in any layer.
     pub async fn locate(&self, key: &str) -> Option<(MemoryLayer, TypedMemoryEntry)> {
         // Check hot layer
@@ -288,14 +290,9 @@ impl MemoryLayerManager {
             return Some((MemoryLayer::Hot, entry));
         }
 
-        // Check warm layer
+        // Check warm layer (unified namespace; includes Archived entries)
         if let Ok(Some(entry)) = self.typed_store.get_typed(WARM_NAMESPACE, key).await {
             return Some((MemoryLayer::Warm, entry));
-        }
-
-        // Check cold layer
-        if let Ok(Some(entry)) = self.typed_store.get_typed(COLD_NAMESPACE, key).await {
-            return Some((MemoryLayer::Cold, entry));
         }
 
         None
@@ -316,24 +313,17 @@ impl MemoryLayerManager {
     }
 
     // ── Promotion / Demotion ────────────────────────────────────────
+    // (stage4 B1) `promote` (the cold→warm dispatcher) was removed — zero
+    // callers, and the cold layer no longer exists. Warm→hot promotion still
+    // happens via `consider_promotion` → `promote_warm_to_hot`.
 
-    /// Promote a memory from cold→warm or warm→hot.
+    /// Demote a memory: hot→warm, or warm→Archived (in place).
     ///
-    /// Returns `Ok(Some(result))` if promotion happened, `Ok(None)` if not eligible.
-    pub async fn promote(&self, key: &str) -> Result<Option<LayerChangeResult>> {
-        // Find the entry
-        let Some((layer, entry)) = self.locate(key).await else {
-            return Ok(None);
-        };
-
-        match layer {
-            MemoryLayer::Cold => self.promote_cold_to_warm(key, entry).await,
-            MemoryLayer::Warm => self.promote_warm_to_hot(key, entry).await,
-            MemoryLayer::Hot => Ok(None), // already at top
-        }
-    }
-
-    /// Demote a memory from hot→warm or warm→cold.
+    /// (stage4 B1) Warm demotion no longer moves the entry to a cold namespace;
+    /// it marks `status = Archived` in place so the memory stays recallable
+    /// (with decay) in the unified namespace. Revival Archived→Active is
+    /// handled by Dreaming (stage 2). `update_meta` takes a full `MemoryMeta`
+    /// (not a closure), hence get-modify-put.
     pub async fn demote(&self, key: &str, reason: &str) -> Result<LayerChangeResult> {
         let Some((layer, entry)) = self.locate(key).await else {
             return Err(ReactError::Config(Box::new(ConfigError::ConfigFileError(
@@ -343,10 +333,27 @@ impl MemoryLayerManager {
 
         match layer {
             MemoryLayer::Hot => self.demote_hot_to_warm(key, entry, reason).await,
-            MemoryLayer::Warm => self.demote_warm_to_cold(key, entry, reason).await,
-            MemoryLayer::Cold => Err(ReactError::Config(Box::new(ConfigError::ConfigFileError(
-                format!("Memory key '{key}' is already in cold layer, cannot demote further"),
-            )))),
+            MemoryLayer::Warm => {
+                let mut meta = entry.meta.clone();
+                meta.status = MemoryStatus::Archived;
+                self.typed_store
+                    .update_meta(WARM_NAMESPACE, key, meta)
+                    .await?;
+                self.record_change(
+                    key,
+                    ChangeType::Demote,
+                    Some("warm"),
+                    Some("archived"),
+                    reason,
+                    "demote",
+                )?;
+                Ok(LayerChangeResult {
+                    key: key.to_string(),
+                    from_layer: MemoryLayer::Warm,
+                    to_layer: MemoryLayer::Warm,
+                    reason: reason.to_string(),
+                })
+            }
         }
     }
 
@@ -786,36 +793,6 @@ impl MemoryLayerManager {
 
     // ── Internal promotion/demotion methods ─────────────────────────
 
-    async fn promote_cold_to_warm(
-        &self,
-        key: &str,
-        entry: TypedMemoryEntry,
-    ) -> Result<Option<LayerChangeResult>> {
-        // Write to warm
-        self.typed_store
-            .put_typed(WARM_NAMESPACE, key, &entry.content, entry.meta.clone())
-            .await?;
-
-        // Delete from cold
-        self.typed_store.delete_typed(COLD_NAMESPACE, key).await?;
-
-        self.record_change(
-            key,
-            ChangeType::Promote,
-            Some("cold"),
-            Some("warm"),
-            "cold→warm promotion",
-            "promote",
-        )?;
-
-        Ok(Some(LayerChangeResult {
-            key: key.to_string(),
-            from_layer: MemoryLayer::Cold,
-            to_layer: MemoryLayer::Warm,
-            reason: "cold→warm promotion".to_string(),
-        }))
-    }
-
     async fn promote_warm_to_hot(
         &self,
         key: &str,
@@ -891,37 +868,6 @@ impl MemoryLayerManager {
             key: key.to_string(),
             from_layer: MemoryLayer::Hot,
             to_layer: MemoryLayer::Warm,
-            reason: reason.to_string(),
-        })
-    }
-
-    async fn demote_warm_to_cold(
-        &self,
-        key: &str,
-        entry: TypedMemoryEntry,
-        reason: &str,
-    ) -> Result<LayerChangeResult> {
-        // Write to cold layer
-        self.typed_store
-            .put_typed(COLD_NAMESPACE, key, &entry.content, entry.meta.clone())
-            .await?;
-
-        // Delete from warm
-        self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
-
-        self.record_change(
-            key,
-            ChangeType::Demote,
-            Some("warm"),
-            Some("cold"),
-            reason,
-            "demote",
-        )?;
-
-        Ok(LayerChangeResult {
-            key: key.to_string(),
-            from_layer: MemoryLayer::Warm,
-            to_layer: MemoryLayer::Cold,
             reason: reason.to_string(),
         })
     }
@@ -1462,7 +1408,6 @@ entries:
     fn test_memory_layer_display() {
         assert_eq!(MemoryLayer::Hot.to_string(), "hot");
         assert_eq!(MemoryLayer::Warm.to_string(), "warm");
-        assert_eq!(MemoryLayer::Cold.to_string(), "cold");
     }
 
     /// Regression for P0-3 (MEMORY.md no lock): two concurrent `add_to_hot`

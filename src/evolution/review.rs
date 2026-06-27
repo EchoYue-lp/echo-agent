@@ -613,24 +613,9 @@ impl MemoryReviewer {
                 .await
             {
                 Ok(_) => {
-                    // Mark status Archived in the (now cold) entry.
-                    // SAFETY: typed_store and layer_manager MUST share the same
-                    // underlying Store instance (both created from the same Arc<dyn Store>).
-                    // ReviewIntegration ensures this; if constructing manually, use the
-                    // same Arc for both MemoryLayerManager::new() and TypedMemoryStore::new().
-                    if let Some((_, entry)) = layer_manager.locate(&report_entry.key).await {
-                        let archived_meta = MemoryMeta {
-                            status: MemoryStatus::Archived,
-                            ..entry.meta.clone()
-                        };
-                        let _ = typed_store
-                            .update_meta(
-                                crate::evolution::layer::COLD_NAMESPACE,
-                                &report_entry.key,
-                                archived_meta,
-                            )
-                            .await;
-                    }
+                    // (stage4 B1) `demote` now marks status=Archived in place in the
+                    // unified namespace, so no separate locate+update_meta is needed
+                    // (the old block targeted the now-removed COLD_NAMESPACE).
                     report.archives_applied += 1;
                     report.changes.push(ReviewChange::Archive {
                         key: report_entry.key.clone(),
@@ -1124,9 +1109,12 @@ mod tests {
             "should merge the conflict group"
         );
 
-        // The stale entry should have moved to cold.
+        // (stage4 B1) The stale entry is Archived in place (unified ns), not
+        // moved to a cold layer.
         let loc = layer_mgr.locate("stale").await;
-        assert!(matches!(loc, Some((MemoryLayer::Cold, _))));
+        let (layer, entry) = loc.expect("stale entry should still be present");
+        assert_eq!(layer, MemoryLayer::Warm);
+        assert_eq!(entry.meta.status, MemoryStatus::Archived);
 
         // The lower-confidence conflict entry should be superseded.
         let build_b = typed
