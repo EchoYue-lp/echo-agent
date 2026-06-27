@@ -30,6 +30,7 @@ pub mod background_review;
 pub mod candidate;
 pub mod curator;
 pub mod draft;
+pub mod dreaming;
 pub mod health;
 pub mod layer;
 pub mod merge;
@@ -54,6 +55,7 @@ pub use background_review::{BackgroundReviewConfig, BackgroundReviewer, ReviewOu
 pub use candidate::{CandidateReport, SkillCandidate, SkillCandidateDetector};
 pub use curator::{Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle, SkillMeta};
 pub use draft::{DraftResult, SkillDraftGenerator};
+pub use dreaming::{Dreaming, DreamingConfig, DreamingReport};
 pub use health::{HealthBreakdown, HealthStatus, SkillHealthMonitor, SkillHealthReport};
 pub use layer::{
     HotEntryMeta, LayerChangeResult, MemoryFile, MemoryLayer, MemoryLayerManager,
