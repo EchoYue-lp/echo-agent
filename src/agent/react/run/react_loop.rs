@@ -819,11 +819,6 @@ impl ReactAgent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        snap.external_cache_user_id = self
-            .external_cache_user_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
 
         // Run the shared core loop in a spawned task
         let context = self.memory.context.clone();

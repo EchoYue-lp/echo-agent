@@ -157,13 +157,12 @@ pub struct ReactAgent {
     ///
     /// `tokio::task_local!` 不会跨 `tokio::spawn` 继承——worker agent 在框架层
     /// 的 dispatch_fork spawn 里执行时，应用层经 task_local 注入的 run_id /
-    /// cancel / trace_sink / cache_user_id 全部丢失。这里改用 Mutex 字段承载
+    /// cancel / trace_sink 全部丢失。这里改用 Mutex 字段承载
     /// （set_external_context 设置，pipeline 构造 ToolContext 时读取），是跨
     /// spawn 安全的值传递通路。
     pub external_cancel:
         std::sync::Mutex<Option<std::sync::Arc<tokio_util::sync::CancellationToken>>>,
     pub external_trace_sink: std::sync::Mutex<Option<echo_core::tools::TraceSinkFn>>,
-    pub external_cache_user_id: std::sync::Mutex<Option<String>>,
 
     /// Optional tool execution pipeline. When set, `execute_tool_feedback_raw`
     /// delegates to this pipeline instead of the inline implementation.
@@ -474,7 +473,6 @@ impl ReactAgent {
             current_run_id: std::sync::Mutex::new(None),
             external_cancel: std::sync::Mutex::new(None),
             external_trace_sink: std::sync::Mutex::new(None),
-            external_cache_user_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
             prompt_template_engine: None,
             current_turn: std::sync::Mutex::new(None),
@@ -2092,11 +2090,6 @@ impl ReactAgent {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
-            cache_user_id: self
-                .external_cache_user_id
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
         })
     }
 
@@ -2187,10 +2180,6 @@ impl Agent for ReactAgent {
             .external_trace_sink
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ctx.trace_sink.clone();
-        *self
-            .external_cache_user_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = ctx.cache_user_id.clone();
     }
 
     fn clear_external_context(&self) {
@@ -2204,10 +2193,6 @@ impl Agent for ReactAgent {
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self
             .external_trace_sink
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        *self
-            .external_cache_user_id
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
     }

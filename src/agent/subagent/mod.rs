@@ -12,8 +12,6 @@ pub mod events;
 pub mod executor;
 pub mod hooks;
 pub mod isolated;
-pub mod lightweight;
-pub mod pool;
 pub mod registry;
 pub mod team;
 pub mod types;
