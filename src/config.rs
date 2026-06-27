@@ -158,32 +158,61 @@ impl AppConfig {
 
     /// Whether auto-compression is configured.
     ///
-    /// Matches `apply_compressor` predicate: a compressor is active when either
-    /// `token_limit > 0` (explicit) or `context_window` is set (inferred limit).
+    /// Matches `apply_compressor` predicate: a compressor is active when any of
+    /// `token_limit > 0` (explicit), `context_window` is set (inferred limit), or
+    /// `compress_strategy` is non-empty (stage4 P4.3: default "summary" turns
+    /// compression on out-of-the-box without requiring an explicit token_limit).
     pub fn has_compressor(&self) -> bool {
-        self.agent.token_limit > 0 || self.model.context_window.is_some()
+        self.agent.token_limit > 0
+            || self.model.context_window.is_some()
+            || !self.agent.compress_strategy.is_empty()
     }
 
-    /// Apply a sliding-window compressor to the agent based on config.
+    /// Apply the configured compressor to the agent (stage4 P4.3).
     ///
-    /// For "summary" or "hybrid" strategies, callers should construct their own
-    /// `SummaryCompressor` / `HybridCompressor` with an `LlmClient` and call
-    /// `agent.set_compressor()` directly.
+    /// Strategies: "summary" (SummaryCompressor — LLM summary, default; falls
+    /// back to SlidingWindow on LLM failure or when no LLM client is configured),
+    /// "sliding" (SlidingWindowCompressor), "adaptive" (AdaptiveCompressor).
     pub async fn apply_compressor(&self, agent: &crate::agent::ReactAgent) {
-        // 使用与 to_agent_config 相同的三态逻辑判定是否启用压缩：
-        // 显式 token_limit > 0 或显式 context_window → 启用；否则不启用。
+        // Compression is on when token_limit/context_window is set OR a strategy
+        // is explicitly chosen (default "summary"). The agent's resolved
+        // token_limit (from create_agent) drives the actual trigger threshold.
         let context_window = resolve_context_window(
             self.model.context_window,
             &self.model.provider,
             &self.model.name,
         );
-        let should_compress = self.agent.token_limit > 0 || self.model.context_window.is_some();
+        let should_compress = self.agent.token_limit > 0
+            || self.model.context_window.is_some()
+            || !self.agent.compress_strategy.is_empty();
         if !should_compress {
             return;
         }
         use crate::compression::compressor::SlidingWindowCompressor;
         let window = self.agent.compress_window.max(2);
         match self.agent.compress_strategy.as_str() {
+            "summary" => {
+                use crate::compression::compressor::SummaryCompressor;
+                match agent.llm_client().cloned() {
+                    Some(llm) => {
+                        agent
+                            .set_compressor(SummaryCompressor::new(llm, window))
+                            .await;
+                        tracing::info!(
+                            "Compressor: SummaryCompressor (stage4 P4.3 default; falls back to SlidingWindow on LLM failure)"
+                        );
+                    }
+                    None => {
+                        tracing::warn!(
+                            "compress_strategy=summary but agent has no LLM client — \
+                             falling back to SlidingWindow"
+                        );
+                        agent
+                            .set_compressor(SlidingWindowCompressor::new(window))
+                            .await;
+                    }
+                }
+            }
             "sliding" | "" => {
                 agent
                     .set_compressor(SlidingWindowCompressor::new(window))
@@ -209,7 +238,7 @@ impl AppConfig {
                 tracing::warn!(
                     strategy = other,
                     "Unknown strategy; falling back to sliding. \
-                     Supported: sliding, adaptive"
+                     Supported: summary, sliding, adaptive"
                 );
                 agent
                     .set_compressor(SlidingWindowCompressor::new(window))
@@ -377,12 +406,14 @@ pub struct AgentYamlConfig {
     /// exceeds this limit, the configured compressor is triggered automatically.
     /// Set to 0 to disable auto-compression (default: 0, meaning no limit).
     pub token_limit: usize,
-    /// Context compression strategy: "sliding" (SlidingWindowCompressor, default),
-    /// "summary" (SummaryCompressor, requires LLM call), "hybrid" (pipeline).
-    /// Only effective when `token_limit > 0`.
+    /// Context compression strategy: "summary" (SummaryCompressor, default —
+    /// LLM summary, falls back to SlidingWindow on LLM failure), "sliding"
+    /// (SlidingWindowCompressor), "adaptive" (AdaptiveCompressor).
+    /// Effective whenever `has_compressor()` is true (token_limit>0,
+    /// context_window set, or this field is non-empty).
     pub compress_strategy: String,
-    /// Window size for SlidingWindowCompressor (number of recent messages to keep).
-    /// Default: 20. Only effective when compress_strategy is "sliding" or "hybrid".
+    /// Window size / keep-recent count for SlidingWindowCompressor / SummaryCompressor
+    /// (number of recent messages to keep uncompressed). Default: 20.
     pub compress_window: usize,
 }
 
@@ -398,7 +429,10 @@ impl Default for AgentYamlConfig {
             memory_path: "~/.echo-agent/memory".to_string(),
             tool_timeout_ms: 120_000,
             token_limit: 0,
-            compress_strategy: "sliding".to_string(),
+            // (stage4 P4.3) Default to SummaryCompressor — durable facts are
+            // flushed by pre_compaction_flush (E1) before summary compression
+            // runs, so summarizing old messages is safe.
+            compress_strategy: "summary".to_string(),
             compress_window: 20,
         }
     }

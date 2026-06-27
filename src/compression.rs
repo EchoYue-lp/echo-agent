@@ -8,8 +8,7 @@
 //! | Compressor | Strategy | Best For |
 //! |------------|----------|----------|
 //! | `SlidingWindowCompressor` | Keeps the N most recent messages | Simple, fast |
-//! | `SummaryCompressor` | Uses an LLM to summarize older messages | High quality |
-//! | `HybridCompressor` | Combines sliding window + LLM summary | Balanced |
+//! | `SummaryCompressor` | Uses an LLM to summarize older messages | High quality (default) |
 //!
 //! # Quick Start
 //!

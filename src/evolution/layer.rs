@@ -357,6 +357,35 @@ impl MemoryLayerManager {
         }
     }
 
+    /// Revive an Archived warm memory back to Active in place (stage4 F1 Dreaming, G2).
+    ///
+    /// `MemoryMeta::is_hot_eligible()` requires `status == Active`, so Archived
+    /// memories must be revived before `consider_promotion` can promote them to
+    /// hot. Get-modify-put (`update_meta` takes a full `MemoryMeta`, not a
+    /// closure). Returns `true` only if the entry was Archived and is now Active.
+    pub async fn revive_archived(&self, key: &str) -> Result<bool> {
+        if let Some(entry) = self.typed_store.get_typed(WARM_NAMESPACE, key).await?
+            && entry.meta.status == MemoryStatus::Archived
+        {
+            let mut meta = entry.meta;
+            meta.status = MemoryStatus::Active;
+            let updated = self
+                .typed_store
+                .update_meta(WARM_NAMESPACE, key, meta)
+                .await?;
+            return Ok(updated);
+        }
+        Ok(false)
+    }
+
+    /// List all warm-layer typed memories matching `filter` (stage4 F1 Dreaming).
+    ///
+    /// Dreaming scans the unified `["agent","memories"]` namespace to find
+    /// high-recall memories worth promoting and stale low-recall ones to demote.
+    pub async fn list_warm_memories(&self, filter: &MemoryFilter) -> Result<Vec<TypedMemoryEntry>> {
+        self.typed_store.list_typed(WARM_NAMESPACE, filter).await
+    }
+
     /// Consider promoting a warm entry to hot if eligible and space exists.
     ///
     /// Called after every new memory write.
@@ -599,21 +628,16 @@ impl MemoryLayerManager {
             }
         }
 
-        // Search warm layer (Store search)
+        // (stage4 D1) Warm layer via the unified composite-score recall entry —
+        // same ranking / Superseded filter / recall_count as the auto path.
         let remaining = limit.saturating_sub(results.len());
         if remaining > 0 {
-            match self
-                .typed_store
-                .search_typed(WARM_NAMESPACE, query, remaining, &MemoryFilter::new())
-                .await
-            {
-                Ok(warm_results) => {
-                    for entry in warm_results {
-                        results.push((MemoryLayer::Warm, entry));
-                    }
-                }
-                Err(_) => {
-                    // Warm search failed — return hot results only
+            let reca =
+                crate::evolution::recall::MemoryRecaller::new(self.typed_store.inner().clone());
+            if let Ok(warm_items) = reca.recall(query, remaining).await {
+                for item in warm_items {
+                    let entry = TypedMemoryEntry::from_store_item(item);
+                    results.push((MemoryLayer::Warm, entry));
                 }
             }
         }

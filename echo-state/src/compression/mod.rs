@@ -4,8 +4,7 @@
 //!
 //! Built-in compression strategies (all implement the [`ContextCompressor`] trait):
 //! - [`compressor::SlidingWindowCompressor`]: Sliding window, discards the oldest N messages
-//! - [`compressor::SummaryCompressor`]: LLM summarization, compresses old messages into a system summary message
-//! - [`compressor::HybridCompressor`]: Multi-strategy pipeline chaining
+//! - [`compressor::SummaryCompressor`]: LLM summarization, compresses old messages into a system summary message (stage4 P4.3 default)
 
 pub mod compressor;
 pub mod horizon;
@@ -258,27 +257,19 @@ impl CompressionMetrics {
 /// # }
 /// ```
 ///
-/// # Hybrid pipeline example
+/// # SummaryCompressor example (stage4 P4.3 default)
 ///
 /// ```rust,no_run
-/// use echo_core::error::Result;
 /// use echo_core::llm::LlmClient;
-/// use echo_state::compression::compressor::{
-///     HybridCompressor, SlidingWindowCompressor, SummaryCompressor,
-/// };
+/// use echo_state::compression::compressor::SummaryCompressor;
 /// use echo_state::compression::{ContextCompressor, ContextManager};
 /// use std::sync::Arc;
 ///
-/// # async fn example(llm: Arc<dyn LlmClient>) -> Result<()> {
-/// let compressor = HybridCompressor::builder()
-///     .stage(SlidingWindowCompressor::new(30))
-///     .stage(SummaryCompressor::new(llm, 8))
-///     .build();
-///
+/// # async fn example(llm: Arc<dyn LlmClient>) {
+/// let compressor = SummaryCompressor::new(llm, 8);
 /// let mut ctx = ContextManager::builder(8192)
 ///     .compressor(compressor)
 ///     .build();
-/// # Ok(())
 /// # }
 /// ```
 pub struct ContextManager {
@@ -290,9 +281,6 @@ pub struct ContextManager {
     /// Any message whose content contains one of these markers is excluded from compression.
     /// Used by the skill system to protect activated skill instructions.
     protected_markers: Vec<String>,
-    /// Hard message count cap. When exceeded, triggers sliding window degradation to prevent OOM.
-    /// Default 200 messages.
-    max_messages: usize,
     /// Optional token budget for percentage-based allocation.
     /// When set, `prepare()` uses budget.allocate() instead of simple token_limit comparison.
     budget: Option<TokenBudget>,
@@ -318,7 +306,6 @@ impl ContextManager {
             compressor: None,
             initial_messages: Vec::new(),
             tokenizer: None,
-            max_messages: None,
             budget: None,
             visibility_horizon: None,
             memory_promoter: None,
@@ -328,84 +315,12 @@ impl ContextManager {
 
     /// Append a message to the context buffer.
     ///
-    /// When the message count exceeds the `max_messages` hard cap, automatically applies sliding window degradation:
-    /// preserves system messages and recent messages, discards the earliest conversation messages in the middle.
-    /// This is the last line of defense; even if no compressor is configured or compression fails, OOM will not occur.
+    /// (stage4 P4.3) The 200-message hard cap is removed — compression is now
+    /// purely token-budget driven (`prepare()` triggers when estimated tokens
+    /// exceed `token_limit`). Token estimation scales with message count, so the
+    /// token budget is the OOM defense (no separate message-count cap needed).
     pub fn push(&mut self, message: Message) {
         self.messages.push(message);
-
-        // Hard cap degradation: apply sliding window when exceeding max_messages
-        if self.messages.len() > self.max_messages {
-            self.apply_hard_cap();
-        }
-    }
-
-    /// Apply hard message cap: preserve system messages, protected messages, and recent messages; discard the earliest in between.
-    fn apply_hard_cap(&mut self) {
-        let target = self.max_messages;
-        if self.messages.len() <= target {
-            return;
-        }
-
-        // Identify protected messages (should not be deleted).
-        // Use a HashSet for O(1) membership checks below (the previous Vec-based
-        // `contains` made the selection loop O(n·m)).
-        let protected: std::collections::HashSet<usize> = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(i, msg)| {
-                if self.is_protected(msg) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Find the position of the first non-system message
-        let first_non_system = self
-            .messages
-            .iter()
-            .position(|m| m.role != Role::System)
-            .unwrap_or(0);
-
-        // Calculate how many non-protected messages need to be deleted and collect
-        // their indices into a HashSet for O(1) lookup during the single-pass removal.
-        let excess = self.messages.len() - target;
-        let mut to_remove: std::collections::HashSet<usize> =
-            std::collections::HashSet::with_capacity(excess);
-        for i in first_non_system..self.messages.len() {
-            if to_remove.len() >= excess {
-                break;
-            }
-            // Skip protected messages
-            if protected.contains(&i) {
-                continue;
-            }
-            to_remove.insert(i);
-        }
-
-        if to_remove.is_empty() {
-            return;
-        }
-
-        let evicted = to_remove.len();
-        tracing::warn!(
-            total = self.messages.len(),
-            cap = target,
-            evicted,
-            "Message count exceeded hard cap, applying sliding window degradation (preserving protected messages)"
-        );
-
-        // Single-pass O(n) removal: drop the selected indices in one sweep instead of
-        // the previous O(n·k) reverse `Vec::remove` loop (each remove shifted the tail).
-        let mut idx = 0;
-        self.messages.retain(|_| {
-            let keep = !to_remove.contains(&idx);
-            idx += 1;
-            keep
-        });
     }
 
     /// Batch-append messages
@@ -416,6 +331,27 @@ impl ContextManager {
     /// Return all messages currently in the buffer (no compression)
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Whether compression is imminent on the next `prepare()` call — i.e. a
+    /// compressor is installed AND the token budget is exceeded.
+    ///
+    /// (stage4 E1) Used by `pre_compaction_flush` to gate the flush LLM call so
+    /// it only fires when compaction is actually about to happen, not on every
+    /// ReAct iteration. Mirrors `prepare()`'s `needs_compression` decision
+    /// (mod.rs:1017-1025) as a non-mutating pre-check. Slight over/under-fire
+    /// vs. the budget path is acceptable — the flush is best-effort.
+    pub fn should_compress(&self) -> bool {
+        if self.compressor.is_none() {
+            return false;
+        }
+        let estimated_tokens = Self::estimate_tokens(&self.messages, &*self.tokenizer);
+        if let Some(ref budget) = self.budget {
+            let allocation = budget.allocate(0, 0, estimated_tokens);
+            allocation.needs_compression()
+        } else {
+            estimated_tokens > self.token_limit
+        }
     }
 
     /// Replace the internal message buffer (used to restore conversation from persistent storage)
@@ -1423,7 +1359,6 @@ pub struct ContextManagerBuilder {
     compressor: Option<Box<dyn ContextCompressor>>,
     initial_messages: Vec<Message>,
     tokenizer: Option<Arc<dyn Tokenizer>>,
-    max_messages: Option<usize>,
     budget: Option<TokenBudget>,
     visibility_horizon: Option<horizon::VisibilityHorizonCompressor>,
     memory_promoter: Option<Arc<dyn MemoryPromoter>>,
@@ -1432,7 +1367,7 @@ pub struct ContextManagerBuilder {
 
 impl ContextManagerBuilder {
     /// Set the compression strategy (optional). Supports any type implementing `ContextCompressor`,
-    /// including `SlidingWindowCompressor`, `SummaryCompressor`, and `HybridCompressor`.
+    /// including `SlidingWindowCompressor` and `SummaryCompressor` (stage4 P4.3 default).
     pub fn compressor(mut self, c: impl ContextCompressor + 'static) -> Self {
         self.compressor = Some(Box::new(c));
         self
@@ -1459,14 +1394,6 @@ impl ContextManagerBuilder {
     /// ```
     pub fn tokenizer(mut self, tokenizer: Arc<dyn Tokenizer>) -> Self {
         self.tokenizer = Some(tokenizer);
-        self
-    }
-
-    /// Set the hard message count cap (default 200).
-    ///
-    /// When exceeded, automatically applies sliding window degradation, preserving system messages and recent messages.
-    pub fn max_messages(mut self, max: usize) -> Self {
-        self.max_messages = Some(max);
         self
     }
 
@@ -1532,7 +1459,6 @@ impl ContextManagerBuilder {
             // (stage4 G1) `protected_memory` is a default marker so recalled
             // memories (wrapped by `format_memory_context`) survive compaction.
             protected_markers: vec!["protected_memory".to_string()],
-            max_messages: self.max_messages.unwrap_or(200),
             budget: self.budget,
             metrics: CompressionMetrics::new(),
             visibility_horizon: self.visibility_horizon,
