@@ -468,7 +468,7 @@ fn check_user_preferences(
 mod tests {
     use super::*;
     use crate::compression::CompressionCheckpoint;
-    use echo_core::llm::types::{Message, MessageContent, Role};
+    use echo_core::llm::types::Message;
 
     #[test]
     fn test_verifier_all_pass_when_no_issues() {

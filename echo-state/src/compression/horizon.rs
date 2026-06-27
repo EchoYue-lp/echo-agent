@@ -894,15 +894,7 @@ mod tests {
             messages
         }
 
-        // Measure tokens at 50 turns vs 10 turns
-        let mut msgs_10 = build_constant_conversation(10);
-        let _ = compressor.compact_horizon(&mut msgs_10);
-        let tokens_10: usize = msgs_10
-            .iter()
-            .filter_map(|m| m.content.as_text())
-            .map(|c| tokenizer.count_tokens(&c))
-            .sum();
-
+        // Measure tokens for a 50-turn conversation after compaction.
         let mut msgs_50 = build_constant_conversation(50);
         let _ = compressor.compact_horizon(&mut msgs_50);
         let tokens_50: usize = msgs_50

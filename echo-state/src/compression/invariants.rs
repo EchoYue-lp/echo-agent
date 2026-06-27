@@ -24,9 +24,7 @@ mod tests {
     };
     use crate::compression::horizon::VisibilityHorizonCompressor;
     use crate::compression::levels::{AdaptiveCompressionConfig, AdaptiveCompressor};
-    use crate::compression::{
-        CompressionCheckpoint, CompressionInput, ContextCompressor, ContextManager,
-    };
+    use crate::compression::{CompressionInput, ContextCompressor, ContextManager};
     use echo_core::llm::types::{Message, MessageContent, Role, ToolCall};
     use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 

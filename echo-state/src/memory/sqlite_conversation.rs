@@ -19,8 +19,6 @@ use tracing::info;
 /// SQLite conversation persistence Store
 pub struct SqliteConversationStore {
     conn: Mutex<Connection>,
-    #[allow(dead_code)]
-    path: PathBuf,
 }
 
 impl SqliteConversationStore {
@@ -58,7 +56,6 @@ impl SqliteConversationStore {
 
         Ok(Self {
             conn: Mutex::new(conn),
-            path,
         })
     }
 
