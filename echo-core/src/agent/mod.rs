@@ -471,6 +471,30 @@ pub trait Agent: Send + Sync {
         })
     }
 
+    /// Streaming task execution with cancellation (multimodal version).
+    ///
+    /// Accepts a pre-built [`Message`] so workers dispatched via subagent
+    /// delegation can see images/files attached by the user. `ReactAgent`
+    /// overrides this to route through its real multimodal pipeline.
+    ///
+    /// The default implementation is **not supported** — agents that don't
+    /// implement multimodal streaming return an error if a multimodal task is
+    /// dispatched to them. This keeps the trait signature lifetime-safe (the
+    /// text-extracted fallback would borrow a local). Callers that need a
+    /// text fallback should extract the text themselves and use
+    /// [`execute_stream_with_cancel`](Self::execute_stream_with_cancel).
+    fn execute_stream_message_with_cancel<'a>(
+        &'a self,
+        _message: Message,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            Err(crate::error::ReactError::Other(
+                "this agent does not implement multimodal streaming (execute_stream_message_with_cancel)".to_string(),
+            ))
+        })
+    }
+
     /// Reset in-memory conversational state.
     ///
     /// Implementations should clear context and fire `SessionStart("clear")` hooks

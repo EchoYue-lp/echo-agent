@@ -236,6 +236,7 @@ impl Tool for AgentDispatchTool {
                 parent_context,
                 delegate_depth: 0,
                 runtime_context: None,
+                message: None,
             };
 
             match executor.dispatch(req).await {

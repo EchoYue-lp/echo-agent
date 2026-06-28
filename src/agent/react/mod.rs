@@ -1931,6 +1931,7 @@ impl ReactAgent {
                 parent_context: self.build_parent_context(&ExecutionMode::Fork).await,
                 delegate_depth: depth,
                 runtime_context: self.build_runtime_context(),
+                message: None,
             };
 
             // Reuse the stored executor (with hook configuration)
@@ -1994,6 +1995,7 @@ impl ReactAgent {
             parent_context: self.build_parent_context(&mode).await,
             delegate_depth: depth,
             runtime_context: self.build_runtime_context(),
+            message: None,
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
@@ -2074,6 +2076,52 @@ impl ReactAgent {
             parent_context: self.build_parent_context(&mode).await,
             delegate_depth: depth,
             runtime_context,
+            message: None,
+        };
+
+        let result = self.tools.subagent_executor.dispatch(req).await?;
+        Ok(result)
+    }
+
+    /// Delegate a multimodal task to a subagent (images/files included).
+    ///
+    /// Like [`delegate_to_agent_with_parent_and_cancel`](Self::delegate_to_agent_with_parent_and_cancel)
+    /// but carries a [`Message`] so the worker sees user-uploaded attachments.
+    /// The `task` text is also kept (used for hooks/events/fallback).
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_to_agent_with_parent_cancel_and_message(
+        &self,
+        target: &str,
+        task: &str,
+        message: crate::llm::types::Message,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
+        use crate::agent::subagent::executor::DispatchRequest;
+        use crate::agent::subagent::types::ExecutionMode;
+
+        let agents = self.tools.subagent_registry.list_available().await;
+        if !agents.iter().any(|d| d.name == target) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Subagent '{}' not found. Available agents: {:?}",
+                target,
+                agents.iter().map(|d| &d.name).collect::<Vec<_>>()
+            )));
+        }
+
+        let mode = ExecutionMode::Fork;
+        let runtime_context = self.build_runtime_context();
+        let req = DispatchRequest {
+            agent_name: target.to_string(),
+            task: task.to_string(),
+            mode_override: Some(mode.clone()),
+            cancel,
+            parent_agent: parent_label.to_string(),
+            parent_context: self.build_parent_context(&mode).await,
+            delegate_depth: depth,
+            runtime_context,
+            message: Some(message),
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
@@ -2324,6 +2372,30 @@ impl Agent for ReactAgent {
         )
     }
 
+    fn execute_stream_message_with_cancel<'a>(
+        &'a self,
+        message: crate::llm::types::Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move {
+                *self.cancel_token.lock().await = Some(cancel.clone());
+                if let Some(handle) = &self.dispatch_cancel_handle {
+                    *handle.lock().await = Some(cancel);
+                }
+                self.run_stream_message_entry(message, run::StreamMode::Execute)
+                    .await
+            }
+            .instrument(info_span!(
+                "agent_execute_stream_message_with_cancel",
+                agent.name = %agent,
+                agent.model = %model
+            )),
+        )
+    }
+
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             self.reset_messages().await;
@@ -2486,37 +2558,6 @@ impl ReactAgent {
             }
             .instrument(info_span!(
                 "agent_chat_stream_message_with_cancel",
-                agent.name = %agent,
-                agent.model = %model
-            )),
-        )
-    }
-
-    /// Streaming task execution with cancellation (multimodal version).
-    ///
-    /// Combines [`execute_stream_message`](Self::execute_stream_message) with
-    /// the cancel-token mirroring of
-    /// [`execute_stream_with_cancel`](Agent::execute_stream_with_cancel). Use
-    /// this when a multimodal single-turn task needs cancellation (complex-task
-    /// runs carrying attachments).
-    pub fn execute_stream_message_with_cancel<'a>(
-        &'a self,
-        message: crate::llm::types::Message,
-        cancel: CancellationToken,
-    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
-        let agent = self.config.agent_name.clone();
-        let model = self.config.model_name.clone();
-        Box::pin(
-            async move {
-                *self.cancel_token.lock().await = Some(cancel.clone());
-                if let Some(handle) = &self.dispatch_cancel_handle {
-                    *handle.lock().await = Some(cancel);
-                }
-                self.run_stream_message_entry(message, run::StreamMode::Execute)
-                    .await
-            }
-            .instrument(info_span!(
-                "agent_execute_stream_message_with_cancel",
                 agent.name = %agent,
                 agent.model = %model
             )),

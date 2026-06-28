@@ -5,6 +5,7 @@
 
 use crate::error::{AgentError, ReactError, Result};
 use echo_core::agent::{Agent, AgentEvent, CancellationToken};
+use echo_core::llm::types::Message;
 use futures::StreamExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,6 +44,11 @@ pub struct DispatchRequest {
     /// run_id/cancel/trace_sink/cache_user_id——绕开会跨 tokio::spawn 断裂的
     /// task_local。`None` = 无外部 context（旧行为，工具读到 None）。
     pub runtime_context: Option<echo_core::tools::ExternalRunContext>,
+    /// Optional multimodal message (images/files). When `Some`, the worker is
+    /// dispatched via `execute_stream_message_with_cancel` instead of the text
+    /// `task` path, so it sees user-uploaded attachments. `None` = plain text
+    /// dispatch (the default for all existing callers).
+    pub message: Option<Message>,
 }
 
 impl std::fmt::Debug for DispatchRequest {
@@ -333,6 +339,7 @@ impl SubagentExecutor {
                                 );
                                 retry_count += 1;
                                 let rt_ctx = req.runtime_context.clone();
+                                let retry_msg = req.message.clone();
                                 req = DispatchRequest {
                                     agent_name: alternative_agent,
                                     task: hook_ctx.task.clone(),
@@ -342,6 +349,7 @@ impl SubagentExecutor {
                                     parent_context: None,
                                     delegate_depth: delegate_depth + 1,
                                     runtime_context: rt_ctx,
+                                    message: retry_msg,
                                 };
                                 // Loop instead of recursing
                                 continue;
@@ -355,6 +363,7 @@ impl SubagentExecutor {
                                 tokio::time::sleep(Duration::from_secs(delay_secs)).await;
                                 retry_count += 1;
                                 let rt_ctx = req.runtime_context.clone();
+                                let retry_msg = req.message.clone();
                                 req = DispatchRequest {
                                     agent_name: hook_ctx.subagent_name.clone(),
                                     task: hook_ctx.task.clone(),
@@ -364,6 +373,7 @@ impl SubagentExecutor {
                                     parent_context: None,
                                     delegate_depth,
                                     runtime_context: rt_ctx,
+                                    message: retry_msg,
                                 };
                                 // Loop instead of recursing
                                 continue;
@@ -445,6 +455,7 @@ impl SubagentExecutor {
                         registry,
                         agent,
                         &task,
+                        None, // teammate mode: text-only dispatch for now
                         child_token.clone(),
                         &parent_agent,
                         &agent_name,
@@ -463,6 +474,7 @@ impl SubagentExecutor {
                         registry,
                         agent,
                         &task,
+                        None, // teammate mode: text-only dispatch for now
                         child_token.clone(),
                         &parent_agent,
                         &agent_name,
@@ -524,13 +536,22 @@ impl SubagentExecutor {
         registry: Arc<SubagentRegistry>,
         agent: &(dyn Agent + Send + Sync),
         task: &str,
+        message: Option<Message>,
         cancel: CancellationToken,
         parent: &str,
         subagent: &str,
         mode: ExecutionMode,
         start: Instant,
     ) -> Result<SubagentResult> {
-        let mut stream = agent.execute_stream_with_cancel(task, cancel).await?;
+        // Multimodal path: when a Message is supplied, run it so the worker
+        // sees images/files. Falls back to the text task otherwise.
+        let mut stream = if let Some(msg) = message {
+            agent
+                .execute_stream_message_with_cancel(msg, cancel)
+                .await?
+        } else {
+            agent.execute_stream_with_cancel(task, cancel).await?
+        };
         let mut output = String::new();
         let mut in_thinking = false;
         let mut prompt_tokens: usize = 0;
@@ -692,6 +713,7 @@ impl SubagentExecutor {
             self.registry.clone(),
             agent_arc.as_ref(),
             &task,
+            req.message.clone(),
             req.cancel.clone(),
             &req.parent_agent,
             &req.agent_name,
@@ -737,6 +759,7 @@ impl SubagentExecutor {
         let parent_agent = req.parent_agent.clone();
         let cancel = req.cancel.clone();
         let registry = self.registry.clone();
+        let message = req.message.clone();
         let enhanced_task = Self::enhance_task(&task, req.parent_context.as_ref());
         // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
         // worker agent 是 registry 预注册的单例(fork 不 clone),其 current_run_id
@@ -785,6 +808,7 @@ impl SubagentExecutor {
                             registry,
                             agent,
                             &enhanced_task,
+                            message.clone(),
                             cancel.clone(),
                             &parent_agent,
                             &agent_name,
@@ -811,6 +835,7 @@ impl SubagentExecutor {
                         registry,
                         agent,
                         &enhanced_task,
+                        message.clone(),
                         cancel.clone(),
                         &parent_agent,
                         &agent_name,
@@ -861,6 +886,7 @@ mod tests {
             parent_context: None,
             delegate_depth: 0,
             runtime_context: None,
+            message: None,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -881,6 +907,7 @@ mod tests {
             parent_context: None,
             delegate_depth: 0,
             runtime_context: None,
+            message: None,
         };
 
         let err = executor.dispatch(req).await.unwrap_err();
@@ -907,6 +934,7 @@ mod tests {
             parent_context: None,
             delegate_depth: 0,
             runtime_context: None,
+            message: None,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -931,6 +959,7 @@ mod tests {
             parent_context: None,
             delegate_depth: 0,
             runtime_context: None,
+            message: None,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -956,6 +985,7 @@ mod tests {
             parent_context: None,
             delegate_depth: 0,
             runtime_context: None,
+            message: None,
         };
 
         let handle = executor.dispatch_teammate(req).await.unwrap();
