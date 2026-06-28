@@ -1,8 +1,8 @@
 use echo_core::error::{LlmError, ReactError, Result};
 use echo_core::llm::capabilities::ProviderCapabilities;
 use echo_core::llm::types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message, ResponseFormat,
-    ToolDefinition,
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ContentPart, Message,
+    MessageContent, ResponseFormat, ToolDefinition,
 };
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::Stream;
@@ -18,6 +18,99 @@ use super::config::{Config, LlmConfig, ModelConfig};
 use super::thinking_translate::translate_thinking_openai_compat;
 
 // ── Convenience Functions ─────────────────────────────────────────────────────
+
+/// Normalize message content for the OpenAI Chat Completions API.
+///
+/// OpenAI's content-part schema only recognizes `text` and `image_url`. Our
+/// `ContentPart::File` (used for PDF/document attachments) serializes to
+/// `{"type":"file",...}`, which OpenAI-compatible gateways (DeepSeek, etc.)
+/// reject or silently drop — losing the attachment entirely.
+///
+/// This replaces any `ContentPart::File` with a text fallback (decoded inline
+/// for text-class files, a name-only placeholder for binary), mirroring the
+/// Anthropic provider's `file_to_content_block` behaviour. `Text` and
+/// `ImageUrl` parts already match the OpenAI spec and pass through untouched.
+fn normalize_messages(messages: Vec<Message>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .map(|mut msg| {
+            if let MessageContent::Parts(parts) = &mut msg.content {
+                let mut rewritten: Vec<ContentPart> = Vec::with_capacity(parts.len());
+                for part in parts.drain(..) {
+                    rewritten.push(normalize_content_part(part));
+                }
+                msg.content = MessageContent::Parts(rewritten);
+            }
+            msg
+        })
+        .collect()
+}
+
+/// Convert a single content part to an OpenAI-compatible form.
+fn normalize_content_part(part: ContentPart) -> ContentPart {
+    match part {
+        ContentPart::Text { .. } | ContentPart::ImageUrl { .. } => part,
+        ContentPart::File { name, content } => {
+            // Same dispatch as the Anthropic provider: text-class files are
+            // decoded and inlined so the model can read them; everything else
+            // (including PDFs, since OpenAI has no document block here) becomes
+            // a name-only placeholder.
+            if is_text_class_filename(&name) {
+                let decoded =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content)
+                        .ok();
+                let text = decoded
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_else(|| format!("[Attachment: {name}] (undecodable)"));
+                ContentPart::Text {
+                    text: format!("\n[Attachment: {name}]\n```\n{text}\n```"),
+                }
+            } else {
+                ContentPart::Text {
+                    text: format!("\n[Attachment: {name}]"),
+                }
+            }
+        }
+    }
+}
+
+/// Whether a filename looks like a text-class file (mirrors the Anthropic
+/// provider's allowlist so both gateways behave identically).
+fn is_text_class_filename(name: &str) -> bool {
+    matches!(
+        name.rsplit('.')
+            .next()
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "txt"
+                | "md"
+                | "markdown"
+                | "json"
+                | "xml"
+                | "yaml"
+                | "yml"
+                | "csv"
+                | "tsv"
+                | "rs"
+                | "py"
+                | "js"
+                | "ts"
+                | "tsx"
+                | "jsx"
+                | "go"
+                | "java"
+                | "c"
+                | "cpp"
+                | "h"
+                | "sh"
+                | "toml"
+                | "ini"
+                | "log"
+                | "sql"
+        )
+    )
+}
 
 /// Assemble request headers
 pub fn assemble_req_header(model: &ModelConfig) -> Result<HeaderMap> {
@@ -58,7 +151,7 @@ pub async fn chat(
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
         model: model.model.clone(),
-        messages: messages.to_vec(),
+        messages: normalize_messages(messages.to_vec()),
         temperature,
         max_tokens,
         stream,
@@ -94,7 +187,7 @@ pub async fn stream_chat(
     let model = Config::get_model(model_name)?;
     let request_body = ChatCompletionRequest {
         model: model.model.clone(),
-        messages,
+        messages: normalize_messages(messages),
         temperature,
         max_tokens,
         stream: Some(true),
@@ -186,7 +279,7 @@ impl LlmClient for OpenAiClient {
                 );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
-                    messages: request.messages,
+                    messages: normalize_messages(request.messages),
                     // o-series / GPT-5 reasoning models reject temperature.
                     temperature: if t.drop_temperature {
                         None
@@ -242,7 +335,7 @@ impl LlmClient for OpenAiClient {
                 );
                 let req = ChatCompletionRequest {
                     model: self.config.model.clone(),
-                    messages: request.messages,
+                    messages: normalize_messages(request.messages),
                     temperature: if t.drop_temperature {
                         None
                     } else {
@@ -417,5 +510,93 @@ impl LlmClient for DefaultLlmClient {
 
     fn model_name(&self) -> &str {
         &self.model_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn multimodal_msg(parts: Vec<ContentPart>) -> Message {
+        let mut msg = Message::user(String::new());
+        msg.content = MessageContent::Parts(parts);
+        msg
+    }
+
+    #[test]
+    fn text_and_image_parts_pass_through_unchanged() {
+        let msg = multimodal_msg(vec![
+            ContentPart::Text {
+                text: "hi".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: echo_core::llm::types::ImageUrl {
+                    url: "data:image/png;base64,AAA".to_string(),
+                    detail: None,
+                },
+            },
+        ]);
+        let out = normalize_messages(vec![msg]);
+        match &out[0].content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(parts[0], ContentPart::Text { .. }));
+                assert!(matches!(parts[1], ContentPart::ImageUrl { .. }));
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_class_file_is_inlined_as_text() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello notes");
+        let msg = multimodal_msg(vec![ContentPart::File {
+            name: "notes.txt".to_string(),
+            content: b64,
+        }]);
+        let out = normalize_messages(vec![msg]);
+        match &out[0].content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    ContentPart::Text { text } => {
+                        assert!(text.contains("hello notes"));
+                        assert!(text.contains("notes.txt"));
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binary_file_becomes_placeholder() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01zip");
+        let msg = multimodal_msg(vec![ContentPart::File {
+            name: "archive.zip".to_string(),
+            content: b64,
+        }]);
+        let out = normalize_messages(vec![msg]);
+        match &out[0].content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    ContentPart::Text { text } => {
+                        assert!(text.contains("archive.zip"));
+                    }
+                    other => panic!("expected Text placeholder, got {other:?}"),
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_text_message_is_untouched() {
+        let msg = Message::user("hello".to_string());
+        let out = normalize_messages(vec![msg]);
+        assert_eq!(out[0].content.as_text(), Some("hello".to_string()));
     }
 }
