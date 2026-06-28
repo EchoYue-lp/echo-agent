@@ -39,7 +39,7 @@ use crate::tools::builtin::check_task::{CheckTaskStatusTool, ListBackgroundTasks
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
 use crate::tools::builtin::memory::{
-    ForgetTool, LayeredRecallTool, LayeredRememberTool, LayeredSearchMemoryTool,
+    ForgetTool, LayeredForgetTool, LayeredRecallTool, LayeredRememberTool, LayeredSearchMemoryTool,
     LegacyStoreRememberTool, RecallTool, SearchMemoryTool,
 };
 #[cfg(feature = "tasks")]
@@ -511,6 +511,9 @@ impl ReactAgent {
             .register(Box::new(LayeredSearchMemoryTool::new(
                 layer_manager.clone(),
             )));
+        self.tools
+            .tool_manager
+            .register(Box::new(LayeredForgetTool::new(layer_manager.clone())));
         self.memory_layer_manager = Some(layer_manager);
     }
 
@@ -942,6 +945,9 @@ impl ReactAgent {
                 .register(Box::new(LayeredSearchMemoryTool::new(
                     layer_manager.clone(),
                 )));
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredForgetTool::new(layer_manager.clone())));
         } else {
             self.tools
                 .tool_manager
@@ -999,6 +1005,9 @@ impl ReactAgent {
                 .register(Box::new(LayeredSearchMemoryTool::new(
                     layer_manager.clone(),
                 )));
+            self.tools
+                .tool_manager
+                .register(Box::new(LayeredForgetTool::new(layer_manager.clone())));
         } else {
             self.tools
                 .tool_manager
@@ -2552,7 +2561,7 @@ impl ReactAgent {
                     response_format: None,
                     thinking: self.thinking.clone(),
                     cancel_token: None,
-                    user_id: None,
+                    user_id: self.config.cache_user_id.clone(),
                     cache_hints: None,
                 })
                 .await?;
@@ -2562,13 +2571,13 @@ impl ReactAgent {
                 self.client.clone(),
                 &self.config.model_name,
                 &messages,
-                None,        // temperature
-                None,        // max_tokens
-                Some(false), // stream
-                None,        // tools
-                None,        // tool_choice
-                None,        // response_format
-                None,        // user_id
+                None,                              // temperature
+                None,                              // max_tokens
+                Some(false),                       // stream
+                None,                              // tools
+                None,                              // tool_choice
+                None,                              // response_format
+                self.config.cache_user_id.clone(), // user_id (E4 fix)
             )
             .await?;
 

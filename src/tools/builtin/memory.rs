@@ -657,6 +657,140 @@ impl Tool for LayeredSearchMemoryTool {
     }
 }
 
+// ── LayeredForgetTool ──────────────────────────────────────────────────────
+
+/// Delete a typed long-term memory via the evolution layer manager (C4 fix).
+///
+/// Routes through [`MemoryLayerManager::delete_memory`] so the unified
+/// namespace `["agent", "memories"]` is used — matching where
+/// [`LayeredRememberTool`] writes. This replaces the legacy `ForgetTool` when a
+/// layer manager is installed; without it, `forget` would delete from the
+/// per-agent namespace and never remove what `remember` stored.
+///
+/// Accepts either the full key (UUID) or an 8-char prefix as shown in recall
+/// results. If the prefix is ambiguous (multiple matches), no deletion happens
+/// and the matches are listed for disambiguation.
+pub struct LayeredForgetTool {
+    pub layer_manager: Arc<MemoryLayerManager>,
+}
+
+impl LayeredForgetTool {
+    pub fn new(layer_manager: Arc<MemoryLayerManager>) -> Self {
+        Self { layer_manager }
+    }
+}
+
+/// Resolve a user-supplied id (full key or short prefix) to at most one
+/// concrete memory key.
+///
+/// Returns `Ok(None)` when nothing matches; `Err(InvalidParameter)` when the
+/// prefix is ambiguous (caller asks the user to disambiguate).
+async fn resolve_forget_key(
+    layer_manager: &Arc<MemoryLayerManager>,
+    id: &str,
+) -> crate::error::Result<Option<String>> {
+    // Fast path: exact match.
+    if layer_manager.locate(id).await.is_some() {
+        return Ok(Some(id.to_string()));
+    }
+    // Slow path: treat `id` as a prefix and scan both layers.
+    let mut matches = Vec::new();
+    for entry in layer_manager.list_hot() {
+        if entry.key.starts_with(id) {
+            matches.push(entry.key);
+        }
+    }
+    if let Ok(warm) = layer_manager
+        .list_warm_memories(&echo_state::memory::typed_store::MemoryFilter::new())
+        .await
+    {
+        for entry in warm {
+            if entry.key.starts_with(id) {
+                matches.push(entry.key);
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(ToolError::InvalidParameter {
+            name: "id".to_string(),
+            message: format!(
+                "ID prefix '{id}' matches {} memories; provide more characters. Matches: {}",
+                matches.len(),
+                matches
+                    .iter()
+                    .map(|k| k.chars().take(8).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+        .into()),
+    }
+}
+
+impl Tool for LayeredForgetTool {
+    fn name(&self) -> &str {
+        "forget"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a typed long-term memory by its ID (full key or the 8-char prefix shown in recall results). \
+         If the prefix matches multiple memories, no deletion happens and the matches are listed for disambiguation."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Memory ID to delete (full key or first 8 chars from recall results)"
+                }
+            },
+            "required": ["id"]
+        })
+    }
+
+    fn execute(
+        &self,
+        parameters: ToolParameters,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        let layer_manager = self.layer_manager.clone();
+        Box::pin(async move {
+            let id = parameters
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("id".to_string()))?;
+
+            // Resolve full key (exact or unambiguous prefix).
+            let key = match resolve_forget_key(&layer_manager, id).await? {
+                Some(k) => k,
+                None => {
+                    return Ok(ToolResult::success(format!(
+                        "No memory entry found with ID \"{id}\", nothing to delete.\n\
+                         Tip: use the recall tool to find the correct ID."
+                    )));
+                }
+            };
+
+            let deleted = layer_manager.delete_memory(&key).await?;
+            if deleted {
+                Ok(ToolResult::success(format!(
+                    "🗑️ Deleted memory ID: {}",
+                    key.chars().take(8).collect::<String>()
+                )))
+            } else {
+                Ok(ToolResult::success(format!(
+                    "No memory entry found with ID \"{id}\", nothing to delete."
+                )))
+            }
+        })
+    }
+}
+
 // ── Helper functions ────────────────────────────────────────────────────────
 
 fn classify_memory_type(content: &str, tags: &[String]) -> MemoryType {

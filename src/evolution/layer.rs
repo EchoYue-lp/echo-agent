@@ -378,6 +378,63 @@ impl MemoryLayerManager {
         Ok(false)
     }
 
+    /// Permanently delete a memory from whichever layer holds it (C4 fix).
+    ///
+    /// Looks up `key` via [`locate`](Self::locate): hot entries are removed from
+    /// MEMORY.md (frontmatter + body); warm entries are deleted from the typed
+    /// store via `delete_typed`. Returns `true` if a memory was found and
+    /// removed, `false` if the key does not exist in any layer.
+    ///
+    /// This closes the namespace gap where the product `forget` tool (legacy
+    /// `ForgetTool`) deleted from the per-agent namespace `[agent_name,
+    /// "memories"]` while `remember` writes the unified `["agent", "memories"]`
+    /// — so `forget` could never delete what `remember` stored. The layered
+    /// variant ([`LayeredForgetTool`]) routes here.
+    pub async fn delete_memory(&self, key: &str) -> Result<bool> {
+        let Some((layer, _entry)) = self.locate(key).await else {
+            return Ok(false);
+        };
+
+        match layer {
+            MemoryLayer::Hot => {
+                // Remove from MEMORY.md under the lock so a concurrent writer
+                // cannot interleave (mirrors `demote_hot_to_warm`).
+                let mut guard = self.lock_hot_file().await.map_err(ReactError::from)?;
+                guard.file.entries.retain(|e| e.key != key);
+
+                let pattern = format!("- **[{key}]**");
+                guard.file.body = guard
+                    .file
+                    .body
+                    .lines()
+                    .filter(|line| !line.starts_with(&pattern))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                guard.commit().map_err(ReactError::from)?;
+            }
+            MemoryLayer::Warm => {
+                let deleted = self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
+                if !deleted {
+                    return Ok(false);
+                }
+            }
+        }
+
+        let layer_name = match layer {
+            MemoryLayer::Hot => "hot",
+            MemoryLayer::Warm => "warm",
+        };
+        self.record_change(
+            key,
+            ChangeType::Delete,
+            Some(layer_name),
+            None,
+            "user forget",
+            "delete_memory",
+        )?;
+        Ok(true)
+    }
+
     /// List all warm-layer typed memories matching `filter` (stage4 F1 Dreaming).
     ///
     /// Dreaming scans the unified `["agent","memories"]` namespace to find
