@@ -2459,6 +2459,70 @@ impl ReactAgent {
             .await
     }
 
+    /// Streaming multi-turn conversation with cancellation (multimodal version).
+    ///
+    /// Combines [`chat_stream_message`](Self::chat_stream_message) with the
+    /// cancel-token + dispatch-handle mirroring that
+    /// [`chat_stream_with_cancel`](Agent::chat_stream_with_cancel) does for
+    /// plain text. Use this for UIs that send images/files AND need
+    /// cooperative cancellation (the Tauri chat path).
+    pub fn chat_stream_message_with_cancel<'a>(
+        &'a self,
+        message: crate::llm::types::Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move {
+                *self.cancel_token.lock().await = Some(cancel.clone());
+                // Mirror the active run's token into the LLM-callable dispatch
+                // tool so subagents are cancelled with the parent (P1-11).
+                if let Some(handle) = &self.dispatch_cancel_handle {
+                    *handle.lock().await = Some(cancel);
+                }
+                self.run_stream_message_entry(message, run::StreamMode::Chat)
+                    .await
+            }
+            .instrument(info_span!(
+                "agent_chat_stream_message_with_cancel",
+                agent.name = %agent,
+                agent.model = %model
+            )),
+        )
+    }
+
+    /// Streaming task execution with cancellation (multimodal version).
+    ///
+    /// Combines [`execute_stream_message`](Self::execute_stream_message) with
+    /// the cancel-token mirroring of
+    /// [`execute_stream_with_cancel`](Agent::execute_stream_with_cancel). Use
+    /// this when a multimodal single-turn task needs cancellation (complex-task
+    /// runs carrying attachments).
+    pub fn execute_stream_message_with_cancel<'a>(
+        &'a self,
+        message: crate::llm::types::Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        Box::pin(
+            async move {
+                *self.cancel_token.lock().await = Some(cancel.clone());
+                if let Some(handle) = &self.dispatch_cancel_handle {
+                    *handle.lock().await = Some(cancel);
+                }
+                self.run_stream_message_entry(message, run::StreamMode::Execute)
+                    .await
+            }
+            .instrument(info_span!(
+                "agent_execute_stream_message_with_cancel",
+                agent.name = %agent,
+                agent.model = %model
+            )),
+        )
+    }
+
     /// Send a message with an image URL (multimodal).
     ///
     /// Sends the image URL directly as an `image_url` part to the LLM.

@@ -129,10 +129,16 @@ impl AnthropicClient {
                                 source: data_url_to_image_source(&image_url.url),
                                 cache_control: None,
                             },
-                            ContentPart::File { name, .. } => ContentBlock::Text {
-                                text: format!("\n[Attachment: {name}]"),
-                                cache_control: None,
-                            },
+                            // File attachments: dispatch by inferred media type.
+                            //   - application/pdf → document content block (the only
+                            //     type Anthropic accepts as base64 document source)
+                            //   - text-class (txt/md/json/xml/...) → decode and inline
+                            //     as text so the model can read it directly
+                            //   - other binary → name-only placeholder (the API has
+                            //     no generic binary attachment block)
+                            ContentPart::File { name, content } => {
+                                file_to_content_block(name, content)
+                            }
                         })
                         .collect();
                     if blocks.is_empty() {
@@ -823,6 +829,17 @@ enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// PDF document content block.
+    ///
+    /// Anthropic only accepts `application/pdf` for base64 document sources
+    /// (other mime types fail). Text-class files are inlined as Text blocks
+    /// instead — see the `ContentPart::File` handling below.
+    #[serde(rename = "document")]
+    Document {
+        source: ImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -855,6 +872,10 @@ impl ContentBlock {
                 ..
             }
             | ContentBlock::Image {
+                cache_control: field,
+                ..
+            }
+            | ContentBlock::Document {
                 cache_control: field,
                 ..
             }
@@ -937,6 +958,51 @@ fn data_url_to_image_source(url: &str) -> ImageSource {
     }
     ImageSource::Url_ {
         url: url.to_string(),
+    }
+}
+
+/// Convert a `ContentPart::File` into the best-fit Anthropic content block.
+///
+/// Anthropic's Messages API only accepts `application/pdf` as a base64
+/// `document` source — other binary types have no generic attachment block.
+/// To make text-class attachments (txt/md/json/src/...) actually readable by
+/// the model, we decode and inline them as text. Binary non-PDF falls back to
+/// a name-only placeholder (the previous behaviour for all files).
+fn file_to_content_block(name: &str, content_base64: &str) -> ContentBlock {
+    let ext = name.rsplit('.').next().map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        // PDF → document content block (the only base64 document type Anthropic
+        // accepts).
+        Some("pdf") => ContentBlock::Document {
+            source: ImageSource::Base64 {
+                media_type: "application/pdf".to_string(),
+                data: content_base64.to_string(),
+            },
+            cache_control: None,
+        },
+        // Text-class files → decode base64 and inline as text so the model can
+        // read the contents directly.
+        Some(
+            "txt" | "md" | "markdown" | "json" | "xml" | "yaml" | "yml" | "csv" | "tsv" | "rs"
+            | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h" | "sh"
+            | "toml" | "ini" | "log" | "sql",
+        ) => {
+            let decoded =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64)
+                    .ok();
+            let text = decoded
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_else(|| format!("[Attachment: {name}] (binary, undecodable)"));
+            ContentBlock::Text {
+                text: format!("\n[Attachment: {name}]\n```\n{text}\n```"),
+                cache_control: None,
+            }
+        }
+        // Other binary → name-only placeholder (no generic attachment block).
+        _ => ContentBlock::Text {
+            text: format!("\n[Attachment: {name}]"),
+            cache_control: None,
+        },
     }
 }
 
@@ -1024,6 +1090,7 @@ struct MessageDeltaBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn text_message(text: &str) -> AnthropicMessage {
         AnthropicMessage {
@@ -1038,6 +1105,7 @@ mod tests {
             AnthropicContent::Blocks(blocks) => blocks.iter().any(|block| match block {
                 ContentBlock::Text { cache_control, .. }
                 | ContentBlock::Image { cache_control, .. }
+                | ContentBlock::Document { cache_control, .. }
                 | ContentBlock::ToolResult { cache_control, .. } => cache_control.is_some(),
                 ContentBlock::ToolUse { .. } => false,
             }),
@@ -1090,5 +1158,56 @@ mod tests {
             body.get("metadata").is_none(),
             "metadata should be absent when user_id is None, got: {body}"
         );
+    }
+
+    // ── 2B: file_to_content_block dispatches by inferred media type ──────────
+
+    #[test]
+    fn pdf_attachment_becomes_document_block() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4 fake");
+        let block = file_to_content_block("report.pdf", &b64);
+        match block {
+            ContentBlock::Document { source, .. } => match source {
+                ImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "application/pdf");
+                    assert_eq!(data, b64);
+                }
+                ImageSource::Url_ { .. } => panic!("expected base64 source"),
+            },
+            other => panic!("expected Document, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_attachment_inlined_as_text() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello notes");
+        let block = file_to_content_block("notes.txt", &b64);
+        match block {
+            ContentBlock::Text { text, .. } => {
+                assert!(
+                    text.contains("hello notes"),
+                    "text should contain decoded content"
+                );
+                assert!(
+                    text.contains("notes.txt"),
+                    "text should mention the filename"
+                );
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binary_non_pdf_attachment_is_placeholder() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01binary");
+        let block = file_to_content_block("archive.zip", &b64);
+        match block {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("archive.zip"));
+                // Should NOT contain decoded binary garbage.
+                assert!(!text.contains("binary"));
+            }
+            other => panic!("expected Text placeholder, got {other:?}"),
+        }
     }
 }
