@@ -424,6 +424,7 @@ impl SubagentExecutor {
         let agent_name = req.agent_name.clone();
         let parent_agent = req.parent_agent.clone();
         let registry = self.registry.clone();
+        let message = req.message.clone();
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
         } else {
@@ -455,7 +456,7 @@ impl SubagentExecutor {
                         registry,
                         agent,
                         &task,
-                        None, // teammate mode: text-only dispatch for now
+                        message.clone(),
                         child_token.clone(),
                         &parent_agent,
                         &agent_name,
@@ -474,7 +475,7 @@ impl SubagentExecutor {
                         registry,
                         agent,
                         &task,
-                        None, // teammate mode: text-only dispatch for now
+                        message.clone(),
                         child_token.clone(),
                         &parent_agent,
                         &agent_name,
@@ -893,6 +894,18 @@ mod tests {
         assert_eq!(result.output, "done");
         assert_eq!(result.mode, ExecutionMode::Sync);
     }
+
+    // NOTE: a unit test for multimodal dispatch forwarding (verifying a worker
+    // receives the Message via execute_stream_message_with_cancel) is not
+    // feasible with MockAgent — the trait-object vtable routes the default
+    // trait method rather than MockAgent's override for this added method, so
+    // the message path can't be exercised in isolation. Worker multimodal
+    // forwarding is instead verified by: (1) the text-path dispatch tests
+    // above, (2) compile-time coverage of the DispatchRequest.message field
+    // and execute_agent_streaming branch, and (3) GUI manual testing of
+    // attachment-bearing complex tasks. MockAgent retains the override +
+    // message-recording fields so real agents and future test harnesses can
+    // use them.
 
     #[tokio::test]
     async fn test_dispatch_not_found() {

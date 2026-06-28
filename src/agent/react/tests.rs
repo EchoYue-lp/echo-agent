@@ -1336,10 +1336,14 @@ fn react_agent_planning_tools_registration() {
     let config = AgentConfig::minimal("model", "agent").enable_task(true);
     let agent = ReactAgent::new(config);
 
+    // The background-task tools are registered when `enable_task` is set.
+    // (Tool names track the current SpawnBackgroundTaskTool / CheckTaskStatusTool
+    // / ListBackgroundTasksTool implementations — older names like create_task
+    // / update_task / list_tasks were renamed long ago.)
     let tool_names = agent.tool_names();
-    assert!(tool_names.contains(&String::from("create_task")));
-    assert!(tool_names.contains(&String::from("update_task")));
-    assert!(tool_names.contains(&String::from("list_tasks")));
+    assert!(tool_names.contains(&String::from("spawn_background_task")));
+    assert!(tool_names.contains(&String::from("check_task_status")));
+    assert!(tool_names.contains(&String::from("list_background_tasks")));
 }
 
 #[test]

@@ -27,7 +27,7 @@
 //! # }
 //! ```
 
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, CancellationToken};
 use crate::error::{AgentError, ReactError, Result};
 use futures::future::BoxFuture;
 use futures::stream;
@@ -53,6 +53,25 @@ pub struct MockAgent {
     system_prompt: String,
     responses: Arc<Mutex<VecDeque<String>>>,
     calls: Arc<Mutex<Vec<String>>>,
+    /// Multimodal messages received via `execute_stream_message_with_cancel`
+    /// (records whether dispatch forwarded attachments to the worker).
+    messages: Arc<Mutex<Vec<echo_core::llm::types::Message>>>,
+}
+
+// All observable state is behind Arc<Mutex>, so cloning shares call/message
+// history — tests can clone a MockAgent, register the clone, and assert on the
+// original.
+impl Clone for MockAgent {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            model_name: self.model_name.clone(),
+            system_prompt: self.system_prompt.clone(),
+            responses: self.responses.clone(),
+            calls: self.calls.clone(),
+            messages: self.messages.clone(),
+        }
+    }
 }
 
 impl MockAgent {
@@ -64,6 +83,7 @@ impl MockAgent {
             system_prompt: "You are a mock agent".to_string(),
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -118,6 +138,24 @@ impl MockAgent {
             .cloned()
     }
 
+    /// Number of multimodal messages received via the message dispatch path.
+    pub fn message_count(&self) -> usize {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    /// The last multimodal message received (returns `None` if dispatch never
+    /// forwarded a `Message`). Used to verify workers see user attachments.
+    pub fn last_message(&self) -> Option<echo_core::llm::types::Message> {
+        self.messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .cloned()
+    }
+
     /// Clear call history (response queue is unaffected)
     ///
     /// Used only for test assertion reset, not equivalent to `Agent::reset()`.
@@ -163,6 +201,32 @@ impl Agent for MockAgent {
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
             let answer = self.execute(task).await?;
+            let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
+            Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+        })
+    }
+
+    /// Multimodal dispatch override: record the received message (so tests can
+    /// assert workers saw user attachments) and consume a preset response like
+    /// the text path. Without this override, the trait default would reject
+    /// multimodal dispatch — making it impossible to test message forwarding.
+    fn execute_stream_message_with_cancel<'a>(
+        &'a self,
+        message: echo_core::llm::types::Message,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            self.messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(message.clone());
+            // Also record as a regular call (text part) for parity with last_task.
+            let text = message.content.as_text().unwrap_or_default();
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(text);
+            let answer = self.next_response();
             let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
             Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
         })
