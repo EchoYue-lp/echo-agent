@@ -60,6 +60,13 @@ type Result<T> = std::result::Result<T, ReactError>;
 /// merged here; Archived status replaces the former cold namespace).
 pub const WARM_NAMESPACE: &[&str] = &["agent", "memories"];
 
+/// Optional namespace for a separate cold/archival tier (retained as pub API
+/// for consumers aligned with Letta/MemGPT archival memory — recall-on-demand,
+/// not proactively loaded into context). The default product path uses
+/// `WARM_NAMESPACE` + `MemoryStatus::Archived` instead; this constant exists
+/// so consumers who need a distinct cold store can opt in.
+pub const COLD_NAMESPACE: &[&str] = &["agent", "cold_memories"];
+
 /// Maximum token budget for the hot layer (MEMORY.md body).
 const HOT_TOKEN_BUDGET: usize = 2000;
 
@@ -76,6 +83,12 @@ pub enum MemoryLayer {
     /// stage4 removed the separate Cold layer; staleness is a recall-decay
     /// weight, not a layer move.
     Warm,
+    /// Optional third tier for long-term archival (rarely loaded, low
+    /// confidence/stale). stage4 collapsed cold into `Warm`+`Archived`, but
+    /// this variant + [`COLD_NAMESPACE`] are retained as pub API so consumers
+    /// who need a separate cold tier (aligned with Letta/MemGPT archival) can
+    /// opt in. The default product path does not use it.
+    Cold,
 }
 
 impl std::fmt::Display for MemoryLayer {
@@ -83,6 +96,7 @@ impl std::fmt::Display for MemoryLayer {
         match self {
             Self::Hot => write!(f, "hot"),
             Self::Warm => write!(f, "warm"),
+            Self::Cold => write!(f, "cold"),
         }
     }
 }
@@ -318,6 +332,34 @@ impl MemoryLayerManager {
     // happens via `consider_promotion` → `promote_warm_to_hot`.
 
     /// Demote a memory: hot→warm, or warm→Archived (in place).
+    /// Promote a memory up one tier: cold→warm, or warm→hot.
+    ///
+    /// This is the inverse of [`demote`](Self::demote). stage4 collapsed the
+    /// separate cold tier into `Warm`+`Archived`, so:
+    /// - `Warm → Hot`: delegates to [`consider_promotion`](Self::consider_promotion).
+    /// - `Cold → Warm`: only meaningful for consumers maintaining a separate
+    ///   cold store under [`COLD_NAMESPACE`]; default path returns `Ok(None)`.
+    /// - `Hot`: already at top, returns `Ok(None)`.
+    ///
+    /// Retained as pub API (aligned with Letta/MemGPT promotion + OpenClaw
+    /// Dreaming) so consumers with a three-tier layout can hook in.
+    pub async fn promote(&self, key: &str) -> Result<Option<LayerChangeResult>> {
+        let Some((layer, _entry)) = self.locate(key).await else {
+            return Ok(None);
+        };
+        match layer {
+            MemoryLayer::Hot => Ok(None),
+            MemoryLayer::Warm => self.consider_promotion(key).await,
+            MemoryLayer::Cold => {
+                tracing::debug!(
+                    key = %key,
+                    "promote() on cold-layer entry; default path has no cold store, no-op"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     ///
     /// (stage4 B1) Warm demotion no longer moves the entry to a cold namespace;
     /// it marks `status = Archived` in place so the memory stays recallable
@@ -354,6 +396,11 @@ impl MemoryLayerManager {
                     reason: reason.to_string(),
                 })
             }
+            MemoryLayer::Cold => Err(ReactError::Config(Box::new(ConfigError::ConfigFileError(
+                format!(
+                    "Memory key '{key}' is in the optional cold layer; the default product path has no cold store, cannot demote further"
+                ),
+            )))),
         }
     }
 
@@ -418,11 +465,22 @@ impl MemoryLayerManager {
                     return Ok(false);
                 }
             }
+            MemoryLayer::Cold => {
+                // Optional tier: consumers maintaining a separate COLD_NAMESPACE
+                // store should delete from it here. Default path has no cold
+                // entries (locate() won't return Cold), so this is unreachable
+                // in the product but required for exhaustiveness.
+                let deleted = self.typed_store.delete_typed(COLD_NAMESPACE, key).await?;
+                if !deleted {
+                    return Ok(false);
+                }
+            }
         }
 
         let layer_name = match layer {
             MemoryLayer::Hot => "hot",
             MemoryLayer::Warm => "warm",
+            MemoryLayer::Cold => "cold",
         };
         self.record_change(
             key,

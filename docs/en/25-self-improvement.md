@@ -207,13 +207,13 @@ let entries = store.list_typed(&["agent", "typed_memories"], &filter).await?;
 | `RepeatedWorkflow` | Same tool sequence observed ≥3 times | 0.75 |
 | `AutoExtracted` | AutoMemory extracted from session archive | 0.6 |
 
-### Three-Tier Memory Management — `MemoryLayerManager`
+### Tiered Memory Management — `MemoryLayerManager`
 
-Memory is tiered by value; the hot tier is always in context, warm/cold are retrieved on demand:
+Memory is tiered by value; the hot tier is always in context, warm is retrieved on demand:
 
 - **Hot** (`.echo-agent/MEMORY.md`): highest value, YAML frontmatter + markdown body, ~2000 token cap, editable by both humans and the Agent.
-- **Warm** (Store KV `["agent","typed_memories"]`): organized by topic, loaded on demand.
-- **Cold** (Store KV `["agent","cold_memories"]`): archive for old/low-confidence memory.
+- **Warm** (Store KV `["agent","memories"]`): unified typed-memory store; organized by topic, loaded on demand. Memories can be `Active` or `Archived` (staleness is a recall-decay weight, not a layer move — Archived stays recallable with decay).
+- **Cold** (optional; Store KV `["agent","cold_memories"]`): retained as pub API for consumers aligned with Letta/MemGPT archival memory (recall-on-demand, not proactively loaded). The default product path collapses cold into `Warm`+`Archived`; consumers who need a distinct cold tier can opt in via `COLD_NAMESPACE`.
 
 ```rust
 use echo_agent::evolution::{MemoryLayerManager, JsonlChangeLog, MemoryMeta, MemorySource, MemoryType};

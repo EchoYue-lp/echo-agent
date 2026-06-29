@@ -178,6 +178,7 @@ pub mod prelude {
 
     // Compression
     pub use crate::compression::compressor::{
+        HybridCompressor, HybridCompressorBuilder, IncrementalSummaryCompressor,
         SlidingWindowCompressor, SummaryCompressor, default_summary_prompt,
     };
     pub use crate::compression::horizon::{VisibilityHorizonCompressor, VisibilityHorizonConfig};

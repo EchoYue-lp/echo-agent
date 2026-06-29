@@ -281,6 +281,17 @@ pub struct ContextManager {
     /// Any message whose content contains one of these markers is excluded from compression.
     /// Used by the skill system to protect activated skill instructions.
     protected_markers: Vec<String>,
+    /// Optional hard message-count cap (supplementary OOM guard).
+    ///
+    /// (stage4 P4.3) The primary OOM defense is the token budget (`token_limit`
+    /// / `budget`); `max_messages` is an optional supplementary guard against
+    /// pathological message-count growth (e.g. many tiny messages that don't
+    /// trip the token threshold but slow rendering/processing). Industry主流
+    /// is token-driven (OpenAI/Anthropic/Letta all bill/window on tokens);
+    /// `max_messages` defaults to `None` (disabled) to align with that.
+    /// Consumers who want a message-count backstop can set it via
+    /// [`ContextManagerBuilder::max_messages`].
+    max_messages: Option<usize>,
     /// Optional token budget for percentage-based allocation.
     /// When set, `prepare()` uses budget.allocate() instead of simple token_limit comparison.
     budget: Option<TokenBudget>,
@@ -306,6 +317,7 @@ impl ContextManager {
             compressor: None,
             initial_messages: Vec::new(),
             tokenizer: None,
+            max_messages: None,
             budget: None,
             visibility_horizon: None,
             memory_promoter: None,
@@ -315,12 +327,70 @@ impl ContextManager {
 
     /// Append a message to the context buffer.
     ///
-    /// (stage4 P4.3) The 200-message hard cap is removed — compression is now
-    /// purely token-budget driven (`prepare()` triggers when estimated tokens
-    /// exceed `token_limit`). Token estimation scales with message count, so the
-    /// token budget is the OOM defense (no separate message-count cap needed).
+    /// (stage4 P4.3) The primary OOM defense is the token budget (`prepare()`
+    /// triggers when estimated tokens exceed `token_limit`). The optional
+    /// `max_messages` cap (if set via builder) is a supplementary backstop:
+    /// when exceeded, a sliding-window degradation preserves system + protected
+    /// + recent messages and discards the earliest in between. Defaults to
+    /// `None` (no message-count cap, token-driven, aligned with industry).
     pub fn push(&mut self, message: Message) {
         self.messages.push(message);
+
+        // Optional supplementary hard cap (defaults to None = disabled).
+        if let Some(cap) = self.max_messages
+            && self.messages.len() > cap
+        {
+            self.apply_hard_cap(cap);
+        }
+    }
+
+    /// Apply hard message cap: preserve system messages, protected messages,
+    /// and recent messages; discard the earliest in between. Only triggered
+    /// when `max_messages` is set and exceeded.
+    fn apply_hard_cap(&mut self, target: usize) {
+        if self.messages.len() <= target {
+            return;
+        }
+
+        // Identify protected message indices (should not be deleted).
+        let protected: std::collections::HashSet<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, msg)| {
+                if self.is_protected(msg) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Find the position of the first non-system message
+        let first_non_system = self
+            .messages
+            .iter()
+            .position(|m| m.role != Role::System)
+            .unwrap_or(0);
+
+        // Preserve: all system messages at the front + the last `target` messages.
+        // Discard the earliest non-system, non-protected messages in between.
+        let keep_count = self.messages.len() - target;
+        let mut to_remove: Vec<usize> = Vec::new();
+        let mut removed = 0;
+        for i in first_non_system..self.messages.len() {
+            if removed >= keep_count {
+                break;
+            }
+            if !protected.contains(&i) && self.messages[i].role != Role::System {
+                to_remove.push(i);
+                removed += 1;
+            }
+        }
+        // Remove in reverse order to keep indices valid.
+        for i in to_remove.into_iter().rev() {
+            self.messages.remove(i);
+        }
     }
 
     /// Batch-append messages
@@ -1359,6 +1429,7 @@ pub struct ContextManagerBuilder {
     compressor: Option<Box<dyn ContextCompressor>>,
     initial_messages: Vec<Message>,
     tokenizer: Option<Arc<dyn Tokenizer>>,
+    max_messages: Option<usize>,
     budget: Option<TokenBudget>,
     visibility_horizon: Option<horizon::VisibilityHorizonCompressor>,
     memory_promoter: Option<Arc<dyn MemoryPromoter>>,
@@ -1394,6 +1465,19 @@ impl ContextManagerBuilder {
     /// ```
     pub fn tokenizer(mut self, tokenizer: Arc<dyn Tokenizer>) -> Self {
         self.tokenizer = Some(tokenizer);
+        self
+    }
+
+    /// Set an optional hard message-count cap (supplementary OOM backstop).
+    ///
+    /// (stage4 P4.3) The primary OOM defense is the token budget; industry主流
+    /// is token-driven (OpenAI/Anthropic/Letta all bill/window on tokens).
+    /// `max_messages` defaults to `None` (disabled). Set it only when you need
+    /// a message-count backstop against pathological growth (e.g. many tiny
+    /// messages). When exceeded, `push()` applies sliding-window degradation
+    /// preserving system + protected + recent messages.
+    pub fn max_messages(mut self, max: usize) -> Self {
+        self.max_messages = Some(max);
         self
     }
 
@@ -1459,6 +1543,7 @@ impl ContextManagerBuilder {
             // (stage4 G1) `protected_memory` is a default marker so recalled
             // memories (wrapped by `format_memory_context`) survive compaction.
             protected_markers: vec!["protected_memory".to_string()],
+            max_messages: self.max_messages,
             budget: self.budget,
             metrics: CompressionMetrics::new(),
             visibility_horizon: self.visibility_horizon,
