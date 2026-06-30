@@ -4,7 +4,6 @@ pub mod anthropic_cache;
 pub mod client;
 pub mod config;
 pub mod openai;
-pub mod openai_cache;
 pub mod thinking_translate;
 pub mod traits;
 

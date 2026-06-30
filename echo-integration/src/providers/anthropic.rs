@@ -168,8 +168,10 @@ impl AnthropicClient {
 
         let tools_ref: &[echo_core::llm::types::ToolDefinition] =
             request.tools.as_deref().unwrap_or(&[]);
-        let cache_plan = if let Some(ref hints) = request.cache_hints {
-            // Agent layer provided pre-computed breakpoints via CacheHints.
+        let cache_plan = if let Some(ref hints) = request.cache_hints
+            && !hints.breakpoints.is_empty()
+        {
+            // Agent layer provided explicit breakpoints via CacheHints.
             use echo_core::llm::cache::BreakpointTarget as BT;
             AnthropicCachePlan {
                 breakpoints: hints.breakpoints.clone(),
@@ -183,7 +185,15 @@ impl AnthropicClient {
                     .any(|b| matches!(b, BT::ToolsLastTool)),
             }
         } else {
-            // Backward compat: compute layout here.
+            // No explicit breakpoints: either no `cache_hints` at all, or the
+            // main think path which sends `Some(CacheHints { breakpoints: vec![], .. })`
+            // — the agent layer computes the layout for the stable-prefix hash
+            // but leaves breakpoint derivation to the provider. Deriving here
+            // (rather than at the agent layer) keeps the layering clean: echo-agent
+            // must not depend on the Anthropic-specific `AnthropicCachePlan`.
+            // WITHOUT this fallback the main path would place ZERO cache_control
+            // (has_system/tool=false, history_breakpoint_count=0) and Anthropic
+            // would never cache the stable prefix on the highest-volume path.
             let layout = echo_core::llm::cache::PromptCacheLayout::from_messages(
                 &request.messages,
                 tools_ref,
@@ -1157,6 +1167,59 @@ mod tests {
         assert!(
             body.get("metadata").is_none(),
             "metadata should be absent when user_id is None, got: {body}"
+        );
+    }
+
+    /// Sprint 2: main think path sends `cache_hints: Some` with **empty**
+    /// breakpoints (agent computes layout for the hash but leaves breakpoint
+    /// derivation to the provider). The provider MUST fall back to
+    /// `AnthropicCachePlan::from_layout` and place cache_control — not silently
+    /// emit zero breakpoints (pre-fix bug: has_system/tool=false,
+    /// history_breakpoint_count=0 → no cache_control on the main path).
+    #[test]
+    fn cache_hints_with_empty_breakpoints_still_places_cache_control() {
+        use echo_core::llm::cache::CacheHints;
+        use echo_core::llm::types::{FunctionSpec, Message, ToolDefinition};
+
+        let messages = vec![
+            Message::system("You are Echo Agent".to_string()),
+            Message::user("h1".to_string()),
+            Message::user("h2".to_string()),
+            Message::user("h3".to_string()),
+            Message::user("h4".to_string()),
+        ];
+        let tools = vec![ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionSpec {
+                name: "t".to_string(),
+                description: "d".to_string(),
+                parameters: serde_json::json!({}),
+            },
+        }];
+        // Main-path shape: Some(CacheHints { breakpoints: vec![], .. }). The
+        // provider recomputes the layout from request.messages+tools itself
+        // (it does not read hints.segments), so segments can be default.
+        let mut req = ChatRequest::default();
+        req.messages = messages;
+        req.tools = Some(tools);
+        req.cache_hints = Some(CacheHints {
+            breakpoints: vec![],
+            stable_prefix_hash: Some("deadbeef".to_string()),
+            segments: Default::default(),
+        });
+
+        let client = AnthropicClient::new("sk-xxx".to_string(), "claude-sonnet-4-6".to_string());
+        let body = serde_json::to_value(client.convert_request(&req)).expect("serialize");
+        // Before fix: zero cache_control. After: from_layout places system +
+        // tools + history breakpoints.
+        let body_str = body.to_string();
+        assert!(
+            body_str.contains("cache_control"),
+            "main-path (empty breakpoints) must still place cache_control via from_layout fallback; got: {body_str}"
+        );
+        assert!(
+            body_str.contains("ephemeral"),
+            "cache_control must be ephemeral; got: {body_str}"
         );
     }
 
