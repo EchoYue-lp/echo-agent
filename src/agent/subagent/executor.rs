@@ -500,9 +500,27 @@ impl SubagentExecutor {
 
     /// Enhance the task description with inherited parent context.
     ///
-    /// Prepends inherited system prompt and conversation history to the task,
-    /// giving the subagent awareness of the parent's state.
-    fn enhance_task(task: &str, parent_ctx: Option<&super::context::SubagentContext>) -> String {
+    /// Prepends the inherited system prompt and a **sliced** conversation
+    /// history to the task, giving the subagent awareness of the parent's
+    /// state.
+    ///
+    /// # History slicing (Sprint 6b)
+    ///
+    /// `inherit_history` controls how many trailing messages are joined:
+    /// - `None`  → no history is inherited (system prompt only, if any).
+    /// - `Some(0)` → inherit all messages already present in `parent_ctx`
+    ///   (these were themselves capped by the Fork mode default when the
+    ///   context was built via `SubagentContext::from_parent`).
+    /// - `Some(n)` → inherit the **last n** messages.
+    ///
+    /// Before Sprint 6b this function ignored `inherit_history` and dumped the
+    /// entire `parent_ctx.messages`, so per-subagent `inherit_history` settings
+    /// (e.g. from a worker `.md` frontmatter) had no effect.
+    fn enhance_task(
+        task: &str,
+        parent_ctx: Option<&super::context::SubagentContext>,
+        inherit_history: Option<usize>,
+    ) -> String {
         let Some(ctx) = parent_ctx else {
             return task.to_string();
         };
@@ -511,9 +529,21 @@ impl SubagentExecutor {
         if !ctx.system_prompt.is_empty() {
             parts.push(format!("[Inherited System Context]\n{}", ctx.system_prompt));
         }
-        if !ctx.messages.is_empty() {
-            let history: Vec<String> = ctx
-                .messages
+
+        // Pick the message slice dictated by inherit_history.
+        // Some(0) = everything already in ctx.messages (capped upstream);
+        // Some(n) = last n; None = none.
+        let selected: &[echo_core::llm::types::Message] = match inherit_history {
+            None => &[],
+            Some(0) => &ctx.messages,
+            Some(n) => {
+                let start = ctx.messages.len().saturating_sub(n);
+                &ctx.messages[start..]
+            }
+        };
+
+        if !selected.is_empty() {
+            let history: Vec<String> = selected
                 .iter()
                 .filter_map(|m| {
                     m.content
@@ -719,7 +749,11 @@ impl SubagentExecutor {
         };
 
         let start = Instant::now();
-        let task = Self::enhance_task(&req.task, req.parent_context.as_ref());
+        let inherit_history = match self.registry.get(&req.agent_name).await {
+            Some(r) => r.definition.inherit_history,
+            None => None,
+        };
+        let task = Self::enhance_task(&req.task, req.parent_context.as_ref(), inherit_history);
         let cancel = req.cancel.clone();
 
         if timeout_secs > 0 {
@@ -802,7 +836,11 @@ impl SubagentExecutor {
         let cancel = req.cancel.clone();
         let registry = self.registry.clone();
         let message = req.message.clone();
-        let enhanced_task = Self::enhance_task(&task, req.parent_context.as_ref());
+        let enhanced_task = Self::enhance_task(
+            &task,
+            req.parent_context.as_ref(),
+            registered.definition.inherit_history,
+        );
         // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
         // worker agent 是 registry 预注册的单例(fork 不 clone),其 current_run_id
         // 初始为 None。dispatch_fork 在 worker 执行前显式 set_external_context,
@@ -903,12 +941,72 @@ impl SubagentExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::subagent::context::SubagentContext;
     use crate::testing::MockAgent;
 
     async fn make_executor() -> (Arc<SubagentRegistry>, SubagentExecutor) {
         let registry = Arc::new(SubagentRegistry::new());
         let executor = SubagentExecutor::new(registry.clone(), SubagentExecutorConfig::default());
         (registry, executor)
+    }
+
+    /// Build a SubagentContext with N numbered user messages and no system prompt.
+    fn ctx_with_messages(n: usize) -> SubagentContext {
+        let mut ctx = SubagentContext::empty();
+        ctx.messages = (0..n)
+            .map(|i| echo_core::llm::types::Message::user(format!("msg{i}")))
+            .collect();
+        ctx
+    }
+
+    #[test]
+    fn enhance_task_no_context_returns_task_unchanged() {
+        let out = SubagentExecutor::enhance_task("do thing", None, None);
+        assert_eq!(out, "do thing");
+    }
+
+    #[test]
+    fn enhance_task_inherit_history_none_omits_history() {
+        // Sprint 6b: inherit_history=None → no history joined, even though
+        // parent_ctx has messages. System prompt still joined if present.
+        let mut ctx = ctx_with_messages(5);
+        ctx.system_prompt = "SYS".to_string();
+        let out = SubagentExecutor::enhance_task("task", Some(&ctx), None);
+        assert!(out.contains("[Inherited System Context]\nSYS"));
+        assert!(out.contains("task"));
+        assert!(
+            !out.contains("msg"),
+            "with inherit_history=None no history should be joined"
+        );
+    }
+
+    #[test]
+    fn enhance_task_inherit_history_n_takes_last_n() {
+        let ctx = ctx_with_messages(5);
+        // Some(2) → only last 2 messages (msg3, msg4).
+        let out = SubagentExecutor::enhance_task("task", Some(&ctx), Some(2));
+        assert!(out.contains("[user] msg3"));
+        assert!(out.contains("[user] msg4"));
+        assert!(!out.contains("msg0"));
+        assert!(!out.contains("msg2"));
+    }
+
+    #[test]
+    fn enhance_task_inherit_history_zero_takes_all() {
+        let ctx = ctx_with_messages(3);
+        let out = SubagentExecutor::enhance_task("task", Some(&ctx), Some(0));
+        assert!(out.contains("msg0"));
+        assert!(out.contains("msg1"));
+        assert!(out.contains("msg2"));
+    }
+
+    #[test]
+    fn enhance_task_inherit_history_larger_than_available_takes_all() {
+        // saturating_sub keeps this panic-free.
+        let ctx = ctx_with_messages(2);
+        let out = SubagentExecutor::enhance_task("task", Some(&ctx), Some(10));
+        assert!(out.contains("msg0"));
+        assert!(out.contains("msg1"));
     }
 
     #[tokio::test]

@@ -88,7 +88,13 @@ impl SubagentBuilder {
     /// Set execution mode to Fork (inherits context, runs independently).
     pub fn fork_mode(mut self) -> Self {
         self.definition.execution_mode = ExecutionMode::Fork;
-        self.definition.inherit_history = Some(10);
+        // Sprint 6b: lowered 10 → 2. Fork subagents are focused workers; a
+        // 10-message prefix bloats their context with stale turns and dilutes
+        // attention on the actual task. 2 trailing messages keep just enough
+        // parent state (typically the last user turn + a tool result) without
+        // the noise. Per-subagent `.inherit_history(n)` still overrides this,
+        // and a `.md` frontmatter can set it per worker.
+        self.definition.inherit_history = Some(2);
         self.definition.inherit_memory = true;
         self
     }
@@ -212,6 +218,7 @@ mod tests {
 
         assert_eq!(def.execution_mode, ExecutionMode::Fork);
         assert_eq!(def.model.as_deref(), Some("qwen3"));
+        // fork_mode() default is 2 (Sprint 6b), then .inherit_history(10) overrides.
         assert_eq!(def.inherit_history, Some(10));
         assert!(def.can_delegate);
         assert_eq!(def.tags, vec!["research"]);
@@ -219,6 +226,16 @@ mod tests {
             def.tool_filter.as_deref(),
             Some(["search".to_string(), "read".to_string()].as_slice())
         );
+    }
+
+    #[test]
+    fn test_builder_fork_default_inherit_history_lowered() {
+        // Sprint 6b: fork_mode() default inherit_history is 2 (was 10).
+        let def = SubagentBuilder::new("w")
+            .description("d")
+            .fork_mode()
+            .build();
+        assert_eq!(def.inherit_history, Some(2));
     }
 
     #[test]

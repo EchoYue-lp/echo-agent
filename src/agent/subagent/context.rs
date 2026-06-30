@@ -46,12 +46,17 @@ impl ContextInheritance {
         }
     }
 
-    /// Fork mode default: inherit prompt + tools + recent 10 messages.
+    /// Fork mode default: inherit prompt + tools + recent 2 messages.
+    ///
+    /// Sprint 6b: lowered 10 → 2 (was over-inheriting, bloating Fork worker
+    /// context with stale turns). `SubagentDefinition.inherit_history` (e.g.
+    /// from a `.md` frontmatter or `.inherit_history(n)`) is now honored at
+    /// dispatch time by `enhance_task` and overrides this default.
     pub fn fork_default() -> Self {
         Self {
             inherit_system_prompt: true,
             inherit_tools: None,
-            inherit_history: Some(10),
+            inherit_history: Some(2),
             inherit_memory: true,
             inject_metadata: HashMap::new(),
         }
@@ -294,7 +299,8 @@ mod tests {
     fn test_fork_default_inherits() {
         let inh = ContextInheritance::fork_default();
         assert!(inh.inherit_system_prompt);
-        assert_eq!(inh.inherit_history, Some(10));
+        // Sprint 6b: fork default inherit_history lowered 10 → 2.
+        assert_eq!(inh.inherit_history, Some(2));
         assert!(inh.inherit_memory);
     }
 
