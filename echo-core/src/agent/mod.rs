@@ -527,6 +527,19 @@ pub trait Agent: Send + Sync {
     /// 默认 noop。ReactAgent override。
     fn clear_external_context(&self) {}
 
+    /// Bind a working directory for this agent's tool calls (Sprint 8 worktree
+    /// isolation). When set, every shell/file/git tool runs inside `path`
+    /// (via `ToolContext.working_dir`). `None` clears it (restore default cwd).
+    ///
+    /// Default: noop. ReactAgent overrides this to set/clear `config.working_dir`
+    /// and refresh its root-system-prompt. Used by Fork dispatch to chroot a
+    /// worker into an isolated git worktree.
+    fn set_working_dir(&self, _path: Option<std::path::PathBuf>) {}
+
+    /// Clear the bound working directory (alias for `set_working_dir(None)`).
+    /// Default: noop. ReactAgent override.
+    fn clear_working_dir(&self) {}
+
     // ── Dynamic capability methods (default noop) ────────────────────
 
     /// Dynamically register a tool at runtime.

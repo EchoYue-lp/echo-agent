@@ -96,6 +96,18 @@ pub struct SubagentDefinition {
     /// When `true`, the sub-agent shares the parent's LLM client, ToolManager,
     /// and GuardManager instead of creating new instances.
     pub lightweight: bool,
+    /// Whether Fork-dispatched execution of this subagent should run inside an
+    /// isolated git worktree (Sprint 8). Mirrors Claude Code's
+    /// `isolation: worktree` frontmatter. Only meaningful for **writer**
+    /// workers (readonly workers don't mutate files and don't need isolation).
+    ///
+    /// When `true` AND a `WorktreeFactory` is configured on the executor, the
+    /// Fork dispatch creates a worktree, binds it as the worker's `working_dir`,
+    /// and finalizes a diff summary after the run. Worktree creation failure
+    /// fails the dispatch (never silently continue without isolation). When
+    /// `true` but no factory is configured, a warning is logged and the worker
+    /// runs without isolation (the application decides whether to supply one).
+    pub isolate_worktree: bool,
 }
 
 impl SubagentDefinition {
@@ -121,6 +133,7 @@ impl SubagentDefinition {
             can_delegate: false,
             tags: Vec::new(),
             lightweight: false,
+            isolate_worktree: false,
         }
     }
 

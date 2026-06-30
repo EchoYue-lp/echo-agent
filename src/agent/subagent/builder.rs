@@ -49,6 +49,7 @@ impl SubagentBuilder {
                 can_delegate: false,
                 tags: Vec::new(),
                 lightweight: false,
+                isolate_worktree: false,
             },
         }
     }
@@ -156,6 +157,16 @@ impl SubagentBuilder {
     /// Allow this subagent to delegate to further subagents.
     pub fn can_delegate(mut self) -> Self {
         self.definition.can_delegate = true;
+        self
+    }
+
+    /// Request that Fork-dispatched execution of this subagent run inside an
+    /// isolated git worktree (Sprint 8). Mirrors Claude Code's
+    /// `isolation: worktree`. Only effective for writer workers; requires a
+    /// `WorktreeFactory` configured on the executor (else a warning is logged
+    /// and the worker runs without isolation).
+    pub fn isolate_worktree(mut self) -> Self {
+        self.definition.isolate_worktree = true;
         self
     }
 

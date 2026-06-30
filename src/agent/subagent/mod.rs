@@ -16,6 +16,7 @@ pub mod registry;
 pub mod team;
 pub mod types;
 pub mod usage;
+pub mod worktree;
 
 // Re-export the most commonly used types
 pub use builder::SubagentBuilder;
@@ -27,4 +28,7 @@ pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, Subage
 pub use registry::SubagentRegistry;
 pub use types::{
     ExecutionMode, RegisteredSubagent, SubagentDefinition, SubagentKind, SubagentResult,
+};
+pub use worktree::{
+    NoWorktreeFactory, SharedWorktreeFactory, WorktreeError, WorktreeFactory, WorktreeHandle,
 };

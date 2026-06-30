@@ -56,6 +56,9 @@ pub struct MockAgent {
     /// Multimodal messages received via `execute_stream_message_with_cancel`
     /// (records whether dispatch forwarded attachments to the worker).
     messages: Arc<Mutex<Vec<echo_core::llm::types::Message>>>,
+    /// `set_working_dir` calls recorded in order (Sprint 8 isolation tests).
+    /// Each entry is the path the agent was asked to bind (`None` = clear).
+    working_dirs: Arc<Mutex<Vec<Option<std::path::PathBuf>>>>,
 }
 
 // All observable state is behind Arc<Mutex>, so cloning shares call/message
@@ -70,6 +73,7 @@ impl Clone for MockAgent {
             responses: self.responses.clone(),
             calls: self.calls.clone(),
             messages: self.messages.clone(),
+            working_dirs: self.working_dirs.clone(),
         }
     }
 }
@@ -84,6 +88,7 @@ impl MockAgent {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
+            working_dirs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -161,6 +166,15 @@ impl MockAgent {
     /// Used only for test assertion reset, not equivalent to `Agent::reset()`.
     pub fn reset_calls(&self) {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// All `set_working_dir` calls recorded in order (Sprint 8 isolation tests).
+    /// Each entry is the path the agent was asked to bind; `None` = clear.
+    pub fn working_dir_calls(&self) -> Vec<Option<std::path::PathBuf>> {
+        self.working_dirs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn next_response(&self) -> String {
@@ -260,6 +274,22 @@ impl Agent for MockAgent {
         Box::pin(async move {
             self.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
         })
+    }
+
+    /// Record `set_working_dir` calls so Sprint 8 isolation tests can verify
+    /// the worker was chrooted into the worktree (and cleared afterwards).
+    fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
+        self.working_dirs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(path);
+    }
+
+    fn clear_working_dir(&self) {
+        self.working_dirs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(None);
     }
 }
 

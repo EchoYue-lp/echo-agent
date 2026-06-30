@@ -117,6 +117,13 @@ pub struct SubagentExecutorConfig {
     /// When set, SubagentStart/SubagentStop events are fired into the
     /// unified HookRegistry alongside the trait-based SubagentHooks.
     pub unified_hook_executor: Option<crate::skills::hooks::UnifiedHookExecutorFn>,
+    /// Optional worktree-isolation factory (Sprint 8). When set, Fork-dispatched
+    /// workers whose `SubagentDefinition.isolate_worktree == true` run inside an
+    /// isolated git worktree created by this factory. `None` = no isolation
+    /// available (workers declaring `isolate_worktree` log a warning and run
+    /// unisolated). Application supplies a git-backed impl; framework stays
+    /// free of git deps.
+    pub worktree_factory: Option<super::worktree::SharedWorktreeFactory>,
 }
 
 impl Default for SubagentExecutorConfig {
@@ -126,6 +133,7 @@ impl Default for SubagentExecutorConfig {
             default_timeout_secs: 600,
             enable_hooks: true,
             unified_hook_executor: None,
+            worktree_factory: None,
         }
     }
 }
@@ -848,6 +856,32 @@ impl SubagentExecutor {
         // cache_user_id——绕开会跨 tokio::spawn 断裂的 task_local。
         let runtime_context = req.runtime_context.clone();
 
+        // Sprint 8: worktree isolation for writer workers. Resolve the intent
+        // before spawning so the closure can capture a shared factory clone.
+        let isolate = registered.definition.isolate_worktree;
+        let worktree_factory = if isolate {
+            self.config.worktree_factory.clone()
+        } else {
+            None
+        };
+        if isolate && worktree_factory.is_none() {
+            // The worker asked for isolation but the application supplied no
+            // factory. Log and run unisolated rather than hard-failing — the
+            // application explicitly chose not to supply worktrees. (A factory
+            // present-but-failing is the hard-fail case, handled below.)
+            tracing::warn!(
+                worker = %agent_name,
+                "Worker declares isolate_worktree but no WorktreeFactory is configured; \
+                 running without isolation"
+            );
+        }
+        // Label identifies this dispatch for worktree branch naming. run_id (if
+        // available from the runtime context) disambiguates concurrent runs.
+        let worktree_label = match runtime_context.as_ref() {
+            Some(ctx) => format!("{agent_name}-{}", ctx.run_id),
+            None => format!("{agent_name}-{}", uuid::Uuid::new_v4().as_simple()),
+        };
+
         let result = tokio::spawn(async move {
             let _permit = permit;
             let start = Instant::now();
@@ -874,6 +908,34 @@ impl SubagentExecutor {
             let has_ctx = runtime_context.is_some();
             if let Some(ctx) = &runtime_context {
                 agent.set_external_context(ctx);
+            }
+
+            // Sprint 8: if isolation was requested and a factory is available,
+            // create a worktree and bind it as the worker's working_dir BEFORE
+            // execution. Creation failure is a hard error — never silently run
+            // a writer without the promised isolation (would let it touch the
+            // main checkout, a data-loss hazard).
+            //
+            // `create` may block on a git subprocess; the application's factory
+            // is responsible for offloading that to spawn_blocking if needed.
+            // We capture the handle to finalize (diff summary) after the run.
+            let mut worktree_handle: Option<super::worktree::WorktreeHandle> = None;
+            if let Some(factory) = &worktree_factory {
+                match factory.create(&worktree_label) {
+                    Ok(handle) => {
+                        agent.set_working_dir(Some(handle.path.clone()));
+                        worktree_handle = Some(handle);
+                    }
+                    Err(e) => {
+                        // Clean up the external context we just set before bailing.
+                        if has_ctx {
+                            agent.clear_external_context();
+                        }
+                        return Err(ReactError::Other(format!(
+                            "Worktree isolation for Fork worker '{agent_name}' failed: {e}"
+                        )));
+                    }
+                }
             }
 
             let result = if timeout_secs > 0 {
@@ -929,6 +991,33 @@ impl SubagentExecutor {
             if has_ctx {
                 agent.clear_external_context();
             }
+
+            // Sprint 8: finalize the worktree (diff summary) and restore the
+            // worker's working_dir so the singleton worker isn't left pointing
+            // at a now-finalized worktree on its next dispatch. Append the diff
+            // to the worker's output so the caller sees what changed.
+            if let Some(handle) = worktree_handle {
+                agent.set_working_dir(None);
+                match (handle.finalize)() {
+                    Ok(diff) => {
+                        if let Ok(mut r) = result {
+                            if !diff.trim().is_empty() {
+                                r.output =
+                                    format!("{}\n\n--- worktree diff ---\n{}", r.output, diff);
+                            }
+                            return Ok(r);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            worker = %agent_name,
+                            error = %e,
+                            "Worktree finalize (diff summary) failed; result preserved"
+                        );
+                    }
+                }
+            }
+
             result
         })
         .await
@@ -1145,5 +1234,206 @@ mod tests {
 
         let result = handle.join().await.unwrap();
         assert_eq!(result.output, "team result");
+    }
+
+    // ── Sprint 8: Fork worktree isolation ──────────────────────────────────
+
+    use crate::agent::subagent::worktree::{WorktreeError, WorktreeFactory, WorktreeHandle};
+    use std::sync::Mutex as StdMutex;
+
+    /// A mock factory whose `create` always succeeds, records the label, and
+    /// whose `finalize` returns a canned diff. `should_fail` toggles hard-fail.
+    struct MockWorktreeFactory {
+        labels: StdMutex<Vec<String>>,
+        should_fail: bool,
+    }
+
+    impl WorktreeFactory for MockWorktreeFactory {
+        fn create(&self, label: &str) -> Result<WorktreeHandle, WorktreeError> {
+            if self.should_fail {
+                return Err(WorktreeError::new("mock worktree create failed"));
+            }
+            self.labels.lock().unwrap().push(label.to_string());
+            let path = std::path::PathBuf::from(format!("/tmp/mock-wt-{label}"));
+            Ok(WorktreeHandle {
+                path,
+                finalize: Box::new(|| Ok("=== mock diff ===\nfoo.rs | 1 +".to_string())),
+            })
+        }
+    }
+
+    /// Build an executor with a worktree factory wired into its config.
+    fn make_executor_with_factory(
+        factory: Arc<dyn WorktreeFactory>,
+    ) -> (Arc<SubagentRegistry>, SubagentExecutor) {
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = SubagentExecutor::new(
+            registry.clone(),
+            SubagentExecutorConfig {
+                worktree_factory: Some(factory),
+                ..SubagentExecutorConfig::default()
+            },
+        );
+        (registry, executor)
+    }
+
+    #[tokio::test]
+    async fn fork_isolate_worktree_binds_path_and_appends_diff() {
+        // A writer worker declaring isolate_worktree, dispatched in Fork mode
+        // with a configured factory: the mock agent should be chrooted into
+        // the worktree path, then cleared, and the diff appended to the output.
+        let factory = Arc::new(MockWorktreeFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let factory_obs: Arc<dyn WorktreeFactory> = factory.clone();
+        let (registry, executor) = make_executor_with_factory(factory_obs);
+
+        let agent = MockAgent::new("writer").with_response("done");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: true,
+            ..super::super::types::SubagentDefinition::new("writer", "Writer")
+        };
+        registry.register(def, Box::new(agent.clone())).await;
+
+        let req = DispatchRequest {
+            agent_name: "writer".into(),
+            task: "edit foo".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let result = executor.dispatch(req).await.unwrap();
+        // Output = worker's answer + appended diff.
+        assert!(result.output.contains("done"));
+        assert!(result.output.contains("=== mock diff ==="));
+        // Factory was invoked once with a label derived from the agent name.
+        let labels = factory.labels.lock().unwrap().clone();
+        assert_eq!(labels.len(), 1);
+        assert!(labels[0].starts_with("writer-"));
+        // MockAgent recorded set_working_dir(Some(path)) then set_working_dir(None)
+        // (the clear after finalize). The first call must be the worktree path.
+        let wd_calls = agent.working_dir_calls();
+        assert!(
+            wd_calls.iter().any(|p| p
+                .as_ref()
+                .map(|p| p.starts_with("/tmp/mock-wt-"))
+                .unwrap_or(false)),
+            "expected a worktree path to be bound, got {wd_calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_isolate_worktree_create_failure_fails_dispatch() {
+        // A factory that hard-fails → dispatch must fail, never run unisolated.
+        let factory = Arc::new(MockWorktreeFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: true,
+        });
+        let factory_obs: Arc<dyn WorktreeFactory> = factory;
+        let (registry, executor) = make_executor_with_factory(factory_obs);
+
+        let agent = MockAgent::new("writer").with_response("done");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: true,
+            ..super::super::types::SubagentDefinition::new("writer", "Writer")
+        };
+        registry.register(def, Box::new(agent.clone())).await;
+
+        let req = DispatchRequest {
+            agent_name: "writer".into(),
+            task: "edit foo".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let err = executor.dispatch(req).await.unwrap_err();
+        assert!(err.to_string().contains("Worktree isolation"), "got: {err}");
+        // The worker must NOT have been chrooted (no path bound).
+        assert!(
+            agent.working_dir_calls().iter().all(|p| p.is_none()),
+            "no worktree path should be bound on failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_isolate_without_factory_runs_unisolated() {
+        // isolate_worktree=true but NO factory configured → warn + run unisolated
+        // (the application explicitly chose not to supply worktrees). The worker
+        // still completes; no path is bound.
+        let (registry, executor) = make_executor().await; // default config, no factory
+
+        let agent = MockAgent::new("writer").with_response("done");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: true,
+            ..super::super::types::SubagentDefinition::new("writer", "Writer")
+        };
+        registry.register(def, Box::new(agent.clone())).await;
+
+        let req = DispatchRequest {
+            agent_name: "writer".into(),
+            task: "edit foo".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let result = executor.dispatch(req).await.unwrap();
+        assert_eq!(result.output, "done"); // no diff appended (no worktree)
+        assert!(agent.working_dir_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fork_no_isolate_does_not_touch_worktree() {
+        // A readonly worker (isolate_worktree=false) never creates a worktree
+        // even when a factory is configured.
+        let factory = Arc::new(MockWorktreeFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let factory_obs: Arc<dyn WorktreeFactory> = factory.clone();
+        let (registry, executor) = make_executor_with_factory(factory_obs);
+
+        let agent = MockAgent::new("reader").with_response("ok");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: false, // readonly
+            ..super::super::types::SubagentDefinition::new("reader", "Reader")
+        };
+        registry.register(def, Box::new(agent.clone())).await;
+
+        let req = DispatchRequest {
+            agent_name: "reader".into(),
+            task: "read foo".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let result = executor.dispatch(req).await.unwrap();
+        assert_eq!(result.output, "ok");
+        assert!(factory.labels.lock().unwrap().is_empty()); // factory never called
+        assert!(agent.working_dir_calls().is_empty());
     }
 }

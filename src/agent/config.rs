@@ -67,6 +67,14 @@ pub struct AgentConfig {
     /// on large projects routinely exceed the old 5-min/none limits.
     /// Per-subagent `SubagentDefinition.timeout_secs` (>0) overrides this.
     pub(crate) subagent_timeout_secs: u64,
+    /// Optional worktree-isolation factory for Fork-dispatched writer workers
+    /// (Sprint 8). When set, workers whose `SubagentDefinition.isolate_worktree`
+    /// is `true` run inside an isolated git worktree created by this factory.
+    /// `None` (default) = no isolation available. Application supplies a
+    /// git-backed impl; framework stays free of git deps.
+    #[cfg(feature = "subagent")]
+    pub(crate) subagent_worktree_factory:
+        Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
     /// Whether to register the `agent_tool` LLM-callable dispatch tool.
     ///
     /// Decoupled from `enable_subagent` (which controls the subagent registry
@@ -182,6 +190,8 @@ impl AgentConfig {
             enable_human_in_loop: false,
             enable_subagent: false,
             subagent_timeout_secs: 600,
+            #[cfg(feature = "subagent")]
+            subagent_worktree_factory: None,
             register_agent_dispatch_tool: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
             stream_buffer_size: 256,
@@ -347,6 +357,20 @@ impl AgentConfig {
     /// (Sync/Fork/Teammate). 0 = no timeout. Default 600 (10 min).
     pub fn subagent_timeout_secs(mut self, secs: u64) -> Self {
         self.subagent_timeout_secs = secs;
+        self
+    }
+
+    /// Supply a worktree-isolation factory for Fork-dispatched writer workers
+    /// (Sprint 8). Workers whose `SubagentDefinition.isolate_worktree == true`
+    /// run inside a git worktree created by this factory. Default: `None`
+    /// (no isolation). The application constructs the factory (git-backed) and
+    /// injects it here; the framework stays free of git dependencies.
+    #[cfg(feature = "subagent")]
+    pub fn subagent_worktree_factory(
+        mut self,
+        factory: std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>,
+    ) -> Self {
+        self.subagent_worktree_factory = Some(factory);
         self
     }
 

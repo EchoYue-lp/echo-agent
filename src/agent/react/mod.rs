@@ -354,6 +354,7 @@ impl ReactAgent {
                 SubagentExecutorConfig {
                     unified_hook_executor: Some(unified_executor),
                     default_timeout_secs: config.subagent_timeout_secs,
+                    worktree_factory: config.subagent_worktree_factory.clone(),
                     ..SubagentExecutorConfig::default()
                 },
             ))
@@ -2262,6 +2263,16 @@ impl Agent for ReactAgent {
             .external_trace_sink
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
+        // Delegate to the inherent method (sets config.working_dir + refreshes
+        // root-system-prompt so the cwd-in-prompt stays accurate).
+        ReactAgent::set_working_dir(self, path);
+    }
+
+    fn clear_working_dir(&self) {
+        ReactAgent::clear_working_dir(self);
     }
 
     fn system_prompt(&self) -> &str {
