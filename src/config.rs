@@ -172,7 +172,12 @@ impl AppConfig {
     ///
     /// Strategies: "summary" (SummaryCompressor — LLM summary, default; falls
     /// back to SlidingWindow on LLM failure or when no LLM client is configured),
-    /// "sliding" (SlidingWindowCompressor), "adaptive" (AdaptiveCompressor).
+    /// "sliding" (SlidingWindowCompressor — most cache-friendly; no prefix mutation),
+    /// "hybrid" (HybridCompressor::summary_buffer — Summary → SlidingWindow pipeline;
+    /// preserves distant facts via summary while keeping the recent window lossless.
+    /// LESS cache-friendly than 'sliding' because the summary stage mutates the prefix
+    /// each compression — choose 'sliding' if prompt-cache hit rate matters most),
+    /// "adaptive" (AdaptiveCompressor).
     pub async fn apply_compressor(&self, agent: &crate::agent::ReactAgent) {
         // Compression is on when token_limit/context_window is set OR a strategy
         // is explicitly chosen (default "summary"). The agent's resolved
@@ -213,6 +218,31 @@ impl AppConfig {
                     }
                 }
             }
+            "hybrid" => {
+                use crate::compression::compressor::HybridCompressor;
+                match agent.llm_client().cloned() {
+                    Some(llm) => {
+                        agent
+                            .set_compressor(HybridCompressor::summary_buffer(llm, window))
+                            .await;
+                        tracing::info!(
+                            "Compressor: HybridCompressor (summary_buffer = Summary → SlidingWindow pipeline). \
+                             Use for long conversations to preserve distant facts via summary while keeping \
+                             the recent window lossless. NOTE: the summary stage mutates the prefix each \
+                             compression, so this is LESS cache-friendly than pure 'sliding'."
+                        );
+                    }
+                    None => {
+                        tracing::warn!(
+                            "compress_strategy=hybrid but agent has no LLM client (summary stage needs LLM) — \
+                             falling back to SlidingWindow"
+                        );
+                        agent
+                            .set_compressor(SlidingWindowCompressor::new(window))
+                            .await;
+                    }
+                }
+            }
             "sliding" | "" => {
                 agent
                     .set_compressor(SlidingWindowCompressor::new(window))
@@ -238,7 +268,7 @@ impl AppConfig {
                 tracing::warn!(
                     strategy = other,
                     "Unknown strategy; falling back to sliding. \
-                     Supported: summary, sliding, adaptive"
+                     Supported: summary, sliding, hybrid, adaptive"
                 );
                 agent
                     .set_compressor(SlidingWindowCompressor::new(window))
