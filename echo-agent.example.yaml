@@ -97,6 +97,10 @@ agent:
   enable_memory: true
   enable_human_in_loop: true
   memory_path: ~/.echo-agent/memory
+  # Default timeout (seconds) for ANY subagent dispatch (Sync/Fork/Teammate).
+  # 0 = no timeout. Default 600 (10 min) — deep tasks on large projects often
+  # need more than the old 5-min/none limits. Per-subagent override in code.
+  subagent_timeout_secs: 600
 
 channels:
   # QQ Bot 通道

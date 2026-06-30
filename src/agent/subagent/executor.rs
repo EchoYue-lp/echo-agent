@@ -107,7 +107,9 @@ impl TeammateHandle {
 pub struct SubagentExecutorConfig {
     /// Maximum concurrent Fork dispatches.
     pub max_concurrent_forks: usize,
-    /// Default timeout for Fork/Teammate dispatches (seconds). 0 = no timeout.
+    /// Default timeout (seconds) for ALL dispatch modes (Sync/Fork/Teammate).
+    /// 0 = no timeout. Sourced from `AgentConfig.subagent_timeout_secs` (default
+    /// 600 = 10 min). Per-subagent `SubagentDefinition.timeout_secs` (>0) overrides.
     pub default_timeout_secs: u64,
     /// Enable hooks.
     pub enable_hooks: bool,
@@ -121,7 +123,7 @@ impl Default for SubagentExecutorConfig {
     fn default() -> Self {
         Self {
             max_concurrent_forks: 5,
-            default_timeout_secs: 300,
+            default_timeout_secs: 600,
             enable_hooks: true,
             unified_hook_executor: None,
         }
@@ -708,20 +710,59 @@ impl SubagentExecutor {
                 ))
             })?;
 
+        // Per-subagent override (0 = executor default). Sync now enforces a
+        // timeout too (previously it blocked the parent indefinitely) — one
+        // config (AgentConfig.subagent_timeout_secs) governs all three modes.
+        let timeout_secs = match self.registry.get(&req.agent_name).await {
+            Some(r) if r.definition.timeout_secs > 0 => r.definition.timeout_secs,
+            _ => self.config.default_timeout_secs,
+        };
+
         let start = Instant::now();
         let task = Self::enhance_task(&req.task, req.parent_context.as_ref());
-        Self::execute_agent_streaming(
-            self.registry.clone(),
-            agent_arc.as_ref(),
-            &task,
-            req.message.clone(),
-            req.cancel.clone(),
-            &req.parent_agent,
-            &req.agent_name,
-            ExecutionMode::Sync,
-            start,
-        )
-        .await
+        let cancel = req.cancel.clone();
+
+        if timeout_secs > 0 {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Err(ReactError::Other(format!(
+                    "Sync subagent '{}' cancelled", req.agent_name
+                ))),
+                r = tokio::time::timeout(
+                    Duration::from_secs(timeout_secs),
+                    Self::execute_agent_streaming(
+                        self.registry.clone(),
+                        agent_arc.as_ref(),
+                        &task,
+                        req.message.clone(),
+                        cancel.clone(),
+                        &req.parent_agent,
+                        &req.agent_name,
+                        ExecutionMode::Sync,
+                        start,
+                    )
+                ) => match r {
+                    Ok(r) => r,
+                    Err(_) => Err(ReactError::Other(format!(
+                        "Sync subagent '{}' timed out after {}s",
+                        req.agent_name, timeout_secs
+                    ))),
+                },
+            }
+        } else {
+            Self::execute_agent_streaming(
+                self.registry.clone(),
+                agent_arc.as_ref(),
+                &task,
+                req.message.clone(),
+                cancel,
+                &req.parent_agent,
+                &req.agent_name,
+                ExecutionMode::Sync,
+                start,
+            )
+            .await
+        }
     }
 
     /// Fork mode: acquire semaphore, spawn task, await with timeout.

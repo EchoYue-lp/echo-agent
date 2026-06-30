@@ -145,6 +145,7 @@ impl AppConfig {
         .enable_memory(self.agent.enable_memory)
         .enable_human_in_loop(self.agent.enable_human_in_loop)
         .max_iterations(self.agent.max_iterations)
+        .subagent_timeout_secs(self.agent.subagent_timeout_secs)
         .memory_path(&self.agent.memory_path)
         .temperature(self.model.temperature)
         .max_tokens(self.model.max_tokens)
@@ -445,6 +446,10 @@ pub struct AgentYamlConfig {
     /// Window size / keep-recent count for SlidingWindowCompressor / SummaryCompressor
     /// (number of recent messages to keep uncompressed). Default: 20.
     pub compress_window: usize,
+    /// Default timeout (seconds) for ANY subagent dispatch mode (Sync/Fork/Teammate).
+    /// 0 = no timeout. Default 600 (10 min) — deep tasks on large projects routinely
+    /// exceed the old 5-min/none limits; per-subagent override exists in SubagentDefinition.
+    pub subagent_timeout_secs: u64,
 }
 
 impl Default for AgentYamlConfig {
@@ -464,6 +469,7 @@ impl Default for AgentYamlConfig {
             // runs, so summarizing old messages is safe.
             compress_strategy: "summary".to_string(),
             compress_window: 20,
+            subagent_timeout_secs: 600,
         }
     }
 }

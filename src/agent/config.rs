@@ -62,6 +62,11 @@ pub struct AgentConfig {
     pub(crate) enable_human_in_loop: bool,
     /// Whether to enable subagent dispatch tool (agent_tool)
     pub(crate) enable_subagent: bool,
+    /// Default timeout (seconds) for ANY subagent dispatch mode
+    /// (Sync/Fork/Teammate). 0 = no timeout. Default 600 (10 min) — deep tasks
+    /// on large projects routinely exceed the old 5-min/none limits.
+    /// Per-subagent `SubagentDefinition.timeout_secs` (>0) overrides this.
+    pub(crate) subagent_timeout_secs: u64,
     /// Whether to register the `agent_tool` LLM-callable dispatch tool.
     ///
     /// Decoupled from `enable_subagent` (which controls the subagent registry
@@ -176,6 +181,7 @@ impl AgentConfig {
             enable_task: false,
             enable_human_in_loop: false,
             enable_subagent: false,
+            subagent_timeout_secs: 600,
             register_agent_dispatch_tool: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
             stream_buffer_size: 256,
@@ -337,6 +343,13 @@ impl AgentConfig {
         self
     }
 
+    /// Set the default subagent dispatch timeout (seconds) for all modes
+    /// (Sync/Fork/Teammate). 0 = no timeout. Default 600 (10 min).
+    pub fn subagent_timeout_secs(mut self, secs: u64) -> Self {
+        self.subagent_timeout_secs = secs;
+        self
+    }
+
     /// Set whether to register the `agent_tool` LLM-callable dispatch tool.
     ///
     /// Independent of `enable_subagent`. When `true`, the `AgentDispatchTool`
@@ -399,6 +412,11 @@ impl AgentConfig {
     /// `true` if subagent dispatch is enabled, `false` if disabled
     pub fn is_subagent_enabled(&self) -> bool {
         self.enable_subagent
+    }
+
+    /// Default subagent dispatch timeout (seconds) for all modes. 0 = no timeout.
+    pub fn get_subagent_timeout_secs(&self) -> u64 {
+        self.subagent_timeout_secs
     }
 
     /// Set maximum iteration rounds

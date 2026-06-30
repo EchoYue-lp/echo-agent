@@ -353,6 +353,7 @@ impl ReactAgent {
                 subagent_registry.clone(),
                 SubagentExecutorConfig {
                     unified_hook_executor: Some(unified_executor),
+                    default_timeout_secs: config.subagent_timeout_secs,
                     ..SubagentExecutorConfig::default()
                 },
             ))
