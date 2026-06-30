@@ -38,6 +38,11 @@ pub struct ReactAgentBuilder {
     enable_human_in_loop: bool,
     enable_subagent: bool,
     register_agent_dispatch_tool: bool,
+    /// Sprint 8: optional worktree-isolation factory for Fork-dispatched writer
+    /// workers. Propagated to `AgentConfig.subagent_worktree_factory` on build.
+    #[cfg(feature = "subagent")]
+    subagent_worktree_factory:
+        Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
     enable_cot: bool,
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
@@ -105,6 +110,8 @@ impl ReactAgentBuilder {
             enable_human_in_loop: false,
             enable_subagent: false,
             register_agent_dispatch_tool: false,
+            #[cfg(feature = "subagent")]
+            subagent_worktree_factory: None,
             enable_cot: true,
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
@@ -293,6 +300,19 @@ impl ReactAgentBuilder {
     /// Enable sub-Agent dispatch
     pub fn enable_subagent(mut self) -> Self {
         self.enable_subagent = true;
+        self
+    }
+
+    /// Sprint 8: supply a worktree-isolation factory for Fork-dispatched writer
+    /// workers (those declaring `isolate_worktree: true`). The application
+    /// constructs the git-backed factory and injects it here; the framework
+    /// stays free of git deps. Default: no factory (no isolation).
+    #[cfg(feature = "subagent")]
+    pub fn subagent_worktree_factory(
+        mut self,
+        factory: std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>,
+    ) -> Self {
+        self.subagent_worktree_factory = Some(factory);
         self
     }
 
@@ -745,6 +765,12 @@ impl ReactAgentBuilder {
             .token_limit(self.token_limit)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);
+
+        // Sprint 8: propagate the worktree factory (if any) into AgentConfig.
+        #[cfg(feature = "subagent")]
+        if let Some(factory) = self.subagent_worktree_factory.clone() {
+            config = config.subagent_worktree_factory(factory);
+        }
 
         if let Some(fmt) = self.response_format {
             config = config.response_format(fmt);
