@@ -19,7 +19,9 @@ impl Default for ManagerWorkerOrchestrator {
     fn default() -> Self {
         Self {
             max_retries: 2,
-            worker_timeout_secs: 300,
+            // Aligned with the unified subagent_timeout_secs (600s = 10 min).
+            // Sprint 5: previously 300. See AgentConfig.subagent_timeout_secs.
+            worker_timeout_secs: 600,
         }
     }
 }
@@ -191,7 +193,8 @@ mod tests {
     fn test_orchestrator_defaults() {
         let orch = ManagerWorkerOrchestrator::new();
         assert_eq!(orch.max_retries, 2);
-        assert_eq!(orch.worker_timeout_secs, 300);
+        // Sprint 5: aligned with the unified subagent_timeout_secs (600s).
+        assert_eq!(orch.worker_timeout_secs, 600);
     }
 
     #[test]

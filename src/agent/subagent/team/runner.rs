@@ -24,7 +24,9 @@ impl Default for TeamRunner {
     fn default() -> Self {
         Self {
             max_concurrent: 5,
-            timeout_secs: 120,
+            // Aligned with the unified subagent_timeout_secs (600s = 10 min).
+            // Sprint 5: previously 120. See AgentConfig.subagent_timeout_secs.
+            timeout_secs: 600,
         }
     }
 }

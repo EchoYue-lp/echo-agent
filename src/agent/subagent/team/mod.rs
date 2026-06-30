@@ -56,7 +56,11 @@ impl Default for TeamConfig {
     fn default() -> Self {
         Self {
             max_concurrent: 5,
-            default_timeout_secs: 300,
+            // Aligned with AgentConfig.subagent_timeout_secs (600s = 10 min),
+            // the single source of truth for all subagent dispatch timeouts
+            // (Sync/Fork/Teammate + team). Sprint 5 unified this last blind
+            // spot: previously 300. 0 = no timeout (see AgentConfig).
+            default_timeout_secs: 600,
             allow_reassignment: true,
             cross_talk: false,
             mailbox_capacity: 64,
@@ -387,6 +391,11 @@ pub struct TeamAgentBuilder {
     name: String,
     members: Vec<(String, TeamRole, Box<dyn Agent>, SubagentDefinition)>,
     strategy: strategy::TeamStrategy,
+    /// Override TeamConfig.default_timeout_secs (seconds). None = use the
+    /// default (600, aligned with AgentConfig.subagent_timeout_secs).
+    /// Callers that hold the unified config (e.g. AgentConfig.subagent_timeout_secs)
+    /// thread it here so team timeouts aren't a separate hardcoded island.
+    default_timeout_secs: Option<u64>,
 }
 
 impl Default for TeamAgentBuilder {
@@ -401,6 +410,7 @@ impl TeamAgentBuilder {
             name: "team".into(),
             members: Vec::new(),
             strategy: strategy::TeamStrategy::default(),
+            default_timeout_secs: None,
         }
     }
 
@@ -452,6 +462,15 @@ impl TeamAgentBuilder {
         self
     }
 
+    /// Override the team-wide default timeout (seconds). 0 = no timeout.
+    /// When unset, `TeamConfig::default()` applies (600s, aligned with
+    /// `AgentConfig.subagent_timeout_secs`). Thread the unified config here
+    /// so team timeouts read from the same source as Sync/Fork/Teammate.
+    pub fn timeout_secs(mut self, secs: u64) -> Self {
+        self.default_timeout_secs = Some(secs);
+        self
+    }
+
     /// Build the TeamAgent.
     pub fn build(self) -> TeamAgent {
         let leader_name = self
@@ -467,6 +486,11 @@ impl TeamAgentBuilder {
             leader_name,
             TeamConfig::default(),
         );
+        // Apply the unified timeout override (from AgentConfig.subagent_timeout_secs)
+        // if the caller supplied one; otherwise the TeamConfig::default() (600s) stands.
+        if let Some(secs) = self.default_timeout_secs {
+            team.config.default_timeout_secs = secs;
+        }
 
         for (name, role, agent, def) in self.members {
             team.add_member(&name, role, agent, def);
@@ -496,6 +520,39 @@ mod tests {
         assert_eq!(team.id, "t1");
         assert_eq!(team.name, "Test Team");
         assert!(team.is_empty());
+    }
+
+    #[test]
+    fn test_team_config_default_timeout_aligned() {
+        // Sprint 5: TeamConfig.default_timeout_secs now reads 600 (aligned
+        // with AgentConfig.subagent_timeout_secs). Guards against regression
+        // to the old hardcoded 300.
+        let cfg = TeamConfig::default();
+        assert_eq!(cfg.default_timeout_secs, 600);
+    }
+
+    #[test]
+    fn test_team_runner_default_timeout_aligned() {
+        // Sprint 5: TeamRunner.timeout_secs aligned 120 → 600.
+        let runner = TeamRunner::new();
+        assert_eq!(runner.timeout_secs, 600);
+    }
+
+    #[test]
+    fn test_team_agent_builder_timeout_override() {
+        // Sprint 5: the builder threads the unified config into TeamConfig.
+        // No override → default (600); override → applied.
+        let def = SubagentDefinition::simple_sync("leader");
+        let default_team = TeamAgent::builder()
+            .manager("leader", Box::new(MockAgent::new("leader")), def.clone())
+            .build();
+        assert_eq!(default_team.team.config.default_timeout_secs, 600);
+
+        let overridden = TeamAgent::builder()
+            .manager("leader", Box::new(MockAgent::new("leader")), def)
+            .timeout_secs(120)
+            .build();
+        assert_eq!(overridden.team.config.default_timeout_secs, 120);
     }
 
     #[test]
