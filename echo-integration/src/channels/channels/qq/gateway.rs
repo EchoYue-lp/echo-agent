@@ -44,45 +44,6 @@ const INTENT_GROUP_AND_C2C_EVENT: u32 = 1 << 25; // QQ direct + group chat event
 #[allow(dead_code)]
 const INTENT_PUBLIC_GUILD_MESSAGES: u32 = 1 << 30; // Public guild message events (guild @bot, default permission)
 
-/// Start QQ Gateway connection — infinite loop with exponential backoff reconnect
-#[allow(dead_code)]
-pub(super) async fn run_gateway_loop(
-    wss_url: String,
-    handler: Arc<dyn MessageHandler>,
-    token: String,
-) {
-    let mut reconnect_delay: u64 = 1;
-    let max_delay: u64 = 60;
-    const STABLE_THRESHOLD_SECS: u64 = 60;
-
-    loop {
-        info!("QQ Gateway: connecting to gateway...");
-        let connected_at = std::time::Instant::now();
-
-        match connect_to_gateway(wss_url.clone(), handler.clone(), token.clone()).await {
-            Ok(()) => {
-                warn!(
-                    "QQ Gateway: connection closed, reconnecting in {}s...",
-                    reconnect_delay
-                );
-            }
-            Err(e) => {
-                error!("QQ Gateway: connection error: {}", e);
-                warn!("QQ Gateway: reconnecting in {}s...", reconnect_delay);
-            }
-        }
-
-        // Reset backoff delay if connection was stable
-        if connected_at.elapsed().as_secs() >= STABLE_THRESHOLD_SECS {
-            reconnect_delay = 1;
-        } else {
-            reconnect_delay = (reconnect_delay * 2).min(max_delay);
-        }
-
-        tokio::time::sleep(Duration::from_secs(reconnect_delay)).await;
-    }
-}
-
 pub(super) async fn connect_to_gateway(
     wss_url: String,
     handler: Arc<dyn MessageHandler>,

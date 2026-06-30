@@ -1502,18 +1502,6 @@ async fn truncate_tool_output_exceeds_limit() {
     );
 }
 
-#[test]
-fn config_compress_threshold_ratio_default() {
-    let config = AgentConfig::new("model", "agent", "prompt");
-    assert!((config.get_compress_threshold_ratio() - 0.2).abs() < f64::EPSILON);
-}
-
-#[test]
-fn config_compress_threshold_ratio_custom() {
-    let config = AgentConfig::new("model", "agent", "prompt").compress_threshold_ratio(0.5);
-    assert!((config.get_compress_threshold_ratio() - 0.5).abs() < f64::EPSILON);
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Feature 5: Dynamic Tool Registration/Deregistration
 // ══════════════════════════════════════════════════════════════════════════════

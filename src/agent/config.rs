@@ -112,9 +112,6 @@ pub struct AgentConfig {
     /// Maximum token count for a single tool output (None = no limit).
     /// Automatically truncated when exceeded, with a `[Output truncated, N tokens total]` hint appended.
     pub(crate) max_tool_output_tokens: Option<usize>,
-    /// When available token ratio falls below this threshold, proactively trigger compression before think().
-    /// Value range 0.0–1.0, default 0.2 (i.e., triggers when less than 20% remains).
-    pub(crate) compress_threshold_ratio: f64,
     /// LLM temperature parameter (0.0–2.0, None means use model default)
     pub(crate) temperature: Option<f32>,
     /// Maximum generation token count (None means use model default)
@@ -197,7 +194,6 @@ impl AgentConfig {
             conversation_id: None,
             response_format: None,
             max_tool_output_tokens: None,
-            compress_threshold_ratio: 0.2,
             temperature: None,
             max_tokens: None,
             cache_user_id: None,
@@ -780,20 +776,6 @@ impl AgentConfig {
     /// Maximum token count, `None` means no limit
     pub fn get_max_tool_output_tokens(&self) -> Option<usize> {
         self.max_tool_output_tokens
-    }
-
-    /// Set proactive compression threshold ratio (0.0–1.0), default 0.2
-    pub fn compress_threshold_ratio(mut self, ratio: f64) -> Self {
-        self.compress_threshold_ratio = ratio.clamp(0.0, 1.0);
-        self
-    }
-
-    /// Get proactive compression threshold ratio
-    ///
-    /// # Returns
-    /// Compression threshold ratio (0.0–1.0), default 0.2
-    pub fn get_compress_threshold_ratio(&self) -> f64 {
-        self.compress_threshold_ratio
     }
 
     /// Enable or disable automatic project rules loading
