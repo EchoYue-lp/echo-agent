@@ -162,8 +162,8 @@ impl Tool for AgentDispatchTool {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["sync", "fork", "teammate"],
-                    "description": "Execution mode: sync - synchronous wait (default), fork - independent with inherited context, teammate - parallel collaboration"
+                    "enum": ["sync", "fork", "teammate", "team"],
+                    "description": "Execution mode: sync - synchronous wait (default), fork - independent with inherited context, teammate - parallel independent agent, team - multi-agent ManagerWorker (plan→fan-out→synthesize, requires the named subagent to have a TeamSpec)"
                 }
             },
             "required": ["agent_name", "task"]
@@ -198,6 +198,7 @@ impl Tool for AgentDispatchTool {
                         "sync" => Some(ExecutionMode::Sync),
                         "fork" => Some(ExecutionMode::Fork),
                         "teammate" => Some(ExecutionMode::Teammate),
+                        "team" => Some(ExecutionMode::Team),
                         _ => None,
                     });
 

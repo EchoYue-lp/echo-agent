@@ -3,6 +3,7 @@
 //! A Team is a group of agents working together under a coordinator.
 //! The leader assigns tasks, teammates execute and report back via mailboxes.
 
+pub mod agent_box;
 pub mod coordinator;
 pub mod mailbox;
 pub mod manager_worker;
@@ -10,6 +11,7 @@ pub mod message;
 pub mod runner;
 pub mod strategy;
 
+pub use agent_box::ArcAgentBox;
 pub use message::TeamMessage;
 pub use runner::TeamRunner;
 
@@ -250,12 +252,23 @@ impl Team {
 pub struct TeamAgent {
     pub team: Team,
     pub strategy: strategy::TeamStrategy,
+    /// Sprint 11: stable run_id for keying checkpoints (NOT `Team.id` which
+    /// regenerates per build via uuid). `None` → in-memory, no persistence.
+    pub run_id: Option<String>,
+    /// Sprint 11: optional state store for checkpoint/resume. `None` → degrade
+    /// to in-memory single-pass execution (today's behavior, backward-compat).
+    pub state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
 }
 
 impl TeamAgent {
     /// Create a new TeamAgent with the given team and strategy.
     pub fn new(team: Team, strategy: strategy::TeamStrategy) -> Self {
-        Self { team, strategy }
+        Self {
+            team,
+            strategy,
+            run_id: None,
+            state_store: None,
+        }
     }
 
     /// Run a task through the team using the configured strategy.
@@ -271,7 +284,13 @@ impl TeamAgent {
         match &self.strategy {
             strategy::TeamStrategy::ManagerWorker => {
                 let orch = manager_worker::ManagerWorkerOrchestrator::new();
-                orch.run(&self.team, task).await
+                orch.run(
+                    &self.team,
+                    task,
+                    self.run_id.as_deref(),
+                    self.state_store.as_deref(),
+                )
+                .await
             }
             strategy::TeamStrategy::Pipeline(agents) => {
                 let mut current = task.to_string();
@@ -396,6 +415,10 @@ pub struct TeamAgentBuilder {
     /// Callers that hold the unified config (e.g. AgentConfig.subagent_timeout_secs)
     /// thread it here so team timeouts aren't a separate hardcoded island.
     default_timeout_secs: Option<u64>,
+    /// Sprint 11: stable run_id for checkpoint keying. None → in-memory.
+    run_id: Option<String>,
+    /// Sprint 11: optional state store for checkpoint/resume. None → degrade.
+    state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
 }
 
 impl Default for TeamAgentBuilder {
@@ -411,6 +434,8 @@ impl TeamAgentBuilder {
             members: Vec::new(),
             strategy: strategy::TeamStrategy::default(),
             default_timeout_secs: None,
+            run_id: None,
+            state_store: None,
         }
     }
 
@@ -471,6 +496,28 @@ impl TeamAgentBuilder {
         self
     }
 
+    /// Sprint 11: set the stable run_id used to key checkpoint nodes. `None`
+    /// (default) → team runs in-memory with no persistence. The run_id should
+    /// come from `ExternalRunContext.run_id` (stable across retries), NOT
+    /// `Team.id` (regenerated per build).
+    pub fn run_id(mut self, run_id: Option<String>) -> Self {
+        self.run_id = run_id;
+        self
+    }
+
+    /// Sprint 11: inject a `RuntimeStateStore` for checkpoint/resume. `None`
+    /// (default) → degrade to in-memory single-pass. When both `run_id` and a
+    /// store are set, `ManagerWorkerOrchestrator` reads prior `TaskNode`s at
+    /// entry (skip Success, reset+rerun Running/Failed) and writes plan /
+    /// per-worker / synthesis checkpoint nodes.
+    pub fn state_store(
+        mut self,
+        store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
+    ) -> Self {
+        self.state_store = store;
+        self
+    }
+
     /// Build the TeamAgent.
     pub fn build(self) -> TeamAgent {
         let leader_name = self
@@ -496,7 +543,12 @@ impl TeamAgentBuilder {
             team.add_member(&name, role, agent, def);
         }
 
-        TeamAgent::new(team, self.strategy)
+        let mut agent = TeamAgent::new(team, self.strategy);
+        // Sprint 11: plumb run_id + state_store into the agent (passed through
+        // to ManagerWorkerOrchestrator::run for checkpoint/resume).
+        agent.run_id = self.run_id;
+        agent.state_store = self.state_store;
+        agent
     }
 }
 
