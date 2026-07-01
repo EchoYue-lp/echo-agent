@@ -131,6 +131,12 @@ pub struct SubagentExecutorConfig {
     /// `None` = no workspace isolation available. Application supplies a
     /// tmpdir-backed impl.
     pub data_workspace_factory: Option<super::workspace::SharedDataWorkspaceFactory>,
+    /// Sprint 11: optional state store for team-mode checkpoint/resume. When
+    /// set AND a team subagent's `TeamSpec` is dispatched, `dispatch_team`
+    /// plumbs this into `TeamAgent` so `ManagerWorkerOrchestrator` can
+    /// read/write checkpoint nodes keyed by `run_id`. `None` → teams run
+    /// in-memory (no persistence, today's behavior).
+    pub runtime_state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
 }
 
 impl Default for SubagentExecutorConfig {
@@ -142,6 +148,7 @@ impl Default for SubagentExecutorConfig {
             unified_hook_executor: None,
             worktree_factory: None,
             data_workspace_factory: None,
+            runtime_state_store: None,
         }
     }
 }
@@ -297,6 +304,9 @@ impl SubagentExecutor {
                         Err(e) => Err(e),
                     }
                 }
+                // Sprint 11: Team mode routes to dispatch_team (Task 5 fills
+                // the body). Stub returns a clear error until Task 5.
+                ExecutionMode::Team => self.dispatch_team(&req).await,
             };
 
             let duration = start.elapsed();
@@ -509,6 +519,106 @@ impl SubagentExecutor {
             agent_name: req.agent_name.clone(),
             cancel: req.cancel.clone(),
             join_handle,
+        })
+    }
+
+    /// Sprint 11: dispatch a team-mode subagent. Builds a `TeamAgent` from the
+    /// definition's `TeamSpec` (manager + workers resolved by name from the
+    /// registry), plumbs `run_id` + `state_store` for checkpoint/resume, and
+    /// runs it.
+    ///
+    /// Timeout: relies on `TeamAgent::execute`'s own `tokio::time::timeout`
+    /// wrapper (uses `TeamConfig.default_timeout_secs`) — no second timeout
+    /// here (would double-wrap). Workers are wrapped in `ArcAgentBox` since
+    /// the builder consumes `Box<dyn Agent>` but the registry returns
+    /// `Arc<dyn Agent>` (shared singletons).
+    async fn dispatch_team(
+        &self,
+        req: &DispatchRequest,
+    ) -> std::result::Result<SubagentResult, crate::error::ReactError> {
+        use super::team::{ArcAgentBox, TeamAgent};
+
+        let registered = self.registry.get(&req.agent_name).await.ok_or_else(|| {
+            crate::error::ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
+        })?;
+        let spec = registered.definition.team.as_ref().ok_or_else(|| {
+            crate::error::ReactError::Other(
+                "Team mode requested but definition has no TeamSpec".into(),
+            )
+        })?;
+
+        // Resolve manager + workers by name (late binding, D-11-team-2).
+        let manager_def = self
+            .registry
+            .get(&spec.manager)
+            .await
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(format!(
+                    "Team manager '{}' not registered",
+                    spec.manager
+                ))
+            })?
+            .definition
+            .clone();
+        let manager_agent = self
+            .registry
+            .get_agent(&spec.manager)
+            .await
+            .ok_or_else(|| {
+                crate::error::ReactError::Other(format!(
+                    "Cannot get manager agent instance '{}'",
+                    spec.manager
+                ))
+            })?;
+
+        let mut builder = TeamAgent::builder()
+            .manager(
+                &spec.manager,
+                Box::new(ArcAgentBox(manager_agent.clone())),
+                manager_def,
+            )
+            .strategy(spec.strategy.clone())
+            .run_id(req.runtime_context.as_ref().map(|c| c.run_id.clone()))
+            .state_store(self.config.runtime_state_store.clone());
+
+        for name in &spec.workers {
+            let w_def = self
+                .registry
+                .get(name)
+                .await
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other(format!(
+                        "Team worker '{}' not registered",
+                        name
+                    ))
+                })?
+                .definition
+                .clone();
+            let w_agent = self.registry.get_agent(name).await.ok_or_else(|| {
+                crate::error::ReactError::Other(format!(
+                    "Cannot get worker agent instance '{}'",
+                    name
+                ))
+            })?;
+            builder = builder.worker(name, Box::new(ArcAgentBox(w_agent.clone())), w_def);
+        }
+        let team_agent = builder.build();
+
+        let start = std::time::Instant::now();
+        let result = team_agent
+            .execute(&req.task)
+            .await
+            .map_err(|e| crate::error::ReactError::Other(format!("Team execution failed: {e}")))?;
+
+        Ok(SubagentResult {
+            agent_name: req.agent_name.clone(),
+            output: result,
+            duration: start.elapsed(),
+            iterations: 1,
+            tokens_used: None, // team doesn't aggregate worker tokens (follow-up)
+            was_truncated: false,
+            mode: ExecutionMode::Team,
+            usage: None,
         })
     }
 
@@ -1308,6 +1418,87 @@ mod tests {
 
         let result = handle.join().await.unwrap();
         assert_eq!(result.output, "team result");
+    }
+
+    // ── Sprint 11: Team dispatch (ExecutionMode::Team + TeamSpec) ─────────
+
+    #[tokio::test]
+    async fn test_dispatch_team_routes_and_runs() {
+        // Register a team-mode subagent + its named manager + worker. Dispatch
+        // must route to dispatch_team and return the synthesized result.
+        let (registry, executor) = make_executor().await;
+
+        // Manager: MockAgent returns plan first, then synthesis.
+        let manager = MockAgent::new("mgr")
+            .with_response("sub1\nsub2")
+            .with_response("SYNTH");
+        let mgr_def = super::super::types::SubagentDefinition::new("mgr", "Manager");
+        registry.register(mgr_def, Box::new(manager)).await;
+
+        // Worker: returns a canned result.
+        let worker = MockAgent::new("wk").with_response("worker-out");
+        let w_def = super::super::types::SubagentDefinition::new("wk", "Worker");
+        registry.register(w_def, Box::new(worker)).await;
+
+        // Team definition: references mgr + wk by name.
+        let team_spec = super::super::types::TeamSpec {
+            strategy: super::super::team::strategy::TeamStrategy::ManagerWorker,
+            manager: "mgr".to_string(),
+            workers: vec!["wk".to_string()],
+            config: super::super::team::TeamConfig::default(),
+        };
+        let mut team_def =
+            super::super::types::SubagentDefinition::new("team-research", "team dispatcher");
+        team_def.execution_mode = ExecutionMode::Team;
+        team_def.team = Some(team_spec);
+        // The team definition itself needs an agent instance registered too
+        // (dispatch looks up the definition by name), but it's never executed
+        // as an agent — use a placeholder mock.
+        let placeholder = MockAgent::new("team-research");
+        registry.register(team_def, Box::new(placeholder)).await;
+
+        let req = DispatchRequest {
+            agent_name: "team-research".into(),
+            task: "research X".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let result = executor.dispatch(req).await.unwrap();
+        assert_eq!(result.mode, ExecutionMode::Team);
+        // Manager's second execute() is synthesis → "SYNTH".
+        assert_eq!(result.output, "SYNTH");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_team_without_spec_errors() {
+        // A Team-mode definition with no TeamSpec → clear error.
+        let (registry, executor) = make_executor().await;
+        let agent = MockAgent::new("broken");
+        let mut def = super::super::types::SubagentDefinition::new("broken", "no spec");
+        def.execution_mode = ExecutionMode::Team;
+        def.team = None;
+        registry.register(def, Box::new(agent)).await;
+
+        let req = DispatchRequest {
+            agent_name: "broken".into(),
+            task: "task".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let err = executor.dispatch(req).await.unwrap_err();
+        assert!(err.to_string().contains("no TeamSpec"));
     }
 
     // ── Sprint 8: Fork worktree isolation ──────────────────────────────────
