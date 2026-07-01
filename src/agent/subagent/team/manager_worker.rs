@@ -31,7 +31,18 @@ impl ManagerWorkerOrchestrator {
     /// Phase 1: Manager decomposes the task into sub-tasks.
     /// Phase 2: Workers execute sub-tasks in parallel (round-robin assignment).
     /// Phase 3: Manager synthesizes results into a final answer.
-    pub async fn run(&self, team: &Team, task: &str) -> Result<String, String> {
+    ///
+    /// Sprint 11: `run_id` + `store` enable checkpoint/resume (Task 4 fills in
+    /// the read/write logic). Both `None` → in-memory single-pass (today's
+    /// behavior). For now the args are accepted but ignored (Task 4 rewrites).
+    pub async fn run(
+        &self,
+        team: &Team,
+        task: &str,
+        run_id: Option<&str>,
+        store: Option<&dyn crate::state::RuntimeStateStore>,
+    ) -> Result<String, String> {
+        let _ = (run_id, store); // Task 4 uses these.
         let manager_name = team.leader_name().ok_or("No leader in team")?;
         let workers: Vec<&TeamMember> = team.workers().collect();
 
