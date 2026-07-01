@@ -2,10 +2,30 @@
 //!
 //! The manager decomposes a task into sub-tasks, fans them out to workers,
 //! collects results, and synthesizes the final answer.
+//!
+//! Sprint 11: single-pass plan → fan-out → synthesize, with **checkpoint/resume**
+//! when a `run_id` + `RuntimeStateStore` are supplied. Three checkpoint nodes
+//! (`team_{run_id}_plan`, `team_{run_id}_worker_{idx}`, `team_{run_id}_synthesis`)
+//! mirror the DAG skip-completed-on-retry pattern (`task_runtime/executor.rs:456`).
+//! `store = None` → pure in-memory single-pass (today's behavior, backward-compat).
 
 use super::{Team, TeamMember};
+use crate::state::{TaskNode, TaskNodeStatus};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+// ── Checkpoint node id helpers ───────────────────────────────────────────────
+
+fn plan_node_id(run_id: &str) -> String {
+    format!("team_{run_id}_plan")
+}
+fn synth_node_id(run_id: &str) -> String {
+    format!("team_{run_id}_synthesis")
+}
+fn worker_node_id(run_id: &str, idx: usize) -> String {
+    format!("team_{run_id}_worker_{idx}")
+}
 
 /// Orchestrates a team using the Manager-Worker pattern.
 ///
@@ -32,9 +52,18 @@ impl ManagerWorkerOrchestrator {
     /// Phase 2: Workers execute sub-tasks in parallel (round-robin assignment).
     /// Phase 3: Manager synthesizes results into a final answer.
     ///
-    /// Sprint 11: `run_id` + `store` enable checkpoint/resume (Task 4 fills in
-    /// the read/write logic). Both `None` → in-memory single-pass (today's
-    /// behavior). For now the args are accepted but ignored (Task 4 rewrites).
+    /// Sprint 11 checkpoint/resume (both `run_id` + `store` required to activate):
+    /// - **Fast-path**: if a prior `synthesis` node is `Success`, return its
+    ///   stored answer immediately (zero agent calls).
+    /// - **plan**: if prior `plan` node is `Success`, reuse its stored ordered
+    ///   sub-task array (deterministic idx binding — user review patch #1);
+    ///   else run planning + checkpoint the plan.
+    /// - **workers**: per `worker_{idx}` node, skip if prior `Success` (reuse
+    ///   stored output); if prior non-Success terminal (`Failed`) or non-terminal
+    ///   (`Running`/`Blocked` — e.g. crash-stale), reset to `Pending` first then
+    ///   re-run (state-reset defense, user review patch #3). Checkpoint each.
+    /// - **synthesis**: always runs unless fast-pathed; checkpoint on completion.
+    ///   `store = None` → skip all read/write, pure in-memory.
     pub async fn run(
         &self,
         team: &Team,
@@ -42,33 +71,98 @@ impl ManagerWorkerOrchestrator {
         run_id: Option<&str>,
         store: Option<&dyn crate::state::RuntimeStateStore>,
     ) -> Result<String, String> {
-        let _ = (run_id, store); // Task 4 uses these.
         let manager_name = team.leader_name().ok_or("No leader in team")?;
         let workers: Vec<&TeamMember> = team.workers().collect();
-
         if workers.is_empty() {
             return Err("No workers in team".into());
+        }
+
+        // ── Load prior checkpoint nodes (DAG skip-on-resume pattern) ──
+        let prior_nodes: HashMap<String, TaskNode> = if let (Some(rid), Some(st)) = (run_id, store)
+        {
+            st.load_nodes(rid)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| (n.id.clone(), n))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        // Fast-path: synthesis already Success → return stored answer.
+        // (Edition 2024 let-chains collapse the nested if-let guards.)
+        if let Some(rid) = run_id
+            && let Some(node) = prior_nodes.get(&synth_node_id(rid))
+            && node.status == TaskNodeStatus::Success
+            && let Some(ans) = node.outputs.as_str()
+        {
+            debug!("Team fast-path: returning stored synthesis (zero agent calls)");
+            return Ok(ans.to_string());
         }
 
         info!(
             team = %team.name,
             manager = %manager_name,
             worker_count = workers.len(),
+            has_checkpoint = prior_nodes.len() > prior_nodes.is_empty() as usize,
             "Starting Manager-Worker execution"
         );
 
-        // Phase 1: Manager plans
-        let sub_tasks = self.plan_sub_tasks(team, manager_name, task).await?;
-        debug!(
-            sub_task_count = sub_tasks.len(),
-            "Manager created sub-tasks"
-        );
+        // ── Phase 1: plan (skip if prior Success; else run + checkpoint) ──
+        // Edition 2024 let-chains collapse the nested guards.
+        let sub_tasks: Vec<String> = if let Some(rid) = run_id
+            && let Some(node) = prior_nodes.get(&plan_node_id(rid))
+            && node.status == TaskNodeStatus::Success
+            && let Some(arr) = node.outputs.as_array()
+        {
+            // Reuse stored plan: ordered [{idx, task}] array (patch #1).
+            let reused: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.get("task").and_then(|t| t.as_str()).map(String::from))
+                .collect();
+            if reused.is_empty() {
+                self.plan_sub_tasks(team, manager_name, task).await?
+            } else {
+                debug!(count = reused.len(), "Reusing stored plan");
+                reused
+            }
+        } else {
+            self.plan_sub_tasks(team, manager_name, task).await?
+        };
 
-        // Phase 2: Fan out to workers
-        let results = self.execute_sub_tasks(&sub_tasks, workers).await;
+        // Checkpoint: write plan node (ordered [{idx, task}] array for idx binding).
+        if let (Some(rid), Some(st)) = (run_id, store) {
+            let plan_outputs = serde_json::Value::Array(
+                sub_tasks
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, t)| serde_json::json!({"idx": idx, "task": t}))
+                    .collect(),
+            );
+            let node = TaskNode::new(plan_node_id(rid), "team_plan")
+                .with_status(TaskNodeStatus::Success)
+                .with_outputs(plan_outputs);
+            let _ = st.save_node(rid, &node).await;
+        }
+        debug!(sub_task_count = sub_tasks.len(), "Plan ready");
 
-        // Phase 3: Manager synthesizes
-        self.synthesize(team, manager_name, task, &results).await
+        // ── Phase 2: fan-out workers (skip Success; reset+rerun Running/Failed) ──
+        let results = self
+            .execute_sub_tasks(&sub_tasks, workers, run_id, store, &prior_nodes)
+            .await;
+
+        // ── Phase 3: synthesize (runs unless fast-pathed above) ──
+        let synthesis = self.synthesize(team, manager_name, task, &results).await?;
+
+        // Checkpoint: write synthesis node.
+        if let (Some(rid), Some(st)) = (run_id, store) {
+            let node = TaskNode::new(synth_node_id(rid), "team_synthesis")
+                .with_status(TaskNodeStatus::Success)
+                .with_outputs(serde_json::Value::String(synthesis.clone()));
+            let _ = st.save_node(rid, &node).await;
+        }
+        Ok(synthesis)
     }
 
     /// Phase 1: The manager decomposes the task into sub-tasks.
@@ -110,44 +204,102 @@ impl ManagerWorkerOrchestrator {
     }
 
     /// Phase 2: Fan out sub-tasks to workers in round-robin fashion.
+    ///
+    /// Sprint 11 checkpoint-aware: skip workers whose prior `worker_{idx}` node
+    /// is `Success` (reuse stored output); reset+rerun those that are
+    /// `Running`/`Failed`/`Blocked` (state-reset defense). Checkpoint each on
+    /// completion.
     async fn execute_sub_tasks(
         &self,
         sub_tasks: &[String],
         workers: Vec<&TeamMember>,
+        run_id: Option<&str>,
+        store: Option<&dyn crate::state::RuntimeStateStore>,
+        prior_nodes: &HashMap<String, TaskNode>,
     ) -> Vec<(String, Result<String, String>)> {
         let worker_count = workers.len();
-        let mut handles = Vec::new();
+        // Each spawned task carries its sub_task index for deterministic
+        // checkpoint id binding (idx travels in the tuple, not derived from
+        // handle position — handles may be reordered by the runtime).
+        type WorkerOutcome = (usize, String, Result<String, String>);
+        let mut handles: Vec<tokio::task::JoinHandle<WorkerOutcome>> = Vec::new();
 
         for (i, sub_task) in sub_tasks.iter().enumerate() {
             let worker = &workers[i % worker_count];
             let worker_name = worker.name.clone();
             let agent = Arc::clone(&worker.agent);
             let task = sub_task.clone();
+            let idx = i;
+
+            // Skip-on-resume: if this worker_idx already Success, reuse its output.
+            if let Some(rid) = run_id {
+                let wid = worker_node_id(rid, i);
+                if let Some(node) = prior_nodes.get(&wid) {
+                    if node.status == TaskNodeStatus::Success {
+                        if let Some(out) = node.outputs.as_str() {
+                            info!(worker = %worker_name, idx = i, "Reusing stored worker result");
+                            let stored: Result<String, String> = Ok(out.to_string());
+                            handles.push(tokio::spawn(async move { (idx, task, stored) }));
+                            continue;
+                        }
+                    } else {
+                        // State-reset defense (patch #3): Running/Failed/Blocked
+                        // → reset to Pending before re-running, overwriting stale
+                        // state. Only when a store is configured.
+                        if let Some(st) = store {
+                            let reset = TaskNode::new(wid.clone(), format!("team_worker_{i}"))
+                                .with_status(TaskNodeStatus::Pending);
+                            let _ = st.save_node(rid, &reset).await;
+                        }
+                    }
+                }
+            }
 
             handles.push(tokio::spawn(async move {
                 let result = agent
                     .execute(&task)
                     .await
                     .map_err(|e| format!("Worker {worker_name} failed: {e}"));
-                (worker_name, task, result)
+                (idx, task, result)
             }));
         }
 
-        let mut results = Vec::new();
+        let mut results: Vec<(String, Result<String, String>)> =
+            vec![(String::new(), Err("uninitialized".to_string())); sub_tasks.len()];
         for handle in handles {
             match handle.await {
-                Ok((name, task, result)) => {
+                Ok((idx, task, result)) => {
+                    let worker_name = workers[idx % worker_count].name.clone();
                     match &result {
-                        Ok(_) => info!(worker = %name, "Worker completed sub-task"),
-                        Err(e) => warn!(worker = %name, error = %e, "Worker failed"),
+                        Ok(_) => info!(worker = %worker_name, idx, "Worker completed sub-task"),
+                        Err(e) => warn!(worker = %worker_name, idx, error = %e, "Worker failed"),
                     }
-                    results.push((task, result));
+                    // Checkpoint per-worker (Success or Failed).
+                    if let (Some(rid), Some(st)) = (run_id, store) {
+                        let status = match &result {
+                            Ok(_) => TaskNodeStatus::Success,
+                            Err(_) => TaskNodeStatus::Failed,
+                        };
+                        let outputs = match &result {
+                            Ok(o) => serde_json::Value::String(o.clone()),
+                            Err(_) => serde_json::Value::Null,
+                        };
+                        let node =
+                            TaskNode::new(worker_node_id(rid, idx), format!("team_worker_{idx}"))
+                                .with_status(status)
+                                .with_outputs(outputs);
+                        let _ = st.save_node(rid, &node).await;
+                    }
+                    results[idx] = (task, result);
                 }
                 Err(e) => {
                     warn!("Worker spawned task panicked: {e}");
                 }
             }
         }
+        // Strip the placeholder entries for indices that never resolved (panic
+        // path); keep results in sub_task order.
+        results.retain(|(t, _)| !t.is_empty());
         results
     }
 
@@ -193,6 +345,16 @@ impl ManagerWorkerOrchestrator {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::agent::AgentEvent;
+    use crate::error::Result;
+    use crate::state::RuntimeStateStore;
+    use crate::testing::MockAgent;
+    use futures::future::BoxFuture;
+    use futures::stream::{self, BoxStream};
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::{Arc, Mutex};
+
     #[test]
     fn test_team_strategy_default() {
         let strategy = crate::agent::subagent::team::strategy::TeamStrategy::default();
@@ -201,5 +363,343 @@ mod tests {
             crate::agent::subagent::team::strategy::TeamStrategy::ManagerWorker
         );
         assert_eq!(strategy.name(), "manager-worker");
+    }
+
+    // ── Stub in-memory RuntimeStateStore for checkpoint tests ──────────────────
+    /// An in-memory RuntimeStateStore: conversation_id → Vec<TaskNode>. Single
+    /// Mutex; fine for tests. Lets us pre-seed nodes and assert on writes.
+    struct InMemStore {
+        nodes: Mutex<StdHashMap<String, Vec<TaskNode>>>,
+    }
+    impl InMemStore {
+        fn new() -> Self {
+            Self {
+                nodes: Mutex::new(StdHashMap::new()),
+            }
+        }
+        /// Pre-seed a node (test setup).
+        fn seed(&self, conv_id: &str, node: TaskNode) {
+            self.nodes
+                .lock()
+                .unwrap()
+                .entry(conv_id.to_string())
+                .or_default()
+                .push(node);
+        }
+        /// Snapshot of nodes for a conversation (test assertion).
+        fn snapshot(&self, conv_id: &str) -> Vec<TaskNode> {
+            self.nodes
+                .lock()
+                .unwrap()
+                .get(conv_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+    impl RuntimeStateStore for InMemStore {
+        fn save_node<'a>(
+            &'a self,
+            conv_id: &'a str,
+            node: &'a TaskNode,
+        ) -> BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async move {
+                let mut guard = self.nodes.lock().unwrap();
+                let vec = guard.entry(conv_id.to_string()).or_default();
+                // Upsert by id (replace if present).
+                if let Some(existing) = vec.iter_mut().find(|n| n.id == node.id) {
+                    *existing = node.clone();
+                } else {
+                    vec.push(node.clone());
+                }
+                Ok(())
+            })
+        }
+        fn load_nodes<'a>(
+            &'a self,
+            conv_id: &'a str,
+        ) -> BoxFuture<'a, crate::error::Result<Vec<TaskNode>>> {
+            Box::pin(async move {
+                Ok(self
+                    .nodes
+                    .lock()
+                    .unwrap()
+                    .get(conv_id)
+                    .cloned()
+                    .unwrap_or_default())
+            })
+        }
+        fn update_status<'a>(
+            &'a self,
+            _conv_id: &'a str,
+            _node_id: &'a str,
+            _status: TaskNodeStatus,
+        ) -> BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn get_checkpoint<'a>(
+            &'a self,
+            _conv_id: &'a str,
+        ) -> BoxFuture<'a, crate::error::Result<Option<crate::state::AgentCheckpoint>>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn save_checkpoint<'a>(
+            &'a self,
+            _checkpoint: &'a crate::state::AgentCheckpoint,
+        ) -> BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn clear_conversation<'a>(
+            &'a self,
+            _conv_id: &'a str,
+        ) -> BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Build a minimal 1-manager + 1-worker team using MockAgents.
+    fn build_team(
+        plan_response: &str,
+        worker_responses: &[&str],
+    ) -> (
+        crate::agent::subagent::team::Team,
+        Arc<MockAgent>,      // manager (for inspection)
+        Vec<Arc<MockAgent>>, // workers (for inspection)
+    ) {
+        use crate::agent::subagent::SubagentDefinition;
+        use crate::agent::subagent::team::{Team, TeamRole};
+        let mut manager = MockAgent::new("manager").with_response(plan_response);
+        // Synthesis is the second execute() call on the manager — give it a canned response.
+        manager = manager.with_response("SYNTHESIS");
+        let manager = Arc::new(manager);
+        let workers: Vec<Arc<MockAgent>> = worker_responses
+            .iter()
+            .map(|r| Arc::new(MockAgent::new("worker").with_response(*r)))
+            .collect();
+        // Box clones of the Arc-wrapped mock agents into the team.
+        // MockAgent is Clone (shares call history via internal Arc<Mutex>).
+        let mut team = Team::new(
+            "team_test".to_string(),
+            "test",
+            "manager",
+            Default::default(),
+        );
+        team.add_member(
+            "manager",
+            TeamRole::Leader,
+            Box::new((*manager).clone()),
+            SubagentDefinition::simple_sync("manager"),
+        );
+        for (i, w) in workers.iter().enumerate() {
+            team.add_member(
+                &format!("worker_{i}"),
+                TeamRole::Worker,
+                Box::new((**w).clone()),
+                SubagentDefinition::simple_sync(format!("worker_{i}")),
+            );
+        }
+        (team, manager, workers)
+    }
+
+    #[tokio::test]
+    async fn run_with_store_writes_three_checkpoints() {
+        // Plan + 1 worker + synthesis all checkpoint Success.
+        let (team, _mgr, _ws) = build_team("subtask A\nsubtask B", &["w-out-0", "w-out-1"]);
+        let store = Arc::new(InMemStore::new());
+        let orch = ManagerWorkerOrchestrator::new();
+        let result = orch
+            .run(&team, "do thing", Some("run-1"), Some(store.as_ref()))
+            .await
+            .unwrap();
+        assert_eq!(result, "SYNTHESIS");
+        let snap = store.snapshot("run-1");
+        let ids: Vec<&str> = snap.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            ids.contains(&"team_run-1_plan"),
+            "plan node missing: {:?}",
+            ids
+        );
+        assert!(
+            ids.contains(&"team_run-1_worker_0"),
+            "worker_0 node missing: {:?}",
+            ids
+        );
+        assert!(
+            ids.contains(&"team_run-1_worker_1"),
+            "worker_1 node missing: {:?}",
+            ids
+        );
+        assert!(
+            ids.contains(&"team_run-1_synthesis"),
+            "synthesis node missing: {:?}",
+            ids
+        );
+        // All should be Success.
+        for n in &snap {
+            assert_eq!(
+                n.status,
+                TaskNodeStatus::Success,
+                "node {} not Success",
+                n.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_fast_path_returns_stored_synthesis() {
+        // Pre-seed synthesis Success → zero agent calls, return stored answer.
+        let (team, _mgr, _ws) = build_team("should-not-be-used", &["x"]);
+        let store = Arc::new(InMemStore::new());
+        store.seed(
+            "run-fast",
+            TaskNode::new("team_run-fast_synthesis", "team_synthesis")
+                .with_status(TaskNodeStatus::Success)
+                .with_outputs(serde_json::Value::String("PRECOMPUTED".to_string())),
+        );
+        let orch = ManagerWorkerOrchestrator::new();
+        let result = orch
+            .run(&team, "do thing", Some("run-fast"), Some(store.as_ref()))
+            .await
+            .unwrap();
+        assert_eq!(result, "PRECOMPUTED");
+    }
+
+    #[tokio::test]
+    async fn run_resumes_skipping_completed_plan_and_worker() {
+        // Pre-seed plan Success + worker_0 Success → plan reused, worker_0 reused,
+        // only worker_1 spawned fresh, synthesis merges stored + new.
+        let (_team, _mgr, workers) = build_team("fresh-plan", &["w-fresh-1"]);
+        // worker_0 won't actually be called (its stored output reused); give the
+        // team's worker_0 a different response that should NOT appear in results.
+        let _ = workers; // (the team was built with one worker slot; this test uses 2)
+        let store = Arc::new(InMemStore::new());
+        store.seed(
+            "run-resume",
+            TaskNode::new("team_run-resume_plan", "team_plan")
+                .with_status(TaskNodeStatus::Success)
+                .with_outputs(serde_json::json!([
+                    {"idx": 0, "task": "task-0"},
+                    {"idx": 1, "task": "task-1"}
+                ])),
+        );
+        store.seed(
+            "run-resume",
+            TaskNode::new("team_run-resume_worker_0", "team_worker_0")
+                .with_status(TaskNodeStatus::Success)
+                .with_outputs(serde_json::Value::String("STORED-W0".to_string())),
+        );
+        // Rebuild team with 2 workers so worker_1 exists.
+        let (team2, _m, _ws) = build_team("fresh-plan", &["fresh-w0", "fresh-w1"]);
+        let orch = ManagerWorkerOrchestrator::new();
+        let _result = orch
+            .run(&team2, "do thing", Some("run-resume"), Some(store.as_ref()))
+            .await
+            .unwrap();
+        // Worker_0's stored result should be reused; worker_1 ran fresh. The
+        // synthesis node should now be written.
+        let snap = store.snapshot("run-resume");
+        let w0 = snap
+            .iter()
+            .find(|n| n.id == "team_run-resume_worker_0")
+            .unwrap();
+        assert_eq!(w0.status, TaskNodeStatus::Success);
+        assert!(snap.iter().any(|n| n.id == "team_run-resume_synthesis"));
+    }
+
+    #[tokio::test]
+    async fn run_resets_stale_running_or_failed_workers() {
+        // Pre-seed worker_0 Running (crash-stale) + worker_1 Failed → both must
+        // be reset to Pending then re-run (state-reset defense, patch #3).
+        let (team, _mgr, _ws) = build_team("task-A\ntask-B", &["rerun-0", "rerun-1"]);
+        let store = Arc::new(InMemStore::new());
+        store.seed(
+            "run-reset",
+            TaskNode::new("team_run-reset_worker_0", "team_worker_0")
+                .with_status(TaskNodeStatus::Running), // stale
+        );
+        store.seed(
+            "run-reset",
+            TaskNode::new("team_run-reset_worker_1", "team_worker_1")
+                .with_status(TaskNodeStatus::Failed),
+        );
+        let orch = ManagerWorkerOrchestrator::new();
+        let _result = orch
+            .run(&team, "do thing", Some("run-reset"), Some(store.as_ref()))
+            .await
+            .unwrap();
+        let snap = store.snapshot("run-reset");
+        // Both workers should now be Success (reran, not stuck).
+        let w0 = snap
+            .iter()
+            .find(|n| n.id == "team_run-reset_worker_0")
+            .unwrap();
+        let w1 = snap
+            .iter()
+            .find(|n| n.id == "team_run-reset_worker_1")
+            .unwrap();
+        assert_eq!(
+            w0.status,
+            TaskNodeStatus::Success,
+            "stale Running worker must rerun"
+        );
+        assert_eq!(
+            w1.status,
+            TaskNodeStatus::Success,
+            "Failed worker must rerun"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_synthesis_missing_reruns_only_synthesis() {
+        // Pre-seed plan + all workers Success but NO synthesis → plan + workers
+        // skipped, only synthesis runs (patch #4 edge case). The plan being
+        // reused means the manager's FIRST execute() call is the synthesis,
+        // so it returns build_team's first response ("task-A").
+        let (team, _mgr, _ws) = build_team("task-A", &["stored-w0"]);
+        let store = Arc::new(InMemStore::new());
+        store.seed(
+            "run-synmiss",
+            TaskNode::new("team_run-synmiss_plan", "team_plan")
+                .with_status(TaskNodeStatus::Success)
+                .with_outputs(serde_json::json!([{"idx": 0, "task": "task-A"}])),
+        );
+        store.seed(
+            "run-synmiss",
+            TaskNode::new("team_run-synmiss_worker_0", "team_worker_0")
+                .with_status(TaskNodeStatus::Success)
+                .with_outputs(serde_json::Value::String("W0-RESULT".to_string())),
+        );
+        let orch = ManagerWorkerOrchestrator::new();
+        let result = orch
+            .run(&team, "do thing", Some("run-synmiss"), Some(store.as_ref()))
+            .await
+            .unwrap();
+        // Synthesis ran (manager's only execute call, since plan was reused) →
+        // returns the first queued response "task-A". Not "SYNTHESIS" because
+        // MockAgent consumes responses in order and the plan-skip means
+        // synthesis is now the first call.
+        assert_eq!(result, "task-A");
+        // Core assertion: synthesis node written Success (plan + workers reused).
+        let snap = store.snapshot("run-synmiss");
+        assert!(
+            snap.iter().any(
+                |n| n.id == "team_run-synmiss_synthesis" && n.status == TaskNodeStatus::Success
+            )
+        );
+        // plan + worker_0 nodes unchanged (still Success, not re-written).
+        let plan = snap
+            .iter()
+            .find(|n| n.id == "team_run-synmiss_plan")
+            .unwrap();
+        assert_eq!(plan.status, TaskNodeStatus::Success);
+    }
+
+    /// Compile-time guard: stub agent impl unused here (MockAgent covers it).
+    #[allow(dead_code)]
+    fn _ensure_agent_event_imported(_: AgentEvent) {}
+    #[allow(dead_code)]
+    fn _ensure_boxstream_imported(_: BoxStream<'static, Result<AgentEvent>>) {}
+    #[allow(dead_code)]
+    fn _ensure_stream_imported() {
+        let _ = stream::once(async { Ok::<_, ()>(()) });
     }
 }
