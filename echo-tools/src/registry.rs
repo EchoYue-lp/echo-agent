@@ -200,6 +200,10 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
     {
         use crate::shell::ShellTool;
         tool_manager.register(Box::new(ShellTool::new()));
+        // Sprint 10b: inline code execution (Python/R/JS/...). Same shell
+        // feature gate; writer toolset only (readonly subset excludes it —
+        // readonly workers shouldn't run arbitrary code).
+        tool_manager.register(Box::new(crate::code::RunCodeTool::new()));
     }
 
     // ── files ─────────────────────────────────────────────────────────────
@@ -393,5 +397,54 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(BibtexGenerateTool));
         tool_manager.register(Box::new(ResearchRememberTool));
         tool_manager.register(Box::new(ResearchRecallTool));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use echo_core::tools::{Tool, ToolRegistrar};
+
+    /// A registrar that collects the names of every tool registered into it.
+    struct Collector {
+        names: std::sync::Mutex<Vec<String>>,
+    }
+    impl ToolRegistrar for Collector {
+        fn register(&mut self, tool: Box<dyn Tool>) {
+            self.names.lock().unwrap().push(tool.name().to_string());
+        }
+    }
+
+    /// Sprint 10b: `run_code` must be in the writer toolset
+    /// (`register_all_tools`). readonly subset must NOT include it.
+    #[test]
+    #[cfg(feature = "shell")]
+    fn register_all_tools_includes_run_code() {
+        let mut c = Collector {
+            names: std::sync::Mutex::new(vec![]),
+        };
+        crate::register_all_tools(&mut c);
+        let names = c.names.lock().unwrap().clone();
+        assert!(
+            names.contains(&"run_code".to_string()),
+            "run_code missing from register_all_tools: {:?}",
+            names
+        );
+    }
+
+    /// Sprint 10b: the readonly subset must NOT include `run_code` (it's a
+    /// writer/execute primitive; readonly workers shouldn't run arbitrary code).
+    #[test]
+    #[cfg(feature = "shell")]
+    fn register_readonly_tools_excludes_run_code() {
+        let mut c = Collector {
+            names: std::sync::Mutex::new(vec![]),
+        };
+        crate::register_readonly_tools(&mut c);
+        let names = c.names.lock().unwrap().clone();
+        assert!(
+            !names.contains(&"run_code".to_string()),
+            "run_code must NOT be in the readonly subset: {:?}",
+            names
+        );
     }
 }

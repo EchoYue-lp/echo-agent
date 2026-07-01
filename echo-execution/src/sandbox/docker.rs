@@ -275,6 +275,12 @@ impl DockerSandbox {
                     "python" | "python3" => ("python3", "-c"),
                     "node" | "javascript" | "js" => ("node", "-e"),
                     "ruby" => ("ruby", "-e"),
+                    // Sprint 10b: R is a first-class language. Without this
+                    // arm R silently fell through to ("sh","-c") and was
+                    // mis-run as shell (no error, wrong interpreter).
+                    // Image `rocker/r-base:latest` is mapped in mod.rs:84;
+                    // a missing image surfaces as Docker's ImageNotFound.
+                    "r" => ("Rscript", "-e"),
                     "perl" => ("perl", "-e"),
                     "php" => ("php", "-r"),
                     _ => ("sh", "-c"),
@@ -649,5 +655,22 @@ mod tests {
         assert!(args.contains(&"python3".to_string()));
         assert!(args.contains(&"-V".to_string()));
         assert!(!args.contains(&"run".to_string()));
+    }
+
+    /// Sprint 10b: R must map to `Rscript -e` in the docker Code backend.
+    ///
+    /// Before the patch, R fell through to `_ => ("sh", "-c")` and was
+    /// SILENTLY mis-run as a shell command (no error, wrong interpreter —
+    /// the worst kind of bug). After the patch it must map to
+    /// `("Rscript", "-e")` like python/node.
+    #[test]
+    fn test_inner_command_code_r_maps_to_rscript() {
+        let cmd = SandboxCommand::code("r", "print(1+1)");
+        let inner = DockerSandbox::build_inner_command(&cmd);
+        assert_eq!(
+            inner,
+            vec!["Rscript", "-e", "print(1+1)"],
+            "R must map to Rscript -e, not silently fall through to sh -c"
+        );
     }
 }

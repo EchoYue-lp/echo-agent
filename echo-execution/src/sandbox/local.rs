@@ -133,6 +133,9 @@ impl LocalSandbox {
             "python" | "python3" => ("python3", "-c"),
             "node" | "javascript" | "js" => ("node", "-e"),
             "ruby" => ("ruby", "-e"),
+            // Sprint 10b: R is a first-class language (arg-based, mirrors
+            // python/ruby/perl). `Rscript -e` runs the inline expression.
+            "r" => ("Rscript", "-e"),
             "perl" => ("perl", "-e"),
             "lua" => ("lua", "-e"),
             "php" => ("php", "-r"),
@@ -698,5 +701,34 @@ mod tests {
             !profile.contains("(allow network*)"),
             "network=false must keep Seatbelt strict"
         );
+    }
+
+    /// Sprint 10b: R must be a first-class language in the `Code` backend.
+    ///
+    /// Before the patch, R fell through to the `_` arm and returned
+    /// `SandboxError::Unavailable("Unsupported language: r")`. After the patch
+    /// it must map to `("Rscript", "-e")` like python/ruby/perl.
+    ///
+    /// We can't assume Rscript is installed in CI, so we only assert the error
+    /// is NOT "Unsupported language" — i.e. the match arm fired and proceeded
+    /// to interpreter resolution (a missing interpreter surfaces as a spawn
+    /// error, not as "Unsupported language").
+    #[tokio::test]
+    async fn code_backend_supports_r_language_mapping() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+        let cmd = SandboxCommand::code("r", "print(1+1)");
+        match sandbox.execute(cmd).await {
+            Ok(_) => { /* Rscript present + ran */ }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(
+                    !msg.contains("Unsupported language"),
+                    "R should not hit the Unsupported-language arm. Got: {msg}"
+                );
+            }
+        }
     }
 }

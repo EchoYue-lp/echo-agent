@@ -165,14 +165,13 @@ pub struct LayerChangeResult {
 
 // ── MemoryLayerManager ─────────────────────────────────────────────────
 
-/// Manages the three-tier memory layer system.
+/// Manages the two-tier memory layer system (stage4: cold removed).
 ///
 /// - **Hot layer**: `.echo-agent/MEMORY.md` (YAML frontmatter + markdown body).
 ///   Always loaded into context. Max ~2000 tokens.
-/// - **Warm layer**: Store KV under `["agent", "typed_memories"]`.
-///   Available on-demand via search.
-/// - **Cold layer**: Store KV under `["agent", "cold_memories"]`.
-///   Archive for old/low-confidence memories.
+/// - **Warm layer**: Store KV under [`WARM_NAMESPACE`] = `["agent", "memories"]`.
+///   Available on-demand via search; Archived entries stay here (recallable
+///   with decay). See module-level docs for why cold is gone.
 pub struct MemoryLayerManager {
     /// Path to the MEMORY.md file.
     hot_path: PathBuf,

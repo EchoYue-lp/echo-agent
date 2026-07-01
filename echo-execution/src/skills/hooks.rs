@@ -2542,10 +2542,6 @@ Notification:
 
     // ── ActivateSkill tests ──
 
-    fn ctx() -> super::HookContext {
-        super::HookContext::for_user_prompt_submit("test input", None, "s1", "agent")
-    }
-
     #[test]
     fn validate_rejects_empty_skill_name() {
         let a = HookAction::ActivateSkill {
