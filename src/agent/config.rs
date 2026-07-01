@@ -821,6 +821,21 @@ impl AgentConfig {
         self
     }
 
+    /// Set whether the verifier (Critic) is enabled (mutable setter).
+    pub fn set_verifier_enabled(&mut self, enabled: bool) {
+        self.verifier_enabled = enabled;
+    }
+
+    /// Set the verifier minimum pass score (mutable setter).
+    pub fn set_verifier_min_score(&mut self, score: f64) {
+        self.verifier_min_score = score;
+    }
+
+    /// Set the verifier max retry count (mutable setter).
+    pub fn set_verifier_max_retries(&mut self, retries: usize) {
+        self.verifier_max_retries = retries;
+    }
+
     /// Set conversation identifier
     ///
     /// # Parameters

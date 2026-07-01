@@ -11,6 +11,7 @@ use echo_state::skill_telemetry::SkillTelemetryStore;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::evolution::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
 
 // Re-export SkillDescriptor for use in this module.
 pub use echo_execution::skills::external::SkillDescriptor;
@@ -47,6 +48,18 @@ pub enum PatchType {
         /// Enhancement details.
         enhancement: String,
     },
+}
+
+impl PatchType {
+    /// Human-readable label for this patch type (used in markdown headings).
+    pub fn label(&self) -> &'static str {
+        match self {
+            PatchType::ErrorHandling { .. } => "Error Handling",
+            PatchType::PrerequisiteCheck { .. } => "Prerequisite Check",
+            PatchType::FallbackStrategy { .. } => "Fallback Strategy",
+            PatchType::InstructionEnhancement { .. } => "Instruction Enhancement",
+        }
+    }
 }
 
 /// A proposed patch for a skill.
@@ -113,6 +126,61 @@ impl SkillPatch {
                 )
             }
         }
+    }
+
+    /// Render the patch as a markdown section suitable for appending to SKILL.md.
+    ///
+    /// The section is placed after the frontmatter and existing body content.
+    /// It includes a timestamped heading, the rationale, and the structured
+    /// instructions derived from the patch type.
+    pub fn to_markdown(&self) -> String {
+        let ts = self.proposed_at.format("%Y-%m-%d").to_string();
+        let mut lines = vec![
+            format!(
+                "\n---\n\n## Auto-patch: {} ({})\n",
+                self.patch_type.label(),
+                ts
+            ),
+            format!("**Rationale:** {}\n", self.rationale),
+            format!("**Confidence:** {:.0}%\n", self.confidence * 100.0),
+        ];
+
+        match &self.patch_type {
+            PatchType::ErrorHandling {
+                failure_pattern,
+                handling_instructions,
+            } => {
+                lines.push(format!("**Failure pattern:** `{failure_pattern}`\n"));
+                lines.push(format!("**Instructions:**\n{handling_instructions}\n"));
+            }
+            PatchType::PrerequisiteCheck {
+                check_description,
+                verification_steps,
+            } => {
+                lines.push(format!("**Check:** {check_description}\n"));
+                lines.push("**Steps:**\n".into());
+                for step in verification_steps {
+                    lines.push(format!("- {step}"));
+                }
+                lines.push(String::new());
+            }
+            PatchType::FallbackStrategy {
+                trigger_condition,
+                fallback_instructions,
+            } => {
+                lines.push(format!("**Trigger:** {trigger_condition}\n"));
+                lines.push(format!("**Fallback:**\n{fallback_instructions}\n"));
+            }
+            PatchType::InstructionEnhancement {
+                target_section,
+                enhancement,
+            } => {
+                lines.push(format!("**Section:** {target_section}\n"));
+                lines.push(format!("**Enhancement:**\n{enhancement}\n"));
+            }
+        }
+
+        lines.join("\n")
     }
 }
 
@@ -183,6 +251,86 @@ impl SkillPatcher {
         });
 
         Ok(all_patches)
+    }
+
+    /// Apply a patch to a skill's SKILL.md file.
+    ///
+    /// Appends the patch instructions as a markdown section to the body
+    /// (after any existing frontmatter). Does NOT modify the YAML frontmatter.
+    /// Records the change in the audit log.
+    ///
+    /// # Arguments
+    /// * `patch` — The patch to apply (from `analyze_and_propose`).
+    /// * `descriptor` — The skill descriptor (provides `.location` = SKILL.md path).
+    /// * `change_log` — Audit log to record the mutation.
+    pub async fn apply_patch(
+        &self,
+        patch: &SkillPatch,
+        descriptor: &SkillDescriptor,
+        change_log: &dyn ChangeLog,
+    ) -> Result<()> {
+        let path = &descriptor.location;
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+            crate::error::ReactError::Other(format!(
+                "Failed to read SKILL.md at {}: {e}",
+                path.display()
+            ))
+        })?;
+
+        // Split frontmatter (--- ... ---) from body. If no frontmatter, treat
+        // the entire content as body.
+        let (frontmatter, body) = if content.starts_with("---\n") {
+            if let Some(end) = content[4..].find("\n---\n") {
+                let fm_end = end + 8; // 4 (prefix) + content + 4 (\n---\n)
+                let (fm, rest) = content.split_at(fm_end);
+                (fm.to_string(), rest.to_string())
+            } else {
+                (String::new(), content.clone())
+            }
+        } else {
+            (String::new(), content.clone())
+        };
+
+        // Append the patch markdown section to the body.
+        let patch_md = patch.to_markdown();
+        let new_body = format!("{}\n{}", body.trim_end(), patch_md);
+        let new_content = if frontmatter.is_empty() {
+            new_body
+        } else {
+            format!("{frontmatter}\n{new_body}\n")
+        };
+
+        // Write back atomically (write to tmp, then rename — same pattern as FileStore).
+        let tmp_path = path.with_extension("md.tmp");
+        tokio::fs::write(&tmp_path, &new_content)
+            .await
+            .map_err(|e| {
+                crate::error::ReactError::Other(format!("Failed to write patched SKILL.md: {e}"))
+            })?;
+        tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
+            crate::error::ReactError::Other(format!("Failed to rename patched SKILL.md: {e}"))
+        })?;
+
+        // Record in audit log.
+        let entry =
+            ChangeEntryBuilder::new(EntityType::Skill, &patch.skill_name, ChangeType::Update)
+                .reason(format!(
+                    "Applied patch: {} (confidence: {:.0}%)",
+                    patch.patch_type.label(),
+                    patch.confidence * 100.0
+                ))
+                .trigger("skill_patcher".to_string())
+                .build(change_log);
+        change_log.record(entry)?;
+
+        tracing::info!(
+            skill = %patch.skill_name,
+            patch_type = patch.patch_type.label(),
+            "Patch applied to {}",
+            path.display()
+        );
+
+        Ok(())
     }
 
     /// Generate a patch proposal for a specific failure pattern.
