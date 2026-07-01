@@ -17,6 +17,11 @@
 //! | `rag`     | `rag` (RagIndexTool, RagSearchTool, …)    |
 //! | `full`    | All of the above                          |
 
+/// Sprint 10b: inline code execution tool (run_code). Gated under `shell`
+/// because it's the same execute/risk class (spawns an interpreter process).
+#[cfg(feature = "shell")]
+#[cfg_attr(docsrs, doc(cfg(feature = "shell")))]
+pub mod code;
 #[cfg(feature = "files")]
 #[cfg_attr(docsrs, doc(cfg(feature = "files")))]
 pub mod files;

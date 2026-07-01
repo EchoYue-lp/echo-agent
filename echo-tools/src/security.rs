@@ -329,14 +329,14 @@ impl PathValidator {
         let resolved = canonical_ancestor.join(suffix);
         // Re-check denied paths on the final path
         for denied in &self.denied_paths {
-            if let Ok(d) = denied.canonicalize() {
-                if resolved.starts_with(&d) {
-                    return Err(ToolError::AccessDenied {
-                        path: path.to_string(),
-                        reason: "Path is in the denied list".into(),
-                    }
-                    .into());
+            if let Ok(d) = denied.canonicalize()
+                && resolved.starts_with(&d)
+            {
+                return Err(ToolError::AccessDenied {
+                    path: path.to_string(),
+                    reason: "Path is in the denied list".into(),
                 }
+                .into());
             }
         }
         Ok(resolved)
