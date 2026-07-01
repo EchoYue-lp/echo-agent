@@ -8,27 +8,22 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// Orchestrates a team using the Manager-Worker pattern.
-pub struct ManagerWorkerOrchestrator {
-    /// Maximum number of retries for failed sub-tasks.
-    pub max_retries: u32,
-    /// Timeout per worker sub-task in seconds.
-    pub worker_timeout_secs: u64,
-}
+///
+/// Stateless except for the checkpoint store passed into `run()`. Sprint 11
+/// removed the dead `max_retries`/`worker_timeout_secs` fields (declared but
+/// never read; timeouts come from the outer `TeamAgent::execute` wrapper and
+/// the `SubagentExecutor` dispatch timeout).
+pub struct ManagerWorkerOrchestrator;
 
 impl Default for ManagerWorkerOrchestrator {
     fn default() -> Self {
-        Self {
-            max_retries: 2,
-            // Aligned with the unified subagent_timeout_secs (600s = 10 min).
-            // Sprint 5: previously 300. See AgentConfig.subagent_timeout_secs.
-            worker_timeout_secs: 600,
-        }
+        Self
     }
 }
 
 impl ManagerWorkerOrchestrator {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// Run a task through the Manager-Worker team.
@@ -187,16 +182,6 @@ impl ManagerWorkerOrchestrator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn test_orchestrator_defaults() {
-        let orch = ManagerWorkerOrchestrator::new();
-        assert_eq!(orch.max_retries, 2);
-        // Sprint 5: aligned with the unified subagent_timeout_secs (600s).
-        assert_eq!(orch.worker_timeout_secs, 600);
-    }
-
     #[test]
     fn test_team_strategy_default() {
         let strategy = crate::agent::subagent::team::strategy::TeamStrategy::default();

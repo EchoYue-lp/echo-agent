@@ -3,6 +3,7 @@
 //! A Team is a group of agents working together under a coordinator.
 //! The leader assigns tasks, teammates execute and report back via mailboxes.
 
+pub mod agent_box;
 pub mod coordinator;
 pub mod mailbox;
 pub mod manager_worker;
@@ -10,6 +11,7 @@ pub mod message;
 pub mod runner;
 pub mod strategy;
 
+pub use agent_box::ArcAgentBox;
 pub use message::TeamMessage;
 pub use runner::TeamRunner;
 

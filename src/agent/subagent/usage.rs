@@ -36,6 +36,7 @@ impl LlmUsageStats {
     ///
     /// `model` is overwritten each call (last-seen wins), which is fine
     /// because a single dispatch typically uses one model.
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
         model: &str,

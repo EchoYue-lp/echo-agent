@@ -581,6 +581,7 @@ impl SubagentExecutor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_agent_streaming(
         registry: Arc<SubagentRegistry>,
         agent: &(dyn Agent + Send + Sync),
@@ -699,11 +700,10 @@ impl SubagentExecutor {
                             success: false,
                         });
                 }
-                AgentEvent::FinalAnswer(answer) => {
-                    if !answer.is_empty() {
-                        output = answer;
-                    }
+                AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
+                    output = answer;
                 }
+                AgentEvent::FinalAnswer(_) => {}
                 AgentEvent::Cancelled => {
                     cancelled = true;
                     registry.event_bus().emit(SubagentEvent::DispatchCancelled {
