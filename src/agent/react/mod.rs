@@ -356,6 +356,7 @@ impl ReactAgent {
                     default_timeout_secs: config.subagent_timeout_secs,
                     worktree_factory: config.subagent_worktree_factory.clone(),
                     data_workspace_factory: config.subagent_data_workspace_factory.clone(),
+                    runtime_state_store: config.subagent_runtime_state_store.clone(),
                     ..SubagentExecutorConfig::default()
                 },
             ))

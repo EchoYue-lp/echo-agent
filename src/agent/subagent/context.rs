@@ -79,6 +79,9 @@ impl ContextInheritance {
             ExecutionMode::Sync => Self::sync_default(),
             ExecutionMode::Fork => Self::fork_default(),
             ExecutionMode::Teammate => Self::teammate_default(),
+            // Sprint 11: team mode builds its own context (manager plans,
+            // workers fan out) — minimal inheritance, like Teammate.
+            ExecutionMode::Team => Self::teammate_default(),
         }
     }
 }

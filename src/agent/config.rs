@@ -82,6 +82,13 @@ pub struct AgentConfig {
     #[cfg(feature = "subagent")]
     pub(crate) subagent_data_workspace_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
+    /// Sprint 11: optional state store for team-mode checkpoint/resume. When
+    /// set, `dispatch_team` plumbs it into `TeamAgent` so `ManagerWorkerOrchestrator`
+    /// can read/write checkpoint nodes keyed by run_id. `None` (default) =
+    /// teams run in-memory (no persistence).
+    #[cfg(feature = "subagent")]
+    pub(crate) subagent_runtime_state_store:
+        Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
     /// Whether to register the `agent_tool` LLM-callable dispatch tool.
     ///
     /// Decoupled from `enable_subagent` (which controls the subagent registry
@@ -201,6 +208,8 @@ impl AgentConfig {
             subagent_worktree_factory: None,
             #[cfg(feature = "subagent")]
             subagent_data_workspace_factory: None,
+            #[cfg(feature = "subagent")]
+            subagent_runtime_state_store: None,
             register_agent_dispatch_tool: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
             stream_buffer_size: 256,
@@ -394,6 +403,20 @@ impl AgentConfig {
         factory: std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>,
     ) -> Self {
         self.subagent_data_workspace_factory = Some(factory);
+        self
+    }
+
+    /// Supply a `RuntimeStateStore` for team-mode checkpoint/resume (Sprint 11).
+    /// When set, `dispatch_team` plumbs it into `TeamAgent` so a timed-out team
+    /// run can resume by skipping already-completed plan/worker/synthesis
+    /// phases (DAG skip-on-resume pattern). Default: `None` (teams in-memory).
+    /// The application supplies a `FileRuntimeStateStore` (or other impl).
+    #[cfg(feature = "subagent")]
+    pub fn subagent_runtime_state_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::state::RuntimeStateStore>,
+    ) -> Self {
+        self.subagent_runtime_state_store = Some(store);
         self
     }
 

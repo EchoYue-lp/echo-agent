@@ -49,6 +49,9 @@ pub struct ReactAgentBuilder {
     #[cfg(feature = "subagent")]
     subagent_data_workspace_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
+    /// Sprint 11: optional RuntimeStateStore for team-mode checkpoint/resume.
+    #[cfg(feature = "subagent")]
+    subagent_runtime_state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
     enable_cot: bool,
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
@@ -120,6 +123,8 @@ impl ReactAgentBuilder {
             subagent_worktree_factory: None,
             #[cfg(feature = "subagent")]
             subagent_data_workspace_factory: None,
+            #[cfg(feature = "subagent")]
+            subagent_runtime_state_store: None,
             enable_cot: true,
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
@@ -333,6 +338,18 @@ impl ReactAgentBuilder {
         factory: std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>,
     ) -> Self {
         self.subagent_data_workspace_factory = Some(factory);
+        self
+    }
+
+    /// Sprint 11: supply a `RuntimeStateStore` for team-mode checkpoint/resume.
+    /// Injected into `SubagentExecutorConfig.runtime_state_store`; `dispatch_team`
+    /// plumbs it into `TeamAgent`. Default: no store (teams run in-memory).
+    #[cfg(feature = "subagent")]
+    pub fn subagent_runtime_state_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::state::RuntimeStateStore>,
+    ) -> Self {
+        self.subagent_runtime_state_store = Some(store);
         self
     }
 
@@ -795,6 +812,11 @@ impl ReactAgentBuilder {
         #[cfg(feature = "subagent")]
         if let Some(factory) = self.subagent_data_workspace_factory.clone() {
             config = config.subagent_data_workspace_factory(factory);
+        }
+        // Sprint 11: propagate the RuntimeStateStore (team checkpoint/resume).
+        #[cfg(feature = "subagent")]
+        if let Some(store) = self.subagent_runtime_state_store.clone() {
+            config = config.subagent_runtime_state_store(store);
         }
 
         if let Some(fmt) = self.response_format {
