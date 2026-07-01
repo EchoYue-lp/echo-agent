@@ -1256,6 +1256,7 @@ impl ReactAgent {
         if let Ok(mut hooks) = self.tools.hook_registry.try_write() {
             hooks.set_sandbox_manager(manager.clone());
         }
+        self.tools.tool_manager.apply_sandbox(manager.clone());
         self.tools.sandbox_manager = Some(manager);
     }
 

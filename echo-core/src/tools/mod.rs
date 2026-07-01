@@ -4,11 +4,13 @@ pub mod permission;
 pub mod skill;
 
 use crate::error::Result;
+use crate::sandbox::SandboxExecutor;
 use futures::future::BoxFuture;
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Classifies the kind of result a tool produced.
 ///
@@ -494,6 +496,16 @@ pub trait Tool: Send + Sync {
         _ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
         self.execute(parameters)
+    }
+
+    /// Optional sandbox injection (P2: run_code 真沙箱).
+    ///
+    /// Tools that hold a sandbox (`ShellTool`/`RunCodeTool`) override this to
+    /// receive the executor at agent-setup time (via `set_sandbox_manager` →
+    /// `ToolManager::apply_sandbox`). Returns `true` if the tool accepted the
+    /// sandbox, `false` (default) for tools that don't use one.
+    fn set_sandbox(&self, _sandbox: Arc<dyn SandboxExecutor>) -> bool {
+        false
     }
 
     /// Stream tool execution, producing incremental [`ToolStreamEvent`]s.

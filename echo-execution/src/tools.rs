@@ -7,6 +7,7 @@
 use dashmap::DashMap;
 use echo_core::error::{Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
+use echo_core::sandbox::SandboxExecutor;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -149,6 +150,20 @@ impl ToolManager {
         let mut tools: Vec<String> = self.tools.iter().map(|e| e.key().clone()).collect();
         tools.sort();
         tools
+    }
+
+    /// Inject a sandbox executor into all registered tools that support it.
+    ///
+    /// Iterates the [`DashMap`] with `iter_mut()`, calling
+    /// [`Tool::set_sandbox`] on each tool. Tools that override the method
+    /// (currently `ShellTool` and `RunCodeTool`) accept the executor;
+    /// all others ignore it via the default `false` implementation.
+    ///
+    /// Called from [`set_sandbox_manager`] at agent-setup time (P2).
+    pub fn apply_sandbox(&self, sandbox: Arc<dyn SandboxExecutor>) {
+        for mut entry in self.tools.iter_mut() {
+            entry.value_mut().set_sandbox(sandbox.clone());
+        }
     }
 
     /// Get a reference to a tool (via DashMap's Ref).

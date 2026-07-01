@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 use shlex::split as shlex_split;
 use std::collections::HashSet;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::process::Command;
 
 static ALLOWED_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -129,8 +129,9 @@ pub fn validate_command_safety(command: &str) -> CommandSafety {
 pub struct ShellTool {
     /// Whether strict mode is enabled (default true)
     strict_mode: bool,
-    /// Optional sandbox executor
-    sandbox: Option<Arc<dyn SandboxExecutor>>,
+    /// Optional sandbox executor (interior-mutable so `Tool::set_sandbox`
+    /// can inject it post-construction via `ToolManager::apply_sandbox`).
+    sandbox: Mutex<Option<Arc<dyn SandboxExecutor>>>,
     /// Command timeout in seconds (default 60 seconds)
     timeout_secs: u64,
 }
@@ -146,7 +147,7 @@ impl ShellTool {
     pub fn new() -> Self {
         Self {
             strict_mode: true,
-            sandbox: None,
+            sandbox: Mutex::new(None),
             timeout_secs: 60,
         }
     }
@@ -155,14 +156,14 @@ impl ShellTool {
     pub fn new_permissive() -> Self {
         Self {
             strict_mode: false,
-            sandbox: None,
+            sandbox: Mutex::new(None),
             timeout_secs: 60,
         }
     }
 
     /// Set the sandbox executor; commands will be executed through the sandbox
-    pub fn with_sandbox(mut self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
-        self.sandbox = Some(sandbox);
+    pub fn with_sandbox(self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
+        *self.sandbox.lock().expect("sandbox mutex poisoned") = Some(sandbox);
         self
     }
 
@@ -183,7 +184,11 @@ impl ShellTool {
 
     /// Check whether a command is safe
     pub fn check_command_safety(&self, command: &str) -> CommandSafety {
-        let has_sandbox = self.sandbox.is_some();
+        let has_sandbox = self
+            .sandbox
+            .lock()
+            .expect("sandbox mutex poisoned")
+            .is_some();
 
         // Check for shell metacharacters (prevent injection)
         // When sandbox is available, allow metacharacters — sandbox provides isolation
@@ -358,6 +363,12 @@ impl Tool for ShellTool {
         ToolRiskLevel::Dangerous
     }
 
+    /// P2: receive sandbox at agent-setup time (via ToolManager::apply_sandbox).
+    fn set_sandbox(&self, sandbox: Arc<dyn SandboxExecutor>) -> bool {
+        *self.sandbox.lock().expect("sandbox mutex poisoned") = Some(sandbox);
+        true
+    }
+
     fn parameters(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -381,6 +392,8 @@ impl Tool for ShellTool {
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
+            // Read sandbox once (interior-mutable; clone the Arc out of the lock).
+            let sandbox = self.sandbox.lock().expect("sandbox mutex poisoned").clone();
             let command = parameters
                 .get("command")
                 .and_then(|v| v.as_str())
@@ -411,11 +424,11 @@ impl Tool for ShellTool {
 
             // Parse command into argv (program name + argument list)
             let has_metacharacters = self.has_shell_metacharacters(command);
-            let has_sandbox = self.sandbox.is_some();
+            let has_sandbox = sandbox.is_some();
 
             if has_sandbox && has_metacharacters {
                 // Use sh -c through sandbox for commands with shell syntax
-                let sandbox = self.sandbox.as_ref().unwrap();
+                let sandbox = sandbox.as_ref().unwrap();
                 let mut sandbox_cmd =
                     SandboxCommand::program("sh", vec!["-c".to_string(), command.to_string()]);
                 if let Some(dir) = &ctx.working_dir {
@@ -460,7 +473,7 @@ impl Tool for ShellTool {
             let args = &parts[1..];
 
             // If sandbox is configured, execute via sandbox (using program mode to avoid shell injection)
-            if let Some(sandbox) = &self.sandbox {
+            if let Some(sandbox) = &sandbox {
                 let mut sandbox_cmd = SandboxCommand::program(program, args.to_vec());
                 if let Some(dir) = &ctx.working_dir {
                     sandbox_cmd = sandbox_cmd.with_working_dir(dir);

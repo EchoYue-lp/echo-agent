@@ -19,7 +19,7 @@ use echo_core::sandbox::{SandboxCommand, SandboxExecutor};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult, ToolRiskLevel};
 use futures::future::BoxFuture;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Languages supported by [`RunCodeTool`]. All use arg-based execution
@@ -67,7 +67,10 @@ fn validate_language(language: &str) -> Result<String> {
 
 /// Inline code execution tool.
 pub struct RunCodeTool {
-    sandbox: Option<Arc<dyn SandboxExecutor>>,
+    /// Interior-mutable so `Tool::set_sandbox` (a `&self` method) can inject
+    /// the executor after construction (via `set_sandbox_manager` →
+    /// `ToolManager::apply_sandbox`), without requiring `&mut self`.
+    sandbox: Mutex<Option<Arc<dyn SandboxExecutor>>>,
     /// Per-call timeout in seconds (default 60, capped at 300 like ShellTool).
     timeout_secs: u64,
 }
@@ -75,7 +78,7 @@ pub struct RunCodeTool {
 impl Default for RunCodeTool {
     fn default() -> Self {
         Self {
-            sandbox: None,
+            sandbox: Mutex::new(None),
             timeout_secs: 60,
         }
     }
@@ -88,8 +91,8 @@ impl RunCodeTool {
 
     /// Inject a sandbox executor (Docker / OS-sandbox / local). Without this,
     /// the tool falls back to a bare `tokio::process` run with a warning.
-    pub fn with_sandbox(mut self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
-        self.sandbox = Some(sandbox);
+    pub fn with_sandbox(self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
+        *self.sandbox.lock().expect("sandbox mutex poisoned") = Some(sandbox);
         self
     }
 
@@ -139,12 +142,20 @@ impl Tool for RunCodeTool {
         ToolRiskLevel::Dangerous
     }
 
+    /// P2: receive sandbox at agent-setup time (via ToolManager::apply_sandbox).
+    fn set_sandbox(&self, sandbox: Arc<dyn SandboxExecutor>) -> bool {
+        *self.sandbox.lock().expect("sandbox mutex poisoned") = Some(sandbox);
+        true
+    }
+
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
         ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
+            // Read sandbox (interior-mutable; clone the Arc out of the lock).
+            let sandbox = self.sandbox.lock().expect("sandbox mutex poisoned").clone();
             // 1. Parse + circuit-break on unknown language (user review patch #1).
             let raw_lang = parameters
                 .get("language")
@@ -175,7 +186,7 @@ impl Tool for RunCodeTool {
             sandbox_cmd = sandbox_cmd.with_timeout(timeout_duration);
 
             // 3. Execute via sandbox if configured, else warn + bare fallback.
-            if let Some(sandbox) = &self.sandbox {
+            if let Some(sandbox) = &sandbox {
                 match tokio::time::timeout(timeout_duration, sandbox.execute(sandbox_cmd)).await {
                     Ok(Ok(result)) => {
                         if result.success() {
