@@ -99,6 +99,63 @@ impl ReactAgent {
         }
     }
 
+    /// Record skill telemetry for the currently activated skill(s).
+    ///
+    /// Fire-and-forget: spawns a detached task so a slow Store write never
+    /// blocks the tool pipeline. No-op when no skill is activated or when no
+    /// memory store is configured. Each activated skill gets its own record
+    /// so `SkillHealthMonitor` / `SkillPatcher` / `SkillMerger` can pick up
+    /// real usage data.
+    fn record_skill_telemetry(
+        &self,
+        tool_name: &str,
+        duration_ms: u64,
+        success: bool,
+        error: Option<&str>,
+    ) {
+        let Some(store) = self.memory.store.as_ref() else {
+            return; // no store configured — graceful degradation
+        };
+        let activated = self.tools.skill_registry.activated_names();
+        if activated.is_empty() {
+            return; // no skill activated — skip
+        }
+        let session_id = self.config.get_session_id().unwrap_or("").to_string();
+        let store = store.clone();
+        let tool_name = tool_name.to_string();
+        let error_msg = error.map(|e| e.to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        tokio::spawn(async move {
+            let ts = echo_state::skill_telemetry::SkillTelemetryStore::new(store);
+            // Bridge: refresh curator last_used_at so apply_transitions computes
+            // idle time from "last actual use" instead of "since creation".
+            // touch_skill is sync + file-locked; errors are non-fatal.
+            let curator = echo_agent::evolution::Curator::default_path(
+                echo_agent::evolution::CuratorConfig::default(),
+            );
+            for skill_name in &activated {
+                let record = echo_state::skill_telemetry::SkillExecutionRecord {
+                    skill_name: skill_name.clone(),
+                    session_id: session_id.clone(),
+                    activated_at: now,
+                    duration_ms,
+                    tools_used: vec![tool_name.clone()],
+                    tool_calls_count: 1,
+                    success,
+                    error_message: error_msg.clone(),
+                };
+                if let Err(e) = ts.record_execution(&record).await {
+                    warn!(error = %e, skill = %skill_name, "skill telemetry write failed");
+                }
+                // Refresh curator activity timestamp (best-effort).
+                let _ = curator.touch_skill(skill_name, true);
+            }
+        });
+    }
+
     #[tracing::instrument(skip(self, input), fields(agent = %self.config.agent_name, tool.name = %tool_name))]
     pub(crate) fn execute_tool_feedback_raw<'a>(
         &'a self,
@@ -463,6 +520,7 @@ impl ReactAgent {
                 if let Some(result) = ctx.result {
                     self.record_memory_trigger_tool_event(tool_name, input, Some(&result), None);
                     if result.success {
+                        self.record_skill_telemetry(tool_name, ctx.duration_ms, true, None);
                         let output = ctx.output.unwrap_or_else(|| result.output.clone());
                         Ok(ToolExecutionOutcome {
                             tool_result: Some(result),
@@ -479,6 +537,12 @@ impl ReactAgent {
                             message: error_msg.clone(),
                         });
                         if soften_errors && tool_name != TOOL_FINAL_ANSWER {
+                            self.record_skill_telemetry(
+                                tool_name,
+                                ctx.duration_ms,
+                                false,
+                                Some(&error_msg),
+                            );
                             Ok(ToolExecutionOutcome {
                                 tool_result: Some(result),
                                 output: format!(
@@ -487,6 +551,12 @@ impl ReactAgent {
                                 hook_messages: ctx.hook_messages,
                             })
                         } else {
+                            self.record_skill_telemetry(
+                                tool_name,
+                                ctx.duration_ms,
+                                false,
+                                Some(&error_msg),
+                            );
                             Err(ToolExecutionFailure {
                                 error: err,
                                 hook_messages: ctx.hook_messages,
@@ -511,6 +581,12 @@ impl ReactAgent {
                     tool_name,
                     input,
                     None,
+                    Some(&error.to_string()),
+                );
+                self.record_skill_telemetry(
+                    tool_name,
+                    ctx.duration_ms,
+                    false,
                     Some(&error.to_string()),
                 );
                 Err(ToolExecutionFailure {
