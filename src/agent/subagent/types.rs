@@ -22,6 +22,12 @@ pub enum ExecutionMode {
     Fork,
     /// Teammate: parallel independent agent with message-passing coordination.
     Teammate,
+    /// Sprint 11: multi-agent team dispatch. Routes through `dispatch_team`
+    /// which builds a `TeamAgent` from the `TeamSpec` on the definition.
+    /// Unlike `Teammate` (single async agent poll), `Team` runs the full
+    /// ManagerWorker plan→fan-out→synthesize pipeline with optional
+    /// checkpoint/resume (when a `RuntimeStateStore` is configured).
+    Team,
 }
 
 impl std::fmt::Display for ExecutionMode {
@@ -30,6 +36,7 @@ impl std::fmt::Display for ExecutionMode {
             ExecutionMode::Sync => write!(f, "sync"),
             ExecutionMode::Fork => write!(f, "fork"),
             ExecutionMode::Teammate => write!(f, "teammate"),
+            ExecutionMode::Team => write!(f, "team"),
         }
     }
 }
@@ -52,6 +59,32 @@ pub enum SubagentKind {
         /// Source identifier (e.g., plugin name or registry URL).
         source: String,
     },
+}
+
+// ── Team Spec (Sprint 11) ─────────────────────────────────────────────────────
+
+/// Specification for a team-mode subagent (Sprint 11).
+///
+/// Carried on [`SubagentDefinition::team`]. The manager + workers are
+/// referenced **by name** (late binding) — `dispatch_team` resolves them from
+/// the `SubagentRegistry` at dispatch time. This decouples team topology from
+/// instance lifetimes: each member is itself a normal registered subagent
+/// (D-11-team-2: name-based late binding).
+///
+/// Only `TeamStrategy::ManagerWorker` is frontmatter-declarable (it's a unit
+/// variant); `Pipeline`/`Debate`/`Swarm` carry inline agent-name data and are
+/// programmatic-only (they remain without production callers — see spec §三
+/// "范围外").
+#[derive(Debug, Clone)]
+pub struct TeamSpec {
+    /// Strategy (typically `ManagerWorker`; others are programmatic-only).
+    pub strategy: super::team::strategy::TeamStrategy,
+    /// Manager/leader subagent name (must be separately registered).
+    pub manager: String,
+    /// Worker subagent names (must each be separately registered).
+    pub workers: Vec<String>,
+    /// Team runtime config (concurrency, timeout, etc.). Reuses `TeamConfig`.
+    pub config: super::team::TeamConfig,
 }
 
 // ── Subagent Definition ───────────────────────────────────────────────────────
@@ -120,6 +153,11 @@ pub struct SubagentDefinition {
     /// of `isolate_worktree` / `isolate_workspace` (worktree takes precedence if
     /// both are set, since a worktree also provides disjoint FS).
     pub isolate_workspace: bool,
+    /// Sprint 11: team-mode specification. When `Some` AND
+    /// `execution_mode == Team`, `dispatch_team` uses this to build the
+    /// TeamAgent (resolving manager + workers by name from the registry).
+    /// `None` for normal Sync/Fork/Teammate subagents.
+    pub team: Option<TeamSpec>,
 }
 
 impl SubagentDefinition {
@@ -147,6 +185,7 @@ impl SubagentDefinition {
             lightweight: false,
             isolate_worktree: false,
             isolate_workspace: false,
+            team: None,
         }
     }
 
@@ -259,6 +298,31 @@ mod tests {
         assert_eq!(ExecutionMode::Sync.to_string(), "sync");
         assert_eq!(ExecutionMode::Fork.to_string(), "fork");
         assert_eq!(ExecutionMode::Teammate.to_string(), "teammate");
+        // Sprint 11: Team variant.
+        assert_eq!(ExecutionMode::Team.to_string(), "team");
+    }
+
+    #[test]
+    fn test_team_spec_construction() {
+        // Sprint 11: a TeamSpec with ManagerWorker strategy can be constructed
+        // and attached to a SubagentDefinition. Workers are name-references.
+        use super::super::team::TeamConfig;
+        use super::super::team::strategy::TeamStrategy;
+        let spec = TeamSpec {
+            strategy: TeamStrategy::ManagerWorker,
+            manager: "planner".to_string(),
+            workers: vec!["explorer".to_string(), "summarizer".to_string()],
+            config: TeamConfig::default(),
+        };
+        let mut def = SubagentDefinition::new("team-research", "team research worker");
+        assert!(def.team.is_none());
+        def.team = Some(spec.clone());
+        assert_eq!(def.team.as_ref().unwrap().manager, "planner");
+        assert_eq!(def.team.as_ref().unwrap().workers.len(), 2);
+        assert_eq!(
+            def.team.as_ref().unwrap().strategy,
+            TeamStrategy::ManagerWorker
+        );
     }
 
     #[test]
