@@ -124,6 +124,13 @@ pub struct SubagentExecutorConfig {
     /// unisolated). Application supplies a git-backed impl; framework stays
     /// free of git deps.
     pub worktree_factory: Option<super::worktree::SharedWorktreeFactory>,
+    /// Optional data-workspace factory (Sprint 10). When set, Fork-dispatched
+    /// workers whose `SubagentDefinition.isolate_workspace == true` run inside
+    /// an isolated per-worker working directory (tmpdir) created by this
+    /// factory — for data/research workers emitting disjoint output artifacts.
+    /// `None` = no workspace isolation available. Application supplies a
+    /// tmpdir-backed impl.
+    pub data_workspace_factory: Option<super::workspace::SharedDataWorkspaceFactory>,
 }
 
 impl Default for SubagentExecutorConfig {
@@ -134,6 +141,7 @@ impl Default for SubagentExecutorConfig {
             enable_hooks: true,
             unified_hook_executor: None,
             worktree_factory: None,
+            data_workspace_factory: None,
         }
     }
 }
@@ -875,8 +883,25 @@ impl SubagentExecutor {
                  running without isolation"
             );
         }
-        // Label identifies this dispatch for worktree branch naming. run_id (if
-        // available from the runtime context) disambiguates concurrent runs.
+        // Sprint 10: data-workspace isolation for data/research workers.
+        // Mutually exclusive with worktree in intent — if a worker declares
+        // both, worktree wins (it also provides disjoint FS). Resolve the
+        // workspace factory only when worktree isolation isn't being used.
+        let isolate_workspace = registered.definition.isolate_workspace && !isolate;
+        let data_workspace_factory = if isolate_workspace {
+            self.config.data_workspace_factory.clone()
+        } else {
+            None
+        };
+        if isolate_workspace && data_workspace_factory.is_none() {
+            tracing::warn!(
+                worker = %agent_name,
+                "Worker declares isolate_workspace but no DataWorkspaceFactory is configured; \
+                 running without a workspace"
+            );
+        }
+        // Label identifies this dispatch for worktree/workspace naming. run_id
+        // (if available from the runtime context) disambiguates concurrent runs.
         let worktree_label = match runtime_context.as_ref() {
             Some(ctx) => format!("{agent_name}-{}", ctx.run_id),
             None => format!("{agent_name}-{}", uuid::Uuid::new_v4().as_simple()),
@@ -933,6 +958,28 @@ impl SubagentExecutor {
                         }
                         return Err(ReactError::Other(format!(
                             "Worktree isolation for Fork worker '{agent_name}' failed: {e}"
+                        )));
+                    }
+                }
+            }
+
+            // Sprint 10: data-workspace isolation. Same shape as worktree above
+            // but for data/research workers: a per-worker tmpdir bound as
+            // working_dir so output files are disjoint across parallel workers.
+            // Creation failure is a hard error (consistent with worktree).
+            let mut workspace_handle: Option<super::workspace::DataWorkspaceHandle> = None;
+            if let Some(factory) = &data_workspace_factory {
+                match factory.create(&worktree_label) {
+                    Ok(handle) => {
+                        agent.set_working_dir(Some(handle.path.clone()));
+                        workspace_handle = Some(handle);
+                    }
+                    Err(e) => {
+                        if has_ctx {
+                            agent.clear_external_context();
+                        }
+                        return Err(ReactError::Other(format!(
+                            "Data workspace for Fork worker '{agent_name}' failed: {e}"
                         )));
                     }
                 }
@@ -1013,6 +1060,33 @@ impl SubagentExecutor {
                             worker = %agent_name,
                             error = %e,
                             "Worktree finalize (diff summary) failed; result preserved"
+                        );
+                    }
+                }
+            }
+
+            // Sprint 10: finalize the data workspace (file listing) and restore
+            // the worker's working_dir. Append the listing to the output so the
+            // orchestrator/analyst can find each worker's disjoint outputs.
+            if let Some(handle) = workspace_handle {
+                agent.set_working_dir(None);
+                match (handle.finalize)() {
+                    Ok(listing) => {
+                        if let Ok(mut r) = result {
+                            if !listing.trim().is_empty() {
+                                r.output = format!(
+                                    "{}\n\n--- workspace outputs ---\n{}",
+                                    r.output, listing
+                                );
+                            }
+                            return Ok(r);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            worker = %agent_name,
+                            error = %e,
+                            "Data workspace finalize (file listing) failed; result preserved"
                         );
                     }
                 }
@@ -1431,5 +1505,182 @@ mod tests {
         // Factory never invoked — readonly workers don't request isolation.
         assert!(factory.labels.lock().unwrap().is_empty());
         let _ = agent;
+    }
+
+    // ── Sprint 10: Fork data-workspace isolation ───────────────────────────
+
+    use crate::agent::subagent::workspace::{
+        DataWorkspaceFactory, DataWorkspaceHandle, WorkspaceError,
+    };
+
+    /// A mock data-workspace factory mirroring MockWorktreeFactory.
+    struct MockWorkspaceFactory {
+        labels: StdMutex<Vec<String>>,
+        should_fail: bool,
+    }
+
+    impl DataWorkspaceFactory for MockWorkspaceFactory {
+        fn create(&self, label: &str) -> std::result::Result<DataWorkspaceHandle, WorkspaceError> {
+            if self.should_fail {
+                return Err(WorkspaceError::new("mock workspace create failed"));
+            }
+            self.labels.lock().unwrap().push(label.to_string());
+            Ok(DataWorkspaceHandle {
+                path: std::path::PathBuf::from(format!("/tmp/mock-ws-{label}")),
+                finalize: Box::new(|| {
+                    Ok::<String, WorkspaceError>(
+                        "run_001_clean.parquet\nrun_001_stats.json".to_string(),
+                    )
+                }),
+            })
+        }
+    }
+
+    /// Build an executor with a data-workspace factory wired into its config.
+    fn make_executor_with_workspace_factory(
+        factory: Arc<dyn DataWorkspaceFactory>,
+    ) -> (Arc<SubagentRegistry>, SubagentExecutor) {
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = SubagentExecutor::new(
+            registry.clone(),
+            SubagentExecutorConfig {
+                data_workspace_factory: Some(factory),
+                ..SubagentExecutorConfig::default()
+            },
+        );
+        (registry, executor)
+    }
+
+    #[tokio::test]
+    async fn fork_isolate_workspace_appends_file_listing() {
+        // A data worker declaring isolate_workspace, dispatched in Fork mode
+        // with a configured factory: the workspace is created and the finalize
+        // file listing is appended to the output (proof of creation+finalize).
+        let factory = Arc::new(MockWorkspaceFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let factory_obs: Arc<dyn DataWorkspaceFactory> = factory.clone();
+        let (registry, executor) = make_executor_with_workspace_factory(factory_obs);
+
+        let agent = MockAgent::new("analyst").with_response("analysis done");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_workspace: true,
+            ..super::super::types::SubagentDefinition::new("analyst", "Analyst")
+        };
+        registry.register(def, Box::new(agent)).await;
+
+        let req = DispatchRequest {
+            agent_name: "analyst".into(),
+            task: "analyze data".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let result = executor.dispatch(req).await.unwrap();
+        assert!(result.output.contains("analysis done"));
+        assert!(result.output.contains("run_001_clean.parquet"));
+        assert!(result.output.contains("--- workspace outputs ---"));
+        // Factory invoked once with a label derived from the agent name.
+        let labels = factory.labels.lock().unwrap().clone();
+        assert_eq!(labels.len(), 1);
+        assert!(labels[0].starts_with("analyst-"));
+    }
+
+    #[tokio::test]
+    async fn fork_isolate_workspace_create_failure_fails_dispatch() {
+        // Workspace factory hard-fails → dispatch fails (safety gate).
+        let factory = Arc::new(MockWorkspaceFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: true,
+        });
+        let factory_obs: Arc<dyn DataWorkspaceFactory> = factory;
+        let (registry, executor) = make_executor_with_workspace_factory(factory_obs);
+
+        let agent = MockAgent::new("analyst").with_response("ok");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_workspace: true,
+            ..super::super::types::SubagentDefinition::new("analyst", "Analyst")
+        };
+        registry.register(def, Box::new(agent)).await;
+
+        let req = DispatchRequest {
+            agent_name: "analyst".into(),
+            task: "analyze".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let err = executor.dispatch(req).await.unwrap_err();
+        assert!(err.to_string().contains("Data workspace"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn fork_worktree_takes_precedence_over_workspace() {
+        // If a worker declares BOTH isolate_worktree and isolate_workspace,
+        // worktree wins (it also provides disjoint FS) — workspace factory is
+        // not invoked. Guards against double-isolation.
+        let ws_factory = Arc::new(MockWorkspaceFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let wt_factory = Arc::new(MockWorktreeFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = SubagentExecutor::new(
+            registry.clone(),
+            SubagentExecutorConfig {
+                worktree_factory: Some(wt_factory.clone()),
+                data_workspace_factory: Some(ws_factory.clone()),
+                ..SubagentExecutorConfig::default()
+            },
+        );
+
+        let agent = MockAgent::new("w").with_response("done");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: true,
+            isolate_workspace: true, // both — worktree should win
+            ..super::super::types::SubagentDefinition::new("w", "Writer")
+        };
+        registry.register(def, Box::new(agent)).await;
+
+        let req = DispatchRequest {
+            agent_name: "w".into(),
+            task: "work".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegate_depth: 0,
+            runtime_context: None,
+            message: None,
+        };
+
+        let result = executor.dispatch(req).await.unwrap();
+        // Worktree was used (mock diff appended), workspace was NOT.
+        assert!(result.output.contains("=== mock diff ==="));
+        assert!(
+            ws_factory.labels.lock().unwrap().is_empty(),
+            "workspace factory must not be invoked when worktree is active"
+        );
+        assert!(
+            !wt_factory.labels.lock().unwrap().is_empty(),
+            "worktree factory should have been invoked"
+        );
     }
 }

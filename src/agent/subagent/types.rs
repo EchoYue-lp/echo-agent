@@ -108,6 +108,18 @@ pub struct SubagentDefinition {
     /// `true` but no factory is configured, a warning is logged and the worker
     /// runs without isolation (the application decides whether to supply one).
     pub isolate_worktree: bool,
+    /// Whether Fork-dispatched execution of this subagent should run inside an
+    /// isolated data workspace (Sprint 10). For **data/research workers** that
+    /// emit generated artifacts (CSVs/parquet/charts) — gives each worker a
+    /// disjoint working directory so parallel runs don't overwrite each other's
+    /// outputs, WITHOUT git coupling (unlike `isolate_worktree`, which suits
+    /// code writers). When `true` AND a `DataWorkspaceFactory` is configured,
+    /// the Fork dispatch creates a workspace (tmpdir), binds it as the worker's
+    /// `working_dir`, and finalizes a file listing after the run. Workspace
+    /// creation failure fails the dispatch. A worker should declare AT MOST ONE
+    /// of `isolate_worktree` / `isolate_workspace` (worktree takes precedence if
+    /// both are set, since a worktree also provides disjoint FS).
+    pub isolate_workspace: bool,
 }
 
 impl SubagentDefinition {
@@ -134,6 +146,7 @@ impl SubagentDefinition {
             tags: Vec::new(),
             lightweight: false,
             isolate_worktree: false,
+            isolate_workspace: false,
         }
     }
 

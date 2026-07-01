@@ -75,6 +75,13 @@ pub struct AgentConfig {
     #[cfg(feature = "subagent")]
     pub(crate) subagent_worktree_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
+    /// Optional data-workspace factory for Fork-dispatched data/research workers
+    /// (Sprint 10). When set, workers whose `SubagentDefinition.isolate_workspace`
+    /// is `true` run inside an isolated per-worker working directory (tmpdir)
+    /// created by this factory. `None` (default) = no workspace isolation.
+    #[cfg(feature = "subagent")]
+    pub(crate) subagent_data_workspace_factory:
+        Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
     /// Whether to register the `agent_tool` LLM-callable dispatch tool.
     ///
     /// Decoupled from `enable_subagent` (which controls the subagent registry
@@ -192,6 +199,8 @@ impl AgentConfig {
             subagent_timeout_secs: 600,
             #[cfg(feature = "subagent")]
             subagent_worktree_factory: None,
+            #[cfg(feature = "subagent")]
+            subagent_data_workspace_factory: None,
             register_agent_dispatch_tool: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
             stream_buffer_size: 256,
@@ -371,6 +380,20 @@ impl AgentConfig {
         factory: std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>,
     ) -> Self {
         self.subagent_worktree_factory = Some(factory);
+        self
+    }
+
+    /// Supply a data-workspace factory for Fork-dispatched data/research workers
+    /// (Sprint 10). Workers whose `SubagentDefinition.isolate_workspace == true`
+    /// run inside a per-worker tmpdir created by this factory (disjoint output
+    /// files). Default: `None`. The application constructs the tmpdir-backed
+    /// factory and injects it here.
+    #[cfg(feature = "subagent")]
+    pub fn subagent_data_workspace_factory(
+        mut self,
+        factory: std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>,
+    ) -> Self {
+        self.subagent_data_workspace_factory = Some(factory);
         self
     }
 

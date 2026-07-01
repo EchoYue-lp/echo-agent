@@ -50,6 +50,7 @@ impl SubagentBuilder {
                 tags: Vec::new(),
                 lightweight: false,
                 isolate_worktree: false,
+                isolate_workspace: false,
             },
         }
     }
@@ -167,6 +168,18 @@ impl SubagentBuilder {
     /// and the worker runs without isolation).
     pub fn isolate_worktree(mut self) -> Self {
         self.definition.isolate_worktree = true;
+        self
+    }
+
+    /// Request that Fork-dispatched execution of this subagent run inside an
+    /// isolated data workspace (Sprint 10) — a per-worker disjoint working
+    /// directory for data/research workers emitting generated artifacts
+    /// (CSVs/parquet/charts), without git coupling. Requires a
+    /// `DataWorkspaceFactory` configured on the executor (else a warning is
+    /// logged and the worker runs without a workspace). A worker should declare
+    /// at most one of `.isolate_worktree()` / `.isolate_workspace()`.
+    pub fn isolate_workspace(mut self) -> Self {
+        self.definition.isolate_workspace = true;
         self
     }
 

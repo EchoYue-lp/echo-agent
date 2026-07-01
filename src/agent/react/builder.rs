@@ -43,6 +43,12 @@ pub struct ReactAgentBuilder {
     #[cfg(feature = "subagent")]
     subagent_worktree_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
+    /// Sprint 10: optional data-workspace factory for Fork-dispatched
+    /// data/research workers. Propagated to
+    /// `AgentConfig.subagent_data_workspace_factory` on build.
+    #[cfg(feature = "subagent")]
+    subagent_data_workspace_factory:
+        Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
     enable_cot: bool,
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
@@ -112,6 +118,8 @@ impl ReactAgentBuilder {
             register_agent_dispatch_tool: false,
             #[cfg(feature = "subagent")]
             subagent_worktree_factory: None,
+            #[cfg(feature = "subagent")]
+            subagent_data_workspace_factory: None,
             enable_cot: true,
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
@@ -313,6 +321,18 @@ impl ReactAgentBuilder {
         factory: std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>,
     ) -> Self {
         self.subagent_worktree_factory = Some(factory);
+        self
+    }
+
+    /// Sprint 10: supply a data-workspace factory for Fork-dispatched
+    /// data/research workers. The application constructs the tmpdir-backed
+    /// factory and injects it here. Default: no factory (no workspace isolation).
+    #[cfg(feature = "subagent")]
+    pub fn subagent_data_workspace_factory(
+        mut self,
+        factory: std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>,
+    ) -> Self {
+        self.subagent_data_workspace_factory = Some(factory);
         self
     }
 
@@ -770,6 +790,11 @@ impl ReactAgentBuilder {
         #[cfg(feature = "subagent")]
         if let Some(factory) = self.subagent_worktree_factory.clone() {
             config = config.subagent_worktree_factory(factory);
+        }
+        // Sprint 10: propagate the data-workspace factory (if any).
+        #[cfg(feature = "subagent")]
+        if let Some(factory) = self.subagent_data_workspace_factory.clone() {
+            config = config.subagent_data_workspace_factory(factory);
         }
 
         if let Some(fmt) = self.response_format {

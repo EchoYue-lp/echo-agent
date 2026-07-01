@@ -355,6 +355,7 @@ impl ReactAgent {
                     unified_hook_executor: Some(unified_executor),
                     default_timeout_secs: config.subagent_timeout_secs,
                     worktree_factory: config.subagent_worktree_factory.clone(),
+                    data_workspace_factory: config.subagent_data_workspace_factory.clone(),
                     ..SubagentExecutorConfig::default()
                 },
             ))
