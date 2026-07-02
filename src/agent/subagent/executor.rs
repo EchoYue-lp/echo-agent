@@ -256,6 +256,14 @@ impl SubagentExecutor {
                 .as_ref()
                 .map(|ctx| ctx.run_id.as_str())
                 .unwrap_or("<none>");
+            // Extract stable identity for event payload (Option<String>).
+            // Used by all Dispatch* events so the bridge/frontend can route
+            // thinking/tool/token streams without temp id allocation.
+            let event_execution_id = req
+                .runtime_context
+                .as_ref()
+                .and_then(|ctx| ctx.execution_id.clone());
+            let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
             let has_trace_sink = req
                 .runtime_context
                 .as_ref()
@@ -295,6 +303,8 @@ impl SubagentExecutor {
                     agent: req.agent_name.clone(),
                     mode: mode.clone(),
                     task: req.task.clone(),
+                    execution_id: event_execution_id.clone(),
+                    run_id: event_run_id.clone(),
                 });
 
             if self.config.enable_hooks {
@@ -361,6 +371,8 @@ impl SubagentExecutor {
                             tokens_used: sub_result.tokens_used.map(|t| t as u64),
                             iterations: Some(sub_result.iterations as u64),
                             output: sub_result.output.clone(),
+                            execution_id: event_execution_id.clone(),
+                            run_id: event_run_id.clone(),
                         });
 
                     if self.config.enable_hooks {
@@ -397,6 +409,8 @@ impl SubagentExecutor {
                             parent: req_parent_agent.clone(),
                             agent: req_agent_name.clone(),
                             error: error_str.clone(),
+                            execution_id: event_execution_id.clone(),
+                            run_id: event_run_id.clone(),
                         });
 
                     if self.config.enable_hooks {
@@ -505,6 +519,13 @@ impl SubagentExecutor {
 
         let handle_id = format!("tm_{}", uuid::Uuid::new_v4().as_simple());
 
+        // Extract stable identity for event payload (moved into the spawn).
+        let event_execution_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.execution_id.clone());
+        let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+
         let join_handle = tokio::spawn(async move {
             let _permit = child_token.clone();
             let start = Instant::now();
@@ -534,6 +555,8 @@ impl SubagentExecutor {
                         &agent_name,
                         ExecutionMode::Teammate,
                         start,
+                        event_execution_id.clone(),
+                        event_run_id.clone(),
                     ) => r,
                 }
             } else {
@@ -553,6 +576,8 @@ impl SubagentExecutor {
                         &agent_name,
                         ExecutionMode::Teammate,
                         start,
+                        event_execution_id.clone(),
+                        event_run_id.clone(),
                     ) => r,
                 }
             }
@@ -746,6 +771,8 @@ impl SubagentExecutor {
         subagent: &str,
         mode: ExecutionMode,
         start: Instant,
+        execution_id: Option<String>,
+        run_id: Option<String>,
     ) -> Result<SubagentResult> {
         // Multimodal path: when a Message is supplied, run it so the worker
         // sees images/files. Falls back to the text task otherwise.
@@ -774,6 +801,8 @@ impl SubagentExecutor {
                                 parent: parent.to_string(),
                                 agent: subagent.to_string(),
                                 content,
+                                execution_id: execution_id.clone(),
+                                run_id: run_id.clone(),
                             });
                     } else {
                         output.push_str(&content);
@@ -783,6 +812,8 @@ impl SubagentExecutor {
                                 parent: parent.to_string(),
                                 agent: subagent.to_string(),
                                 content,
+                                execution_id: execution_id.clone(),
+                                run_id: run_id.clone(),
                             });
                     }
                 }
@@ -793,6 +824,8 @@ impl SubagentExecutor {
                         .emit(SubagentEvent::DispatchThinkingStarted {
                             parent: parent.to_string(),
                             agent: subagent.to_string(),
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
                         });
                 }
                 AgentEvent::ThinkEnd {
@@ -809,6 +842,8 @@ impl SubagentExecutor {
                             agent: subagent.to_string(),
                             prompt_tokens: pt,
                             completion_tokens: ct,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
                         });
                 }
                 AgentEvent::LlmUsage {
@@ -830,6 +865,8 @@ impl SubagentExecutor {
                             agent: subagent.to_string(),
                             name,
                             args,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
                         });
                 }
                 AgentEvent::ToolResult { name, output } => {
@@ -841,6 +878,8 @@ impl SubagentExecutor {
                             name,
                             result: output,
                             success: true,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
                         });
                 }
                 AgentEvent::ToolError { name, error } => {
@@ -852,6 +891,8 @@ impl SubagentExecutor {
                             name,
                             result: error,
                             success: false,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
                         });
                 }
                 AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
@@ -863,6 +904,8 @@ impl SubagentExecutor {
                     registry.event_bus().emit(SubagentEvent::DispatchCancelled {
                         parent: parent.to_string(),
                         agent: subagent.to_string(),
+                        execution_id: execution_id.clone(),
+                        run_id: run_id.clone(),
                     });
                     break;
                 }
@@ -925,6 +968,11 @@ impl SubagentExecutor {
         };
         let task = Self::enhance_task(&req.task, req.parent_context.as_ref(), inherit_history);
         let cancel = req.cancel.clone();
+        let event_execution_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.execution_id.clone());
+        let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
 
         if timeout_secs > 0 {
             tokio::select! {
@@ -944,6 +992,8 @@ impl SubagentExecutor {
                         &req.agent_name,
                         ExecutionMode::Sync,
                         start,
+                        event_execution_id.clone(),
+                        event_run_id.clone(),
                     )
                 ) => match r {
                     Ok(r) => r,
@@ -964,6 +1014,8 @@ impl SubagentExecutor {
                 &req.agent_name,
                 ExecutionMode::Sync,
                 start,
+                event_execution_id,
+                event_run_id,
             )
             .await
         }
@@ -1017,6 +1069,11 @@ impl SubagentExecutor {
         // 使 pipeline 构造 ToolContext 时带上应用层的 run_id/cancel/trace_sink/
         // cache_user_id——绕开会跨 tokio::spawn 断裂的 task_local。
         let runtime_context = req.runtime_context.clone();
+        // Extract stable identity for event payload (moved into the spawn below).
+        let event_execution_id = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.execution_id.clone());
+        let event_run_id = runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
 
         // Sprint 8: worktree isolation for writer workers. Resolve the intent
         // before spawning so the closure can capture a shared factory clone.
@@ -1175,6 +1232,8 @@ impl SubagentExecutor {
                             &agent_name,
                             ExecutionMode::Fork,
                             start,
+                            event_execution_id.clone(),
+                            event_run_id.clone(),
                         )
                     ) => {
                         match r {
@@ -1202,6 +1261,8 @@ impl SubagentExecutor {
                         &agent_name,
                         ExecutionMode::Fork,
                         start,
+                        event_execution_id.clone(),
+                        event_run_id.clone(),
                     ) => r,
                 }
             };

@@ -32,6 +32,14 @@ pub enum SubagentEvent {
         mode: ExecutionMode,
         /// Task description being dispatched.
         task: String,
+        /// Stable execution id from the caller's [`ExternalRunContext`]
+        /// (format `{task_id}:{attempt}` in EKO). `None` = legacy caller that
+        /// has not opted in; bridges fall back to temp id allocation.
+        /// Frontends should use this as the canonical `subagent_run_id`.
+        execution_id: Option<String>,
+        /// Parent run id from the caller's [`ExternalRunContext`]. `None` =
+        /// legacy caller.
+        run_id: Option<String>,
     },
     /// Dispatch completed successfully.
     DispatchCompleted {
@@ -47,6 +55,10 @@ pub enum SubagentEvent {
         iterations: Option<u64>,
         /// Final output text produced by the subagent.
         output: String,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Dispatch failed.
     DispatchFailed {
@@ -56,6 +68,10 @@ pub enum SubagentEvent {
         agent: String,
         /// Error message describing the failure.
         error: String,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Dispatch was cancelled.
     DispatchCancelled {
@@ -63,6 +79,10 @@ pub enum SubagentEvent {
         parent: String,
         /// Name of the subagent whose dispatch was cancelled.
         agent: String,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Subagent reasoning started.
     DispatchThinkingStarted {
@@ -70,6 +90,10 @@ pub enum SubagentEvent {
         parent: String,
         /// Name of the subagent that is reasoning.
         agent: String,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Subagent reasoning emitted incremental content.
     DispatchThinkingDelta {
@@ -79,6 +103,10 @@ pub enum SubagentEvent {
         agent: String,
         /// Incremental reasoning text.
         content: String,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Subagent reasoning ended.
     DispatchThinkingEnded {
@@ -90,6 +118,10 @@ pub enum SubagentEvent {
         prompt_tokens: usize,
         /// Number of completion tokens consumed.
         completion_tokens: usize,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Subagent emitted final-answer text.
     DispatchTokenDelta {
@@ -99,6 +131,10 @@ pub enum SubagentEvent {
         agent: String,
         /// Incremental final-answer text.
         content: String,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Subagent started a tool call.
     DispatchToolStarted {
@@ -110,6 +146,10 @@ pub enum SubagentEvent {
         name: String,
         /// Tool arguments.
         args: serde_json::Value,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// Subagent completed a tool call.
     DispatchToolCompleted {
@@ -123,6 +163,10 @@ pub enum SubagentEvent {
         result: String,
         /// Whether the tool call succeeded.
         success: bool,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
     },
     /// A team was created.
     TeamCreated {
