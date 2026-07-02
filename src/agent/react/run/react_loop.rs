@@ -479,57 +479,151 @@ impl ReactAgent {
             .map(|(_, name, _)| name.clone())
             .collect();
 
-        // Execute non-approval tools concurrently
+        // Determine which tools are exempt from the parallel batch timeout.
+        //
+        // Long-running tools (subagent dispatch such as `agent_tool` /
+        // `delegate_readonly`, web research) that internally run their own
+        // multi-step ReAct declare `exempt_from_batch_timeout() -> true`. Their
+        // latency is inherently far higher than typical file/shell tools and
+        // would otherwise dominate the batch budget, prematurely cancelling
+        // peers. Such tools are separated out and run without the outer batch
+        // timeout (each carries its own per-execution timeout, e.g. the
+        // subagent 600s default in `SubagentExecutor`).
+        //
+        // Collect exempt tool indices up front so the DashMap Ref is dropped
+        // before any await below (no read lock held across tool futures).
+        let exempt_indices: std::collections::HashSet<usize> = concurrent_tools
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, name, _))| {
+                self.tools
+                    .tool_manager
+                    .get_tool(name)
+                    .map(|entry| entry.value().exempt_from_batch_timeout())
+                    .unwrap_or(false)
+                    .then_some(i)
+            })
+            .collect();
+        let timed_indices: Vec<usize> = (0..concurrent_tools.len())
+            .filter(|i| !exempt_indices.contains(i))
+            .collect();
+        let exempt_indices_vec: Vec<usize> = exempt_indices.iter().copied().collect();
+        if !exempt_indices.is_empty() {
+            let names: Vec<&str> = exempt_indices_vec
+                .iter()
+                .map(|&i| concurrent_tools[i].1.as_str())
+                .collect();
+            info!(
+                agent = %agent,
+                tools = ?names,
+                "⏳ Running {} exempt (long-running) tools without batch timeout",
+                exempt_indices.len()
+            );
+        }
+
+        // Execute non-approval tools concurrently, split into two groups:
+        //   - timed: subject to batch_timeout (original behavior).
+        //   - exempt: joined without an outer timeout.
+        // Results are placed back into a Vec indexed by the ORIGINAL position
+        // so downstream context push / hook / statistics (which zip
+        // `concurrent_tools` with `concurrent_results`) stays aligned and
+        // unchanged.
         let concurrent_results: Vec<
             std::result::Result<ToolExecutionOutcome, ToolExecutionFailure>,
         > = if concurrent_tools.is_empty() {
             Vec::new()
         } else {
-            let futures: Vec<_> = concurrent_tools
-                .iter()
-                .map(|(_, name, args)| {
-                    self.execute_tool_feedback_raw(name, args, self.config.tool_error_feedback)
-                        .instrument(info_span!("tool_execute", tool.name = %name))
-                })
-                .collect();
-            let batch_timeout = super::retry::compute_concurrent_tool_batch_timeout(
-                &self.config.tool_execution,
-                futures.len(),
-                max_concurrency,
-            );
+            let mut results: Vec<
+                Option<std::result::Result<ToolExecutionOutcome, ToolExecutionFailure>>,
+            > = (0..concurrent_tools.len()).map(|_| None).collect();
 
-            if let Some(timeout) = batch_timeout {
-                match tokio::time::timeout(timeout, join_all(futures)).await {
-                    Ok(results) => results,
-                    Err(_) => {
-                        // Fire PostToolBatch hook before returning timeout error
-                        let hook_ctx = crate::skills::hooks::HookContext::for_post_tool_batch(
-                            &batch_tool_names,
-                            0,
-                            batch_tool_names.len(),
-                            self.config.session_id.as_deref().unwrap_or(""),
-                            &self.config.agent_name,
-                        );
-                        let registry = self.tools.hook_registry.read().await.clone();
-                        let batch_result = registry.run_lifecycle_hooks(&hook_ctx).await;
-                        if let Some(ctx) = &batch_result.injected_context {
-                            super::context::push_runtime_context_note(
-                                &self.memory.context,
-                                "Hook:PostToolBatch",
-                                ctx,
-                            )
-                            .await;
+            // 1) Timed batch (with batch_timeout, original logic).
+            if !timed_indices.is_empty() {
+                let futures: Vec<_> = timed_indices
+                    .iter()
+                    .map(|&i| {
+                        let (_, name, args) = &concurrent_tools[i];
+                        self.execute_tool_feedback_raw(name, args, self.config.tool_error_feedback)
+                            .instrument(info_span!("tool_execute", tool.name = %name))
+                    })
+                    .collect();
+                let batch_timeout = super::retry::compute_concurrent_tool_batch_timeout(
+                    &self.config.tool_execution,
+                    futures.len(),
+                    max_concurrency,
+                );
+                let timed_results = if let Some(timeout) = batch_timeout {
+                    match tokio::time::timeout(timeout, join_all(futures)).await {
+                        Ok(results) => results,
+                        Err(_) => {
+                            // Fire PostToolBatch hook before returning timeout error
+                            let hook_ctx = crate::skills::hooks::HookContext::for_post_tool_batch(
+                                &batch_tool_names,
+                                0,
+                                batch_tool_names.len(),
+                                self.config.session_id.as_deref().unwrap_or(""),
+                                &self.config.agent_name,
+                            );
+                            let registry = self.tools.hook_registry.read().await.clone();
+                            let batch_result = registry.run_lifecycle_hooks(&hook_ctx).await;
+                            if let Some(ctx) = &batch_result.injected_context {
+                                super::context::push_runtime_context_note(
+                                    &self.memory.context,
+                                    "Hook:PostToolBatch",
+                                    ctx,
+                                )
+                                .await;
+                            }
+                            return Err(ToolError::Timeout(format!(
+                                "parallel tool batch exceeded total timeout after {:?}",
+                                timeout
+                            ))
+                            .into());
                         }
-                        return Err(ToolError::Timeout(format!(
-                            "parallel tool batch exceeded total timeout after {:?}",
-                            timeout
-                        ))
-                        .into());
                     }
+                } else {
+                    join_all(futures).await
+                };
+                for (i, r) in timed_indices.into_iter().zip(timed_results.into_iter()) {
+                    results[i] = Some(r);
                 }
-            } else {
-                join_all(futures).await
             }
+
+            // 2) Exempt batch (no outer timeout — each tool has its own
+            //    per-execution timeout, e.g. subagent 600s default).
+            if !exempt_indices_vec.is_empty() {
+                let futures: Vec<_> = exempt_indices_vec
+                    .iter()
+                    .map(|&i| {
+                        let (_, name, args) = &concurrent_tools[i];
+                        self.execute_tool_feedback_raw(name, args, self.config.tool_error_feedback)
+                            .instrument(info_span!("tool_execute", tool.name = %name))
+                    })
+                    .collect();
+                let exempt_results = join_all(futures).await;
+                for (i, r) in exempt_indices_vec
+                    .into_iter()
+                    .zip(exempt_results.into_iter())
+                {
+                    results[i] = Some(r);
+                }
+            }
+
+            // Every slot must be filled (each tool went into exactly one group).
+            results
+                .into_iter()
+                .map(|r| {
+                    r.unwrap_or_else(|| {
+                        // Defensive: should be unreachable (every index is timed or exempt).
+                        Err(ToolExecutionFailure {
+                            error: ReactError::Other(
+                                "tool result slot not filled (internal invariant violation)".into(),
+                            ),
+                            hook_messages: Default::default(),
+                        })
+                    })
+                })
+                .collect()
         };
 
         // Push concurrent results to context
@@ -717,7 +811,6 @@ impl ReactAgent {
         let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
         let mut context = self.memory.context.lock().await;
-        context.push(Message::user(message.to_string()));
         if let Some(runtime_context) = super::context::format_turn_runtime_context(
             memory_context.as_deref(),
             ws_block.as_str(),
@@ -727,6 +820,7 @@ impl ReactAgent {
                 &runtime_context,
             ));
         }
+        context.push(Message::user(message.to_string()));
 
         // Start trace run recording
         self.start_trace_run(message).await;

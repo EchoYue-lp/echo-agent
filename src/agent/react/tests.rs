@@ -1602,9 +1602,9 @@ async fn recall_injects_memories_into_current_user_message() {
         "expected at least one memory to be recalled, got {recalled}"
     );
 
-    // The context now keeps the user's request stable and places recalled memory
-    // in a following runtime-context user message so cacheable request/history
-    // prefixes are not mixed with volatile retrieval results.
+    // The context keeps stable workspace/runtime state before the current user
+    // request so provider prefix caches can reuse the shared project context
+    // across different requests.
     let ctx = agent.memory.context.lock().await;
     let messages = ctx.messages();
 
@@ -1653,17 +1653,17 @@ async fn recall_injects_memories_into_current_user_message() {
         "memory_context user message must not duplicate the current request"
     );
 
-    let request_then_context = messages.windows(2).any(|pair| {
+    let context_then_request = messages.windows(2).any(|pair| {
         pair[0].role == Role::User
-            && pair[0].text_content().is_some_and(|c| c == "Rust")
-            && pair[1].role == Role::User
-            && pair[1]
+            && pair[0]
                 .text_content()
                 .is_some_and(|c| c.starts_with("[runtime_context:turn]"))
+            && pair[1].role == Role::User
+            && pair[1].text_content().is_some_and(|c| c == "Rust")
     });
     assert!(
-        request_then_context,
-        "expected stable request user message followed by volatile runtime context"
+        context_then_request,
+        "expected runtime context before current request so shared workspace context remains prefix-cacheable"
     );
 }
 

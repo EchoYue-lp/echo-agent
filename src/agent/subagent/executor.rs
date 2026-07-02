@@ -10,7 +10,7 @@ use futures::StreamExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::context::SubagentContext;
 use super::events::SubagentEvent;
@@ -251,6 +251,32 @@ impl SubagentExecutor {
                 .as_ref()
                 .unwrap_or(&registered.definition.execution_mode)
                 .clone();
+            let runtime_run_id = req
+                .runtime_context
+                .as_ref()
+                .map(|ctx| ctx.run_id.as_str())
+                .unwrap_or("<none>");
+            let has_trace_sink = req
+                .runtime_context
+                .as_ref()
+                .is_some_and(|ctx| ctx.trace_sink.is_some());
+            let has_cancel = req
+                .runtime_context
+                .as_ref()
+                .is_some_and(|ctx| ctx.cancel.is_some());
+            info!(
+                parent = %req.parent_agent,
+                subagent = %req.agent_name,
+                mode = ?mode,
+                attempt = retry_count + 1,
+                delegate_depth = req.delegate_depth,
+                runtime_run_id = %runtime_run_id,
+                has_runtime_context = req.runtime_context.is_some(),
+                has_trace_sink,
+                has_cancel,
+                task_chars = req.task.chars().count(),
+                "subagent_dispatch_start"
+            );
 
             // Build hook context
             let hook_ctx = SubagentHookContext {
@@ -315,6 +341,16 @@ impl SubagentExecutor {
                 Ok(mut sub_result) => {
                     sub_result.duration = duration;
                     sub_result.mode = mode.clone();
+                    info!(
+                        parent = %req_parent_agent,
+                        subagent = %req_agent_name,
+                        mode = ?mode,
+                        duration_ms = duration.as_millis() as u64,
+                        output_chars = sub_result.output.chars().count(),
+                        tokens_used = ?sub_result.tokens_used,
+                        iterations = sub_result.iterations,
+                        "subagent_dispatch_complete"
+                    );
 
                     self.registry
                         .event_bus()
@@ -324,6 +360,7 @@ impl SubagentExecutor {
                             duration_ms: duration.as_millis() as u64,
                             tokens_used: sub_result.tokens_used.map(|t| t as u64),
                             iterations: Some(sub_result.iterations as u64),
+                            output: sub_result.output.clone(),
                         });
 
                     if self.config.enable_hooks {
@@ -346,6 +383,13 @@ impl SubagentExecutor {
                 }
                 Err(e) => {
                     let error_str = e.to_string();
+                    warn!(
+                        parent = %req_parent_agent,
+                        subagent = %req_agent_name,
+                        mode = ?mode,
+                        error = %error_str,
+                        "subagent_dispatch_failed"
+                    );
 
                     self.registry
                         .event_bus()
@@ -1010,6 +1054,24 @@ impl SubagentExecutor {
                  running without a workspace"
             );
         }
+        let runtime_run_id = runtime_context
+            .as_ref()
+            .map(|ctx| ctx.run_id.as_str())
+            .unwrap_or("<none>");
+        let has_trace_sink = runtime_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.trace_sink.is_some());
+        info!(
+            parent = %parent_agent,
+            subagent = %agent_name,
+            runtime_run_id = %runtime_run_id,
+            has_runtime_context = runtime_context.is_some(),
+            has_trace_sink,
+            timeout_secs,
+            isolate_worktree = isolate,
+            isolate_workspace,
+            "subagent_fork_start"
+        );
         // Label identifies this dispatch for worktree/workspace naming. run_id
         // (if available from the runtime context) disambiguates concurrent runs.
         let worktree_label = match runtime_context.as_ref() {

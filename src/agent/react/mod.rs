@@ -2151,6 +2151,7 @@ impl ReactAgent {
             .clone()?;
         Some(echo_core::tools::ExternalRunContext {
             run_id,
+            execution_id: None,
             cancel: self
                 .external_cancel
                 .lock()

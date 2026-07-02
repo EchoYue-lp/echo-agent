@@ -20,6 +20,7 @@ pub struct LlmCritic {
     client: Arc<Client>,
     system_prompt: String,
     pass_threshold: f64,
+    cache_user_id: Option<String>,
 }
 
 impl LlmCritic {
@@ -43,6 +44,7 @@ impl LlmCritic {
             ),
             system_prompt: Self::default_system_prompt().to_string(),
             pass_threshold: 7.0,
+            cache_user_id: None,
         }
     }
 
@@ -55,6 +57,13 @@ impl LlmCritic {
     /// Set pass threshold (0.0 - 10.0)
     pub fn with_pass_threshold(mut self, threshold: f64) -> Self {
         self.pass_threshold = threshold;
+        self
+    }
+
+    /// Set provider-side user id for KVCache/content-safety/scheduling isolation
+    /// on providers that support it (for example DeepSeek).
+    pub fn with_cache_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.cache_user_id = Some(user_id.into());
         self
     }
 
@@ -112,6 +121,77 @@ impl LlmCritic {
     }
 }
 
+impl LlmCritic {
+    /// Issue the critique LLM call with a given `response_format`.
+    ///
+    /// Extracted so the main `critique` flow can retry once without
+    /// `response_format` when the provider rejects structured output
+    /// (some OpenAI-compatible endpoints return HTTP 400 for
+    /// `response_format: json_schema`, e.g. "This response_format type is
+    /// unavailable now"). Returning the raw text here keeps the JSON parsing
+    /// concern in `parse_critique_output`.
+    async fn call_llm(
+        &self,
+        messages: &[Message],
+        response_format: Option<ResponseFormat>,
+    ) -> std::result::Result<String, String> {
+        let response = llm::chat(
+            self.client.clone(),
+            &self.model,
+            messages,
+            Some(0.3),
+            Some(2048u32),
+            Some(false),
+            None,
+            None,
+            response_format,
+            self.cache_user_id.clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(response
+            .choices
+            .first()
+            .and_then(|c| c.message.content.as_text())
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    /// Whether an error message indicates the provider rejected the
+    /// `response_format` parameter (and thus a text fallback is worth trying).
+    ///
+    /// Matches on common phrasings from OpenAI-compatible endpoints that don't
+    /// support structured output (DeepSeek/Qwen/GLM/etc. return variants of
+    /// "response_format type is unavailable"). Conservative: only triggers
+    /// fallback on a clear signal, so unrelated API errors still surface.
+    fn is_response_format_unsupported(err: &str) -> bool {
+        let lower = err.to_ascii_lowercase();
+        lower.contains("response_format")
+            && (lower.contains("unavailable")
+                || lower.contains("unsupported")
+                || lower.contains("not supported")
+                || lower.contains("invalid"))
+    }
+
+    fn should_skip_structured_response_format(&self) -> bool {
+        let model = self.model.to_ascii_lowercase();
+        model.starts_with("deepseek-")
+    }
+
+    fn fallback_messages(&self, user_content: &str) -> Vec<Message> {
+        vec![
+            Message::system(self.system_prompt.clone()),
+            Message::user(format!(
+                "{user_content}\n\n\
+                 IMPORTANT: respond with ONLY a JSON object matching this schema, \
+                 no markdown fences, no prose. Fields: score (0-10 number), \
+                 passed (boolean), feedback (string), suggestions (array of strings)."
+            )),
+        ]
+    }
+}
+
 impl Critic for LlmCritic {
     fn critique<'a>(
         &'a self,
@@ -136,34 +216,48 @@ impl Critic for LlmCritic {
 
             let messages = vec![
                 Message::system(self.system_prompt.clone()),
-                Message::user(user_content),
+                Message::user(user_content.clone()),
             ];
-
             let response_format = Some(ResponseFormat::json_schema(
                 "critique_output",
                 critique_output_schema(),
             ));
 
-            let response = llm::chat(
-                self.client.clone(),
-                &self.model,
-                &messages,
-                Some(0.3),
-                Some(2048u32),
-                Some(false),
-                None,
-                None,
-                response_format,
-                None,
-            )
-            .await
-            .map_err(|e| ReactError::Other(format!("LLM critique call failed: {}", e)))?;
-
-            let content = response
-                .choices
-                .first()
-                .and_then(|c| c.message.content.as_text())
-                .unwrap_or_default();
+            let content = if self.should_skip_structured_response_format() {
+                debug!(
+                    model = %self.model,
+                    "critique: skipping response_format for provider without json_schema support"
+                );
+                self.call_llm(&self.fallback_messages(&user_content), None)
+                    .await
+                    .map_err(|e| ReactError::Other(format!("LLM critique call failed: {e}")))?
+            } else {
+                // First attempt: structured output via json_schema (preferred —
+                // guarantees schema-conformant JSON when the provider supports it).
+                match self.call_llm(&messages, response_format).await {
+                    Ok(text) => text,
+                    Err(e) if Self::is_response_format_unsupported(&e) => {
+                        // Provider rejects structured output — retry once without
+                        // response_format. The system prompt already asks for JSON;
+                        // append an explicit instruction so the model emits parseable
+                        // JSON that `parse_critique_output` (markdown/autofix aware)
+                        // can still handle. Keeps critic functional on providers
+                        // that lack json_schema support.
+                        warn!(
+                            error = %e,
+                            "critique: structured output unsupported, retrying as plain text"
+                        );
+                        self.call_llm(&self.fallback_messages(&user_content), None)
+                            .await
+                            .map_err(|e| {
+                                ReactError::Other(format!("LLM critique call failed: {e}"))
+                            })?
+                    }
+                    Err(e) => {
+                        return Err(ReactError::Other(format!("LLM critique call failed: {e}")));
+                    }
+                }
+            };
 
             debug!(response = %content, "LlmCritic raw response");
 
@@ -223,5 +317,61 @@ mod tests {
         let output = LlmCritic::parse_critique_output(text).unwrap();
         assert!(!output.passed); // Fallback: not passed
         assert_eq!(output.score, 5.0);
+    }
+
+    #[test]
+    fn test_is_response_format_unsupported_matches_provider_phrasings() {
+        // Real phrasing from the user's bug report (国产 OpenAI 兼容端点).
+        let real = "API error (status 400): This response_format type is unavailable now";
+        assert!(LlmCritic::is_response_format_unsupported(real));
+        // Common variants across providers.
+        assert!(LlmCritic::is_response_format_unsupported(
+            "response_format unsupported"
+        ));
+        assert!(LlmCritic::is_response_format_unsupported(
+            "response_format is not supported by this model"
+        ));
+        assert!(LlmCritic::is_response_format_unsupported(
+            "invalid response_format parameter"
+        ));
+    }
+
+    #[test]
+    fn test_is_response_format_unsupported_rejects_unrelated_errors() {
+        // Unrelated API errors must NOT trigger the fallback (would mask real
+        // failures like auth/quota/network issues).
+        assert!(!LlmCritic::is_response_format_unsupported(
+            "401 unauthorized"
+        ));
+        assert!(!LlmCritic::is_response_format_unsupported("rate limited"));
+        assert!(!LlmCritic::is_response_format_unsupported(
+            "network timeout"
+        ));
+        assert!(!LlmCritic::is_response_format_unsupported(
+            "insufficient quota"
+        ));
+    }
+
+    #[test]
+    fn deepseek_skips_structured_response_format() {
+        let critic = LlmCritic::new("deepseek-v4-flash");
+        assert!(critic.should_skip_structured_response_format());
+
+        let other = LlmCritic::new("gpt-5.1");
+        assert!(!other.should_skip_structured_response_format());
+    }
+
+    #[test]
+    fn fallback_messages_request_json_only() -> std::result::Result<(), &'static str> {
+        let critic = LlmCritic::new("deepseek-v4-flash");
+        let messages = critic.fallback_messages("Evaluate this");
+        assert_eq!(messages.len(), 2);
+        let user_message = messages
+            .get(1)
+            .and_then(|m| m.content.as_text())
+            .ok_or("expected fallback user message text")?;
+        assert!(user_message.contains("ONLY a JSON object"));
+        assert!(user_message.contains("score (0-10 number)"));
+        Ok(())
     }
 }

@@ -508,6 +508,22 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this tool is exempt from the parallel batch timeout.
+    ///
+    /// Long-running tools (subagent dispatch such as `agent_tool` /
+    /// `delegate_readonly`, web research) that internally run their own
+    /// multi-step ReAct should override this to return `true`. Such tools are
+    /// separated out of the concurrent batch's total timeout (see
+    /// `react_loop.rs`) and instead run with their own per-execution timeout
+    /// (e.g. the subagent 600s default in `SubagentExecutor`), because their
+    /// latency is inherently far higher than typical file/shell tools and would
+    /// otherwise dominate the batch budget, prematurely cancelling peers.
+    ///
+    /// Default: `false` (subject to the batch timeout like all other tools).
+    fn exempt_from_batch_timeout(&self) -> bool {
+        false
+    }
+
     /// Stream tool execution, producing incremental [`ToolStreamEvent`]s.
     ///
     /// The default implementation wraps [`Self::execute`] into a single
@@ -587,6 +603,11 @@ pub type TraceSinkFn = std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 pub struct ExternalRunContext {
     /// 当前 run 标识（应用层 run，如 EKO 的 TaskRuntime run_id）。
     pub run_id: String,
+    /// 当前 run 内的一次具体执行标识（如 EKO 的 TaskRuntime task_id）。
+    ///
+    /// `None` 表示只有 run 级上下文。设置后，subagent / tool trace 应使用它
+    /// 作为前端可见执行记录的稳定 id，而不是再临时分配一套 dispatch id。
+    pub execution_id: Option<String>,
     /// 当前 run 的取消令牌。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// Worker trace 事件回传通道。
@@ -667,6 +688,7 @@ mod tool_context_tests {
     fn external_run_context_constructs_without_cache_user_id() {
         let _ctx = ExternalRunContext {
             run_id: "run-1".to_string(),
+            execution_id: None,
             cancel: None,
             trace_sink: None,
             // No cache_user_id field — if it still exists, this fails to compile.
@@ -729,6 +751,82 @@ mod tool_context_tests {
         let ctx = ToolContext::default();
         let resolved = ctx.resolve_path(std::path::Path::new("a/b"));
         assert_eq!(resolved.as_ref(), std::path::Path::new("a/b"));
+    }
+}
+
+#[cfg(test)]
+mod exempt_from_batch_timeout_tests {
+    use super::*;
+
+    /// A tool that does NOT override `exempt_from_batch_timeout`. Verifies the
+    /// trait default is `false` (subject to the batch timeout like all ordinary
+    /// tools). Guards against accidental default flip.
+    struct OrdinaryTool;
+
+    impl Tool for OrdinaryTool {
+        fn name(&self) -> &str {
+            "ordinary"
+        }
+        fn description(&self) -> &str {
+            "test tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+    }
+
+    /// A tool that DOES override `exempt_from_batch_timeout -> true`, modeling
+    /// long-running dispatch tools (agent_tool / delegate_readonly).
+    struct LongRunningTool;
+
+    impl Tool for LongRunningTool {
+        fn name(&self) -> &str {
+            "long_running"
+        }
+        fn description(&self) -> &str {
+            "long-running dispatch tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn exempt_from_batch_timeout(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn ordinary_tool_is_not_exempt_by_default() {
+        let t = OrdinaryTool;
+        assert!(
+            !t.exempt_from_batch_timeout(),
+            "default must be false — ordinary tools are subject to the batch timeout"
+        );
+    }
+
+    #[test]
+    fn long_running_tool_can_opt_into_exempt() {
+        let t = LongRunningTool;
+        assert!(
+            t.exempt_from_batch_timeout(),
+            "override -> true must be honored so long-running tools bypass the batch timeout"
+        );
+    }
+
+    /// Trait-object dispatch: the exemption must be observable through
+    /// `dyn Tool` (this is how `react_loop` reads it via `ToolManager::get_tool`).
+    #[test]
+    fn exemption_visible_through_dyn_trait_object() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(OrdinaryTool), Box::new(LongRunningTool)];
+        let ordinary = tools
+            .iter()
+            .find(|t| t.name() == "ordinary")
+            .expect("ordinary tool present");
+        let long_running = tools
+            .iter()
+            .find(|t| t.name() == "long_running")
+            .expect("long_running tool present");
+        assert!(!ordinary.exempt_from_batch_timeout());
+        assert!(long_running.exempt_from_batch_timeout());
     }
 }
 

@@ -487,12 +487,12 @@ impl ReactAgent {
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
 
         let mut context = self.memory.context.lock().await;
-        context.push(Message::user(input.to_string()));
         if let Some(runtime_context) =
             format_turn_runtime_context(memory_context.as_deref(), ws_block.as_str())
         {
             context.push(runtime_context_note("turn", &runtime_context));
         }
+        context.push(Message::user(input.to_string()));
         // Drop context lock before hook execution (avoid deadlock with
         // fire_lifecycle_hook's own context acquisition)
         drop(context);
@@ -551,12 +551,12 @@ impl ReactAgent {
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
 
         let mut context = self.memory.context.lock().await;
-        context.push(message.clone());
         if let Some(runtime_context) =
             format_turn_runtime_context(memory_context.as_deref(), ws_block.as_str())
         {
             context.push(runtime_context_note("turn", &runtime_context));
         }
+        context.push(message.clone());
         drop(context);
 
         // Fire UserPromptSubmit hook (see prepare_stream_context for rationale)
@@ -702,6 +702,7 @@ impl crate::agent::snapshot::AgentRunSnapshot {
             ],
             temperature: Some(0.2),
             max_tokens: Some(2048),
+            user_id: self.config.cache_user_id.clone(),
             ..Default::default()
         };
 

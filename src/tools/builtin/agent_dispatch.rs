@@ -122,6 +122,15 @@ impl Tool for AgentDispatchTool {
         "Dispatch tasks to specialized SubAgents. For complex read-only investigation, architecture review, or validation planning, prefer issuing multiple agent_tool calls in the same assistant turn so independent SubAgents run in parallel. Use only agent_name values listed in the schema."
     }
 
+    /// `agent_tool` dispatches a subagent that runs its own multi-step ReAct
+    /// (latency far higher than typical file/shell tools). Exempt it from the
+    /// parallel batch timeout so it doesn't dominate the batch budget and
+    /// prematurely cancel peers; it has its own per-dispatch timeout instead
+    /// (see `SubagentExecutor` default 600s).
+    fn exempt_from_batch_timeout(&self) -> bool {
+        true
+    }
+
     fn parameters(&self) -> Value {
         let catalog = self
             .catalog

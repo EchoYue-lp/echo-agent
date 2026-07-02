@@ -45,6 +45,8 @@ pub enum SubagentEvent {
         tokens_used: Option<u64>,
         /// Number of ReAct iterations executed.
         iterations: Option<u64>,
+        /// Final output text produced by the subagent.
+        output: String,
     },
     /// Dispatch failed.
     DispatchFailed {

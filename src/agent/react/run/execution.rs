@@ -405,7 +405,7 @@ impl ReactAgent {
             response_format: None,
             thinking: None,
             cancel_token: None,
-            user_id: None,
+            user_id: self.config.cache_user_id.clone(),
             cache_hints: None,
         };
         match llm_client.chat(request).await {
