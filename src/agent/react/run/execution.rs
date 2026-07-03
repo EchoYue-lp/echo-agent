@@ -150,8 +150,15 @@ impl ReactAgent {
                 if let Err(e) = ts.record_execution(&record).await {
                     warn!(error = %e, skill = %skill_name, "skill telemetry write failed");
                 }
-                // Refresh curator activity timestamp (best-effort).
-                let _ = curator.touch_skill(skill_name, true);
+                // P2-9: touch_skill 内部是 flock + fs read/write (curator.rs), 同步
+                // 阻塞。此前在 async 块里直接调用会卡 tokio worker 线程。包进
+                // spawn_blocking 丢到阻塞线程池 (best-effort, 忽略错误)。
+                let curator_clone = curator.clone();
+                let skill_clone = skill_name.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    curator_clone.touch_skill(&skill_clone, true)
+                })
+                .await;
             }
         });
     }

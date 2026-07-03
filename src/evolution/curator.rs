@@ -190,6 +190,17 @@ pub struct Curator {
     state_path: PathBuf,
 }
 
+// P2-9: 需要 Clone 以便在 spawn_blocking 闭包里使用 (touch_skill 是同步阻塞,
+// 移到阻塞线程池)。Curator 是无状态句柄 (touch_skill 内部 flock), Clone 成本极低。
+impl Clone for Curator {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            state_path: self.state_path.clone(),
+        }
+    }
+}
+
 impl Curator {
     /// Create a new curator with the given config and state file path.
     pub fn new(config: CuratorConfig, state_path: impl Into<PathBuf>) -> Self {
