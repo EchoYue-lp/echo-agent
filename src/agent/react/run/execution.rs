@@ -295,6 +295,10 @@ impl ReactAgent {
         if output.len() > SPILL_THRESHOLD {
             let tmp_dir = std::env::temp_dir().join("echo_agent_spill");
             let _ = std::fs::create_dir_all(&tmp_dir);
+            // P1-4: spill 文件此前通过 tmp.keep() 持久化后永不删除, echo_agent_spill/
+            // 无限增长。每次新建 spill 时 best-effort 清理 1 小时前的旧文件 — 冷路径
+            // (>1MB 才触发), 同步扫描成本低; 失败静默 (不影响本次 spill)。
+            cleanup_old_spills(&tmp_dir, std::time::Duration::from_secs(3600));
             match tempfile::NamedTempFile::new_in(&tmp_dir) {
                 Ok(mut tmp) => {
                     use std::io::Write;
@@ -651,4 +655,38 @@ fn newline_boundary_rev(chars: &[char], target: usize) -> usize {
         }
     }
     t
+}
+
+/// Best-effort 删除 spill 目录中超过 `max_age` 的旧文件 (P1-4)。
+///
+/// spill 文件通过 `NamedTempFile::keep()` 持久化后由 LLM 按需读取, 框架无法
+/// 知道"何时不再需要"。采用创建时清理: 每次新建 spill 顺手扫一遍目录, 按
+/// mtime 删过期文件。这是冷路径 (仅 >1MB 输出触发), 同步扫描 + 静默失败,
+/// 不影响本次 spill 写入。
+fn cleanup_old_spills(dir: &std::path::Path, max_age: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        // 只清理 regular file (跳过子目录等), 且 best-effort: 任一失败跳过。
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let should_remove = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|mtime| {
+                now.duration_since(mtime)
+                    .map(|age| age > max_age)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if should_remove {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
