@@ -279,8 +279,8 @@ impl SkillPatcher {
 
         // Split frontmatter (--- ... ---) from body. If no frontmatter, treat
         // the entire content as body.
-        let (frontmatter, body) = if content.starts_with("---\n") {
-            if let Some(end) = content[4..].find("\n---\n") {
+        let (frontmatter, body) = if let Some(rest) = content.strip_prefix("---\n") {
+            if let Some(end) = rest.find("\n---\n") {
                 let fm_end = end + 8; // 4 (prefix) + content + 4 (\n---\n)
                 let (fm, rest) = content.split_at(fm_end);
                 (fm.to_string(), rest.to_string())

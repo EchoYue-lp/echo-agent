@@ -163,6 +163,15 @@ pub struct ReactAgent {
     pub external_cancel:
         std::sync::Mutex<Option<std::sync::Arc<tokio_util::sync::CancellationToken>>>,
     pub external_trace_sink: std::sync::Mutex<Option<echo_core::tools::TraceSinkFn>>,
+    /// Stable execution id (`{task_id}:{attempt}`) set by the app layer before
+    /// dispatching a subagent, so `SubagentEvent.execution_id` carries a stable
+    /// identifier instead of bridge-side temp allocation. Carried as a Mutex
+    /// field (same cross-spawn pattern as the other external_* fields).
+    pub external_execution_id: std::sync::Mutex<Option<String>>,
+    /// Chat message id that triggered the run, forwarded to
+    /// `SubagentEvent::DispatchStarted.message_id` so the frontend can pin a
+    /// subagent stream to the right chat message block.
+    pub external_message_id: std::sync::Mutex<Option<String>>,
 
     /// Optional tool execution pipeline. When set, `execute_tool_feedback_raw`
     /// delegates to this pipeline instead of the inline implementation.
@@ -477,6 +486,8 @@ impl ReactAgent {
             current_run_id: std::sync::Mutex::new(None),
             external_cancel: std::sync::Mutex::new(None),
             external_trace_sink: std::sync::Mutex::new(None),
+            external_execution_id: std::sync::Mutex::new(None),
+            external_message_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
             prompt_template_engine: None,
             current_turn: std::sync::Mutex::new(None),
@@ -2151,8 +2162,16 @@ impl ReactAgent {
             .clone()?;
         Some(echo_core::tools::ExternalRunContext {
             run_id,
-            execution_id: None,
-            message_id: None,
+            execution_id: self
+                .external_execution_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            message_id: self
+                .external_message_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             cancel: self
                 .external_cancel
                 .lock()
@@ -2253,6 +2272,14 @@ impl Agent for ReactAgent {
             .external_trace_sink
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ctx.trace_sink.clone();
+        *self
+            .external_execution_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.execution_id.clone();
+        *self
+            .external_message_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.message_id.clone();
     }
 
     fn clear_external_context(&self) {
@@ -2266,6 +2293,14 @@ impl Agent for ReactAgent {
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self
             .external_trace_sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_execution_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_message_id
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
