@@ -895,7 +895,10 @@ impl AgentConfig {
     /// # Parameters
     /// * `path` - Working directory path, None means use current directory
     pub fn working_dir(self, path: Option<PathBuf>) -> Self {
-        *self.working_dir.lock().unwrap() = path;
+        // Mutex 中毒 (某持有锁的线程 panic) 时不让整个 agent 崩溃:
+        // 用 into_inner() 恢复毒锁内部数据继续写入。对齐 react_loop.rs:811
+        // 的 .ok() 思路 — 配置写入失败也不该 panic。
+        *self.working_dir.lock().unwrap_or_else(|e| e.into_inner()) = path;
         self
     }
 

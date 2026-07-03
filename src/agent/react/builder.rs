@@ -837,7 +837,9 @@ impl ReactAgentBuilder {
             config = config.conversation_id(conversation_id);
         }
         if let Some(working_dir) = &self.working_dir {
-            *config.working_dir.lock().unwrap() = Some(working_dir.clone());
+            // Mutex 中毒时恢复毒锁内部数据继续写入, 不 panic 整个 agent。
+            *config.working_dir.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(working_dir.clone());
         }
         if self.react_checkpoint_interval > 0 {
             config = config.react_checkpoint_interval(self.react_checkpoint_interval);

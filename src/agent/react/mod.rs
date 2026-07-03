@@ -1101,7 +1101,7 @@ impl ReactAgent {
 
     /// The current working directory binding, if any.
     pub fn working_dir(&self) -> Option<std::path::PathBuf> {
-        self.config.working_dir.lock().unwrap().clone()
+        self.config.working_dir.lock().ok().and_then(|g| g.clone())
     }
 
     /// Get the current conversation history messages (read-only).

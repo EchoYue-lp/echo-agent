@@ -100,7 +100,7 @@ impl RuntimeConfig {
             max_iterations: config.max_iterations,
             session_id: config.session_id.clone(),
             conversation_id: config.conversation_id.clone(),
-            working_dir: config.working_dir.lock().unwrap().clone(),
+            working_dir: config.working_dir.lock().ok().and_then(|g| g.clone()),
             temperature: config.temperature,
             max_tokens: config.max_tokens,
             tool_error_feedback: config.tool_error_feedback,
