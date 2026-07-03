@@ -2152,6 +2152,7 @@ impl ReactAgent {
         Some(echo_core::tools::ExternalRunContext {
             run_id,
             execution_id: None,
+            message_id: None,
             cancel: self
                 .external_cancel
                 .lock()

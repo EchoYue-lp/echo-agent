@@ -40,6 +40,10 @@ pub enum SubagentEvent {
         /// Parent run id from the caller's [`ExternalRunContext`]. `None` =
         /// legacy caller.
         run_id: Option<String>,
+        /// Message id that triggered the run (chat `message_key`). Lets the
+        /// frontend pin the subagent stream to the right chat message block.
+        /// `None` = non-chat path (cron, etc).
+        message_id: Option<String>,
     },
     /// Dispatch completed successfully.
     DispatchCompleted {
@@ -131,6 +135,34 @@ pub enum SubagentEvent {
         agent: String,
         /// Incremental final-answer text.
         content: String,
+        /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
+        execution_id: Option<String>,
+        /// Parent run id (see [`Self::DispatchStarted::run_id`]).
+        run_id: Option<String>,
+    },
+    /// LLM usage reported by the subagent's underlying model call (carries the
+    /// full cache-diagnostic breakdown). Emitted once per model call so the
+    /// frontend can render token / cache-hit metrics without peeking at the
+    /// legacy `worker://trace` channel.
+    DispatchLlmUsage {
+        /// Name of the parent agent that initiated the dispatch.
+        parent: String,
+        /// Name of the subagent that made the model call.
+        agent: String,
+        /// Model name (provider-specific).
+        model: String,
+        /// Prompt (input) tokens for this call.
+        prompt_tokens: usize,
+        /// Completion (output) tokens for this call.
+        completion_tokens: usize,
+        /// Total tokens (input + output), as reported by the provider.
+        total_tokens: usize,
+        /// Prompt tokens served from the prefix cache (cache hit).
+        cached_prompt_tokens: usize,
+        /// Prompt tokens written into the cache (cache write).
+        cache_creation_prompt_tokens: usize,
+        /// Whether the provider actually returned a usage report for this call.
+        usage_reported: bool,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).

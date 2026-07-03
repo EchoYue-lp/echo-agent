@@ -608,6 +608,9 @@ pub struct ExternalRunContext {
     /// `None` 表示只有 run 级上下文。设置后，subagent / tool trace 应使用它
     /// 作为前端可见执行记录的稳定 id，而不是再临时分配一套 dispatch id。
     pub execution_id: Option<String>,
+    /// 触发本次 run 的消息 id（chat 场景下 = message_key，用于把 subagent
+    /// 执行流钉到聊天流里对应的消息区块上）。`None` = 非 chat 路径（cron 等）。
+    pub message_id: Option<String>,
     /// 当前 run 的取消令牌。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// Worker trace 事件回传通道。
@@ -689,6 +692,7 @@ mod tool_context_tests {
         let _ctx = ExternalRunContext {
             run_id: "run-1".to_string(),
             execution_id: None,
+            message_id: None,
             cancel: None,
             trace_sink: None,
             // No cache_user_id field — if it still exists, this fails to compile.

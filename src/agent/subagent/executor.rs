@@ -264,6 +264,10 @@ impl SubagentExecutor {
                 .as_ref()
                 .and_then(|ctx| ctx.execution_id.clone());
             let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+            let event_message_id = req
+                .runtime_context
+                .as_ref()
+                .and_then(|ctx| ctx.message_id.clone());
             let has_trace_sink = req
                 .runtime_context
                 .as_ref()
@@ -305,6 +309,7 @@ impl SubagentExecutor {
                     task: req.task.clone(),
                     execution_id: event_execution_id.clone(),
                     run_id: event_run_id.clone(),
+                    message_id: event_message_id.clone(),
                 });
 
             if self.config.enable_hooks {
@@ -856,6 +861,19 @@ impl SubagentExecutor {
                     usage_reported,
                 } => {
                     usage_stats.record(&model, pt, ct, tt, cpt, ccpt, usage_reported);
+                    registry.event_bus().emit(SubagentEvent::DispatchLlmUsage {
+                        parent: parent.to_string(),
+                        agent: subagent.to_string(),
+                        model: model.clone(),
+                        prompt_tokens: pt,
+                        completion_tokens: ct,
+                        total_tokens: tt,
+                        cached_prompt_tokens: cpt,
+                        cache_creation_prompt_tokens: ccpt,
+                        usage_reported,
+                        execution_id: execution_id.clone(),
+                        run_id: run_id.clone(),
+                    });
                 }
                 AgentEvent::ToolCall { name, args } => {
                     registry
