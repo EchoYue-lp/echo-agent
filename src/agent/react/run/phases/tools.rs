@@ -71,10 +71,22 @@ pub(crate) async fn run_tools(
             cb.on_think_end(agent, &ts, pt, ct).await;
         }
     }
-    context
-        .lock()
-        .await
-        .push(Message::assistant_with_tools(msg_tc));
+    // Push the assistant turn into history. When ALL tool calls were dropped
+    // (e.g. every args failed JSON parsing after repair), `msg_tc` is empty —
+    // pushing an assistant_with_tools([]) with empty content makes providers
+    // reject the next request with HTTP 400 ("content or tool_calls must be
+    // set"). Fall back to a content-bearing assistant message so the turn is
+    // structurally valid and the model can retry the call.
+    if msg_tc.is_empty() {
+        context.lock().await.push(Message::assistant(
+            "(流式工具调用参数解析失败,已跳过;请重新发起工具调用)".to_string(),
+        ));
+    } else {
+        context
+            .lock()
+            .await
+            .push(Message::assistant_with_tools(msg_tc));
+    }
 
     #[cfg(feature = "human-loop")]
     let (appr, conc) = {
