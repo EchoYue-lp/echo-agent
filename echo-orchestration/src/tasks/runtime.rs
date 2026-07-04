@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use echo_core::error::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::str::FromStr;
 
 /// Stable task identifier used by runtime DAG primitives.
@@ -236,9 +237,135 @@ pub trait TaskWorker: Send + Sync {
     ) -> Result<TaskExecutionSummary>;
 }
 
+/// Pure DAG bookkeeping for task-runtime executors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DagExecutionState {
+    pub completed: HashSet<TaskId>,
+    pub in_flight: HashSet<TaskId>,
+    pub failed: HashSet<TaskId>,
+}
+
+impl DagExecutionState {
+    /// Build state from a snapshot. Already-completed tasks are treated as
+    /// resolved; already-running tasks are treated as externally in-flight.
+    pub fn from_tasks(tasks: &[RuntimeTask]) -> Self {
+        let completed = tasks
+            .iter()
+            .filter(|task| task.status == RuntimeTaskStatus::Completed)
+            .map(|task| task.id.clone())
+            .collect();
+        let in_flight = tasks
+            .iter()
+            .filter(|task| task.status == RuntimeTaskStatus::Running)
+            .map(|task| task.id.clone())
+            .collect();
+        let failed = tasks
+            .iter()
+            .filter(|task| task.status == RuntimeTaskStatus::Failed)
+            .map(|task| task.id.clone())
+            .collect();
+
+        Self {
+            completed,
+            in_flight,
+            failed,
+        }
+    }
+
+    /// Refresh externally in-flight tasks from a newer task snapshot.
+    pub fn refresh_in_flight(&mut self, tasks: &[RuntimeTask]) -> DagRefresh {
+        let mut refresh = DagRefresh::default();
+        if self.in_flight.is_empty() {
+            return refresh;
+        }
+
+        for task_id in self.in_flight.clone() {
+            let Some(task) = tasks.iter().find(|task| task.id == task_id) else {
+                continue;
+            };
+
+            match task.status {
+                RuntimeTaskStatus::Completed => {
+                    self.in_flight.remove(&task_id);
+                    self.completed.insert(task_id.clone());
+                    refresh.completed.push(task_id);
+                }
+                RuntimeTaskStatus::Failed => {
+                    self.in_flight.remove(&task_id);
+                    self.failed.insert(task_id.clone());
+                    refresh.failed.push(task_id);
+                }
+                RuntimeTaskStatus::Skipped | RuntimeTaskStatus::Cancelled => {
+                    self.in_flight.remove(&task_id);
+                    refresh.terminal_non_success.push(task_id);
+                }
+                RuntimeTaskStatus::Pending
+                | RuntimeTaskStatus::Running
+                | RuntimeTaskStatus::Blocked => {}
+            }
+        }
+
+        refresh
+    }
+
+    /// Task ids that are ready to dispatch in the next wave.
+    pub fn ready_task_ids(&self, tasks: &[RuntimeTask]) -> Vec<TaskId> {
+        tasks
+            .iter()
+            .filter(|task| {
+                !self.completed.contains(&task.id)
+                    && !self.in_flight.contains(&task.id)
+                    && !self.failed.contains(&task.id)
+            })
+            .filter(|task| {
+                task.status == RuntimeTaskStatus::Pending
+                    && task
+                        .depends_on
+                        .iter()
+                        .all(|dep| self.completed.contains(dep))
+            })
+            .map(|task| task.id.clone())
+            .collect()
+    }
+
+    /// Downstream task ids blocked by failed dependencies.
+    pub fn blocked_by_failures(&self, tasks: &[RuntimeTask]) -> Vec<TaskId> {
+        tasks
+            .iter()
+            .filter(|task| !self.completed.contains(&task.id) && !self.failed.contains(&task.id))
+            .filter(|task| task.depends_on.iter().any(|dep| self.failed.contains(dep)))
+            .map(|task| task.id.clone())
+            .collect()
+    }
+
+    /// Whether every task has completed successfully.
+    pub fn all_completed(&self, tasks: &[RuntimeTask]) -> bool {
+        self.completed.len() == tasks.len()
+    }
+
+    /// Whether every unfinished task is either failed or blocked by a failed
+    /// dependency.
+    pub fn all_unfinished_failed_or_blocked(&self, tasks: &[RuntimeTask]) -> bool {
+        tasks.iter().all(|task| {
+            self.completed.contains(&task.id)
+                || self.failed.contains(&task.id)
+                || task.depends_on.iter().any(|dep| self.failed.contains(dep))
+        })
+    }
+}
+
+/// Result of refreshing in-flight tasks from a newer snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DagRefresh {
+    pub completed: Vec<TaskId>,
+    pub failed: Vec<TaskId>,
+    pub terminal_non_success: Vec<TaskId>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{NestedDelegationPolicy, RuntimeTaskKind, RuntimeTaskStatus};
+    use crate::tasks::runtime::{DagExecutionState, RuntimeTask};
     use std::str::FromStr;
 
     #[test]
@@ -278,5 +405,74 @@ mod tests {
         let child = child.unwrap_or_default();
         assert_eq!(child.delegate_depth, 2);
         assert!(!child.can_delegate());
+    }
+
+    fn runtime_task(id: &str, status: RuntimeTaskStatus, deps: &[&str]) -> RuntimeTask {
+        RuntimeTask {
+            id: id.to_string(),
+            title: id.to_string(),
+            description: String::new(),
+            kind: RuntimeTaskKind::Investigation,
+            agent_role: "explorer".to_string(),
+            depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
+            files: Vec::new(),
+            allowed_tools: Vec::new(),
+            verification: Vec::new(),
+            retry_count: 0,
+            max_retries: 3,
+            status,
+        }
+    }
+
+    #[test]
+    fn dag_state_initializes_from_snapshot() {
+        let tasks = vec![
+            runtime_task("done", RuntimeTaskStatus::Completed, &[]),
+            runtime_task("running", RuntimeTaskStatus::Running, &[]),
+            runtime_task("failed", RuntimeTaskStatus::Failed, &[]),
+        ];
+
+        let state = DagExecutionState::from_tasks(&tasks);
+
+        assert!(state.completed.contains("done"));
+        assert!(state.in_flight.contains("running"));
+        assert!(state.failed.contains("failed"));
+    }
+
+    #[test]
+    fn dag_ready_frontier_requires_completed_dependencies() {
+        let tasks = vec![
+            runtime_task("a", RuntimeTaskStatus::Completed, &[]),
+            runtime_task("b", RuntimeTaskStatus::Pending, &["a"]),
+            runtime_task("c", RuntimeTaskStatus::Pending, &["b"]),
+        ];
+        let state = DagExecutionState::from_tasks(&tasks);
+
+        assert_eq!(state.ready_task_ids(&tasks), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn dag_refresh_observes_external_in_flight_completion() {
+        let original = vec![runtime_task("a", RuntimeTaskStatus::Running, &[])];
+        let updated = vec![runtime_task("a", RuntimeTaskStatus::Completed, &[])];
+        let mut state = DagExecutionState::from_tasks(&original);
+
+        let refresh = state.refresh_in_flight(&updated);
+
+        assert_eq!(refresh.completed, vec!["a".to_string()]);
+        assert!(state.completed.contains("a"));
+        assert!(!state.in_flight.contains("a"));
+    }
+
+    #[test]
+    fn dag_detects_failed_downstream_blockers() {
+        let tasks = vec![
+            runtime_task("a", RuntimeTaskStatus::Failed, &[]),
+            runtime_task("b", RuntimeTaskStatus::Pending, &["a"]),
+        ];
+        let state = DagExecutionState::from_tasks(&tasks);
+
+        assert_eq!(state.blocked_by_failures(&tasks), vec!["b".to_string()]);
+        assert!(state.all_unfinished_failed_or_blocked(&tasks));
     }
 }
