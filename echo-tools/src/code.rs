@@ -375,6 +375,7 @@ mod tests {
             run_id: None,
             cancel: None,
             trace_sink: None,
+            delegation_policy: None,
         };
         let _ = tool.execute_with_context(params, &ctx).await.unwrap();
 

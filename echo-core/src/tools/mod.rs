@@ -599,6 +599,50 @@ pub trait Tool: Send + Sync {
 /// 应用层类型——应用层在填入时把自己的事件序列化成 Value。
 pub type TraceSinkFn = std::sync::Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 
+/// Nested delegation policy for agents and workers.
+///
+/// Lives in `echo_core` because [`ToolContext`] is the cross-spawn channel used
+/// by `agent_tool`; higher-level task/runtime crates may re-export this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NestedDelegationPolicy {
+    /// Whether this worker role may spawn child subagents.
+    pub can_spawn_subagents: bool,
+    /// Current delegation depth for this worker.
+    pub delegate_depth: u8,
+    /// Maximum permitted delegation depth.
+    pub max_delegate_depth: u8,
+}
+
+impl Default for NestedDelegationPolicy {
+    fn default() -> Self {
+        Self {
+            can_spawn_subagents: false,
+            delegate_depth: 0,
+            max_delegate_depth: 2,
+        }
+    }
+}
+
+impl NestedDelegationPolicy {
+    /// Whether a child subagent can be created under this policy.
+    pub fn can_delegate(&self) -> bool {
+        self.can_spawn_subagents && self.delegate_depth < self.max_delegate_depth
+    }
+
+    /// Policy to pass to a child worker, if delegation is allowed.
+    pub fn child_policy(&self) -> Option<Self> {
+        if !self.can_delegate() {
+            return None;
+        }
+
+        Some(Self {
+            can_spawn_subagents: self.can_spawn_subagents,
+            delegate_depth: self.delegate_depth.saturating_add(1),
+            max_delegate_depth: self.max_delegate_depth,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct ExternalRunContext {
     /// 当前 run 标识（应用层 run，如 EKO 的 TaskRuntime run_id）。
@@ -615,6 +659,8 @@ pub struct ExternalRunContext {
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// Worker trace 事件回传通道。
     pub trace_sink: Option<TraceSinkFn>,
+    /// Nested delegation policy to propagate into tools such as `agent_tool`.
+    pub delegation_policy: Option<NestedDelegationPolicy>,
 }
 
 /// 运行时上下文，工具执行时由 ExecuteStage 注入。
@@ -638,6 +684,8 @@ pub struct ToolContext {
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
     pub trace_sink: Option<TraceSinkFn>,
+    /// Nested delegation policy for LLM-callable dispatch tools.
+    pub delegation_policy: Option<NestedDelegationPolicy>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -651,6 +699,7 @@ impl std::fmt::Debug for ToolContext {
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
             )
             .field("trace_sink", &self.trace_sink.as_ref().map(|_| "<sink>"))
+            .field("delegation_policy", &self.delegation_policy)
             .finish()
     }
 }
@@ -679,6 +728,7 @@ mod tool_context_tests {
         assert!(ctx.working_dir.is_none());
         assert!(ctx.conversation_id.is_none());
         assert!(ctx.run_id.is_none());
+        assert!(ctx.delegation_policy.is_none());
     }
 
     // ── stage4 P4.1: cache_user_id single-source ────────────────────────────
@@ -695,6 +745,7 @@ mod tool_context_tests {
             message_id: None,
             cancel: None,
             trace_sink: None,
+            delegation_policy: None,
             // No cache_user_id field — if it still exists, this fails to compile.
         };
     }
@@ -707,6 +758,7 @@ mod tool_context_tests {
             run_id: None,
             cancel: None,
             trace_sink: None,
+            delegation_policy: None,
             // No cache_user_id field — if it still exists, this fails to compile.
         };
     }

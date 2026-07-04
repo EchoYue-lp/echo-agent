@@ -127,6 +127,10 @@ impl ReactAgent {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .clone();
+                    snap.external_delegation_policy = *self
+                        .external_delegation_policy
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     // DirectAnswer uses trimmed [system, user] messages and does
                     // not consume the recalled context, so the recall count is
                     // informational only.
@@ -200,6 +204,10 @@ impl ReactAgent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        snap.external_delegation_policy = *self
+            .external_delegation_policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         tokio::spawn(async move {
             // Move the guard into the spawned task — held for full stream duration

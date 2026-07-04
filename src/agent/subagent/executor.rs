@@ -1103,7 +1103,10 @@ impl SubagentExecutor {
         // 初始为 None。dispatch_fork 在 worker 执行前显式 set_external_context,
         // 使 pipeline 构造 ToolContext 时带上应用层的 run_id/cancel/trace_sink/
         // cache_user_id——绕开会跨 tokio::spawn 断裂的 task_local。
-        let runtime_context = req.runtime_context.clone();
+        let mut runtime_context = req.runtime_context.clone();
+        if let Some(ctx) = runtime_context.as_mut() {
+            ctx.delegation_policy = Some(req.delegation_policy);
+        }
         // Extract stable identity for event payload (moved into the spawn below).
         let event_execution_id = runtime_context
             .as_ref()

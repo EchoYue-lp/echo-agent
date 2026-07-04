@@ -163,6 +163,8 @@ pub struct ReactAgent {
     pub external_cancel:
         std::sync::Mutex<Option<std::sync::Arc<tokio_util::sync::CancellationToken>>>,
     pub external_trace_sink: std::sync::Mutex<Option<echo_core::tools::TraceSinkFn>>,
+    pub external_delegation_policy:
+        std::sync::Mutex<Option<echo_core::tools::NestedDelegationPolicy>>,
     /// Stable execution id (`{task_id}:{attempt}`) set by the app layer before
     /// dispatching a subagent, so `SubagentEvent.execution_id` carries a stable
     /// identifier instead of bridge-side temp allocation. Carried as a Mutex
@@ -486,6 +488,7 @@ impl ReactAgent {
             current_run_id: std::sync::Mutex::new(None),
             external_cancel: std::sync::Mutex::new(None),
             external_trace_sink: std::sync::Mutex::new(None),
+            external_delegation_policy: std::sync::Mutex::new(None),
             external_execution_id: std::sync::Mutex::new(None),
             external_message_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
@@ -2182,6 +2185,10 @@ impl ReactAgent {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            delegation_policy: *self
+                .external_delegation_policy
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
         })
     }
 
@@ -2273,6 +2280,10 @@ impl Agent for ReactAgent {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ctx.trace_sink.clone();
         *self
+            .external_delegation_policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.delegation_policy;
+        *self
             .external_execution_id
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = ctx.execution_id.clone();
@@ -2293,6 +2304,10 @@ impl Agent for ReactAgent {
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self
             .external_trace_sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_delegation_policy
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self

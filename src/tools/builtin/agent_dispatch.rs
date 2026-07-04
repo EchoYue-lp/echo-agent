@@ -4,6 +4,7 @@ use crate::agent::subagent::executor::SubagentExecutor;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::agent::CancellationToken;
+use echo_core::tools::{NestedDelegationPolicy, ToolContext};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -111,6 +112,116 @@ impl AgentDispatchTool {
     pub fn catalog_handle(&self) -> Arc<std::sync::RwLock<Vec<SubagentCatalogEntry>>> {
         self.catalog.clone()
     }
+
+    fn delegation_policy_from_context(
+        ctx: Option<&ToolContext>,
+    ) -> std::result::Result<NestedDelegationPolicy, String> {
+        match ctx.and_then(|ctx| ctx.delegation_policy) {
+            Some(policy) => policy.child_policy().ok_or_else(|| {
+                format!(
+                    "Delegation depth exceeded (max {})",
+                    policy.max_delegate_depth
+                )
+            }),
+            None => Ok(crate::agent::subagent::DispatchRequest::policy_from_depth(
+                0,
+            )),
+        }
+    }
+
+    fn dispatch_with_context(
+        &self,
+        parameters: ToolParameters,
+        ctx: Option<&ToolContext>,
+    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+        let executor = self.executor.clone();
+        let parent_agent = self.parent_agent.clone();
+        let cancel_handle = self.cancel.clone();
+        let factory = self.parent_context_factory.clone();
+        let delegation_policy = match Self::delegation_policy_from_context(ctx) {
+            Ok(policy) => policy,
+            Err(e) => return Box::pin(async move { Ok(ToolResult::error(e)) }),
+        };
+
+        Box::pin(async move {
+            let agent_name = parameters
+                .get("agent_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("agent_name".to_string()))?;
+
+            let task = parameters
+                .get("task")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("task".to_string()))?;
+
+            let mode_override =
+                parameters
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .and_then(|m| match m {
+                        "sync" => Some(ExecutionMode::Sync),
+                        "fork" => Some(ExecutionMode::Fork),
+                        "teammate" => Some(ExecutionMode::Teammate),
+                        "team" => Some(ExecutionMode::Team),
+                        _ => None,
+                    });
+
+            info!(
+                target_agent = %agent_name,
+                task = %task,
+                mode = ?mode_override,
+                delegate_depth = delegation_policy.delegate_depth,
+                max_delegate_depth = delegation_policy.max_delegate_depth,
+                "Dispatching task to subagent via SubagentExecutor"
+            );
+
+            // Build parent context if factory is available
+            let parent_context = if let Some(ref f) = factory {
+                let effective_mode = mode_override.clone().unwrap_or(ExecutionMode::Sync);
+                let ctx = f.build(&effective_mode).await;
+                if ctx.has_content() { Some(ctx) } else { None }
+            } else {
+                None
+            };
+
+            // Derive the subagent's cancel token from the parent run's current
+            // token (P1-11). If the parent run hasn't started (no token set),
+            // fall back to a fresh token so dispatch still works standalone.
+            let cancel = cancel_handle
+                .lock()
+                .await
+                .as_ref()
+                .map(|t| t.child_token())
+                .unwrap_or_else(CancellationToken::new);
+
+            let req = crate::agent::subagent::DispatchRequest {
+                agent_name: agent_name.to_string(),
+                task: task.to_string(),
+                mode_override,
+                cancel,
+                parent_agent: parent_agent.clone(),
+                parent_context,
+                delegation_policy,
+                runtime_context: None,
+                message: None,
+            };
+
+            match executor.dispatch(req).await {
+                Ok(result) => {
+                    info!(target_agent = %agent_name, "Subagent completed successfully");
+                    debug!(target_agent = %agent_name, output = %result.output, "Subagent result");
+                    Ok(ToolResult::success(result.output))
+                }
+                Err(e) => {
+                    warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
+                    Ok(ToolResult::error(format!(
+                        "SubAgent '{}' execution failed: {}",
+                        agent_name, e
+                    )))
+                }
+            }
+        })
+    }
 }
 
 impl Tool for AgentDispatchTool {
@@ -183,86 +294,56 @@ impl Tool for AgentDispatchTool {
         &self,
         parameters: ToolParameters,
     ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
-        let executor = self.executor.clone();
-        let parent_agent = self.parent_agent.clone();
-        let cancel_handle = self.cancel.clone();
-        let factory = self.parent_context_factory.clone();
+        self.dispatch_with_context(parameters, None)
+    }
 
-        Box::pin(async move {
-            let agent_name = parameters
-                .get("agent_name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("agent_name".to_string()))?;
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, crate::error::Result<ToolResult>> {
+        self.dispatch_with_context(parameters, Some(ctx))
+    }
+}
 
-            let task = parameters
-                .get("task")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("task".to_string()))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            let mode_override =
-                parameters
-                    .get("mode")
-                    .and_then(|v| v.as_str())
-                    .and_then(|m| match m {
-                        "sync" => Some(ExecutionMode::Sync),
-                        "fork" => Some(ExecutionMode::Fork),
-                        "teammate" => Some(ExecutionMode::Teammate),
-                        "team" => Some(ExecutionMode::Team),
-                        _ => None,
-                    });
+    #[test]
+    fn default_dispatch_policy_starts_at_root() {
+        let policy = AgentDispatchTool::delegation_policy_from_context(None).unwrap_or_default();
+        assert!(policy.can_spawn_subagents);
+        assert_eq!(policy.delegate_depth, 0);
+        assert_eq!(policy.max_delegate_depth, 3);
+    }
 
-            info!(
-                target_agent = %agent_name,
-                task = %task,
-                mode = ?mode_override,
-                "Dispatching task to subagent via SubagentExecutor"
-            );
+    #[test]
+    fn context_dispatch_policy_advances_to_child() {
+        let ctx = ToolContext {
+            delegation_policy: Some(NestedDelegationPolicy {
+                can_spawn_subagents: true,
+                delegate_depth: 1,
+                max_delegate_depth: 2,
+            }),
+            ..Default::default()
+        };
+        let policy =
+            AgentDispatchTool::delegation_policy_from_context(Some(&ctx)).unwrap_or_default();
+        assert_eq!(policy.delegate_depth, 2);
+        assert!(!policy.can_delegate());
+    }
 
-            // Build parent context if factory is available
-            let parent_context = if let Some(ref f) = factory {
-                let effective_mode = mode_override.clone().unwrap_or(ExecutionMode::Sync);
-                let ctx = f.build(&effective_mode).await;
-                if ctx.has_content() { Some(ctx) } else { None }
-            } else {
-                None
-            };
-
-            // Derive the subagent's cancel token from the parent run's current
-            // token (P1-11). If the parent run hasn't started (no token set),
-            // fall back to a fresh token so dispatch still works standalone.
-            let cancel = cancel_handle
-                .lock()
-                .await
-                .as_ref()
-                .map(|t| t.child_token())
-                .unwrap_or_else(CancellationToken::new);
-
-            let req = crate::agent::subagent::DispatchRequest {
-                agent_name: agent_name.to_string(),
-                task: task.to_string(),
-                mode_override,
-                cancel,
-                parent_agent: parent_agent.clone(),
-                parent_context,
-                delegation_policy: crate::agent::subagent::DispatchRequest::policy_from_depth(0),
-                runtime_context: None,
-                message: None,
-            };
-
-            match executor.dispatch(req).await {
-                Ok(result) => {
-                    info!(target_agent = %agent_name, "Subagent completed successfully");
-                    debug!(target_agent = %agent_name, output = %result.output, "Subagent result");
-                    Ok(ToolResult::success(result.output))
-                }
-                Err(e) => {
-                    warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
-                    Ok(ToolResult::error(format!(
-                        "SubAgent '{}' execution failed: {}",
-                        agent_name, e
-                    )))
-                }
-            }
-        })
+    #[test]
+    fn context_dispatch_policy_rejects_exhausted_depth() {
+        let ctx = ToolContext {
+            delegation_policy: Some(NestedDelegationPolicy {
+                can_spawn_subagents: true,
+                delegate_depth: 2,
+                max_delegate_depth: 2,
+            }),
+            ..Default::default()
+        };
+        assert!(AgentDispatchTool::delegation_policy_from_context(Some(&ctx)).is_err());
     }
 }

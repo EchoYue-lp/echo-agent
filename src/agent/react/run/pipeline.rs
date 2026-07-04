@@ -409,6 +409,7 @@ impl PipelineStage for ExecuteStage {
             run_id: snapshot.current_run_id.clone(),
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
+            delegation_policy: snapshot.external_delegation_policy,
         };
         let result = match snapshot
             .tools

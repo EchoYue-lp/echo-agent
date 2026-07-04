@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use echo_core::error::Result;
+pub use echo_core::tools::NestedDelegationPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -149,47 +150,6 @@ impl Default for ConcurrencyLimits {
             max_concurrent_shells: 1,
             max_parallel_llm_calls: 4,
         }
-    }
-}
-
-/// Nested delegation policy for workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NestedDelegationPolicy {
-    /// Whether this worker role may spawn child subagents.
-    pub can_spawn_subagents: bool,
-    /// Current delegation depth for this worker.
-    pub delegate_depth: u8,
-    /// Maximum permitted delegation depth.
-    pub max_delegate_depth: u8,
-}
-
-impl Default for NestedDelegationPolicy {
-    fn default() -> Self {
-        Self {
-            can_spawn_subagents: false,
-            delegate_depth: 0,
-            max_delegate_depth: 2,
-        }
-    }
-}
-
-impl NestedDelegationPolicy {
-    /// Whether a child subagent can be created under this policy.
-    pub fn can_delegate(&self) -> bool {
-        self.can_spawn_subagents && self.delegate_depth < self.max_delegate_depth
-    }
-
-    /// Policy to pass to a child worker, if delegation is allowed.
-    pub fn child_policy(&self) -> Option<Self> {
-        if !self.can_delegate() {
-            return None;
-        }
-
-        Some(Self {
-            can_spawn_subagents: self.can_spawn_subagents,
-            delegate_depth: self.delegate_depth.saturating_add(1),
-            max_delegate_depth: self.max_delegate_depth,
-        })
     }
 }
 

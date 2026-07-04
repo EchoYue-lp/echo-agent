@@ -219,6 +219,7 @@ pub struct AgentRunSnapshot {
     /// 与 current_run_id 同源、同生命周期（set/clear 在同一处）。
     pub external_cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     pub external_trace_sink: Option<echo_core::tools::TraceSinkFn>,
+    pub external_delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
     /// Permission service (human-in-the-loop).
     #[cfg(feature = "human-loop")]
     pub permission_service: Option<Arc<crate::human_loop::PermissionService>>,
@@ -260,9 +261,25 @@ impl AgentRunSnapshot {
             cancel_token: agent.cancel_token.try_lock().ok().and_then(|g| g.clone()),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
-            current_run_id: None,  // set by run_stream_channel
-            external_cancel: None, // set alongside current_run_id
-            external_trace_sink: None,
+            current_run_id: agent
+                .current_run_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            external_cancel: agent
+                .external_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            external_trace_sink: agent
+                .external_trace_sink
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            external_delegation_policy: *agent
+                .external_delegation_policy
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
             token_tracker: Arc::clone(&agent.token_tracker),
