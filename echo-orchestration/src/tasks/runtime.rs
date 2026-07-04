@@ -9,6 +9,7 @@ use echo_core::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
+use tokio_util::sync::CancellationToken;
 
 /// Stable task identifier used by runtime DAG primitives.
 pub type TaskId = String;
@@ -192,6 +193,52 @@ impl NestedDelegationPolicy {
     }
 }
 
+/// Product-neutral context passed to a task worker.
+#[derive(Debug, Clone)]
+pub struct TaskWorkerContext {
+    pub run_id: String,
+    pub cancel: CancellationToken,
+    pub concurrency_limits: ConcurrencyLimits,
+    pub delegation_policy: NestedDelegationPolicy,
+}
+
+impl TaskWorkerContext {
+    pub fn new(run_id: impl Into<String>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            cancel: CancellationToken::new(),
+            concurrency_limits: ConcurrencyLimits::default(),
+            delegation_policy: NestedDelegationPolicy::default(),
+        }
+    }
+
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub fn with_concurrency_limits(mut self, limits: ConcurrencyLimits) -> Self {
+        self.concurrency_limits = limits;
+        self
+    }
+
+    pub fn with_delegation_policy(mut self, policy: NestedDelegationPolicy) -> Self {
+        self.delegation_policy = policy;
+        self
+    }
+
+    pub fn child_delegation_context(&self) -> Option<Self> {
+        self.delegation_policy
+            .child_policy()
+            .map(|delegation_policy| Self {
+                run_id: self.run_id.clone(),
+                cancel: self.cancel.child_token(),
+                concurrency_limits: self.concurrency_limits,
+                delegation_policy,
+            })
+    }
+}
+
 /// A bounded follow-up task proposed by a worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestedTask {
@@ -231,9 +278,9 @@ pub struct TaskExecutionSummary {
 pub trait TaskWorker: Send + Sync {
     async fn execute(
         &self,
+        context: TaskWorkerContext,
         task: RuntimeTask,
         dependency_summaries: Vec<TaskExecutionSummary>,
-        delegation_policy: NestedDelegationPolicy,
     ) -> Result<TaskExecutionSummary>;
 }
 
@@ -364,7 +411,10 @@ pub struct DagRefresh {
 
 #[cfg(test)]
 mod tests {
-    use super::{NestedDelegationPolicy, RuntimeTaskKind, RuntimeTaskStatus};
+    use super::{
+        ConcurrencyLimits, NestedDelegationPolicy, RuntimeTaskKind, RuntimeTaskStatus,
+        TaskWorkerContext,
+    };
     use crate::tasks::runtime::{DagExecutionState, RuntimeTask};
     use std::str::FromStr;
 
@@ -405,6 +455,31 @@ mod tests {
         let child = child.unwrap_or_default();
         assert_eq!(child.delegate_depth, 2);
         assert!(!child.can_delegate());
+    }
+
+    #[test]
+    fn task_worker_context_builds_child_delegation_context() {
+        let context = TaskWorkerContext::new("run-1")
+            .with_concurrency_limits(ConcurrencyLimits {
+                max_concurrent_workers: 2,
+                max_concurrent_writes: 1,
+                max_concurrent_shells: 1,
+                max_parallel_llm_calls: 2,
+            })
+            .with_delegation_policy(NestedDelegationPolicy {
+                can_spawn_subagents: true,
+                delegate_depth: 0,
+                max_delegate_depth: 1,
+            });
+
+        let child = context.child_delegation_context();
+
+        assert!(child.is_some());
+        let child = child.unwrap_or_else(|| TaskWorkerContext::new("missing"));
+        assert_eq!(child.run_id, "run-1");
+        assert_eq!(child.delegation_policy.delegate_depth, 1);
+        assert_eq!(child.concurrency_limits.max_concurrent_workers, 2);
+        assert!(!child.delegation_policy.can_delegate());
     }
 
     fn runtime_task(id: &str, status: RuntimeTaskStatus, deps: &[&str]) -> RuntimeTask {

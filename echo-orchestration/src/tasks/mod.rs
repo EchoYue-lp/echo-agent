@@ -41,6 +41,7 @@ pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, Rule
 pub use runtime::{
     ConcurrencyLimits, DagExecutionState, DagRefresh, NestedDelegationPolicy, RuntimeTask,
     RuntimeTaskKind, RuntimeTaskStatus, SuggestedTask, TaskExecutionSummary, TaskId, TaskWorker,
+    TaskWorkerContext,
 };
 pub use scheduler::{
     ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,
