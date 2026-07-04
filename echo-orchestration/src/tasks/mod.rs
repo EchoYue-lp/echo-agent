@@ -9,6 +9,7 @@ pub mod executor;
 pub mod hooks;
 mod manager;
 pub mod replanner;
+pub mod runtime;
 pub mod scheduler;
 pub mod store;
 mod task;
@@ -37,6 +38,10 @@ pub use hooks::{
 pub use manager::TaskManager;
 pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, RuleBasedReplanner};
+pub use runtime::{
+    ConcurrencyLimits, NestedDelegationPolicy, RuntimeTask, RuntimeTaskKind, RuntimeTaskStatus,
+    SuggestedTask, TaskExecutionSummary, TaskId, TaskWorker,
+};
 pub use scheduler::{
     ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,
 };
