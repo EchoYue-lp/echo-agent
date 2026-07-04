@@ -1945,7 +1945,7 @@ impl ReactAgent {
                     .unwrap_or_else(CancellationToken::new),
                 parent_agent: self.config.agent_name.clone(),
                 parent_context: self.build_parent_context(&ExecutionMode::Fork).await,
-                delegate_depth: depth,
+                delegation_policy: DispatchRequest::policy_from_depth(depth),
                 runtime_context: self.build_runtime_context(),
                 message: None,
             };
@@ -2009,7 +2009,7 @@ impl ReactAgent {
                 .unwrap_or_else(CancellationToken::new),
             parent_agent: self.config.agent_name.clone(),
             parent_context: self.build_parent_context(&mode).await,
-            delegate_depth: depth,
+            delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context: self.build_runtime_context(),
             message: None,
         };
@@ -2090,7 +2090,7 @@ impl ReactAgent {
             cancel,
             parent_agent: parent_label.to_string(),
             parent_context: self.build_parent_context(&mode).await,
-            delegate_depth: depth,
+            delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: None,
         };
@@ -2135,7 +2135,7 @@ impl ReactAgent {
             cancel,
             parent_agent: parent_label.to_string(),
             parent_context: self.build_parent_context(&mode).await,
-            delegate_depth: depth,
+            delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: Some(message),
         };

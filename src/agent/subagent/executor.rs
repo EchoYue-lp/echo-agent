@@ -17,6 +17,7 @@ use super::events::SubagentEvent;
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
 use super::registry::SubagentRegistry;
 use super::types::{ExecutionMode, SubagentResult};
+use crate::tasks::NestedDelegationPolicy;
 
 // ── Dispatch Request ──────────────────────────────────────────────────────────
 
@@ -35,8 +36,8 @@ pub struct DispatchRequest {
     pub parent_agent: String,
     /// Parent context for inheritance (Fork mode).
     pub parent_context: Option<SubagentContext>,
-    /// Current delegation depth (prevents infinite delegation chains).
-    pub delegate_depth: u32,
+    /// Nested delegation policy (prevents unbounded delegation chains).
+    pub delegation_policy: NestedDelegationPolicy,
     /// 应用层 run 级上下文（跨 spawn 安全，值传递）。
     ///
     /// dispatch_fork 在 worker agent 执行前把它注入到 worker 实例
@@ -58,7 +59,7 @@ impl std::fmt::Debug for DispatchRequest {
             .field("task", &self.task)
             .field("mode_override", &self.mode_override)
             .field("parent_agent", &self.parent_agent)
-            .field("delegate_depth", &self.delegate_depth)
+            .field("delegation_policy", &self.delegation_policy)
             .field(
                 "runtime_context",
                 &self.runtime_context.as_ref().map(|c| &c.run_id),
@@ -67,8 +68,17 @@ impl std::fmt::Debug for DispatchRequest {
     }
 }
 
-/// Maximum delegation depth to prevent infinite chains.
-const MAX_DELEGATE_DEPTH: u32 = 3;
+impl DispatchRequest {
+    /// Build a request delegation policy from the legacy depth parameter used
+    /// by older public helper methods.
+    pub fn policy_from_depth(depth: u32) -> NestedDelegationPolicy {
+        NestedDelegationPolicy {
+            can_spawn_subagents: true,
+            delegate_depth: depth.min(u8::MAX as u32) as u8,
+            max_delegate_depth: 3,
+        }
+    }
+}
 
 // ── Teammate Handle ───────────────────────────────────────────────────────────
 
@@ -224,10 +234,10 @@ impl SubagentExecutor {
 
         loop {
             // Guard against infinite delegation chains
-            if req.delegate_depth > MAX_DELEGATE_DEPTH {
+            if req.delegation_policy.delegate_depth > req.delegation_policy.max_delegate_depth {
                 return Err(ReactError::Other(format!(
                     "Delegation depth exceeded (max {}): agent '{}'",
-                    MAX_DELEGATE_DEPTH, req.agent_name
+                    req.delegation_policy.max_delegate_depth, req.agent_name
                 )));
             }
 
@@ -281,7 +291,7 @@ impl SubagentExecutor {
                 subagent = %req.agent_name,
                 mode = ?mode,
                 attempt = retry_count + 1,
-                delegate_depth = req.delegate_depth,
+                delegate_depth = req.delegation_policy.delegate_depth,
                 runtime_run_id = %runtime_run_id,
                 has_runtime_context = req.runtime_context.is_some(),
                 has_trace_sink,
@@ -319,7 +329,7 @@ impl SubagentExecutor {
             // Snapshot fields needed in error path before `req` is moved
             let req_agent_name = req.agent_name.clone();
             let req_parent_agent = req.parent_agent.clone();
-            let delegate_depth = req.delegate_depth;
+            let delegation_policy = req.delegation_policy;
 
             // Fire unified SubagentStart hook
             if let Some(ref executor) = self.config.unified_hook_executor {
@@ -422,10 +432,17 @@ impl SubagentExecutor {
                         let decision = self.hooks.on_failure(&hook_ctx, &error_str).await;
                         match decision {
                             super::hooks::SubagentRetryDecision::Delegate { alternative_agent } => {
+                                let Some(child_policy) = delegation_policy.child_policy() else {
+                                    return Err(ReactError::Other(format!(
+                                        "Delegation depth exceeded (max {}): agent '{}'",
+                                        delegation_policy.max_delegate_depth,
+                                        hook_ctx.subagent_name
+                                    )));
+                                };
                                 info!(
                                     from = %hook_ctx.subagent_name,
                                     to = %alternative_agent,
-                                    depth = delegate_depth + 1,
+                                    depth = child_policy.delegate_depth,
                                     "Delegating to alternative subagent"
                                 );
                                 retry_count += 1;
@@ -438,7 +455,7 @@ impl SubagentExecutor {
                                     cancel: parent_cancel.child_token(),
                                     parent_agent: hook_ctx.parent_agent.clone(),
                                     parent_context: None,
-                                    delegate_depth: delegate_depth + 1,
+                                    delegation_policy: child_policy,
                                     runtime_context: rt_ctx,
                                     message: retry_msg,
                                 };
@@ -462,7 +479,7 @@ impl SubagentExecutor {
                                     cancel: parent_cancel.child_token(),
                                     parent_agent: hook_ctx.parent_agent.clone(),
                                     parent_context: None,
-                                    delegate_depth,
+                                    delegation_policy,
                                     runtime_context: rt_ctx,
                                     message: retry_msg,
                                 };
@@ -1374,6 +1391,19 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_request_uses_nested_delegation_policy_as_depth_authority() {
+        let policy = DispatchRequest::policy_from_depth(2);
+
+        assert!(policy.can_spawn_subagents);
+        assert_eq!(policy.delegate_depth, 2);
+        assert_eq!(policy.max_delegate_depth, 3);
+
+        let child = policy.child_policy().unwrap_or_default();
+        assert_eq!(child.delegate_depth, 3);
+        assert!(!child.can_delegate());
+    }
+
+    #[test]
     fn enhance_task_no_context_returns_task_unchanged() {
         let out = SubagentExecutor::enhance_task("do thing", None, None);
         assert_eq!(out, "do thing");
@@ -1438,7 +1468,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1471,7 +1501,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1498,7 +1528,7 @@ mod tests {
             cancel,
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1523,7 +1553,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1549,7 +1579,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "leader".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1605,7 +1635,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1633,7 +1663,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1712,7 +1742,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1753,7 +1783,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1790,7 +1820,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1827,7 +1857,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1910,7 +1940,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1950,7 +1980,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };
@@ -1998,7 +2028,7 @@ mod tests {
             cancel: CancellationToken::new(),
             parent_agent: "parent".into(),
             parent_context: None,
-            delegate_depth: 0,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
         };

@@ -244,7 +244,7 @@ impl Tool for AgentDispatchTool {
                 cancel,
                 parent_agent: parent_agent.clone(),
                 parent_context,
-                delegate_depth: 0,
+                delegation_policy: crate::agent::subagent::DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
             };
