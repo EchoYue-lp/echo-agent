@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// QQ Bot WebSocket opcodes (Discord Gateway protocol)
 const OP_DISPATCH: u32 = 0; // Event message
