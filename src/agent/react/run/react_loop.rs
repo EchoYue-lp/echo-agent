@@ -279,7 +279,7 @@ impl ReactAgent {
             }
         }
 
-        let tools = self.tools.tool_manager.get_openai_tools();
+        let tools = self.tools.tools_for_llm();
 
         // Circuit breaker check
         let circuit_breaker = self.guard.circuit_breaker.clone();

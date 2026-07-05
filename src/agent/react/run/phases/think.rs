@@ -249,7 +249,7 @@ pub(crate) async fn create_llm_stream(
     >,
 > {
     let tools = if snap.config.enable_tool {
-        let t = snap.tools.tool_manager.get_openai_tools();
+        let t = snap.tools.tools_for_llm();
         if t.is_empty() { None } else { Some(t) }
     } else {
         None

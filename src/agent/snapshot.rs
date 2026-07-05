@@ -141,6 +141,11 @@ pub struct ToolRuntime {
     pub active_skill_names: Vec<String>,
     /// Current plan state (shared with ReactAgent).
     pub plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Shared disabled-tools flag (mirrors `ToolExecutionSubsystem.disabled_tools`).
+    /// The streaming path reads it here via [`tools_for_llm`] so it honors the
+    /// same per-run hiding as the non-streaming path. Populated by the app
+    /// layer (e.g. EKO Chat mode hides task tools).
+    pub disabled_tools: Arc<std::sync::RwLock<Option<std::collections::HashSet<String>>>>,
 }
 
 impl ToolRuntime {
@@ -152,6 +157,26 @@ impl ToolRuntime {
             skill_allowed_tools: agent.tools.skill_registry.active_skill_allowed_tools(),
             active_skill_names: agent.tools.skill_registry.activated_names(),
             plan_state: Arc::clone(&agent.plan_state),
+            disabled_tools: Arc::clone(&agent.tools.disabled_tools),
+        }
+    }
+
+    /// Return the tool definitions to send to the LLM, with `disabled_tools`
+    /// filtered out. Streaming path uses this; non-streaming path uses
+    /// `ToolExecutionSubsystem::tools_for_llm` (same logic, different owner).
+    pub fn tools_for_llm(&self) -> Vec<crate::llm::types::ToolDefinition> {
+        let tools = self.tool_manager.get_openai_tools();
+        let disabled = self
+            .disabled_tools
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        match disabled {
+            Some(set) if !set.is_empty() => tools
+                .into_iter()
+                .filter(|t| !set.contains(&t.function.name))
+                .collect(),
+            _ => tools,
         }
     }
 }

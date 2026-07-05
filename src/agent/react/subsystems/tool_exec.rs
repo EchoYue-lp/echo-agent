@@ -40,6 +40,16 @@ pub(crate) struct ToolExecutionSubsystem {
     /// Intervention callbacks that can influence agent behavior before
     /// tool calls, LLM reasoning, and final answers.
     pub(crate) intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,
+    /// Per-run disabled tool names. Tools in this set are hidden from the LLM
+    /// (filtered out of the tool list sent to the model). Populated by the
+    /// application layer (e.g. EKO hides task-management tools when in Chat
+    /// interaction mode). Read fresh each iteration via [`tools_for_llm`].
+    ///
+    /// Unlike `ToolManager::unregister` (which mutates the shared registry and
+    /// would affect other in-flight turns on pooled agents), this is a
+    /// separate runtime flag — the tool stays registered and available to
+    /// other turns; only the LLM tool list is filtered.
+    pub(crate) disabled_tools: Arc<std::sync::RwLock<Option<std::collections::HashSet<String>>>>,
 }
 
 impl ToolExecutionSubsystem {
@@ -47,6 +57,35 @@ impl ToolExecutionSubsystem {
     #[allow(dead_code)]
     pub(crate) fn tool_manager_arc(&self) -> Arc<ToolManager> {
         Arc::clone(&self.tool_manager)
+    }
+
+    /// Return the tool definitions to send to the LLM, with `disabled_tools`
+    /// filtered out. This is the single chokepoint that honors per-run tool
+    /// hiding — both LLM call sites (streaming + non-streaming) use this
+    /// instead of `tool_manager.get_openai_tools()` directly.
+    pub(crate) fn tools_for_llm(&self) -> Vec<crate::llm::types::ToolDefinition> {
+        let tools = self.tool_manager.get_openai_tools();
+        let disabled = self
+            .disabled_tools
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        match disabled {
+            Some(set) if !set.is_empty() => tools
+                .into_iter()
+                .filter(|t| !set.contains(&t.function.name))
+                .collect(),
+            _ => tools,
+        }
+    }
+
+    /// Set the disabled tool set for the current run. Callers (e.g. drive_chat)
+    /// pass `Some(set)` to hide tools, or `None` to clear. The set is read
+    /// fresh on each LLM iteration via [`tools_for_llm`].
+    pub(crate) fn set_disabled_tools(&self, names: Option<std::collections::HashSet<String>>) {
+        if let Ok(mut guard) = self.disabled_tools.write() {
+            *guard = names;
+        }
     }
 
     #[cfg(feature = "mcp")]

@@ -383,6 +383,20 @@ impl ReactAgent {
         self.config.token_limit = token_limit;
     }
 
+    /// Hide tools from the LLM for the current run.
+    ///
+    /// Tools whose names appear in `names` are filtered out of the tool list
+    /// sent to the model, so the model cannot call them. The tools remain
+    /// registered and visible to other turns (unlike `remove_tool`, which
+    /// mutates the shared registry). Pass `None` or an empty set to clear.
+    ///
+    /// Read fresh on each LLM iteration, so setting this just before a run
+    /// takes effect immediately. Typical use (EKO): hide task-management tools
+    /// when the user is in Chat interaction mode.
+    pub fn set_disabled_tools(&self, names: Option<std::collections::HashSet<String>>) {
+        self.tools.set_disabled_tools(names);
+    }
+
     /// Add Agent callback
     ///
     /// # Parameters

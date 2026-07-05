@@ -452,6 +452,7 @@ impl ReactAgent {
                 mcp_manager: McpManager::new(),
                 sandbox_manager: None,
                 intervention_callbacks: Vec::new(),
+                disabled_tools: Arc::new(std::sync::RwLock::new(None)),
             },
             guard: GuardSubsystem {
                 guard_manager: None,
