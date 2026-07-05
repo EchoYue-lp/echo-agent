@@ -2070,6 +2070,34 @@ impl ReactAgent {
         cancel: CancellationToken,
         depth: u32,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_parent_context_and_cancel(
+            target,
+            task,
+            parent_label,
+            cancel,
+            depth,
+            self.build_runtime_context(),
+        )
+        .await
+    }
+
+    /// Delegate a task with an explicit runtime context.
+    ///
+    /// This is the concurrency-safe product-layer entry point: callers that
+    /// already have a TaskRuntime context should pass it as a value on the
+    /// dispatch request instead of first writing it into this agent's shared
+    /// external-context fields. Multiple parallel dispatches can then carry
+    /// different execution ids without overwriting each other.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_to_agent_with_parent_context_and_cancel(
+        &self,
+        target: &str,
+        task: &str,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2084,9 +2112,6 @@ impl ReactAgent {
         }
 
         let mode = ExecutionMode::Fork;
-        // 从当前 agent 的 external_* 构造 runtime_context 透传给 worker
-        // (主 agent → worker、worker → sub-worker 自动继承,嵌套自然)。
-        let runtime_context = self.build_runtime_context();
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
@@ -2118,6 +2143,34 @@ impl ReactAgent {
         cancel: CancellationToken,
         depth: u32,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_parent_context_cancel_and_message(
+            target,
+            task,
+            message,
+            parent_label,
+            cancel,
+            depth,
+            self.build_runtime_context(),
+        )
+        .await
+    }
+
+    /// Delegate a multimodal task with an explicit runtime context.
+    ///
+    /// See [`delegate_to_agent_with_parent_context_and_cancel`] for why
+    /// product runtimes should prefer value-passing the context for parallel
+    /// dispatches.
+    #[cfg(feature = "subagent")]
+    pub async fn delegate_to_agent_with_parent_context_cancel_and_message(
+        &self,
+        target: &str,
+        task: &str,
+        message: crate::llm::types::Message,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2131,7 +2184,6 @@ impl ReactAgent {
         }
 
         let mode = ExecutionMode::Fork;
-        let runtime_context = self.build_runtime_context();
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
