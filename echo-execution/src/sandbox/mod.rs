@@ -12,7 +12,7 @@
 //!
 //! | 层 | 实现 | 隔离强度 | 开销 | 适用场景 |
 //! |----|------|----------|------|----------|
-//! | Local | [`LocalSandbox`] | OS 级（namespace/sandbox-exec） | 极低 | 开发调试、受信操作 |
+//! | Local | [`LocalSandbox`] | macOS/Linux OS 级；Windows 进程级 | 极低 | 开发调试、受信操作 |
 //! | Docker | [`DockerSandbox`] | 容器级（namespace + cgroups） | 中等 | 不可信代码、环境隔离 |
 //! | K8s | [`K8sSandbox`] | 编排工作负载级（Pod） | 较高 | 大规模并发、企业级 |
 //!

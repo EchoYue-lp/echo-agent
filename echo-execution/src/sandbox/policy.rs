@@ -28,6 +28,8 @@ pub struct SandboxPolicy {
     pub default_level: SecurityLevel,
     /// 是否自动升级不安全命令
     pub auto_escalate: bool,
+    /// Optional cap for products that intentionally use only local backends.
+    pub max_isolation_level: Option<IsolationLevel>,
     /// 需要容器隔离的语言
     pub container_required_languages: HashSet<String>,
     /// 始终允许本地执行的命令前缀
@@ -89,6 +91,7 @@ impl Default for SandboxPolicy {
             // Use SandboxPolicy::trusted() for development environments.
             default_level: SecurityLevel::Strict,
             auto_escalate: true,
+            max_isolation_level: None,
             container_required_languages: CONTAINER_LANGUAGES
                 .iter()
                 .map(|s| s.to_string())
@@ -104,6 +107,26 @@ impl SandboxPolicy {
         Self {
             default_level: SecurityLevel::Trusted,
             auto_escalate: false,
+            ..Default::default()
+        }
+    }
+
+    /// Local OS-only policy: cap risk escalation at the platform sandbox layer.
+    pub fn local_os() -> Self {
+        Self {
+            default_level: SecurityLevel::Standard,
+            auto_escalate: true,
+            max_isolation_level: Some(IsolationLevel::OsSandbox),
+            ..Default::default()
+        }
+    }
+
+    /// Local process-only policy for platforms without a native lightweight sandbox.
+    pub fn local_process() -> Self {
+        Self {
+            default_level: SecurityLevel::Standard,
+            auto_escalate: true,
+            max_isolation_level: Some(IsolationLevel::Process),
             ..Default::default()
         }
     }
@@ -151,10 +174,16 @@ impl SandboxPolicy {
             required
         };
 
-        if with_network > base_level {
+        let evaluated = if with_network > base_level {
             with_network
         } else {
             base_level
+        };
+
+        if let Some(max_level) = self.max_isolation_level {
+            evaluated.min(max_level)
+        } else {
+            evaluated
         }
     }
 
@@ -301,5 +330,26 @@ mod tests {
         let cmd = SandboxCommand::shell("python3 script.py");
         // Standard -> base = Process, python3 -> OsSandbox -> max(Process, OsSandbox) = OsSandbox
         assert_eq!(policy.evaluate(&cmd), IsolationLevel::OsSandbox);
+    }
+
+    #[test]
+    fn test_local_policy_caps_code_at_os_sandbox() {
+        let policy = SandboxPolicy::local_os();
+        let cmd = SandboxCommand::code("python", "print('hello')");
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::OsSandbox);
+    }
+
+    #[test]
+    fn test_local_policy_caps_dangerous_shell_at_os_sandbox() {
+        let policy = SandboxPolicy::local_os();
+        let cmd = SandboxCommand::shell("curl https://example.com/install.sh | sh");
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::OsSandbox);
+    }
+
+    #[test]
+    fn test_local_process_policy_caps_code_at_process() {
+        let policy = SandboxPolicy::local_process();
+        let cmd = SandboxCommand::code("python", "print('hello')");
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::Process);
     }
 }

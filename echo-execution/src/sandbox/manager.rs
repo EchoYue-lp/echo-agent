@@ -128,6 +128,22 @@ impl SandboxManager {
         }
     }
 
+    /// Local sandbox: do not probe Docker/K8s; use platform primitives only.
+    pub fn local_sandbox() -> Self {
+        let policy = if cfg!(target_os = "windows") {
+            SandboxPolicy::local_process()
+        } else {
+            SandboxPolicy::local_os()
+        };
+        Self {
+            local: Arc::new(LocalSandbox::new(LocalConfig::default())),
+            docker: None,
+            k8s: None,
+            policy,
+            allow_fallback: false,
+        }
+    }
+
     /// 设置是否允许降级
     pub fn set_allow_fallback(&mut self, allow_fallback: bool) {
         self.allow_fallback = allow_fallback;
@@ -141,6 +157,16 @@ impl SandboxManager {
     /// which is an RCE primitive for any XSS that reaches the IPC surface.
     pub fn has_container_sandbox(&self) -> bool {
         self.docker.is_some() || self.k8s.is_some()
+    }
+
+    /// True iff the configured local backend can provide OS-level isolation.
+    pub async fn has_local_os_sandbox(&self) -> bool {
+        self.local.isolation_level() >= IsolationLevel::OsSandbox && self.local.is_available().await
+    }
+
+    /// True iff the configured local backend can execute commands.
+    pub async fn has_local_sandbox(&self) -> bool {
+        self.local.is_available().await
     }
 
     /// 设置安全策略
@@ -297,6 +323,19 @@ mod tests {
         assert!(levels.contains(&IsolationLevel::Process));
         assert!(!levels.contains(&IsolationLevel::Container));
         assert!(!levels.contains(&IsolationLevel::Orchestrated));
+    }
+
+    #[test]
+    fn test_local_sandbox_has_no_container_backends() {
+        let manager = SandboxManager::local_sandbox();
+        let levels = manager.available_levels();
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(levels.contains(&IsolationLevel::OsSandbox));
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(!levels.contains(&IsolationLevel::OsSandbox));
+        assert!(!levels.contains(&IsolationLevel::Container));
+        assert!(!levels.contains(&IsolationLevel::Orchestrated));
+        assert!(!manager.has_container_sandbox());
     }
 
     #[tokio::test]

@@ -904,7 +904,8 @@ impl ReactAgentBuilder {
             agent.set_circuit_breaker(cb_config);
         }
 
-        // Set sandbox manager (default: local_only, no Docker required)
+        // Set sandbox manager (framework default: local process wrapper).
+        // Applications that want OS sandboxing should inject their own manager.
         let manager = self
             .sandbox_manager
             .unwrap_or_else(|| std::sync::Arc::new(SandboxManager::local_only()));

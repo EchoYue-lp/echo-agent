@@ -2,7 +2,8 @@
 //!
 //! 使用本地进程执行命令，并在支持的平台启用操作系统原生隔离：
 //! - **macOS**: `sandbox-exec` (Seatbelt)
-//! - **Linux**: 当前仍是进程级隔离 + 资源限制（尚未接入 `bubblewrap`）
+//! - **Linux**: `bubblewrap` (user/mount/pid/network namespaces)
+//! - **Windows**: minimal process backend (`cmd /C` + timeout/output limits)
 //! - **其他**: 仅进程隔离（超时 + 输出截断）
 //! - 支持通过 `SandboxCommand::stdin` 传入标准输入
 //!
@@ -23,7 +24,7 @@ use tokio::process::Command;
 /// 本地沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalConfig {
-    /// 是否启用 OS 级沙箱（sandbox-exec / bubblewrap）
+    /// 是否启用本地沙箱后端（sandbox-exec / bubblewrap / Windows process backend）
     pub enable_os_sandbox: bool,
     /// 允许访问的路径（只读）
     pub allowed_read_paths: Vec<PathBuf>,
@@ -35,17 +36,24 @@ pub struct LocalConfig {
     pub default_timeout_secs: u64,
     /// 最大输出大小（字节）
     pub max_output_bytes: usize,
+    /// 最大内存大小（字节）。Linux/WSL2 限制虚拟地址空间；macOS 限制 data segment。
+    pub max_memory_bytes: Option<u64>,
 }
 
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
-            enable_os_sandbox: cfg!(target_os = "macos"),
+            enable_os_sandbox: cfg!(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            )),
             allowed_read_paths: vec![PathBuf::from("/usr"), PathBuf::from("/bin")],
             allowed_write_paths: vec![],
             allow_network: false,
             default_timeout_secs: 30,
             max_output_bytes: 1024 * 1024, // 1 MB
+            max_memory_bytes: None,
         }
     }
 }
@@ -63,16 +71,49 @@ impl LocalSandbox {
     }
 
     fn effective_os_sandbox_enabled(&self) -> bool {
-        self.config.enable_os_sandbox && cfg!(target_os = "macos")
+        self.config.enable_os_sandbox
+            && cfg!(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            ))
+    }
+
+    fn sandbox_type(&self) -> &'static str {
+        if !self.effective_os_sandbox_enabled() {
+            return "local";
+        }
+        if cfg!(target_os = "macos") {
+            "local-seatbelt"
+        } else if cfg!(target_os = "linux") {
+            "local-bubblewrap"
+        } else if cfg!(target_os = "windows") {
+            "local-windows-process"
+        } else {
+            "local"
+        }
+    }
+
+    fn effective_working_dir(&self, sandbox_cmd: &SandboxCommand) -> Option<PathBuf> {
+        sandbox_cmd
+            .working_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
     }
 
     /// 构建 shell 命令
     fn build_shell_command(&self, cmd: &str, sandbox_cmd: &SandboxCommand) -> Command {
-        let mut command = if self.effective_os_sandbox_enabled() {
+        let mut command = if self.effective_os_sandbox_enabled() && cfg!(target_os = "macos") {
             // macOS: 使用 sandbox-exec
-            let profile = self.build_seatbelt_profile();
+            let profile = self.build_seatbelt_profile_for(sandbox_cmd);
             let mut c = Command::new("sandbox-exec");
             c.arg("-p").arg(profile).arg("sh").arg("-c").arg(cmd);
+            c
+        } else if self.effective_os_sandbox_enabled() && cfg!(target_os = "linux") {
+            self.build_bubblewrap_command("sh", &["-c".to_string(), cmd.to_string()], sandbox_cmd)
+        } else if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(cmd);
             c
         } else {
             let mut c = Command::new("sh");
@@ -100,12 +141,14 @@ impl LocalSandbox {
         args: &[String],
         sandbox_cmd: &SandboxCommand,
     ) -> Command {
-        let mut command = if self.effective_os_sandbox_enabled() {
-            let profile = self.build_seatbelt_profile();
+        let mut command = if self.effective_os_sandbox_enabled() && cfg!(target_os = "macos") {
+            let profile = self.build_seatbelt_profile_for(sandbox_cmd);
             let mut c = Command::new("sandbox-exec");
             c.arg("-p").arg(profile).arg(program);
             c.args(args);
             c
+        } else if self.effective_os_sandbox_enabled() && cfg!(target_os = "linux") {
+            self.build_bubblewrap_command(program, args, sandbox_cmd)
         } else {
             let mut c = Command::new(program);
             c.args(args);
@@ -129,36 +172,19 @@ impl LocalSandbox {
         code: &str,
         sandbox_cmd: &SandboxCommand,
     ) -> std::result::Result<Command, SandboxError> {
-        let (interpreter, flag) = match language {
-            "python" | "python3" => ("python3", "-c"),
-            "node" | "javascript" | "js" => ("node", "-e"),
-            "ruby" => ("ruby", "-e"),
-            // Sprint 10b: R is a first-class language (arg-based, mirrors
-            // python/ruby/perl). `Rscript -e` runs the inline expression.
-            "r" => ("Rscript", "-e"),
-            "perl" => ("perl", "-e"),
-            "lua" => ("lua", "-e"),
-            "php" => ("php", "-r"),
-            "bash" | "sh" => ("sh", "-c"),
-            _ => {
-                return Err(SandboxError::Unavailable(format!(
-                    "Unsupported language: {language}"
-                )));
-            }
-        };
+        let (interpreter, invocation_args) = code_invocation(language, code)?;
 
-        let mut command = if self.effective_os_sandbox_enabled() {
-            let profile = self.build_seatbelt_profile();
+        let mut command = if self.effective_os_sandbox_enabled() && cfg!(target_os = "macos") {
+            let profile = self.build_seatbelt_profile_for(sandbox_cmd);
             let mut c = Command::new("sandbox-exec");
-            c.arg("-p")
-                .arg(profile)
-                .arg(interpreter)
-                .arg(flag)
-                .arg(code);
+            c.arg("-p").arg(profile).arg(interpreter);
+            c.args(&invocation_args);
             c
+        } else if self.effective_os_sandbox_enabled() && cfg!(target_os = "linux") {
+            self.build_bubblewrap_command(interpreter, &invocation_args, sandbox_cmd)
         } else {
             let mut c = Command::new(interpreter);
-            c.arg(flag).arg(code);
+            c.args(&invocation_args);
             c
         };
 
@@ -173,49 +199,23 @@ impl LocalSandbox {
     }
 
     /// 生成 macOS Seatbelt profile
+    #[cfg(test)]
     fn build_seatbelt_profile(&self) -> String {
+        self.build_seatbelt_profile_with_working_dir(None)
+    }
+
+    fn build_seatbelt_profile_for(&self, sandbox_cmd: &SandboxCommand) -> String {
+        self.build_seatbelt_profile_with_working_dir(
+            self.effective_working_dir(sandbox_cmd).as_ref(),
+        )
+    }
+
+    fn build_seatbelt_profile_with_working_dir(&self, working_dir: Option<&PathBuf>) -> String {
         let mut profile = String::from("(version 1)\n(deny default)\n");
 
-        // 基本权限
-        profile.push_str("(allow process-exec)\n");
-        profile.push_str("(allow process-fork)\n");
-        profile.push_str("(allow sysctl-read)\n");
-        profile.push_str("(allow mach-lookup)\n");
-
-        // 读取权限：validate paths to prevent Seatbelt profile injection
-        for path in &self.config.allowed_read_paths {
-            let path_str = path.display().to_string();
-            if validate_sandbox_path(&path_str).is_err() {
-                continue; // Skip invalid paths silently
-            }
-            let escaped = path_str.replace('"', "\\\"");
-            profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
-        }
-        // 始终允许读取基本系统路径
-        profile.push_str("(allow file-read* (subpath \"/usr\"))\n");
-        profile.push_str("(allow file-read* (subpath \"/bin\"))\n");
-        profile.push_str("(allow file-read* (subpath \"/Library\"))\n");
-        profile.push_str("(allow file-read* (subpath \"/System\"))\n");
-        profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
-        profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
-
-        // 写入权限：validate paths to prevent Seatbelt profile injection
-        for path in &self.config.allowed_write_paths {
-            let path_str = path.display().to_string();
-            if validate_sandbox_path(&path_str).is_err() {
-                continue; // Skip invalid paths silently
-            }
-            let escaped = path_str.replace('"', "\\\"");
-            profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", escaped));
-        }
-        // 允许写 /dev/null
-        profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");
-
-        // 临时文件
-        profile.push_str("(allow file-read* (subpath \"/tmp\"))\n");
-        profile.push_str("(allow file-write* (subpath \"/tmp\"))\n");
-        profile.push_str("(allow file-read* (subpath \"/private/tmp\"))\n");
-        profile.push_str("(allow file-write* (subpath \"/private/tmp\"))\n");
+        self.append_seatbelt_base_policy(&mut profile);
+        self.append_seatbelt_platform_read_defaults(&mut profile);
+        self.append_seatbelt_filesystem_policy(&mut profile, working_dir);
 
         // 网络
         if self.config.allow_network {
@@ -223,6 +223,139 @@ impl LocalSandbox {
         }
 
         profile
+    }
+
+    fn append_seatbelt_base_policy(&self, profile: &mut String) {
+        // Shells and language runtimes need broader process metadata access than
+        // fork+exec. File and network access remain constrained by later layers.
+        profile.push_str("(allow process*)\n");
+        profile.push_str("(allow sysctl-read)\n");
+        profile.push_str("(allow mach-lookup)\n");
+
+        // Python multiprocessing, OpenMP, and native libraries commonly touch
+        // these IPC and pseudo-terminal primitives during startup.
+        profile.push_str("(allow ipc-posix-sem)\n");
+        profile.push_str("(allow ipc-posix-shm)\n");
+        profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
+        profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");
+        profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
+        profile.push_str("(allow file-read* (literal \"/dev/random\"))\n");
+        profile.push_str("(allow file-read* (literal \"/dev/ptmx\"))\n");
+        profile.push_str("(allow file-write* (literal \"/dev/ptmx\"))\n");
+    }
+
+    fn append_seatbelt_platform_read_defaults(&self, profile: &mut String) {
+        // Claude Code's sandbox defaults to broad reads so common compilers,
+        // interpreters, and package managers can discover system dependencies.
+        // Sensitive paths are denied again in the filesystem layer.
+        profile.push_str("(allow file-read*)\n");
+    }
+
+    fn append_seatbelt_filesystem_policy(
+        &self,
+        profile: &mut String,
+        working_dir: Option<&PathBuf>,
+    ) {
+        for path in &self.config.allowed_read_paths {
+            append_seatbelt_subpath_rule(profile, "file-read*", path);
+        }
+        for path in &self.config.allowed_write_paths {
+            append_seatbelt_subpath_rule(profile, "file-write*", path);
+        }
+        if let Some(path) = working_dir {
+            append_seatbelt_subpath_rule(profile, "file-read*", path);
+            append_seatbelt_subpath_rule(profile, "file-write*", path);
+        }
+
+        // Match Claude Code's default write boundary: project working directory
+        // plus the session temp directory, not arbitrary parent/home paths.
+        let session_temp_dir = std::env::temp_dir();
+        append_seatbelt_subpath_rule(profile, "file-write*", &session_temp_dir);
+
+        for path in credential_deny_defaults() {
+            append_seatbelt_subpath_deny(profile, path);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_bubblewrap_command(
+        &self,
+        program: &str,
+        args: &[String],
+        sandbox_cmd: &SandboxCommand,
+    ) -> Command {
+        let mut command = Command::new("bwrap");
+        command
+            .arg("--unshare-user-try")
+            .arg("--unshare-ipc")
+            .arg("--unshare-pid")
+            .arg("--unshare-uts")
+            .arg("--unshare-cgroup-try")
+            .arg("--die-with-parent")
+            .arg("--new-session")
+            .arg("--clearenv")
+            .arg("--ro-bind")
+            .arg("/")
+            .arg("/")
+            .arg("--dev")
+            .arg("/dev")
+            .arg("--proc")
+            .arg("/proc")
+            .arg("--tmpfs")
+            .arg("/tmp")
+            .arg("--dir")
+            .arg("/run");
+
+        if !self.config.allow_network {
+            command.arg("--unshare-net");
+        }
+
+        for (key, value) in default_sandbox_env(&sandbox_cmd.env) {
+            command.arg("--setenv").arg(key).arg(value);
+        }
+
+        for path in &self.config.allowed_read_paths {
+            command.arg("--ro-bind-try").arg(path).arg(path);
+        }
+        for path in &self.config.allowed_write_paths {
+            command.arg("--bind-try").arg(path).arg(path);
+        }
+
+        let session_temp_dir = std::env::temp_dir();
+        if !is_generic_temp_dir(&session_temp_dir) {
+            command
+                .arg("--bind-try")
+                .arg(&session_temp_dir)
+                .arg(&session_temp_dir);
+        }
+
+        if let Some(working_dir) = self.effective_working_dir(sandbox_cmd) {
+            command
+                .arg("--bind-try")
+                .arg(&working_dir)
+                .arg(&working_dir)
+                .arg("--chdir")
+                .arg(working_dir);
+        }
+
+        for path in credential_deny_defaults() {
+            append_bubblewrap_credential_deny(&mut command, &path);
+        }
+
+        command.arg("--").arg(program).args(args);
+        command
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn build_bubblewrap_command(
+        &self,
+        program: &str,
+        args: &[String],
+        _sandbox_cmd: &SandboxCommand,
+    ) -> Command {
+        let mut command = Command::new(program);
+        command.args(args);
+        command
     }
 
     /// 执行命令并收集输出
@@ -233,11 +366,12 @@ impl LocalSandbox {
         mut command: Command,
         timeout: std::time::Duration,
         stdin: Option<&str>,
+        sandbox_type: &'static str,
     ) -> Result<ExecutionResult> {
         if stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
         }
-        configure_command_process_group(&mut command);
+        configure_command_process(&mut command, self.config.max_memory_bytes);
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         command.kill_on_drop(true);
@@ -274,14 +408,17 @@ impl LocalSandbox {
             Ok(Ok(status)) => {
                 let duration = start.elapsed();
                 let stdout = read_pipe_output(stdout_pipe, self.config.max_output_bytes).await;
-                let stderr = read_pipe_output(stderr_pipe, self.config.max_output_bytes).await;
+                let mut stderr = read_pipe_output(stderr_pipe, self.config.max_output_bytes).await;
+                if status.code().is_none() && stderr.is_empty() {
+                    stderr = platform_termination_message(&status);
+                }
 
                 Ok(ExecutionResult {
                     exit_code: status.code().unwrap_or(-1),
                     stdout,
                     stderr,
                     duration,
-                    sandbox_type: "local".to_string(),
+                    sandbox_type: sandbox_type.to_string(),
                     timed_out: false,
                 })
             }
@@ -301,7 +438,7 @@ impl LocalSandbox {
                     stdout: String::new(),
                     stderr: format!("Process timed out after {}s", timeout.as_secs()),
                     duration,
-                    sandbox_type: "local".to_string(),
+                    sandbox_type: sandbox_type.to_string(),
                     timed_out: true,
                 })
             }
@@ -328,13 +465,129 @@ fn validate_sandbox_path(path: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+fn append_seatbelt_subpath_rule(profile: &mut String, operation: &str, path: &PathBuf) {
+    let path = normalize_seatbelt_profile_path(path);
+    let path_str = path.display().to_string();
+    if validate_sandbox_path(&path_str).is_err() {
+        return;
+    }
+    let escaped = path_str.replace('"', "\\\"");
+    profile.push_str(&format!("(allow {operation} (subpath \"{escaped}\"))\n"));
+}
+
+fn append_seatbelt_subpath_deny(profile: &mut String, path: PathBuf) {
+    let path = normalize_seatbelt_profile_path(&path);
+    let path_str = path.display().to_string();
+    if validate_sandbox_path(&path_str).is_err() {
+        return;
+    }
+    let escaped = path_str.replace('"', "\\\"");
+    profile.push_str(&format!("(deny file-read* (subpath \"{escaped}\"))\n"));
+    profile.push_str(&format!("(deny file-write* (subpath \"{escaped}\"))\n"));
+}
+
+fn normalize_seatbelt_profile_path(path: &PathBuf) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
+}
+
+fn credential_deny_defaults() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+
+    vec![
+        home.join(".ssh"),
+        home.join(".aws"),
+        home.join(".azure"),
+        home.join(".config/gcloud"),
+        home.join(".docker"),
+        home.join(".kube"),
+        home.join(".gnupg"),
+        home.join(".netrc"),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn append_bubblewrap_credential_deny(command: &mut Command, path: &PathBuf) {
+    if path.is_dir() {
+        command.arg("--tmpfs").arg(path);
+    } else if path.is_file() {
+        command.arg("--ro-bind-try").arg("/dev/null").arg(path);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_generic_temp_dir(path: &PathBuf) -> bool {
+    path == &PathBuf::from("/tmp") || path == &PathBuf::from("/private/tmp")
+}
+
+fn code_invocation(
+    language: &str,
+    code: &str,
+) -> std::result::Result<(&'static str, Vec<String>), SandboxError> {
+    let code_arg = code.to_string();
+    let invocation = if cfg!(target_os = "windows") {
+        match language {
+            "python" | "python3" => ("python", vec!["-c".to_string(), code_arg]),
+            "node" | "javascript" | "js" => ("node", vec!["-e".to_string(), code_arg]),
+            "ruby" => ("ruby", vec!["-e".to_string(), code_arg]),
+            "r" => ("Rscript", vec!["-e".to_string(), code_arg]),
+            "perl" => ("perl", vec!["-e".to_string(), code_arg]),
+            "lua" => ("lua", vec!["-e".to_string(), code_arg]),
+            "php" => ("php", vec!["-r".to_string(), code_arg]),
+            "bash" | "sh" => ("cmd", vec!["/C".to_string(), code_arg]),
+            _ => {
+                return Err(SandboxError::Unavailable(format!(
+                    "Unsupported language: {language}"
+                )));
+            }
+        }
+    } else {
+        match language {
+            "python" | "python3" => ("python3", vec!["-c".to_string(), code_arg]),
+            "node" | "javascript" | "js" => ("node", vec!["-e".to_string(), code_arg]),
+            "ruby" => ("ruby", vec!["-e".to_string(), code_arg]),
+            "r" => ("Rscript", vec!["-e".to_string(), code_arg]),
+            "perl" => ("perl", vec!["-e".to_string(), code_arg]),
+            "lua" => ("lua", vec!["-e".to_string(), code_arg]),
+            "php" => ("php", vec!["-r".to_string(), code_arg]),
+            "bash" | "sh" => ("sh", vec!["-c".to_string(), code_arg]),
+            _ => {
+                return Err(SandboxError::Unavailable(format!(
+                    "Unsupported language: {language}"
+                )));
+            }
+        }
+    };
+    Ok(invocation)
+}
+
+// Local sandbox 的 `max_memory_bytes` 字段在 **所有 local 后端(macOS / Linux / Windows)
+// 上都不被强制**(对齐 Claude Code / Codex —— 它们在沙箱层都不设内存上限)。
+//
+// 本地场景下为何保留字段但不强制(AGENTS.md 要求注明):
+//
+// - **macOS**:XNU kernel 对任何 < RLIM_INFINITY 的 `RLIMIT_DATA` 都返回 EINVAL(已实测
+//   验证,见 https://github.com/hacksider/Deep-Live-Cam/issues/1848);`RLIMIT_AS` 又会
+//   在 dyld/framework 加载阶段拒绝无害的内存映射。macOS 没有可靠的用户态 per-process
+//   内存上限机制(jetsam 系统级不可控、无 cgroup)。
+// - **Linux**:`RLIMIT_AS` 限制整个虚拟地址空间,glibc `ld.so` 用 mmap 加载共享库,
+//   设低了会让进程还没跑到用户代码就因 ENOMEM 崩掉(import 重库 / JIT 运行时尤其严重,
+//   见 https://stackoverflow.com/q/39755928)。设大了又等于没限。cgroup 才是 Linux 上
+//   可靠的内存上限机制,而 cgroup 走 Docker/K8s 路径(`docker.rs`/`k8s.rs`),不经过这里。
+// - **Windows**:local sandbox 本就是 `cmd /C` + 超时/输出截断的进程级后端,无 rlimit 概念。
+//
+// Claude Code 和 Codex 在所有平台的沙箱层都不设内存上限,真正的内存上限交给容器层
+// (cgroup)。EKO 沿用同一设计:`max_memory_bytes` 字段保留是给 Docker/K8s 路径用的,
+// local 后端(macOS/Linux/Windows)静默忽略它。Linux local 沙箱仍可用 bwrap 做
+// namespace 隔离(见 `build_bubblewrap_command`),只是不限内存。
 #[cfg(unix)]
-fn configure_command_process_group(command: &mut Command) {
+fn configure_command_process(command: &mut Command, _max_memory_bytes: Option<u64>) {
     command.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn configure_command_process_group(_command: &mut Command) {}
+fn configure_command_process(_command: &mut Command, _max_memory_bytes: Option<u64>) {}
 
 async fn cleanup_child_process(child: &mut tokio::process::Child) {
     #[cfg(unix)]
@@ -351,6 +604,21 @@ async fn cleanup_child_process(child: &mut tokio::process::Child) {
         tracing::warn!("Failed to kill child process: {e}");
     }
     let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+fn platform_termination_message(status: &std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+
+    match status.signal() {
+        Some(signal) => format!("Process terminated by signal {signal}"),
+        None => "Process terminated without an exit code".to_string(),
+    }
+}
+
+#[cfg(not(unix))]
+fn platform_termination_message(_status: &std::process::ExitStatus) -> String {
+    "Process terminated without an exit code".to_string()
 }
 
 /// 从管道句柄中读取全部输出，并截断超过 max_bytes 的部分。
@@ -375,13 +643,45 @@ async fn read_pipe_output<R: AsyncReadExt + Unpin>(
     s
 }
 
+#[cfg(target_os = "linux")]
+fn default_linux_read_paths() -> Vec<&'static str> {
+    vec![
+        "/usr",
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/etc/alternatives",
+        "/etc/ssl",
+        "/etc/ca-certificates",
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn default_sandbox_env(extra: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
+    let mut env = vec![
+        (
+            "PATH".to_string(),
+            "/usr/local/bin:/usr/bin:/bin".to_string(),
+        ),
+        ("HOME".to_string(), "/tmp".to_string()),
+        ("TMPDIR".to_string(), "/tmp".to_string()),
+        ("LANG".to_string(), "C.UTF-8".to_string()),
+    ];
+    for (key, value) in extra {
+        env.push((key.clone(), value.clone()));
+    }
+    env
+}
+
 impl SandboxExecutor for LocalSandbox {
     fn name(&self) -> &str {
         "local"
     }
 
     fn isolation_level(&self) -> IsolationLevel {
-        if self.effective_os_sandbox_enabled() {
+        if self.effective_os_sandbox_enabled()
+            && cfg!(any(target_os = "macos", target_os = "linux"))
+        {
             IsolationLevel::OsSandbox
         } else {
             IsolationLevel::Process
@@ -390,11 +690,20 @@ impl SandboxExecutor for LocalSandbox {
 
     fn is_available(&self) -> BoxFuture<'_, bool> {
         Box::pin(async {
-            if self.effective_os_sandbox_enabled() {
+            if self.effective_os_sandbox_enabled() && cfg!(target_os = "macos") {
                 Command::new("sandbox-exec")
-                    .arg("-n")
-                    .arg("default")
+                    .arg("-p")
+                    .arg("(version 1)\n(allow default)")
                     .arg("true")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            } else if self.effective_os_sandbox_enabled() && cfg!(target_os = "linux") {
+                Command::new("bwrap")
+                    .arg("--version")
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
@@ -419,7 +728,7 @@ impl SandboxExecutor for LocalSandbox {
                     .build_code_command(language, code, &command)
                     .map_err(|e| echo_core::error::ReactError::Sandbox(Box::new(e)))?,
             };
-            self.run_command(cmd, timeout, command.stdin.as_deref())
+            self.run_command(cmd, timeout, command.stdin.as_deref(), self.sandbox_type())
                 .await
         })
     }
@@ -456,9 +765,9 @@ impl SandboxExecutor for LocalSandbox {
 ///
 /// 路径采用"合并"而非"替换":config 默认带 /usr /bin 读路径,
 /// 替换会破坏基本执行;policy 声明的路径作为增量追加(去重保序)。
-/// network / max_output_bytes 采用"覆盖":policy 显式声明则覆盖 config 默认。
+/// network / max_output_bytes / memory_bytes 采用"覆盖":policy 显式声明则覆盖 config 默认。
 fn merge_limits_into_config(mut config: LocalConfig, limits: &ResourceLimits) -> LocalConfig {
-    // network: policy 显式声明则覆盖(EKO 默认 local trust = true)
+    // network: policy 显式声明则覆盖 base config
     config.allow_network = limits.network;
 
     // writable_paths: 合并(去重保序)
@@ -478,6 +787,7 @@ fn merge_limits_into_config(mut config: LocalConfig, limits: &ResourceLimits) ->
     if let Some(max_bytes) = limits.max_output_bytes {
         config.max_output_bytes = max_bytes as usize;
     }
+    config.max_memory_bytes = limits.memory_bytes;
 
     config
 }
@@ -577,6 +887,81 @@ mod tests {
         assert!(sandbox.is_available().await);
     }
 
+    /// 验证 `execute_with_limits` 带 `memory_bytes` 时命令能成功执行。
+    ///
+    /// 平台语义(对齐 Claude Code / Codex —— 沙箱层不设内存上限):
+    /// 所有 local 后端(macOS/Linux/Windows)都**静默忽略** `memory_bytes` —— rlimit 在
+    /// 现代动态运行时上不可靠(macOS RLIMIT_DATA 必 EINVAL;Linux RLIMIT_AS 会卡 glibc
+    /// ld.so 的 mmap),真正的内存上限交给容器层(Docker/K8s 的 cgroup)。字段保留是
+    /// 给容器路径用的,local 路径上被忽略,见 `configure_command_process` 注释。
+    ///
+    /// 本测试的历史意义:它守护的是一次回归 —— 之前 macOS 上 `memory_bytes: Some`
+    /// 会让 spawn 直接 EINVAL(`os error 22`),GUI 任何代码执行都失败。现在带 limits
+    /// 也必须能成功 spawn。
+    #[tokio::test]
+    async fn execute_with_memory_limit_starts_os_sandbox_shell()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: true,
+            ..Default::default()
+        });
+        if !sandbox.is_available().await {
+            return Ok(());
+        }
+
+        let result = sandbox
+            .execute_with_limits(
+                SandboxCommand::shell("echo hello"),
+                ResourceLimits {
+                    memory_bytes: Some(512 * 1024 * 1024),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(result.success(), "stderr: {}", result.stderr);
+        assert_eq!(result.stdout.trim(), "hello");
+        Ok(())
+    }
+
+    /// 同 [`execute_with_memory_limit_starts_os_sandbox_shell`],但走 Code 路径(python3 -c)。
+    /// 验证 GUI 用例 `print('hello from sandbox')` 能成功执行 —— 之前 macOS 上传
+    /// `memory_bytes: Some` 会让它 EINVAL。
+    #[tokio::test]
+    async fn execute_with_memory_limit_starts_os_sandbox_python_when_available()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let python_available = std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or_else(|_| false);
+        if !python_available {
+            return Ok(());
+        }
+
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: true,
+            ..Default::default()
+        });
+        if !sandbox.is_available().await {
+            return Ok(());
+        }
+
+        let result = sandbox
+            .execute_with_limits(
+                SandboxCommand::code("python", "print('hello from sandbox')"),
+                ResourceLimits {
+                    memory_bytes: Some(512 * 1024 * 1024),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(result.success(), "stderr: {}", result.stderr);
+        assert_eq!(result.stdout.trim(), "hello from sandbox");
+        Ok(())
+    }
+
     fn _count_processes_matching(pattern: &str) -> i32 {
         std::process::Command::new("sh")
             .args([
@@ -592,12 +977,37 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_linux_reports_process_isolation_without_os_sandbox_backend() {
+    fn test_linux_reports_os_sandbox_when_enabled() {
         let sandbox = LocalSandbox::new(LocalConfig {
             enable_os_sandbox: true,
             ..Default::default()
         });
-        assert_eq!(sandbox.isolation_level(), IsolationLevel::Process);
+        assert_eq!(sandbox.isolation_level(), IsolationLevel::OsSandbox);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_bubblewrap_command_contains_local_isolation() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: true,
+            allow_network: false,
+            allowed_write_paths: vec![PathBuf::from("/tmp/eko-work")],
+            ..Default::default()
+        });
+        let cmd =
+            SandboxCommand::shell("echo hello").with_working_dir(PathBuf::from("/tmp/eko-work"));
+        let command = sandbox.build_bubblewrap_command(
+            "sh",
+            &["-c".to_string(), "echo hello".to_string()],
+            &cmd,
+        );
+        let rendered = format!("{command:?}");
+        assert!(rendered.contains("bwrap"));
+        assert!(rendered.contains("--ro-bind"));
+        assert!(rendered.contains("\"/\""));
+        assert!(rendered.contains("--unshare-net"));
+        assert!(rendered.contains("--tmpfs"));
+        assert!(rendered.contains("/tmp/eko-work"));
     }
 
     #[cfg(target_os = "macos")]
@@ -613,10 +1023,38 @@ mod tests {
         let profile = sandbox.build_seatbelt_profile();
 
         assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow process-exec)"));
+        assert!(profile.contains("(allow process*)"));
+        assert!(profile.contains("(allow ipc-posix-sem)"));
+        assert!(profile.contains("(allow ipc-posix-shm)"));
+        assert!(profile.contains("/dev/ptmx"));
+        assert!(profile.contains("(allow file-read*)"));
         assert!(profile.contains("/opt/data"));
         assert!(profile.contains("/tmp/sandbox"));
+        assert!(profile.contains("(deny file-read* (subpath"));
+        assert!(profile.contains(".ssh"));
         assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn test_seatbelt_path_validation_rejects_profile_injection_chars() {
+        assert!(validate_sandbox_path("/tmp/valid path_1-2.3").is_ok());
+        assert!(validate_sandbox_path("/tmp/bad\"quote").is_err());
+        assert!(validate_sandbox_path("/tmp/bad\nnewline").is_err());
+        assert!(validate_sandbox_path("/tmp/bad(paren)").is_err());
+        assert!(validate_sandbox_path("/tmp/bad;comment").is_err());
+        assert!(validate_sandbox_path("/tmp/bad#comment").is_err());
+        assert!(validate_sandbox_path("/tmp/bad\0null").is_err());
+    }
+
+    #[test]
+    fn test_seatbelt_rule_builder_skips_invalid_paths() {
+        let mut profile = String::new();
+        append_seatbelt_subpath_rule(
+            &mut profile,
+            "file-write*",
+            &PathBuf::from("/tmp/bad\")\n(allow file-write* (subpath \"/\""),
+        );
+        assert!(profile.is_empty());
     }
 
     /// 验证 execute_with_limits 路径下,ResourceLimits 的 network /
@@ -666,6 +1104,7 @@ mod tests {
 
         // max_output_bytes 覆盖
         assert_eq!(merged.max_output_bytes, 2 * 1024 * 1024);
+        assert_eq!(merged.max_memory_bytes, Some(256 * 1024 * 1024));
 
         // 最终:用 merged config 构建 profile,network 放行应出现
         let sandbox = LocalSandbox::new(merged);
