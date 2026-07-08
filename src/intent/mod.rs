@@ -6,7 +6,6 @@
 //! |---------------------|-----------------------------------------------|
 //! | `DirectAnswer`      | Skip ReAct, call LLM directly                 |
 //! | `SkillRequired`     | Activate skill, then run ReAct                |
-//! | `WorkflowRequired`  | Execute workflow graph, then run ReAct        |
 //! | `Fallback`          | Proceed with normal ReAct loop                |
 //!
 //! # Quick Start
@@ -38,11 +37,6 @@ pub enum Intent {
     DirectAnswer { confidence: f32 },
     /// Activate a skill by name before entering the ReAct loop.
     SkillRequired { skill_name: String, confidence: f32 },
-    /// Execute a named workflow graph before entering the ReAct loop.
-    WorkflowRequired {
-        workflow_name: String,
-        confidence: f32,
-    },
     /// Confidence too low — fall back to the normal ReAct loop.
     Fallback,
 }
@@ -53,7 +47,6 @@ impl Intent {
         match self {
             Intent::DirectAnswer { confidence } => Some(*confidence),
             Intent::SkillRequired { confidence, .. } => Some(*confidence),
-            Intent::WorkflowRequired { confidence, .. } => Some(*confidence),
             Intent::Fallback => None,
         }
     }
@@ -62,14 +55,6 @@ impl Intent {
     pub fn skill_name(&self) -> Option<&str> {
         match self {
             Intent::SkillRequired { skill_name, .. } => Some(skill_name.as_str()),
-            _ => None,
-        }
-    }
-
-    /// Return the workflow name, if this is a `WorkflowRequired` intent.
-    pub fn workflow_name(&self) -> Option<&str> {
-        match self {
-            Intent::WorkflowRequired { workflow_name, .. } => Some(workflow_name.as_str()),
             _ => None,
         }
     }
@@ -99,8 +84,6 @@ pub struct IntentRouterConfig {
     pub enable_direct_answer: bool,
     /// Whether the `SkillRequired` shortcut is enabled.
     pub enable_skill_routing: bool,
-    /// Whether the `WorkflowRequired` shortcut is enabled.
-    pub enable_workflow_routing: bool,
 }
 
 impl Default for IntentRouterConfig {
@@ -109,7 +92,6 @@ impl Default for IntentRouterConfig {
             confidence_threshold: 0.7,
             enable_direct_answer: true,
             enable_skill_routing: true,
-            enable_workflow_routing: true,
         }
     }
 }
@@ -121,7 +103,7 @@ impl Default for IntentRouterConfig {
 /// When attached to a [`ReactAgent`](crate::agent::ReactAgent), every user
 /// message is first classified by the configured [`IntentClassifier`];
 /// depending on the returned [`Intent`], the agent either shortcuts to a
-/// direct answer, activates a skill, runs a workflow, or proceeds with the
+/// direct answer, activates a skill, or proceeds with the
 /// standard ReAct loop.
 #[derive(Clone)]
 pub struct IntentRouter {
@@ -160,21 +142,6 @@ impl IntentRouter {
                 {
                     Intent::SkillRequired {
                         skill_name,
-                        confidence,
-                    }
-                } else {
-                    Intent::Fallback
-                }
-            }
-            Intent::WorkflowRequired {
-                workflow_name,
-                confidence,
-            } => {
-                if self.config.enable_workflow_routing
-                    && confidence >= self.config.confidence_threshold
-                {
-                    Intent::WorkflowRequired {
-                        workflow_name,
                         confidence,
                     }
                 } else {

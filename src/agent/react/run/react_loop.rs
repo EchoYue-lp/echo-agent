@@ -877,18 +877,6 @@ impl ReactAgent {
                         tracing::warn!(skill = %skill_name, error = %e, "IntentRouter: failed to activate skill");
                     }
                 }
-                crate::intent::Intent::WorkflowRequired {
-                    workflow_name,
-                    confidence,
-                } => {
-                    tracing::info!(
-                        agent = %self.config.agent_name,
-                        workflow = %workflow_name,
-                        confidence = confidence,
-                        "🎯 IntentRouter: WorkflowRequired (fallback to ReAct for now)"
-                    );
-                    // TODO: execute workflow before entering ReAct
-                }
                 crate::intent::Intent::Fallback => {
                     tracing::debug!(agent = %self.config.agent_name, "IntentRouter: Fallback to ReAct");
                 }

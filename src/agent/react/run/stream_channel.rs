@@ -166,18 +166,6 @@ impl ReactAgent {
                     }
                     // Fall through to run_core_loop.
                 }
-                crate::intent::Intent::WorkflowRequired {
-                    workflow_name,
-                    confidence,
-                } => {
-                    tracing::info!(
-                        agent = %self.config.agent_name,
-                        workflow = %workflow_name,
-                        confidence = confidence,
-                        "🎯 Stream IntentRouter: WorkflowRequired (fallback to ReAct for now)"
-                    );
-                    // Fall through to run_core_loop.
-                }
                 crate::intent::Intent::Fallback => {
                     tracing::debug!(
                         agent = %self.config.agent_name,
