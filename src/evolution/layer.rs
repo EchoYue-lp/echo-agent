@@ -895,7 +895,7 @@ impl MemoryLayerManager {
             source: entry.meta.source,
             topic: entry.meta.topic.clone(),
             risk: entry.meta.risk,
-            last_promoted: chrono::Utc::now().to_rfc3339(),
+            last_promoted: crate::utils::time::now_local().to_rfc3339(),
         };
 
         // Add to frontmatter

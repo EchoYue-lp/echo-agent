@@ -59,6 +59,7 @@ pub struct ChangeEntry {
     /// Unique identifier for this change.
     pub change_id: String,
     /// When the change occurred.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub timestamp: DateTime<Utc>,
     /// What kind of entity was changed.
     pub entity_type: EntityType,

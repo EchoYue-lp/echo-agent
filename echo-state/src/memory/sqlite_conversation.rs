@@ -10,7 +10,7 @@ pub use echo_core::memory::conversation::{
 };
 use futures::future::BoxFuture;
 use rusqlite::{Connection, params};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -69,8 +69,8 @@ impl SqliteConversationStore {
                 title               TEXT,
                 summary             TEXT,
                 compressed_before_id INTEGER,
-                created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
             CREATE INDEX IF NOT EXISTS idx_conv_user ON conversation(user_id);
             CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversation(updated_at DESC);
@@ -83,7 +83,7 @@ impl SqliteConversationStore {
                 attachments_json    TEXT,
                 tool_calls_json     TEXT,
                 tool_result_json    TEXT,
-                created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
             CREATE INDEX IF NOT EXISTS idx_msg_conv ON message(conversation_id);",
         )
@@ -273,7 +273,7 @@ impl ConversationStore for SqliteConversationStore {
                 return Ok(());
             }
 
-            sets.push("updated_at = datetime('now')".to_string());
+            sets.push("updated_at = datetime('now', 'localtime')".to_string());
             params.push(Box::new(conversation_id.to_string()));
 
             let sql = format!(
@@ -352,7 +352,7 @@ impl ConversationStore for SqliteConversationStore {
 
             // Update conversation timestamp
             let update_result = conn.execute(
-                "UPDATE conversation SET updated_at = datetime('now') WHERE conversation_id = ?1",
+                "UPDATE conversation SET updated_at = datetime('now', 'localtime') WHERE conversation_id = ?1",
                 params![conversation_id],
             );
 

@@ -134,8 +134,8 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     .map_err(|e| crate::error::ReactError::Other(format!("serialize status: {e}")))?,
                     deps,
                     outputs,
-                    node.created_at.to_rfc3339(),
-                    node.updated_at.to_rfc3339(),
+                    crate::utils::time::to_local(node.created_at).to_rfc3339(),
+                    crate::utils::time::to_local(node.updated_at).to_rfc3339(),
                 ],
             )
             .map_err(|e| RuntimeStateError::Io(format!("failed to save node: {}", e)))?;
@@ -209,7 +209,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
             let status_str = serde_json::to_string(&status).unwrap_or_default();
             conn.execute(
                 "UPDATE task_nodes SET status = ?1, updated_at = ?2 WHERE id = ?3 AND conversation_id = ?4",
-                params![status_str, Utc::now().to_rfc3339(), node_id, conversation_id],
+                params![status_str, crate::utils::time::now_local().to_rfc3339(), node_id, conversation_id],
             )
             .map_err(|e| RuntimeStateError::Io(format!("failed to update status: {}", e)))?;
             Ok(())
@@ -288,7 +288,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                     active_skills_str,
                     checkpoint.blocked_reason.as_deref(),
                     checkpoint.working_dir.as_ref().and_then(|p| p.to_str()),
-                    checkpoint.timestamp.to_rfc3339(),
+                    crate::utils::time::to_local(checkpoint.timestamp).to_rfc3339(),
                 ],
             )
             .map_err(|e| RuntimeStateError::Io(format!("failed to save checkpoint: {}", e)))?;

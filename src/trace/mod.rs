@@ -64,9 +64,11 @@ pub struct Run {
     pub timings: RunTimings,
 
     /// When the run started.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub started_at: DateTime<Utc>,
 
     /// When the run finished (set on completion, failure, or cancellation).
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
     pub finished_at: Option<DateTime<Utc>>,
 }
 
@@ -270,7 +272,9 @@ pub struct RunSummary {
     pub session_id: String,
     pub status: RunStatus,
     pub input_preview: String,
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub started_at: DateTime<Utc>,
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
     pub finished_at: Option<DateTime<Utc>>,
     pub token_usage: TokenUsage,
     pub total_duration_ms: u64,

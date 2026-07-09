@@ -50,6 +50,7 @@ pub struct Checkpoint {
     /// Step count
     pub step_count: usize,
     /// Creation time
+    #[serde(with = "echo_core::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
     /// Pending tool calls (if any)
     pub pending_action: Option<serde_json::Value>,
@@ -189,6 +190,7 @@ pub struct CheckpointInfo {
     pub graph_name: String,
     pub current_node: String,
     pub step_count: usize,
+    #[serde(with = "echo_core::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
     pub interrupt_type: InterruptType,
     pub parent_checkpoint_id: Option<String>,

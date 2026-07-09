@@ -235,7 +235,7 @@ Confidence: {confidence:.0}%.
         confidence = confidence,
         safe_topic = safe_topic,
         source_label = source_label,
-        created_at = created_at.to_rfc3339(),
+        created_at = crate::utils::time::to_local(*created_at).to_rfc3339(),
         workflow_steps = workflow_steps,
     )
 }

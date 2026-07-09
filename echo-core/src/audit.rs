@@ -12,6 +12,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     /// Time when the event was recorded.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub timestamp: DateTime<Utc>,
     /// Optional conversation or session identifier.
     pub session_id: Option<String>,

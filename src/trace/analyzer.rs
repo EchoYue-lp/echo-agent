@@ -40,8 +40,10 @@ pub struct SessionSummary {
     /// Cumulative tool execution duration (ms).
     pub total_tool_duration_ms: u64,
     /// Earliest `started_at` in the session.
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
     pub first_started_at: Option<DateTime<Utc>>,
     /// Latest `finished_at` in the session.
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
     pub last_finished_at: Option<DateTime<Utc>>,
     /// Tool names used across all runs in this session.
     pub tools_used: Vec<String>,
@@ -99,8 +101,10 @@ pub struct ErrorPattern {
     /// Tool names most frequently associated with this error.
     pub associated_tools: Vec<String>,
     /// First occurrence timestamp.
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
     pub first_seen: Option<DateTime<Utc>>,
     /// Last occurrence timestamp.
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
     pub last_seen: Option<DateTime<Utc>>,
 }
 

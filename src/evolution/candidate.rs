@@ -55,6 +55,7 @@ pub struct SkillCandidate {
     /// The memory type of the source observations.
     pub source_type: MemoryType,
     /// When this candidate was created.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
 }
 

@@ -37,6 +37,7 @@ pub struct TrajectoryEntry {
     /// Whether the task completed successfully
     pub completed: bool,
     /// Timestamp when saved
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub timestamp: DateTime<Utc>,
     /// Total token usage
     pub token_usage: u32,

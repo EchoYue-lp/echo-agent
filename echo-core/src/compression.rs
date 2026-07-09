@@ -79,6 +79,7 @@ pub struct CompressionCheckpoint {
     /// Wall-clock duration of the compression pass in milliseconds.
     pub compression_duration_ms: u64,
     /// Timestamp when this checkpoint was created.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
     /// User-provided focus instructions for this compression, if any.
     pub focus_instructions: Option<String>,

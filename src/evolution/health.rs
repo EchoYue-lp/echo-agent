@@ -96,6 +96,7 @@ pub struct SkillHealthReport {
     /// Human-readable recommendations based on health analysis.
     pub recommendations: Vec<String>,
     /// When this report was generated.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub analyzed_at: DateTime<Utc>,
 }
 

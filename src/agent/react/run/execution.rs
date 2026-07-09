@@ -48,7 +48,7 @@ impl ReactAgent {
             return;
         };
 
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = crate::utils::time::now_local().to_rfc3339();
         let session_id = self.config.get_session_id().unwrap_or("").to_string();
         state
             .tool_sequences

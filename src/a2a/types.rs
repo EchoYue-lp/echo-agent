@@ -537,7 +537,7 @@ impl A2ATaskStatus {
         Self {
             state,
             message: None,
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            timestamp: Some(crate::utils::time::now_local().to_rfc3339()),
         }
     }
 
@@ -546,7 +546,7 @@ impl A2ATaskStatus {
         Self {
             state,
             message: Some(message),
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            timestamp: Some(crate::utils::time::now_local().to_rfc3339()),
         }
     }
 }

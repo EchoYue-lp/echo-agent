@@ -22,6 +22,7 @@ pub struct NotebookCell {
     /// Execution duration in milliseconds.
     pub duration_ms: u64,
     /// Timestamp when this step was recorded.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub timestamp: DateTime<Utc>,
 }
 

@@ -156,6 +156,7 @@ pub struct TaskProgress {
     /// Estimated seconds remaining, based on elapsed time and progress.
     pub eta_secs: Option<u64>,
     /// Timestamp of this progress update.
+    #[serde(with = "echo_core::utils::time::local_rfc3339")]
     pub updated_at: DateTime<Utc>,
 }
 

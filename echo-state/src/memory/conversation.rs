@@ -3,7 +3,6 @@
 //! Trait definition and data types live in [`echo_core::memory::conversation`].
 //! This module provides `project_messages`/`project_message` helpers.
 
-use chrono::Utc;
 use echo_core::error::Result;
 use echo_core::llm::types::{Message, Role};
 pub use echo_core::memory::conversation::StoredMessage;
@@ -44,6 +43,6 @@ pub fn project_message(conversation_id: &str, message: &Message) -> Result<Store
         attachments_json: None,
         tool_calls_json,
         tool_result_json,
-        created_at: Utc::now().to_rfc3339(),
+        created_at: echo_core::utils::time::now_local().to_rfc3339(),
     })
 }

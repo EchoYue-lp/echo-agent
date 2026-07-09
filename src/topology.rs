@@ -148,6 +148,7 @@ pub struct TopologyEdge {
     /// Call count
     pub call_count: u64,
     /// Most recent call time
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub last_called: DateTime<Utc>,
     /// Cumulative execution time (milliseconds)
     pub total_duration_ms: u64,

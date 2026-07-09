@@ -227,6 +227,7 @@ pub struct TaskExecutionSummary {
     pub next_implications: Vec<String>,
     #[serde(default)]
     pub suggested_tasks: Vec<SuggestedTask>,
+    #[serde(with = "echo_core::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
 }
 

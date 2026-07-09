@@ -47,6 +47,7 @@ pub struct SkillMergeProposal {
     /// Which skill should be deprecated.
     pub deprecated_skill: String,
     /// When this proposal was created.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
 }
 

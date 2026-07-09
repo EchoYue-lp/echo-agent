@@ -66,8 +66,10 @@ pub struct TaskNode {
     /// Node outputs (arbitrary JSON).
     pub outputs: serde_json::Value,
     /// Timestamp when the node was created.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub created_at: DateTime<Utc>,
     /// Timestamp when the node was last updated.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub updated_at: DateTime<Utc>,
 }
 
@@ -128,6 +130,7 @@ pub struct AgentCheckpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<std::path::PathBuf>,
     /// Timestamp when the checkpoint was captured.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub timestamp: DateTime<Utc>,
 }
 

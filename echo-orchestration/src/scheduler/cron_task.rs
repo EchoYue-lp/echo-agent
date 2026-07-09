@@ -52,7 +52,7 @@ impl CronTask {
             status: CronTaskStatus::Enabled,
             last_run_at: None,
             last_result: None,
-            created_at: Utc::now().to_rfc3339(),
+            created_at: echo_core::utils::time::now_local().to_rfc3339(),
         }
     }
 
@@ -215,7 +215,7 @@ impl CronTaskStore {
         let mut tasks = self.load_all()?;
         for task in &mut tasks {
             if task.id.starts_with(id) {
-                task.last_run_at = Some(Utc::now().to_rfc3339());
+                task.last_run_at = Some(echo_core::utils::time::now_local().to_rfc3339());
                 task.last_result = Some(result.chars().take(500).collect());
                 break;
             }

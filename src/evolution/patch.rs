@@ -76,6 +76,7 @@ pub struct SkillPatch {
     /// Priority score (0-10) for ordering patches.
     pub priority: u8,
     /// When this patch was proposed.
+    #[serde(with = "crate::utils::time::local_rfc3339")]
     pub proposed_at: DateTime<Utc>,
 }
 
