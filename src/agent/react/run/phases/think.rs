@@ -145,12 +145,6 @@ pub(crate) async fn run_think(
     if let Some(ref u) = last_usage {
         snap.token_tracker.record_usage(u);
     }
-    // Log cumulative cache stats every 10 requests for observability.
-    let request_count = snap.token_tracker.request_count();
-    if request_count > 0 && request_count.is_multiple_of(10) {
-        snap.token_tracker
-            .log_cumulative_cache_stats(&snap.config.agent_name);
-    }
     tracing::debug!(
         target: "echo_agent::llm_usage",
         agent = %snap.config.agent_name,
@@ -164,22 +158,6 @@ pub(crate) async fn run_think(
         "LLM usage recorded"
     );
 
-    // Log cache hit rate for observability.
-    // Uses Usage::cache_hit_rate() which handles provider semantics
-    // (OpenAI/DeepSeek: prompt_tokens includes cached; Anthropic: excludes).
-    let cache_hit_rate = last_usage
-        .as_ref()
-        .and_then(|u| u.cache_hit_rate())
-        .unwrap_or(0.0);
-    tracing::info!(
-        target: "echo_agent::cache",
-        agent = %snap.config.agent_name,
-        prompt_tokens = pt,
-        cached_prompt_tokens = cached_prompt_tokens,
-        cache_creation_prompt_tokens = cache_creation_prompt_tokens,
-        cache_hit_rate = format!("{:.1}%", cache_hit_rate * 100.0),
-        "💰 prompt cache stats"
-    );
     yield_event_or!(
         tx,
         AgentEvent::LlmUsage {

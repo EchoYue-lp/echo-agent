@@ -306,23 +306,6 @@ impl AgentSnapshot {
             .unwrap_or(0);
         let usage_reported = last_usage.is_some();
 
-        // Log cache hit rate for observability (non-streaming / direct path).
-        // Uses Usage::cache_hit_rate() which handles provider semantics
-        // (OpenAI/DeepSeek: prompt_tokens includes cached; Anthropic: excludes).
-        let cache_hit_rate = last_usage
-            .as_ref()
-            .and_then(|u| u.cache_hit_rate())
-            .unwrap_or(0.0);
-        tracing::info!(
-            target: "echo_agent::cache",
-            agent = %self.config.agent_name,
-            prompt_tokens = pt,
-            cached_prompt_tokens = cached_prompt_tokens,
-            cache_creation_prompt_tokens = cache_creation_prompt_tokens,
-            cache_hit_rate = format!("{:.1}%", cache_hit_rate * 100.0),
-            "💰 prompt cache stats"
-        );
-
         let _ = tx
             .send(Ok(AgentEvent::LlmUsage {
                 model: self.config.model_name.clone(),

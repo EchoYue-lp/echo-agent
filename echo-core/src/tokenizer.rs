@@ -308,26 +308,6 @@ impl TokenUsageTracker {
         }
     }
 
-    /// Log cumulative cache stats at `info` level (for periodic observability).
-    pub fn log_cumulative_cache_stats(&self, agent: &str) {
-        let requests = self.request_count.load(Ordering::Relaxed);
-        if let Some(rate) = self.cumulative_cache_hit_rate() {
-            let cached = self.total_cached_prompt_tokens.load(Ordering::Relaxed);
-            let creation = self
-                .total_cache_creation_prompt_tokens
-                .load(Ordering::Relaxed);
-            tracing::info!(
-                target: "echo_agent::cache",
-                agent = %agent,
-                requests,
-                cumulative_cache_hit_rate = format!("{:.1}%", rate * 100.0),
-                total_cached_prompt_tokens = cached,
-                total_cache_creation_prompt_tokens = creation,
-                "📊 cumulative cache performance"
-            );
-        }
-    }
-
     /// Reset all counters.
     pub fn reset(&self) {
         self.total_prompt_tokens.store(0, Ordering::Relaxed);
