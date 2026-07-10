@@ -586,9 +586,8 @@ pub trait Tool: Send + Sync {
 
 /// 应用层注入的 run 级上下文（跨 spawn 安全，值传递）。
 ///
-/// 由应用层（如 EKO 的 launch_unified_run）在每次 run 启动时构造，经
-/// `DispatchRequest.runtime_context` → `dispatch_fork` → `Agent::set_external_context`
-/// 注入到 worker agent 实例，最终由 pipeline 填入 [`ToolContext`]。
+/// 由应用层在每次 run 启动时构造，经 `AgentInvocationContext` 随单次调用
+/// 传入，最终由 pipeline 填入 [`ToolContext`]。
 ///
 /// 为什么需要这个：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。worker 在框架
 /// 层的 `tokio::spawn`（subagent_executor.rs）里执行，task_local 全部丢失。而
@@ -645,9 +644,9 @@ impl NestedDelegationPolicy {
 
 #[derive(Clone)]
 pub struct ExternalRunContext {
-    /// 当前 run 标识（应用层 run，如 EKO 的 TaskRuntime run_id）。
+    /// 当前应用层 run 标识。
     pub run_id: String,
-    /// 当前 run 内的一次具体执行标识（如 EKO 的 TaskRuntime task_id）。
+    /// 当前 run 内的一次具体执行标识。
     ///
     /// `None` 表示只有 run 级上下文。设置后，subagent / tool trace 应使用它
     /// 作为前端可见执行记录的稳定 id，而不是再临时分配一套 dispatch id。

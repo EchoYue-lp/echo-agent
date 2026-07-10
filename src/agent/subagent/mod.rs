@@ -28,7 +28,8 @@ pub use executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig, Te
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use registry::SubagentRegistry;
 pub use types::{
-    ExecutionMode, RegisteredSubagent, SubagentDefinition, SubagentKind, SubagentResult,
+    ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentDefinition, SubagentKind,
+    SubagentResult,
 };
 pub use workspace::{
     DataWorkspaceFactory, DataWorkspaceHandle, NoWorkspaceFactory, SharedDataWorkspaceFactory,

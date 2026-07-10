@@ -15,15 +15,41 @@ pub mod verifier;
 // Re-export from echo_core for backward compatibility
 pub use echo_core::compression::{
     CanonicalContext, CompressionCheckpoint, CompressionInput, CompressionOutput,
-    ContextCompressor, StructuredSummary, ToolPairFix, ToolPairFixType,
+    ContextCompressor, ContextProjection, PreModelContextProjector, ProjectionContext,
+    StructuredSummary, ToolPairFix, ToolPairFixType,
 };
 
 use crate::compression::compressor::SlidingWindowCompressor;
 use echo_core::budget::TokenBudget;
 use echo_core::error::Result;
-use echo_core::llm::types::{Message, MessageContent, Role};
+use echo_core::llm::types::{ContentPart, Message, MessageContent, Role};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
+
+const PROJECTION_ENVELOPE_PREFIX: &str = "<echo-agent-context-projection-v1>";
+
+/// Return whether a message carries the framework-owned context projection envelope.
+///
+/// Consumers should use this predicate instead of matching the private envelope
+/// representation directly.
+pub fn is_context_projection_message(message: &Message) -> bool {
+    projection_envelope_text(message).is_some()
+}
+
+fn projection_envelope_text(message: &Message) -> Option<&str> {
+    match &message.content {
+        MessageContent::Text(content) => content
+            .starts_with(PROJECTION_ENVELOPE_PREFIX)
+            .then_some(content.as_str()),
+        MessageContent::Parts(parts) => parts.first().and_then(|part| match part {
+            ContentPart::Text { text } if text.starts_with(PROJECTION_ENVELOPE_PREFIX) => {
+                Some(text.as_str())
+            }
+            _ => None,
+        }),
+        MessageContent::Empty => None,
+    }
+}
 
 /// Callback trait for promoting evicted messages to long-term memory.
 ///
@@ -471,8 +497,56 @@ impl ContextManager {
         }
     }
 
+    /// Replace marker-tagged model context at the system/history boundary.
+    ///
+    /// Projection messages receive a framework-reserved envelope. Existing
+    /// messages with that envelope are removed before current projections are
+    /// inserted, making replacement recoverable after persistence and restore.
+    pub fn apply_projections(&mut self, projections: &[ContextProjection]) {
+        self.messages
+            .retain(|message| !is_context_projection_message(message));
+
+        let boundary = self
+            .messages
+            .iter()
+            .position(|message| message.role != Role::System)
+            .unwrap_or(self.messages.len());
+        let current = projections
+            .iter()
+            .filter(|projection| !projection.marker.is_empty())
+            .filter_map(|projection| {
+                projection.message.clone().map(|message| {
+                    Self::wrap_projection_message(message, projection.marker.as_str())
+                })
+            });
+        self.messages.splice(boundary..boundary, current);
+    }
+
+    /// Count messages currently protected by registered content markers.
+    pub fn protected_message_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|message| self.is_protected(message))
+            .count()
+    }
+
+    /// Return whether the context owns a projection with exactly this marker.
+    pub fn has_projection(&self, marker: &str) -> bool {
+        let Ok(encoded_marker) = serde_json::to_string(marker) else {
+            return false;
+        };
+        let expected = format!("{PROJECTION_ENVELOPE_PREFIX}\nmarker={encoded_marker}\n");
+        self.messages.iter().any(|message| {
+            projection_envelope_text(message)
+                .is_some_and(|envelope| envelope.starts_with(expected.as_str()))
+        })
+    }
+
     /// Check if a message is protected from compression.
     fn is_protected(&self, message: &Message) -> bool {
+        if is_context_projection_message(message) {
+            return true;
+        }
         if self.protected_markers.is_empty() {
             return false;
         }
@@ -481,6 +555,24 @@ impl ContextManager {
         } else {
             false
         }
+    }
+
+    fn wrap_projection_message(mut message: Message, marker: &str) -> Message {
+        let encoded_marker =
+            serde_json::to_string(marker).unwrap_or_else(|_| "\"invalid-marker\"".to_string());
+        let envelope = format!("{PROJECTION_ENVELOPE_PREFIX}\nmarker={encoded_marker}\n");
+        match &mut message.content {
+            MessageContent::Text(content) => {
+                *content = format!("{envelope}{content}");
+            }
+            MessageContent::Parts(parts) => {
+                parts.insert(0, ContentPart::Text { text: envelope });
+            }
+            MessageContent::Empty => {
+                message.content = MessageContent::Text(envelope);
+            }
+        }
+        message
     }
 
     /// Split messages into (compressible, protected_metadata).
@@ -622,16 +714,14 @@ impl ContextManager {
             return;
         };
 
-        // Check: does the first message still contain the system prompt?
-        let has_system = self
-            .messages
-            .first()
-            .map(|m| m.role == Role::System)
-            .unwrap_or(false);
-
-        // If system message was lost, re-inject from canonical source
-        if !has_system {
-            if let Some(ref prompt) = canonical.system_prompt {
+        // Restore the exact canonical prompt even when another system message
+        // occupies the system region.
+        if let Some(ref prompt) = canonical.system_prompt {
+            let has_canonical_system = self.messages.iter().any(|message| {
+                message.role == Role::System
+                    && message.content.as_text_ref() == Some(prompt.as_str())
+            });
+            if !has_canonical_system {
                 self.messages.insert(0, Message::system(prompt.clone()));
                 tracing::debug!("Re-injected system prompt from canonical context");
             }
@@ -671,6 +761,17 @@ impl ContextManager {
                 self.messages.insert(sys_end, Message::system(msg));
             }
         }
+    }
+
+    fn finalize_checkpoint(
+        &self,
+        checkpoint: Option<CompressionCheckpoint>,
+    ) -> Option<CompressionCheckpoint> {
+        checkpoint.map(|mut value| {
+            value.retained_count = self.messages.len();
+            value.token_after = self.token_estimate();
+            value
+        })
     }
 
     /// Remove the compressor, reverting to unlimited mode
@@ -798,6 +899,11 @@ impl ContextManager {
         let checkpoint =
             checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
 
+        if self.canonical_context.is_some() {
+            self.reinject_canonical_context();
+        }
+        let checkpoint = self.finalize_checkpoint(checkpoint);
+
         let stats = ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
@@ -866,6 +972,11 @@ impl ContextManager {
         let checkpoint =
             checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
 
+        if self.canonical_context.is_some() {
+            self.reinject_canonical_context();
+        }
+        let checkpoint = self.finalize_checkpoint(checkpoint);
+
         let stats = ForceCompressStats {
             before_count,
             after_count: self.messages.len(),
@@ -919,6 +1030,11 @@ impl ContextManager {
 
         let checkpoint =
             checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
+
+        if self.canonical_context.is_some() {
+            self.reinject_canonical_context();
+        }
+        let checkpoint = self.finalize_checkpoint(checkpoint);
 
         let stats = ForceCompressStats {
             before_count,
@@ -1244,6 +1360,7 @@ impl ContextManager {
         if self.canonical_context.is_some() {
             self.reinject_canonical_context();
         }
+        combined_checkpoint = self.finalize_checkpoint(combined_checkpoint);
 
         Ok(PrepareResult {
             messages: self.messages.clone(),
@@ -1558,6 +1675,259 @@ mod tests {
     use super::*;
     use crate::compression::compressor::SlidingWindowCompressor;
     use echo_core::error::Result;
+
+    #[test]
+    fn context_projection_replaces_existing_tagged_message() {
+        let marker = "<runtime_projection>";
+        let mut ctx = ContextManager::builder(4096)
+            .with_system("system".to_string())
+            .build();
+        ctx.push(Message::user("history".to_string()));
+
+        ctx.apply_projections(&[ContextProjection {
+            marker: marker.to_string(),
+            message: Some(Message::user(format!("{marker}old"))),
+        }]);
+        ctx.apply_projections(&[ContextProjection {
+            marker: marker.to_string(),
+            message: Some(Message::user(format!("{marker}new"))),
+        }]);
+
+        let projected: Vec<_> = ctx
+            .messages()
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .as_text_ref()
+                    .is_some_and(|text| text.contains(marker))
+            })
+            .collect();
+        assert_eq!(projected.len(), 1);
+        assert!(
+            projected
+                .first()
+                .is_some_and(|message| is_context_projection_message(message))
+        );
+        assert!(
+            projected
+                .first()
+                .and_then(|message| message.content.as_text_ref())
+                .is_some_and(|text| text.ends_with("<runtime_projection>new"))
+        );
+        assert_eq!(ctx.protected_message_count(), 1);
+    }
+
+    #[test]
+    fn context_projection_none_removes_stale_tagged_message() {
+        let marker = "<runtime_projection>";
+        let mut ctx = ContextManager::builder(4096)
+            .with_system("system".to_string())
+            .build();
+        ctx.apply_projections(&[ContextProjection {
+            marker: marker.to_string(),
+            message: Some(Message::user(format!("{marker}stale"))),
+        }]);
+
+        ctx.apply_projections(&[ContextProjection {
+            marker: marker.to_string(),
+            message: None,
+        }]);
+
+        assert!(
+            ctx.messages().iter().all(|message| {
+                message
+                    .content
+                    .as_text_ref()
+                    .is_none_or(|text| !text.contains(marker))
+            }),
+            "None projection must remove stale tagged context"
+        );
+        assert_eq!(ctx.protected_message_count(), 0);
+    }
+
+    #[test]
+    fn context_projection_preserves_unrelated_marker_text() {
+        let marker = "runtime-marker";
+        let mut ctx = ContextManager::builder(4096)
+            .with_system("system".to_string())
+            .build();
+        ctx.push(Message::user(
+            "ordinary conversation mentions runtime-marker".to_string(),
+        ));
+
+        ctx.apply_projections(&[ContextProjection {
+            marker: marker.to_string(),
+            message: Some(Message::user("projected state".to_string())),
+        }]);
+
+        assert!(ctx.messages().iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text == "ordinary conversation mentions runtime-marker")
+        }));
+        assert_eq!(ctx.protected_message_count(), 1);
+    }
+
+    #[test]
+    fn has_projection_matches_exact_envelope_marker() {
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.apply_projections(&[ContextProjection {
+            marker: "runtime-marker".to_string(),
+            message: Some(Message::user("current runtime".to_string())),
+        }]);
+
+        assert!(ctx.has_projection("runtime-marker"));
+        assert!(!ctx.has_projection("runtime"));
+        assert!(!ctx.has_projection("runtime-marker-extra"));
+    }
+
+    #[test]
+    fn has_projection_ignores_plain_message_text() {
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.push(Message::user(
+            "plain text mentions runtime-marker but is not an owned projection".to_string(),
+        ));
+
+        assert!(!ctx.has_projection("runtime-marker"));
+    }
+
+    #[test]
+    fn context_projection_removes_restored_projection_without_transient_state() {
+        let mut original = ContextManager::builder(4096)
+            .with_system("system".to_string())
+            .build();
+        original.apply_projections(&[ContextProjection {
+            marker: "runtime".to_string(),
+            message: Some(Message::user("stale restored projection".to_string())),
+        }]);
+        let restored_messages = original.messages().to_vec();
+        let mut restored = ContextManager::builder(4096).build();
+        restored.set_messages(restored_messages);
+
+        restored.apply_projections(&[]);
+
+        assert!(restored.messages().iter().all(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_none_or(|text| !text.contains("stale restored projection"))
+        }));
+    }
+
+    fn canonical_test_context() -> ContextManager {
+        let canonical = CanonicalContext {
+            system_prompt: Some("canonical system".to_string()),
+            project_rules: Some("canonical rules".to_string()),
+            skill_injections: Vec::new(),
+            active_skill_names: Vec::new(),
+        };
+        let mut ctx = ContextManager::builder(1)
+            .compressor(SlidingWindowCompressor::new(1))
+            .with_system("canonical system".to_string())
+            .canonical_context(canonical)
+            .build();
+        ctx.push(Message::user(
+            "enough conversation content to force compression".to_string(),
+        ));
+        ctx
+    }
+
+    fn assert_canonical_checkpoint_matches_context(
+        ctx: &ContextManager,
+        checkpoint: Option<&CompressionCheckpoint>,
+    ) {
+        assert_eq!(
+            checkpoint.map(|value| value.retained_count),
+            Some(ctx.messages().len())
+        );
+        assert_eq!(
+            checkpoint.map(|value| value.token_after),
+            Some(ctx.token_estimate())
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_system_context_is_not_duplicated() -> Result<()> {
+        let mut ctx = canonical_test_context();
+
+        let _ = ctx.prepare(None).await?;
+        let _ = ctx.prepare(None).await?;
+
+        let system_occurrences = ctx
+            .messages()
+            .iter()
+            .filter_map(|message| message.content.as_text_ref())
+            .filter(|content| content.contains("canonical system"))
+            .count();
+        assert_eq!(system_occurrences, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_system_context_replaces_missing_prompt_beside_other_system_message()
+    -> Result<()> {
+        let canonical = CanonicalContext {
+            system_prompt: Some("canonical system".to_string()),
+            project_rules: None,
+            skill_injections: Vec::new(),
+            active_skill_names: Vec::new(),
+        };
+        let mut ctx = ContextManager::builder(4096)
+            .with_system("different system".to_string())
+            .canonical_context(canonical)
+            .build();
+
+        let result = ctx.prepare(None).await?;
+
+        assert!(result.messages.iter().any(|message| {
+            message.role == Role::System
+                && message.content.as_text_ref() == Some("canonical system")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_prepare_checkpoint_matches_final_context() -> Result<()> {
+        let mut ctx = canonical_test_context();
+
+        let result = ctx.prepare(None).await?;
+
+        assert_canonical_checkpoint_matches_context(&ctx, result.checkpoint.as_ref());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_force_compress_checkpoint_matches_final_context() -> Result<()> {
+        let mut ctx = canonical_test_context();
+
+        let (_, checkpoint) = ctx.force_compress(1).await?;
+
+        assert_canonical_checkpoint_matches_context(&ctx, checkpoint.as_ref());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_force_compress_with_focus_checkpoint_matches_final_context() -> Result<()> {
+        let mut ctx = canonical_test_context();
+
+        let (_, checkpoint) = ctx.force_compress_with_focus("rules", 1).await?;
+
+        assert_canonical_checkpoint_matches_context(&ctx, checkpoint.as_ref());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_force_compress_with_checkpoint_matches_final_context() -> Result<()> {
+        let mut ctx = canonical_test_context();
+        let compressor = SlidingWindowCompressor::new(1);
+
+        let (_, checkpoint) = ctx.force_compress_with(&compressor).await?;
+
+        assert_canonical_checkpoint_matches_context(&ctx, checkpoint.as_ref());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_sliding_window_compressor() -> Result<()> {

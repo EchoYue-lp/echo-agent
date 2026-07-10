@@ -41,16 +41,57 @@ impl ReactAgent {
         let text = init.text.clone();
         let message = init.message.clone();
         let label = init.label.clone();
+        let mut invocation = init.invocation;
+        // Capture value-carried run metadata before the execution mutex wait.
+        // Concurrent callers may update/clear the agent's shared external
+        // context while this invocation is queued, but this snapshot belongs
+        // to the invocation that entered here.
+        let legacy_runtime = if invocation.is_none() {
+            Some((
+                self.current_run_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+                self.external_cancel
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+                self.external_trace_sink
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+                *self
+                    .external_delegation_policy
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            ))
+        } else {
+            None
+        };
 
         // ★ Acquire execution mutex BEFORE context mutation — using lock_owned()
         // so the guard can be moved into the spawned task and held for the
         // entire stream lifetime.
         let execution_guard = self.execution_mutex.clone().lock_owned().await;
 
-        // Start trace run BEFORE the prepare phase so trace events emitted
-        // below (PhaseTransition, GuardBlock audit) are recorded rather than
-        // silently dropped when current_run_id is None.
-        self.start_trace_run(&text).await;
+        // Start trace run BEFORE prepare. Value-scoped invocations never write
+        // the agent-wide current_run_id; legacy calls retain the old behavior.
+        if let Some(invocation) = invocation.as_mut() {
+            if invocation.runtime.is_none()
+                && let Some(run_id) = self.start_scoped_trace_run(&text).await
+            {
+                invocation.runtime = Some(echo_core::tools::ExternalRunContext {
+                    run_id,
+                    execution_id: None,
+                    message_id: None,
+                    cancel: None,
+                    trace_sink: None,
+                    delegation_policy: None,
+                });
+            }
+        } else {
+            self.start_trace_run(&text).await;
+        }
 
         // ── Restore thread context (Execute mode) + memory triggers/recall ──
         let recalled = if let Some(ref msg) = init.message {
@@ -105,7 +146,9 @@ impl ReactAgent {
             let messages = self.memory.context.lock().await.messages().to_vec();
             let intent = router.classify(&text, &messages).await;
             match intent {
-                crate::intent::Intent::DirectAnswer { confidence } => {
+                crate::intent::Intent::DirectAnswer { confidence }
+                    if self.allows_direct_answer_shortcut() =>
+                {
                     tracing::info!(
                         agent = %self.config.agent_name,
                         confidence = confidence,
@@ -147,6 +190,13 @@ impl ReactAgent {
                     drop(execution_guard);
                     return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
                 }
+                crate::intent::Intent::DirectAnswer { confidence } => {
+                    tracing::debug!(
+                        agent = %self.config.agent_name,
+                        confidence,
+                        "Stream DirectAnswer routed through ReAct for pre-model projection"
+                    );
+                }
                 crate::intent::Intent::SkillRequired {
                     skill_name,
                     confidence,
@@ -175,27 +225,23 @@ impl ReactAgent {
             }
         }
 
-        let mut snap = make_snapshot(self);
-        // Pass current run_id from the agent to the snapshot
-        snap.current_run_id = self
-            .current_run_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        snap.external_cancel = self
-            .external_cancel
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        snap.external_trace_sink = self
-            .external_trace_sink
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        snap.external_delegation_policy = *self
-            .external_delegation_policy
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut snap = if let Some(invocation) = invocation.as_ref() {
+            AgentSnapshot::from_agent_with_invocation(self, invocation)
+        } else {
+            make_snapshot(self)
+        };
+        if let Some((
+            current_run_id,
+            external_cancel,
+            external_trace_sink,
+            external_delegation_policy,
+        )) = legacy_runtime
+        {
+            snap.current_run_id = current_run_id;
+            snap.external_cancel = external_cancel;
+            snap.external_trace_sink = external_trace_sink;
+            snap.external_delegation_policy = external_delegation_policy;
+        }
 
         tokio::spawn(async move {
             // Move the guard into the spawned task — held for full stream duration
@@ -476,6 +522,9 @@ impl AgentSnapshot {
 mod tests {
     use super::*;
     use crate::agent::config::AgentConfig;
+    use crate::compression::{ContextProjection, PreModelContextProjector, ProjectionContext};
+    use crate::intent::{Intent, IntentClassifier, IntentRouter, IntentRouterConfig};
+    use echo_core::agent::Agent;
     use echo_core::guard::{Guard, GuardDirection, GuardResult};
     use futures::StreamExt;
     use futures::future::BoxFuture;
@@ -504,6 +553,72 @@ mod tests {
         }
     }
 
+    struct AlwaysDirectClassifier;
+
+    impl IntentClassifier for AlwaysDirectClassifier {
+        fn classify<'a>(
+            &'a self,
+            _user_input: &'a str,
+            _context: &'a [Message],
+        ) -> BoxFuture<'a, Intent> {
+            Box::pin(async { Intent::DirectAnswer { confidence: 1.0 } })
+        }
+    }
+
+    struct RoutingProjection;
+
+    impl PreModelContextProjector for RoutingProjection {
+        fn project(
+            &self,
+            _context: &ProjectionContext,
+        ) -> BoxFuture<'_, Result<Vec<ContextProjection>>> {
+            Box::pin(async {
+                Ok(vec![ContextProjection {
+                    marker: "routing-test".to_string(),
+                    message: Some(Message::user("required routing projection".to_string())),
+                }])
+            })
+        }
+    }
+
+    struct BlockingRunIdProjection {
+        run_ids: std::sync::Mutex<Vec<Option<String>>>,
+        calls: std::sync::atomic::AtomicUsize,
+        first_started: tokio::sync::Notify,
+        release_first: tokio::sync::Notify,
+    }
+
+    impl BlockingRunIdProjection {
+        fn new() -> Self {
+            Self {
+                run_ids: std::sync::Mutex::new(Vec::new()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                first_started: tokio::sync::Notify::new(),
+                release_first: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    impl PreModelContextProjector for BlockingRunIdProjection {
+        fn project<'a>(
+            &'a self,
+            context: &'a ProjectionContext,
+        ) -> BoxFuture<'a, Result<Vec<ContextProjection>>> {
+            Box::pin(async move {
+                self.run_ids
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(context.run_id.clone());
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    self.first_started.notify_one();
+                    self.release_first.notified().await;
+                }
+                Ok(Vec::new())
+            })
+        }
+    }
+
     /// Build a minimal agent with a blocking input guard.
     fn agent_with_blocking_guard() -> ReactAgent {
         let mut agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
@@ -526,6 +641,7 @@ mod tests {
                     text: "anything".into(),
                     message: None,
                     label: String::new(),
+                    invocation: None,
                 },
                 StreamMode::Chat,
             )
@@ -567,6 +683,7 @@ mod tests {
                     text: "first".into(),
                     message: None,
                     label: String::new(),
+                    invocation: None,
                 },
                 StreamMode::Chat,
             )
@@ -583,6 +700,7 @@ mod tests {
                     text: "second".into(),
                     message: None,
                     label: String::new(),
+                    invocation: None,
                 },
                 StreamMode::Chat,
             ),
@@ -618,6 +736,219 @@ mod tests {
             .expect("agent builds")
     }
 
+    fn agent_with_direct_router_and_projection(llm: Arc<MockLlmClient>) -> Result<ReactAgent> {
+        let router = IntentRouter::new(
+            Box::new(AlwaysDirectClassifier),
+            IntentRouterConfig::default(),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm)
+            .intent_router(router)
+            .system_prompt("You are a test assistant.")
+            .build()?;
+        agent.set_pre_model_context_projector(Some(Arc::new(RoutingProjection)));
+        Ok(agent)
+    }
+
+    #[tokio::test]
+    async fn queued_stream_keeps_invocation_run_contexts_atomic() -> Result<()> {
+        let llm = MockLlmClient::new().with_responses(["first", "second"]);
+        let agent = Arc::new(agent_with_mock_llm(llm));
+        let projector = Arc::new(BlockingRunIdProjection::new());
+        agent.set_pre_model_context_projector(Some(projector.clone()));
+        let invocation_a = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                run_id: "run-a".to_string(),
+                execution_id: Some("execution-a".to_string()),
+                message_id: Some("message-a".to_string()),
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: Some(echo_core::tools::NestedDelegationPolicy {
+                    can_spawn_subagents: true,
+                    delegate_depth: 1,
+                    max_delegate_depth: 2,
+                }),
+            }),
+            working_dir: Some(std::path::PathBuf::from("/tmp/worktree-a")),
+            cancel: None,
+        };
+        let first_stream = agent
+            .execute_stream_with_invocation_context(
+                "first",
+                crate::agent::CancellationToken::new(),
+                invocation_a,
+            )
+            .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            projector.first_started.notified(),
+        )
+        .await
+        .map_err(|_| {
+            crate::error::ReactError::Other("first projection did not start".to_string())
+        })?;
+
+        let invocation_b = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                run_id: "run-b".to_string(),
+                execution_id: Some("execution-b".to_string()),
+                message_id: Some("message-b".to_string()),
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: Some(echo_core::tools::NestedDelegationPolicy {
+                    can_spawn_subagents: true,
+                    delegate_depth: 2,
+                    max_delegate_depth: 3,
+                }),
+            }),
+            working_dir: Some(std::path::PathBuf::from("/tmp/worktree-b")),
+            cancel: None,
+        };
+        let mut queued = Box::pin(agent.execute_stream_with_invocation_context(
+            "second",
+            crate::agent::CancellationToken::new(),
+            invocation_b,
+        ));
+        tokio::select! {
+            result = &mut queued => {
+                return Err(crate::error::ReactError::Other(format!(
+                    "queued stream unexpectedly bypassed execution mutex: {:?}",
+                    result.is_ok()
+                )));
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+        projector.release_first.notify_one();
+
+        let _: Vec<_> = first_stream.collect().await;
+        let second_stream = queued.await?;
+        let _: Vec<_> = second_stream.collect().await;
+        let run_ids = projector
+            .run_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        assert_eq!(
+            run_ids,
+            vec![Some("run-a".to_string()), Some("run-b".to_string())]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn value_scoped_stream_does_not_mutate_agent_run_id() -> Result<()> {
+        let mut agent = agent_with_mock_llm(MockLlmClient::new().with_response("done"));
+        agent.set_run_store(Arc::new(crate::trace::InMemoryRunStore::new()));
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                run_id: "value-run".to_string(),
+                execution_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            }),
+            working_dir: None,
+            cancel: None,
+        };
+
+        let stream = agent
+            .execute_stream_with_invocation_context(
+                "run",
+                crate::agent::CancellationToken::new(),
+                invocation,
+            )
+            .await?;
+        let _: Vec<_> = stream.collect().await;
+        assert!(agent.current_run_id().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_streaming_direct_answer_routes_through_projection_boundary() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response("normal loop answer"));
+        let agent = agent_with_direct_router_and_projection(llm.clone())?;
+
+        let _ = agent.run_chat_direct("hello").await?;
+
+        let messages = llm.last_messages().unwrap_or_default();
+        assert!(messages.iter().any(|message| {
+            message
+                .content
+                .as_text()
+                .is_some_and(|text| text.contains("required routing projection"))
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_direct_answer_routes_through_projection_boundary() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response("normal loop answer"));
+        let agent = agent_with_direct_router_and_projection(llm.clone())?;
+
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "hello".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        let _: Vec<_> = stream.collect().await;
+
+        let messages = llm.last_messages().unwrap_or_default();
+        assert!(messages.iter().any(|message| {
+            message
+                .content
+                .as_text()
+                .is_some_and(|text| text.contains("required routing projection"))
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sequential_execute_stream_calls_reset_prior_task_messages() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_response("first answer")
+                .with_response("second answer"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("You are a test assistant.")
+            .build()?;
+
+        let first = agent
+            .execute_stream_with_cancel("first task", crate::agent::CancellationToken::new())
+            .await?;
+        let _: Vec<_> = first.collect().await;
+        let second = agent
+            .execute_stream_with_cancel("second task", crate::agent::CancellationToken::new())
+            .await?;
+        let _: Vec<_> = second.collect().await;
+
+        let calls = llm.all_calls();
+        let second_messages = calls.get(1).ok_or_else(|| {
+            crate::error::ReactError::Other("missing second LLM call".to_string())
+        })?;
+        assert!(second_messages.iter().any(|message| {
+            message
+                .content
+                .as_text()
+                .is_some_and(|text| text.contains("second task"))
+        }));
+        assert!(second_messages.iter().all(|message| {
+            message
+                .content
+                .as_text()
+                .is_none_or(|text| !text.contains("first task"))
+        }));
+        Ok(())
+    }
+
     /// Collect the AgentEvents emitted by one streaming turn.
     async fn collect_events(agent: &ReactAgent, text: &str) -> Vec<AgentEvent> {
         let stream = agent
@@ -626,6 +957,7 @@ mod tests {
                     text: text.into(),
                     message: None,
                     label: String::new(),
+                    invocation: None,
                 },
                 StreamMode::Chat,
             )
@@ -709,6 +1041,7 @@ mod tests {
                     text: "anything".into(),
                     message: None,
                     label: String::new(),
+                    invocation: None,
                 },
                 StreamMode::Chat,
             )
@@ -758,6 +1091,7 @@ mod tests {
                 text: "hello".into(),
                 message: None,
                 label: String::new(),
+                invocation: None,
             },
             StreamMode::Chat,
         );

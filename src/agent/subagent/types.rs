@@ -41,6 +41,34 @@ impl std::fmt::Display for ExecutionMode {
     }
 }
 
+/// Isolation boundary that was actually established for a dispatch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservedIsolation {
+    Primary,
+    Context,
+    Worktree,
+    Workspace,
+    Worker,
+    PrimaryFallback,
+    #[default]
+    Unknown,
+}
+
+impl ObservedIsolation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Context => "context",
+            Self::Worktree => "worktree",
+            Self::Workspace => "workspace",
+            Self::Worker => "worker",
+            Self::PrimaryFallback => "primary-fallback",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 // ── Subagent Kind ─────────────────────────────────────────────────────────────
 
 /// How the subagent definition is sourced.
@@ -221,6 +249,8 @@ pub struct SubagentResult {
     pub was_truncated: bool,
     /// Execution mode that was used.
     pub mode: ExecutionMode,
+    /// Isolation boundary actually established before model execution.
+    pub isolation_observed: ObservedIsolation,
     /// Cumulative LLM usage across all calls in this dispatch.
     /// `None` when the agent produced no `LlmUsage` events (e.g. cancelled
     /// before first LLM call, or the provider never returned usage).
@@ -243,6 +273,7 @@ impl SubagentResult {
             tokens_used: None,
             was_truncated: false,
             mode: ExecutionMode::Sync,
+            isolation_observed: ObservedIsolation::Unknown,
             usage: None,
         }
     }
@@ -268,6 +299,7 @@ impl SubagentResult {
             tokens_used: None,
             was_truncated: false,
             mode: ExecutionMode::Fork,
+            isolation_observed: ObservedIsolation::Unknown,
             usage: None,
         }
     }

@@ -43,7 +43,8 @@ pub(crate) struct ToolExecutionSubsystem {
     /// Per-run disabled tool names. Tools in this set are hidden from the LLM
     /// (filtered out of the tool list sent to the model). Populated by the
     /// application layer (e.g. EKO hides task-management tools when in Chat
-    /// interaction mode). Read fresh each iteration via [`tools_for_llm`].
+    /// interaction mode). Captured into each run snapshot, which filters the
+    /// model-visible tool definitions on every reasoning iteration.
     ///
     /// Unlike `ToolManager::unregister` (which mutates the shared registry and
     /// would affect other in-flight turns on pooled agents), this is a
@@ -59,29 +60,9 @@ impl ToolExecutionSubsystem {
         Arc::clone(&self.tool_manager)
     }
 
-    /// Return the tool definitions to send to the LLM, with `disabled_tools`
-    /// filtered out. This is the single chokepoint that honors per-run tool
-    /// hiding — both LLM call sites (streaming + non-streaming) use this
-    /// instead of `tool_manager.get_openai_tools()` directly.
-    pub(crate) fn tools_for_llm(&self) -> Vec<crate::llm::types::ToolDefinition> {
-        let tools = self.tool_manager.get_openai_tools();
-        let disabled = self
-            .disabled_tools
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        match disabled {
-            Some(set) if !set.is_empty() => tools
-                .into_iter()
-                .filter(|t| !set.contains(&t.function.name))
-                .collect(),
-            _ => tools,
-        }
-    }
-
     /// Set the disabled tool set for the current run. Callers (e.g. drive_chat)
-    /// pass `Some(set)` to hide tools, or `None` to clear. The set is read
-    /// fresh on each LLM iteration via [`tools_for_llm`].
+    /// pass `Some(set)` to hide tools, or `None` to clear. Each run snapshot
+    /// shares this flag and reads it on every LLM iteration.
     pub(crate) fn set_disabled_tools(&self, names: Option<std::collections::HashSet<String>>) {
         if let Ok(mut guard) = self.disabled_tools.write() {
             *guard = names;

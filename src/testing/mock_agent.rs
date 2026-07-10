@@ -56,6 +56,8 @@ pub struct MockAgent {
     /// Multimodal messages received via `execute_stream_message_with_cancel`
     /// (records whether dispatch forwarded attachments to the worker).
     messages: Arc<Mutex<Vec<echo_core::llm::types::Message>>>,
+    /// Value-scoped invocation metadata received by streaming calls.
+    invocation_contexts: Arc<Mutex<Vec<echo_core::agent::AgentInvocationContext>>>,
     /// `set_working_dir` calls recorded in order (Sprint 8 isolation tests).
     /// Each entry is the path the agent was asked to bind (`None` = clear).
     working_dirs: Arc<Mutex<Vec<Option<std::path::PathBuf>>>>,
@@ -73,6 +75,7 @@ impl Clone for MockAgent {
             responses: self.responses.clone(),
             calls: self.calls.clone(),
             messages: self.messages.clone(),
+            invocation_contexts: self.invocation_contexts.clone(),
             working_dirs: self.working_dirs.clone(),
         }
     }
@@ -88,6 +91,7 @@ impl MockAgent {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
+            invocation_contexts: Arc::new(Mutex::new(Vec::new())),
             working_dirs: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -177,6 +181,14 @@ impl MockAgent {
             .clone()
     }
 
+    /// Invocation contexts received by value-scoped streaming methods.
+    pub fn invocation_contexts(&self) -> Vec<echo_core::agent::AgentInvocationContext> {
+        self.invocation_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     fn next_response(&self) -> String {
         self.responses
             .lock()
@@ -243,6 +255,37 @@ impl Agent for MockAgent {
             let answer = self.next_response();
             let event_stream = stream::once(async move { Ok(AgentEvent::FinalAnswer(answer)) });
             Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
+        })
+    }
+
+    fn execute_stream_with_invocation_context<'a>(
+        &'a self,
+        task: &'a str,
+        _cancel: CancellationToken,
+        invocation: echo_core::agent::AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            self.invocation_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(invocation);
+            self.execute_stream(task).await
+        })
+    }
+
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: echo_core::llm::types::Message,
+        cancel: CancellationToken,
+        invocation: echo_core::agent::AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async move {
+            self.invocation_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(invocation);
+            self.execute_stream_message_with_cancel(message, cancel)
+                .await
         })
     }
 

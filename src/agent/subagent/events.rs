@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
 
-use super::types::ExecutionMode;
+use super::types::{ExecutionMode, ObservedIsolation};
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 128;
 
@@ -44,6 +44,14 @@ pub enum SubagentEvent {
         /// frontend pin the subagent stream to the right chat message block.
         /// `None` = non-chat path (cron, etc).
         message_id: Option<String>,
+    },
+    /// Isolation boundary established after setup and before model execution.
+    DispatchIsolationObserved {
+        parent: String,
+        agent: String,
+        isolation: ObservedIsolation,
+        execution_id: Option<String>,
+        run_id: Option<String>,
     },
     /// Dispatch completed successfully.
     DispatchCompleted {
@@ -258,6 +266,19 @@ impl SubagentEventListener for LoggingSubagentListener {
                     agent = %agent,
                     duration_ms = duration_ms,
                     "subagent_dispatch_completed"
+                );
+            }
+            SubagentEvent::DispatchIsolationObserved {
+                parent,
+                agent,
+                isolation,
+                ..
+            } => {
+                info!(
+                    parent = %parent,
+                    agent = %agent,
+                    isolation = isolation.as_str(),
+                    "subagent_dispatch_isolation_observed"
                 );
             }
             SubagentEvent::DispatchFailed {

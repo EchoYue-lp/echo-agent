@@ -18,6 +18,9 @@ use echo_core::tokenizer::Tokenizer;
 use std::sync::Arc;
 
 fn is_internal_transcript_message(message: &Message) -> bool {
+    if crate::compression::is_context_projection_message(message) {
+        return true;
+    }
     let Some(text) = message.content.as_text() else {
         return false;
     };
@@ -142,9 +145,9 @@ pub struct ToolRuntime {
     /// Current plan state (shared with ReactAgent).
     pub plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Shared disabled-tools flag (mirrors `ToolExecutionSubsystem.disabled_tools`).
-    /// The streaming path reads it here via [`tools_for_llm`] so it honors the
-    /// same per-run hiding as the non-streaming path. Populated by the app
-    /// layer (e.g. EKO Chat mode hides task tools).
+    /// The run path reads it here via [`tools_for_llm`] so every reasoning
+    /// iteration honors the latest per-run hiding. Populated by the app layer
+    /// (e.g. EKO Chat mode hides task tools).
     pub disabled_tools: Arc<std::sync::RwLock<Option<std::collections::HashSet<String>>>>,
 }
 
@@ -162,8 +165,7 @@ impl ToolRuntime {
     }
 
     /// Return the tool definitions to send to the LLM, with `disabled_tools`
-    /// filtered out. Streaming path uses this; non-streaming path uses
-    /// `ToolExecutionSubsystem::tools_for_llm` (same logic, different owner).
+    /// filtered out. All reasoning iterations use this snapshot-scoped view.
     pub fn tools_for_llm(&self) -> Vec<crate::llm::types::ToolDefinition> {
         let tools = self.tool_manager.get_openai_tools();
         let disabled = self
@@ -270,41 +272,89 @@ pub struct AgentRunSnapshot {
     /// (stage4 E1) Layered memory manager — used by `pre_compaction_flush` to
     /// write durable facts before compression. Cloned from the parent ReactAgent.
     pub memory_layer_manager: Option<Arc<crate::evolution::MemoryLayerManager>>,
+    /// Optional application projection refreshed at the pre-prepare boundary.
+    pub pre_model_context_projector: Option<Arc<dyn crate::compression::PreModelContextProjector>>,
 }
 
 impl AgentRunSnapshot {
     /// Create a snapshot from a [`ReactAgent`].
     pub fn from_agent(agent: &super::ReactAgent) -> Self {
+        Self::from_agent_source(agent, None)
+    }
+
+    /// Create a snapshot whose run-scoped fields come from one invocation value.
+    pub fn from_agent_with_invocation(
+        agent: &super::ReactAgent,
+        invocation: &echo_core::agent::AgentInvocationContext,
+    ) -> Self {
+        Self::from_agent_source(agent, Some(invocation))
+    }
+
+    fn from_agent_source(
+        agent: &super::ReactAgent,
+        invocation: Option<&echo_core::agent::AgentInvocationContext>,
+    ) -> Self {
+        let mut config = RuntimeConfig::from_agent_config(&agent.config);
+        if let Some(working_dir) = invocation.and_then(|context| context.working_dir.as_ref()) {
+            config.working_dir = Some(working_dir.clone());
+        }
+        let runtime = invocation.and_then(|context| context.runtime.as_ref());
         Self {
-            config: Arc::new(RuntimeConfig::from_agent_config(&agent.config)),
+            config: Arc::new(config),
             tools: Arc::new(ToolRuntime::from_agent(agent)),
             guard: Arc::new(GuardRuntime::from_agent(agent)),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             client: agent.client().clone(),
             llm_client: agent.llm_client().cloned(),
             thinking: agent.thinking().cloned(),
-            cancel_token: agent.cancel_token.try_lock().ok().and_then(|g| g.clone()),
+            cancel_token: if let Some(context) = invocation {
+                context.cancel.clone().or_else(|| {
+                    runtime
+                        .and_then(|value| value.cancel.as_ref())
+                        .map(|cancel| cancel.as_ref().clone())
+                })
+            } else {
+                agent.cancel_token.try_lock().ok().and_then(|g| g.clone())
+            },
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
-            current_run_id: agent
-                .current_run_id
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            external_cancel: agent
-                .external_cancel
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            external_trace_sink: agent
-                .external_trace_sink
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            external_delegation_policy: *agent
-                .external_delegation_policy
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
+            current_run_id: if invocation.is_some() {
+                runtime.map(|context| context.run_id.clone())
+            } else {
+                agent
+                    .current_run_id
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            },
+            external_cancel: if let Some(context) = invocation {
+                runtime
+                    .and_then(|value| value.cancel.clone())
+                    .or_else(|| context.cancel.clone().map(Arc::new))
+            } else {
+                agent
+                    .external_cancel
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            },
+            external_trace_sink: if invocation.is_some() {
+                runtime.and_then(|context| context.trace_sink.clone())
+            } else {
+                agent
+                    .external_trace_sink
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            },
+            external_delegation_policy: if invocation.is_some() {
+                runtime.and_then(|context| context.delegation_policy)
+            } else {
+                *agent
+                    .external_delegation_policy
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+            },
             #[cfg(feature = "human-loop")]
             permission_service: agent.approval.permission_service.clone(),
             token_tracker: Arc::clone(&agent.token_tracker),
@@ -314,6 +364,11 @@ impl AgentRunSnapshot {
             critic: agent.critic.clone(),
             tool_execution_pipeline: agent.tool_execution_pipeline.clone(),
             memory_layer_manager: agent.memory_layer_manager.clone(),
+            pre_model_context_projector: agent
+                .pre_model_context_projector
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
         }
     }
 
@@ -886,5 +941,93 @@ impl AgentRunSnapshot {
                 Err(e) => Err(e),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod transcript_filter_tests {
+    use super::{AgentRunSnapshot, filter_user_visible_transcript};
+    use crate::compression::{ContextManager, ContextProjection};
+    use crate::error::Result;
+    use echo_core::llm::types::Message;
+
+    #[test]
+    fn transcript_filter_excludes_projection_owned_messages_only() {
+        let mut context = ContextManager::builder(4096).build();
+        context.push(Message::user(
+            "ordinary text mentions provider-marker".to_string(),
+        ));
+        context.apply_projections(&[ContextProjection {
+            marker: "provider-marker".to_string(),
+            message: Some(Message::user("internal projected state".to_string())),
+        }]);
+        context.push(Message::user("ordinary visible message".to_string()));
+
+        let visible = filter_user_visible_transcript(context.messages());
+        let visible_text: Vec<String> = visible
+            .iter()
+            .filter_map(|message| message.content.as_text())
+            .collect();
+
+        assert_eq!(
+            visible_text,
+            vec![
+                "ordinary text mentions provider-marker".to_string(),
+                "ordinary visible message".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invocation_snapshot_derives_runtime_fields_as_one_value() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .build()?;
+        let cancel = std::sync::Arc::new(crate::agent::CancellationToken::new());
+        let trace_sink: echo_core::tools::TraceSinkFn = std::sync::Arc::new(|_| {});
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                run_id: "run-atomic".to_string(),
+                execution_id: Some("execution-atomic".to_string()),
+                message_id: Some("message-atomic".to_string()),
+                cancel: Some(std::sync::Arc::clone(&cancel)),
+                trace_sink: Some(std::sync::Arc::clone(&trace_sink)),
+                delegation_policy: Some(echo_core::tools::NestedDelegationPolicy {
+                    can_spawn_subagents: true,
+                    delegate_depth: 3,
+                    max_delegate_depth: 4,
+                }),
+            }),
+            working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
+            cancel: None,
+        };
+
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        assert_eq!(snapshot.current_run_id.as_deref(), Some("run-atomic"));
+        assert_eq!(
+            snapshot.config.working_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree-atomic"))
+        );
+        assert!(
+            snapshot
+                .external_cancel
+                .as_ref()
+                .is_some_and(|value| std::sync::Arc::ptr_eq(value, &cancel))
+        );
+        assert!(
+            snapshot
+                .external_trace_sink
+                .as_ref()
+                .is_some_and(|value| std::sync::Arc::ptr_eq(value, &trace_sink))
+        );
+        assert_eq!(
+            snapshot.external_delegation_policy,
+            Some(echo_core::tools::NestedDelegationPolicy {
+                can_spawn_subagents: true,
+                delegate_depth: 3,
+                max_delegate_depth: 4,
+            })
+        );
+        Ok(())
     }
 }

@@ -28,4 +28,6 @@ pub(crate) struct StreamInit {
     pub message: Option<Message>,
     /// Log label (e.g. "" or "(multimodal)")
     pub label: String,
+    /// Value-scoped metadata captured before waiting for agent execution.
+    pub invocation: Option<echo_core::agent::AgentInvocationContext>,
 }

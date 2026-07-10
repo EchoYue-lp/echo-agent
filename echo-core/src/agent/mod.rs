@@ -25,6 +25,40 @@ use std::future::Future;
 use std::pin::Pin;
 pub use tokio_util::sync::CancellationToken;
 
+/// Value-scoped metadata for one streaming agent invocation.
+#[derive(Clone, Default)]
+pub struct AgentInvocationContext {
+    /// Run metadata propagated into the invocation's tool context.
+    pub runtime: Option<crate::tools::ExternalRunContext>,
+    /// Per-invocation working directory. `None` uses the agent's configured default.
+    pub working_dir: Option<std::path::PathBuf>,
+    /// Cancellation token captured with the invocation before queueing.
+    pub cancel: Option<CancellationToken>,
+}
+
+impl std::fmt::Debug for AgentInvocationContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentInvocationContext")
+            .field(
+                "run_id",
+                &self.runtime.as_ref().map(|runtime| runtime.run_id.as_str()),
+            )
+            .field(
+                "execution_id",
+                &self
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.execution_id.as_deref()),
+            )
+            .field("working_dir", &self.working_dir)
+            .field(
+                "cancel",
+                &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .finish()
+    }
+}
+
 /// Events produced during Agent execution
 ///
 /// Cover each phase of the Agent lifecycle for progress bars, logs, UI updates, etc.
@@ -425,6 +459,19 @@ pub trait Agent: Send + Sync {
         })
     }
 
+    /// Execute with invocation metadata carried as one immutable value.
+    ///
+    /// The default preserves compatibility for agents that do not consume
+    /// invocation metadata.
+    fn execute_stream_with_invocation_context<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+        _invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.execute_stream_with_cancel(task, cancel)
+    }
+
     /// Chat with the agent in a multi-turn conversation.
     ///
     /// **Conversation-oriented**: preserves existing context (no reset),
@@ -495,6 +542,19 @@ pub trait Agent: Send + Sync {
         })
     }
 
+    /// Multimodal streaming with value-scoped invocation metadata.
+    ///
+    /// The default delegates to the existing multimodal method so third-party
+    /// agents remain source compatible.
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        _invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.execute_stream_message_with_cancel(message, cancel)
+    }
+
     /// Reset in-memory conversational state.
     ///
     /// Implementations should clear context and fire `SessionStart("clear")` hooks
@@ -511,29 +571,25 @@ pub trait Agent: Send + Sync {
 
     // ── External run context (跨 spawn 安全的值传递, 见 ExternalRunContext) ──
 
-    /// 注入应用层 run 级上下文（worker 场景）。
+    /// Legacy agent-wide run context setter.
     ///
     /// **背景**：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。worker agent
     /// 在框架层的 `tokio::spawn`（subagent_executor.rs 的 dispatch_fork）里执行，
-    /// 应用层经 task_local 注入的 run_id / cancel / trace_sink 全部丢失。本方法
-    /// 让应用层经值传递（`ExternalRunContext`，跨 spawn 安全）把 context 注入到
-    /// worker agent 实例——dispatch_fork 在 worker 执行前调用，pipeline 构造
-    /// `ToolContext` 时读取，工具 override `execute_with_context` 即可拿到。
-    ///
-    /// 默认 noop。ReactAgent override：把 ctx 写入自己的 external_* Mutex 字段。
+    /// 应用层经 task_local 注入的 run_id / cancel / trace_sink 全部丢失。
+    /// 新代码应使用 `AgentInvocationContext` 的 value-scoped streaming methods；
+    /// 此 setter 仅为外部兼容保留。
     fn set_external_context(&self, _ctx: &crate::tools::ExternalRunContext) {}
 
-    /// 清除外部上下文（worker 执行后调用，防止泄漏到下一个 run）。
-    /// 默认 noop。ReactAgent override。
+    /// Clear context installed through the legacy setter.
     fn clear_external_context(&self) {}
 
     /// Bind a working directory for this agent's tool calls (Sprint 8 worktree
     /// isolation). When set, every shell/file/git tool runs inside `path`
     /// (via `ToolContext.working_dir`). `None` clears it (restore default cwd).
     ///
-    /// Default: noop. ReactAgent overrides this to set/clear `config.working_dir`
-    /// and refresh its root-system-prompt. Used by Fork dispatch to chroot a
-    /// worker into an isolated git worktree.
+    /// Default: noop. New invocation paths should use
+    /// `AgentInvocationContext::working_dir`; this setter remains compatible
+    /// with callers that intentionally configure an agent-wide default.
     fn set_working_dir(&self, _path: Option<std::path::PathBuf>) {}
 
     /// Clear the bound working directory (alias for `set_working_dir(None)`).
@@ -627,6 +683,22 @@ impl Agent for Box<dyn Agent> {
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         self.as_ref().execute_stream(task)
     }
+    fn execute_stream_with_cancel<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref().execute_stream_with_cancel(task, cancel)
+    }
+    fn execute_stream_with_invocation_context<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref()
+            .execute_stream_with_invocation_context(task, cancel, invocation)
+    }
     fn chat<'a>(&'a self, message: &'a str) -> BoxFuture<'a, Result<String>> {
         self.as_ref().chat(message)
     }
@@ -636,11 +708,47 @@ impl Agent for Box<dyn Agent> {
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         self.as_ref().chat_stream(message)
     }
+    fn chat_stream_with_cancel<'a>(
+        &'a self,
+        message: &'a str,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref().chat_stream_with_cancel(message, cancel)
+    }
+    fn execute_stream_message_with_cancel<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref()
+            .execute_stream_message_with_cancel(message, cancel)
+    }
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: Message,
+        cancel: CancellationToken,
+        invocation: AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        self.as_ref()
+            .execute_stream_message_with_invocation_context(message, cancel, invocation)
+    }
     fn current_run_id(&self) -> Option<String> {
         self.as_ref().current_run_id()
     }
     fn reset(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         self.as_ref().reset()
+    }
+    fn set_external_context(&self, ctx: &crate::tools::ExternalRunContext) {
+        self.as_ref().set_external_context(ctx);
+    }
+    fn clear_external_context(&self) {
+        self.as_ref().clear_external_context();
+    }
+    fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
+        self.as_ref().set_working_dir(path);
+    }
+    fn clear_working_dir(&self) {
+        self.as_ref().clear_working_dir();
     }
     fn register_tool(&self, tool: Box<dyn crate::tools::Tool>) {
         self.as_ref().register_tool(tool)

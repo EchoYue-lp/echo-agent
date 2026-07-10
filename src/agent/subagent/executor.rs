@@ -4,7 +4,7 @@
 //! execution strategy based on the definition's [`ExecutionMode`].
 
 use crate::error::{AgentError, ReactError, Result};
-use echo_core::agent::{Agent, AgentEvent, CancellationToken};
+use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
 use echo_core::llm::types::Message;
 use futures::StreamExt;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use super::context::SubagentContext;
 use super::events::SubagentEvent;
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
 use super::registry::SubagentRegistry;
-use super::types::{ExecutionMode, SubagentResult};
+use super::types::{ExecutionMode, ObservedIsolation, SubagentResult};
 use crate::tasks::NestedDelegationPolicy;
 
 // ── Dispatch Request ──────────────────────────────────────────────────────────
@@ -40,13 +40,11 @@ pub struct DispatchRequest {
     pub delegation_policy: NestedDelegationPolicy,
     /// 应用层 run 级上下文（跨 spawn 安全，值传递）。
     ///
-    /// dispatch_fork 在 worker agent 执行前把它注入到 worker 实例
-    /// （`set_external_context`），使 worker 内的工具能经 ToolContext 读到
-    /// run_id/cancel/trace_sink/cache_user_id——绕开会跨 tokio::spawn 断裂的
-    /// task_local。`None` = 无外部 context（旧行为，工具读到 None）。
+    /// dispatch_fork 将它放入本次 `AgentInvocationContext`，使 worker 内的工具
+    /// 能经 ToolContext 读到 run_id/cancel/trace_sink——不修改共享 agent。
     pub runtime_context: Option<echo_core::tools::ExternalRunContext>,
     /// Optional multimodal message (images/files). When `Some`, the worker is
-    /// dispatched via `execute_stream_message_with_cancel` instead of the text
+    /// dispatched via `execute_stream_message_with_invocation_context` instead of the text
     /// `task` path, so it sees user-uploaded attachments. `None` = plain text
     /// dispatch (the default for all existing callers).
     pub message: Option<Message>,
@@ -228,6 +226,7 @@ impl SubagentExecutor {
                 tokens_used: None,
                 was_truncated: false,
                 mode: req.mode_override.clone().unwrap_or(ExecutionMode::Fork),
+                isolation_observed: ObservedIsolation::Unknown,
                 usage: None,
             });
         }
@@ -547,6 +546,10 @@ impl SubagentExecutor {
             .as_ref()
             .and_then(|ctx| ctx.execution_id.clone());
         let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+        let invocation = AgentInvocationContext {
+            runtime: req.runtime_context.clone(),
+            ..AgentInvocationContext::default()
+        };
 
         let join_handle = tokio::spawn(async move {
             let _permit = child_token.clone();
@@ -573,6 +576,7 @@ impl SubagentExecutor {
                         &task,
                         message.clone(),
                         child_token.clone(),
+                        invocation.clone(),
                         &parent_agent,
                         &agent_name,
                         ExecutionMode::Teammate,
@@ -594,6 +598,7 @@ impl SubagentExecutor {
                         &task,
                         message.clone(),
                         child_token.clone(),
+                        invocation.clone(),
                         &parent_agent,
                         &agent_name,
                         ExecutionMode::Teammate,
@@ -709,6 +714,7 @@ impl SubagentExecutor {
             tokens_used: None, // team doesn't aggregate worker tokens (follow-up)
             was_truncated: false,
             mode: ExecutionMode::Team,
+            isolation_observed: ObservedIsolation::Worker,
             usage: None,
         })
     }
@@ -789,6 +795,7 @@ impl SubagentExecutor {
         task: &str,
         message: Option<Message>,
         cancel: CancellationToken,
+        invocation: AgentInvocationContext,
         parent: &str,
         subagent: &str,
         mode: ExecutionMode,
@@ -800,10 +807,12 @@ impl SubagentExecutor {
         // sees images/files. Falls back to the text task otherwise.
         let mut stream = if let Some(msg) = message {
             agent
-                .execute_stream_message_with_cancel(msg, cancel)
+                .execute_stream_message_with_invocation_context(msg, cancel, invocation)
                 .await?
         } else {
-            agent.execute_stream_with_cancel(task, cancel).await?
+            agent
+                .execute_stream_with_invocation_context(task, cancel, invocation)
+                .await?
         };
         let mut output = String::new();
         let mut in_thinking = false;
@@ -971,6 +980,7 @@ impl SubagentExecutor {
             tokens_used,
             was_truncated: false,
             mode,
+            isolation_observed: ObservedIsolation::Unknown,
             usage,
         })
     }
@@ -1008,6 +1018,10 @@ impl SubagentExecutor {
             .as_ref()
             .and_then(|ctx| ctx.execution_id.clone());
         let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+        let invocation = AgentInvocationContext {
+            runtime: req.runtime_context.clone(),
+            ..AgentInvocationContext::default()
+        };
 
         if timeout_secs > 0 {
             tokio::select! {
@@ -1023,6 +1037,7 @@ impl SubagentExecutor {
                         &task,
                         req.message.clone(),
                         cancel.clone(),
+                        invocation.clone(),
                         &req.parent_agent,
                         &req.agent_name,
                         ExecutionMode::Sync,
@@ -1045,6 +1060,7 @@ impl SubagentExecutor {
                 &task,
                 req.message.clone(),
                 cancel,
+                invocation,
                 &req.parent_agent,
                 &req.agent_name,
                 ExecutionMode::Sync,
@@ -1099,10 +1115,9 @@ impl SubagentExecutor {
             registered.definition.inherit_history,
         );
         // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
-        // worker agent 是 registry 预注册的单例(fork 不 clone),其 current_run_id
-        // 初始为 None。dispatch_fork 在 worker 执行前显式 set_external_context,
-        // 使 pipeline 构造 ToolContext 时带上应用层的 run_id/cancel/trace_sink/
-        // cache_user_id——绕开会跨 tokio::spawn 断裂的 task_local。
+        // worker agent 是 registry 预注册的单例(fork 不 clone)。run context
+        // 与实际 isolation path 作为同一个 invocation value 传入，避免并行
+        // dispatch 修改单例上的共享 runtime/working_dir。
         let mut runtime_context = req.runtime_context.clone();
         if let Some(ctx) = runtime_context.as_mut() {
             ctx.delegation_policy = Some(req.delegation_policy);
@@ -1188,19 +1203,12 @@ impl SubagentExecutor {
                     tokens_used: None,
                     was_truncated: false,
                     mode: ExecutionMode::Fork,
+                    isolation_observed: ObservedIsolation::Unknown,
                     usage: None,
                 });
             }
 
             let agent = agent_arc.as_ref();
-
-            // 注入外部 run context(worker 执行前)。worker 跑完 clear,防泄漏到
-            // 同一 worker 实例的下一次 dispatch。worker 是单例,若不清,current_run_id
-            // 等会残留给下一个 run。
-            let has_ctx = runtime_context.is_some();
-            if let Some(ctx) = &runtime_context {
-                agent.set_external_context(ctx);
-            }
 
             // Sprint 8: if isolation was requested and a factory is available,
             // create a worktree and bind it as the worker's working_dir BEFORE
@@ -1215,14 +1223,9 @@ impl SubagentExecutor {
             if let Some(factory) = &worktree_factory {
                 match factory.create(&worktree_label) {
                     Ok(handle) => {
-                        agent.set_working_dir(Some(handle.path.clone()));
                         worktree_handle = Some(handle);
                     }
                     Err(e) => {
-                        // Clean up the external context we just set before bailing.
-                        if has_ctx {
-                            agent.clear_external_context();
-                        }
                         return Err(ReactError::Other(format!(
                             "Worktree isolation for Fork worker '{agent_name}' failed: {e}"
                         )));
@@ -1238,13 +1241,9 @@ impl SubagentExecutor {
             if let Some(factory) = &data_workspace_factory {
                 match factory.create(&worktree_label) {
                     Ok(handle) => {
-                        agent.set_working_dir(Some(handle.path.clone()));
                         workspace_handle = Some(handle);
                     }
                     Err(e) => {
-                        if has_ctx {
-                            agent.clear_external_context();
-                        }
                         return Err(ReactError::Other(format!(
                             "Data workspace for Fork worker '{agent_name}' failed: {e}"
                         )));
@@ -1252,7 +1251,32 @@ impl SubagentExecutor {
                 }
             }
 
-            let result = if timeout_secs > 0 {
+            let isolation_observed = if worktree_handle.is_some() {
+                ObservedIsolation::Worktree
+            } else if workspace_handle.is_some() {
+                ObservedIsolation::Workspace
+            } else {
+                ObservedIsolation::Context
+            };
+            let invocation = AgentInvocationContext {
+                runtime: runtime_context.clone(),
+                working_dir: worktree_handle
+                    .as_ref()
+                    .map(|handle| handle.path.clone())
+                    .or_else(|| workspace_handle.as_ref().map(|handle| handle.path.clone())),
+                cancel: None,
+            };
+            registry
+                .event_bus()
+                .emit(SubagentEvent::DispatchIsolationObserved {
+                    parent: parent_agent.clone(),
+                    agent: agent_name.clone(),
+                    isolation: isolation_observed,
+                    execution_id: event_execution_id.clone(),
+                    run_id: event_run_id.clone(),
+                });
+
+            let mut result = if timeout_secs > 0 {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(ReactError::Other(format!(
@@ -1266,6 +1290,7 @@ impl SubagentExecutor {
                             &enhanced_task,
                             message.clone(),
                             cancel.clone(),
+                            invocation.clone(),
                             &parent_agent,
                             &agent_name,
                             ExecutionMode::Fork,
@@ -1295,6 +1320,7 @@ impl SubagentExecutor {
                         &enhanced_task,
                         message.clone(),
                         cancel.clone(),
+                        invocation.clone(),
                         &parent_agent,
                         &agent_name,
                         ExecutionMode::Fork,
@@ -1304,18 +1330,14 @@ impl SubagentExecutor {
                     ) => r,
                 }
             };
-
-            // worker 执行后清理外部 context(防泄漏)
-            if has_ctx {
-                agent.clear_external_context();
+            if let Ok(subagent_result) = &mut result {
+                subagent_result.isolation_observed = isolation_observed;
             }
 
-            // Sprint 8: finalize the worktree (diff summary) and restore the
-            // worker's working_dir so the singleton worker isn't left pointing
-            // at a now-finalized worktree on its next dispatch. Append the diff
-            // to the worker's output so the caller sees what changed.
+            // Sprint 8: finalize the worktree and append its diff summary. The
+            // working directory is invocation-scoped, so reusable workers keep
+            // no mutable directory state that needs restoring after dispatch.
             if let Some(handle) = worktree_handle {
-                agent.set_working_dir(None);
                 match (handle.finalize)() {
                     Ok(diff) => {
                         if let Ok(mut r) = result {
@@ -1336,11 +1358,9 @@ impl SubagentExecutor {
                 }
             }
 
-            // Sprint 10: finalize the data workspace (file listing) and restore
-            // the worker's working_dir. Append the listing to the output so the
-            // orchestrator/analyst can find each worker's disjoint outputs.
+            // Sprint 10: finalize the invocation-scoped data workspace and
+            // append its file listing so downstream workers can find outputs.
             if let Some(handle) = workspace_handle {
-                agent.set_working_dir(None);
                 match (handle.finalize)() {
                     Ok(listing) => {
                         if let Ok(mut r) = result {
@@ -1720,9 +1740,8 @@ mod tests {
 
     #[tokio::test]
     async fn fork_isolate_worktree_binds_path_and_appends_diff() {
-        // A writer worker declaring isolate_worktree, dispatched in Fork mode
-        // with a configured factory: the mock agent should be chrooted into
-        // the worktree path, then cleared, and the diff appended to the output.
+        // A writer worker declaring isolate_worktree should observe Worktree
+        // isolation for this invocation and append the finalized diff.
         let factory = Arc::new(MockWorktreeFactory {
             labels: StdMutex::new(Vec::new()),
             should_fail: false,
@@ -1759,6 +1778,140 @@ mod tests {
         let labels = factory.labels.lock().unwrap().clone();
         assert_eq!(labels.len(), 1);
         assert!(labels[0].starts_with("writer-"));
+    }
+
+    #[tokio::test]
+    async fn fork_worktree_observation_precedes_worker_completion()
+    -> std::result::Result<(), String> {
+        let factory = Arc::new(MockWorktreeFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let factory_obs: Arc<dyn WorktreeFactory> = factory;
+        let (registry, executor) = make_executor_with_factory(factory_obs);
+        let agent = MockAgent::new("writer").with_response("done");
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: true,
+            ..super::super::types::SubagentDefinition::new("writer", "Writer")
+        };
+        registry.register(def, Box::new(agent)).await;
+        let mut events = registry.event_bus().subscribe();
+        let req = DispatchRequest {
+            agent_name: "writer".into(),
+            task: "edit foo".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+        };
+
+        let result = executor
+            .dispatch(req)
+            .await
+            .map_err(|error| error.to_string())?;
+        if result.isolation_observed != ObservedIsolation::Worktree {
+            return Err(format!(
+                "expected worktree result observation, got {:?}",
+                result.isolation_observed
+            ));
+        }
+        let started = events.recv().await.map_err(|error| error.to_string())?;
+        let observed = events.recv().await.map_err(|error| error.to_string())?;
+        let completed = events.recv().await.map_err(|error| error.to_string())?;
+        if !matches!(started.as_ref(), SubagentEvent::DispatchStarted { .. }) {
+            return Err(format!("first event was not started: {started:?}"));
+        }
+        if !matches!(
+            observed.as_ref(),
+            SubagentEvent::DispatchIsolationObserved {
+                isolation: ObservedIsolation::Worktree,
+                ..
+            }
+        ) {
+            return Err(format!(
+                "second event was not worktree observation: {observed:?}"
+            ));
+        }
+        if !matches!(completed.as_ref(), SubagentEvent::DispatchCompleted { .. }) {
+            return Err(format!("third event was not completed: {completed:?}"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_forks_carry_distinct_worktree_invocations()
+    -> std::result::Result<(), String> {
+        let factory = Arc::new(MockWorktreeFactory {
+            labels: StdMutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let factory_obs: Arc<dyn WorktreeFactory> = factory;
+        let (registry, executor) = make_executor_with_factory(factory_obs);
+        let agent = MockAgent::new("writer").with_responses(["done-a", "done-b"]);
+        let def = super::super::types::SubagentDefinition {
+            execution_mode: ExecutionMode::Fork,
+            isolate_worktree: true,
+            ..super::super::types::SubagentDefinition::new("writer", "Writer")
+        };
+        registry.register(def, Box::new(agent.clone())).await;
+        let executor = Arc::new(executor);
+        let request = |run_id: &str| DispatchRequest {
+            agent_name: "writer".into(),
+            task: format!("edit for {run_id}"),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: Some(echo_core::tools::ExternalRunContext {
+                run_id: run_id.to_string(),
+                execution_id: Some(format!("execution-{run_id}")),
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            }),
+            message: None,
+        };
+
+        let first = {
+            let executor = Arc::clone(&executor);
+            async move { executor.dispatch(request("run-a")).await }
+        };
+        let second = {
+            let executor = Arc::clone(&executor);
+            async move { executor.dispatch(request("run-b")).await }
+        };
+        let (first_result, second_result) = tokio::join!(first, second);
+        first_result.map_err(|error| error.to_string())?;
+        second_result.map_err(|error| error.to_string())?;
+
+        let invocations = agent.invocation_contexts();
+        if invocations.len() != 2 {
+            return Err(format!(
+                "expected two value-scoped invocations, got {invocations:?}"
+            ));
+        }
+        for invocation in invocations {
+            let runtime = invocation
+                .runtime
+                .ok_or_else(|| "fork invocation missing runtime context".to_string())?;
+            let working_dir = invocation
+                .working_dir
+                .ok_or_else(|| format!("{} missing worktree path", runtime.run_id))?;
+            let path = working_dir.to_string_lossy();
+            if !path.contains(runtime.run_id.as_str()) {
+                return Err(format!(
+                    "cross-worktree invocation: run {} received {}",
+                    runtime.run_id, path
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -1867,6 +2020,7 @@ mod tests {
 
         let result = executor.dispatch(req).await.unwrap();
         assert_eq!(result.output, "ok");
+        assert_eq!(result.isolation_observed, ObservedIsolation::Context);
         // Factory never invoked — readonly workers don't request isolation.
         assert!(factory.labels.lock().unwrap().is_empty());
         let _ = agent;
@@ -1952,6 +2106,7 @@ mod tests {
         assert!(result.output.contains("analysis done"));
         assert!(result.output.contains("run_001_clean.parquet"));
         assert!(result.output.contains("--- workspace outputs ---"));
+        assert_eq!(result.isolation_observed, ObservedIsolation::Workspace);
         // Factory invoked once with a label derived from the agent name.
         let labels = factory.labels.lock().unwrap().clone();
         assert_eq!(labels.len(), 1);

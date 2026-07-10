@@ -170,247 +170,6 @@ impl ReactAgent {
         }
     }
 
-    /// Call LLM for reasoning, returning the list of steps for this round.
-    ///
-    /// Before each call, `ContextManager::prepare` auto-compresses overflow history messages,
-    /// then the compressed message list is passed to the LLM; the LLM response is appended back to context.
-    #[allow(dead_code)]
-    #[tracing::instrument(skip(self), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
-    pub(crate) async fn think(&self) -> Result<Vec<StepType>> {
-        let agent = self.config.agent_name.clone();
-        let callbacks = self.config.callbacks.clone();
-        let mut res = Vec::new();
-
-        debug!(agent = %agent, model = %self.config.model_name, "🧠 LLM thinking...");
-
-        // ContextManager::prepare handles compression internally — no need for duplicate pre-check here.
-        // Fire PreCompact hooks before compression
-        let pre_compact_result = self
-            .fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
-            .await;
-
-        let prepare_result = self.memory.context.lock().await.prepare(None).await?;
-
-        if let Some(ref stats) = prepare_result.compressed {
-            tracing::info!(
-                agent = %agent,
-                before = stats.before_count,
-                after = stats.after_count,
-                before_tokens = stats.before_tokens,
-                after_tokens = stats.after_tokens,
-                "📦 Context auto-compressed"
-            );
-            // Fire PostCompact hooks with actual compression stats
-            {
-                let hook_stats = crate::skills::hooks::CompressHookStats {
-                    before_count: stats.before_count,
-                    after_count: stats.after_count,
-                    before_tokens: stats.before_tokens,
-                    after_tokens: stats.after_tokens,
-                };
-                let hook_ctx = crate::skills::hooks::HookContext::for_post_compact(
-                    &hook_stats,
-                    "auto",
-                    self.config.session_id.as_deref().unwrap_or(""),
-                    &self.config.agent_name,
-                );
-                let registry = self.tools.hook_registry.read().await.clone();
-                let post_result = registry.run_lifecycle_hooks(&hook_ctx).await;
-                if let Some(ctx) = &post_result.injected_context {
-                    super::context::push_runtime_context_note(
-                        &self.memory.context,
-                        "Hook:PostCompact",
-                        ctx,
-                    )
-                    .await;
-                }
-                for msg in &post_result.messages {
-                    super::context::push_runtime_context_note(
-                        &self.memory.context,
-                        "Hook:PostCompact",
-                        msg,
-                    )
-                    .await;
-                }
-            }
-        }
-
-        // Inject any PreCompact hook messages into context
-        if let Some(ctx) = &pre_compact_result.injected_context {
-            super::context::push_runtime_context_note(&self.memory.context, "Hook:PreCompact", ctx)
-                .await;
-        }
-        for msg in &pre_compact_result.messages {
-            super::context::push_runtime_context_note(&self.memory.context, "Hook:PreCompact", msg)
-                .await;
-        }
-
-        let messages = prepare_result.messages;
-
-        for cb in &callbacks {
-            cb.on_think_start(&agent, &messages).await;
-        }
-
-        // ── Intervention callbacks for think ──
-        for intervention in &self.tools.intervention_callbacks {
-            let result = intervention.on_think_start(&agent, &messages).await;
-            if result.cancel {
-                return Err(ReactError::Other(
-                    "Agent execution cancelled by intervention at think".into(),
-                ));
-            }
-            if result.block {
-                let reason = result
-                    .block_reason
-                    .unwrap_or_else(|| "blocked by intervention at think".into());
-                warn!(agent = %agent, reason = %reason, "Intervention blocked think");
-                return Err(ReactError::Other(format!(
-                    "Think blocked by intervention: {}",
-                    reason
-                )));
-            }
-            if let Some(context) = result.injected_context {
-                super::context::push_runtime_context_note(
-                    &self.memory.context,
-                    "Intervention:ThinkStart",
-                    &context,
-                )
-                .await;
-            }
-        }
-
-        let tools = self.tools.tools_for_llm();
-
-        // Circuit breaker check
-        let circuit_breaker = self.guard.circuit_breaker.clone();
-        if let Some(cb) = &circuit_breaker
-            && cb.is_open()
-        {
-            warn!(agent = %agent, "🔴 Circuit breaker open, skip LLM request");
-            // Fire StopFailure hook for circuit breaker
-            let sf_result = self
-                .fire_lifecycle_hook(
-                    crate::skills::hooks::HookEvent::StopFailure,
-                    Some("circuit_breaker_open"),
-                )
-                .await;
-            if !sf_result.messages.is_empty() || sf_result.injected_context.is_some() {
-                warn!(agent = %agent, "StopFailure hook (circuit_breaker) produced output that cannot be injected (terminal path)");
-            }
-            return Err(ReactError::Agent(Box::new(
-                AgentError::InitializationFailed(
-                    "LLM service unavailable (circuit breaker open)".to_string(),
-                ),
-            )));
-        }
-
-        let (message, usage, finish_reason) = self.call_llm_with_retry(&messages, tools).await?;
-
-        let has_tool_calls = message.tool_calls.is_some();
-        let tool_calls_count = message.tool_calls.as_ref().map_or(0, |tc| tc.len());
-        let has_content = message.content.as_text_ref().is_some();
-        let has_reasoning = message.reasoning_content.is_some();
-        warn!(
-            agent = %agent,
-            has_tool_calls,
-            tool_calls_count,
-            has_content,
-            has_reasoning,
-            finish_reason = ?finish_reason,
-            content_debug = ?message.content,
-            reasoning_preview = ?message.reasoning_content.as_ref().map(|r| r.chars().take(200).collect::<String>()),
-            "🔍 LLM response diagnostics"
-        );
-
-        if let Some(tool_calls) = &message.tool_calls
-            && !tool_calls.is_empty()
-        {
-            self.memory.context.lock().await.push(message.clone());
-            let tool_names: Vec<&str> = tool_calls
-                .iter()
-                .map(|c| c.function.name.as_str())
-                .collect();
-            info!(
-                agent = %agent,
-                tools = ?tool_names,
-                "🧠 LLM decided to call {} tools",
-                tool_calls.len()
-            );
-            for call in tool_calls {
-                res.push(StepType::Call {
-                    tool_call_id: call.id.clone(),
-                    function_name: call.function.name.clone(),
-                    arguments: serde_json::from_str(&call.function.arguments)?,
-                });
-            }
-        } else if let Some(content) = message.content.as_text_ref() {
-            self.memory.context.lock().await.push(message.clone());
-            debug!(agent = %agent, "🧠 LLM returned text response");
-            res.push(StepType::Thought(content.to_string()));
-        } else if message.reasoning_content.is_some() || message.content.as_text_ref().is_none() {
-            // Don't push to context: messages with empty content + no tool_calls sent to the API
-            // cause "content field is required" errors; reasoning_content is the model's internal
-            // thought process and doesn't need to be passed back to the next round.
-            debug!(agent = %agent, "🧠 LLM returned only reasoning content or empty response, continue iterating");
-        }
-
-        let prompt_tokens = usage.as_ref().and_then(|u| u.prompt_tokens).unwrap_or(0);
-        let completion_tokens = usage
-            .as_ref()
-            .and_then(|u| u.completion_tokens)
-            .unwrap_or(0);
-
-        // Record usage in the token tracker for cumulative tracking
-        if let Some(ref u) = usage {
-            self.token_tracker.record_usage(u);
-        }
-        let cached_prompt_tokens = usage
-            .as_ref()
-            .map(|u| u.cached_prompt_tokens())
-            .unwrap_or(0);
-        let cache_creation_prompt_tokens = usage
-            .as_ref()
-            .map(|u| u.cache_creation_prompt_tokens())
-            .unwrap_or(0);
-        let total_tokens = usage
-            .as_ref()
-            .and_then(|u| u.total_tokens)
-            .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
-        tracing::debug!(
-            target: "echo_agent::llm_usage",
-            agent = %agent,
-            model = %self.config.model_name,
-            prompt_tokens = prompt_tokens,
-            completion_tokens = completion_tokens,
-            total_tokens = total_tokens,
-            cached_prompt_tokens = cached_prompt_tokens,
-            cache_creation_prompt_tokens = cache_creation_prompt_tokens,
-            usage_reported = usage.is_some(),
-            "LLM usage recorded"
-        );
-
-        // Record trace event
-        self.record_trace_event(crate::trace::RunEvent::LlmCall {
-            messages: messages.len(),
-            prompt_tokens,
-            completion_tokens,
-            duration_ms: 0, // duration tracked by caller
-        })
-        .await;
-
-        for cb in &callbacks {
-            cb.on_think_end(
-                &agent,
-                &res,
-                prompt_tokens as usize,
-                completion_tokens as usize,
-            )
-            .await;
-        }
-
-        Ok(res)
-    }
-
     /// Process steps produced by one think round:
     /// - Tool calls → execute in parallel (approval-required tools are serialized), return answer on `final_answer`
     /// - No tool calls → plain text response treated as final answer, returned directly
@@ -855,13 +614,22 @@ impl ReactAgent {
             let messages = self.memory.context.lock().await.messages().to_vec();
             let intent = router.classify(message, &messages).await;
             match intent {
-                crate::intent::Intent::DirectAnswer { confidence } => {
+                crate::intent::Intent::DirectAnswer { confidence }
+                    if self.allows_direct_answer_shortcut() =>
+                {
                     tracing::info!(
                         agent = %self.config.agent_name,
                         confidence = confidence,
                         "🎯 IntentRouter: DirectAnswer shortcut"
                     );
                     return self.direct_answer(message).await;
+                }
+                crate::intent::Intent::DirectAnswer { confidence } => {
+                    tracing::debug!(
+                        agent = %self.config.agent_name,
+                        confidence,
+                        "DirectAnswer routed through ReAct for pre-model projection"
+                    );
                 }
                 crate::intent::Intent::SkillRequired {
                     skill_name,

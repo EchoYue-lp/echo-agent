@@ -8,6 +8,33 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
+/// A replaceable, marker-tagged message projected into model context.
+#[derive(Debug, Clone)]
+pub struct ContextProjection {
+    /// Stable content marker used to identify the projection across refreshes.
+    pub marker: String,
+    /// Current projected message, or `None` to remove a stale projection.
+    pub message: Option<Message>,
+}
+
+/// Generic run metadata available to a pre-model context projector.
+#[derive(Debug, Clone)]
+pub struct ProjectionContext {
+    pub iteration: usize,
+    pub agent_name: String,
+    pub session_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub run_id: Option<String>,
+}
+
+/// Produces replaceable context immediately before model input preparation.
+pub trait PreModelContextProjector: Send + Sync {
+    fn project<'a>(
+        &'a self,
+        context: &'a ProjectionContext,
+    ) -> BoxFuture<'a, Result<Vec<ContextProjection>>>;
+}
+
 /// Compression pipeline input
 pub struct CompressionInput {
     /// Messages to be compressed
@@ -339,10 +366,11 @@ impl CanonicalContext {
             || !self.skill_injections.is_empty()
     }
 
-    /// Build re-injection messages that should be inserted after compression.
+    /// Build supplemental re-injection messages inserted after compression.
     ///
-    /// Returns the full system prompt and project rules content as separate
-    /// system messages, ensuring critical context survives compression.
+    /// The base system prompt is restored directly by `ContextManager`; this
+    /// method returns only supplemental canonical context so the prompt is not
+    /// represented twice.
     /// Returns `None` if there's nothing to re-inject.
     pub fn to_reinjection_messages(&self) -> Option<Vec<String>> {
         if !self.has_any() {
@@ -350,24 +378,6 @@ impl CanonicalContext {
         }
 
         let mut msgs: Vec<String> = Vec::new();
-
-        // Re-inject full system prompt as the authoritative first message
-        if let Some(ref prompt) = self.system_prompt {
-            // Truncate to 4000 chars to avoid overwhelming the context
-            let truncated: String = prompt.chars().take(4000).collect();
-            if truncated.len() < prompt.len() {
-                msgs.push(format!(
-                    "[Canonical context — system prompt ({} total chars, truncated)]:\n{}",
-                    prompt.len(),
-                    truncated
-                ));
-            } else {
-                msgs.push(format!(
-                    "[Canonical context — system prompt restored after compression]:\n{}",
-                    truncated
-                ));
-            }
-        }
 
         // Re-inject project rules as a separate system message
         if let Some(ref rules) = self.project_rules {
@@ -404,16 +414,16 @@ fn normalize_path(path: &str) -> String {
 fn extract_json_from_text(text: &str) -> Option<String> {
     // Try ```json ... ``` code fence
     if let Some(start) = text.find("```json") {
-        let after_fence = &text[start + 7..];
+        let after_fence = text.get(start.saturating_add(7)..)?;
         if let Some(end) = after_fence.find("```") {
-            return Some(after_fence[..end].trim().to_string());
+            return after_fence.get(..end).map(|value| value.trim().to_string());
         }
     }
     // Try ``` ... ``` code fence
     if let Some(start) = text.find("```") {
-        let after_fence = &text[start + 3..];
+        let after_fence = text.get(start.saturating_add(3)..)?;
         if let Some(end) = after_fence.find("```") {
-            let candidate = after_fence[..end].trim().to_string();
+            let candidate = after_fence.get(..end)?.trim().to_string();
             if candidate.starts_with('{') {
                 return Some(candidate);
             }
@@ -422,8 +432,8 @@ fn extract_json_from_text(text: &str) -> Option<String> {
     // Try finding { ... } block
     if let Some(start) = text.find('{') {
         if let Some(end) = text.rfind('}') {
-            let candidate = text[start..=end].to_string();
-            if candidate.len() >= 10 {
+            let candidate = text.get(start..=end)?.to_string();
+            if candidate.chars().count() >= 10 {
                 return Some(candidate);
             }
         }

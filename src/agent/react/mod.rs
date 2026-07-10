@@ -112,6 +112,9 @@ pub struct ReactAgent {
     pub(crate) guard: GuardSubsystem,
     /// Memory & persistence subsystem: context management, long-term memory, snapshots, transcript projection
     pub(crate) memory: MemorySubsystem,
+    /// Optional application-supplied projection refreshed before every model call.
+    pub(crate) pre_model_context_projector:
+        std::sync::RwLock<Option<Arc<dyn crate::compression::PreModelContextProjector>>>,
     /// Human-in-the-loop approval subsystem
     #[allow(dead_code)]
     pub(crate) approval: ApprovalSubsystem,
@@ -466,6 +469,7 @@ impl ReactAgent {
                 conversation_store: None,
                 state_store: None,
             },
+            pre_model_context_projector: std::sync::RwLock::new(None),
             approval: ApprovalSubsystem {
                 #[cfg(feature = "human-loop")]
                 approval_provider,
@@ -539,6 +543,24 @@ impl ReactAgent {
     /// Whether this agent has the layered memory runtime installed.
     pub fn has_memory_layer_manager(&self) -> bool {
         self.memory_layer_manager.is_some()
+    }
+
+    /// Set or clear the application-supplied pre-model context projector.
+    pub fn set_pre_model_context_projector(
+        &self,
+        projector: Option<Arc<dyn crate::compression::PreModelContextProjector>>,
+    ) {
+        *self
+            .pre_model_context_projector
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = projector;
+    }
+
+    pub(crate) fn allows_direct_answer_shortcut(&self) -> bool {
+        self.pre_model_context_projector
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_none()
     }
 
     /// (stage4 F1) Access the shared layer manager so app-side write paths
@@ -1686,12 +1708,14 @@ impl ReactAgent {
         &self,
         input: &str,
         mode: run::StreamMode,
+        invocation: Option<echo_core::agent::AgentInvocationContext>,
     ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
         self.run_stream_channel(
             run::types::StreamInit {
                 text: input.to_string(),
                 message: None,
                 label: String::new(),
+                invocation,
             },
             mode,
         )
@@ -1704,6 +1728,7 @@ impl ReactAgent {
         &self,
         message: crate::llm::types::Message,
         mode: run::StreamMode,
+        invocation: Option<echo_core::agent::AgentInvocationContext>,
     ) -> Result<futures::stream::BoxStream<'static, Result<AgentEvent>>> {
         let text = message.content.as_text().unwrap_or_default();
         self.run_stream_channel(
@@ -1711,6 +1736,7 @@ impl ReactAgent {
                 text,
                 message: Some(message),
                 label: "(multimodal)".to_string(),
+                invocation,
             },
             mode,
         )
@@ -1780,6 +1806,30 @@ impl ReactAgent {
                 tracing::warn!(error = %e, "Failed to save trace run on start");
             }
         }
+    }
+
+    /// Start a trace run without mutating the agent-wide current run id.
+    pub(crate) async fn start_scoped_trace_run(&self, input: &str) -> Option<String> {
+        let store = self.run_store.as_ref()?;
+        let run_id = format!("run_{}", uuid::Uuid::new_v4());
+        let run = crate::trace::Run {
+            run_id: run_id.clone(),
+            parent_run_id: None,
+            session_id: self.config.session_id.clone().unwrap_or_default(),
+            status: crate::trace::RunStatus::Running,
+            input: input.to_string(),
+            events: vec![],
+            final_output: None,
+            error: None,
+            token_usage: crate::trace::TokenUsage::default(),
+            timings: crate::trace::RunTimings::default(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+        };
+        if let Err(error) = store.save(run).await {
+            tracing::warn!(error = %error, "Failed to save scoped trace run on start");
+        }
+        Some(run_id)
     }
 
     /// Finalize the current trace run (completed or failed).
@@ -2161,6 +2211,7 @@ impl ReactAgent {
     /// product runtimes should prefer value-passing the context for parallel
     /// dispatches.
     #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)] // Public delegation boundary carries explicit cancellation and run context.
     pub async fn delegate_to_agent_with_parent_context_cancel_and_message(
         &self,
         target: &str,
@@ -2420,7 +2471,11 @@ impl Agent for ReactAgent {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
         Box::pin(
-            async move { self.run_stream_entry(task, run::StreamMode::Execute).await }.instrument(
+            async move {
+                self.run_stream_entry(task, run::StreamMode::Execute, None)
+                    .await
+            }
+            .instrument(
                 info_span!("agent_execute_stream", agent.name = %agent, agent.model = %model),
             ),
         )
@@ -2442,9 +2497,11 @@ impl Agent for ReactAgent {
         let agent = self.config.agent_name.clone();
         let model = self.config.model_name.clone();
         Box::pin(
-            async move { self.run_stream_entry(message, run::StreamMode::Chat).await }.instrument(
-                info_span!("agent_chat_stream", agent.name = %agent, agent.model = %model),
-            ),
+            async move {
+                self.run_stream_entry(message, run::StreamMode::Chat, None)
+                    .await
+            }
+            .instrument(info_span!("agent_chat_stream", agent.name = %agent, agent.model = %model)),
         )
     }
 
@@ -2464,7 +2521,8 @@ impl Agent for ReactAgent {
                 if let Some(handle) = &self.dispatch_cancel_handle {
                     *handle.lock().await = Some(cancel);
                 }
-                self.run_stream_entry(_message, run::StreamMode::Chat).await
+                self.run_stream_entry(_message, run::StreamMode::Chat, None)
+                    .await
             }
             .instrument(info_span!("agent_chat_stream_with_cancel", agent.name = %agent, agent.model = %model)),
         )
@@ -2486,9 +2544,32 @@ impl Agent for ReactAgent {
                 if let Some(handle) = &self.dispatch_cancel_handle {
                     *handle.lock().await = Some(cancel);
                 }
-                self.run_stream_entry(_task, run::StreamMode::Execute).await
+                self.run_stream_entry(_task, run::StreamMode::Execute, None)
+                    .await
             }
             .instrument(info_span!("agent_execute_stream_with_cancel", agent.name = %agent, agent.model = %model)),
+        )
+    }
+
+    fn execute_stream_with_invocation_context<'a>(
+        &'a self,
+        task: &'a str,
+        cancel: CancellationToken,
+        mut invocation: echo_core::agent::AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        invocation.cancel = Some(cancel);
+        Box::pin(
+            async move {
+                self.run_stream_entry(task, run::StreamMode::Execute, Some(invocation))
+                    .await
+            }
+            .instrument(info_span!(
+                "agent_execute_stream_with_invocation_context",
+                agent.name = %agent,
+                agent.model = %model
+            )),
         )
     }
 
@@ -2505,11 +2586,33 @@ impl Agent for ReactAgent {
                 if let Some(handle) = &self.dispatch_cancel_handle {
                     *handle.lock().await = Some(cancel);
                 }
-                self.run_stream_message_entry(message, run::StreamMode::Execute)
+                self.run_stream_message_entry(message, run::StreamMode::Execute, None)
                     .await
             }
             .instrument(info_span!(
                 "agent_execute_stream_message_with_cancel",
+                agent.name = %agent,
+                agent.model = %model
+            )),
+        )
+    }
+
+    fn execute_stream_message_with_invocation_context<'a>(
+        &'a self,
+        message: crate::llm::types::Message,
+        cancel: CancellationToken,
+        mut invocation: echo_core::agent::AgentInvocationContext,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let agent = self.config.agent_name.clone();
+        let model = self.config.model_name.clone();
+        invocation.cancel = Some(cancel);
+        Box::pin(
+            async move {
+                self.run_stream_message_entry(message, run::StreamMode::Execute, Some(invocation))
+                    .await
+            }
+            .instrument(info_span!(
+                "agent_execute_stream_message_with_invocation_context",
                 agent.name = %agent,
                 agent.model = %model
             )),
@@ -2634,7 +2737,7 @@ impl ReactAgent {
         &self,
         message: crate::llm::types::Message,
     ) -> Result<futures::stream::BoxStream<'_, Result<AgentEvent>>> {
-        self.run_stream_message_entry(message, run::StreamMode::Chat)
+        self.run_stream_message_entry(message, run::StreamMode::Chat, None)
             .await
     }
 
@@ -2647,7 +2750,7 @@ impl ReactAgent {
         &self,
         message: crate::llm::types::Message,
     ) -> Result<futures::stream::BoxStream<'_, Result<AgentEvent>>> {
-        self.run_stream_message_entry(message, run::StreamMode::Execute)
+        self.run_stream_message_entry(message, run::StreamMode::Execute, None)
             .await
     }
 
@@ -2673,7 +2776,7 @@ impl ReactAgent {
                 if let Some(handle) = &self.dispatch_cancel_handle {
                     *handle.lock().await = Some(cancel);
                 }
-                self.run_stream_message_entry(message, run::StreamMode::Chat)
+                self.run_stream_message_entry(message, run::StreamMode::Chat, None)
                     .await
             }
             .instrument(info_span!(

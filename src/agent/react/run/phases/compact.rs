@@ -22,7 +22,7 @@ pub(crate) async fn run_compact(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
-    _iteration: usize,
+    iteration: usize,
 ) -> Result<CompactOutcome> {
     snap.fire_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
         .await;
@@ -33,9 +33,31 @@ pub(crate) async fn run_compact(
     let _ = snap.pre_compaction_flush(context).await;
     // Save checkpoint before compression (preserves full context)
     snap.save_runtime_checkpoint(context, None).await;
+    let projection_context = crate::compression::ProjectionContext {
+        iteration,
+        agent_name: snap.config.agent_name.clone(),
+        session_id: snap.config.session_id.clone(),
+        conversation_id: snap.config.conversation_id.clone(),
+        run_id: snap.current_run_id.clone(),
+    };
+    let projections = if let Some(projector) = &snap.pre_model_context_projector {
+        match projector.project(&projection_context).await {
+            Ok(projections) => projections,
+            Err(error) => {
+                tracing::warn!(error = %error, "Pre-model context projection failed");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let prepare_result = try_send_or!(
         tx,
-        context.lock().await.prepare(None).await,
+        {
+            let mut context = context.lock().await;
+            context.apply_projections(&projections);
+            context.prepare(None).await
+        },
         CompactOutcome::Abandoned
     );
 
@@ -83,7 +105,58 @@ mod tests {
     use crate::agent::ReactAgent;
     use crate::agent::config::AgentConfig;
     use crate::agent::snapshot::AgentRunSnapshot;
+    use crate::compression::{ContextProjection, PreModelContextProjector, ProjectionContext};
     use crate::llm::types::{Message, Role};
+    use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct IterationProjector {
+        calls: AtomicUsize,
+    }
+
+    impl PreModelContextProjector for IterationProjector {
+        fn project(
+            &self,
+            context: &ProjectionContext,
+        ) -> BoxFuture<'_, Result<Vec<ContextProjection>>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let content = format!(
+                "<changing_projection>call={call};iteration={}",
+                context.iteration
+            );
+            Box::pin(async move {
+                Ok(vec![ContextProjection {
+                    marker: "<changing_projection>".to_string(),
+                    message: Some(Message::user(content)),
+                }])
+            })
+        }
+    }
+
+    struct FailsAfterFirstProjection {
+        calls: AtomicUsize,
+    }
+
+    impl PreModelContextProjector for FailsAfterFirstProjection {
+        fn project(
+            &self,
+            _context: &ProjectionContext,
+        ) -> BoxFuture<'_, Result<Vec<ContextProjection>>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    Ok(vec![ContextProjection {
+                        marker: "failure-test".to_string(),
+                        message: Some(Message::user("projection before failure".to_string())),
+                    }])
+                } else {
+                    Err(crate::error::ReactError::Other(
+                        "projection unavailable".to_string(),
+                    ))
+                }
+            })
+        }
+    }
 
     /// Default `ReactAgent` has no compressor configured, so
     /// `ContextManager::prepare` returns `compressed: None` → no
@@ -136,6 +209,111 @@ mod tests {
             .await
             .expect("run_compact must succeed for non-zero iteration");
         assert!(matches!(outcome, CompactOutcome::Continue(_)));
+    }
+
+    #[tokio::test]
+    async fn run_compact_replaces_projection_before_each_prepare() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        agent.set_pre_model_context_projector(Some(Arc::new(IterationProjector {
+            calls: AtomicUsize::new(0),
+        })));
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+
+        let first = run_compact(&snap, &agent.memory.context, &tx, 3).await?;
+        let second = run_compact(&snap, &agent.memory.context, &tx, 4).await?;
+
+        let first_messages = match first {
+            CompactOutcome::Continue(messages) => messages,
+            CompactOutcome::Abandoned => Vec::new(),
+        };
+        let second_messages = match second {
+            CompactOutcome::Continue(messages) => messages,
+            CompactOutcome::Abandoned => Vec::new(),
+        };
+        assert!(first_messages.iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("call=0;iteration=3"))
+        }));
+        assert!(second_messages.iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("call=1;iteration=4"))
+        }));
+        assert!(second_messages.iter().all(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_none_or(|text| !text.contains("call=0;iteration=3"))
+        }));
+        assert_eq!(
+            second_messages
+                .iter()
+                .filter(|message| {
+                    message
+                        .content
+                        .as_text_ref()
+                        .is_some_and(|text| text.contains("<changing_projection>"))
+                })
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_compact_clears_projection_after_provider_failure() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        agent.set_pre_model_context_projector(Some(Arc::new(FailsAfterFirstProjection {
+            calls: AtomicUsize::new(0),
+        })));
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+
+        let _ = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
+        let second = run_compact(&snap, &agent.memory.context, &tx, 1).await?;
+
+        let messages = match second {
+            CompactOutcome::Continue(messages) => messages,
+            CompactOutcome::Abandoned => Vec::new(),
+        };
+        assert!(messages.iter().all(|message| {
+            message
+                .content
+                .as_text()
+                .is_none_or(|text| !text.contains("projection before failure"))
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_compact_clears_projection_after_provider_removal() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        agent.set_pre_model_context_projector(Some(Arc::new(IterationProjector {
+            calls: AtomicUsize::new(0),
+        })));
+        let first_snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let _ = run_compact(&first_snap, &agent.memory.context, &tx, 0).await?;
+
+        agent.set_pre_model_context_projector(None);
+        let second_snap = AgentRunSnapshot::from_agent(&agent);
+        let second = run_compact(&second_snap, &agent.memory.context, &tx, 1).await?;
+
+        let messages = match second {
+            CompactOutcome::Continue(messages) => messages,
+            CompactOutcome::Abandoned => Vec::new(),
+        };
+        assert!(messages.iter().all(|message| {
+            message
+                .content
+                .as_text()
+                .is_none_or(|text| !text.contains("<changing_projection>"))
+        }));
+        Ok(())
     }
 }
 

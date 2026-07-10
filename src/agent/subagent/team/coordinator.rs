@@ -292,6 +292,7 @@ mod tests {
             tokens_used: None,
             was_truncated: false,
             mode: crate::agent::subagent::types::ExecutionMode::Teammate,
+            isolation_observed: crate::agent::subagent::types::ObservedIsolation::Worker,
             usage: None,
         };
 
