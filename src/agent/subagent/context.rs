@@ -16,9 +16,20 @@ use super::types::ExecutionMode;
 
 /// Declares what the subagent inherits from its parent.
 ///
-/// Each execution mode has a default preset:
-/// - **Sync**: no inheritance (shares state via the mutex).
-/// - **Fork**: inherits system prompt + tools + recent history.
+/// ## Fresh vs Fork inheritance (Claude/Cursor-aligned)
+///
+/// - **Fresh** ([`Self::fresh_default`]): no parent system / history / memory.
+///   This is the product default for TaskRuntime and `agent_tool` (omit mode).
+/// - **Fork inheritance** ([`Self::fork_default`]): inherit parent system prompt
+///   + recent history + memory. Opt-in via `agent_tool` `mode=fork`.
+///
+/// `ExecutionMode::Fork` is orthogonal: it selects the concurrent dispatch path
+/// (semaphore + worktree/workspace). A Fork *execution* can still use Fresh
+/// *inheritance*.
+///
+/// Historical mode presets:
+/// - **Sync**: no inheritance ([`Self::sync_default`] == fresh).
+/// - **Fork mode preset**: inherits system prompt + tools + recent history.
 /// - **Teammate**: no inheritance (communicates via mailbox).
 #[derive(Debug, Clone)]
 pub struct ContextInheritance {
@@ -44,6 +55,14 @@ impl ContextInheritance {
             inherit_memory: false,
             inject_metadata: HashMap::new(),
         }
+    }
+
+    /// Claude/Cursor-aligned default: no parent conversation inheritance.
+    ///
+    /// Prefer this name in new call sites; [`Self::sync_default`] remains as
+    /// the historical alias with identical fields.
+    pub fn fresh_default() -> Self {
+        Self::sync_default()
     }
 
     /// Fork mode default: inherit prompt + tools + recent 2 messages.
@@ -296,6 +315,40 @@ mod tests {
         assert!(!inh.inherit_system_prompt);
         assert!(inh.inherit_history.is_none());
         assert!(!inh.inherit_memory);
+    }
+
+    #[test]
+    fn fresh_default_is_alias_of_sync_default() {
+        let a = ContextInheritance::fresh_default();
+        let b = ContextInheritance::sync_default();
+        assert_eq!(a.inherit_system_prompt, b.inherit_system_prompt);
+        assert_eq!(a.inherit_history, b.inherit_history);
+        assert_eq!(a.inherit_memory, b.inherit_memory);
+    }
+
+    #[test]
+    fn from_parent_fresh_yields_empty_inheritable_content() {
+        let tools = vec![ToolDefinition {
+            tool_type: "function".to_string(),
+            function: echo_core::llm::types::FunctionSpec {
+                name: "search".into(),
+                description: "Search".into(),
+                parameters: serde_json::json!({}),
+            },
+        }];
+        let msgs = vec![Message::user("hello".to_string())];
+        let ctx = SubagentContext::from_parent(
+            "PARENT SYSTEM",
+            &tools,
+            &msgs,
+            None,
+            &ContextInheritance::fresh_default(),
+        );
+        assert!(ctx.system_prompt.is_empty());
+        assert!(ctx.messages.is_empty());
+        assert!(ctx.tool_definitions.is_empty());
+        assert!(ctx.store.is_none());
+        assert!(!ctx.has_content());
     }
 
     #[test]

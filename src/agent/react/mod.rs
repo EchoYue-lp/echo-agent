@@ -1998,7 +1998,11 @@ impl ReactAgent {
                     .map(|t| t.child_token())
                     .unwrap_or_else(CancellationToken::new),
                 parent_agent: self.config.agent_name.clone(),
-                parent_context: self.build_parent_context(&ExecutionMode::Fork).await,
+                parent_context: self
+                    .build_parent_context_with(
+                        &crate::agent::subagent::context::ContextInheritance::fresh_default(),
+                    )
+                    .await,
                 delegation_policy: DispatchRequest::policy_from_depth(depth),
                 runtime_context: self.build_runtime_context(),
                 message: None,
@@ -2019,9 +2023,8 @@ impl ReactAgent {
     /// registered subagent, this method routes to the specified `target` agent.
     /// Returns an error if the target agent is not registered.
     ///
-    /// Context inheritance is applied automatically: the subagent receives
-    /// the parent's system prompt, tools, and recent conversation history
-    /// based on the Fork mode default policy.
+    /// Default inheritance is **fresh** (no parent system/history/memory).
+    /// Execution still uses Fork mode so worktree/workspace isolation works.
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent(&self, target: &str, task: &str) -> Result<String> {
         self.delegate_to_agent_with_depth(target, task, 0).await
@@ -2049,10 +2052,11 @@ impl ReactAgent {
         }
 
         let mode = ExecutionMode::Fork;
+        let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
-            mode_override: Some(mode.clone()),
+            mode_override: Some(mode),
             // Inherit the parent run's cancel token (P1-11) — see delegate_task.
             cancel: self
                 .cancel_token
@@ -2062,7 +2066,7 @@ impl ReactAgent {
                 .map(|t| t.child_token())
                 .unwrap_or_else(CancellationToken::new),
             parent_agent: self.config.agent_name.clone(),
-            parent_context: self.build_parent_context(&mode).await,
+            parent_context: self.build_parent_context_with(&inheritance).await,
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context: self.build_runtime_context(),
             message: None,
@@ -2161,14 +2165,17 @@ impl ReactAgent {
             )));
         }
 
+        // Keep Fork execution for worktree/workspace isolation, but default to
+        // fresh inheritance (no parent system/history/memory) — Claude/Cursor.
         let mode = ExecutionMode::Fork;
+        let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
-            mode_override: Some(mode.clone()),
+            mode_override: Some(mode),
             cancel,
             parent_agent: parent_label.to_string(),
-            parent_context: self.build_parent_context(&mode).await,
+            parent_context: self.build_parent_context_with(&inheritance).await,
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: None,
@@ -2234,14 +2241,16 @@ impl ReactAgent {
             )));
         }
 
+        // Keep Fork execution for worktree/workspace; fresh inheritance by default.
         let mode = ExecutionMode::Fork;
+        let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
-            mode_override: Some(mode.clone()),
+            mode_override: Some(mode),
             cancel,
             parent_agent: parent_label.to_string(),
-            parent_context: self.build_parent_context(&mode).await,
+            parent_context: self.build_parent_context_with(&inheritance).await,
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: Some(message),
@@ -2251,11 +2260,6 @@ impl ReactAgent {
         Ok(result)
     }
 
-    /// Build parent context for subagent dispatch based on execution mode.
-    ///
-    /// Shared by `delegate_task()`, `delegate_to_agent()`, and conceptually
-    /// mirrors `ParentContextFactory::build()` (used by `AgentDispatchTool`).
-    #[cfg(feature = "subagent")]
     /// 从当前 agent 的 external_* 字段构造 ExternalRunContext（透传给 worker）。
     ///
     /// 这样主 agent 委派 worker、worker 委派 sub-worker 时,run context 自动继承
@@ -2296,26 +2300,26 @@ impl ReactAgent {
         })
     }
 
+    /// Build parent context using an explicit inheritance policy.
+    ///
+    /// Product defaults use [`ContextInheritance::fresh_default`]. Pass
+    /// [`ContextInheritance::fork_default`] (or `ContextInheritance::for_mode`)
+    /// when the caller explicitly wants parent conversation inheritance.
+    /// Mirrors `ParentContextFactory::build_with_inheritance`.
     #[cfg(feature = "subagent")]
-    async fn build_parent_context(
+    async fn build_parent_context_with(
         &self,
-        mode: &crate::agent::subagent::types::ExecutionMode,
+        inheritance: &crate::agent::subagent::context::ContextInheritance,
     ) -> Option<crate::agent::subagent::context::SubagentContext> {
-        use crate::agent::subagent::context::{ContextInheritance, SubagentContext};
+        use crate::agent::subagent::context::SubagentContext;
 
-        let inheritance = ContextInheritance::for_mode(mode);
         let system_prompt = self.system_prompt().to_string();
         let tool_defs = self.tool_definitions();
         let messages = self.memory.context.lock().await.messages().to_vec();
         let store = self.memory.store.clone();
 
-        let ctx = SubagentContext::from_parent(
-            &system_prompt,
-            &tool_defs,
-            &messages,
-            store,
-            &inheritance,
-        );
+        let ctx =
+            SubagentContext::from_parent(&system_prompt, &tool_defs, &messages, store, inheritance);
         if ctx.has_content() { Some(ctx) } else { None }
     }
 }

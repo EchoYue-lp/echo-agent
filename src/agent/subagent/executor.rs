@@ -203,6 +203,11 @@ impl SubagentExecutor {
         &self.hooks
     }
 
+    /// Shared registry handle (for callers that need definition lookups).
+    pub fn registry(&self) -> &Arc<SubagentRegistry> {
+        &self.registry
+    }
+
     /// Main dispatch entry point.
     ///
     /// Routes to the appropriate mode based on the definition or override.
@@ -1429,6 +1434,13 @@ mod tests {
     #[test]
     fn enhance_task_no_context_returns_task_unchanged() {
         let out = SubagentExecutor::enhance_task("do thing", None, None);
+        assert_eq!(out, "do thing");
+    }
+
+    #[test]
+    fn enhance_task_empty_fresh_context_leaves_task_alone() {
+        let ctx = super::super::context::SubagentContext::empty();
+        let out = SubagentExecutor::enhance_task("do thing", Some(&ctx), None);
         assert_eq!(out, "do thing");
     }
 

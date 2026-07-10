@@ -27,9 +27,11 @@ pub struct ParentContextFactory {
 }
 
 impl ParentContextFactory {
-    /// Build a SubagentContext using the specified inheritance policy.
-    pub async fn build(&self, mode: &ExecutionMode) -> SubagentContext {
-        let inheritance = ContextInheritance::for_mode(mode);
+    /// Build a SubagentContext using an explicit inheritance policy.
+    pub async fn build_with_inheritance(
+        &self,
+        inheritance: &ContextInheritance,
+    ) -> SubagentContext {
         let ctx = self.context.lock().await;
         let messages = ctx.messages().to_vec();
         let tool_defs: Vec<_> = self
@@ -43,8 +45,14 @@ impl ParentContextFactory {
             &tool_defs,
             &messages,
             self.store.clone(),
-            &inheritance,
+            inheritance,
         )
+    }
+
+    /// Build a SubagentContext using the mode's default inheritance preset.
+    pub async fn build(&self, mode: &ExecutionMode) -> SubagentContext {
+        self.build_with_inheritance(&ContextInheritance::for_mode(mode))
+            .await
     }
 }
 
@@ -166,19 +174,41 @@ impl AgentDispatchTool {
                         _ => None,
                     });
 
+            // Inheritance is independent of execution mode:
+            // - omit / sync → fresh (no parent system/history/memory)
+            // - fork → inherit parent slice (Claude fork semantics)
+            // (applied below when building parent_context)
+
+            // Execution mode: keep caller's choice, but force Fork when the
+            // target role declares worktree/workspace isolation (those paths
+            // only exist on dispatch_fork today).
+            let mut exec_mode = mode_override.clone().unwrap_or(ExecutionMode::Sync);
+            if let Some(registered) = executor.registry().get(agent_name).await {
+                let def = &registered.definition;
+                if def.isolate_worktree || def.isolate_workspace {
+                    exec_mode = ExecutionMode::Fork;
+                }
+            }
+
             info!(
                 target_agent = %agent_name,
                 task = %task,
-                mode = ?mode_override,
+                mode = ?exec_mode,
+                inherit_fork = matches!(mode_override, Some(ExecutionMode::Fork)),
                 delegate_depth = delegation_policy.delegate_depth,
                 max_delegate_depth = delegation_policy.max_delegate_depth,
                 "Dispatching task to subagent via SubagentExecutor"
             );
 
-            // Build parent context if factory is available
+            // Build parent context if factory is available.
+            // mode=fork → mode-preset inheritance via build(); otherwise fresh.
             let parent_context = if let Some(ref f) = factory {
-                let effective_mode = mode_override.clone().unwrap_or(ExecutionMode::Sync);
-                let ctx = f.build(&effective_mode).await;
+                let ctx = if matches!(mode_override, Some(ExecutionMode::Fork)) {
+                    f.build(&ExecutionMode::Fork).await
+                } else {
+                    f.build_with_inheritance(&ContextInheritance::fresh_default())
+                        .await
+                };
                 if ctx.has_content() { Some(ctx) } else { None }
             } else {
                 None
@@ -197,7 +227,7 @@ impl AgentDispatchTool {
             let req = crate::agent::subagent::DispatchRequest {
                 agent_name: agent_name.to_string(),
                 task: task.to_string(),
-                mode_override,
+                mode_override: Some(exec_mode),
                 cancel,
                 parent_agent: parent_agent.clone(),
                 parent_context,
@@ -230,7 +260,12 @@ impl Tool for AgentDispatchTool {
     }
 
     fn description(&self) -> &str {
-        "Dispatch tasks to specialized SubAgents. For complex read-only investigation, architecture review, or validation planning, prefer issuing multiple agent_tool calls in the same assistant turn so independent SubAgents run in parallel. Use only agent_name values listed in the schema."
+        "Dispatch tasks to specialized SubAgents in an isolated context. \
+         Default is fresh context (no parent conversation). Use mode=fork only when \
+         the SubAgent needs shared background from this session. For complex \
+         read-only investigation, prefer multiple agent_tool calls in one turn so \
+         independent SubAgents run in parallel. Use only agent_name values listed \
+         in the schema."
     }
 
     /// `agent_tool` dispatches a subagent that runs its own multi-step ReAct
@@ -283,7 +318,7 @@ impl Tool for AgentDispatchTool {
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate", "team"],
-                    "description": "Execution mode: sync - synchronous wait (default), fork - independent with inherited context, teammate - parallel independent agent, team - multi-agent ManagerWorker (plan→fan-out→synthesize, requires the named subagent to have a TeamSpec)"
+                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = parallel mailbox agent; \"team\" = ManagerWorker (requires TeamSpec)."
                 }
             },
             "required": ["agent_name", "task"]
