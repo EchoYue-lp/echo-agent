@@ -61,6 +61,8 @@ pub struct MockAgent {
     /// `set_working_dir` calls recorded in order (Sprint 8 isolation tests).
     /// Each entry is the path the agent was asked to bind (`None` = clear).
     working_dirs: Arc<Mutex<Vec<Option<std::path::PathBuf>>>>,
+    /// Artificial delay before returning (for background-dispatch tests).
+    delay_ms: u64,
 }
 
 // All observable state is behind Arc<Mutex>, so cloning shares call/message
@@ -77,6 +79,7 @@ impl Clone for MockAgent {
             messages: self.messages.clone(),
             invocation_contexts: self.invocation_contexts.clone(),
             working_dirs: self.working_dirs.clone(),
+            delay_ms: self.delay_ms,
         }
     }
 }
@@ -93,7 +96,14 @@ impl MockAgent {
             messages: Arc::new(Mutex::new(Vec::new())),
             invocation_contexts: Arc::new(Mutex::new(Vec::new())),
             working_dirs: Arc::new(Mutex::new(Vec::new())),
+            delay_ms: 0,
         }
+    }
+
+    /// Artificial delay before each response (background-dispatch tests).
+    pub fn with_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.delay_ms = delay_ms;
+        self
     }
 
     /// Set the model name (for tests that need to check model_name)
@@ -213,6 +223,9 @@ impl Agent for MockAgent {
 
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
+            if self.delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            }
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

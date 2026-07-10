@@ -4,7 +4,7 @@ use crate::agent::subagent::executor::SubagentExecutor;
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::agent::CancellationToken;
-use echo_core::tools::{NestedDelegationPolicy, ToolContext};
+use echo_core::tools::{ExternalRunContext, NestedDelegationPolicy, ToolContext};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -137,6 +137,25 @@ impl AgentDispatchTool {
         }
     }
 
+    /// Build [`ExternalRunContext`] for GUI/TUI identity pinning.
+    ///
+    /// Requires `ToolContext.run_id` (set by chat / TaskRuntime). Chat path
+    /// uses `run_id == root_message_id`, so `message_id` reuses `run_id`.
+    /// `execution_id` has no `:` so the Tauri bridge uses the full string as
+    /// `subagent_run_id` (avoids colliding parallel same-role dispatches).
+    fn runtime_context_from_tool_ctx(ctx: Option<&ToolContext>) -> Option<ExternalRunContext> {
+        let c = ctx?;
+        let run_id = c.run_id.clone()?;
+        Some(ExternalRunContext {
+            run_id: run_id.clone(),
+            execution_id: Some(format!("agent_tool-{}", uuid::Uuid::new_v4())),
+            message_id: Some(run_id),
+            cancel: c.cancel.clone(),
+            trace_sink: c.trace_sink.clone(),
+            delegation_policy: c.delegation_policy,
+        })
+    }
+
     fn dispatch_with_context(
         &self,
         parameters: ToolParameters,
@@ -146,6 +165,7 @@ impl AgentDispatchTool {
         let parent_agent = self.parent_agent.clone();
         let cancel_handle = self.cancel.clone();
         let factory = self.parent_context_factory.clone();
+        let runtime_context = Self::runtime_context_from_tool_ctx(ctx);
         let delegation_policy = match Self::delegation_policy_from_context(ctx) {
             Ok(policy) => policy,
             Err(e) => return Box::pin(async move { Ok(ToolResult::error(e)) }),
@@ -174,6 +194,11 @@ impl AgentDispatchTool {
                         _ => None,
                     });
 
+            let param_background = parameters
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
             // Inheritance is independent of execution mode:
             // - omit / sync → fresh (no parent system/history/memory)
             // - fork → inherit parent slice (Claude fork semantics)
@@ -183,17 +208,21 @@ impl AgentDispatchTool {
             // target role declares worktree/workspace isolation (those paths
             // only exist on dispatch_fork today).
             let mut exec_mode = mode_override.clone().unwrap_or(ExecutionMode::Sync);
+            let mut role_is_background = false;
             if let Some(registered) = executor.registry().get(agent_name).await {
                 let def = &registered.definition;
                 if def.isolate_worktree || def.isolate_workspace {
                     exec_mode = ExecutionMode::Fork;
                 }
+                role_is_background = def.is_background;
             }
+            let run_background = param_background || role_is_background;
 
             info!(
                 target_agent = %agent_name,
                 task = %task,
                 mode = ?exec_mode,
+                background = run_background,
                 inherit_fork = matches!(mode_override, Some(ExecutionMode::Fork)),
                 delegate_depth = delegation_policy.delegate_depth,
                 max_delegate_depth = delegation_policy.max_delegate_depth,
@@ -232,22 +261,60 @@ impl AgentDispatchTool {
                 parent_agent: parent_agent.clone(),
                 parent_context,
                 delegation_policy,
-                runtime_context: None,
+                runtime_context,
                 message: None,
+                background: run_background,
             };
 
-            match executor.dispatch(req).await {
-                Ok(result) => {
-                    info!(target_agent = %agent_name, "Subagent completed successfully");
-                    debug!(target_agent = %agent_name, output = %result.output, "Subagent result");
-                    Ok(ToolResult::success(result.output))
+            if run_background {
+                match executor.dispatch_background(req).await {
+                    Ok(handle) => {
+                        info!(
+                            target_agent = %handle.agent_name,
+                            execution_id = %handle.execution_id,
+                            "Background subagent started"
+                        );
+                        Ok(ToolResult::success(
+                            json!({
+                                "status": "started",
+                                "execution_id": handle.execution_id,
+                                "agent_name": handle.agent_name,
+                            })
+                            .to_string(),
+                        ))
+                    }
+                    Err(e) => {
+                        warn!(target_agent = %agent_name, error = %e, "Background subagent start failed");
+                        Ok(ToolResult::error(format!(
+                            "SubAgent '{}' background start failed: {}",
+                            agent_name, e
+                        )))
+                    }
                 }
-                Err(e) => {
-                    warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
-                    Ok(ToolResult::error(format!(
-                        "SubAgent '{}' execution failed: {}",
-                        agent_name, e
-                    )))
+            } else {
+                match executor.dispatch(req).await {
+                    Ok(result) => {
+                        info!(target_agent = %agent_name, "Subagent completed successfully");
+                        let parent_facing = if result.summary.trim().is_empty() {
+                            result.output.clone()
+                        } else {
+                            result.summary.clone()
+                        };
+                        debug!(
+                            target_agent = %agent_name,
+                            summary = %parent_facing,
+                            output_chars = result.output.chars().count(),
+                            "Subagent result"
+                        );
+                        Ok(ToolResult::success(parent_facing))
+                    }
+                    Err(e) => {
+                        warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
+                        Ok(ToolResult::error(format!(
+                            "SubAgent '{}' execution failed: {}",
+                            agent_name, e
+                        )))
+                    }
                 }
             }
         })
@@ -262,8 +329,10 @@ impl Tool for AgentDispatchTool {
     fn description(&self) -> &str {
         "Dispatch tasks to specialized SubAgents in an isolated context. \
          Default is fresh context (no parent conversation). Use mode=fork only when \
-         the SubAgent needs shared background from this session. For complex \
-         read-only investigation, prefer multiple agent_tool calls in one turn so \
+         the SubAgent needs shared background from this session. Set background=true \
+         to start the SubAgent without blocking (returns started + execution_id; \
+         completion arrives via events / chat note). For complex read-only \
+         investigation, prefer multiple agent_tool calls in one turn so \
          independent SubAgents run in parallel. Use only agent_name values listed \
          in the schema."
     }
@@ -319,6 +388,10 @@ impl Tool for AgentDispatchTool {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate", "team"],
                     "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = parallel mailbox agent; \"team\" = ManagerWorker (requires TeamSpec)."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Optional. When true, start the SubAgent without blocking this turn; returns {status:\"started\", execution_id, agent_name}. Also true when the target role declares is_background."
                 }
             },
             "required": ["agent_name", "task"]
@@ -380,5 +453,37 @@ mod tests {
             ..Default::default()
         };
         assert!(AgentDispatchTool::delegation_policy_from_context(Some(&ctx)).is_err());
+    }
+
+    #[test]
+    fn runtime_context_none_without_tool_ctx() {
+        assert!(AgentDispatchTool::runtime_context_from_tool_ctx(None).is_none());
+    }
+
+    #[test]
+    fn runtime_context_none_without_run_id() {
+        let ctx = ToolContext::default();
+        assert!(AgentDispatchTool::runtime_context_from_tool_ctx(Some(&ctx)).is_none());
+    }
+
+    #[test]
+    fn runtime_context_from_run_id_pins_message_and_execution_id() {
+        let ctx = ToolContext {
+            run_id: Some("msg-key-1".to_string()),
+            ..Default::default()
+        };
+        let rt = AgentDispatchTool::runtime_context_from_tool_ctx(Some(&ctx))
+            .expect("runtime_context should be Some when run_id is set");
+        assert_eq!(rt.run_id, "msg-key-1");
+        assert_eq!(rt.message_id.as_deref(), Some("msg-key-1"));
+        let exec_id = rt.execution_id.expect("execution_id required");
+        assert!(
+            exec_id.starts_with("agent_tool-"),
+            "execution_id should be agent_tool-{{uuid}}, got {exec_id}"
+        );
+        assert!(
+            !exec_id.contains(':'),
+            "execution_id must not contain ':' so bridge uses full id as subagent_run_id"
+        );
     }
 }

@@ -287,6 +287,8 @@ mod tests {
         let result = SubagentResult {
             agent_name: "w".into(),
             output: "done".into(),
+            summary: String::new(),
+            artifacts: Vec::new(),
             duration: std::time::Duration::from_millis(100),
             iterations: 1,
             tokens_used: None,

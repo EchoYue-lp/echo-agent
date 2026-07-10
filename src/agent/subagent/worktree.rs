@@ -20,11 +20,10 @@
 //! # Safety gate
 //!
 //! If a worker declares `isolate_worktree: true` but **no factory is
-//! configured**, the framework logs a warning and runs without isolation
-//! (the application decided not to supply worktrees). But if a factory **is**
-//! configured and `create` fails, the Fork dispatch fails hard — never silently
-//! continue, since that would let a writer touch the main checkout without the
-//! promised isolation (data-loss hazard, AGENTS.md "本地场景下为何仍需要").
+//! configured**, the Fork dispatch **hard-fails** — never silently share the
+//! main checkout (multi-writer data-loss hazard; AGENTS.md "本地场景下为何仍需要").
+//! If a factory **is** configured and `create` fails, dispatch likewise fails
+//! hard.
 
 use std::path::PathBuf;
 use std::sync::Arc;

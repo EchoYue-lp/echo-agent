@@ -44,6 +44,10 @@ pub enum SubagentEvent {
         /// frontend pin the subagent stream to the right chat message block.
         /// `None` = non-chat path (cron, etc).
         message_id: Option<String>,
+        /// True when this dispatch was started via [`dispatch_background`]
+        /// (non-blocking); UI shows a background card and injects a finished
+        /// note into the parent chat on completion.
+        background: bool,
     },
     /// Isolation boundary established after setup and before model execution.
     DispatchIsolationObserved {

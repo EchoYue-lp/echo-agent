@@ -186,6 +186,9 @@ pub struct SubagentDefinition {
     /// TeamAgent (resolving manager + workers by name from the registry).
     /// `None` for normal Sync/Fork/Teammate subagents.
     pub team: Option<TeamSpec>,
+    /// When `true`, the role prefers background dispatch (Phase 2 schedules
+    /// asynchronously). Phase 1 only stores the flag from frontmatter.
+    pub is_background: bool,
 }
 
 impl SubagentDefinition {
@@ -214,6 +217,7 @@ impl SubagentDefinition {
             isolate_worktree: false,
             isolate_workspace: false,
             team: None,
+            is_background: false,
         }
     }
 
@@ -232,13 +236,66 @@ impl SubagentDefinition {
 
 // ── Subagent Result ───────────────────────────────────────────────────────────
 
+/// Default char budget for parent-facing summary when no `## Summary` heading.
+const DEFAULT_SUMMARY_CHARS: usize = 1200;
+
+/// Split raw subagent output into a parent-facing summary and artifact paths.
+///
+/// Looks for markdown headings `## Summary` and `## Artifacts`. If Summary is
+/// missing, falls back to a UTF-8-safe truncation of the full text (never
+/// panics on multi-byte characters).
+pub fn split_subagent_output(raw: &str) -> (String, Vec<String>) {
+    let summary = extract_markdown_section(raw, "Summary")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| raw.chars().take(DEFAULT_SUMMARY_CHARS).collect());
+    let artifacts = extract_markdown_section(raw, "Artifacts")
+        .map(|section| {
+            section
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    let item = trimmed
+                        .strip_prefix("- ")
+                        .or_else(|| trimmed.strip_prefix("* "))
+                        .unwrap_or(trimmed)
+                        .trim();
+                    if item.is_empty() {
+                        None
+                    } else {
+                        Some(item.to_string())
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (summary, artifacts)
+}
+
+fn extract_markdown_section<'a>(raw: &'a str, heading: &str) -> Option<&'a str> {
+    let needle = format!("## {heading}");
+    let start = raw.find(&needle)?;
+    let after = raw.get(start.saturating_add(needle.len())..)?;
+    let body_start = after.find('\n').map(|i| i.saturating_add(1)).unwrap_or(0);
+    let body = after.get(body_start..)?;
+    let end = body
+        .find("\n## ")
+        .or_else(|| body.find("\n# "))
+        .unwrap_or_else(|| body.len());
+    body.get(..end)
+}
+
 /// Result returned by a subagent execution.
 #[derive(Debug, Clone)]
 pub struct SubagentResult {
     /// Agent name that produced this result.
     pub agent_name: String,
-    /// Final output text.
+    /// Final output text (full detail for UI / storage).
     pub output: String,
+    /// Concise summary for the parent LLM. Filled by [`Self::with_structured`].
+    pub summary: String,
+    /// Artifact paths extracted from `## Artifacts` (may be empty).
+    pub artifacts: Vec<String>,
     /// Execution duration.
     pub duration: Duration,
     /// Number of iterations used.
@@ -268,6 +325,8 @@ impl SubagentResult {
         Self {
             agent_name: agent_name.to_string(),
             output,
+            summary: String::new(),
+            artifacts: Vec::new(),
             duration,
             iterations: 1,
             tokens_used: None,
@@ -276,6 +335,7 @@ impl SubagentResult {
             isolation_observed: ObservedIsolation::Unknown,
             usage: None,
         }
+        .with_structured()
     }
 
     /// Create a result for a forked (non-blocking) subagent execution.
@@ -294,6 +354,8 @@ impl SubagentResult {
         Self {
             agent_name: agent_name.to_string(),
             output,
+            summary: String::new(),
+            artifacts: Vec::new(),
             duration,
             iterations,
             tokens_used: None,
@@ -302,6 +364,15 @@ impl SubagentResult {
             isolation_observed: ObservedIsolation::Unknown,
             usage: None,
         }
+        .with_structured()
+    }
+
+    /// Fill [`Self::summary`] / [`Self::artifacts`] from [`Self::output`].
+    pub fn with_structured(mut self) -> Self {
+        let (summary, artifacts) = split_subagent_output(&self.output);
+        self.summary = summary;
+        self.artifacts = artifacts;
+        self
     }
 }
 
@@ -332,6 +403,29 @@ mod tests {
         assert_eq!(ExecutionMode::Teammate.to_string(), "teammate");
         // Sprint 11: Team variant.
         assert_eq!(ExecutionMode::Team.to_string(), "team");
+    }
+
+    #[test]
+    fn split_output_prefers_summary_heading() {
+        let raw = "## Summary\n短结论\n\n## Artifacts\n- src/a.rs\n- docs/b.md\n\n## Notes\n细节";
+        let (summary, artifacts) = split_subagent_output(raw);
+        assert_eq!(summary, "短结论");
+        assert_eq!(
+            artifacts,
+            vec!["src/a.rs".to_string(), "docs/b.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_output_truncates_utf8_safely_without_heading() {
+        let raw: String = "中文"
+            .chars()
+            .chain(std::iter::repeat('x').take(2000))
+            .collect();
+        let (summary, _) = split_subagent_output(&raw);
+        assert_eq!(summary.chars().count(), DEFAULT_SUMMARY_CHARS);
+        // Must not panic and must start with the multi-byte prefix.
+        assert!(summary.starts_with("中文"));
     }
 
     #[test]

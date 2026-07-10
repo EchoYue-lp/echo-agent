@@ -48,6 +48,10 @@ pub struct DispatchRequest {
     /// `task` path, so it sees user-uploaded attachments. `None` = plain text
     /// dispatch (the default for all existing callers).
     pub message: Option<Message>,
+    /// When true, this dispatch was (or will be) started via
+    /// [`SubagentExecutor::dispatch_background`]. Propagated onto
+    /// [`SubagentEvent::DispatchStarted`] so UI can mark background cards.
+    pub background: bool,
 }
 
 impl std::fmt::Debug for DispatchRequest {
@@ -95,6 +99,20 @@ pub struct TeammateHandle {
     join_handle: tokio::task::JoinHandle<Result<SubagentResult>>,
 }
 
+/// Handle returned immediately by [`SubagentExecutor::dispatch_background`].
+///
+/// The worker continues on a spawned task; lifecycle events
+/// (`DispatchStarted` / `DispatchCompleted` / `DispatchFailed`) still fire on
+/// the registry event bus. Unlike [`TeammateHandle`], this does not expose a
+/// join handle — callers observe completion via events / UI.
+#[derive(Debug, Clone)]
+pub struct BackgroundSubagentHandle {
+    /// Stable execution id (also on `DispatchStarted.execution_id`).
+    pub execution_id: String,
+    /// Target subagent name.
+    pub agent_name: String,
+}
+
 impl TeammateHandle {
     /// Check if the teammate has completed.
     pub fn is_finished(&self) -> bool {
@@ -127,10 +145,10 @@ pub struct SubagentExecutorConfig {
     pub unified_hook_executor: Option<crate::skills::hooks::UnifiedHookExecutorFn>,
     /// Optional worktree-isolation factory (Sprint 8). When set, Fork-dispatched
     /// workers whose `SubagentDefinition.isolate_worktree == true` run inside an
-    /// isolated git worktree created by this factory. `None` = no isolation
-    /// available (workers declaring `isolate_worktree` log a warning and run
-    /// unisolated). Application supplies a git-backed impl; framework stays
-    /// free of git deps.
+    /// isolated git worktree created by this factory. `None` = isolation
+    /// unavailable: workers declaring `isolate_worktree` **hard-fail** (do not
+    /// silently share the main tree). Application supplies a git-backed impl;
+    /// framework stays free of git deps.
     pub worktree_factory: Option<super::worktree::SharedWorktreeFactory>,
     /// Optional data-workspace factory (Sprint 10). When set, Fork-dispatched
     /// workers whose `SubagentDefinition.isolate_workspace == true` run inside
@@ -226,6 +244,8 @@ impl SubagentExecutor {
             return Ok(SubagentResult {
                 agent_name: req.agent_name.clone(),
                 output: "Cancelled before execution".into(),
+                summary: String::new(),
+                artifacts: Vec::new(),
                 duration: std::time::Duration::ZERO,
                 iterations: 0,
                 tokens_used: None,
@@ -324,6 +344,7 @@ impl SubagentExecutor {
                     execution_id: event_execution_id.clone(),
                     run_id: event_run_id.clone(),
                     message_id: event_message_id.clone(),
+                    background: req.background,
                 });
 
             if self.config.enable_hooks {
@@ -410,7 +431,7 @@ impl SubagentExecutor {
                         executor(ctx).await;
                     }
 
-                    return Ok(sub_result);
+                    return Ok(sub_result.with_structured());
                 }
                 Err(e) => {
                     let error_str = e.to_string();
@@ -462,6 +483,7 @@ impl SubagentExecutor {
                                     delegation_policy: child_policy,
                                     runtime_context: rt_ctx,
                                     message: retry_msg,
+                                    background: false,
                                 };
                                 // Loop instead of recursing
                                 continue;
@@ -486,6 +508,7 @@ impl SubagentExecutor {
                                     delegation_policy,
                                     runtime_context: rt_ctx,
                                     message: retry_msg,
+                                    background: false,
                                 };
                                 // Loop instead of recursing
                                 continue;
@@ -510,6 +533,89 @@ impl SubagentExecutor {
                 }
             }
         }
+    }
+
+    /// Clone internals so a background worker can own an executor on a spawned task.
+    fn clone_for_spawn(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            hooks: self.hooks.clone(),
+            config: SubagentExecutorConfig {
+                max_concurrent_forks: self.config.max_concurrent_forks,
+                default_timeout_secs: self.config.default_timeout_secs,
+                enable_hooks: self.config.enable_hooks,
+                unified_hook_executor: self.config.unified_hook_executor.clone(),
+                worktree_factory: self.config.worktree_factory.clone(),
+                data_workspace_factory: self.config.data_workspace_factory.clone(),
+                runtime_state_store: self.config.runtime_state_store.clone(),
+            },
+            semaphore: self.semaphore.clone(),
+        }
+    }
+
+    /// Ensure `runtime_context.execution_id` is set (generate `agent_tool-{uuid}` if missing).
+    fn ensure_background_execution_id(req: &mut DispatchRequest) -> String {
+        let ctx = req
+            .runtime_context
+            .get_or_insert_with(|| echo_core::tools::ExternalRunContext {
+                run_id: format!("bg-{}", uuid::Uuid::new_v4().as_simple()),
+                execution_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            });
+        if ctx
+            .execution_id
+            .as_ref()
+            .map(|id| id.is_empty())
+            .unwrap_or(true)
+        {
+            ctx.execution_id = Some(format!("agent_tool-{}", uuid::Uuid::new_v4()));
+        }
+        ctx.execution_id
+            .clone()
+            .unwrap_or_else(|| format!("agent_tool-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Non-blocking dispatch: spawn the normal `dispatch` path and return a handle
+    /// immediately. Lifecycle events still fire on the registry event bus.
+    ///
+    /// Mirrors the `tokio::spawn` pattern of [`Self::dispatch_teammate`], but
+    /// reuses Sync/Fork/Team routing via [`Self::dispatch`] rather than the
+    /// teammate-only streaming path.
+    pub async fn dispatch_background(
+        &self,
+        mut req: DispatchRequest,
+    ) -> Result<BackgroundSubagentHandle> {
+        // Fail fast if the target role is missing (same as sync dispatch).
+        if self.registry.get(&req.agent_name).await.is_none() {
+            return Err(ReactError::Other(format!(
+                "Subagent '{}' not found",
+                req.agent_name
+            )));
+        }
+
+        let execution_id = Self::ensure_background_execution_id(&mut req);
+        req.background = true;
+        let agent_name = req.agent_name.clone();
+        let agent_name_for_handle = agent_name.clone();
+        let spawned = self.clone_for_spawn();
+
+        tokio::spawn(async move {
+            if let Err(e) = spawned.dispatch(req).await {
+                warn!(
+                    agent = %agent_name,
+                    error = %e,
+                    "background subagent dispatch failed"
+                );
+            }
+        });
+
+        Ok(BackgroundSubagentHandle {
+            execution_id,
+            agent_name: agent_name_for_handle,
+        })
     }
 
     /// Dispatch a teammate, returning a handle for async polling.
@@ -714,6 +820,8 @@ impl SubagentExecutor {
         Ok(SubagentResult {
             agent_name: req.agent_name.clone(),
             output: result,
+            summary: String::new(),
+            artifacts: Vec::new(),
             duration: start.elapsed(),
             iterations: 1,
             tokens_used: None, // team doesn't aggregate worker tokens (follow-up)
@@ -980,6 +1088,8 @@ impl SubagentExecutor {
         Ok(SubagentResult {
             agent_name: subagent.to_string(),
             output,
+            summary: String::new(),
+            artifacts: Vec::new(),
             duration: start.elapsed(),
             iterations: 1,
             tokens_used,
@@ -1142,15 +1252,15 @@ impl SubagentExecutor {
             None
         };
         if isolate && worktree_factory.is_none() {
-            // The worker asked for isolation but the application supplied no
-            // factory. Log and run unisolated rather than hard-failing — the
-            // application explicitly chose not to supply worktrees. (A factory
-            // present-but-failing is the hard-fail case, handled below.)
-            tracing::warn!(
-                worker = %agent_name,
-                "Worker declares isolate_worktree but no WorktreeFactory is configured; \
-                 running without isolation"
-            );
+            // Hard-fail: a worker that declared isolate_worktree must not
+            // silently share the main tree (multi-implementer safety). Local
+            // personal-assistant threat model still needs this — otherwise
+            // parallel writers corrupt each other's edits.
+            return Err(ReactError::Other(format!(
+                "Worker '{}' declares isolate_worktree but no WorktreeFactory is configured; \
+                 refusing to run without isolation",
+                agent_name
+            )));
         }
         // Sprint 10: data-workspace isolation for data/research workers.
         // Mutually exclusive with worktree in intent — if a worker declares
@@ -1203,6 +1313,8 @@ impl SubagentExecutor {
                 return Ok(SubagentResult {
                     agent_name: agent_name.clone(),
                     output: "Cancelled before execution".into(),
+                    summary: String::new(),
+                    artifacts: Vec::new(),
                     duration: start.elapsed(),
                     iterations: 0,
                     tokens_used: None,
@@ -1506,11 +1618,82 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
         assert_eq!(result.output, "done");
         assert_eq!(result.mode, ExecutionMode::Sync);
+    }
+
+    #[tokio::test]
+    async fn dispatch_background_returns_before_completion() {
+        let (registry, executor) = make_executor().await;
+        let agent = MockAgent::new("slow")
+            .with_delay_ms(200)
+            .with_response("## Summary\nbg done");
+        let def = super::super::types::SubagentDefinition::new("slow", "Slow worker");
+        registry.register(def, Box::new(agent)).await;
+
+        let mut events = registry.event_bus().subscribe();
+        let req = DispatchRequest {
+            agent_name: "slow".into(),
+            task: "take your time".into(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".into(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            background: false,
+        };
+
+        let started_at = Instant::now();
+        let handle = executor.dispatch_background(req).await.unwrap();
+        assert!(
+            started_at.elapsed() < Duration::from_millis(100),
+            "dispatch_background must return before the slow worker finishes"
+        );
+        assert!(!handle.execution_id.is_empty());
+        assert_eq!(handle.agent_name, "slow");
+        assert!(handle.execution_id.starts_with("agent_tool-"));
+
+        let mut saw_started_bg = false;
+        let mut saw_completed = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline && !(saw_started_bg && saw_completed) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Ok(ev)) => match ev.as_ref() {
+                    SubagentEvent::DispatchStarted {
+                        background: true,
+                        execution_id: Some(id),
+                        ..
+                    } if id == &handle.execution_id => {
+                        saw_started_bg = true;
+                    }
+                    SubagentEvent::DispatchCompleted {
+                        output,
+                        execution_id: Some(id),
+                        ..
+                    } if id == &handle.execution_id => {
+                        assert!(output.contains("bg done"));
+                        saw_completed = true;
+                    }
+                    _ => {}
+                },
+                _ => break,
+            }
+        }
+        assert!(
+            saw_started_bg,
+            "expected DispatchStarted with background=true"
+        );
+        assert!(
+            saw_completed,
+            "expected DispatchCompleted after background work"
+        );
     }
 
     // NOTE: a unit test for multimodal dispatch forwarding (verifying a worker
@@ -1539,6 +1722,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let err = executor.dispatch(req).await.unwrap_err();
@@ -1566,6 +1750,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -1591,6 +1776,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -1617,6 +1803,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let handle = executor.dispatch_teammate(req).await.unwrap();
@@ -1673,6 +1860,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -1701,6 +1889,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let err = executor.dispatch(req).await.unwrap_err();
@@ -1779,6 +1968,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -1819,6 +2009,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor
@@ -1888,6 +2079,7 @@ mod tests {
                 delegation_policy: None,
             }),
             message: None,
+            background: false,
         };
 
         let first = {
@@ -1954,6 +2146,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let err = executor.dispatch(req).await.unwrap_err();
@@ -1967,10 +2160,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_isolate_without_factory_runs_unisolated() {
-        // isolate_worktree=true but NO factory configured → warn + run unisolated
-        // (the application explicitly chose not to supply worktrees). The worker
-        // still completes; no path is bound.
+    async fn fork_isolate_without_factory_hard_fails() {
+        // isolate_worktree=true but NO factory configured → hard-fail
+        // (must not silently share the main tree with other writers).
         let (registry, executor) = make_executor().await; // default config, no factory
 
         let agent = MockAgent::new("writer").with_response("done");
@@ -1991,11 +2183,17 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
-        let result = executor.dispatch(req).await.unwrap();
-        // No factory → no worktree → no diff appended; worker still completed.
-        assert_eq!(result.output, "done");
+        let err = executor.dispatch(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no WorktreeFactory")
+                || err
+                    .to_string()
+                    .contains("refusing to run without isolation"),
+            "got: {err}"
+        );
         let _ = agent;
     }
 
@@ -2028,6 +2226,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -2112,6 +2311,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
@@ -2153,6 +2353,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let err = executor.dispatch(req).await.unwrap_err();
@@ -2201,6 +2402,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();

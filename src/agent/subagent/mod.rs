@@ -24,12 +24,15 @@ pub use builder::SubagentBuilder;
 pub use context::{ContextInheritance, MemoryScope, OutputSchema, SubagentContext};
 pub use context_builder::{ContextBuilder, SubagentOutput};
 pub use events::{SubagentEvent, SubagentEventBus};
-pub use executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig, TeammateHandle};
+pub use executor::{
+    BackgroundSubagentHandle, DispatchRequest, SubagentExecutor, SubagentExecutorConfig,
+    TeammateHandle,
+};
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use registry::SubagentRegistry;
 pub use types::{
     ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentDefinition, SubagentKind,
-    SubagentResult,
+    SubagentResult, split_subagent_output,
 };
 pub use workspace::{
     DataWorkspaceFactory, DataWorkspaceHandle, NoWorkspaceFactory, SharedDataWorkspaceFactory,

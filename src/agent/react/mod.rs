@@ -2006,6 +2006,7 @@ impl ReactAgent {
                 delegation_policy: DispatchRequest::policy_from_depth(depth),
                 runtime_context: self.build_runtime_context(),
                 message: None,
+                background: false,
             };
 
             // Reuse the stored executor (with hook configuration)
@@ -2070,6 +2071,7 @@ impl ReactAgent {
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context: self.build_runtime_context(),
             message: None,
+            background: false,
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
@@ -2179,6 +2181,7 @@ impl ReactAgent {
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: None,
+            background: false,
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;
@@ -2254,6 +2257,7 @@ impl ReactAgent {
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: Some(message),
+            background: false,
         };
 
         let result = self.tools.subagent_executor.dispatch(req).await?;

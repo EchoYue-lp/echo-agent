@@ -52,6 +52,7 @@ impl SubagentBuilder {
                 isolate_worktree: false,
                 isolate_workspace: false,
                 team: None,
+                is_background: false,
             },
         }
     }
@@ -192,6 +193,12 @@ impl SubagentBuilder {
     pub fn team(mut self, spec: super::types::TeamSpec) -> Self {
         self.definition.execution_mode = ExecutionMode::Team;
         self.definition.team = Some(spec);
+        self
+    }
+
+    /// Mark this role as preferring background dispatch (Phase 2).
+    pub fn background(mut self) -> Self {
+        self.definition.is_background = true;
         self
     }
 
