@@ -608,6 +608,13 @@ impl ReactAgent {
                 return Err(e);
             }
         };
+        let turn_id = self
+            .current_run_id
+            .lock()
+            .ok()
+            .and_then(|value| value.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let active_turn_lease = self.turn_steer_mailbox.begin(turn_id);
 
         // ★ NEW: Intent routing
         if let Some(ref router) = self.intent_router {
@@ -652,6 +659,7 @@ impl ReactAgent {
         }
 
         // Create channel + snapshot
+        active_turn_lease.set_steerable(true);
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(self.config.stream_buffer_size);
         let mut snap = AgentRunSnapshot::from_agent(self);
         snap.current_run_id = self
@@ -715,6 +723,7 @@ impl ReactAgent {
             }
         }
 
+        drop(active_turn_lease);
         Ok(answer)
     }
 

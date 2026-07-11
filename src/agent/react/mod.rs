@@ -133,6 +133,8 @@ pub struct ReactAgent {
     /// to support request-level stream cancellation.
     /// Uses `tokio::sync::Mutex` to support `&self` streaming methods.
     pub(crate) cancel_token: tokio::sync::Mutex<Option<CancellationToken>>,
+    /// Same-turn user input mailbox shared with streaming snapshots.
+    pub(crate) turn_steer_mailbox: Arc<crate::agent::steer::TurnSteerMailbox>,
 
     /// Shared handle to the `AgentDispatchTool`'s cancel token (P1-11).
     ///
@@ -248,6 +250,15 @@ pub(crate) struct MemoryTriggerRuntimeState {
 // ── Construction & initialization ──────────────────────────────────────────────
 
 impl ReactAgent {
+    /// Inject user input into the currently active regular ReAct turn.
+    pub fn steer_input(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<String, crate::agent::TurnSteerError> {
+        self.turn_steer_mailbox.steer(expected_turn_id, message)
+    }
+
     /// Chain-of-thought preamble auto-injected before tool calls.
     const COT_INSTRUCTION: &'static str =
         "Before calling any tool, briefly describe your analysis and execution plan.";
@@ -483,6 +494,7 @@ impl ReactAgent {
             llm_config: None,
             thinking: None,
             cancel_token: tokio::sync::Mutex::new(None),
+            turn_steer_mailbox: Arc::new(crate::agent::steer::TurnSteerMailbox::default()),
             #[cfg(feature = "subagent")]
             dispatch_cancel_handle,
             #[cfg(not(feature = "subagent"))]

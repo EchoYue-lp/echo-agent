@@ -92,6 +92,18 @@ impl ReactAgent {
         } else {
             self.start_trace_run(&text).await;
         }
+        let turn_id = invocation
+            .as_ref()
+            .and_then(|value| value.runtime.as_ref())
+            .map(|runtime| runtime.run_id.clone())
+            .or_else(|| {
+                self.current_run_id
+                    .lock()
+                    .ok()
+                    .and_then(|value| value.clone())
+            })
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
 
         // ── Restore thread context (Execute mode) + memory triggers/recall ──
         let recalled = if let Some(ref msg) = init.message {
@@ -188,6 +200,7 @@ impl ReactAgent {
                         .await
                         .push(Message::assistant(content));
                     drop(execution_guard);
+                    drop(active_turn_lease);
                     return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
                 }
                 crate::intent::Intent::DirectAnswer { confidence } => {
@@ -242,10 +255,12 @@ impl ReactAgent {
             snap.external_trace_sink = external_trace_sink;
             snap.external_delegation_policy = external_delegation_policy;
         }
+        active_turn_lease.set_steerable(true);
 
         tokio::spawn(async move {
             // Move the guard into the spawned task — held for full stream duration
             let _execution_guard = execution_guard;
+            let _active_turn_lease = active_turn_lease;
             if let Err(e) = snap
                 .run_core_loop(context, text, message, label, mode, recalled, tx.clone())
                 .await
@@ -268,6 +283,31 @@ fn make_snapshot(agent: &ReactAgent) -> AgentSnapshot {
 }
 
 impl AgentSnapshot {
+    async fn drain_steer_into_context(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        assistant_draft: Option<String>,
+    ) -> usize {
+        let Some(turn_id) = self.current_run_id.as_deref() else {
+            return 0;
+        };
+        let pending = self.turn_steer_mailbox.drain(turn_id);
+        if pending.is_empty() {
+            return 0;
+        }
+        let count = pending.len();
+        let mut guard = context.lock().await;
+        if let Some(draft) = assistant_draft
+            && !draft.is_empty()
+        {
+            guard.push(Message::assistant(draft));
+        }
+        for message in pending {
+            guard.push(message);
+        }
+        count
+    }
+
     /// Streaming "direct answer" shortcut used by IntentRouter.
     ///
     /// Bypasses the ReAct loop and calls the LLM directly with a trimmed
@@ -425,6 +465,8 @@ impl AgentSnapshot {
                 "--- Streaming iteration{label} ---",
             );
 
+            let _ = self.drain_steer_into_context(&context, None).await;
+
             // Compact: PreCompact hook → (stage4 E1) pre_compaction_flush →
             //          checkpoint → ContextManager.prepare → PostCompact hook.
             // The flush itself lives inside `run_compact` so every compaction
@@ -453,6 +495,13 @@ impl AgentSnapshot {
                 phases::tools::run_tools(&self, &context, &tx, &mut state, iteration, think, &label)
                     .await?
             } else if !think.content_buffer.is_empty() {
+                if self
+                    .drain_steer_into_context(&context, Some(think.content_buffer.clone()))
+                    .await
+                    > 0
+                {
+                    continue;
+                }
                 let pt = think.pt;
                 let ct = think.ct;
                 match phases::verify::verify_final_text(
@@ -482,6 +531,9 @@ impl AgentSnapshot {
                     continue;
                 }
                 IterOutcome::Finish { output } => {
+                    if self.drain_steer_into_context(&context, None).await > 0 {
+                        continue;
+                    }
                     return phases::finalize::finalize_completed_run(
                         &self, context, &label, &output, iteration, &state, tx,
                     )
@@ -1128,5 +1180,76 @@ mod tests {
             .iter()
             .any(|e| matches!(e, Ok(AgentEvent::FinalAnswer { .. })));
         assert!(!has_final, "cancelled stream must not emit FinalAnswer");
+        assert!(matches!(
+            agent.steer_input(None, Message::user("late steer".to_string())),
+            Err(crate::agent::TurnSteerError::NoActiveTurn)
+        ));
+    }
+
+    #[tokio::test]
+    async fn steer_during_llm_call_continues_same_turn_with_new_input() -> Result<()> {
+        use futures::StreamExt;
+        use std::time::Duration;
+
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_responses(["draft answer", "corrected answer"])
+                .with_delay(Duration::from_millis(150)),
+        );
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("You are a test assistant.")
+            .build()?;
+        agent.config_mut().max_iterations = 4;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                run_id: "turn-steer-1".to_string(),
+                execution_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            }),
+            working_dir: None,
+            cancel: None,
+        };
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "initial request".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: Some(invocation),
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let accepted = agent
+            .steer_input(
+                Some("turn-steer-1"),
+                Message::user("steer correction".to_string()),
+            )
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        assert_eq!(accepted, "turn-steer-1");
+
+        let events = stream.collect::<Vec<_>>().await;
+        assert!(events.iter().any(|event| {
+            matches!(event, Ok(AgentEvent::FinalAnswer(answer)) if answer == "corrected answer")
+        }));
+        assert_eq!(llm.call_count(), 2);
+        let last_messages = llm.last_messages().unwrap_or_default();
+        assert!(
+            last_messages
+                .iter()
+                .any(|message| { message.content.as_text().as_deref() == Some("draft answer") })
+        );
+        assert!(
+            last_messages.iter().any(|message| {
+                message.content.as_text().as_deref() == Some("steer correction")
+            })
+        );
+        Ok(())
     }
 }

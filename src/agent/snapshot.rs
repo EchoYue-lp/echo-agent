@@ -235,6 +235,8 @@ pub struct AgentRunSnapshot {
     pub thinking: Option<crate::llm::ThinkingConfig>,
     /// Cancellation token (set after construction).
     pub cancel_token: Option<crate::agent::CancellationToken>,
+    /// Shared same-turn input mailbox.
+    pub(crate) turn_steer_mailbox: Arc<crate::agent::steer::TurnSteerMailbox>,
     /// Recently read files for read-before-edit enforcement (path → read instant).
     pub recently_read_files:
         Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
@@ -316,6 +318,7 @@ impl AgentRunSnapshot {
             } else {
                 agent.cancel_token.try_lock().ok().and_then(|g| g.clone())
             },
+            turn_steer_mailbox: Arc::clone(&agent.turn_steer_mailbox),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
             current_run_id: if invocation.is_some() {

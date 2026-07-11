@@ -55,6 +55,7 @@ pub mod default_factory;
 pub mod handle;
 pub mod react;
 pub mod snapshot;
+mod steer;
 pub mod turn;
 
 #[cfg(feature = "subagent")]
@@ -66,6 +67,7 @@ pub use crate::agent::handle::AgentHandle;
 pub use crate::agent::react::ReactAgent;
 pub use crate::agent::react::builder::ReactAgentBuilder;
 pub use crate::agent::react::structured::StructuredAgent;
+pub use crate::agent::steer::TurnSteerError;
 pub use config::{AgentConfig, AgentRole};
 
 /// Agent factory types — re-exported from echo-core with facade-level overrides.

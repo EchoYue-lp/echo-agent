@@ -183,6 +183,16 @@ pub struct AgentHandle {
 }
 
 impl AgentHandle {
+    /// Inject user input into the active turn without waiting for its stream.
+    pub async fn steer_input(
+        &self,
+        expected_turn_id: Option<&str>,
+        message: crate::llm::types::Message,
+    ) -> std::result::Result<String, crate::agent::TurnSteerError> {
+        let guard = self.agent.read().await;
+        guard.steer_input(expected_turn_id, message)
+    }
+
     /// Wrap an existing `Arc<RwLock<ReactAgent>>`.
     pub fn from_arc(agent: Arc<RwLock<ReactAgent>>) -> Self {
         Self { agent }
