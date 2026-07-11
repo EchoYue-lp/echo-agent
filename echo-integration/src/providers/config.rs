@@ -75,7 +75,7 @@ pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
         name: "OpenAI",
         base_url: provider_urls::OPENAI,
         env_vars: &["OPENAI_API_KEY"],
-        default_models: &["gpt-5.5"],
+        default_models: &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
         requires_api_key: true,
     },
     ProviderMetadata {
@@ -83,7 +83,7 @@ pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
         name: "Anthropic",
         base_url: provider_urls::ANTHROPIC,
         env_vars: &["ANTHROPIC_API_KEY"],
-        default_models: &["claude-opus-4-8", "claude-opus-4-7"],
+        default_models: &["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5"],
         requires_api_key: true,
     },
     ProviderMetadata {
@@ -91,7 +91,7 @@ pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
         name: "Moonshot",
         base_url: provider_urls::MOONSHOT,
         env_vars: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
-        default_models: &["kimi-k2.6"],
+        default_models: &["kimi-k2.7-code", "kimi-k2.6"],
         requires_api_key: true,
     },
     ProviderMetadata {
@@ -99,7 +99,7 @@ pub const BUILTIN_PROVIDER_METADATA: &[ProviderMetadata] = &[
         name: "智谱",
         base_url: provider_urls::ZHIPU,
         env_vars: &["ZHIPU_API_KEY", "GLM_API_KEY"],
-        default_models: &["glm-5.1"],
+        default_models: &["glm-5.2", "glm-5.1"],
         requires_api_key: true,
     },
 ];

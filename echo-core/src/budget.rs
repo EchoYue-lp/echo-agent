@@ -148,9 +148,9 @@ impl TokenBudget {
 }
 
 impl Default for TokenBudget {
-    /// Creates a budget for a 128K model with default allocations.
+    /// Creates a budget for a 396K model with default allocations.
     fn default() -> Self {
-        Self::new(128_000)
+        Self::new(396_000)
     }
 }
 
@@ -270,6 +270,12 @@ mod tests {
         assert_eq!(budget.output_budget(), 10_000); // 10%
         // 100% - 10% - 5% - 10% - 10% = 65%
         assert_eq!(budget.conversation_budget(), 65_000);
+    }
+
+    #[test]
+    fn default_budget_uses_396k_context_window() {
+        let budget = TokenBudget::default();
+        assert_eq!(budget.total_window, 396_000);
     }
 
     #[test]

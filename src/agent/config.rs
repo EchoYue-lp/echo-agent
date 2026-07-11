@@ -8,8 +8,8 @@ use echo_core::budget::TokenBudgetConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Default token limit for agent context (128000 tokens, matches TokenBudget default).
-pub const DEFAULT_TOKEN_LIMIT: usize = 128_000;
+/// Default token limit for agent context (396000 tokens, matches TokenBudget default).
+pub const DEFAULT_TOKEN_LIMIT: usize = 396_000;
 
 /// Agent role enum, determining its responsibility scope in a multi-agent system.
 ///

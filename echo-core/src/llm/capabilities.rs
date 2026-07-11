@@ -176,28 +176,24 @@ pub struct ModelProfile {
 /// 未匹配到已知模式时返回 None。
 pub fn infer_context_window(_provider: &str, model_name: &str) -> Option<u32> {
     let lower = model_name.to_ascii_lowercase();
-    if lower.contains("qwen3-235b") {
-        Some(131_072)
-    } else if lower.starts_with("gpt-5.5") || lower.starts_with("gpt-4.5") {
-        Some(128_000)
-    } else if lower.starts_with("gpt-4o") || lower.contains("gpt-4o") {
-        // GPT-4o / GPT-4o-mini: 128K context
-        Some(128_000)
-    } else if lower.starts_with("gpt-4-turbo") || lower.contains("gpt-4-turbo") {
-        Some(128_000)
-    } else if lower.starts_with("gpt-4") {
-        // Original GPT-4 (non-turbo, non-o): 8K context
-        Some(8_192)
-    } else if lower.starts_with("claude-3-opus") {
-        Some(200_000)
-    } else if lower.starts_with("claude-3.5") || lower.starts_with("claude-4") {
-        Some(200_000)
-    } else if lower.starts_with("claude-") {
-        Some(200_000)
-    } else if lower.starts_with("deepseek-") {
-        Some(128_000)
-    } else if lower.starts_with("qwen-") {
-        Some(131_072)
+    if lower.starts_with("gpt-5.6") {
+        // GPT-5.6 Sol/Terra/Luna expose a 1.05M context window.
+        Some(1_050_000)
+    } else if lower.starts_with("claude-fable-5")
+        || lower.starts_with("claude-opus-4-8")
+        || lower.starts_with("claude-sonnet-5")
+    {
+        Some(1_000_000)
+    } else if lower.starts_with("deepseek-v4") {
+        Some(1_000_000)
+    } else if lower.starts_with("qwen3.7-max") {
+        Some(1_000_000)
+    } else if lower.starts_with("qwen3.7-plus") {
+        Some(1_000_000)
+    } else if lower.starts_with("kimi-k2.7") || lower.starts_with("kimi-k2.6") {
+        Some(256_000)
+    } else if lower.starts_with("glm-5.2") {
+        Some(1_000_000)
     } else {
         None
     }
@@ -478,6 +474,44 @@ mod tests {
             resolve_thinking_protocol("o4-mini", "openai"),
             T::OpenaiReasoningEffort
         );
+    }
+
+    #[test]
+    fn infers_current_frontier_context_windows() {
+        assert_eq!(
+            infer_context_window("openai", "gpt-5.6-sol"),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            infer_context_window("openai", "gpt-5.6-terra"),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            infer_context_window("anthropic", "claude-sonnet-5"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            infer_context_window("anthropic", "claude-opus-4-8"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            infer_context_window("deepseek", "deepseek-v4-pro"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            infer_context_window("dashscope", "qwen3.7-max"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            infer_context_window("dashscope", "qwen3.7-plus"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            infer_context_window("moonshot", "kimi-k2.7-code"),
+            Some(256_000)
+        );
+        assert_eq!(infer_context_window("zhipu", "glm-5.2"), Some(1_000_000));
+        assert_eq!(infer_context_window("custom", "unknown-model"), None);
     }
 
     #[test]

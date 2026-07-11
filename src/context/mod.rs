@@ -46,7 +46,7 @@ pub struct ContextBudget {
 impl Default for ContextBudget {
     fn default() -> Self {
         Self {
-            total_tokens: 128_000,
+            total_tokens: 396_000,
             user_reserve: 500,
             history_max: 50_000,
             tool_results_max: 20_000,
@@ -61,6 +61,16 @@ impl ContextBudget {
             total_tokens,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod default_budget_tests {
+    use super::ContextBudget;
+
+    #[test]
+    fn default_context_budget_uses_396k_window() {
+        assert_eq!(ContextBudget::default().total_tokens, 396_000);
     }
 }
 
