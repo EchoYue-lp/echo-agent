@@ -373,6 +373,8 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/eko-data-worker-xyz")),
             conversation_id: None,
             run_id: None,
+            turn_id: None,
+            execution_id: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,

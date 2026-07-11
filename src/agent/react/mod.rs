@@ -175,6 +175,7 @@ pub struct ReactAgent {
     /// identifier instead of bridge-side temp allocation. Carried as a Mutex
     /// field (same cross-spawn pattern as the other external_* fields).
     pub external_execution_id: std::sync::Mutex<Option<String>>,
+    pub external_turn_id: std::sync::Mutex<Option<String>>,
     /// Chat message id that triggered the run, forwarded to
     /// `SubagentEvent::DispatchStarted.message_id` so the frontend can pin a
     /// subagent stream to the right chat message block.
@@ -507,6 +508,7 @@ impl ReactAgent {
             external_trace_sink: std::sync::Mutex::new(None),
             external_delegation_policy: std::sync::Mutex::new(None),
             external_execution_id: std::sync::Mutex::new(None),
+            external_turn_id: std::sync::Mutex::new(None),
             external_message_id: std::sync::Mutex::new(None),
             tool_execution_pipeline: None,
             prompt_template_engine: None,
@@ -2286,9 +2288,19 @@ impl ReactAgent {
             .current_run_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()?;
+            .clone();
+        let turn_id = self
+            .external_turn_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if run_id.is_none() && turn_id.is_none() {
+            return None;
+        }
         Some(echo_core::tools::ExternalRunContext {
+            conversation_id: self.config.conversation_id.clone(),
             run_id,
+            turn_id,
             execution_id: self
                 .external_execution_id
                 .lock()
@@ -2394,7 +2406,11 @@ impl Agent for ReactAgent {
         *self
             .current_run_id
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(ctx.run_id.clone());
+            .unwrap_or_else(|e| e.into_inner()) = ctx.run_id.clone();
+        *self
+            .external_turn_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = ctx.turn_id.clone();
         *self
             .external_cancel
             .lock()
@@ -2420,6 +2436,10 @@ impl Agent for ReactAgent {
     fn clear_external_context(&self) {
         *self
             .current_run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .external_turn_id
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self

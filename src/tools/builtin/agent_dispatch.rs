@@ -139,17 +139,20 @@ impl AgentDispatchTool {
 
     /// Build [`ExternalRunContext`] for GUI/TUI identity pinning.
     ///
-    /// Requires `ToolContext.run_id` (set by chat / TaskRuntime). Chat path
-    /// uses `run_id == root_message_id`, so `message_id` reuses `run_id`.
+    /// Uses the formal run id when present and always preserves the chat turn id.
     /// `execution_id` has no `:` so the Tauri bridge uses the full string as
     /// `subagent_run_id` (avoids colliding parallel same-role dispatches).
     fn runtime_context_from_tool_ctx(ctx: Option<&ToolContext>) -> Option<ExternalRunContext> {
         let c = ctx?;
-        let run_id = c.run_id.clone()?;
+        if c.run_id.is_none() && c.turn_id.is_none() {
+            return None;
+        }
         Some(ExternalRunContext {
-            run_id: run_id.clone(),
+            conversation_id: c.conversation_id.clone(),
+            run_id: c.run_id.clone(),
+            turn_id: c.turn_id.clone(),
             execution_id: Some(format!("agent_tool-{}", uuid::Uuid::new_v4())),
-            message_id: Some(run_id),
+            message_id: c.turn_id.clone(),
             cancel: c.cancel.clone(),
             trace_sink: c.trace_sink.clone(),
             delegation_policy: c.delegation_policy,

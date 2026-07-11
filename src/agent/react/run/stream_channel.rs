@@ -81,7 +81,9 @@ impl ReactAgent {
                 && let Some(run_id) = self.start_scoped_trace_run(&text).await
             {
                 invocation.runtime = Some(echo_core::tools::ExternalRunContext {
-                    run_id,
+                    conversation_id: self.config.conversation_id.clone(),
+                    run_id: Some(run_id),
+                    turn_id: None,
                     execution_id: None,
                     message_id: None,
                     cancel: None,
@@ -95,7 +97,7 @@ impl ReactAgent {
         let turn_id = invocation
             .as_ref()
             .and_then(|value| value.runtime.as_ref())
-            .map(|runtime| runtime.run_id.clone())
+            .and_then(|runtime| runtime.turn_id.clone().or_else(|| runtime.run_id.clone()))
             .or_else(|| {
                 self.current_run_id
                     .lock()
@@ -810,7 +812,9 @@ mod tests {
         agent.set_pre_model_context_projector(Some(projector.clone()));
         let invocation_a = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
-                run_id: "run-a".to_string(),
+                conversation_id: None,
+                run_id: Some("run-a".to_string()),
+                turn_id: None,
                 execution_id: Some("execution-a".to_string()),
                 message_id: Some("message-a".to_string()),
                 cancel: None,
@@ -842,7 +846,9 @@ mod tests {
 
         let invocation_b = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
-                run_id: "run-b".to_string(),
+                conversation_id: None,
+                run_id: Some("run-b".to_string()),
+                turn_id: None,
                 execution_id: Some("execution-b".to_string()),
                 message_id: Some("message-b".to_string()),
                 cancel: None,
@@ -893,7 +899,9 @@ mod tests {
         agent.set_run_store(Arc::new(crate::trace::InMemoryRunStore::new()));
         let invocation = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
-                run_id: "value-run".to_string(),
+                conversation_id: None,
+                run_id: Some("value-run".to_string()),
+                turn_id: None,
                 execution_id: None,
                 message_id: None,
                 cancel: None,
@@ -1203,7 +1211,9 @@ mod tests {
         agent.config_mut().max_iterations = 4;
         let invocation = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
-                run_id: "turn-steer-1".to_string(),
+                conversation_id: None,
+                run_id: Some("turn-steer-1".to_string()),
+                turn_id: Some("turn-steer-1".to_string()),
                 execution_id: None,
                 message_id: None,
                 cancel: None,

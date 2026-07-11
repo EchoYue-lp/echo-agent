@@ -407,6 +407,8 @@ impl PipelineStage for ExecuteStage {
             working_dir: snapshot.config.working_dir.clone(),
             conversation_id: snapshot.config.conversation_id.clone(),
             run_id: snapshot.current_run_id.clone(),
+            turn_id: snapshot.current_turn_id.clone(),
+            execution_id: snapshot.current_execution_id.clone(),
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,

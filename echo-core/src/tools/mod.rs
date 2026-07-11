@@ -644,8 +644,12 @@ impl NestedDelegationPolicy {
 
 #[derive(Clone)]
 pub struct ExternalRunContext {
-    /// 当前应用层 run 标识。
-    pub run_id: String,
+    /// 当前会话标识，跨主 agent/subagent 保持稳定。
+    pub conversation_id: Option<String>,
+    /// 当前应用层正式 run 标识。普通对话 turn 尚未创建任务 run 时为 None。
+    pub run_id: Option<String>,
+    /// 当前用户输入/agent turn 的稳定标识。
+    pub turn_id: Option<String>,
     /// 当前 run 内的一次具体执行标识。
     ///
     /// `None` 表示只有 run 级上下文。设置后，subagent / tool trace 应使用它
@@ -679,6 +683,10 @@ pub struct ToolContext {
     pub conversation_id: Option<String>,
     /// 当前 run 标识（透传给 trace/audit）。
     pub run_id: Option<String>,
+    /// 当前用户输入/agent turn 标识。
+    pub turn_id: Option<String>,
+    /// 当前 run 内的一次具体执行标识。
+    pub execution_id: Option<String>,
     /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
@@ -693,6 +701,8 @@ impl std::fmt::Debug for ToolContext {
             .field("working_dir", &self.working_dir)
             .field("conversation_id", &self.conversation_id)
             .field("run_id", &self.run_id)
+            .field("turn_id", &self.turn_id)
+            .field("execution_id", &self.execution_id)
             .field(
                 "cancel",
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
@@ -739,7 +749,9 @@ mod tool_context_tests {
     #[test]
     fn external_run_context_constructs_without_cache_user_id() {
         let _ctx = ExternalRunContext {
-            run_id: "run-1".to_string(),
+            conversation_id: Some("conv-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
             execution_id: None,
             message_id: None,
             cancel: None,
@@ -755,6 +767,8 @@ mod tool_context_tests {
             working_dir: None,
             conversation_id: None,
             run_id: None,
+            turn_id: None,
+            execution_id: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,

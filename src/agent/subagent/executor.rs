@@ -288,7 +288,7 @@ impl SubagentExecutor {
             let runtime_run_id = req
                 .runtime_context
                 .as_ref()
-                .map(|ctx| ctx.run_id.as_str())
+                .and_then(|ctx| ctx.run_id.as_deref())
                 .unwrap_or("<none>");
             // Extract stable identity for event payload (Option<String>).
             // Used by all Dispatch* events so the bridge/frontend can route
@@ -297,7 +297,10 @@ impl SubagentExecutor {
                 .runtime_context
                 .as_ref()
                 .and_then(|ctx| ctx.execution_id.clone());
-            let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+            let event_run_id = req
+                .runtime_context
+                .as_ref()
+                .and_then(|ctx| ctx.run_id.clone());
             let event_message_id = req
                 .runtime_context
                 .as_ref()
@@ -558,7 +561,9 @@ impl SubagentExecutor {
         let ctx = req
             .runtime_context
             .get_or_insert_with(|| echo_core::tools::ExternalRunContext {
-                run_id: format!("bg-{}", uuid::Uuid::new_v4().as_simple()),
+                conversation_id: None,
+                run_id: Some(format!("bg-{}", uuid::Uuid::new_v4().as_simple())),
+                turn_id: None,
                 execution_id: None,
                 message_id: None,
                 cancel: None,
@@ -656,7 +661,10 @@ impl SubagentExecutor {
             .runtime_context
             .as_ref()
             .and_then(|ctx| ctx.execution_id.clone());
-        let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+        let event_run_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.run_id.clone());
         let invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
             ..AgentInvocationContext::default()
@@ -785,7 +793,11 @@ impl SubagentExecutor {
                 manager_def,
             )
             .strategy(spec.strategy.clone())
-            .run_id(req.runtime_context.as_ref().map(|c| c.run_id.clone()))
+            .run_id(
+                req.runtime_context
+                    .as_ref()
+                    .and_then(|context| context.run_id.clone()),
+            )
             .state_store(self.config.runtime_state_store.clone());
 
         for name in &spec.workers {
@@ -1132,7 +1144,10 @@ impl SubagentExecutor {
             .runtime_context
             .as_ref()
             .and_then(|ctx| ctx.execution_id.clone());
-        let event_run_id = req.runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+        let event_run_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.run_id.clone());
         let invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
             ..AgentInvocationContext::default()
@@ -1241,7 +1256,7 @@ impl SubagentExecutor {
         let event_execution_id = runtime_context
             .as_ref()
             .and_then(|ctx| ctx.execution_id.clone());
-        let event_run_id = runtime_context.as_ref().map(|ctx| ctx.run_id.clone());
+        let event_run_id = runtime_context.as_ref().and_then(|ctx| ctx.run_id.clone());
 
         // Sprint 8: worktree isolation for writer workers. Resolve the intent
         // before spawning so the closure can capture a shared factory clone.
@@ -1281,7 +1296,7 @@ impl SubagentExecutor {
         }
         let runtime_run_id = runtime_context
             .as_ref()
-            .map(|ctx| ctx.run_id.as_str())
+            .and_then(|ctx| ctx.run_id.as_deref())
             .unwrap_or("<none>");
         let has_trace_sink = runtime_context
             .as_ref()
@@ -1299,10 +1314,18 @@ impl SubagentExecutor {
         );
         // Label identifies this dispatch for worktree/workspace naming. run_id
         // (if available from the runtime context) disambiguates concurrent runs.
-        let worktree_label = match runtime_context.as_ref() {
-            Some(ctx) => format!("{agent_name}-{}", ctx.run_id),
-            None => format!("{agent_name}-{}", uuid::Uuid::new_v4().as_simple()),
-        };
+        let worktree_identity = runtime_context
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .execution_id
+                    .as_deref()
+                    .or(context.run_id.as_deref())
+                    .or(context.turn_id.as_deref())
+            })
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
+        let worktree_label = format!("{agent_name}-{worktree_identity}");
 
         let result = tokio::spawn(async move {
             let _permit = permit;

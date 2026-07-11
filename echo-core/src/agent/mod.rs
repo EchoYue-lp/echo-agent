@@ -41,7 +41,17 @@ impl std::fmt::Debug for AgentInvocationContext {
         f.debug_struct("AgentInvocationContext")
             .field(
                 "run_id",
-                &self.runtime.as_ref().map(|runtime| runtime.run_id.as_str()),
+                &self
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.run_id.as_deref()),
+            )
+            .field(
+                "turn_id",
+                &self
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.turn_id.as_deref()),
             )
             .field(
                 "execution_id",

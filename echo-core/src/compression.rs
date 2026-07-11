@@ -25,6 +25,7 @@ pub struct ProjectionContext {
     pub session_id: Option<String>,
     pub conversation_id: Option<String>,
     pub run_id: Option<String>,
+    pub turn_id: Option<String>,
 }
 
 /// Produces replaceable context immediately before model input preparation.

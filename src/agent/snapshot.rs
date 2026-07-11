@@ -244,6 +244,10 @@ pub struct AgentRunSnapshot {
     pub run_store: Option<Arc<dyn RunStore>>,
     /// Current run ID.
     pub current_run_id: Option<String>,
+    /// Current user-input/agent turn ID.
+    pub current_turn_id: Option<String>,
+    /// Current concrete worker/tool execution ID.
+    pub current_execution_id: Option<String>,
     /// 外部 run 级上下文（跨 spawn 安全，从 ReactAgent.external_* 抓取）。
     /// 与 current_run_id 同源、同生命周期（set/clear 在同一处）。
     pub external_cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
@@ -301,6 +305,9 @@ impl AgentRunSnapshot {
             config.working_dir = Some(working_dir.clone());
         }
         let runtime = invocation.and_then(|context| context.runtime.as_ref());
+        if let Some(conversation_id) = runtime.and_then(|context| context.conversation_id.clone()) {
+            config.conversation_id = Some(conversation_id);
+        }
         Self {
             config: Arc::new(config),
             tools: Arc::new(ToolRuntime::from_agent(agent)),
@@ -322,7 +329,7 @@ impl AgentRunSnapshot {
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
             current_run_id: if invocation.is_some() {
-                runtime.map(|context| context.run_id.clone())
+                runtime.and_then(|context| context.run_id.clone())
             } else {
                 agent
                     .current_run_id
@@ -330,6 +337,8 @@ impl AgentRunSnapshot {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone()
             },
+            current_turn_id: runtime.and_then(|context| context.turn_id.clone()),
+            current_execution_id: runtime.and_then(|context| context.execution_id.clone()),
             external_cancel: if let Some(context) = invocation {
                 runtime
                     .and_then(|value| value.cancel.clone())
@@ -990,7 +999,9 @@ mod transcript_filter_tests {
         let trace_sink: echo_core::tools::TraceSinkFn = std::sync::Arc::new(|_| {});
         let invocation = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
-                run_id: "run-atomic".to_string(),
+                conversation_id: None,
+                run_id: Some("run-atomic".to_string()),
+                turn_id: None,
                 execution_id: Some("execution-atomic".to_string()),
                 message_id: Some("message-atomic".to_string()),
                 cancel: Some(std::sync::Arc::clone(&cancel)),

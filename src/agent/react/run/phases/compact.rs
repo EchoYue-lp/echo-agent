@@ -39,6 +39,7 @@ pub(crate) async fn run_compact(
         session_id: snap.config.session_id.clone(),
         conversation_id: snap.config.conversation_id.clone(),
         run_id: snap.current_run_id.clone(),
+        turn_id: snap.current_turn_id.clone(),
     };
     let projections = if let Some(projector) = &snap.pre_model_context_projector {
         match projector.project(&projection_context).await {
