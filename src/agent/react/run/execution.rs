@@ -508,6 +508,7 @@ impl ReactAgent {
             block_reason: None,
             duration_ms: 0,
             plan_mode: self.config.plan_mode,
+            stream_tx: None,
         };
 
         match pipeline.run(&mut ctx, &snapshot).await {

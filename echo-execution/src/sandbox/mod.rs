@@ -59,6 +59,7 @@ pub use policy::{SandboxPolicy, SecurityLevel};
 // Re-export core types from echo_core
 pub use echo_core::sandbox::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
+    SandboxOutputChannel, SandboxStreamEvent,
 };
 
 // ── 共享工具 ────────────────────────────────────────────────────────────────

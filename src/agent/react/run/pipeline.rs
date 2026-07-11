@@ -6,9 +6,10 @@
 
 use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result};
-use crate::tools::{ToolParameters, ToolResult, is_write_tool};
+use crate::tools::{ToolParameters, ToolResult, ToolStreamEvent, is_write_tool};
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::sync::mpsc;
 use tracing::debug;
 
 // ── ToolExecutionContext ────────────────────────────────────────────
@@ -37,6 +38,8 @@ pub(crate) struct ToolExecutionContext {
     pub duration_ms: u64,
     /// Whether the agent is in plan mode (read-only tools only).
     pub plan_mode: bool,
+    /// Incremental tool events, tagged with their stable invocation identity.
+    pub stream_tx: Option<mpsc::Sender<(String, String, ToolStreamEvent)>>,
 }
 
 // ── PipelineStage trait ────────────────────────────────────────────
@@ -413,12 +416,70 @@ impl PipelineStage for ExecuteStage {
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,
         };
-        let result = match snapshot
+        let execution_result = if snapshot
             .tools
             .tool_manager
-            .execute_tool_with_context(&ctx.tool_name, ctx.params.clone(), &tool_ctx)
-            .await
+            .supports_streaming(&ctx.tool_name)
         {
+            if let Some(stream_tx) = ctx.stream_tx.as_ref() {
+                let (event_tx, mut event_rx) = mpsc::channel(64);
+                let mut execution = Box::pin(
+                    snapshot
+                        .tools
+                        .tool_manager
+                        .execute_tool_stream_with_context(
+                            &ctx.tool_name,
+                            ctx.params.clone(),
+                            &tool_ctx,
+                            Some(event_tx),
+                        ),
+                );
+                let mut stream_open = true;
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        event = event_rx.recv(), if stream_open => {
+                            match event {
+                                Some(event) => {
+                                    stream_tx
+                                        .send((ctx.call_id.clone(), ctx.tool_name.clone(), event))
+                                        .await
+                                        .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                                }
+                                None => stream_open = false,
+                            }
+                        }
+                        result = &mut execution => break result,
+                    }
+                };
+                while let Some(event) = event_rx.recv().await {
+                    stream_tx
+                        .send((ctx.call_id.clone(), ctx.tool_name.clone(), event))
+                        .await
+                        .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                }
+                result
+            } else {
+                snapshot
+                    .tools
+                    .tool_manager
+                    .execute_tool_stream_with_context(
+                        &ctx.tool_name,
+                        ctx.params.clone(),
+                        &tool_ctx,
+                        None,
+                    )
+                    .await
+            }
+        } else {
+            snapshot
+                .tools
+                .tool_manager
+                .execute_tool_with_context(&ctx.tool_name, ctx.params.clone(), &tool_ctx)
+                .await
+        };
+
+        let result = match execution_result {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = e.to_string();
@@ -805,6 +866,11 @@ fn extract_path_param(_tool_name: &str, params: &ToolParameters) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentEvent;
+    use echo_core::tools::{Tool, ToolContext, ToolOutputChannel};
+    use futures::Stream;
+    use std::pin::Pin;
+    use std::sync::Arc;
 
     #[test]
     fn test_is_write_tool() {
@@ -822,5 +888,214 @@ mod tests {
             extract_path_param("edit_file", &params),
             Some("src/main.rs".to_string())
         );
+    }
+
+    struct InterleavingTool;
+
+    impl Tool for InterleavingTool {
+        fn name(&self) -> &str {
+            "interleaving"
+        }
+
+        fn description(&self) -> &str {
+            "test stream interleaving"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("unused")) })
+        }
+
+        fn execute_stream_with_context<'a>(
+            &'a self,
+            params: ToolParameters,
+            _ctx: &ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>,
+        > {
+            Box::pin(async move {
+                let label = params
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let initial_delay = params
+                    .get("initial_delay")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let finish_delay = params
+                    .get("finish_delay")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let events = futures::stream::unfold(
+                    (0_u8, label, initial_delay, finish_delay),
+                    |(state, label, initial_delay, finish_delay)| async move {
+                        match state {
+                            0 => {
+                                tokio::time::sleep(std::time::Duration::from_millis(initial_delay))
+                                    .await;
+                                Some((
+                                    ToolStreamEvent::Output {
+                                        channel: ToolOutputChannel::Stdout,
+                                        chunk: format!("{label}-1"),
+                                    },
+                                    (1, label, initial_delay, finish_delay),
+                                ))
+                            }
+                            1 => {
+                                tokio::time::sleep(std::time::Duration::from_millis(finish_delay))
+                                    .await;
+                                Some((
+                                    ToolStreamEvent::Output {
+                                        channel: ToolOutputChannel::Stdout,
+                                        chunk: format!("{label}-2"),
+                                    },
+                                    (2, label, initial_delay, finish_delay),
+                                ))
+                            }
+                            2 => Some((
+                                ToolStreamEvent::Complete(ToolResult::success(label.clone())),
+                                (3, label, initial_delay, finish_delay),
+                            )),
+                            _ => None,
+                        }
+                    },
+                );
+                Ok(Box::pin(events) as Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>)
+            })
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+    }
+
+    fn streaming_context(
+        call_id: &str,
+        label: &str,
+        initial_delay: u64,
+        finish_delay: u64,
+        stream_tx: mpsc::Sender<(String, String, ToolStreamEvent)>,
+    ) -> ToolExecutionContext {
+        let input = serde_json::json!({
+            "label": label,
+            "initial_delay": initial_delay,
+            "finish_delay": finish_delay,
+        });
+        let params = match &input {
+            Value::Object(map) => map.clone().into_iter().collect(),
+            _ => ToolParameters::new(),
+        };
+        ToolExecutionContext {
+            call_id: call_id.to_string(),
+            tool_name: "interleaving".to_string(),
+            params,
+            input,
+            hook_messages: HookMessageBatches::default(),
+            result: None,
+            output: None,
+            blocked: false,
+            block_reason: None,
+            duration_ms: 0,
+            plan_mode: false,
+            stream_tx: Some(stream_tx),
+        }
+    }
+
+    #[tokio::test]
+    async fn multiplexed_streams_preserve_identity_and_terminal_order() {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .enable_tools()
+            .tool(Box::new(InterleavingTool))
+            .build()
+            .expect("test agent should build");
+        let snapshot = Arc::new(crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent));
+        let (stream_tx, mut stream_rx) = mpsc::channel(64);
+        let (completion_tx, mut completion_rx) = mpsc::channel(2);
+
+        for mut ctx in [
+            streaming_context("call-a", "a", 0, 60, stream_tx.clone()),
+            streaming_context("call-b", "b", 10, 10, stream_tx.clone()),
+        ] {
+            let snapshot = Arc::clone(&snapshot);
+            let completion_tx = completion_tx.clone();
+            tokio::spawn(async move {
+                let result = ExecuteStage.run(&mut ctx, &snapshot).await;
+                completion_tx
+                    .send((
+                        ctx.call_id.clone(),
+                        ctx.tool_name.clone(),
+                        result,
+                        ctx.result,
+                    ))
+                    .await
+                    .expect("completion receiver should remain open");
+            });
+        }
+        drop(stream_tx);
+        drop(completion_tx);
+
+        let mut events = Vec::new();
+        let mut terminal_count = 0;
+        while terminal_count < 2 {
+            tokio::select! {
+                biased;
+                Some((call_id, name, event)) = stream_rx.recv() => {
+                    events.push(AgentEvent::ToolStream { call_id, name, event });
+                }
+                Some((call_id, name, execution, result)) = completion_rx.recv() => {
+                    execution.expect("execute stage should succeed");
+                    let result = result.expect("execute stage should set a result");
+                    events.push(AgentEvent::ToolResult {
+                        call_id,
+                        name,
+                        output: result.output,
+                    });
+                    terminal_count += 1;
+                }
+            }
+        }
+        events.push(AgentEvent::ToolBatchEnd);
+
+        let stream_chunks: Vec<(String, String)> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolStream {
+                    call_id,
+                    event: ToolStreamEvent::Output { chunk, .. },
+                    ..
+                } => Some((call_id.clone(), chunk.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stream_chunks,
+            vec![
+                ("call-a".into(), "a-1".into()),
+                ("call-b".into(), "b-1".into()),
+                ("call-b".into(), "b-2".into()),
+                ("call-a".into(), "a-2".into()),
+            ]
+        );
+
+        let terminal_ids: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult { call_id, .. } | AgentEvent::ToolError { call_id, .. } => {
+                    Some(call_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terminal_ids, vec!["call-b", "call-a"]);
+        assert!(matches!(events.last(), Some(AgentEvent::ToolBatchEnd)));
     }
 }

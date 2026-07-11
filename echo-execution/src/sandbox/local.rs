@@ -11,15 +11,22 @@
 
 use super::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
+    SandboxOutputChannel, SandboxStreamEvent,
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
 use futures::future::BoxFuture;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::mpsc;
+
+const STREAM_CHUNK_BYTES: usize = 16 * 1024;
+const STREAM_CHANNEL_CAPACITY: usize = 32;
 
 /// 本地沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,11 +370,33 @@ impl LocalSandbox {
     /// 超时时显式 kill + wait 清理子进程，避免僵尸/孤儿进程残留。
     async fn run_command(
         &self,
-        mut command: Command,
+        command: Command,
         timeout: std::time::Duration,
         stdin: Option<&str>,
         sandbox_type: &'static str,
     ) -> Result<ExecutionResult> {
+        let mut stream = self
+            .run_command_stream(command, timeout, stdin, sandbox_type)
+            .await?;
+        while let Some(event) = stream.next().await {
+            if let SandboxStreamEvent::Complete(result) = event {
+                return Ok(result);
+            }
+        }
+        Err(echo_core::error::ReactError::Sandbox(Box::new(
+            SandboxError::IoError(
+                "Local sandbox stream ended without a completion event".to_string(),
+            ),
+        )))
+    }
+
+    async fn run_command_stream(
+        &self,
+        mut command: Command,
+        timeout: std::time::Duration,
+        stdin: Option<&str>,
+        sandbox_type: &'static str,
+    ) -> Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send>>> {
         if stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
         }
@@ -375,8 +404,6 @@ impl LocalSandbox {
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         command.kill_on_drop(true);
-
-        let start = Instant::now();
 
         let mut child = command.spawn().map_err(|e| {
             echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
@@ -399,50 +426,26 @@ impl LocalSandbox {
             drop(child_stdin);
         }
 
-        // 提前取出 stdout/stderr 管道，避免 child.wait() 消耗后无法读取
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
-
-        // 使用 &mut self 等待，保留 Child 句柄的控制权
-        match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) => {
-                let duration = start.elapsed();
-                let stdout = read_pipe_output(stdout_pipe, self.config.max_output_bytes).await;
-                let mut stderr = read_pipe_output(stderr_pipe, self.config.max_output_bytes).await;
-                if status.code().is_none() && stderr.is_empty() {
-                    stderr = platform_termination_message(&status);
-                }
-
-                Ok(ExecutionResult {
-                    exit_code: status.code().unwrap_or(-1),
-                    stdout,
-                    stderr,
-                    duration,
-                    sandbox_type: sandbox_type.to_string(),
-                    timed_out: false,
-                })
-            }
-            Ok(Err(e)) => {
-                // wait() 自身失败 — 清理进程
-                cleanup_child_process(&mut child).await;
-                Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::IoError(format!("Process wait error: {e}")),
-                )))
-            }
-            Err(_) => {
-                // 超时 — 显式 kill + wait 确保进程完全终止并被收割
-                cleanup_child_process(&mut child).await;
-                let duration = start.elapsed();
-                Ok(ExecutionResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: format!("Process timed out after {}s", timeout.as_secs()),
-                    duration,
-                    sandbox_type: sandbox_type.to_string(),
-                    timed_out: true,
-                })
-            }
-        }
+        let max_output_bytes = self.config.max_output_bytes;
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        tokio::spawn(async move {
+            run_streaming_child(
+                &mut child,
+                stdout_pipe,
+                stderr_pipe,
+                tx,
+                timeout,
+                max_output_bytes,
+                sandbox_type,
+            )
+            .await;
+        });
+        Ok(Box::pin(futures::stream::unfold(
+            rx,
+            |mut receiver| async move { receiver.recv().await.map(|event| (event, receiver)) },
+        )))
     }
 }
 
@@ -594,6 +597,8 @@ async fn cleanup_child_process(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         if let Err(e) = std::process::Command::new("kill")
             .args(["-KILL", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
         {
             tracing::warn!("Failed to send SIGKILL to process group {pid}: {e}");
@@ -604,6 +609,303 @@ async fn cleanup_child_process(child: &mut tokio::process::Child) {
         tracing::warn!("Failed to kill child process: {e}");
     }
     let _ = child.wait().await;
+}
+
+async fn run_streaming_child(
+    child: &mut tokio::process::Child,
+    mut stdout: Option<tokio::process::ChildStdout>,
+    mut stderr: Option<tokio::process::ChildStderr>,
+    tx: mpsc::Sender<SandboxStreamEvent>,
+    timeout: std::time::Duration,
+    max_output_bytes: usize,
+    sandbox_type: &'static str,
+) {
+    let start = Instant::now();
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let mut stdout_buffer = [0_u8; STREAM_CHUNK_BYTES];
+    let mut stderr_buffer = [0_u8; STREAM_CHUNK_BYTES];
+    let mut stdout_decoder = IncrementalUtf8Decoder::default();
+    let mut stderr_decoder = IncrementalUtf8Decoder::default();
+    let mut retained_stdout = RetainedPipeOutput::new();
+    let mut retained_stderr = RetainedPipeOutput::new();
+    let mut status = None;
+
+    loop {
+        if stdout.is_none() && stderr.is_none() && status.is_some() {
+            break;
+        }
+        tokio::select! {
+            _ = tx.closed() => {
+                cleanup_child_process(child).await;
+                return;
+            }
+            _ = &mut deadline => {
+                cleanup_child_process(child).await;
+                let result = local_execution_result(
+                    -1,
+                    retained_stdout,
+                    retained_stderr,
+                    start.elapsed(),
+                    sandbox_type,
+                    true,
+                    Some(format!("Process timed out after {}s", timeout.as_secs())),
+                );
+                let _ = tx.send(SandboxStreamEvent::Complete(result)).await;
+                return;
+            }
+            read = async {
+                match stdout.as_mut() {
+                    Some(pipe) => pipe.read(&mut stdout_buffer).await,
+                    None => Ok(0),
+                }
+            }, if stdout.is_some() => {
+                match read {
+                    Ok(0) => {
+                        stdout = None;
+                        if let Some(chunk) = stdout_decoder.finish()
+                            && send_sandbox_output(&tx, SandboxOutputChannel::Stdout, chunk).await.is_err()
+                        {
+                            cleanup_child_process(child).await;
+                            return;
+                        }
+                    }
+                    Ok(count) => {
+                        let bytes = stdout_buffer.get(..count).unwrap_or_default();
+                        let retained = retained_stdout
+                            .bytes
+                            .len()
+                            .saturating_add(retained_stderr.bytes.len());
+                        retained_stdout.push(bytes, max_output_bytes.saturating_sub(retained));
+                        for chunk in stdout_decoder.push(bytes) {
+                            if send_sandbox_output(&tx, SandboxOutputChannel::Stdout, chunk).await.is_err() {
+                                cleanup_child_process(child).await;
+                                return;
+                            }
+                        }
+                    }
+                    Err(_) => stdout = None,
+                }
+            }
+            read = async {
+                match stderr.as_mut() {
+                    Some(pipe) => pipe.read(&mut stderr_buffer).await,
+                    None => Ok(0),
+                }
+            }, if stderr.is_some() => {
+                match read {
+                    Ok(0) => {
+                        stderr = None;
+                        if let Some(chunk) = stderr_decoder.finish()
+                            && send_sandbox_output(&tx, SandboxOutputChannel::Stderr, chunk).await.is_err()
+                        {
+                            cleanup_child_process(child).await;
+                            return;
+                        }
+                    }
+                    Ok(count) => {
+                        let bytes = stderr_buffer.get(..count).unwrap_or_default();
+                        let retained = retained_stdout
+                            .bytes
+                            .len()
+                            .saturating_add(retained_stderr.bytes.len());
+                        retained_stderr.push(bytes, max_output_bytes.saturating_sub(retained));
+                        for chunk in stderr_decoder.push(bytes) {
+                            if send_sandbox_output(&tx, SandboxOutputChannel::Stderr, chunk).await.is_err() {
+                                cleanup_child_process(child).await;
+                                return;
+                            }
+                        }
+                    }
+                    Err(_) => stderr = None,
+                }
+            }
+            waited = child.wait(), if status.is_none() => {
+                match waited {
+                    Ok(exit_status) => status = Some(exit_status),
+                    Err(error) => {
+                        cleanup_child_process(child).await;
+                        let result = local_execution_result(
+                            -1,
+                            retained_stdout,
+                            retained_stderr,
+                            start.elapsed(),
+                            sandbox_type,
+                            false,
+                            Some(format!("Process wait error: {error}")),
+                        );
+                        let _ = tx.send(SandboxStreamEvent::Complete(result)).await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    let exit_code = status
+        .as_ref()
+        .and_then(std::process::ExitStatus::code)
+        .unwrap_or(-1);
+    let termination_message = status
+        .as_ref()
+        .filter(|status| status.code().is_none())
+        .map(platform_termination_message);
+    let result = local_execution_result(
+        exit_code,
+        retained_stdout,
+        retained_stderr,
+        start.elapsed(),
+        sandbox_type,
+        false,
+        termination_message,
+    );
+    let _ = tx.send(SandboxStreamEvent::Complete(result)).await;
+}
+
+async fn send_sandbox_output(
+    tx: &mpsc::Sender<SandboxStreamEvent>,
+    channel: SandboxOutputChannel,
+    text: String,
+) -> std::result::Result<(), ()> {
+    for chunk in split_stream_chunks(text) {
+        tx.send(SandboxStreamEvent::Output { channel, chunk })
+            .await
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn split_stream_chunks(text: String) -> Vec<String> {
+    if text.len() <= STREAM_CHUNK_BYTES {
+        return vec![text];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for character in text.chars() {
+        if current.len().saturating_add(character.len_utf8()) > STREAM_CHUNK_BYTES
+            && !current.is_empty()
+        {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(character);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+struct RetainedPipeOutput {
+    bytes: Vec<u8>,
+    total_bytes: u64,
+    truncated: bool,
+}
+
+impl RetainedPipeOutput {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            total_bytes: 0,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], remaining_capacity: usize) {
+        self.total_bytes = self
+            .total_bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let retain = remaining_capacity.min(bytes.len());
+        if let Some(prefix) = bytes.get(..retain) {
+            self.bytes.extend_from_slice(prefix);
+        }
+        self.truncated |= retain < bytes.len();
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).to_string()
+    }
+}
+
+#[derive(Default)]
+struct IncrementalUtf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl IncrementalUtf8Decoder {
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(bytes);
+        let mut output = String::new();
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(valid) => {
+                    output.push_str(valid);
+                    self.pending.clear();
+                    break;
+                }
+                Err(error) => {
+                    let valid_len = error.valid_up_to();
+                    if let Some(valid_bytes) = self.pending.get(..valid_len)
+                        && let Ok(valid) = std::str::from_utf8(valid_bytes)
+                    {
+                        output.push_str(valid);
+                    }
+                    match error.error_len() {
+                        Some(invalid_len) => {
+                            output.push('\u{FFFD}');
+                            let consumed = valid_len.saturating_add(invalid_len);
+                            self.pending.drain(..consumed.min(self.pending.len()));
+                        }
+                        None => {
+                            self.pending.drain(..valid_len.min(self.pending.len()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if output.is_empty() {
+            Vec::new()
+        } else {
+            split_stream_chunks(output)
+        }
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let output = String::from_utf8_lossy(&self.pending).to_string();
+        self.pending.clear();
+        Some(output)
+    }
+}
+
+fn local_execution_result(
+    exit_code: i32,
+    stdout: RetainedPipeOutput,
+    stderr: RetainedPipeOutput,
+    duration: std::time::Duration,
+    sandbox_type: &str,
+    timed_out: bool,
+    fallback_stderr: Option<String>,
+) -> ExecutionResult {
+    let mut stderr_text = stderr.text();
+    if stderr_text.is_empty()
+        && let Some(message) = fallback_stderr
+    {
+        stderr_text = message;
+    }
+    ExecutionResult {
+        exit_code,
+        stdout: stdout.text(),
+        stderr: stderr_text,
+        duration,
+        sandbox_type: sandbox_type.to_string(),
+        timed_out,
+        output_truncated: stdout.truncated || stderr.truncated,
+        stdout_bytes: stdout.total_bytes,
+        stderr_bytes: stderr.total_bytes,
+    }
 }
 
 #[cfg(unix)]
@@ -619,28 +921,6 @@ fn platform_termination_message(status: &std::process::ExitStatus) -> String {
 #[cfg(not(unix))]
 fn platform_termination_message(_status: &std::process::ExitStatus) -> String {
     "Process terminated without an exit code".to_string()
-}
-
-/// 从管道句柄中读取全部输出，并截断超过 max_bytes 的部分。
-async fn read_pipe_output<R: AsyncReadExt + Unpin>(
-    mut pipe: Option<R>,
-    max_bytes: usize,
-) -> String {
-    let Some(ref mut reader) = pipe else {
-        return String::new();
-    };
-    let cap = max_bytes.min(4096);
-    let mut buf = Vec::with_capacity(cap);
-    if reader.read_to_end(&mut buf).await.is_err() {
-        return String::new();
-    }
-    let mut s = String::from_utf8_lossy(&buf).to_string();
-    if s.len() > max_bytes {
-        let safe_end = s.floor_char_boundary(max_bytes);
-        s.truncate(safe_end);
-        s.push_str("\n... [output truncated]");
-    }
-    s
 }
 
 #[cfg(target_os = "linux")]
@@ -733,6 +1013,30 @@ impl SandboxExecutor for LocalSandbox {
         })
     }
 
+    fn execute_stream<'a>(
+        &'a self,
+        command: SandboxCommand,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>> {
+        Box::pin(async move {
+            let timeout = command.timeout;
+            let cmd = match &command.kind {
+                CommandKind::Shell(cmd) => self.build_shell_command(cmd, &command),
+                CommandKind::Program { program, args } => {
+                    self.build_program_command(program, args, &command)
+                }
+                CommandKind::Code { language, code } => self
+                    .build_code_command(language, code, &command)
+                    .map_err(|error| echo_core::error::ReactError::Sandbox(Box::new(error)))?,
+            };
+            self.run_command_stream(cmd, timeout, command.stdin.as_deref(), self.sandbox_type())
+                .await
+        })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     fn execute_with_limits(
         &self,
         command: SandboxCommand,
@@ -797,6 +1101,8 @@ fn merge_limits_into_config(mut config: LocalConfig, limits: &ResourceLimits) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::sandbox::{SandboxOutputChannel, SandboxStreamEvent};
+    use futures::StreamExt;
 
     #[tokio::test]
     async fn test_local_sandbox_echo() {
@@ -810,6 +1116,90 @@ mod tests {
         assert!(result.success());
         assert_eq!(result.stdout.trim(), "hello");
         assert_eq!(result.sandbox_type, "local");
+    }
+
+    #[test]
+    fn local_sandbox_declares_live_streaming_support() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+        assert!(sandbox.supports_streaming());
+    }
+
+    #[tokio::test]
+    async fn local_sandbox_streams_before_command_completes() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+        let command = SandboxCommand::shell("printf first; sleep 1; printf second");
+        let started = Instant::now();
+        let mut stream = sandbox.execute_stream(command).await.unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_millis(700), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(900));
+        assert!(matches!(
+            first,
+            SandboxStreamEvent::Output {
+                channel: SandboxOutputChannel::Stdout,
+                ref chunk,
+            } if chunk == "first"
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_sandbox_stream_decoder_preserves_split_unicode() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+        let command = SandboxCommand::shell(
+            "printf '\\342'; sleep 0.05; printf '\\202'; sleep 0.05; printf '\\254'",
+        );
+        let mut stream = sandbox.execute_stream(command).await.unwrap();
+        let mut streamed = String::new();
+        let mut complete = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                SandboxStreamEvent::Output {
+                    channel: SandboxOutputChannel::Stdout,
+                    chunk,
+                } => streamed.push_str(&chunk),
+                SandboxStreamEvent::Complete(result) => complete = Some(result),
+                _ => {}
+            }
+        }
+
+        assert_eq!(streamed, "€");
+        assert_eq!(complete.unwrap().stdout, "€");
+    }
+
+    #[tokio::test]
+    async fn local_sandbox_stream_caps_retained_output_but_reports_total_bytes() {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            max_output_bytes: 4,
+            ..Default::default()
+        });
+        let mut stream = sandbox
+            .execute_stream(SandboxCommand::shell("printf abcdef"))
+            .await
+            .unwrap();
+        let mut complete = None;
+        while let Some(event) = stream.next().await {
+            if let SandboxStreamEvent::Complete(result) = event {
+                complete = Some(result);
+            }
+        }
+
+        let result = complete.unwrap();
+        assert_eq!(result.stdout, "abcd");
+        assert!(result.output_truncated);
+        assert_eq!(result.stdout_bytes, 6);
     }
 
     #[tokio::test]

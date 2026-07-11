@@ -113,6 +113,8 @@ pub enum AgentEvent {
     // ── Tool Invocation ──────────────────────────────────────────────────────────
     /// Preparing to invoke a tool
     ToolCall {
+        /// Stable tool-call identity (model tool_call_id, or generated UUID).
+        call_id: String,
         /// Tool name
         name: String,
         /// Tool arguments (JSON format)
@@ -120,6 +122,8 @@ pub enum AgentEvent {
     },
     /// Tool execution completed
     ToolResult {
+        /// Stable tool-call identity matching the preceding [`Self::ToolCall`].
+        call_id: String,
         /// Tool name
         name: String,
         /// Tool execution result (string format)
@@ -127,16 +131,21 @@ pub enum AgentEvent {
     },
     /// Tool execution error
     ToolError {
+        /// Stable tool-call identity matching the preceding [`Self::ToolCall`].
+        call_id: String,
         /// Tool name
         name: String,
         /// Error message
         error: String,
     },
-    /// Streaming tool progress event
+    /// Streaming tool progress / output event (not a terminal lifecycle event).
     ToolStream {
+        /// Stable tool-call identity matching the preceding [`Self::ToolCall`].
+        call_id: String,
         /// Tool name
         name: String,
-        /// Stream event payload
+        /// Stream event payload (`Progress` / `Output`; `Complete` is mapped to
+        /// [`Self::ToolResult`] / [`Self::ToolError`] by the ReAct runner).
         event: crate::tools::ToolStreamEvent,
     },
     /// Emitted before a batch of tools starts executing.

@@ -249,7 +249,7 @@ impl A2AServer {
                                     is_final: false,
                                 });
                             }
-                            Ok(AgentEvent::ToolResult { name, output }) => {
+                            Ok(AgentEvent::ToolResult { name, output, .. }) => {
                                 yield A2AStreamEvent::ArtifactUpdate(TaskArtifactUpdateEvent {
                                     task_id: task_id.clone(),
                                     artifact: A2AArtifact {

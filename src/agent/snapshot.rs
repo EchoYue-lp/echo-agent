@@ -898,9 +898,13 @@ impl AgentRunSnapshot {
     /// between streaming and non-streaming paths.
     pub(crate) fn execute_tool_with_policy<'a>(
         &'a self,
+        call_id: String,
         tool_name: &'a str,
         params: &'a crate::tools::ToolParameters,
         input: &'a serde_json::Value,
+        stream_tx: Option<
+            tokio::sync::mpsc::Sender<(String, String, crate::tools::ToolStreamEvent)>,
+        >,
     ) -> futures::future::BoxFuture<'a, std::result::Result<String, crate::error::ReactError>> {
         Box::pin(async move {
             // Use the unified pipeline for consistent behavior
@@ -916,7 +920,7 @@ impl AgentRunSnapshot {
                 });
 
             let mut ctx = crate::agent::react::run::pipeline::ToolExecutionContext {
-                call_id: String::new(),
+                call_id,
                 tool_name: tool_name.to_string(),
                 params: params.clone(),
                 input: input.clone(),
@@ -927,6 +931,7 @@ impl AgentRunSnapshot {
                 block_reason: None,
                 duration_ms: 0,
                 plan_mode: self.config.plan_mode,
+                stream_tx,
             };
 
             match pipeline.run(&mut ctx, self).await {

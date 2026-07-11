@@ -3,15 +3,30 @@
 //! Security policy: only allows safe commands in the whitelist, uses direct argv execution (rejects shell injection)
 
 use echo_core::error::{Result, ToolError};
-use echo_core::sandbox::{SandboxCommand, SandboxExecutor};
+use echo_core::sandbox::{
+    SandboxCommand, SandboxExecutor, SandboxOutputChannel, SandboxStreamEvent,
+};
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
+use echo_core::tools::{
+    Tool, ToolContext, ToolOutputChannel, ToolParameters, ToolResult, ToolResultKind,
+    ToolRiskLevel, ToolStreamEvent,
+};
 use futures::future::BoxFuture;
+use futures::{Stream, StreamExt};
 use serde_json::Value;
 use shlex::split as shlex_split;
 use std::collections::HashSet;
+use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::mpsc;
+
+const STREAM_CHUNK_BYTES: usize = 16 * 1024;
+const MAX_RETAINED_OUTPUT_BYTES: usize = 1024 * 1024;
+const STREAM_CHANNEL_CAPACITY: usize = 32;
 
 static ALLOWED_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
@@ -163,7 +178,10 @@ impl ShellTool {
 
     /// Set the sandbox executor; commands will be executed through the sandbox
     pub fn with_sandbox(self, sandbox: Arc<dyn SandboxExecutor>) -> Self {
-        *self.sandbox.lock().expect("sandbox mutex poisoned") = Some(sandbox);
+        *self
+            .sandbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sandbox);
         self
     }
 
@@ -187,7 +205,7 @@ impl ShellTool {
         let has_sandbox = self
             .sandbox
             .lock()
-            .expect("sandbox mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_some();
 
         // Check for shell metacharacters (prevent injection)
@@ -365,7 +383,10 @@ impl Tool for ShellTool {
 
     /// P2: receive sandbox at agent-setup time (via ToolManager::apply_sandbox).
     fn set_sandbox(&self, sandbox: Arc<dyn SandboxExecutor>) -> bool {
-        *self.sandbox.lock().expect("sandbox mutex poisoned") = Some(sandbox);
+        *self
+            .sandbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sandbox);
         true
     }
 
@@ -389,11 +410,33 @@ impl Tool for ShellTool {
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
-        ctx: &'a echo_core::tools::ToolContext,
+        ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
-            // Read sandbox once (interior-mutable; clone the Arc out of the lock).
-            let sandbox = self.sandbox.lock().expect("sandbox mutex poisoned").clone();
+            let mut stream = self.execute_stream_with_context(parameters, ctx).await?;
+            while let Some(event) = stream.next().await {
+                if let ToolStreamEvent::Complete(result) = event {
+                    return Ok(result);
+                }
+            }
+            Ok(ToolResult::error(
+                "Shell execution stream ended without a completion event",
+            ))
+        })
+    }
+
+    fn execute_stream_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>> {
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            let sandbox = self
+                .sandbox
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
             let command = parameters
                 .get("command")
                 .and_then(|v| v.as_str())
@@ -409,142 +452,558 @@ impl Tool for ShellTool {
             match self.check_command_safety(command) {
                 CommandSafety::Safe => {}
                 CommandSafety::RequiresApproval(reason) => {
-                    return Ok(ToolResult::error(format!(
+                    return Ok(single_complete_stream(ToolResult::error(format!(
                         "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
                         reason, command
-                    )));
+                    ))));
                 }
                 CommandSafety::Dangerous(reason) => {
-                    return Ok(ToolResult::error(format!(
+                    return Ok(single_complete_stream(ToolResult::error(format!(
                         "🚫 Safety rejection: {}\nCommand: {}\n\nTo perform this operation, please execute it manually in the terminal.",
                         reason, command
-                    )));
+                    ))));
                 }
             }
 
-            // Parse command into argv (program name + argument list)
             let has_metacharacters = self.has_shell_metacharacters(command);
-            let has_sandbox = sandbox.is_some();
+            let working_dir = ctx
+                .working_dir
+                .clone()
+                .or_else(|| std::env::current_dir().ok());
+            let timeout = Duration::from_secs(timeout_secs);
 
-            if has_sandbox && has_metacharacters {
-                // Use sh -c through sandbox for commands with shell syntax
-                let sandbox = sandbox.as_ref().unwrap();
-                let mut sandbox_cmd =
-                    SandboxCommand::program("sh", vec!["-c".to_string(), command.to_string()]);
-                if let Some(dir) = &ctx.working_dir {
+            if let Some(sandbox) = sandbox {
+                let mut sandbox_cmd = if has_metacharacters {
+                    SandboxCommand::program("sh", vec!["-c".to_string(), command.to_string()])
+                } else {
+                    let parts = parse_command(self.name(), command)?;
+                    let Some(program) = parts.first() else {
+                        return Err(ToolError::ExecutionFailed {
+                            tool: self.name().to_string(),
+                            message: "Command is empty".to_string(),
+                        }
+                        .into());
+                    };
+                    SandboxCommand::program(program, parts.get(1..).unwrap_or_default().to_vec())
+                };
+                sandbox_cmd.timeout = timeout;
+                if let Some(dir) = &working_dir {
                     sandbox_cmd = sandbox_cmd.with_working_dir(dir);
                 }
-
-                // Wrap with timeout
-                let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
-                match tokio::time::timeout(timeout_duration, sandbox.execute(sandbox_cmd)).await {
-                    Ok(Ok(result)) => {
-                        if result.success() {
-                            return Ok(ToolResult::success(result.stdout));
-                        } else {
-                            return Ok(ToolResult::error(format!(
-                                "Command execution failed, exit code: {}\nstdout: {}\nstderr: {}",
-                                result.exit_code, result.stdout, result.stderr
-                            )));
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        return Ok(ToolResult::error(format!(
-                            "Sandbox execution failed: {}",
-                            e
-                        )));
-                    }
-                    Err(_) => {
-                        return Ok(ToolResult::error(format!(
-                            "⏱️ Command timeout after {} seconds\nCommand: {}",
-                            timeout_secs, command
-                        )));
-                    }
-                }
-            }
-
-            let parts = shlex_split(command).ok_or_else(|| ToolError::ExecutionFailed {
-                tool: self.name().to_string(),
-                message:
-                    "Command parsing failed, possibly unclosed quotes or malformed argument format"
-                        .to_string(),
-            })?;
-            let program = parts[0].as_str();
-            let args = &parts[1..];
-
-            // If sandbox is configured, execute via sandbox (using program mode to avoid shell injection)
-            if let Some(sandbox) = &sandbox {
-                let mut sandbox_cmd = SandboxCommand::program(program, args.to_vec());
-                if let Some(dir) = &ctx.working_dir {
-                    sandbox_cmd = sandbox_cmd.with_working_dir(dir);
-                }
-
-                // Wrap with timeout
-                let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
-                match tokio::time::timeout(timeout_duration, sandbox.execute(sandbox_cmd)).await {
-                    Ok(Ok(result)) => {
-                        if result.success() {
-                            Ok(ToolResult::success(result.stdout))
-                        } else {
-                            Ok(ToolResult::error(format!(
-                                "Command execution failed, exit code: {}\nstdout: {}\nstderr: {}",
-                                result.exit_code, result.stdout, result.stderr
-                            )))
-                        }
-                    }
-                    Ok(Err(e)) => Ok(ToolResult::error(format!(
-                        "Sandbox execution failed: {}",
-                        e
-                    ))),
-                    Err(_) => Ok(ToolResult::error(format!(
-                        "⏱️ Command timeout after {} seconds\nCommand: {}",
-                        timeout_secs, command
-                    ))),
-                }
+                Ok(start_sandbox_stream(sandbox, sandbox_cmd, working_dir))
             } else {
-                // Direct execution (no sandbox, using direct argv mode to reject sh -c injection)
-                // Wrap with timeout. `kill_on_drop(true)` ensures the child is terminated
-                // if this future is dropped mid-execution (e.g. user cancels the run with
-                // Ctrl-C) — without it the process would be orphaned and keep running.
-                let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
-                let mut command_builder = Command::new(program);
-                command_builder.args(args).kill_on_drop(true);
-                if let Some(dir) = &ctx.working_dir {
-                    command_builder.current_dir(dir);
-                }
-                match tokio::time::timeout(timeout_duration, command_builder.output()).await {
-                    Ok(Ok(output)) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                        if output.status.success() {
-                            Ok(ToolResult::success(stdout))
-                        } else {
-                            Ok(ToolResult::error(format!(
-                                "Command execution failed, exit code: {:?}\nstdout: {}\nstderr: {}",
-                                output.status.code(),
-                                stdout,
-                                stderr
-                            )))
-                        }
+                let parts = parse_command(self.name(), command)?;
+                let Some(program) = parts.first() else {
+                    return Err(ToolError::ExecutionFailed {
+                        tool: self.name().to_string(),
+                        message: "Command is empty".to_string(),
                     }
-                    Ok(Err(e)) => Ok(ToolResult::error(format!(
-                        "Unable to execute command: {}",
-                        e
-                    ))),
-                    Err(_) => Ok(ToolResult::error(format!(
-                        "⏱️ Command timeout after {} seconds\nCommand: {}",
-                        timeout_secs, command
-                    ))),
-                }
+                    .into());
+                };
+                start_direct_stream(
+                    program,
+                    parts.get(1..).unwrap_or_default(),
+                    working_dir,
+                    timeout,
+                )
             }
         })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+}
+
+fn parse_command(tool_name: &str, command: &str) -> Result<Vec<String>> {
+    shlex_split(command).ok_or_else(|| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_string(),
+            message:
+                "Command parsing failed, possibly unclosed quotes or malformed argument format"
+                    .to_string(),
+        }
+        .into()
+    })
+}
+
+fn single_complete_stream<'a>(
+    result: ToolResult,
+) -> Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> {
+    Box::pin(futures::stream::once(async move {
+        ToolStreamEvent::Complete(result)
+    }))
+}
+
+fn receiver_stream<'a>(
+    receiver: mpsc::Receiver<ToolStreamEvent>,
+) -> Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> {
+    Box::pin(futures::stream::unfold(
+        receiver,
+        |mut receiver| async move { receiver.recv().await.map(|event| (event, receiver)) },
+    ))
+}
+
+fn start_direct_stream<'a>(
+    program: &str,
+    args: &[String],
+    working_dir: Option<std::path::PathBuf>,
+    timeout: Duration,
+) -> Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    if let Some(dir) = &working_dir {
+        command.current_dir(dir);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "shell".to_string(),
+            message: format!("Unable to execute command: {error}"),
+        })?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        run_direct_child(&mut child, stdout, stderr, tx, working_dir, timeout).await;
+    });
+    Ok(receiver_stream(rx))
+}
+
+fn start_sandbox_stream<'a>(
+    sandbox: Arc<dyn SandboxExecutor>,
+    command: SandboxCommand,
+    working_dir: Option<std::path::PathBuf>,
+) -> Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> {
+    let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        let stream = tokio::select! {
+            _ = tx.closed() => return,
+            stream = sandbox.execute_stream(command) => stream,
+        };
+        let Ok(mut stream) = stream else {
+            let message = stream
+                .err()
+                .map(|error| format!("Sandbox execution failed: {error}"))
+                .unwrap_or_else(|| "Sandbox execution failed".to_string());
+            let result = ToolResult::error(message)
+                .with_meta("duration_ms", "0")
+                .with_meta("exit_code", "-1")
+                .with_meta(
+                    "working_dir",
+                    working_dir
+                        .as_ref()
+                        .map(|dir| dir.display().to_string())
+                        .unwrap_or_default(),
+                )
+                .with_meta("output_truncated", "false")
+                .with_meta("stdout_bytes", "0")
+                .with_meta("stderr_bytes", "0");
+            let _ = tx.send(ToolStreamEvent::Complete(result)).await;
+            return;
+        };
+
+        loop {
+            let event = tokio::select! {
+                _ = tx.closed() => return,
+                event = stream.next() => event,
+            };
+            let Some(event) = event else {
+                return;
+            };
+            let mapped = match event {
+                SandboxStreamEvent::Output { channel, chunk } => ToolStreamEvent::Output {
+                    channel: match channel {
+                        SandboxOutputChannel::Stdout => ToolOutputChannel::Stdout,
+                        SandboxOutputChannel::Stderr => ToolOutputChannel::Stderr,
+                    },
+                    chunk,
+                },
+                SandboxStreamEvent::Complete(result) => ToolStreamEvent::Complete(
+                    tool_result_from_execution(result, working_dir.as_ref()),
+                ),
+            };
+            if tx.send(mapped).await.is_err() {
+                return;
+            }
+        }
+    });
+    receiver_stream(rx)
+}
+
+async fn run_direct_child(
+    child: &mut tokio::process::Child,
+    mut stdout: Option<tokio::process::ChildStdout>,
+    mut stderr: Option<tokio::process::ChildStderr>,
+    tx: mpsc::Sender<ToolStreamEvent>,
+    working_dir: Option<std::path::PathBuf>,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let mut stdout_buffer = [0_u8; STREAM_CHUNK_BYTES];
+    let mut stderr_buffer = [0_u8; STREAM_CHUNK_BYTES];
+    let mut stdout_decoder = IncrementalUtf8Decoder::default();
+    let mut stderr_decoder = IncrementalUtf8Decoder::default();
+    let mut retained_stdout = RetainedOutput::default();
+    let mut retained_stderr = RetainedOutput::default();
+    let mut status = None;
+
+    loop {
+        if stdout.is_none() && stderr.is_none() && status.is_some() {
+            break;
+        }
+
+        tokio::select! {
+            _ = tx.closed() => {
+                cleanup_direct_child(child).await;
+                return;
+            }
+            _ = &mut deadline => {
+                cleanup_direct_child(child).await;
+                let result = build_tool_result(
+                    -1,
+                    retained_stdout,
+                    retained_stderr,
+                    start.elapsed(),
+                    working_dir.as_ref(),
+                    true,
+                );
+                let _ = tx.send(ToolStreamEvent::Complete(result)).await;
+                return;
+            }
+            read = async {
+                match stdout.as_mut() {
+                    Some(pipe) => pipe.read(&mut stdout_buffer).await,
+                    None => Ok(0),
+                }
+            }, if stdout.is_some() => {
+                match read {
+                    Ok(0) => {
+                        stdout = None;
+                        if let Some(chunk) = stdout_decoder.finish()
+                            && send_output(&tx, ToolOutputChannel::Stdout, chunk).await.is_err()
+                        {
+                            cleanup_direct_child(child).await;
+                            return;
+                        }
+                    }
+                    Ok(count) => {
+                        let bytes = stdout_buffer.get(..count).unwrap_or_default();
+                        let retained = retained_stdout
+                            .bytes
+                            .len()
+                            .saturating_add(retained_stderr.bytes.len());
+                        retained_stdout.push(bytes, MAX_RETAINED_OUTPUT_BYTES.saturating_sub(retained));
+                        for chunk in stdout_decoder.push(bytes) {
+                            if send_output(&tx, ToolOutputChannel::Stdout, chunk).await.is_err() {
+                                cleanup_direct_child(child).await;
+                                return;
+                            }
+                        }
+                    }
+                    Err(_) => stdout = None,
+                }
+            }
+            read = async {
+                match stderr.as_mut() {
+                    Some(pipe) => pipe.read(&mut stderr_buffer).await,
+                    None => Ok(0),
+                }
+            }, if stderr.is_some() => {
+                match read {
+                    Ok(0) => {
+                        stderr = None;
+                        if let Some(chunk) = stderr_decoder.finish()
+                            && send_output(&tx, ToolOutputChannel::Stderr, chunk).await.is_err()
+                        {
+                            cleanup_direct_child(child).await;
+                            return;
+                        }
+                    }
+                    Ok(count) => {
+                        let bytes = stderr_buffer.get(..count).unwrap_or_default();
+                        let retained = retained_stdout
+                            .bytes
+                            .len()
+                            .saturating_add(retained_stderr.bytes.len());
+                        retained_stderr.push(bytes, MAX_RETAINED_OUTPUT_BYTES.saturating_sub(retained));
+                        for chunk in stderr_decoder.push(bytes) {
+                            if send_output(&tx, ToolOutputChannel::Stderr, chunk).await.is_err() {
+                                cleanup_direct_child(child).await;
+                                return;
+                            }
+                        }
+                    }
+                    Err(_) => stderr = None,
+                }
+            }
+            waited = child.wait(), if status.is_none() => {
+                match waited {
+                    Ok(exit_status) => status = Some(exit_status),
+                    Err(_) => {
+                        cleanup_direct_child(child).await;
+                        status = None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
+    let result = build_tool_result(
+        exit_code,
+        retained_stdout,
+        retained_stderr,
+        start.elapsed(),
+        working_dir.as_ref(),
+        false,
+    );
+    let _ = tx.send(ToolStreamEvent::Complete(result)).await;
+}
+
+async fn send_output(
+    tx: &mpsc::Sender<ToolStreamEvent>,
+    channel: ToolOutputChannel,
+    text: String,
+) -> std::result::Result<(), ()> {
+    for chunk in split_stream_chunks(text) {
+        tx.send(ToolStreamEvent::Output { channel, chunk })
+            .await
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn split_stream_chunks(text: String) -> Vec<String> {
+    if text.len() <= STREAM_CHUNK_BYTES {
+        return vec![text];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for character in text.chars() {
+        if current.len().saturating_add(character.len_utf8()) > STREAM_CHUNK_BYTES
+            && !current.is_empty()
+        {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(character);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+async fn cleanup_direct_child(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+#[derive(Default)]
+struct RetainedOutput {
+    bytes: Vec<u8>,
+    total_bytes: u64,
+    truncated: bool,
+}
+
+impl RetainedOutput {
+    fn push(&mut self, bytes: &[u8], remaining_capacity: usize) {
+        self.total_bytes = self
+            .total_bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let retain = remaining_capacity.min(bytes.len());
+        if let Some(prefix) = bytes.get(..retain) {
+            self.bytes.extend_from_slice(prefix);
+        }
+        self.truncated |= retain < bytes.len();
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).to_string()
+    }
+}
+
+#[derive(Default)]
+struct IncrementalUtf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl IncrementalUtf8Decoder {
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(bytes);
+        let mut output = String::new();
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(valid) => {
+                    output.push_str(valid);
+                    self.pending.clear();
+                    break;
+                }
+                Err(error) => {
+                    let valid_len = error.valid_up_to();
+                    if let Some(valid_bytes) = self.pending.get(..valid_len)
+                        && let Ok(valid) = std::str::from_utf8(valid_bytes)
+                    {
+                        output.push_str(valid);
+                    }
+                    match error.error_len() {
+                        Some(invalid_len) => {
+                            output.push('\u{FFFD}');
+                            let consumed = valid_len.saturating_add(invalid_len);
+                            self.pending.drain(..consumed.min(self.pending.len()));
+                        }
+                        None => {
+                            self.pending.drain(..valid_len.min(self.pending.len()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if output.is_empty() {
+            Vec::new()
+        } else {
+            split_stream_chunks(output)
+        }
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let output = String::from_utf8_lossy(&self.pending).to_string();
+        self.pending.clear();
+        Some(output)
+    }
+}
+
+fn build_tool_result(
+    exit_code: i32,
+    stdout: RetainedOutput,
+    stderr: RetainedOutput,
+    duration: Duration,
+    working_dir: Option<&std::path::PathBuf>,
+    timed_out: bool,
+) -> ToolResult {
+    let stdout_text = stdout.text();
+    let stderr_text = stderr.text();
+    let truncated = stdout.truncated || stderr.truncated;
+    let mut result = if exit_code == 0 && !timed_out {
+        ToolResult::success_with_kind(
+            ToolResultKind::CommandOutput {
+                exit_code: Some(exit_code),
+            },
+            stdout_text,
+        )
+    } else {
+        let final_output = combined_process_output(&stdout_text, &stderr_text);
+        let message = if timed_out {
+            format!("Command timeout\nstdout: {stdout_text}\nstderr: {stderr_text}")
+        } else {
+            format!(
+                "Command execution failed, exit code: {exit_code}\nstdout: {stdout_text}\nstderr: {stderr_text}"
+            )
+        };
+        ToolResult::error(message).with_output(final_output)
+    };
+    result.kind = ToolResultKind::CommandOutput {
+        exit_code: Some(exit_code),
+    };
+    result.truncated = truncated;
+    result
+        .with_meta("duration_ms", duration.as_millis().to_string())
+        .with_meta("exit_code", exit_code.to_string())
+        .with_meta(
+            "working_dir",
+            working_dir
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_default(),
+        )
+        .with_meta("output_truncated", truncated.to_string())
+        .with_meta("stdout_bytes", stdout.total_bytes.to_string())
+        .with_meta("stderr_bytes", stderr.total_bytes.to_string())
+}
+
+fn tool_result_from_execution(
+    result: echo_core::sandbox::ExecutionResult,
+    working_dir: Option<&std::path::PathBuf>,
+) -> ToolResult {
+    let stdout_bytes = if result.stdout_bytes == 0 {
+        u64::try_from(result.stdout.len()).unwrap_or(u64::MAX)
+    } else {
+        result.stdout_bytes
+    };
+    let stderr_bytes = if result.stderr_bytes == 0 {
+        u64::try_from(result.stderr.len()).unwrap_or(u64::MAX)
+    } else {
+        result.stderr_bytes
+    };
+    let mut tool_result = if result.success() {
+        ToolResult::success_with_kind(
+            ToolResultKind::CommandOutput {
+                exit_code: Some(result.exit_code),
+            },
+            result.stdout,
+        )
+    } else {
+        let final_output = combined_process_output(&result.stdout, &result.stderr);
+        ToolResult::error(format!(
+            "Command execution failed, exit code: {}\nstdout: {}\nstderr: {}",
+            result.exit_code, result.stdout, result.stderr
+        ))
+        .with_output(final_output)
+    };
+    tool_result.kind = ToolResultKind::CommandOutput {
+        exit_code: Some(result.exit_code),
+    };
+    tool_result.truncated = result.output_truncated;
+    tool_result
+        .with_meta("duration_ms", result.duration.as_millis().to_string())
+        .with_meta("exit_code", result.exit_code.to_string())
+        .with_meta(
+            "working_dir",
+            working_dir
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_default(),
+        )
+        .with_meta("output_truncated", result.output_truncated.to_string())
+        .with_meta("stdout_bytes", stdout_bytes.to_string())
+        .with_meta("stderr_bytes", stderr_bytes.to_string())
+}
+
+fn combined_process_output(stdout: &str, stderr: &str) -> String {
+    if stderr.is_empty() {
+        stdout.to_string()
+    } else if stdout.is_empty() {
+        stderr.to_string()
+    } else {
+        format!("{stdout}\n{stderr}")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::tools::{ToolContext, ToolOutputChannel, ToolStreamEvent};
+    use futures::StreamExt;
     use std::collections::HashMap;
 
     #[test]
@@ -777,6 +1236,242 @@ mod tests {
         let result = tool.execute(params).await.unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("rejection"));
+    }
+
+    #[test]
+    fn shell_tool_declares_live_streaming_support() {
+        assert!(ShellTool::new().supports_streaming());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_stream_emits_first_chunk_before_process_exit() {
+        let script =
+            create_test_script("live", "#!/bin/sh\nprintf first\nsleep 1\nprintf second\n");
+        let tool = ShellTool::new_permissive();
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::json!(script.display().to_string()),
+        );
+
+        let started = std::time::Instant::now();
+        let mut stream = tool
+            .execute_stream_with_context(params, &ToolContext::default())
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_millis(700), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(900));
+        assert!(matches!(
+            first,
+            ToolStreamEvent::Output {
+                channel: ToolOutputChannel::Stdout,
+                ref chunk,
+            } if chunk == "first"
+        ));
+
+        let mut complete = None;
+        while let Some(event) = stream.next().await {
+            if let ToolStreamEvent::Complete(result) = event {
+                complete = Some(result);
+            }
+        }
+        let result = complete.unwrap();
+        assert!(result.success);
+        assert_eq!(result.output, "firstsecond");
+        assert_eq!(
+            result.metadata.get("exit_code").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            result.metadata.get("output_truncated").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            result.metadata.get("stdout_bytes").map(String::as_str),
+            Some("11")
+        );
+
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_stream_failure_retains_stderr_and_exit_metadata() {
+        let script = create_test_script("failure", "#!/bin/sh\nprintf broken >&2\nexit 7\n");
+        let tool = ShellTool::new_permissive();
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::json!(script.display().to_string()),
+        );
+
+        let mut stream = tool
+            .execute_stream_with_context(params, &ToolContext::default())
+            .await
+            .unwrap();
+        let mut complete = None;
+        let mut streamed_stderr = String::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                ToolStreamEvent::Output {
+                    channel: ToolOutputChannel::Stderr,
+                    chunk,
+                } => streamed_stderr.push_str(&chunk),
+                ToolStreamEvent::Complete(result) => complete = Some(result),
+                _ => {}
+            }
+        }
+
+        let result = complete.unwrap();
+        assert!(!result.success);
+        assert_eq!(streamed_stderr, "broken");
+        assert_eq!(result.output, "broken");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("broken")
+        );
+        assert_eq!(
+            result.metadata.get("exit_code").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            result.metadata.get("stderr_bytes").map(String::as_str),
+            Some("6")
+        );
+
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_stream_preserves_unicode_split_across_pipe_reads() {
+        let script = create_test_script(
+            "unicode",
+            "#!/bin/sh\nprintf '\\342'; sleep 0.05; printf '\\202'; sleep 0.05; printf '\\254'\n",
+        );
+        let tool = ShellTool::new_permissive();
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::json!(script.display().to_string()),
+        );
+        let mut stream = tool
+            .execute_stream_with_context(params, &ToolContext::default())
+            .await
+            .unwrap();
+        let mut streamed = String::new();
+        let mut complete = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                ToolStreamEvent::Output {
+                    channel: ToolOutputChannel::Stdout,
+                    chunk,
+                } => streamed.push_str(&chunk),
+                ToolStreamEvent::Complete(result) => complete = Some(result),
+                _ => {}
+            }
+        }
+
+        assert_eq!(streamed, "€");
+        assert_eq!(complete.unwrap().output, "€");
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_stream_caps_retained_output_and_reports_total_bytes() {
+        let script = create_test_script(
+            "truncate",
+            "#!/bin/sh\nhead -c 1100000 /dev/zero | tr '\\000' x\n",
+        );
+        let tool = ShellTool::new_permissive();
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::json!(script.display().to_string()),
+        );
+        let mut stream = tool
+            .execute_stream_with_context(params, &ToolContext::default())
+            .await
+            .unwrap();
+        let mut complete = None;
+        while let Some(event) = stream.next().await {
+            if let ToolStreamEvent::Complete(result) = event {
+                complete = Some(result);
+            }
+        }
+
+        let result = complete.unwrap();
+        assert!(result.success);
+        assert!(result.truncated);
+        assert_eq!(result.output.len(), MAX_RETAINED_OUTPUT_BYTES);
+        assert_eq!(
+            result.metadata.get("output_truncated").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            result.metadata.get("stdout_bytes").map(String::as_str),
+            Some("1100000")
+        );
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_shell_stream_kills_and_reaps_child() {
+        let script = create_test_script(
+            "cancel",
+            "#!/bin/sh\necho $$ > \"$1\"\nprintf started\nsleep 30\n",
+        );
+        let pid_file = script.with_extension("pid");
+        let tool = ShellTool::new_permissive();
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::json!(format!("{} {}", script.display(), pid_file.display())),
+        );
+        let mut stream = tool
+            .execute_stream_with_context(params, &ToolContext::default())
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(first, ToolStreamEvent::Output { .. }));
+        drop(stream);
+
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        let mut reaped = false;
+        for _ in 0..20 {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !alive {
+                reaped = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(reaped, "cancelled shell child {pid} should be reaped");
+
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_file(pid_file);
     }
 
     #[tokio::test]
@@ -1032,5 +1727,21 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    fn create_test_script(label: &str, contents: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "echo-shell-stream-{label}-{}-{}",
+            std::process::id(),
+            nanoid_counter()
+        ));
+        std::fs::write(&path, contents).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
     }
 }

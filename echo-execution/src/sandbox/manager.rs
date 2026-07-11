@@ -7,13 +7,16 @@
 
 use super::{
     DockerSandbox, ExecutionResult, IsolationLevel, K8sSandbox, LocalSandbox, ResourceLimits,
-    SandboxCommand, SandboxExecutor, docker::DockerConfig, k8s::K8sConfig, local::LocalConfig,
-    policy::SandboxPolicy,
+    SandboxCommand, SandboxExecutor, SandboxStreamEvent, docker::DockerConfig, k8s::K8sConfig,
+    local::LocalConfig, policy::SandboxPolicy,
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
 use futures::future::BoxFuture;
+use futures::{Stream, StreamExt};
+use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// 沙箱管理器：统一调度三层沙箱
@@ -49,6 +52,70 @@ impl SandboxExecutor for SandboxManager {
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move { SandboxManager::execute(self, command).await })
+    }
+
+    fn execute_stream<'a>(
+        &'a self,
+        command: SandboxCommand,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>> {
+        Box::pin(async move {
+            let required = self.policy.evaluate(&command);
+            let executor = self.select_executor(required)?;
+            let actual = executor.isolation_level();
+            if actual < required && !self.allow_fallback {
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::PermissionDenied(format!(
+                        "Cannot downgrade from {required} to {actual}: no executor meets the required isolation level"
+                    )),
+                )));
+            }
+            let (tx, rx) = mpsc::channel(32);
+            tokio::spawn(async move {
+                let executor_name = executor.name().to_string();
+                let stream = tokio::select! {
+                    _ = tx.closed() => return,
+                    stream = executor.execute_stream(command) => stream,
+                };
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let message = format!("Sandbox execution failed: {error}");
+                        let stderr_bytes = u64::try_from(message.len()).unwrap_or(u64::MAX);
+                        let _ = tx
+                            .send(SandboxStreamEvent::Complete(ExecutionResult {
+                                exit_code: -1,
+                                stdout: String::new(),
+                                stderr: message,
+                                duration: std::time::Duration::ZERO,
+                                sandbox_type: executor_name,
+                                timed_out: false,
+                                output_truncated: false,
+                                stdout_bytes: 0,
+                                stderr_bytes,
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+                loop {
+                    let event = tokio::select! {
+                        _ = tx.closed() => return,
+                        event = stream.next() => event,
+                    };
+                    let Some(event) = event else {
+                        return;
+                    };
+                    if tx.send(event).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(
+                Box::pin(futures::stream::unfold(rx, |mut receiver| async move {
+                    receiver.recv().await.map(|event| (event, receiver))
+                })) as Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>,
+            )
+        })
     }
 
     fn execute_with_limits(

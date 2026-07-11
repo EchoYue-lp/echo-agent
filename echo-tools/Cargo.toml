@@ -40,7 +40,7 @@ serde_json = "1.0"
 schemars = "0.8"
 tracing = "0.1"
 regex = "1"
-tokio = { version = "1", features = ["process", "time", "rt", "macros", "sync", "fs"] }
+tokio = { version = "1", features = ["process", "time", "rt", "macros", "sync", "fs", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 async-trait = { version = "0.1", optional = true }
 

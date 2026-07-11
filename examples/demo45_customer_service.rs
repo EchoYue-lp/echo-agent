@@ -485,7 +485,7 @@ async fn stream_chat(agent: &mut ReactAgent, message: &str) -> Result<ChatRunSum
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::ToolCall { name, args: _ } => {
+            AgentEvent::ToolCall { name, args: _, .. } => {
                 summary.tool_calls.push(name.clone());
                 print!("\n   🔧 [工具: {}]\n", name);
                 std::io::stdout().flush().ok();

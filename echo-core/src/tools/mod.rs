@@ -209,11 +209,27 @@ impl ToolResult {
     }
 }
 
+/// Logical channel for incremental tool output.
+///
+/// Tools such as shell map process pipes onto these channels; other tools may
+/// use [`ToolOutputChannel::Log`] for unstructured progress text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputChannel {
+    /// Primary process / command stdout.
+    Stdout,
+    /// Process stderr or equivalent error stream.
+    Stderr,
+    /// Tool-defined log / diagnostic stream.
+    Log,
+}
+
 /// Streaming tool output event
 ///
-/// When a tool implements [`Tool::execute_stream`] and [`Tool::supports_streaming`],
-/// it produces a sequence of these events during execution, enabling real-time
-/// progress reporting and incremental output delivery to the UI / caller.
+/// When a tool implements [`Tool::execute_stream_with_context`] and
+/// [`Tool::supports_streaming`], it produces a sequence of these events during
+/// execution, enabling real-time progress reporting and incremental output
+/// delivery to the UI / caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum ToolStreamEvent {
@@ -224,9 +240,11 @@ pub enum ToolStreamEvent {
         /// Optional completion percentage (0-100).
         percent: Option<u8>,
     },
-    /// Incremental partial output chunk (e.g. streaming text generation).
-    PartialOutput {
-        /// Output fragment produced so far.
+    /// Incremental output chunk on a named channel.
+    Output {
+        /// Which logical stream the chunk belongs to.
+        channel: ToolOutputChannel,
+        /// Output fragment (UTF-8 text; may be a partial line).
         chunk: String,
     },
     /// Terminal event carrying the final [`ToolResult`].
@@ -524,24 +542,23 @@ pub trait Tool: Send + Sync {
         false
     }
 
-    /// Stream tool execution, producing incremental [`ToolStreamEvent`]s.
+    /// Stream tool execution with full [`ToolContext`].
     ///
-    /// The default implementation wraps [`Self::execute`] into a single
-    /// [`ToolStreamEvent::Complete`] event, so existing tools work without
-    /// any changes. Override this and [`Self::supports_streaming`] when
-    /// the tool can produce real-time progress or partial output.
+    /// Prefer this over [`Self::execute_stream`]. The default implementation
+    /// calls [`Self::execute_with_context`] and yields a single
+    /// [`ToolStreamEvent::Complete`]. Override together with
+    /// [`Self::supports_streaming`] when the tool can emit real-time
+    /// [`ToolStreamEvent::Progress`] / [`ToolStreamEvent::Output`].
     ///
-    /// # Returns
-    ///
-    /// A future that resolves to a boxed [`Stream`] of [`ToolStreamEvent`].
-    /// The stream MUST end with a [`ToolStreamEvent::Complete`] event that
-    /// carries the final [`ToolResult`].
-    fn execute_stream<'a>(
+    /// The returned stream MUST end with [`ToolStreamEvent::Complete`].
+    fn execute_stream_with_context<'a>(
         &'a self,
         params: ToolParameters,
+        ctx: &ToolContext,
     ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>> {
+        let ctx = ctx.clone();
         Box::pin(async move {
-            let result = self.execute(params).await?;
+            let result = self.execute_with_context(params, &ctx).await?;
             let stream: Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> = Box::pin(
                 stream::once(async move { ToolStreamEvent::Complete(result) }),
             );
@@ -549,10 +566,25 @@ pub trait Tool: Send + Sync {
         })
     }
 
+    /// Stream tool execution with an empty [`ToolContext`].
+    ///
+    /// Compatibility entry point — delegates to
+    /// [`Self::execute_stream_with_context`]. New call sites should pass a
+    /// real context instead.
+    fn execute_stream<'a>(
+        &'a self,
+        params: ToolParameters,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>> {
+        Box::pin(async move {
+            let ctx = ToolContext::default();
+            self.execute_stream_with_context(params, &ctx).await
+        })
+    }
+
     /// Whether this tool supports streaming execution.
     ///
-    /// Return `true` only if [`Self::execute_stream`] emits meaningful
-    /// intermediate events (Progress / PartialOutput). The default is
+    /// Return `true` only if [`Self::execute_stream_with_context`] emits
+    /// meaningful intermediate events (`Progress` / `Output`). The default is
     /// `false` so that non-streaming tools are not inadvertently routed
     /// through the stream path.
     fn supports_streaming(&self) -> bool {
@@ -944,5 +976,55 @@ mod execute_with_context_tests {
         let result = tool.execute_with_context(params, &ctx).await.unwrap();
         assert!(result.success, "expected success");
         assert_eq!(result.output, "echo: hello");
+    }
+}
+
+#[cfg(test)]
+mod tool_stream_event_contract_tests {
+    use super::*;
+
+    #[test]
+    fn tool_stream_event_serde_round_trip_output_channels() {
+        let events = vec![
+            ToolStreamEvent::Progress {
+                message: "running".into(),
+                percent: Some(40),
+            },
+            ToolStreamEvent::Output {
+                channel: ToolOutputChannel::Stdout,
+                chunk: "hello 中文 🦀".into(),
+            },
+            ToolStreamEvent::Output {
+                channel: ToolOutputChannel::Stderr,
+                chunk: "warn\n".into(),
+            },
+            ToolStreamEvent::Output {
+                channel: ToolOutputChannel::Log,
+                chunk: "note".into(),
+            },
+            ToolStreamEvent::Complete(ToolResult::success("done").with_meta("exit_code", "0")),
+        ];
+
+        for event in events {
+            let json = serde_json::to_string(&event).expect("serialize");
+            let back: ToolStreamEvent = serde_json::from_str(&json).expect("deserialize");
+            let again = serde_json::to_string(&back).expect("re-serialize");
+            assert_eq!(json, again, "serde round-trip must be stable");
+        }
+    }
+
+    #[test]
+    fn tool_stream_event_json_uses_output_not_partial_output() {
+        let event = ToolStreamEvent::Output {
+            channel: ToolOutputChannel::Stdout,
+            chunk: "x".into(),
+        };
+        let json = serde_json::to_value(&event).expect("to_value");
+        assert_eq!(json["event_type"], "output");
+        assert!(json.get("chunk").is_some() || json.get("channel").is_some());
+        assert!(
+            json.get("event_type").and_then(|v| v.as_str()) != Some("partial_output"),
+            "PartialOutput variant must not exist"
+        );
     }
 }

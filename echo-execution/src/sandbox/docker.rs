@@ -406,11 +406,14 @@ impl SandboxExecutor for DockerSandbox {
 
                     Ok(ExecutionResult {
                         exit_code: output.status.code().unwrap_or(-1),
+                        stdout_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
+                        stderr_bytes: u64::try_from(output.stderr.len()).unwrap_or(u64::MAX),
                         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                         duration: start.elapsed(),
                         sandbox_type: "docker".to_string(),
                         timed_out: false,
+                        output_truncated: false,
                     })
                 }
                 Ok(Err(e)) => {
@@ -434,6 +437,9 @@ impl SandboxExecutor for DockerSandbox {
                         duration: start.elapsed(),
                         sandbox_type: "docker".to_string(),
                         timed_out: true,
+                        output_truncated: false,
+                        stdout_bytes: 0,
+                        stderr_bytes: 0,
                     })
                 }
             }
@@ -513,18 +519,21 @@ impl SandboxExecutor for DockerSandbox {
 
                     let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let stdout_bytes = u64::try_from(output.stdout.len()).unwrap_or(u64::MAX);
+                    let stderr_bytes = u64::try_from(output.stderr.len()).unwrap_or(u64::MAX);
+                    let mut output_truncated = false;
 
                     if let Some(max) = limits.max_output_bytes {
                         let max = max as usize;
                         if stdout.len() > max {
-                            let safe_end = stdout.floor_char_boundary(max);
-                            stdout.truncate(safe_end);
+                            stdout = truncate_output_to_bytes(&stdout, max);
                             stdout.push_str("\n... [output truncated]");
+                            output_truncated = true;
                         }
                         if stderr.len() > max {
-                            let safe_end = stderr.floor_char_boundary(max);
-                            stderr.truncate(safe_end);
+                            stderr = truncate_output_to_bytes(&stderr, max);
                             stderr.push_str("\n... [output truncated]");
+                            output_truncated = true;
                         }
                     }
 
@@ -535,6 +544,9 @@ impl SandboxExecutor for DockerSandbox {
                         duration: start.elapsed(),
                         sandbox_type: "docker".to_string(),
                         timed_out: false,
+                        output_truncated,
+                        stdout_bytes,
+                        stderr_bytes,
                     })
                 }
                 Ok(Err(e)) => {
@@ -557,6 +569,9 @@ impl SandboxExecutor for DockerSandbox {
                         duration: start.elapsed(),
                         sandbox_type: "docker".to_string(),
                         timed_out: true,
+                        output_truncated: false,
+                        stdout_bytes: 0,
+                        stderr_bytes: 0,
                     })
                 }
             }
@@ -564,11 +579,33 @@ impl SandboxExecutor for DockerSandbox {
     }
 }
 
+fn truncate_output_to_bytes(output: &str, max_bytes: usize) -> String {
+    let mut retained_bytes = 0_usize;
+    output
+        .chars()
+        .take_while(|character| {
+            let next = retained_bytes.saturating_add(character.len_utf8());
+            if next > max_bytes {
+                false
+            } else {
+                retained_bytes = next;
+                true
+            }
+        })
+        .collect()
+}
+
 // ── 单元测试 ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_streaming_is_explicitly_buffered_fallback() {
+        let sandbox = DockerSandbox::new(DockerConfig::default());
+        assert!(!sandbox.supports_streaming());
+    }
 
     #[test]
     fn test_docker_config_default() {

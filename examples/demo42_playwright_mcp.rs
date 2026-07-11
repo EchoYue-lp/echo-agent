@@ -137,7 +137,7 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                     prompt_tokens, completion_tokens
                 );
             }
-            AgentEvent::ToolCall { name, args } => {
+            AgentEvent::ToolCall { name, args, .. } => {
                 tool_calls += 1;
                 println!("\n🔧 调用工具: {}", name);
                 let args_str = serde_json::to_string_pretty(&args).unwrap_or_default();
@@ -148,7 +148,7 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                     println!("   ... (参数过长，已截断)");
                 }
             }
-            AgentEvent::ToolResult { name, output } => {
+            AgentEvent::ToolResult { name, output, .. } => {
                 let preview: String = output.chars().take(800).collect();
                 println!("\n✅ 工具返回: {}", name);
                 println!("   结果: {}", preview);
@@ -156,7 +156,7 @@ async fn demo_agent_browser_task(_config: &McpConfigFile) -> echo_agent::error::
                     println!("   ... (共 {} 字符)", output.len());
                 }
             }
-            AgentEvent::ToolError { name, error } => {
+            AgentEvent::ToolError { name, error, .. } => {
                 tool_errors += 1;
                 println!("\n❌ 工具错误: {}", name);
                 println!("   错误: {}", error);

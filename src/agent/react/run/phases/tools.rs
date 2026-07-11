@@ -3,7 +3,7 @@
 //! handoff to `finalize_completed_run` when `final_answer` is accepted.
 
 use super::super::processor::build_tool_calls_from_map;
-use super::super::stream_macros::{try_send_or, yield_event_or};
+use super::super::stream_macros::{try_send_or, yield_event_or, yield_final_event_or};
 use super::verify::verify_answer;
 use super::{IterOutcome, LoopState, ThinkOutput};
 use crate::agent::AgentEvent;
@@ -11,6 +11,7 @@ use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{ReactError, Result};
 use crate::llm::types::Message;
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,10 +49,11 @@ pub(crate) async fn run_tools(
         },
         IterOutcome::Abandoned
     );
-    for (_, name, args) in &steps {
+    for (id, name, args) in &steps {
         yield_event_or!(
             tx,
             AgentEvent::ToolCall {
+                call_id: id.clone(),
                 name: name.clone(),
                 args: args.clone(),
             },
@@ -106,37 +108,129 @@ pub(crate) async fn run_tools(
     let (appr, conc): (Vec<(String, String, Value)>, Vec<(String, String, Value)>) =
         (vec![], steps);
 
+    let mut finish_output = None;
+
     if !conc.is_empty() {
         let mc = snap.tools.tool_manager.max_concurrency();
         let snapshot = snap.clone();
-        let futs: Vec<_> = conc
-            .iter()
-            .map(|(_, n, a)| {
-                let snapshot = snapshot.clone();
-                let name = n.clone();
-                let args = a.clone();
+        let tool_count = conc.len();
+        let (stream_tx, mut stream_rx) = mpsc::channel(64);
+        let mut futs = FuturesUnordered::new();
+        for (id, name, args) in conc {
+            let snapshot = snapshot.clone();
+            let event_tx = stream_tx.clone();
+            futs.push(
                 async move {
                     let params = if let Value::Object(m) = &args {
                         m.clone().into_iter().collect()
                     } else {
                         HashMap::new()
                     };
-                    snapshot
-                        .execute_tool_with_policy(&name, &params, &args)
-                        .await
+                    let result = snapshot
+                        .execute_tool_with_policy(id.clone(), &name, &params, &args, Some(event_tx))
+                        .await;
+                    (id, name, result)
                 }
-                .instrument(info_span!("tool", tool.name = %n))
-            })
-            .collect();
+                .instrument(info_span!("tool")),
+            );
+        }
+        drop(stream_tx);
         let bt = super::super::retry::compute_concurrent_tool_batch_timeout(
             &snap.config.tool_execution,
-            futs.len(),
+            tool_count,
             mc,
         );
-        let results: Vec<std::result::Result<String, ReactError>> =
-            match await_tools_batch(futs, snap.cancel_token.as_ref(), bt).await {
-                ToolBatchOutcome::Completed(r) => r,
-                ToolBatchOutcome::Timeout => {
+        let cancel = async {
+            match snap.cancel_token.as_ref() {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        let timeout = async {
+            match bt {
+                Some(duration) => tokio::time::sleep(duration).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(cancel);
+        tokio::pin!(timeout);
+
+        let mut stream_open = true;
+        while !futs.is_empty() || stream_open {
+            tokio::select! {
+                biased;
+                event = stream_rx.recv(), if stream_open => {
+                    match event {
+                        Some((call_id, name, event)) => {
+                            yield_final_event_or!(
+                                tx,
+                                AgentEvent::ToolStream { call_id, name, event },
+                                IterOutcome::Abandoned
+                            );
+                        }
+                        None => stream_open = false,
+                    }
+                }
+                Some((id, fname, result)) = futs.next(), if !futs.is_empty() => {
+                    while let Ok((call_id, name, event)) = stream_rx.try_recv() {
+                        yield_final_event_or!(
+                            tx,
+                            AgentEvent::ToolStream { call_id, name, event },
+                            IterOutcome::Abandoned
+                        );
+                    }
+                    match result {
+                        Ok(output) => {
+                            yield_event_or!(
+                                tx,
+                                AgentEvent::ToolResult {
+                                    call_id: id.clone(),
+                                    name: fname.clone(),
+                                    output: output.clone(),
+                                },
+                                IterOutcome::Abandoned
+                            );
+                            context.lock().await.push(Message::tool_result(
+                                id,
+                                fname.clone(),
+                                output.clone(),
+                            ));
+                            if fname == TOOL_FINAL_ANSWER {
+                                // Verify answer before accepting
+                                if verify_answer(snap, context, &output, state.verifier_retry_count).await {
+                                    finish_output = Some(output);
+                                } else {
+                                    // Verifier failed — continue loop for self-correction
+                                    state.verifier_retry_count += 1;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            yield_event_or!(
+                                tx,
+                                AgentEvent::ToolError {
+                                    call_id: id.clone(),
+                                    name: fname.clone(),
+                                    error: error.to_string(),
+                                },
+                                IterOutcome::Abandoned
+                            );
+                            context.lock().await.push(Message::tool_result(
+                                id,
+                                fname.clone(),
+                                format!("[Error] {error}"),
+                            ));
+                            // Checkpoint on tool error for recovery
+                            snap.save_runtime_checkpoint(
+                                context,
+                                Some(format!("Tool error: {fname}")),
+                            )
+                            .await;
+                        }
+                    }
+                },
+                _ = &mut cancel => return Ok(IterOutcome::Abandoned),
+                _ = &mut timeout => {
                     try_send_or!(
                         tx,
                         Err(ReactError::from(crate::error::ToolError::Timeout(
@@ -144,57 +238,6 @@ pub(crate) async fn run_tools(
                         ))),
                         IterOutcome::Abandoned
                     )
-                }
-                // Cancelled mid-batch: the dropped tool futures kill their child
-                // processes (kill_on_drop), so long shell commands stop immediately.
-                // Return Abandoned so the streaming loop stops (Ok(())).
-                ToolBatchOutcome::Cancelled => {
-                    return Ok(IterOutcome::Abandoned);
-                }
-            };
-
-        for ((id, fname, _), result) in conc.into_iter().zip(results) {
-            match result {
-                Ok(output) => {
-                    yield_event_or!(
-                        tx,
-                        AgentEvent::ToolResult {
-                            name: fname.clone(),
-                            output: output.clone(),
-                        },
-                        IterOutcome::Abandoned
-                    );
-                    context.lock().await.push(Message::tool_result(
-                        id,
-                        fname.clone(),
-                        output.clone(),
-                    ));
-                    if fname == TOOL_FINAL_ANSWER {
-                        // Verify answer before accepting
-                        if verify_answer(snap, context, &output, state.verifier_retry_count).await {
-                            return Ok(IterOutcome::Finish { output });
-                        }
-                        // Verifier failed — continue loop for self-correction
-                        state.verifier_retry_count += 1;
-                    }
-                }
-                Err(error) => {
-                    yield_event_or!(
-                        tx,
-                        AgentEvent::ToolError {
-                            name: fname.clone(),
-                            error: error.to_string(),
-                        },
-                        IterOutcome::Abandoned
-                    );
-                    context.lock().await.push(Message::tool_result(
-                        id,
-                        fname.clone(),
-                        format!("[Error] {error}"),
-                    ));
-                    // Checkpoint on tool error for recovery
-                    snap.save_runtime_checkpoint(context, Some(format!("Tool error: {fname}")))
-                        .await;
                 }
             }
         }
@@ -206,11 +249,46 @@ pub(crate) async fn run_tools(
         } else {
             HashMap::new()
         };
-        match snap.execute_tool_with_policy(&fname, &params, &args).await {
+        let (stream_tx, mut stream_rx) = mpsc::channel(64);
+        let execution =
+            snap.execute_tool_with_policy(id.clone(), &fname, &params, &args, Some(stream_tx));
+        tokio::pin!(execution);
+        let result = loop {
+            tokio::select! {
+                biased;
+                Some((call_id, name, event)) = stream_rx.recv() => {
+                    yield_final_event_or!(
+                        tx,
+                        AgentEvent::ToolStream { call_id, name, event },
+                        IterOutcome::Abandoned
+                    );
+                }
+                result = &mut execution => break result,
+                _ = async {
+                    match snap.cancel_token.as_ref() {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                } => return Ok(IterOutcome::Abandoned),
+            }
+        };
+        while let Some((call_id, name, event)) = stream_rx.recv().await {
+            yield_final_event_or!(
+                tx,
+                AgentEvent::ToolStream {
+                    call_id,
+                    name,
+                    event
+                },
+                IterOutcome::Abandoned
+            );
+        }
+        match result {
             Ok(truncated) => {
                 yield_event_or!(
                     tx,
                     AgentEvent::ToolResult {
+                        call_id: id.clone(),
                         name: fname.clone(),
                         output: truncated.clone(),
                     },
@@ -224,16 +302,18 @@ pub(crate) async fn run_tools(
                 if fname == TOOL_FINAL_ANSWER {
                     // Verify answer before accepting
                     if verify_answer(snap, context, &truncated, state.verifier_retry_count).await {
-                        return Ok(IterOutcome::Finish { output: truncated });
+                        finish_output = Some(truncated);
+                    } else {
+                        // Verifier failed — continue loop for self-correction
+                        state.verifier_retry_count += 1;
                     }
-                    // Verifier failed — continue loop for self-correction
-                    state.verifier_retry_count += 1;
                 }
             }
             Err(error) => {
                 yield_event_or!(
                     tx,
                     AgentEvent::ToolError {
+                        call_id: id.clone(),
                         name: fname.clone(),
                         error: error.to_string(),
                     },
@@ -252,6 +332,9 @@ pub(crate) async fn run_tools(
     }
 
     yield_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
+    if let Some(output) = finish_output {
+        return Ok(IterOutcome::Finish { output });
+    }
     snap.auto_snapshot(context, iteration).await;
 
     // Periodic runtime checkpoint based on configured interval
@@ -261,51 +344,4 @@ pub(crate) async fn run_tools(
     }
 
     Ok(IterOutcome::Continue)
-}
-
-/// Outcome of awaiting a batch of tool futures.
-enum ToolBatchOutcome {
-    /// All futures completed.
-    Completed(Vec<std::result::Result<String, ReactError>>),
-    /// The batch timeout elapsed.
-    Timeout,
-    /// The run was cancelled mid-batch (Ctrl-C / `cancel_token`). The dropped
-    /// tool futures terminate their child processes via `kill_on_drop`.
-    Cancelled,
-}
-
-/// Await a batch of tool futures, racing against an optional cancellation token
-/// and batch timeout. This is the single place where in-flight tools become
-/// interruptible: previously `join_all` ran to completion and Ctrl-C only took
-/// effect at the next stream-yield boundary.
-///
-/// When cancelled, the returned futures are dropped, and tools spawned with
-/// `kill_on_drop(true)` (e.g. `ShellTool`) terminate their child processes.
-async fn await_tools_batch(
-    futs: Vec<impl std::future::Future<Output = std::result::Result<String, ReactError>>>,
-    cancel: Option<&crate::agent::CancellationToken>,
-    batch_timeout: Option<std::time::Duration>,
-) -> ToolBatchOutcome {
-    use futures::future::join_all;
-
-    let batch = join_all(futs);
-
-    match batch_timeout {
-        Some(to) => {
-            tokio::select! {
-                biased;
-                // Only arm the cancel branch when a token is present.
-                _ = async { match cancel { Some(t) => t.cancelled().await, None => std::future::pending().await } } => ToolBatchOutcome::Cancelled,
-                _ = tokio::time::sleep(to) => ToolBatchOutcome::Timeout,
-                results = batch => ToolBatchOutcome::Completed(results),
-            }
-        }
-        None => {
-            tokio::select! {
-                biased;
-                _ = async { match cancel { Some(t) => t.cancelled().await, None => std::future::pending().await } } => ToolBatchOutcome::Cancelled,
-                results = batch => ToolBatchOutcome::Completed(results),
-            }
-        }
-    }
 }

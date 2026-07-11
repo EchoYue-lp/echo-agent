@@ -313,13 +313,13 @@ async fn demo_multi_callback_stream() -> echo_agent::error::Result<()> {
                 print!("{}", t);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::ToolCall { name, args } => {
+            AgentEvent::ToolCall { name, args, .. } => {
                 println!("\n  [ToolCall] {name}({})", compact_args(&args));
             }
-            AgentEvent::ToolResult { name, output } => {
+            AgentEvent::ToolResult { name, output, .. } => {
                 println!("  [ToolResult] [{name}] {}", truncate(&output, 60));
             }
-            AgentEvent::ToolError { name, error } => {
+            AgentEvent::ToolError { name, error, .. } => {
                 return Err(ReactError::Other(format!(
                     "demo11 验收失败：流式回调示例中工具 `{name}` 出错: {error}"
                 )));

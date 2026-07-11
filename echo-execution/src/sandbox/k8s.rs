@@ -296,11 +296,14 @@ impl K8sSandbox {
                 self.delete_pod(&pod_name).await;
                 Ok(ExecutionResult {
                     exit_code: output.status.code().unwrap_or(-1),
+                    stdout_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
+                    stderr_bytes: u64::try_from(output.stderr.len()).unwrap_or(u64::MAX),
                     stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                     stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                     duration: start.elapsed(),
                     sandbox_type: "k8s".to_string(),
                     timed_out: false,
+                    output_truncated: false,
                 })
             }
             Ok(Err(e)) => {
@@ -320,6 +323,9 @@ impl K8sSandbox {
                     duration: start.elapsed(),
                     sandbox_type: "k8s".to_string(),
                     timed_out: true,
+                    output_truncated: false,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
                 })
             }
         }
@@ -403,6 +409,12 @@ impl SandboxExecutor for K8sSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn k8s_streaming_is_explicitly_buffered_fallback() {
+        let sandbox = K8sSandbox::new(K8sConfig::default());
+        assert!(!sandbox.supports_streaming());
+    }
 
     #[test]
     fn test_k8s_config_default() {

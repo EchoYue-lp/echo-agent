@@ -1026,7 +1026,7 @@ impl SubagentExecutor {
                         run_id: run_id.clone(),
                     });
                 }
-                AgentEvent::ToolCall { name, args } => {
+                AgentEvent::ToolCall { name, args, .. } => {
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolStarted {
@@ -1038,7 +1038,7 @@ impl SubagentExecutor {
                             run_id: run_id.clone(),
                         });
                 }
-                AgentEvent::ToolResult { name, output } => {
+                AgentEvent::ToolResult { name, output, .. } => {
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolCompleted {
@@ -1051,7 +1051,7 @@ impl SubagentExecutor {
                             run_id: run_id.clone(),
                         });
                 }
-                AgentEvent::ToolError { name, error } => {
+                AgentEvent::ToolError { name, error, .. } => {
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolCompleted {

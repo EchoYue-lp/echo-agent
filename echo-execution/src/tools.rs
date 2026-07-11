@@ -16,8 +16,8 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 pub use echo_core::tools::{
-    Tool, ToolContext, ToolExecutionConfig, ToolParameters, ToolRegistrar, ToolResult,
-    ToolRiskLevel, ToolStreamEvent,
+    Tool, ToolContext, ToolExecutionConfig, ToolOutputChannel, ToolParameters, ToolRegistrar,
+    ToolResult, ToolRiskLevel, ToolStreamEvent,
 };
 
 impl ToolRegistrar for ToolManager {
@@ -332,33 +332,22 @@ impl ToolManager {
         }
     }
 
-    /// Stream tool execution, collecting all [`ToolStreamEvent`]s into a Vec.
+    /// Execute a tool while forwarding incremental events with backpressure.
     ///
-    /// This method applies the same concurrency control, timeout, and retry
-    /// semantics as [`Self::execute_tool`], but routes through
-    /// [`Tool::execute_stream`] when the tool supports streaming.
-    ///
-    /// For tools that do not support streaming, the default `execute_stream`
-    /// implementation wraps [`Tool::execute`] into a single
-    /// [`ToolStreamEvent::Complete`], so this method still works correctly
-    /// (it simply returns a Vec with one element).
-    ///
-    /// # Returns
-    ///
-    /// A Vec of [`ToolStreamEvent`] ending with a [`ToolStreamEvent::Complete`].
-    /// If the stream does not produce a `Complete` event (e.g. timeout), the
-    /// last event may be a `Progress` or `PartialOutput`, and the caller
-    /// should treat this as an incomplete execution.
-    pub async fn execute_tool_stream_collect(
+    /// The concurrency permit and per-attempt timeout cover the complete
+    /// stream lifetime. Attempts are retried only until the first output chunk
+    /// has been delivered to the caller.
+    pub async fn execute_tool_stream_with_context(
         &self,
         tool_name: &str,
         parameters: ToolParameters,
-    ) -> Result<Vec<ToolStreamEvent>> {
+        ctx: &ToolContext,
+        event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
+    ) -> Result<ToolResult> {
         let tool = self
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
 
-        // Concurrency control: acquire semaphore permit (read/write separation)
         let is_read = crate::risk::ToolRiskClassifier::classify(tool_name)
             == crate::risk::ToolRiskCategory::ReadOnly;
 
@@ -366,7 +355,13 @@ impl ToolManager {
             if let Some(sem) = &self.read_semaphore {
                 match sem.acquire().await {
                     Ok(permit) => Some(permit),
-                    Err(_) => None,
+                    Err(e) => {
+                        return Err(ToolError::ExecutionFailed {
+                            tool: tool_name.to_string(),
+                            message: format!("Concurrency limit error: {e}"),
+                        }
+                        .into());
+                    }
                 }
             } else {
                 None
@@ -394,7 +389,6 @@ impl ToolManager {
         } else {
             0
         };
-
         let mut last_err: Option<echo_core::error::ReactError> = None;
 
         for attempt in 0..=max_retries {
@@ -403,43 +397,88 @@ impl ToolManager {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 
-            let stream_result = if self.config.timeout_ms > 0 {
+            let mut output_forwarded = false;
+            let consume_stream = async {
+                use futures::StreamExt;
+
+                let mut stream = tool
+                    .execute_stream_with_context(parameters.clone(), ctx)
+                    .await?;
+                while let Some(event) = stream.next().await {
+                    match event {
+                        ToolStreamEvent::Complete(result) => return Ok(result),
+                        event @ ToolStreamEvent::Output { .. } => {
+                            if let Some(tx) = event_tx.as_ref() {
+                                tx.send(event)
+                                    .await
+                                    .map_err(|_| ToolError::ExecutionFailed {
+                                        tool: tool_name.to_string(),
+                                        message: "Tool stream receiver closed".into(),
+                                    })?;
+                                output_forwarded = true;
+                            }
+                        }
+                        event @ ToolStreamEvent::Progress { .. } => {
+                            if let Some(tx) = event_tx.as_ref() {
+                                tx.send(event)
+                                    .await
+                                    .map_err(|_| ToolError::ExecutionFailed {
+                                        tool: tool_name.to_string(),
+                                        message: "Tool stream receiver closed".into(),
+                                    })?;
+                            }
+                        }
+                    }
+                }
+                Err(ToolError::ExecutionFailed {
+                    tool: tool_name.to_string(),
+                    message: "Tool stream ended without a Complete event".into(),
+                }
+                .into())
+            };
+
+            let result = if self.config.timeout_ms > 0 {
                 match tokio::time::timeout(
                     Duration::from_millis(self.config.timeout_ms),
-                    tool.execute_stream(parameters.clone()),
+                    consume_stream,
                 )
                 .await
                 {
-                    Ok(future_result) => future_result,
+                    Ok(result) => result,
                     Err(_) => Err(ToolError::Timeout(tool_name.to_string()).into()),
                 }
             } else {
-                tool.execute_stream(parameters.clone()).await
+                consume_stream.await
             };
 
-            match stream_result {
-                Ok(stream) => {
-                    // Consume the stream, collecting all events
-                    use futures::StreamExt;
-                    let events: Vec<ToolStreamEvent> = stream.collect().await;
-                    return Ok(events);
-                }
-                Err(e) if attempt < max_retries => {
+            match result {
+                Ok(result) => return Ok(result),
+                Err(e) if attempt < max_retries && !output_forwarded => {
                     last_err = Some(e);
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        Err(last_err.unwrap_or_else(|| ToolError::NotFound(tool_name.to_string()).into()))
+        Err(last_err.unwrap_or_else(|| {
+            ToolError::ExecutionFailed {
+                tool: tool_name.to_string(),
+                message: "Tool stream execution failed without an error".into(),
+            }
+            .into()
+        }))
     }
 }
 
 #[cfg(test)]
 mod execute_with_context_tests {
     use super::*;
-    use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult};
+    use echo_core::tools::{
+        Tool, ToolContext, ToolOutputChannel, ToolParameters, ToolResult, ToolStreamEvent,
+    };
+    use futures::Stream;
     use std::path::PathBuf;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
 
     /// Records the `ToolContext` it was called with, so we can verify
@@ -450,6 +489,62 @@ mod execute_with_context_tests {
 
     struct NamedTool {
         name: &'static str,
+    }
+
+    struct DelayedStreamingTool;
+
+    impl Tool for DelayedStreamingTool {
+        fn name(&self) -> &str {
+            "delayed_stream"
+        }
+
+        fn description(&self) -> &str {
+            "emits output before completing"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _p: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("done")) })
+        }
+
+        fn execute_stream_with_context<'a>(
+            &'a self,
+            _params: ToolParameters,
+            _ctx: &ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>,
+        > {
+            Box::pin(async {
+                let events = futures::stream::unfold(0_u8, |state| async move {
+                    match state {
+                        0 => Some((
+                            ToolStreamEvent::Output {
+                                channel: ToolOutputChannel::Stdout,
+                                chunk: "first".into(),
+                            },
+                            1,
+                        )),
+                        1 => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Some((ToolStreamEvent::Complete(ToolResult::success("done")), 2))
+                        }
+                        _ => None,
+                    }
+                });
+                Ok(Box::pin(events) as Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>)
+            })
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
     }
 
     impl Tool for NamedTool {
@@ -527,6 +622,44 @@ mod execute_with_context_tests {
         );
         assert_eq!(got.conversation_id.as_deref(), Some("c"));
         assert_eq!(got.run_id.as_deref(), Some("r"));
+    }
+
+    #[tokio::test]
+    async fn streaming_output_is_forwarded_before_execution_completes() {
+        let manager = Arc::new(ToolManager::new());
+        manager.register(Box::new(DelayedStreamingTool));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let task_manager = Arc::clone(&manager);
+
+        let handle = tokio::spawn(async move {
+            task_manager
+                .execute_tool_stream_with_context(
+                    "delayed_stream",
+                    ToolParameters::new(),
+                    &ToolContext::default(),
+                    Some(event_tx),
+                )
+                .await
+        });
+
+        let event = tokio::time::timeout(Duration::from_millis(50), event_rx.recv())
+            .await
+            .expect("first output should arrive promptly")
+            .expect("stream channel should remain open");
+        assert!(matches!(
+            event,
+            ToolStreamEvent::Output {
+                channel: ToolOutputChannel::Stdout,
+                ref chunk,
+            } if chunk == "first"
+        ));
+        assert!(!handle.is_finished());
+
+        let result = handle
+            .await
+            .expect("streaming task should join")
+            .expect("streaming tool should complete");
+        assert_eq!(result.output, "done");
     }
 
     #[test]

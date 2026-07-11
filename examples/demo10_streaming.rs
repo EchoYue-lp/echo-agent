@@ -146,7 +146,7 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
                 final_answer = answer;
                 println!();
             }
-            AgentEvent::ToolError { name, error } => {
+            AgentEvent::ToolError { name, error, .. } => {
                 return Err(echo_agent::error::ReactError::Other(format!(
                     "demo10 验收失败：文本流式执行中工具 `{name}` 出错: {error}"
                 )));
@@ -205,13 +205,13 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::ToolCall { name, args } => {
+            AgentEvent::ToolCall { name, args, .. } => {
                 println!("\n  🔧 工具调用: {name}({:?})", args);
             }
-            AgentEvent::ToolResult { name, output } => {
+            AgentEvent::ToolResult { name, output, .. } => {
                 println!("  📤 工具结果: [{name}] → {}", truncate(&output, 60));
             }
-            AgentEvent::ToolError { name, error } => {
+            AgentEvent::ToolError { name, error, .. } => {
                 return Err(echo_agent::error::ReactError::Other(format!(
                     "demo10 验收失败：工具流式执行中 `{name}` 出错: {error}"
                 )));

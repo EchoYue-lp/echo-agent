@@ -5,9 +5,11 @@
 //! in the `echo-execution` crate.
 
 use futures::future::BoxFuture;
+use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::time::Duration;
 
 use crate::error::Result;
@@ -28,6 +30,29 @@ pub trait SandboxExecutor: Send + Sync {
     /// Execute a command
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>>;
 
+    /// Execute a command as an event stream.
+    ///
+    /// Executors without live pipe support degrade explicitly to one buffered
+    /// [`SandboxStreamEvent::Complete`] event. Callers can inspect
+    /// [`Self::supports_streaming`] before describing output as live.
+    fn execute_stream<'a>(
+        &'a self,
+        command: SandboxCommand,
+    ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>> {
+        Box::pin(async move {
+            let result = self.execute(command).await?;
+            let events: Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>> = Box::pin(
+                stream::once(async move { SandboxStreamEvent::Complete(result) }),
+            );
+            Ok(events)
+        })
+    }
+
+    /// Whether [`Self::execute_stream`] emits output before completion.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
     /// Execute a command with resource limits
     fn execute_with_limits(
         &self,
@@ -42,6 +67,25 @@ pub trait SandboxExecutor: Send + Sync {
     fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
+}
+
+/// Pipe channel for sandbox output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxOutputChannel {
+    Stdout,
+    Stderr,
+}
+
+/// Incremental sandbox execution event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum SandboxStreamEvent {
+    Output {
+        channel: SandboxOutputChannel,
+        chunk: String,
+    },
+    Complete(ExecutionResult),
 }
 
 /// Isolation level
@@ -178,6 +222,15 @@ pub struct ExecutionResult {
     pub sandbox_type: String,
     /// Whether the execution was terminated due to timeout
     pub timed_out: bool,
+    /// Whether retained output exceeded the configured memory cap.
+    #[serde(default)]
+    pub output_truncated: bool,
+    /// Total stdout bytes observed before truncation.
+    #[serde(default)]
+    pub stdout_bytes: u64,
+    /// Total stderr bytes observed before truncation.
+    #[serde(default)]
+    pub stderr_bytes: u64,
 }
 
 impl ExecutionResult {

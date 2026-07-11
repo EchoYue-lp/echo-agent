@@ -352,6 +352,9 @@ mod tests {
                         duration: Duration::from_millis(1),
                         sandbox_type: "recording".to_string(),
                         timed_out: false,
+                        output_truncated: false,
+                        stdout_bytes: 2,
+                        stderr_bytes: 0,
                     })
                 })
             }
