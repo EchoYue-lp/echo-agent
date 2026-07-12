@@ -78,6 +78,7 @@ pub struct RuntimeConfig {
     pub model_name: String,
     pub max_iterations: usize,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
+    pub supports_tool_choice_none: bool,
     pub session_id: Option<String>,
     pub conversation_id: Option<String>,
     /// Session-bound working directory (worktree path). Injected into each
@@ -116,6 +117,10 @@ impl RuntimeConfig {
             model_name: config.model_name.clone(),
             max_iterations: config.max_iterations,
             run_budget: config.run_budget.clone(),
+            supports_tool_choice_none: config
+                .model_profile
+                .as_ref()
+                .is_none_or(|profile| profile.supports_tool_choice_none),
             session_id: config.session_id.clone(),
             conversation_id: config.conversation_id.clone(),
             working_dir: config.working_dir.lock().ok().and_then(|g| g.clone()),
@@ -177,6 +182,9 @@ impl ToolRuntime {
             .ok()
             .and_then(|guard| guard.clone())
             .unwrap_or_default();
+        if let Some(profile) = agent.config.model_profile.as_ref() {
+            disabled_tools.extend(profile.excluded_tools.iter().cloned());
+        }
         if let Some(invocation_disabled_tools) = invocation_disabled_tools {
             disabled_tools.extend(invocation_disabled_tools.iter().cloned());
         }
@@ -1283,6 +1291,50 @@ mod transcript_filter_tests {
             snapshot.config.run_budget.iteration_wind_down_remaining,
             Some(1)
         );
+    }
+
+    #[test]
+    fn model_profile_exclusions_join_effective_tool_policy() -> Result<()> {
+        let mut profile =
+            echo_core::llm::capabilities::ModelProfile::from_provider_name("model", "openai");
+        profile.excluded_tools.insert("shell".to_string());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("model")
+            .model_profile(profile)
+            .tool(Box::new(NamedTool("shell")))
+            .tool(Box::new(NamedTool("read_file")))
+            .build()?;
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let tools: HashSet<String> = tool_names(&snapshot).into_iter().collect();
+        assert!(!tools.contains("shell"));
+        assert!(tools.contains("read_file"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_profile_prompt_suffix_is_canonical_after_compression() -> Result<()> {
+        let mut profile =
+            echo_core::llm::capabilities::ModelProfile::from_provider_name("model", "openai");
+        profile.prompt_suffix = Some("Use compact tool arguments.".to_string());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("model")
+            .system_prompt("Base prompt")
+            .model_profile(profile)
+            .token_limit(64)
+            .build()?;
+
+        let mut context = agent.memory.context.lock().await;
+        context.push(echo_core::llm::types::Message::user(
+            "temporary context".to_string(),
+        ));
+        let _ = context.force_compress(1).await?;
+        assert!(context.messages().iter().any(|message| {
+            message.text_content().is_some_and(|text| {
+                text.contains("Base prompt") && text.contains("Use compact tool arguments.")
+            })
+        }));
+        Ok(())
     }
 
     #[test]

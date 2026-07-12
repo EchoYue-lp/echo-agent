@@ -281,7 +281,8 @@ pub(crate) async fn create_llm_stream(
                         temperature: temp,
                         max_tokens,
                         tools: t,
-                        tool_choice: final_only.then(|| "none".to_string()),
+                        tool_choice: (final_only && snap.config.supports_tool_choice_none)
+                            .then(|| "none".to_string()),
                         response_format: None,
                         thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
@@ -336,7 +337,8 @@ pub(crate) async fn create_llm_stream(
                     snap.config.temperature,
                     snap.config.max_tokens,
                     t,
-                    final_only.then(|| "none".to_string()),
+                    (final_only && snap.config.supports_tool_choice_none)
+                        .then(|| "none".to_string()),
                     None,
                     ct,
                     None,

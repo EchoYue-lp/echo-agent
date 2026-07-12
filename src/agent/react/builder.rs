@@ -57,6 +57,7 @@ pub struct ReactAgentBuilder {
     tool_execution: ToolExecutionConfig,
     max_iterations: usize,
     run_budget: echo_core::agent::RunBudgetPolicy,
+    model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
     token_limit: usize,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
@@ -131,6 +132,7 @@ impl ReactAgentBuilder {
             tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
+            model_profile: None,
             token_limit: DEFAULT_TOKEN_LIMIT,
             max_tokens: None,
             temperature: None,
@@ -433,6 +435,12 @@ impl ReactAgentBuilder {
     /// Configure one-shot iteration wind-down and provider-reported token budget.
     pub fn run_budget(mut self, policy: echo_core::agent::RunBudgetPolicy) -> Self {
         self.run_budget = policy;
+        self
+    }
+
+    /// Install a resolved provider/model profile that controls harness behavior.
+    pub fn model_profile(mut self, profile: echo_core::llm::capabilities::ModelProfile) -> Self {
+        self.model_profile = Some(profile);
         self
     }
 
@@ -811,6 +819,9 @@ impl ReactAgentBuilder {
             .token_limit(self.token_limit)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);
+        if let Some(profile) = self.model_profile {
+            config = config.model_profile(profile);
+        }
 
         // Sprint 8: propagate the worktree factory (if any) into AgentConfig.
         #[cfg(feature = "subagent")]

@@ -58,6 +58,7 @@ pub struct MockLlmClient {
     /// The list of messages received on each call, recorded in order
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
     tool_choices: Arc<Mutex<Vec<Option<String>>>>,
+    tool_counts: Arc<Mutex<Vec<usize>>>,
     /// Optional delay before returning each response. When set, `chat` and
     /// `chat_stream` sleep for this duration, but will return early with a
     /// Cancelled error if the request's `cancel_token` is triggered. This lets
@@ -79,6 +80,7 @@ impl MockLlmClient {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
             tool_choices: Arc::new(Mutex::new(Vec::new())),
+            tool_counts: Arc::new(Mutex::new(Vec::new())),
             delay: None,
         }
     }
@@ -244,6 +246,14 @@ impl MockLlmClient {
             .clone()
     }
 
+    /// Number of exposed tool definitions received by each request.
+    pub fn all_tool_counts(&self) -> Vec<usize> {
+        self.tool_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Number of remaining unconsumed preset responses
     pub fn remaining(&self) -> usize {
         self.responses
@@ -284,6 +294,10 @@ impl LlmClient for MockLlmClient {
     fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
         Box::pin(async move {
             // Record this call
+            self.tool_counts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.tools.as_ref().map_or(0, Vec::len));
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -332,6 +346,10 @@ impl LlmClient for MockLlmClient {
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
         Box::pin(async move {
             // Record this call
+            self.tool_counts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.tools.as_ref().map_or(0, Vec::len));
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

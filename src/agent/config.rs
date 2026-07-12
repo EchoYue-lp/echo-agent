@@ -49,6 +49,8 @@ pub struct AgentConfig {
     pub(crate) max_iterations: usize,
     /// Optional soft run budgets. All fields default to disabled.
     pub(crate) run_budget: echo_core::agent::RunBudgetPolicy,
+    /// Resolved provider/model capabilities that affect harness behavior.
+    pub(crate) model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
     /// Tool allowlist (empty = no restriction, all registered tools can be called)
     pub(crate) allowed_tools: Vec<String>,
     pub(crate) role: AgentRole,
@@ -199,6 +201,7 @@ impl AgentConfig {
             agent_name: agent_name.to_string(),
             max_iterations: 100,
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
+            model_profile: None,
             allowed_tools: Vec::new(),
             role: AgentRole::default(),
             enable_tool: false,
@@ -508,6 +511,12 @@ impl AgentConfig {
     /// Set soft run budgets for iteration wind-down and model-token finalization.
     pub fn run_budget(mut self, policy: echo_core::agent::RunBudgetPolicy) -> Self {
         self.run_budget = policy;
+        self
+    }
+
+    /// Install a resolved model profile for harness-level behavior.
+    pub fn model_profile(mut self, profile: echo_core::llm::capabilities::ModelProfile) -> Self {
+        self.model_profile = Some(profile);
         self
     }
 

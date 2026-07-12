@@ -608,7 +608,7 @@ impl ReactAgent {
         // what provider-side prompt caching (DeepSeek KVCache, Anthropic
         // prompt cache, OpenAI prefix cache) keys on — any change to it
         // invalidates the entire cache.
-        let prompt = if config.enable_tool && config.enable_cot {
+        let mut prompt = if config.enable_tool && config.enable_cot {
             format!(
                 "{}\n\n{}",
                 config.system_prompt.trim_end(),
@@ -617,6 +617,16 @@ impl ReactAgent {
         } else {
             config.system_prompt.clone()
         };
+
+        if let Some(suffix) = config
+            .model_profile
+            .as_ref()
+            .and_then(|profile| profile.prompt_suffix.as_deref())
+            .filter(|suffix| !suffix.trim().is_empty())
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(suffix.trim());
+        }
 
         // Project rules are loaded from the workspace and are stable per
         // project. They can stay in the system prompt since they don't

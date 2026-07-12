@@ -15,6 +15,7 @@
 //! reasoning support, multimodal support, etc.).
 
 use crate::llm::thinking::ThinkingProtocol;
+use std::collections::{HashMap, HashSet};
 
 // ── ProviderCapabilities ─────────────────────────────────────────────
 
@@ -58,6 +59,10 @@ pub struct ProviderCapabilities {
     /// Ollama and local models typically do not.
     pub supports_parallel_tool_calls: bool,
 
+    /// Supports an explicit `tool_choice=none` request control. Providers
+    /// without it can still implement final-only mode by exposing no tools.
+    pub supports_tool_choice_none: bool,
+
     /// Tokenizer name or identifier for accurate token counting (e.g.
     /// `"cl100k_base"` for GPT-4, `"o200k_base"` for GPT-4o).
     /// `None` means the tokenizer is unknown; callers should fall back to
@@ -80,6 +85,7 @@ impl ProviderCapabilities {
             structured_output: true,
             requires_version_header: false,
             supports_parallel_tool_calls: true,
+            supports_tool_choice_none: true,
             tokenizer_name: None,
         }
     }
@@ -97,6 +103,7 @@ impl ProviderCapabilities {
             structured_output: false, // no JSON mode in Messages API
             requires_version_header: true,
             supports_parallel_tool_calls: true,
+            supports_tool_choice_none: false,
             tokenizer_name: Some("claude"),
         }
     }
@@ -114,6 +121,7 @@ impl ProviderCapabilities {
             structured_output: false,
             requires_version_header: false,
             supports_parallel_tool_calls: false,
+            supports_tool_choice_none: false,
             tokenizer_name: None,
         }
     }
@@ -167,6 +175,18 @@ pub struct ModelProfile {
     /// Whether this model supports parallel tool calls (derived from provider
     /// capabilities; may be overridden for specific models).
     pub supports_parallel_tool_calls: bool,
+
+    /// Whether the provider/model accepts explicit `tool_choice=none`.
+    pub supports_tool_choice_none: bool,
+
+    /// Known context window in tokens.
+    pub context_window: Option<u32>,
+
+    /// Harness-level tool exclusions for this model.
+    pub excluded_tools: HashSet<String>,
+
+    /// Stable model-specific system prompt suffix.
+    pub prompt_suffix: Option<String>,
 
     /// Tokenizer name for accurate token counting (None if unknown).
     pub tokenizer_name: Option<&'static str>,
@@ -250,6 +270,10 @@ impl ModelProfile {
             max_output_tokens,
             supports_streaming: true, // All supported providers stream
             supports_parallel_tool_calls: capabilities.supports_parallel_tool_calls,
+            supports_tool_choice_none: capabilities.supports_tool_choice_none,
+            context_window: infer_context_window(provider, model_name),
+            excluded_tools: HashSet::new(),
+            prompt_suffix: None,
             tokenizer_name,
         }
     }
@@ -259,6 +283,108 @@ impl ModelProfile {
         let capabilities = ProviderCapabilities::from_provider_name(provider);
         Self::new(model_name, provider, capabilities)
     }
+}
+
+/// Consumer-provided harness overrides for a provider or exact model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelProfileOverride {
+    pub supports_parallel_tool_calls: Option<bool>,
+    pub supports_tool_choice_none: Option<bool>,
+    pub supports_structured_output: Option<bool>,
+    pub context_window: Option<u32>,
+    pub excluded_tools: HashSet<String>,
+    pub prompt_suffix: Option<String>,
+}
+
+impl ModelProfileOverride {
+    fn apply_to(&self, profile: &mut ModelProfile) {
+        if let Some(value) = self.supports_parallel_tool_calls {
+            profile.supports_parallel_tool_calls = value;
+        }
+        if let Some(value) = self.supports_tool_choice_none {
+            profile.supports_tool_choice_none = value;
+        }
+        if let Some(value) = self.supports_structured_output {
+            profile.capabilities.structured_output = value;
+        }
+        if let Some(value) = self.context_window {
+            profile.context_window = Some(value);
+        }
+        profile
+            .excluded_tools
+            .extend(self.excluded_tools.iter().cloned());
+        if let Some(value) = &self.prompt_suffix {
+            profile.prompt_suffix = Some(value.clone());
+        }
+    }
+}
+
+/// Resolves a base [`ModelProfile`] plus consumer-registered overrides.
+///
+/// Provider defaults are applied first. An exact normalized `provider:model`
+/// entry is then applied and therefore has higher precedence.
+#[derive(Debug, Clone, Default)]
+pub struct ModelProfileResolver {
+    provider_defaults: HashMap<String, ModelProfileOverride>,
+    exact_models: HashMap<String, ModelProfileOverride>,
+}
+
+impl ModelProfileResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_provider_default(
+        mut self,
+        provider: impl AsRef<str>,
+        profile: ModelProfileOverride,
+    ) -> Self {
+        self.provider_defaults
+            .insert(normalize_selector_part(provider.as_ref()), profile);
+        self
+    }
+
+    pub fn register_exact(
+        mut self,
+        provider: impl AsRef<str>,
+        model: impl AsRef<str>,
+        profile: ModelProfileOverride,
+    ) -> Self {
+        self.exact_models
+            .insert(selector_key(provider.as_ref(), model.as_ref()), profile);
+        self
+    }
+
+    pub fn resolve(
+        &self,
+        provider: &str,
+        model: &str,
+        capabilities: ProviderCapabilities,
+    ) -> ModelProfile {
+        let mut profile = ModelProfile::new(model, provider, capabilities);
+        if let Some(default) = self
+            .provider_defaults
+            .get(&normalize_selector_part(provider))
+        {
+            default.apply_to(&mut profile);
+        }
+        if let Some(exact) = self.exact_models.get(&selector_key(provider, model)) {
+            exact.apply_to(&mut profile);
+        }
+        profile
+    }
+}
+
+fn normalize_selector_part(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn selector_key(provider: &str, model: &str) -> String {
+    format!(
+        "{}:{}",
+        normalize_selector_part(provider),
+        normalize_selector_part(model)
+    )
 }
 
 /// Resolve the thinking wire-protocol from a (lowercased) model name and
@@ -595,5 +721,60 @@ mod tests {
             resolve_thinking_protocol("kimi-k2-thinking", "moonshot"),
             T::None
         );
+    }
+
+    #[test]
+    fn exact_model_override_wins_over_provider_default() {
+        let resolver = ModelProfileResolver::new()
+            .register_provider_default(
+                " OpenAI ",
+                ModelProfileOverride {
+                    supports_parallel_tool_calls: Some(false),
+                    supports_tool_choice_none: Some(false),
+                    excluded_tools: HashSet::from(["shell".to_string()]),
+                    prompt_suffix: Some("provider suffix".to_string()),
+                    ..Default::default()
+                },
+            )
+            .register_exact(
+                "openai",
+                "GPT-5-CODEX",
+                ModelProfileOverride {
+                    supports_parallel_tool_calls: Some(true),
+                    supports_tool_choice_none: Some(true),
+                    context_window: Some(400_000),
+                    excluded_tools: HashSet::from(["browser".to_string()]),
+                    prompt_suffix: Some("exact suffix".to_string()),
+                    ..Default::default()
+                },
+            );
+
+        let profile = resolver.resolve(
+            "OPENAI",
+            "gpt-5-codex",
+            ProviderCapabilities::openai_compatible(),
+        );
+        assert!(profile.supports_parallel_tool_calls);
+        assert!(profile.supports_tool_choice_none);
+        assert_eq!(profile.context_window, Some(400_000));
+        assert_eq!(profile.prompt_suffix.as_deref(), Some("exact suffix"));
+        assert_eq!(
+            profile.excluded_tools,
+            HashSet::from(["shell".to_string(), "browser".to_string()])
+        );
+    }
+
+    #[test]
+    fn provider_default_applies_without_fuzzy_model_matching() {
+        let resolver = ModelProfileResolver::new().register_provider_default(
+            "ollama",
+            ModelProfileOverride {
+                supports_structured_output: Some(true),
+                ..Default::default()
+            },
+        );
+        let profile = resolver.resolve("ollama", "local/custom", ProviderCapabilities::ollama());
+        assert!(profile.capabilities.structured_output);
+        assert!(!profile.supports_tool_choice_none);
     }
 }

@@ -1271,6 +1271,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn final_only_falls_back_to_empty_tool_surface_when_none_is_unsupported() {
+        let usage = crate::llm::types::Usage {
+            prompt_tokens: Some(6),
+            completion_tokens: Some(5),
+            total_tokens: Some(11),
+            ..crate::llm::types::Usage::default()
+        };
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call_with_usage("blocked", "mock_calc", r#"{"x":1}"#, usage)
+                .with_response("fallback final"),
+        );
+        let profile =
+            echo_core::llm::capabilities::ModelProfile::from_provider_name("local-model", "ollama");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(profile)
+            .tool(Box::new(
+                MockTool::new("mock_calc").with_response("must not run"),
+            ))
+            .max_iterations(3)
+            .run_budget(echo_core::agent::RunBudgetPolicy {
+                iteration_wind_down_remaining: None,
+                max_model_tokens: Some(10),
+            })
+            .build()
+            .expect("agent builds");
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "fallback final")
+        );
+        assert_eq!(llm.all_tool_choices(), vec![None, None]);
+        let tool_counts = llm.all_tool_counts();
+        assert!(tool_counts.first().is_some_and(|count| *count > 0));
+        assert_eq!(tool_counts.get(1), Some(&0));
+    }
+
+    #[tokio::test]
     async fn missing_provider_usage_does_not_fake_token_budget_exhaustion() {
         let llm = MockLlmClient::new()
             .then_tool_call("allowed", "mock_calc", r#"{"x":1}"#)
