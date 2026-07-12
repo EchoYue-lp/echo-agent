@@ -178,9 +178,18 @@ src/agent/react/run/stream_loop/
 └── processor.rs     # 事件处理和分发
 ```
 
-### 工具输出截断
+### 工具输出落盘与截断
 
-v0.2.1 引入 head+tail 截断策略（70/30 分割），对齐换行边界：
+所有工具结果统一经过输出预算阶段。达到 1 MiB 的输出会先写入受管 spill 文件，
+模型只接收预览、完整文件路径和 `read_file` 回读提示。即使没有配置
+`max_tool_output_tokens`，超大输出仍会落盘。
+
+配置 working directory 时，spill 文件写到
+`<working_dir>/.echo-agent/spill`，确保受工作目录约束的文件工具可以回读；未配置时
+回退系统临时目录。每次创建新 spill 时会尽力清理一小时前的旧文件。
+
+未达到 spill 阈值但超过 `max_tool_output_tokens` 的结果使用 UTF-8 安全的 head+tail
+视图，按 70/30 分配保留字符：
 
 ```
 完整输出: [────────────────────────────────────────] 10KB
@@ -188,4 +197,6 @@ v0.2.1 引入 head+tail 截断策略（70/30 分割），对齐换行边界：
                               ↑ 省略中间部分
 ```
 
-这确保 Agent 始终能看到工具输出的开头和结尾，同时控制 token 消耗。
+spill 创建失败时，框架使用保守的 fallback token 预算截断，不会把完整超大结果直接
+塞回模型。`ToolResult.truncated` 和 metadata 会记录 spilled、truncated 或
+spill_failed_truncated。

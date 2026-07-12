@@ -624,7 +624,12 @@ impl PipelineStage for TruncationStage {
             .as_deref()
             .or_else(|| ctx.result.as_ref().map(|r| r.output.as_str()))
             .unwrap_or("");
-        ctx.output = Some(snapshot.truncate_tool_output(raw.to_string()).await);
+        let processed = snapshot.process_tool_output(raw.to_string());
+        if let Some(result) = ctx.result.as_mut() {
+            result.truncated = processed.truncated;
+            result.metadata.extend(processed.metadata);
+        }
+        ctx.output = Some(processed.output);
         Ok(())
     }
 }
@@ -706,7 +711,12 @@ impl PipelineStage for TraceRecordingStage {
                     name: ctx.tool_name.clone(),
                     success: result.success,
                     output_preview: Some(if result.success {
-                        result.output.chars().take(200).collect()
+                        ctx.output
+                            .as_deref()
+                            .unwrap_or(&result.output)
+                            .chars()
+                            .take(200)
+                            .collect()
                     } else {
                         result
                             .error
@@ -716,7 +726,7 @@ impl PipelineStage for TraceRecordingStage {
                             .take(200)
                             .collect()
                     }),
-                    output_truncated: ctx.output.is_some(),
+                    output_truncated: result.truncated,
                     duration_ms: ctx.duration_ms,
                 })
                 .await;
@@ -777,10 +787,10 @@ impl ToolExecutionPipeline {
                 Box::new(CallbackStage::START),
                 Box::new(AuditStage),
                 Box::new(ExecuteStage),
-                Box::new(TraceRecordingStage),
                 Box::new(PostToolUseHookStage),
                 Box::new(OutputGuardStage),
                 Box::new(TruncationStage),
+                Box::new(TraceRecordingStage),
                 Box::new(CallbackStage::END),
             ],
         }
@@ -1007,6 +1017,139 @@ mod tests {
             plan_mode: false,
             stream_tx: Some(stream_tx),
         }
+    }
+
+    fn completed_context(output: String) -> ToolExecutionContext {
+        ToolExecutionContext {
+            call_id: "call-output-budget".to_string(),
+            tool_name: "shell".to_string(),
+            params: ToolParameters::new(),
+            input: serde_json::json!({}),
+            hook_messages: HookMessageBatches::default(),
+            result: Some(ToolResult::success(output)),
+            output: None,
+            blocked: false,
+            block_reason: None,
+            duration_ms: 0,
+            plan_mode: false,
+            stream_tx: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn truncation_stage_spills_without_token_limit_and_read_file_can_recover() -> Result<()> {
+        let working_dir =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .working_dir(working_dir.path())
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let original = format!("{}END", "中文🙂\n".repeat(300_000));
+        let mut ctx = completed_context(original.clone());
+
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        let result = ctx
+            .result
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("truncation stage lost tool result".to_string()))?;
+        assert!(result.truncated);
+        assert_eq!(
+            result.metadata.get("output_handling").map(String::as_str),
+            Some("spilled")
+        );
+        let artifact_path = result
+            .metadata
+            .get("artifact_path")
+            .ok_or_else(|| ReactError::Other("spill metadata lacks artifact_path".to_string()))?;
+        assert!(std::path::Path::new(artifact_path).starts_with(working_dir.path()));
+        assert!(ctx.output.as_deref().is_some_and(|output| {
+            output.contains("Output spilled to disk") && output.contains(artifact_path)
+        }));
+
+        let read_tool = crate::tools::files::files::ReadFileTool::new();
+        let params = [
+            ("path".to_string(), Value::String(artifact_path.clone())),
+            ("offset".to_string(), Value::from(300_001_u64)),
+            ("limit".to_string(), Value::from(1_u64)),
+        ]
+        .into_iter()
+        .collect();
+        let tool_context = ToolContext {
+            working_dir: Some(working_dir.path().to_path_buf()),
+            ..ToolContext::default()
+        };
+        let recovered = read_tool
+            .execute_with_context(params, &tool_context)
+            .await?;
+        assert!(recovered.success);
+        assert!(recovered.output.contains("END"));
+        assert_eq!(
+            std::fs::read_to_string(artifact_path).ok().as_deref(),
+            Some(original.as_str())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn truncation_stage_is_utf8_safe() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .max_tool_output_tokens(20)
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("中文🙂abc".repeat(500));
+
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        let output = ctx
+            .output
+            .as_deref()
+            .ok_or_else(|| ReactError::Other("truncation stage produced no output".to_string()))?;
+        assert!(output.contains("Output truncated"));
+        assert!(ctx.result.as_ref().is_some_and(|result| result.truncated));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn truncation_stage_falls_back_when_spill_directory_is_unwritable() -> Result<()> {
+        let working_dir_file =
+            tempfile::NamedTempFile::new().map_err(|error| ReactError::Other(error.to_string()))?;
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .working_dir(working_dir_file.path())
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("失败回退🙂".repeat(300_000));
+
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        let result = ctx
+            .result
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("truncation stage lost tool result".to_string()))?;
+        assert!(result.truncated);
+        assert_eq!(
+            result.metadata.get("output_handling").map(String::as_str),
+            Some("spill_failed_truncated")
+        );
+        assert!(result.metadata.contains_key("spill_error"));
+        assert!(
+            ctx.output
+                .as_deref()
+                .is_some_and(|output| output.contains("Output truncated"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn default_pipeline_records_trace_after_output_budgeting() {
+        let pipeline = ToolExecutionPipeline::default_pipeline();
+        let names: Vec<&str> = pipeline.stages.iter().map(|stage| stage.name()).collect();
+        let truncation = names.iter().position(|name| *name == "truncation");
+        let trace = names.iter().position(|name| *name == "trace_recording");
+        assert!(matches!((truncation, trace), (Some(left), Some(right)) if left < right));
     }
 
     #[tokio::test]

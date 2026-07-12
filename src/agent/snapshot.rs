@@ -15,7 +15,20 @@ use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
 use echo_core::llm::types::{Message, Role};
 use echo_core::tokenizer::Tokenizer;
+use std::io::Write as _;
 use std::sync::Arc;
+
+const TOOL_OUTPUT_SPILL_THRESHOLD_BYTES: usize = 1_048_576;
+const TOOL_OUTPUT_SPILL_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+const TOOL_OUTPUT_PREVIEW_CHARS: usize = 500;
+const TOOL_OUTPUT_SPILL_FAILURE_FALLBACK_TOKENS: usize = 8_000;
+
+/// Result of applying the run-scoped output budget to one tool result.
+pub(crate) struct ProcessedToolOutput {
+    pub output: String,
+    pub truncated: bool,
+    pub metadata: std::collections::HashMap<String, String>,
+}
 
 fn is_internal_transcript_message(message: &Message) -> bool {
     if crate::compression::is_context_projection_message(message) {
@@ -732,51 +745,114 @@ impl AgentRunSnapshot {
         }
     }
 
-    /// Truncate tool output based on token budget.
-    ///
-    /// Uses `HeuristicTokenizer` for accurate ASCII/CJK-aware token estimation,
-    /// matching the tokenizer used by `execution.rs` and `ContextManager`.
-    pub async fn truncate_tool_output(&self, output: String) -> String {
-        // Only apply truncation when a max token limit is configured
-        let Some(max_tokens) = self.config.max_tool_output_tokens else {
-            return output;
+    /// Apply the single authoritative spill/truncation policy for tool output.
+    pub(crate) fn process_tool_output(&self, output: String) -> ProcessedToolOutput {
+        let original_bytes = output.len();
+        let mut spill_error = None;
+        if original_bytes >= TOOL_OUTPUT_SPILL_THRESHOLD_BYTES {
+            match self.spill_tool_output(&output) {
+                Ok(path) => {
+                    let preview: String = output.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
+                    let mut metadata = std::collections::HashMap::new();
+                    metadata.insert("output_handling".to_string(), "spilled".to_string());
+                    metadata.insert("artifact_path".to_string(), path.display().to_string());
+                    metadata.insert("original_bytes".to_string(), original_bytes.to_string());
+                    return ProcessedToolOutput {
+                        output: format!(
+                            "{preview}\n\n[Output spilled to disk: {} ({:.1} MiB). Use read_file with this exact path to read the full output.]",
+                            path.display(),
+                            original_bytes as f64 / 1_048_576.0
+                        ),
+                        truncated: true,
+                        metadata,
+                    };
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "tool output spill failed; falling back to token truncation");
+                    spill_error = Some(error.to_string());
+                }
+            }
+        }
+
+        let max_tokens = self.config.max_tool_output_tokens.or_else(|| {
+            spill_error
+                .as_ref()
+                .map(|_| TOOL_OUTPUT_SPILL_FAILURE_FALLBACK_TOKENS)
+        });
+        let Some(max_tokens) = max_tokens else {
+            return ProcessedToolOutput {
+                output,
+                truncated: false,
+                metadata: std::collections::HashMap::new(),
+            };
         };
 
         let tokenizer = echo_core::tokenizer::HeuristicTokenizer;
         let estimated_tokens = tokenizer.count_tokens(&output);
         if estimated_tokens <= max_tokens {
-            return output;
+            return ProcessedToolOutput {
+                output,
+                truncated: false,
+                metadata: std::collections::HashMap::new(),
+            };
         }
 
-        // Truncate with head + tail strategy
-        let head_chars = max_tokens * 2; // ~50% of budget for head
-        let tail_chars = max_tokens * 2; // ~50% of budget for tail
-
-        if output.len() <= head_chars + tail_chars {
-            return output;
-        }
-
-        // UTF-8 safe truncation: find char boundaries
-        let head_end = output
-            .char_indices()
-            .take_while(|(i, _)| *i < head_chars)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        let tail_start = output
-            .char_indices()
-            .rev()
-            .take_while(|(i, _)| *i >= output.len() - tail_chars)
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(output.len());
-        let head = &output[..head_end];
-        let tail = &output[tail_start..];
         let notice = format!(
-            "\n\n[... output truncated: ~{} tokens → {} tokens shown ...]\n\n",
-            estimated_tokens, max_tokens
+            "\n\n[Output truncated: ~{estimated_tokens} tokens total, {max_tokens} token budget]\n\n"
         );
-        format!("{}{}{}", head, notice, tail)
+        let notice_tokens = tokenizer.count_tokens(&notice);
+        let available_tokens = max_tokens.saturating_sub(notice_tokens);
+        let available_chars = available_tokens.saturating_mul(4);
+        let head_chars = available_chars.saturating_mul(7) / 10;
+        let tail_chars = available_chars.saturating_sub(head_chars);
+        let head: String = output.chars().take(head_chars).collect();
+        let tail_reversed: String = output.chars().rev().take(tail_chars).collect();
+        let tail: String = tail_reversed.chars().rev().collect();
+        let truncated_output = if available_tokens == 0 {
+            format!("[Output truncated: ~{estimated_tokens} tokens total]")
+        } else {
+            format!("{head}{notice}{tail}")
+        };
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "output_handling".to_string(),
+            if spill_error.is_some() {
+                "spill_failed_truncated"
+            } else {
+                "truncated"
+            }
+            .to_string(),
+        );
+        metadata.insert("original_bytes".to_string(), original_bytes.to_string());
+        metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
+        if let Some(error) = spill_error {
+            metadata.insert("spill_error".to_string(), error);
+        }
+        ProcessedToolOutput {
+            output: truncated_output,
+            truncated: true,
+            metadata,
+        }
+    }
+
+    /// Backward-compatible string view used by legacy internal call sites.
+    pub async fn truncate_tool_output(&self, output: String) -> String {
+        self.process_tool_output(output).output
+    }
+
+    fn spill_tool_output(&self, output: &str) -> std::io::Result<std::path::PathBuf> {
+        let spill_dir = self
+            .config
+            .working_dir
+            .as_ref()
+            .map(|working_dir| working_dir.join(".echo-agent").join("spill"))
+            .unwrap_or_else(|| std::env::temp_dir().join("echo_agent_spill"));
+        std::fs::create_dir_all(&spill_dir)?;
+        cleanup_old_tool_output_spills(&spill_dir, TOOL_OUTPUT_SPILL_MAX_AGE);
+        let mut file = tempfile::NamedTempFile::new_in(&spill_dir)?;
+        file.write_all(output.as_bytes())?;
+        let (_, path) = file.keep().map_err(|error| error.error)?;
+        Ok(path)
     }
 
     // ── Lifecycle hook fan-out ───────────────────────────────────────
@@ -958,6 +1034,28 @@ impl AgentRunSnapshot {
                 Err(e) => Err(e),
             }
         })
+    }
+}
+
+fn cleanup_old_tool_output_spills(dir: &std::path::Path, max_age: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let expired = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
+        if expired {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

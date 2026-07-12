@@ -395,7 +395,13 @@ async fn main() -> Result<()> {
 | `compress_threshold_ratio` | `f64` | 0.2 | `AgentConfig::compress_threshold_ratio()` | Trigger compression when headroom drops below this ratio |
 | `max_iterations` | `usize` | 10 | `AgentConfig::max_iterations()` | Max iterations (prevents infinite loops) |
 | `force_read_before_edit` | `bool` | false | `AgentConfig::force_read_before_edit()` | Require `read_file` before any edit/write/delete |
-| `max_tool_output_tokens` | `Option<usize>` | None | `AgentConfig::max_tool_output_tokens()` | Per-tool output token limit; auto-truncated when exceeded |
+| `max_tool_output_tokens` | `Option<usize>` | None | `AgentConfig::max_tool_output_tokens()` | Per-tool output token limit; smaller oversized results use UTF-8-safe head/tail truncation |
+
+Tool outputs of at least 1 MiB are spilled before token truncation regardless of this
+setting. The model receives a preview and a `read_file` path. With a configured working
+directory, artifacts are stored under `<working_dir>/.echo-agent/spill`; otherwise the
+system temporary directory is used. Spill failures fall back to a conservative token
+limit and are recorded in `ToolResult.metadata`.
 
 ### Git Checkpoint API
 

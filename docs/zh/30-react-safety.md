@@ -395,7 +395,12 @@ async fn main() -> Result<()> {
 | `compress_threshold_ratio` | `f64` | 0.2 | `AgentConfig::compress_threshold_ratio()` | 剩余空间低于此比例时触发压缩 |
 | `max_iterations` | `usize` | 10 | `AgentConfig::max_iterations()` | 最大迭代次数（防无限循环） |
 | `force_read_before_edit` | `bool` | false | `AgentConfig::force_read_before_edit()` | 编辑文件前必须先用 `read_file` 读取 |
-| `max_tool_output_tokens` | `Option<usize>` | None | `AgentConfig::max_tool_output_tokens()` | 单个工具输出 token 上限，超限自动截断 |
+| `max_tool_output_tokens` | `Option<usize>` | None | `AgentConfig::max_tool_output_tokens()` | 单个工具输出 token 上限；较小的超限结果使用 UTF-8 安全的首尾截断 |
+
+达到 1 MiB 的工具输出无论是否配置该参数，都会在 token 截断前先 spill。模型收到预览和
+`read_file` 路径。配置 working directory 时，artifact 位于
+`<working_dir>/.echo-agent/spill`；否则使用系统临时目录。spill 失败会回退保守的 token
+上限，并记录到 `ToolResult.metadata`。
 
 ### Git 检查点 API
 

@@ -175,9 +175,20 @@ src/agent/react/run/stream_loop/
 └── processor.rs     # Event processing and dispatch
 ```
 
-### Tool Output Truncation
+### Tool Output Spill and Truncation
 
-v0.2.1 introduces head+tail truncation (70/30 split), aligned to newline boundaries:
+All tool results pass through one output-budget stage. Outputs of at least 1 MiB are
+written to a managed spill file before token truncation, and the model receives a
+preview plus the exact path for `read_file`. Spill is active even when
+`max_tool_output_tokens` is not configured.
+
+When a working directory is configured, spill files live under
+`<working_dir>/.echo-agent/spill` so the confined file tools can read them. Without a
+working directory, echo-agent falls back to the system temporary directory. Files older
+than one hour are removed on a best-effort basis when a new spill is created.
+
+Smaller output that exceeds `max_tool_output_tokens` uses a UTF-8-safe head+tail view
+with a 70/30 character allocation:
 
 ```
 Full output:    [────────────────────────────────────────] 10KB
@@ -185,4 +196,6 @@ After truncate: [────── head (70%) ──────][── tail (
                                       ↑ middle omitted
 ```
 
-This ensures the Agent always sees the beginning and end of tool output while controlling token consumption.
+If spill creation fails, echo-agent applies a conservative fallback token budget instead
+of returning the full oversized result to the model. `ToolResult.truncated` and metadata
+record whether the result was spilled, truncated, or truncated after a spill failure.

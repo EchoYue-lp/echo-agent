@@ -7,13 +7,12 @@ use super::super::{ReactAgent, TOOL_FINAL_ANSWER};
 use super::context::HookMessageBatches;
 use crate::error::{ReactError, Result, ToolError};
 use crate::guard::GuardDirection;
-use crate::llm::{ChatRequest, Message};
 use crate::tools::{ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[allow(dead_code)]
 pub(crate) struct ToolExecutionOutcome {
@@ -249,190 +248,11 @@ impl ReactAgent {
         }
     }
 
-    /// Truncate tool output based on token budget.
-    ///
-    /// When `max_tool_output_tokens` is configured and the estimated output tokens
-    /// exceed the limit, the output is truncated to a **head + tail** view:
-    /// the first ~70% of the budget is taken from the beginning, the remaining
-    /// ~30% from the end.  Cut points are aligned to newline boundaries so that
-    /// code blocks, JSON structures, and log lines stay intact.
+    /// Delegate to the run snapshot's authoritative spill/truncation policy.
     pub(crate) async fn truncate_tool_output(&self, output: String) -> String {
-        // Only apply truncation/summary when a max token limit is configured
-        let Some(max_tokens) = self.config.max_tool_output_tokens else {
-            return output;
-        };
-
-        let ctx = self.memory.context.lock().await;
-        let tokenizer = ctx.tokenizer();
-        let token_count = tokenizer.count_tokens(&output);
-        if token_count <= max_tokens {
-            drop(ctx);
-            return output;
-        }
-        drop(ctx);
-
-        // Event-level summary: for long tool outputs (>2000 chars), generate LLM summary
-        const SUMMARY_THRESHOLD: usize = 2000;
-        if output.len() > SUMMARY_THRESHOLD {
-            // Try LLM summary first
-            if let Some(summary) = self.summarize_tool_output(&output).await {
-                return summary;
-            }
-            // Fallback: structured summary
-            let line_count = output.lines().count();
-            let char_count = output.len();
-            let first_line = output.lines().next().unwrap_or("");
-            let summary = format!(
-                "[Summary: {char_count} chars, ~{line_count} lines. First line: {first_line}]\n\n"
-            );
-            let head: String = output.chars().skip(first_line.len()).take(1400).collect();
-            let tail: String = output
-                .chars()
-                .rev()
-                .take(400)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            return format!("{summary}{head}\n...\n{tail}");
-        }
-
-        // Large output spill-to-disk: if output exceeds 1MB, write to temp file
-        const SPILL_THRESHOLD: usize = 1_048_576; // 1MB
-        if output.len() > SPILL_THRESHOLD {
-            let tmp_dir = std::env::temp_dir().join("echo_agent_spill");
-            let _ = std::fs::create_dir_all(&tmp_dir);
-            // P1-4: spill 文件此前通过 tmp.keep() 持久化后永不删除, echo_agent_spill/
-            // 无限增长。每次新建 spill 时 best-effort 清理 1 小时前的旧文件 — 冷路径
-            // (>1MB 才触发), 同步扫描成本低; 失败静默 (不影响本次 spill)。
-            cleanup_old_spills(&tmp_dir, std::time::Duration::from_secs(3600));
-            match tempfile::NamedTempFile::new_in(&tmp_dir) {
-                Ok(mut tmp) => {
-                    use std::io::Write;
-                    if tmp.write_all(output.as_bytes()).is_ok() {
-                        // Persist the temp file so it can be read later
-                        match tmp.keep() {
-                            Ok((_, path)) => {
-                                let preview: String = output.chars().take(500).collect();
-                                return format!(
-                                    "{preview}\n\n[Output spilled to disk: {} ({:.1}MB). Use read_file to read the full output.]",
-                                    path.display(),
-                                    output.len() as f64 / 1_048_576.0
-                                );
-                            }
-                            Err(_) => { /* keep failed, fall through to truncation */ }
-                        }
-                    }
-                }
-                Err(_) => { /* temp file creation failed, fall through to truncation */ }
-            }
-        }
-
-        let Some(max_tokens) = self.config.max_tool_output_tokens else {
-            return output;
-        };
-        let ctx = self.memory.context.lock().await;
-        let tokenizer = ctx.tokenizer();
-        let token_count = tokenizer.count_tokens(&output);
-        if token_count <= max_tokens {
-            drop(ctx);
-            return output;
-        }
-
-        let notice = format!(
-            "\n\n[... output truncated: {} tokens total → {} tokens shown ...]\n\n",
-            token_count, max_tokens,
-        );
-        let notice_tokens = tokenizer.count_tokens(&notice);
-        let available = max_tokens.saturating_sub(notice_tokens);
-
-        // If the budget is too tight for a meaningful split, fall back to
-        // prefix-only with a short suffix.
-        if available < 4 {
-            drop(ctx);
-            let truncated: String = output.chars().take(max_tokens * 4).collect();
-            return format!("{truncated}\n[Output truncated, total {token_count} tokens]");
-        }
-
-        let head_budget = (available as f64 * 0.7) as usize;
-        let tail_budget = available.saturating_sub(head_budget);
-
-        let chars: Vec<char> = output.chars().collect();
-        let char_per_token = chars.len() as f64 / token_count as f64;
-
-        // ── head ──────────────────────────────────────────────────
-        let head_char_end = {
-            let est = (head_budget as f64 * char_per_token * 1.05) as usize;
-            newline_boundary_fwd(&chars, est.min(chars.len()))
-        };
-        let head: String = chars[..head_char_end].iter().collect();
-        let actual_head = tokenizer.count_tokens(&head);
-        let head = if actual_head > head_budget {
-            let scale = head_budget as f64 / actual_head as f64;
-            let adj = newline_boundary_fwd(&chars, (head_char_end as f64 * scale) as usize);
-            chars[..adj].iter().collect::<String>()
-        } else {
-            head
-        };
-
-        // ── tail ──────────────────────────────────────────────────
-        let tail_char_start = {
-            let est = chars
-                .len()
-                .saturating_sub((tail_budget as f64 * char_per_token * 1.05) as usize);
-            newline_boundary_rev(&chars, est)
-        };
-        let tail: String = chars[tail_char_start..].iter().collect();
-        let actual_tail = tokenizer.count_tokens(&tail);
-        let tail = if actual_tail > tail_budget {
-            let scale = tail_budget as f64 / actual_tail as f64;
-            let keep = (tail.len() as f64 * scale) as usize;
-            let adj =
-                newline_boundary_rev(&chars, tail_char_start + tail.len().saturating_sub(keep));
-            chars[adj..].iter().collect::<String>()
-        } else {
-            tail
-        };
-
-        drop(ctx);
-        format!("{head}{notice}{tail}")
-    }
-
-    /// Use LLM to generate a concise summary of tool output.
-    ///
-    /// Returns `None` if LLM is unavailable or summarization fails.
-    async fn summarize_tool_output(&self, output: &str) -> Option<String> {
-        let llm_client = self.llm_client.as_ref()?;
-        let snippet: String = output.chars().take(4000).collect();
-        let prompt = format!(
-            "Summarize the following tool output in 1-2 sentences. Focus on key results, errors, or actionable findings:\n\n{snippet}"
-        );
-        let request = ChatRequest {
-            messages: vec![Message::user(prompt)],
-            temperature: Some(0.0),
-            max_tokens: Some(100),
-            tools: None,
-            tool_choice: None,
-            response_format: None,
-            thinking: None,
-            cancel_token: None,
-            user_id: self.config.cache_user_id.clone(),
-            cache_hints: None,
-        };
-        match llm_client.chat(request).await {
-            Ok(response) => {
-                let summary = response.content().unwrap_or_default();
-                if summary.is_empty() {
-                    None
-                } else {
-                    Some(format!("[Tool output summary: {}]", summary))
-                }
-            }
-            Err(e) => {
-                debug!("Tool output summarization failed: {}", e);
-                None
-            }
-        }
+        crate::agent::snapshot::AgentRunSnapshot::from_agent(self)
+            .truncate_tool_output(output)
+            .await
     }
 
     /// Perform guard check on tool output to prevent malicious content injection
@@ -635,66 +455,6 @@ impl ReactAgent {
                     .await;
                 Err(failure.error)
             }
-        }
-    }
-}
-
-// ── truncation helpers ──────────────────────────────────────────────
-
-/// Find the nearest newline at or before `target`, so truncation lands on
-/// a natural boundary (line / code-block / JSON key end).
-fn newline_boundary_fwd(chars: &[char], target: usize) -> usize {
-    let t = target.min(chars.len());
-    for i in (0..t).rev() {
-        if chars[i] == '\n' {
-            return i + 1; // include the newline in the kept portion
-        }
-    }
-    t
-}
-
-/// Find the nearest newline at or after `target`, so the tail starts at a
-/// clean line boundary.
-fn newline_boundary_rev(chars: &[char], target: usize) -> usize {
-    let t = target.min(chars.len());
-    for (i, ch) in chars.iter().enumerate().skip(t) {
-        if *ch == '\n' {
-            return i + 1; // start after the newline
-        }
-    }
-    t
-}
-
-/// Best-effort 删除 spill 目录中超过 `max_age` 的旧文件 (P1-4)。
-///
-/// spill 文件通过 `NamedTempFile::keep()` 持久化后由 LLM 按需读取, 框架无法
-/// 知道"何时不再需要"。采用创建时清理: 每次新建 spill 顺手扫一遍目录, 按
-/// mtime 删过期文件。这是冷路径 (仅 >1MB 输出触发), 同步扫描 + 静默失败,
-/// 不影响本次 spill 写入。
-fn cleanup_old_spills(dir: &std::path::Path, max_age: std::time::Duration) {
-    let now = std::time::SystemTime::now();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        // 只清理 regular file (跳过子目录等), 且 best-effort: 任一失败跳过。
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let should_remove = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map(|mtime| {
-                now.duration_since(mtime)
-                    .map(|age| age > max_age)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if should_remove {
-            let _ = std::fs::remove_file(&path);
         }
     }
 }
