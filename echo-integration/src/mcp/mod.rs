@@ -84,7 +84,11 @@ impl McpManager {
             .tools()
             .iter()
             .map(|tool| {
-                Box::new(McpToolAdapter::new(client.clone(), tool.clone())) as Box<dyn Tool>
+                Box::new(McpToolAdapter::with_server_name(
+                    client.clone(),
+                    tool.clone(),
+                    name.clone(),
+                )) as Box<dyn Tool>
             })
             .collect::<Vec<_>>();
 
@@ -121,10 +125,14 @@ impl McpManager {
     /// 获取所有已连接服务端的全部工具
     pub fn get_all_tools(&self) -> Vec<Box<dyn Tool>> {
         self.clients
-            .values()
-            .flat_map(|client| {
+            .iter()
+            .flat_map(|(server_name, client)| {
                 client.tools().iter().map(|tool| {
-                    Box::new(McpToolAdapter::new(client.clone(), tool.clone())) as Box<dyn Tool>
+                    Box::new(McpToolAdapter::with_server_name(
+                        client.clone(),
+                        tool.clone(),
+                        server_name.clone(),
+                    )) as Box<dyn Tool>
                 })
             })
             .collect()

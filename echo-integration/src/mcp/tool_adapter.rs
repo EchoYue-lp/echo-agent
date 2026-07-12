@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use super::client::McpClient;
-use super::types::McpTool;
+use super::types::{McpContent, McpTool, McpToolCallResult};
 use echo_core::error::Result;
 use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolResultKind, ToolRiskLevel};
 
@@ -14,17 +14,107 @@ use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolResultKind, ToolRis
 pub struct McpToolAdapter {
     client: Arc<McpClient>,
     tool: McpTool,
+    server_name: Option<String>,
+    exposed_name: String,
 }
 
 impl McpToolAdapter {
     pub fn new(client: Arc<McpClient>, tool: McpTool) -> Self {
-        Self { client, tool }
+        let exposed_name = tool.name.clone();
+        Self {
+            client,
+            tool,
+            server_name: None,
+            exposed_name,
+        }
     }
+
+    pub fn with_server_name(
+        client: Arc<McpClient>,
+        tool: McpTool,
+        server_name: impl Into<String>,
+    ) -> Self {
+        let server_name = server_name.into();
+        let exposed_name = format!(
+            "mcp__{}__{}",
+            sanitize_tool_name_part(&server_name),
+            sanitize_tool_name_part(&tool.name)
+        );
+        Self {
+            client,
+            tool,
+            server_name: Some(server_name),
+            exposed_name,
+        }
+    }
+
+    fn attach_result_metadata(&self, result: &mut ToolResult, result_type: &str) {
+        result
+            .metadata
+            .insert("tool_source".to_string(), "mcp".to_string());
+        result
+            .metadata
+            .insert("mcp_tool".to_string(), self.tool.name.clone());
+        result
+            .metadata
+            .insert("result_type".to_string(), result_type.to_string());
+        if let Some(server_name) = &self.server_name {
+            result
+                .metadata
+                .insert("mcp_server".to_string(), server_name.clone());
+        }
+    }
+}
+
+fn sanitize_tool_name_part(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unnamed".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn mcp_result_type(result: &McpToolCallResult) -> &'static str {
+    if result.structured_content.is_some() {
+        return "json";
+    }
+    if result
+        .content
+        .iter()
+        .any(|content| matches!(content, McpContent::Image { .. }))
+    {
+        return "image";
+    }
+    if result
+        .content
+        .iter()
+        .any(|content| matches!(content, McpContent::Audio { .. }))
+    {
+        return "audio";
+    }
+    if result
+        .content
+        .iter()
+        .any(|content| matches!(content, McpContent::Resource { .. }))
+    {
+        return "resource";
+    }
+    "text"
 }
 
 impl Tool for McpToolAdapter {
     fn name(&self) -> &str {
-        &self.tool.name
+        &self.exposed_name
     }
 
     fn description(&self) -> &str {
@@ -54,6 +144,7 @@ impl Tool for McpToolAdapter {
         Box::pin(async move {
             let args = serde_json::Value::Object(parameters.into_iter().collect());
             let result = self.client.call_tool(&self.tool.name, args).await?;
+            let result_type = mcp_result_type(&result);
 
             let text = McpClient::content_to_text(&result.content);
 
@@ -69,6 +160,7 @@ impl Tool for McpToolAdapter {
                         error_code: "mcp_is_error".to_string(),
                     };
                 }
+                self.attach_result_metadata(&mut tr, result_type);
                 return Ok(tr);
             }
 
@@ -88,7 +180,62 @@ impl Tool for McpToolAdapter {
                 tr.output.push_str(&format!("\n\n附加字段:\n{extra_str}"));
             }
 
+            self.attach_result_metadata(&mut tr, result_type);
+
             Ok(tr)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(
+        content: Vec<McpContent>,
+        structured_content: Option<serde_json::Value>,
+    ) -> McpToolCallResult {
+        McpToolCallResult {
+            content,
+            is_error: false,
+            structured_content,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn result_type_prefers_structured_content() {
+        let value = result(
+            vec![McpContent::Image {
+                data: "frame".to_string(),
+                mime_type: "image/png".to_string(),
+            }],
+            Some(serde_json::json!({ "ok": true })),
+        );
+        assert_eq!(mcp_result_type(&value), "json");
+    }
+
+    #[test]
+    fn result_type_reports_rich_content() {
+        let value = result(
+            vec![McpContent::Resource {
+                resource: super::super::types::McpResourceLink {
+                    uri: "file:///tmp/report".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    name: Some("report".to_string()),
+                },
+            }],
+            None,
+        );
+        assert_eq!(mcp_result_type(&value), "resource");
+    }
+
+    #[test]
+    fn qualified_names_are_stable_and_tool_safe() {
+        assert_eq!(
+            sanitize_tool_name_part("GitHub Issues/v2"),
+            "GitHub_Issues_v2"
+        );
+        assert_eq!(sanitize_tool_name_part(""), "unnamed");
     }
 }
