@@ -827,6 +827,7 @@ mod tests {
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-a")),
             cancel: None,
+            disabled_tools: None,
         };
         let first_stream = agent
             .execute_stream_with_invocation_context(
@@ -861,6 +862,7 @@ mod tests {
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-b")),
             cancel: None,
+            disabled_tools: None,
         };
         let mut queued = Box::pin(agent.execute_stream_with_invocation_context(
             "second",
@@ -910,6 +912,7 @@ mod tests {
             }),
             working_dir: None,
             cancel: None,
+            disabled_tools: None,
         };
 
         let stream = agent
@@ -1222,6 +1225,7 @@ mod tests {
             }),
             working_dir: None,
             cancel: None,
+            disabled_tools: None,
         };
         let stream = agent
             .run_stream_channel(

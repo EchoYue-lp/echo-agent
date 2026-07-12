@@ -89,6 +89,30 @@ AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
 
 ---
 
+## Invocation 级工具面
+
+调用方需要只对某一轮隐藏工具、又不能修改 pooled/shared agent 时，使用
+`AgentInvocationContext::disabled_tools`：
+
+```rust
+use echo_agent::agent::AgentInvocationContext;
+use std::collections::HashSet;
+
+let invocation = AgentInvocationContext {
+    disabled_tools: Some(HashSet::from(["create_complex_task".to_string()])),
+    ..Default::default()
+};
+```
+
+run snapshot 会把 invocation 排除项与 agent 默认排除项合并，再叠加已激活 skill 的
+allowlist 和 plan mode 只读工具面，并在该 invocation 生命周期内冻结。隐藏工具既不会
+出现在发给模型的 schema 中；即使 provider 仍返回该调用，执行 pipeline 也会拒绝。
+
+`ReactAgent::set_disabled_tools` 现在只设置后续 run 的 agent 默认值，不会改变已经创建的
+snapshot。
+
+---
+
 ## 生命周期回调
 
 实现 `AgentCallback` trait，可以监听 Agent 执行的每个阶段（用于埋点、日志、UI 实时更新等）：
@@ -116,7 +140,8 @@ impl AgentCallback for MyCallback {
 
     fn on_tool_end<'a>(&'a self, agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            println!("[{}] 工具结果: {} -> {}", agent, tool, &result[..result.len().min(80)]);
+            let preview: String = result.chars().take(80).collect();
+            println!("[{}] 工具结果: {} -> {}", agent, tool, preview);
         })
     }
 

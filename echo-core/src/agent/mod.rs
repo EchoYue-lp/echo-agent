@@ -34,6 +34,11 @@ pub struct AgentInvocationContext {
     pub working_dir: Option<std::path::PathBuf>,
     /// Cancellation token captured with the invocation before queueing.
     pub cancel: Option<CancellationToken>,
+    /// Tool names hidden only for this invocation.
+    ///
+    /// These exclusions are combined with agent-level defaults when the run
+    /// snapshot is created. They never mutate the shared tool registry.
+    pub disabled_tools: Option<std::collections::HashSet<String>>,
 }
 
 impl std::fmt::Debug for AgentInvocationContext {
@@ -64,6 +69,13 @@ impl std::fmt::Debug for AgentInvocationContext {
             .field(
                 "cancel",
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .field(
+                "disabled_tools",
+                &self
+                    .disabled_tools
+                    .as_ref()
+                    .map(std::collections::HashSet::len),
             )
             .finish()
     }

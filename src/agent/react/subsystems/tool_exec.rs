@@ -40,16 +40,17 @@ pub(crate) struct ToolExecutionSubsystem {
     /// Intervention callbacks that can influence agent behavior before
     /// tool calls, LLM reasoning, and final answers.
     pub(crate) intervention_callbacks: Vec<Arc<dyn InterventionCallback>>,
-    /// Per-run disabled tool names. Tools in this set are hidden from the LLM
+    /// Agent-level default disabled tool names. Tools in this set are hidden from the LLM
     /// (filtered out of the tool list sent to the model). Populated by the
-    /// application layer (e.g. EKO hides task-management tools when in Chat
-    /// interaction mode). Captured into each run snapshot, which filters the
-    /// model-visible tool definitions on every reasoning iteration.
+    /// application layer for durable agent-wide policy. Invocation-specific
+    /// exclusions belong in `AgentInvocationContext::disabled_tools`. The
+    /// current value is cloned into each run snapshot and never read again by
+    /// that run.
     ///
     /// Unlike `ToolManager::unregister` (which mutates the shared registry and
     /// would affect other in-flight turns on pooled agents), this is a
     /// separate runtime flag — the tool stays registered and available to
-    /// other turns; only the LLM tool list is filtered.
+    /// other agents; only the LLM tool list is filtered.
     pub(crate) disabled_tools: Arc<std::sync::RwLock<Option<std::collections::HashSet<String>>>>,
 }
 
@@ -60,9 +61,9 @@ impl ToolExecutionSubsystem {
         Arc::clone(&self.tool_manager)
     }
 
-    /// Set the disabled tool set for the current run. Callers (e.g. drive_chat)
-    /// pass `Some(set)` to hide tools, or `None` to clear. Each run snapshot
-    /// shares this flag and reads it on every LLM iteration.
+    /// Set agent-level default disabled tools for subsequent runs.
+    ///
+    /// Existing snapshots are immutable and are not affected.
     pub(crate) fn set_disabled_tools(&self, names: Option<std::collections::HashSet<String>>) {
         if let Ok(mut guard) = self.disabled_tools.write() {
             *guard = names;

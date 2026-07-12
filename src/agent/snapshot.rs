@@ -157,15 +157,27 @@ pub struct ToolRuntime {
     pub active_skill_names: Vec<String>,
     /// Current plan state (shared with ReactAgent).
     pub plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
-    /// Shared disabled-tools flag (mirrors `ToolExecutionSubsystem.disabled_tools`).
-    /// The run path reads it here via [`tools_for_llm`] so every reasoning
-    /// iteration honors the latest per-run hiding. Populated by the app layer
-    /// (e.g. EKO Chat mode hides task tools).
-    pub disabled_tools: Arc<std::sync::RwLock<Option<std::collections::HashSet<String>>>>,
+    /// Effective disabled tools captured for this invocation.
+    pub disabled_tools: std::collections::HashSet<String>,
+    /// Whether the invocation uses plan mode's read-only tool surface.
+    pub plan_mode: bool,
 }
 
 impl ToolRuntime {
-    pub fn from_agent(agent: &super::ReactAgent) -> Self {
+    pub fn from_agent(
+        agent: &super::ReactAgent,
+        invocation_disabled_tools: Option<&std::collections::HashSet<String>>,
+    ) -> Self {
+        let mut disabled_tools = agent
+            .tools
+            .disabled_tools
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_default();
+        if let Some(invocation_disabled_tools) = invocation_disabled_tools {
+            disabled_tools.extend(invocation_disabled_tools.iter().cloned());
+        }
         Self {
             tool_manager: Arc::clone(&agent.tools.tool_manager),
             hook_registry: agent.tools.hook_registry.clone(),
@@ -173,26 +185,36 @@ impl ToolRuntime {
             skill_allowed_tools: agent.tools.skill_registry.active_skill_allowed_tools(),
             active_skill_names: agent.tools.skill_registry.activated_names(),
             plan_state: Arc::clone(&agent.plan_state),
-            disabled_tools: Arc::clone(&agent.tools.disabled_tools),
+            disabled_tools,
+            plan_mode: agent.config.plan_mode,
         }
     }
 
-    /// Return the tool definitions to send to the LLM, with `disabled_tools`
-    /// filtered out. All reasoning iterations use this snapshot-scoped view.
+    /// Return the immutable, invocation-scoped tool definitions for the LLM.
     pub fn tools_for_llm(&self) -> Vec<crate::llm::types::ToolDefinition> {
-        let tools = self.tool_manager.get_openai_tools();
-        let disabled = self
-            .disabled_tools
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        match disabled {
-            Some(set) if !set.is_empty() => tools
-                .into_iter()
-                .filter(|t| !set.contains(&t.function.name))
-                .collect(),
-            _ => tools,
-        }
+        self.tool_manager
+            .get_openai_tools()
+            .into_iter()
+            .filter(|tool| !self.disabled_tools.contains(&tool.function.name))
+            .filter(|tool| {
+                self.skill_allowed_tools
+                    .as_ref()
+                    .is_none_or(|allowed_tools| {
+                        allowed_tools.iter().any(|pattern| {
+                            echo_execution::skills::external::types::tool_matcher(
+                                pattern,
+                                &tool.function.name,
+                            )
+                        })
+                    })
+            })
+            .filter(|tool| {
+                !self.plan_mode
+                    || (!crate::tools::is_write_tool(&tool.function.name)
+                        && tool.function.name != "shell"
+                        && tool.function.name != "delete_file")
+            })
+            .collect()
     }
 }
 
@@ -323,7 +345,10 @@ impl AgentRunSnapshot {
         }
         Self {
             config: Arc::new(config),
-            tools: Arc::new(ToolRuntime::from_agent(agent)),
+            tools: Arc::new(ToolRuntime::from_agent(
+                agent,
+                invocation.and_then(|context| context.disabled_tools.as_ref()),
+            )),
             guard: Arc::new(GuardRuntime::from_agent(agent)),
             snapshot_manager: agent.memory.snapshot_manager.clone(),
             client: agent.client().clone(),
@@ -1061,10 +1086,45 @@ fn cleanup_old_tool_output_spills(dir: &std::path::Path, max_age: std::time::Dur
 
 #[cfg(test)]
 mod transcript_filter_tests {
-    use super::{AgentRunSnapshot, filter_user_visible_transcript};
+    use super::{AgentRunSnapshot, ToolRuntime, filter_user_visible_transcript};
     use crate::compression::{ContextManager, ContextProjection};
     use crate::error::Result;
     use echo_core::llm::types::Message;
+    use echo_core::tools::{Tool, ToolParameters, ToolResult};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    struct NamedTool(&'static str);
+
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "snapshot policy test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    fn tool_names(snapshot: &AgentRunSnapshot) -> Vec<String> {
+        snapshot
+            .tools
+            .tools_for_llm()
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect()
+    }
 
     #[test]
     fn transcript_filter_excludes_projection_owned_messages_only() {
@@ -1117,6 +1177,7 @@ mod transcript_filter_tests {
             }),
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
             cancel: None,
+            disabled_tools: None,
         };
 
         let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
@@ -1146,5 +1207,79 @@ mod transcript_filter_tests {
             })
         );
         Ok(())
+    }
+
+    #[test]
+    fn invocation_tool_exclusions_are_isolated_and_snapshot_immutable() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(NamedTool("alpha")))
+            .tool(Box::new(NamedTool("beta")))
+            .tool(Box::new(NamedTool("gamma")))
+            .tool(Box::new(NamedTool("delta")))
+            .build()?;
+        agent.set_disabled_tools(Some(HashSet::from(["gamma".to_string()])));
+
+        let invocation_a = echo_core::agent::AgentInvocationContext {
+            disabled_tools: Some(HashSet::from(["alpha".to_string()])),
+            ..Default::default()
+        };
+        let invocation_b = echo_core::agent::AgentInvocationContext {
+            disabled_tools: Some(HashSet::from(["beta".to_string()])),
+            ..Default::default()
+        };
+        let snapshot_a = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation_a);
+        let snapshot_b = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation_b);
+
+        agent.set_disabled_tools(Some(HashSet::from(["delta".to_string()])));
+
+        let tools_a: HashSet<String> = tool_names(&snapshot_a).into_iter().collect();
+        let tools_b: HashSet<String> = tool_names(&snapshot_b).into_iter().collect();
+        assert!(!tools_a.contains("alpha"));
+        assert!(!tools_a.contains("gamma"));
+        assert!(tools_a.contains("beta"));
+        assert!(tools_a.contains("delta"));
+        assert!(!tools_b.contains("beta"));
+        assert!(!tools_b.contains("gamma"));
+        assert!(tools_b.contains("alpha"));
+        assert!(tools_b.contains("delta"));
+        let snapshot_c = AgentRunSnapshot::from_agent(&agent);
+        let tools_c: HashSet<String> = tool_names(&snapshot_c).into_iter().collect();
+        assert!(tools_c.contains("alpha"));
+        assert!(tools_c.contains("beta"));
+        assert!(tools_c.contains("gamma"));
+        assert!(!tools_c.contains("delta"));
+        Ok(())
+    }
+
+    #[test]
+    fn tool_visibility_combines_skill_plan_and_disabled_policies() {
+        let manager = Arc::new(crate::tools::ToolManager::new());
+        for name in ["read_file", "write_file", "shell", "final_answer", "custom"] {
+            manager.register(Box::new(NamedTool(name)));
+        }
+        let runtime = ToolRuntime {
+            tool_manager: manager,
+            hook_registry: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            intervention_callbacks: Vec::new(),
+            skill_allowed_tools: Some(HashSet::from([
+                "read_file".to_string(),
+                "write_file".to_string(),
+                "shell".to_string(),
+                "final_answer".to_string(),
+            ])),
+            active_skill_names: Vec::new(),
+            plan_state: Arc::new(tokio::sync::RwLock::new(None)),
+            disabled_tools: HashSet::from(["final_answer".to_string()]),
+            plan_mode: true,
+        };
+
+        let visible: Vec<String> = runtime
+            .tools_for_llm()
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect();
+
+        assert_eq!(visible, vec!["read_file"]);
     }
 }

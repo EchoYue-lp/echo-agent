@@ -89,6 +89,31 @@ AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
 
 ---
 
+## Invocation-Scoped Tool Surface
+
+Use `AgentInvocationContext::disabled_tools` when a caller needs to hide tools for
+one turn without mutating a pooled/shared agent:
+
+```rust
+use echo_agent::agent::AgentInvocationContext;
+use std::collections::HashSet;
+
+let invocation = AgentInvocationContext {
+    disabled_tools: Some(HashSet::from(["create_complex_task".to_string()])),
+    ..Default::default()
+};
+```
+
+The run snapshot combines these exclusions with agent-level defaults, then applies
+the activated skill allowlist and plan-mode read-only surface. The result is frozen
+for the invocation. Hidden tools are omitted from the model schema and rejected by
+the execution pipeline if a provider still returns such a call.
+
+`ReactAgent::set_disabled_tools` now sets defaults for subsequent runs; it does not
+change snapshots that are already running.
+
+---
+
 ## Lifecycle Callbacks
 
 Implement `AgentCallback` to observe every phase of execution (for analytics, logging, UI updates, etc.):
@@ -116,7 +141,8 @@ impl AgentCallback for MyCallback {
 
     fn on_tool_end<'a>(&'a self, agent: &'a str, tool: &'a str, result: &'a str) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            println!("[{}] Tool result: {} -> {}", agent, tool, &result[..result.len().min(80)]);
+            let preview: String = result.chars().take(80).collect();
+            println!("[{}] Tool result: {} -> {}", agent, tool, preview);
         })
     }
 

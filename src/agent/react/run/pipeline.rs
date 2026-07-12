@@ -163,6 +163,32 @@ impl PipelineStage for ParseValidateStage {
     }
 }
 
+/// Enforces the invocation-scoped tool surface at execution time.
+pub struct ToolVisibilityStage;
+
+#[async_trait]
+impl PipelineStage for ToolVisibilityStage {
+    fn name(&self) -> &str {
+        "tool_visibility"
+    }
+
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        if snapshot.tools.disabled_tools.contains(&ctx.tool_name) {
+            ctx.blocked = true;
+            ctx.block_reason = Some(format!(
+                "Tool '{}' is not available in this invocation",
+                ctx.tool_name
+            ));
+            ctx.output = ctx.block_reason.clone();
+        }
+        Ok(())
+    }
+}
+
 /// Runs PreToolUse hooks.
 pub struct PreToolUseHookStage;
 
@@ -779,6 +805,7 @@ impl ToolExecutionPipeline {
             stages: vec![
                 Box::new(InterventionStage),
                 Box::new(ParseValidateStage),
+                Box::new(ToolVisibilityStage),
                 Box::new(PlanModeStage),
                 Box::new(PreToolUseHookStage),
                 Box::new(PermissionStage),
@@ -1034,6 +1061,33 @@ mod tests {
             plan_mode: false,
             stream_tx: None,
         }
+    }
+
+    #[tokio::test]
+    async fn invocation_disabled_tool_is_blocked_before_execution() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .build()?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            disabled_tools: Some(std::collections::HashSet::from(["hidden_tool".to_string()])),
+            ..Default::default()
+        };
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &invocation,
+        );
+        let mut ctx = completed_context(String::new());
+        ctx.tool_name = "hidden_tool".to_string();
+
+        ToolVisibilityStage.run(&mut ctx, &snapshot).await?;
+
+        assert!(ctx.blocked);
+        assert!(
+            ctx.block_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not available in this invocation"))
+        );
+        Ok(())
     }
 
     #[tokio::test]

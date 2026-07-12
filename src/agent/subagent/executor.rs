@@ -1405,6 +1405,7 @@ impl SubagentExecutor {
                     .map(|handle| handle.path.clone())
                     .or_else(|| workspace_handle.as_ref().map(|handle| handle.path.clone())),
                 cancel: None,
+                disabled_tools: None,
             };
             registry
                 .event_bus()
