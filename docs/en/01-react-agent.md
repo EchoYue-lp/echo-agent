@@ -112,6 +112,20 @@ the execution pipeline if a provider still returns such a call.
 `ReactAgent::set_disabled_tools` now sets defaults for subsequent runs; it does not
 change snapshots that are already running.
 
+### Run Budgets
+
+`RunBudgetPolicy` adds opt-in convergence controls without changing the existing
+hard `max_iterations` behavior. `iteration_wind_down_remaining` injects one short
+instruction when the configured number of iterations remains. `max_model_tokens`
+counts only provider-reported input and output tokens; missing usage remains unknown
+and never triggers a fabricated threshold. Once the threshold is reached, the next
+request exposes no tools and sends `tool_choice=none`. Decisions are emitted as
+`AgentEvent::BudgetDecision` and recorded in the run trace.
+
+Configure an agent default with `ReactAgentBuilder::run_budget`, or override one
+call with `AgentInvocationContext::run_budget`. The run snapshot freezes the
+resolved value, so queued invocations cannot change each other's budget.
+
 ---
 
 ## Lifecycle Callbacks

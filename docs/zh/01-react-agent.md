@@ -111,6 +111,18 @@ allowlist 和 plan mode 只读工具面，并在该 invocation 生命周期内�
 `ReactAgent::set_disabled_tools` 现在只设置后续 run 的 agent 默认值，不会改变已经创建的
 snapshot。
 
+### Run 预算
+
+`RunBudgetPolicy` 提供默认关闭的收束控制，不改变既有 `max_iterations` 硬停止语义。
+`iteration_wind_down_remaining` 在剩余迭代数达到阈值时只注入一次短提示；
+`max_model_tokens` 只累计 provider 实际返回的 input/output token。provider 未返回 usage
+时保持 unknown，不用估算值伪造精确阈值。达到 token 阈值后，下一次请求不暴露工具并发送
+`tool_choice=none`。决策通过 `AgentEvent::BudgetDecision` 输出，同时写入 run trace。
+
+消费方可以通过 `ReactAgentBuilder::run_budget` 设置 agent 默认值，也可以用
+`AgentInvocationContext::run_budget` 覆盖单次调用。run snapshot 创建时冻结最终值，因此排队
+invocation 不会互相修改预算。
+
 ---
 
 ## 生命周期回调

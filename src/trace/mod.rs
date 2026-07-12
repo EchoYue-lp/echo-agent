@@ -96,6 +96,19 @@ pub enum RunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEvent {
+    /// A run budget changed the set of allowed next actions.
+    BudgetDecision {
+        /// Decision name: `wind_down`, `final_only`, or `hard_stop`.
+        decision: String,
+        /// Stable machine-readable reason.
+        reason: String,
+        /// Current one-based iteration.
+        iteration: usize,
+        /// Provider-reported input + output tokens accumulated so far.
+        reported_model_tokens: usize,
+        /// False when any response omitted usage metadata.
+        usage_complete: bool,
+    },
     /// An LLM call was made.
     LlmCall {
         /// Number of messages in the request.

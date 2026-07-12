@@ -28,6 +28,7 @@ pub(crate) async fn run_think(
     tx: &mpsc::Sender<Result<AgentEvent>>,
     state: &mut LoopState,
     messages: Vec<Message>,
+    final_only: bool,
 ) -> Result<ThinkOutcome> {
     let agent = &snap.config.agent_name;
     for cb in snap.config.callbacks.iter() {
@@ -78,7 +79,7 @@ pub(crate) async fn run_think(
 
     let mut llm_stream = Box::pin(try_send_or!(
         tx,
-        create_llm_stream(snap, messages.clone()).await,
+        create_llm_stream(snap, messages.clone(), final_only).await,
         ThinkOutcome::Abandoned
     ));
     let mut content_buffer = String::new();
@@ -214,6 +215,7 @@ pub(crate) async fn run_think(
         tool_call_map,
         pt,
         ct,
+        usage_reported,
     }))
 }
 
@@ -221,12 +223,13 @@ pub(crate) async fn run_think(
 pub(crate) async fn create_llm_stream(
     snap: &AgentRunSnapshot,
     messages: Vec<Message>,
+    final_only: bool,
 ) -> Result<
     std::pin::Pin<
         Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
     >,
 > {
-    let tools = if snap.config.enable_tool {
+    let tools = if snap.config.enable_tool && !final_only {
         let t = snap.tools.tools_for_llm();
         if t.is_empty() { None } else { Some(t) }
     } else {
@@ -278,7 +281,7 @@ pub(crate) async fn create_llm_stream(
                         temperature: temp,
                         max_tokens,
                         tools: t,
-                        tool_choice: None,
+                        tool_choice: final_only.then(|| "none".to_string()),
                         response_format: None,
                         thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
@@ -333,7 +336,7 @@ pub(crate) async fn create_llm_stream(
                     snap.config.temperature,
                     snap.config.max_tokens,
                     t,
-                    None,
+                    final_only.then(|| "none".to_string()),
                     None,
                     ct,
                     None,

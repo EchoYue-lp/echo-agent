@@ -25,6 +25,32 @@ use std::future::Future;
 use std::pin::Pin;
 pub use tokio_util::sync::CancellationToken;
 
+/// Optional soft budgets applied to one ReAct invocation.
+///
+/// `None` fields preserve the existing behavior. The hard iteration limit
+/// remains `AgentConfig::max_iterations`; this policy only adds an explicit
+/// wind-down point and a provider-reported model-token ceiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunBudgetPolicy {
+    /// Inject a one-shot wind-down instruction when this many iterations remain.
+    pub iteration_wind_down_remaining: Option<usize>,
+    /// Enter final-only mode after this many provider-reported model tokens.
+    pub max_model_tokens: Option<usize>,
+}
+
+/// Observable decision made by the run budget controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetDecision {
+    /// Normal ReAct execution may continue.
+    Continue,
+    /// The run should converge, but tools remain available.
+    WindDown,
+    /// The next model call must produce text without tools.
+    FinalOnly,
+    /// A hard budget has been exhausted and the run must fail.
+    HardStop,
+}
+
 /// Value-scoped metadata for one streaming agent invocation.
 #[derive(Clone, Default)]
 pub struct AgentInvocationContext {
@@ -39,6 +65,8 @@ pub struct AgentInvocationContext {
     /// These exclusions are combined with agent-level defaults when the run
     /// snapshot is created. They never mutate the shared tool registry.
     pub disabled_tools: Option<std::collections::HashSet<String>>,
+    /// Per-invocation budget policy. `None` uses the agent default.
+    pub run_budget: Option<RunBudgetPolicy>,
 }
 
 impl std::fmt::Debug for AgentInvocationContext {
@@ -77,6 +105,7 @@ impl std::fmt::Debug for AgentInvocationContext {
                     .as_ref()
                     .map(std::collections::HashSet::len),
             )
+            .field("run_budget", &self.run_budget)
             .finish()
     }
 }
@@ -120,6 +149,19 @@ pub enum AgentEvent {
         cache_creation_prompt_tokens: usize,
         /// Whether the provider response contained usage metadata.
         usage_reported: bool,
+    },
+    /// A run budget crossed a behavior boundary.
+    BudgetDecision {
+        /// Decision taken by the harness.
+        decision: BudgetDecision,
+        /// Stable machine-readable reason.
+        reason: String,
+        /// Current iteration count (one-based).
+        iteration: usize,
+        /// Provider-reported model tokens accumulated in this invocation.
+        reported_model_tokens: usize,
+        /// False when at least one provider response omitted usage metadata.
+        usage_complete: bool,
     },
 
     // ── Tool Invocation ──────────────────────────────────────────────────────────
@@ -318,6 +360,7 @@ impl AgentEvent {
             | AgentEvent::ThinkStart
             | AgentEvent::ThinkEnd { .. }
             | AgentEvent::LlmUsage { .. }
+            | AgentEvent::BudgetDecision { .. }
             | AgentEvent::MemoryRecalled { .. }
             | AgentEvent::ContextCompressed { .. }
             | AgentEvent::Chart { .. } => AgentPhase::Thinking,

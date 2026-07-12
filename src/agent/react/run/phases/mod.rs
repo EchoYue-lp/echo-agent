@@ -43,6 +43,25 @@ pub(crate) struct LoopState {
     /// TaskNode id created by `prepare_turn` for DAG status tracking. `None`
     /// when no `RuntimeStateStore` is configured.
     pub task_node_id: Option<String>,
+    /// Invocation-local budget counters. They remain in the loop state while
+    /// HITL approval awaits and therefore are preserved across pause/resume.
+    pub budget: RunBudgetState,
+}
+
+#[derive(Default)]
+pub(crate) struct RunBudgetState {
+    pub reported_model_tokens: usize,
+    pub usage_complete: bool,
+    pub wind_down_emitted: bool,
+    pub final_only_emitted: bool,
+    pub final_only: bool,
+}
+
+impl RunBudgetState {
+    pub(crate) fn record_usage(&mut self, tokens: usize, reported: bool) {
+        self.reported_model_tokens = self.reported_model_tokens.saturating_add(tokens);
+        self.usage_complete = self.usage_complete && reported;
+    }
 }
 
 impl LoopState {
@@ -51,6 +70,10 @@ impl LoopState {
             stop_hook_continued: false,
             verifier_retry_count: 0,
             task_node_id,
+            budget: RunBudgetState {
+                usage_complete: true,
+                ..RunBudgetState::default()
+            },
         }
     }
 }
@@ -103,6 +126,8 @@ pub(crate) struct ThinkOutput {
     pub pt: usize,
     /// Completion tokens reported by the LLM.
     pub ct: usize,
+    /// Whether the provider supplied usage metadata for this response.
+    pub usage_reported: bool,
 }
 
 /// What a single iteration body decided.
@@ -120,4 +145,23 @@ pub(crate) enum IterOutcome {
     /// Channel closed mid-iteration (a yield/try_send macro fired
     /// `return Ok(())`). The driver returns `Ok(())` immediately.
     Abandoned,
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::LoopState;
+
+    #[tokio::test]
+    async fn budget_counters_survive_async_pause_resume_boundary() {
+        let mut state = LoopState::new(None);
+        state.budget.record_usage(12, true);
+
+        // HITL approval pauses inside the same run future. Crossing an await
+        // boundary must not reset invocation-local counters.
+        tokio::task::yield_now().await;
+        state.budget.record_usage(8, false);
+
+        assert_eq!(state.budget.reported_model_tokens, 20);
+        assert!(!state.budget.usage_complete);
+    }
 }

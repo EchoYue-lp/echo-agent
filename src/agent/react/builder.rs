@@ -56,6 +56,7 @@ pub struct ReactAgentBuilder {
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
     max_iterations: usize,
+    run_budget: echo_core::agent::RunBudgetPolicy,
     token_limit: usize,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
@@ -129,6 +130,7 @@ impl ReactAgentBuilder {
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
+            run_budget: echo_core::agent::RunBudgetPolicy::default(),
             token_limit: DEFAULT_TOKEN_LIMIT,
             max_tokens: None,
             temperature: None,
@@ -425,6 +427,12 @@ impl ReactAgentBuilder {
     /// Set maximum iteration count
     pub fn max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    /// Configure one-shot iteration wind-down and provider-reported token budget.
+    pub fn run_budget(mut self, policy: echo_core::agent::RunBudgetPolicy) -> Self {
+        self.run_budget = policy;
         self
     }
 
@@ -799,6 +807,7 @@ impl ReactAgentBuilder {
             .tool_error_feedback(self.tool_error_feedback)
             .tool_execution(self.tool_execution)
             .max_iterations(self.max_iterations)
+            .run_budget(self.run_budget)
             .token_limit(self.token_limit)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);

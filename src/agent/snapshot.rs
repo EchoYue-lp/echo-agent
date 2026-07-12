@@ -77,6 +77,7 @@ pub struct RuntimeConfig {
     pub agent_name: String,
     pub model_name: String,
     pub max_iterations: usize,
+    pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub session_id: Option<String>,
     pub conversation_id: Option<String>,
     /// Session-bound working directory (worktree path). Injected into each
@@ -114,6 +115,7 @@ impl RuntimeConfig {
             agent_name: config.agent_name.clone(),
             model_name: config.model_name.clone(),
             max_iterations: config.max_iterations,
+            run_budget: config.run_budget.clone(),
             session_id: config.session_id.clone(),
             conversation_id: config.conversation_id.clone(),
             working_dir: config.working_dir.lock().ok().and_then(|g| g.clone()),
@@ -338,6 +340,9 @@ impl AgentRunSnapshot {
         let mut config = RuntimeConfig::from_agent_config(&agent.config);
         if let Some(working_dir) = invocation.and_then(|context| context.working_dir.as_ref()) {
             config.working_dir = Some(working_dir.clone());
+        }
+        if let Some(run_budget) = invocation.and_then(|context| context.run_budget.as_ref()) {
+            config.run_budget = run_budget.clone();
         }
         let runtime = invocation.and_then(|context| context.runtime.as_ref());
         if let Some(conversation_id) = runtime.and_then(|context| context.conversation_id.clone()) {
@@ -1178,6 +1183,7 @@ mod transcript_filter_tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
             cancel: None,
             disabled_tools: None,
+            run_budget: None,
         };
 
         let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
@@ -1250,6 +1256,33 @@ mod transcript_filter_tests {
         assert!(tools_c.contains("gamma"));
         assert!(!tools_c.contains("delta"));
         Ok(())
+    }
+
+    #[test]
+    fn invocation_run_budget_overrides_agent_default_without_mutation() {
+        let mut agent = crate::agent::ReactAgent::new(
+            crate::agent::AgentConfig::new("model", "agent", "system").run_budget(
+                echo_core::agent::RunBudgetPolicy {
+                    iteration_wind_down_remaining: Some(2),
+                    max_model_tokens: Some(1_000),
+                },
+            ),
+        );
+        let invocation = echo_core::agent::AgentInvocationContext {
+            run_budget: Some(echo_core::agent::RunBudgetPolicy {
+                iteration_wind_down_remaining: Some(1),
+                max_model_tokens: Some(100),
+            }),
+            ..Default::default()
+        };
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        agent.config_mut().run_budget.max_model_tokens = Some(5);
+
+        assert_eq!(snapshot.config.run_budget.max_model_tokens, Some(100));
+        assert_eq!(
+            snapshot.config.run_budget.iteration_wind_down_remaining,
+            Some(1)
+        );
     }
 
     #[test]

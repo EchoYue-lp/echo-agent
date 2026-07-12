@@ -332,7 +332,7 @@ impl AgentSnapshot {
             Message::user(message.to_string()),
         ];
 
-        let stream = super::phases::think::create_llm_stream(self, messages).await?;
+        let stream = super::phases::think::create_llm_stream(self, messages, false).await?;
         let mut stream = std::pin::pin!(stream);
         let mut content = String::new();
         let mut last_usage: Option<echo_core::llm::types::Usage> = None;
@@ -469,6 +469,51 @@ impl AgentSnapshot {
 
             let _ = self.drain_steer_into_context(&context, None).await;
 
+            let remaining = max_iterations.saturating_sub(iteration);
+            if !state.budget.wind_down_emitted
+                && self.config.max_iterations > 0
+                && self
+                    .config
+                    .run_budget
+                    .iteration_wind_down_remaining
+                    .is_some_and(|threshold| threshold > 0 && remaining <= threshold)
+            {
+                state.budget.wind_down_emitted = true;
+                super::context::push_runtime_context_note(
+                    &context,
+                    "RunBudget:WindDown",
+                    "The iteration budget is nearly exhausted. Stop opening new branches and converge on a final answer.",
+                )
+                .await;
+                let _ = tx
+                    .send(Ok(AgentEvent::BudgetDecision {
+                        decision: echo_core::agent::BudgetDecision::WindDown,
+                        reason: "iteration_wind_down".to_string(),
+                        iteration: iteration.saturating_add(1),
+                        reported_model_tokens: state.budget.reported_model_tokens,
+                        usage_complete: state.budget.usage_complete,
+                    }))
+                    .await;
+                self.record_event(crate::trace::RunEvent::BudgetDecision {
+                    decision: "wind_down".to_string(),
+                    reason: "iteration_wind_down".to_string(),
+                    iteration: iteration.saturating_add(1),
+                    reported_model_tokens: state.budget.reported_model_tokens,
+                    usage_complete: state.budget.usage_complete,
+                })
+                .await;
+            }
+
+            if state.budget.final_only && !state.budget.final_only_emitted {
+                state.budget.final_only_emitted = true;
+                super::context::push_runtime_context_note(
+                    &context,
+                    "RunBudget:FinalOnly",
+                    "The model-token budget is exhausted. Produce the best final answer now without calling tools.",
+                )
+                .await;
+            }
+
             // Compact: PreCompact hook → (stage4 E1) pre_compaction_flush →
             //          checkpoint → ContextManager.prepare → PostCompact hook.
             // The flush itself lives inside `run_compact` so every compaction
@@ -482,15 +527,60 @@ impl AgentSnapshot {
                 };
 
             // Think: callbacks + interventions + LLM stream → buffered output
-            let think =
-                match phases::think::run_think(&self, &context, &tx, &mut state, messages).await? {
-                    phases::ThinkOutcome::Continue(t) => t,
-                    phases::ThinkOutcome::Abandoned
-                    | phases::ThinkOutcome::Cancelled
-                    | phases::ThinkOutcome::Blocked => {
-                        return Ok(());
-                    }
-                };
+            let final_only = state.budget.final_only;
+            let think = match phases::think::run_think(
+                &self, &context, &tx, &mut state, messages, final_only,
+            )
+            .await?
+            {
+                phases::ThinkOutcome::Continue(t) => t,
+                phases::ThinkOutcome::Abandoned
+                | phases::ThinkOutcome::Cancelled
+                | phases::ThinkOutcome::Blocked => {
+                    return Ok(());
+                }
+            };
+
+            let iteration_tokens = think.pt.saturating_add(think.ct);
+            state
+                .budget
+                .record_usage(iteration_tokens, think.usage_reported);
+            if !state.budget.final_only
+                && self
+                    .config
+                    .run_budget
+                    .max_model_tokens
+                    .is_some_and(|limit| limit > 0 && state.budget.reported_model_tokens >= limit)
+            {
+                state.budget.final_only = true;
+                let _ = tx
+                    .send(Ok(AgentEvent::BudgetDecision {
+                        decision: echo_core::agent::BudgetDecision::FinalOnly,
+                        reason: "model_token_budget".to_string(),
+                        iteration: iteration.saturating_add(1),
+                        reported_model_tokens: state.budget.reported_model_tokens,
+                        usage_complete: state.budget.usage_complete,
+                    }))
+                    .await;
+                self.record_event(crate::trace::RunEvent::BudgetDecision {
+                    decision: "final_only".to_string(),
+                    reason: "model_token_budget".to_string(),
+                    iteration: iteration.saturating_add(1),
+                    reported_model_tokens: state.budget.reported_model_tokens,
+                    usage_complete: state.budget.usage_complete,
+                })
+                .await;
+            }
+
+            if state.budget.final_only && !think.tool_call_map.is_empty() {
+                super::context::push_runtime_context_note(
+                    &context,
+                    "RunBudget:BlockedTools",
+                    "Tool calls were ignored because this invocation is in final-only mode. Return a text answer.",
+                )
+                .await;
+                continue;
+            }
 
             // Branch: tool calls vs text answer vs no-response
             let outcome = if !think.tool_call_map.is_empty() {
@@ -828,6 +918,7 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-a")),
             cancel: None,
             disabled_tools: None,
+            run_budget: None,
         };
         let first_stream = agent
             .execute_stream_with_invocation_context(
@@ -863,6 +954,7 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-b")),
             cancel: None,
             disabled_tools: None,
+            run_budget: None,
         };
         let mut queued = Box::pin(agent.execute_stream_with_invocation_context(
             "second",
@@ -913,6 +1005,7 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            run_budget: None,
         };
 
         let stream = agent
@@ -1087,6 +1180,128 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn iteration_wind_down_is_injected_once() {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call("call_1", "mock_calc", r#"{"x":1}"#)
+                .with_response("done"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .tool(Box::new(MockTool::new("mock_calc").with_response("1")))
+            .max_iterations(2)
+            .run_budget(echo_core::agent::RunBudgetPolicy {
+                iteration_wind_down_remaining: Some(1),
+                max_model_tokens: None,
+            })
+            .build()
+            .expect("agent builds");
+
+        let events = collect_events(&agent, "run").await;
+        let wind_down_count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::BudgetDecision {
+                        decision: echo_core::agent::BudgetDecision::WindDown,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(wind_down_count, 1);
+        let calls = llm.all_calls();
+        let second = calls.get(1).expect("second LLM call");
+        assert!(second.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|text| text.contains("iteration budget is nearly exhausted"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn model_token_budget_blocks_tools_and_forces_final_only_request() {
+        let usage = crate::llm::types::Usage {
+            prompt_tokens: Some(6),
+            completion_tokens: Some(5),
+            total_tokens: Some(11),
+            ..crate::llm::types::Usage::default()
+        };
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call_with_usage("blocked", "mock_calc", r#"{"x":1}"#, usage)
+                .with_response("final without tools"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .tool(Box::new(
+                MockTool::new("mock_calc").with_response("must not run"),
+            ))
+            .max_iterations(3)
+            .run_budget(echo_core::agent::RunBudgetPolicy {
+                iteration_wind_down_remaining: None,
+                max_model_tokens: Some(10),
+            })
+            .build()
+            .expect("agent builds");
+
+        let events = collect_events(&agent, "run").await;
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::BudgetDecision {
+                    decision: echo_core::agent::BudgetDecision::FinalOnly,
+                    reported_model_tokens: 11,
+                    usage_complete: true,
+                    ..
+                }
+            )
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolCall { .. }))
+        );
+        assert!(
+            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "final without tools")
+        );
+        assert_eq!(llm.all_tool_choices(), vec![None, Some("none".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn missing_provider_usage_does_not_fake_token_budget_exhaustion() {
+        let llm = MockLlmClient::new()
+            .then_tool_call("allowed", "mock_calc", r#"{"x":1}"#)
+            .with_response("done");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .tool(Box::new(MockTool::new("mock_calc").with_response("1")))
+            .run_budget(echo_core::agent::RunBudgetPolicy {
+                iteration_wind_down_remaining: None,
+                max_model_tokens: Some(1),
+            })
+            .build()
+            .expect("agent builds");
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolCall { .. }))
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::BudgetDecision {
+                    decision: echo_core::agent::BudgetDecision::FinalOnly,
+                    ..
+                }
+            )
+        }));
+    }
+
     /// When the mock LLM exhausts its response queue (returns EmptyResponse
     /// error), the loop must terminate gracefully with an Error event rather
     /// than hanging or panicking. Guards the empty-response / error branch.
@@ -1226,6 +1441,7 @@ mod tests {
             working_dir: None,
             cancel: None,
             disabled_tools: None,
+            run_budget: None,
         };
         let stream = agent
             .run_stream_channel(

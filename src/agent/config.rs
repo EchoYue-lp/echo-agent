@@ -47,6 +47,8 @@ pub struct AgentConfig {
     pub(crate) agent_name: String,
     /// Maximum iteration rounds, prevents infinite loops (default: 100, effectively unlimited for most tasks)
     pub(crate) max_iterations: usize,
+    /// Optional soft run budgets. All fields default to disabled.
+    pub(crate) run_budget: echo_core::agent::RunBudgetPolicy,
     /// Tool allowlist (empty = no restriction, all registered tools can be called)
     pub(crate) allowed_tools: Vec<String>,
     pub(crate) role: AgentRole,
@@ -196,6 +198,7 @@ impl AgentConfig {
             system_prompt: system_prompt.to_string(),
             agent_name: agent_name.to_string(),
             max_iterations: 100,
+            run_budget: echo_core::agent::RunBudgetPolicy::default(),
             allowed_tools: Vec::new(),
             role: AgentRole::default(),
             enable_tool: false,
@@ -499,6 +502,12 @@ impl AgentConfig {
     /// Default is 100, which is effectively unlimited for most tasks. Set to a lower value for stricter control.
     pub fn max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Set soft run budgets for iteration wind-down and model-token finalization.
+    pub fn run_budget(mut self, policy: echo_core::agent::RunBudgetPolicy) -> Self {
+        self.run_budget = policy;
         self
     }
 
