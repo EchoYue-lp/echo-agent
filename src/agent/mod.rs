@@ -35,8 +35,9 @@
 
 pub use echo_core::agent::builder::AgentBuilder as AgentBuilderTrait;
 pub use echo_core::agent::{
-    Agent, AgentCallback, AgentEvent, AgentInvocationContext, CancellationToken,
-    InterventionCallback, InterventionResult, StepType,
+    AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentEvent, AgentInvocationContext,
+    CancellationToken, EventEnvelope, EventIdentity, InterventionCallback, InterventionResult,
+    StepType, envelope_event_stream, envelope_event_stream_after,
 };
 
 use std::collections::HashMap;

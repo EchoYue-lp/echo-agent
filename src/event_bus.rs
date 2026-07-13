@@ -1,26 +1,16 @@
-//! Unified event bus — single tokio::broadcast channel for AgentEvents.
+//! Unified event bus for the versioned agent event transport contract.
 //!
 //! Allows Webhook/Trace/UI/Audit to subscribe to the same event stream,
 //! replacing the current scattered per-frontend event mapping.
 
-use crate::agent::AgentEvent;
+use crate::agent::EventEnvelope;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-
-/// Wraps an AgentEvent with run context for multi-agent filtering.
-#[derive(Debug, Clone)]
-pub struct BusEvent {
-    pub event: Arc<AgentEvent>,
-    /// Run ID this event belongs to (None = global/system event).
-    pub run_id: Option<String>,
-    /// Agent name that produced this event.
-    pub agent_id: Option<String>,
-}
 
 /// Unified event bus. Subscribe with `subscribe()`, publish with `send()`.
 /// Capacity 1024 to handle batch eval runs without dropping events.
 pub struct EventBus {
-    sender: broadcast::Sender<Arc<BusEvent>>,
+    sender: broadcast::Sender<Arc<EventEnvelope>>,
 }
 
 impl EventBus {
@@ -29,23 +19,13 @@ impl EventBus {
         Self { sender }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<BusEvent>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<EventEnvelope>> {
         self.sender.subscribe()
     }
 
-    /// Send an event with run context.
-    pub fn send_with(&self, event: AgentEvent, run_id: Option<String>, agent_id: Option<String>) {
-        let _ = self.sender.send(Arc::new(BusEvent {
-            event: Arc::new(event),
-            run_id,
-            agent_id,
-        }));
-    }
-    pub fn send(&self, event: AgentEvent) {
-        self.send_with(event, None, None);
-    }
-    pub fn send_for_run(&self, event: AgentEvent, run_id: &str) {
-        self.send_with(event, Some(run_id.to_string()), None);
+    /// Publish an already sequenced event envelope.
+    pub fn send(&self, event: EventEnvelope) {
+        let _ = self.sender.send(Arc::new(event));
     }
 
     pub fn subscriber_count(&self) -> usize {

@@ -137,9 +137,10 @@ pub mod workspace {
 pub mod prelude {
     // Agent
     pub use crate::agent::{
-        Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle, AgentRole, CancellationToken,
-        InterventionCallback, InterventionResult, ReactAgent, ReactAgentBuilder, StepType,
-        StructuredAgent,
+        AGENT_EVENT_SCHEMA_VERSION, Agent, AgentCallback, AgentConfig, AgentEvent, AgentHandle,
+        AgentRole, CancellationToken, EventEnvelope, EventIdentity, InterventionCallback,
+        InterventionResult, ReactAgent, ReactAgentBuilder, StepType, StructuredAgent,
+        envelope_event_stream, envelope_event_stream_after,
     };
     // Prompt Template
     pub use echo_core::agent::PromptTemplateManager;

@@ -2,6 +2,7 @@
 
 pub mod builder;
 mod critic;
+mod event_envelope;
 pub mod factory;
 pub mod intervention;
 pub mod prompt_template;
@@ -12,6 +13,10 @@ pub use intervention::{CallbackBridge, InterventionCallback, InterventionResult}
 pub use prompt_template::PromptTemplateManager;
 
 pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, ThresholdCritic};
+pub use event_envelope::{
+    AGENT_EVENT_SCHEMA_VERSION, EventEnvelope, EventIdentity, envelope_event_stream,
+    envelope_event_stream_after,
+};
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 
 use crate::error::{ReactError, Result};
@@ -20,6 +25,7 @@ use crate::llm::types::Message;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt as _;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
@@ -39,7 +45,8 @@ pub struct RunBudgetPolicy {
 }
 
 /// Observable decision made by the run budget controller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BudgetDecision {
     /// Normal ReAct execution may continue.
     Continue,
@@ -113,7 +120,8 @@ impl std::fmt::Debug for AgentInvocationContext {
 /// Events produced during Agent execution
 ///
 /// Cover each phase of the Agent lifecycle for progress bars, logs, UI updates, etc.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentEvent {
     // ── LLM Interaction ──────────────────────────────────────────────────────────
@@ -300,6 +308,14 @@ pub enum AgentPhase {
 }
 
 impl AgentEvent {
+    /// Whether this event ends the invocation event stream.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            AgentEvent::FinalAnswer(_) | AgentEvent::Cancelled | AgentEvent::Error { .. }
+        )
+    }
+
     /// Return prompt token count for `ThinkEnd`.
     pub fn prompt_tokens(&self) -> Option<usize> {
         match self {

@@ -207,7 +207,16 @@ impl A2AServer {
             let stream_result = agent_guard.execute_stream(&input_text).await;
 
             match stream_result {
-                Ok(mut event_stream) => {
+                Ok(raw_stream) => {
+                    let identity = crate::agent::EventIdentity {
+                        conversation_id: None,
+                        run_id: Some(task_id.clone()),
+                        turn_id: task_id.clone(),
+                        execution_id: Some(task_id.clone()),
+                        parent_event_id: None,
+                    };
+                    let mut event_stream =
+                        crate::agent::envelope_event_stream(raw_stream, identity);
                     let mut accumulated_text = String::new();
                     let mut artifact_index: usize = 0;
                     let mut first_chunk = true;
@@ -224,7 +233,7 @@ impl A2AServer {
                             cancel_tokens.write().await.remove(&task_id);
                             return;
                         }
-                        match event_result {
+                        match event_result.map(|envelope| envelope.payload) {
                             Ok(AgentEvent::Token(token)) => {
                                 accumulated_text.push_str(&token);
                                 yield A2AStreamEvent::ArtifactUpdate(TaskArtifactUpdateEvent {

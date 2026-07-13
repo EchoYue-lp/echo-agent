@@ -930,7 +930,8 @@ impl SubagentExecutor {
     ) -> Result<SubagentResult> {
         // Multimodal path: when a Message is supplied, run it so the worker
         // sees images/files. Falls back to the text task otherwise.
-        let mut stream = if let Some(msg) = message {
+        let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation);
+        let raw_stream = if let Some(msg) = message {
             agent
                 .execute_stream_message_with_invocation_context(msg, cancel, invocation)
                 .await?
@@ -939,6 +940,7 @@ impl SubagentExecutor {
                 .execute_stream_with_invocation_context(task, cancel, invocation)
                 .await?
         };
+        let mut stream = echo_core::agent::envelope_event_stream(raw_stream, event_identity);
         let mut output = String::new();
         let mut in_thinking = false;
         let mut prompt_tokens: usize = 0;
@@ -947,7 +949,7 @@ impl SubagentExecutor {
         let mut usage_stats = super::usage::LlmUsageStats::default();
 
         while let Some(event_result) = stream.next().await {
-            let event = event_result?;
+            let event = event_result?.payload;
             match event {
                 AgentEvent::Token(content) => {
                     if in_thinking {
@@ -2096,7 +2098,9 @@ mod tests {
             parent_context: None,
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: Some(echo_core::tools::ExternalRunContext {
-                run_id: run_id.to_string(),
+                conversation_id: None,
+                run_id: Some(run_id.to_string()),
+                turn_id: None,
                 execution_id: Some(format!("execution-{run_id}")),
                 message_id: None,
                 cancel: None,
@@ -2129,14 +2133,17 @@ mod tests {
             let runtime = invocation
                 .runtime
                 .ok_or_else(|| "fork invocation missing runtime context".to_string())?;
+            let run_id = runtime
+                .run_id
+                .ok_or_else(|| "fork invocation missing run id".to_string())?;
             let working_dir = invocation
                 .working_dir
-                .ok_or_else(|| format!("{} missing worktree path", runtime.run_id))?;
+                .ok_or_else(|| format!("{run_id} missing worktree path"))?;
             let path = working_dir.to_string_lossy();
-            if !path.contains(runtime.run_id.as_str()) {
+            if !path.contains(run_id.as_str()) {
                 return Err(format!(
                     "cross-worktree invocation: run {} received {}",
-                    runtime.run_id, path
+                    run_id, path
                 ));
             }
         }

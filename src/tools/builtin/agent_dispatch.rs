@@ -477,7 +477,7 @@ mod tests {
         };
         let rt = AgentDispatchTool::runtime_context_from_tool_ctx(Some(&ctx))
             .expect("runtime_context should be Some when run_id is set");
-        assert_eq!(rt.run_id, "msg-key-1");
+        assert_eq!(rt.run_id.as_deref(), Some("msg-key-1"));
         assert_eq!(rt.message_id.as_deref(), Some("msg-key-1"));
         let exec_id = rt.execution_id.expect("execution_id required");
         assert!(
