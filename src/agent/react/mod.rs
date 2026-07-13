@@ -330,10 +330,13 @@ impl ReactAgent {
                     let wd = config
                         .working_dir
                         .lock()
-                        .unwrap()
-                        .clone()
+                        .ok()
+                        .and_then(|guard| guard.clone())
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                    echo_core::project_rules::rules_injection(&wd)
+                    echo_core::project_rules::rules_injection_with_root(
+                        &wd,
+                        config.project_root.as_deref(),
+                    )
                 }
                 #[cfg(not(feature = "project-rules"))]
                 None
@@ -642,7 +645,11 @@ impl ReactAgent {
                 .and_then(|guard| guard.clone())
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_default();
-            prompt = echo_core::project_rules::inject_rules(&prompt, &wd);
+            prompt = echo_core::project_rules::inject_rules_with_root(
+                &prompt,
+                &wd,
+                config.project_root.as_deref(),
+            );
         }
 
         prompt

@@ -68,6 +68,7 @@ pub struct ReactAgentBuilder {
     /// Session-bound working directory (worktree path). Propagated to
     /// `AgentConfig.working_dir` on build, then into every tool's ToolContext.
     working_dir: Option<std::path::PathBuf>,
+    project_root: Option<std::path::PathBuf>,
     #[cfg(feature = "human-loop")]
     approval_provider: Option<Arc<dyn HumanLoopProvider>>,
     #[cfg(feature = "human-loop")]
@@ -141,6 +142,7 @@ impl ReactAgentBuilder {
             session_id: None,
             conversation_id: None,
             working_dir: None,
+            project_root: None,
             #[cfg(feature = "human-loop")]
             approval_provider: None,
             #[cfg(feature = "human-loop")]
@@ -658,6 +660,12 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Set the boundary for project instruction discovery.
+    pub fn project_root(mut self, project_root: impl Into<std::path::PathBuf>) -> Self {
+        self.project_root = Some(project_root.into());
+        self
+    }
+
     #[cfg(feature = "human-loop")]
     /// Set approval Provider
     pub fn approval_provider(mut self, provider: Arc<dyn HumanLoopProvider>) -> Self {
@@ -821,6 +829,9 @@ impl ReactAgentBuilder {
             .temperature(self.temperature);
         if let Some(profile) = self.model_profile {
             config = config.model_profile(profile);
+        }
+        if let Some(project_root) = self.project_root {
+            config = config.project_root(project_root);
         }
 
         // Sprint 8: propagate the worktree factory (if any) into AgentConfig.

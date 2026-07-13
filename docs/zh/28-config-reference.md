@@ -84,8 +84,14 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | `token_limit` | `usize` | `usize::MAX` | 上下文 Token 限制 |
 | `compress_threshold_ratio` | `f64` | `0.2` | 可用比例低于此值时触发压缩 |
 | `response_format` | `Option<ResponseFormat>` | `None`（文本） | 结构化输出格式 |
-| `auto_project_rules` | `bool` | `true` | 自动加载 `.echo-agent/AGENT.md` |
-| `working_dir` | `Option<PathBuf>` | `None`（当前目录） | 项目规则文件的工作目录 |
+| `auto_project_rules` | `bool` | `true` | 启用 `project-rules` feature 时解析项目指令 |
+| `working_dir` | `Option<PathBuf>` | `None`（当前目录） | 指令发现的叶子目录 |
+| `project_root` | `Option<PathBuf>` | `None` | 显式发现边界；未设置时使用最近 Git/worktree root |
+
+指令发现从 project root 走到 `working_dir`，每层最多选择一个非空 UTF-8 文件。框架原生
+`.echo-agent/AGENT.md`、`RULES.md`、`rules.md` 优先，其次是 `AGENTS.override.md`、
+`AGENTS.md`、`CLAUDE.md`。没有显式 root 或 Git root 时只检查 `working_dir`。解析后指向
+project root 外部的 symlink 会被忽略。`InstructionResolver` 会返回来源路径和优先级，供诊断使用。
 
 #### LLM 容错
 

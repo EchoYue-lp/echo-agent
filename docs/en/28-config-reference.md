@@ -84,8 +84,16 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | `token_limit` | `usize` | `usize::MAX` | Context token limit |
 | `compress_threshold_ratio` | `f64` | `0.2` | Trigger compression when available ratio falls below |
 | `response_format` | `Option<ResponseFormat>` | `None` (text) | Structured output format |
-| `auto_project_rules` | `bool` | `true` | Auto-load `.echo-agent/AGENT.md` |
-| `working_dir` | `Option<PathBuf>` | `None` (cwd) | Working directory for project rules |
+| `auto_project_rules` | `bool` | `true` | Resolve project instructions when the `project-rules` feature is enabled |
+| `working_dir` | `Option<PathBuf>` | `None` (cwd) | Leaf directory for instruction discovery |
+| `project_root` | `Option<PathBuf>` | `None` | Explicit discovery boundary; otherwise use the nearest Git/worktree root |
+
+Instruction discovery walks from the project root to `working_dir`, selecting at most one
+non-empty UTF-8 file per directory. Native `.echo-agent/AGENT.md`, `RULES.md`, or `rules.md`
+files take priority, followed by `AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md`. Without
+an explicit or Git root, only `working_dir` is inspected. Symlinks resolving outside the
+project root are ignored. `InstructionResolver` exposes the selected source paths and their
+precedence for diagnostics.
 
 #### LLM Resilience
 

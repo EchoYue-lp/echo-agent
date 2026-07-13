@@ -153,6 +153,8 @@ pub struct AgentConfig {
     pub(crate) cache_user_id: Option<String>,
     /// Whether to automatically load project rules file (`.echo-agent/AGENT.md`), default true
     pub(crate) auto_project_rules: bool,
+    /// Optional explicit boundary for project instruction discovery.
+    pub(crate) project_root: Option<std::path::PathBuf>,
     /// Working directory (for searching project rules files), None means use current directory.
     /// Mutex enables `&self` updates during resume (BUG-3).
     pub(crate) working_dir: std::sync::Mutex<Option<PathBuf>>,
@@ -238,6 +240,7 @@ impl AgentConfig {
             max_tokens: None,
             cache_user_id: None,
             auto_project_rules: true,
+            project_root: None,
             working_dir: std::sync::Mutex::new(None),
             token_budget_config: TokenBudgetConfig::default(),
             enable_notebook: false,
@@ -905,6 +908,12 @@ impl AgentConfig {
     /// * `enabled` - `true` to automatically search for `.echo-agent/AGENT.md` in the working directory and inject into system prompt
     pub fn auto_project_rules(mut self, enabled: bool) -> Self {
         self.auto_project_rules = enabled;
+        self
+    }
+
+    /// Set the project root boundary used for instruction discovery.
+    pub fn project_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.project_root = Some(root.into());
         self
     }
 
