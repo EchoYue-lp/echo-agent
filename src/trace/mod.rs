@@ -172,6 +172,15 @@ pub enum RunEvent {
         /// Checkpoint identifier.
         id: String,
     },
+    /// A persisted runtime checkpoint was restored before execution continued.
+    CheckpointResumed {
+        /// Conversation owning the checkpoint.
+        conversation_id: String,
+        /// Completed tool calls restored from paired message history.
+        completed_tool_call_ids: Vec<String>,
+        /// Checkpoint capture time.
+        checkpoint_timestamp: DateTime<Utc>,
+    },
     /// A tool permission decision was made.
     PermissionDecision {
         /// Tool name.

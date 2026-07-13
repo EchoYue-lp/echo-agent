@@ -15,7 +15,7 @@ pub use prompt_template::PromptTemplateManager;
 pub use critic::{CompositeCritic, CompositeStrategy, Critic, StaticCritic, ThresholdCritic};
 pub use event_envelope::{
     AGENT_EVENT_SCHEMA_VERSION, EventEnvelope, EventIdentity, envelope_event_stream,
-    envelope_event_stream_after,
+    envelope_event_stream_after, validate_event_trajectory,
 };
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 

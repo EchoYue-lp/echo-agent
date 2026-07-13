@@ -516,6 +516,14 @@ impl AgentRunSnapshot {
                 "Failed to save runtime checkpoint to state store"
             );
         } else {
+            self.record_event(crate::trace::RunEvent::Checkpoint {
+                id: format!(
+                    "checkpoint:{}:{}",
+                    conv_id,
+                    checkpoint.timestamp.timestamp_millis()
+                ),
+            })
+            .await;
             tracing::debug!(
                 conversation_id = conv_id.as_str(),
                 message_count = messages.len(),

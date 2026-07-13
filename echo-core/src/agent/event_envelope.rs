@@ -193,6 +193,107 @@ pub fn envelope_event_stream_after<'a>(
     Box::pin(wrapped)
 }
 
+/// Validate a captured envelope trajectory without re-running a model.
+pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let Some(first) = events.first() else {
+        return vec!["trajectory is empty".to_string()];
+    };
+    let mut seen_ids = std::collections::HashSet::<String>::new();
+    let mut seen_event_ids = std::collections::HashSet::<String>::new();
+    let mut tool_calls = HashMap::<String, String>::new();
+    let mut terminal_count = 0_usize;
+
+    for (index, event) in events.iter().enumerate() {
+        let expected_sequence = u64::try_from(index)
+            .unwrap_or(u64::MAX)
+            .saturating_add(first.sequence);
+        if event.schema_version != AGENT_EVENT_SCHEMA_VERSION {
+            violations.push(format!(
+                "unsupported schema version at sequence {}: {}",
+                event.sequence, event.schema_version
+            ));
+        }
+        if event.sequence != expected_sequence {
+            violations.push(format!(
+                "non-contiguous sequence: expected {expected_sequence}, got {}",
+                event.sequence
+            ));
+        }
+        if event.conversation_id != first.conversation_id
+            || event.run_id != first.run_id
+            || event.turn_id != first.turn_id
+            || event.execution_id != first.execution_id
+        {
+            violations.push(format!("identity changed at sequence {}", event.sequence));
+        }
+        if !seen_event_ids.insert(event.event_id.clone()) {
+            violations.push(format!("duplicate event id: {}", event.event_id));
+        }
+        if let Some(parent_id) = event.parent_event_id.as_ref()
+            && first.parent_event_id.as_ref() != Some(parent_id)
+            && !seen_ids.contains(parent_id)
+        {
+            violations.push(format!(
+                "parent event {} was not emitted before sequence {}",
+                parent_id, event.sequence
+            ));
+        }
+
+        match &event.payload {
+            AgentEvent::ToolCall { call_id, .. } => {
+                if tool_calls
+                    .insert(call_id.clone(), event.event_id.clone())
+                    .is_some()
+                {
+                    violations.push(format!("duplicate in-flight tool call: {call_id}"));
+                }
+            }
+            AgentEvent::ToolResult { call_id, .. } | AgentEvent::ToolError { call_id, .. } => {
+                match tool_calls.remove(call_id) {
+                    Some(parent_id) if event.parent_event_id.as_ref() == Some(&parent_id) => {}
+                    Some(parent_id) => violations.push(format!(
+                        "tool completion {call_id} has wrong parent; expected {parent_id}"
+                    )),
+                    None => violations.push(format!("orphan tool completion: {call_id}")),
+                }
+            }
+            AgentEvent::ToolStream { call_id, .. } => {
+                if let Some(parent_id) = tool_calls.get(call_id) {
+                    if event.parent_event_id.as_ref() != Some(parent_id) {
+                        violations.push(format!("tool stream {call_id} has wrong parent"));
+                    }
+                } else {
+                    violations.push(format!("orphan tool stream: {call_id}"));
+                }
+            }
+            _ => {}
+        }
+        if event.payload.is_terminal() {
+            terminal_count = terminal_count.saturating_add(1);
+            if index.saturating_add(1) != events.len() {
+                violations.push(format!(
+                    "terminal event at sequence {} is not last",
+                    event.sequence
+                ));
+            }
+        }
+        seen_ids.insert(event.event_id.clone());
+    }
+
+    if terminal_count != 1 {
+        violations.push(format!(
+            "trajectory must contain exactly one terminal event, got {terminal_count}"
+        ));
+    }
+    let mut unfinished = tool_calls.into_keys().collect::<Vec<_>>();
+    unfinished.sort();
+    for call_id in unfinished {
+        violations.push(format!("tool call without completion: {call_id}"));
+    }
+    violations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +448,67 @@ mod tests {
             Some("final_answer")
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn validates_canonical_success_cancel_error_and_hitl_budget_prefixes() -> Result<()> {
+        for raw in [
+            vec![
+                Ok(AgentEvent::BudgetDecision {
+                    decision: super::super::BudgetDecision::FinalOnly,
+                    reason: "token_budget".to_string(),
+                    iteration: 2,
+                    reported_model_tokens: 100,
+                    usage_complete: true,
+                }),
+                Ok(AgentEvent::FinalAnswer("完成 🧪".to_string())),
+            ],
+            vec![
+                Ok(AgentEvent::SafetyNotice {
+                    action: "write file".to_string(),
+                    reason: "requested".to_string(),
+                    risk: "local mutation".to_string(),
+                    permission: "confirm".to_string(),
+                }),
+                Ok(AgentEvent::Cancelled),
+            ],
+            vec![Ok(AgentEvent::Error {
+                source: "model".to_string(),
+                message: "stream interrupted".to_string(),
+            })],
+        ] {
+            let events = envelope_event_stream(Box::pin(stream::iter(raw)), identity())
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            assert!(validate_event_trajectory(&events).is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn trajectory_validator_reports_sequence_identity_parent_and_terminal_drift() {
+        let mut first = EventEnvelope::new(
+            &identity(),
+            1,
+            Some("missing-parent".to_string()),
+            AgentEvent::FinalAnswer("early".to_string()),
+        );
+        first.schema_version = AGENT_EVENT_SCHEMA_VERSION.saturating_add(1);
+        let mut second = EventEnvelope::new(&identity(), 3, None, AgentEvent::Cancelled);
+        second.turn_id = "different-turn".to_string();
+        second.event_id = first.event_id.clone();
+        let violations = validate_event_trajectory(&[first, second]);
+        for expected in [
+            "schema version",
+            "not last",
+            "non-contiguous",
+            "identity changed",
+            "duplicate event id",
+            "exactly one terminal",
+        ] {
+            assert!(violations.iter().any(|value| value.contains(expected)));
+        }
     }
 }

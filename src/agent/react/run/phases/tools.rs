@@ -331,6 +331,10 @@ pub(crate) async fn run_tools(
         }
     }
 
+    // This is the first point where every assistant tool call in the batch has
+    // a matching result. Persist it regardless of the periodic interval so a
+    // restart never loses an already completed write/dangerous tool outcome.
+    snap.save_runtime_checkpoint(context, None).await;
     yield_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
     if let Some(output) = finish_output {
         return Ok(IterOutcome::Finish { output });

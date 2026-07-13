@@ -868,7 +868,78 @@ mod tests {
     // straight through to run_core_loop.
 
     use crate::agent::react::builder::ReactAgentBuilder;
+    use crate::state::RuntimeStateStore;
     use crate::testing::{MockLlmClient, MockTool};
+
+    #[derive(Default)]
+    struct RecordingRuntimeStateStore {
+        checkpoint: std::sync::Mutex<Option<crate::state::AgentCheckpoint>>,
+    }
+
+    impl crate::state::RuntimeStateStore for RecordingRuntimeStateStore {
+        fn save_node<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _node: &'a crate::state::TaskNode,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn load_nodes<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<Vec<crate::state::TaskNode>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn update_status<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _node_id: &'a str,
+            _status: crate::state::TaskNodeStatus,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn get_checkpoint<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<Option<crate::state::AgentCheckpoint>>> {
+            Box::pin(async move {
+                Ok(self
+                    .checkpoint
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone())
+            })
+        }
+
+        fn save_checkpoint<'a>(
+            &'a self,
+            checkpoint: &'a crate::state::AgentCheckpoint,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                *self
+                    .checkpoint
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(checkpoint.clone());
+                Ok(())
+            })
+        }
+
+        fn clear_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                *self
+                    .checkpoint
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = None;
+                Ok(())
+            })
+        }
+    }
 
     /// Build a streaming-capable agent backed by a scripted mock LLM, with
     /// no guard and no intent router (so requests reach run_core_loop).
@@ -1178,6 +1249,119 @@ mod tests {
             matches!(last, AgentEvent::FinalAnswer(t) if t.contains("42")),
             "expected FinalAnswer with 42, got: {last:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn completed_tool_batch_is_checkpointed_before_next_model_call() -> Result<()> {
+        let store = Arc::new(RecordingRuntimeStateStore::default());
+        let llm = MockLlmClient::new()
+            .then_tool_call("write-1", "mock_write", r#"{"path":"结果-🧪.md"}"#)
+            .with_response("done");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .tool(Box::new(
+                MockTool::new("mock_write").with_response("written"),
+            ))
+            .conversation_id("resume-conversation")
+            .state_store(store.clone())
+            .build()?;
+
+        let mut stream = agent.execute_stream("write it").await?;
+        while let Some(event) = stream.next().await {
+            if matches!(event?, AgentEvent::ToolBatchEnd) {
+                break;
+            }
+        }
+        drop(stream);
+
+        let checkpoint = store
+            .get_checkpoint("resume-conversation")
+            .await?
+            .ok_or_else(|| {
+                crate::error::ReactError::Other("tool batch checkpoint missing".to_string())
+            })?;
+        assert_eq!(checkpoint.completed_tool_call_ids()?, vec!["write-1"]);
+        assert!(checkpoint.restore_messages()?.len() >= 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resume_records_checkpoint_origin_and_completed_tools_in_trace() -> Result<()> {
+        use crate::trace::RunStore;
+
+        let store = Arc::new(RecordingRuntimeStateStore::default());
+        let checkpoint_messages = vec![
+            Message::system("system".to_string()),
+            Message::assistant_with_tools(vec![echo_core::llm::types::ToolCall {
+                id: "write-1".to_string(),
+                call_type: "function".to_string(),
+                function: echo_core::llm::types::FunctionCall {
+                    name: "mock_write".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            Message::tool_result(
+                "write-1".to_string(),
+                "mock_write".to_string(),
+                "written".to_string(),
+            ),
+        ];
+        let mut checkpoint = crate::state::AgentCheckpoint::new("resume-conversation");
+        checkpoint.messages_json = serde_json::to_string(&checkpoint_messages)
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        store.save_checkpoint(&checkpoint).await?;
+
+        let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(MockLlmClient::new().with_response("resumed")))
+            .conversation_id("resume-conversation")
+            .state_store(store)
+            .with_run_store(run_store.clone())
+            .build()?;
+        let events = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "continue".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Execute,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::FinalAnswer(answer) if answer == "resumed"
+        )));
+
+        let summary = run_store
+            .list_all(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
+        let run = run_store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("trace payload missing".to_string()))?;
+        assert!(
+            run.events.iter().any(|event| matches!(
+                event,
+                crate::trace::RunEvent::CheckpointResumed {
+                    conversation_id,
+                    completed_tool_call_ids,
+                    ..
+                } if conversation_id == "resume-conversation"
+                    && completed_tool_call_ids == &["write-1".to_string()]
+            )),
+            "resume trace missing from events: {:?}",
+            run.events
+        );
+        Ok(())
     }
 
     #[tokio::test]

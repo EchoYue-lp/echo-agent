@@ -1593,15 +1593,7 @@ impl ReactAgent {
 
         let checkpoint = store.get_checkpoint(conv_id).await?;
         if let Some(ref cp) = checkpoint {
-            let messages: Vec<crate::llm::types::Message> = serde_json::from_str(&cp.messages_json)
-                .map_err(|e| {
-                    crate::error::ReactError::RuntimeState(Box::new(
-                        echo_core::error::RuntimeStateError::SerializationError(format!(
-                            "Failed to deserialize checkpoint messages: {}",
-                            e
-                        )),
-                    ))
-                })?;
+            let messages = cp.restore_messages()?;
 
             let msg_count = messages.len();
             self.memory.context.lock().await.set_messages(messages);
@@ -1641,9 +1633,17 @@ impl ReactAgent {
                 );
             }
 
+            let completed_tool_call_ids = cp.completed_tool_call_ids()?;
+            self.record_trace_event(crate::trace::RunEvent::CheckpointResumed {
+                conversation_id: conv_id.clone(),
+                completed_tool_call_ids: completed_tool_call_ids.clone(),
+                checkpoint_timestamp: cp.timestamp,
+            })
+            .await;
             tracing::info!(
                 conversation_id = conv_id.as_str(),
                 message_count = msg_count,
+                completed_tool_calls = completed_tool_call_ids.len(),
                 blocked_reason = ?cp.blocked_reason,
                 "Resumed from RuntimeStateStore checkpoint"
             );

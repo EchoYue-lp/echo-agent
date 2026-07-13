@@ -50,6 +50,81 @@ impl TrajectoryReplay {
             .count()
     }
 
+    /// Validate model-independent lifecycle invariants in the recorded run.
+    pub fn contract_violations(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        let mut pending = std::collections::HashMap::<String, String>::new();
+        let mut completed = std::collections::HashMap::<String, String>::new();
+        let mut last_iteration = 0_usize;
+
+        for event in &self.run.events {
+            match event {
+                RunEvent::ToolCall { call_id, name, .. } => {
+                    if pending.insert(call_id.clone(), name.clone()).is_some()
+                        || completed.contains_key(call_id)
+                    {
+                        violations.push(format!("duplicate tool call id: {call_id}"));
+                    }
+                }
+                RunEvent::ToolResult {
+                    call_id, name, ..
+                } => match pending.remove(call_id) {
+                    Some(expected_name) if expected_name == *name => {
+                        if completed.insert(call_id.clone(), name.clone()).is_some() {
+                            violations.push(format!("duplicate tool completion: {call_id}"));
+                        }
+                    }
+                    Some(expected_name) => violations.push(format!(
+                        "tool completion name mismatch for {call_id}: expected {expected_name}, got {name}"
+                    )),
+                    None => violations.push(format!("orphan tool completion: {call_id}")),
+                },
+                RunEvent::ToolError {
+                    call_id, name, ..
+                } => {
+                    if let Some(completed_name) = completed.get(call_id) {
+                        if completed_name != name {
+                            violations.push(format!(
+                                "tool error name mismatch for {call_id}: expected {completed_name}, got {name}"
+                            ));
+                        }
+                    } else {
+                        match pending.remove(call_id) {
+                            Some(expected_name) if expected_name == *name => {
+                                completed.insert(call_id.clone(), name.clone());
+                            }
+                            Some(expected_name) => violations.push(format!(
+                                "tool error name mismatch for {call_id}: expected {expected_name}, got {name}"
+                            )),
+                            None => violations.push(format!("orphan tool error: {call_id}")),
+                        }
+                    }
+                }
+                RunEvent::PhaseTransition { iteration, .. } => {
+                    if *iteration < last_iteration {
+                        violations.push(format!(
+                            "phase iteration regressed from {last_iteration} to {iteration}"
+                        ));
+                    }
+                    last_iteration = *iteration;
+                }
+                RunEvent::SubAgentRun { outcome, .. }
+                    if !matches!(outcome.as_str(), "completed" | "failed" | "cancelled") =>
+                {
+                    violations.push(format!("invalid subagent outcome: {outcome}"));
+                }
+                _ => {}
+            }
+        }
+
+        let mut unfinished = pending.into_keys().collect::<Vec<_>>();
+        unfinished.sort();
+        for call_id in unfinished {
+            violations.push(format!("tool call without completion: {call_id}"));
+        }
+        violations
+    }
+
     /// Normalize a path for comparison (resolve ../, ./, //).
     fn normalize_path(path: &str) -> String {
         let p = path.replace('\\', "/").replace("//", "/");
@@ -121,7 +196,7 @@ impl TrajectoryReplay {
 
     /// Evaluate constraints against this run.
     pub fn evaluate_constraints(&self, constraints: &EvalConstraints) -> Vec<String> {
-        let mut violations = Vec::new();
+        let mut violations = self.contract_violations();
 
         // Check max tool calls
         if let Some(max) = constraints.max_tool_calls {
@@ -344,5 +419,83 @@ mod tests {
         ]);
         let replay = TrajectoryReplay::new(run);
         assert_eq!(replay.error_count(), 1);
+    }
+
+    #[test]
+    fn contract_accepts_canonical_tool_and_subagent_trajectory() {
+        let run = make_run(vec![
+            RunEvent::PhaseTransition {
+                phase: "think".into(),
+                iteration: 0,
+            },
+            RunEvent::ToolCall {
+                call_id: "write-你好-1".into(),
+                name: "write_file".into(),
+                args: Some(serde_json::json!({"path": "结果-🧪.md"})),
+                risk: None,
+                duration_ms: 1,
+            },
+            RunEvent::ToolResult {
+                call_id: "write-你好-1".into(),
+                name: "write_file".into(),
+                success: true,
+                output_preview: Some("完成".into()),
+                output_truncated: false,
+                duration_ms: 1,
+            },
+            RunEvent::SubAgentRun {
+                agent_name: "reviewer".into(),
+                task: "检查 UTF-8 🧪".into(),
+                outcome: "completed".into(),
+            },
+        ]);
+        assert!(TrajectoryReplay::new(run).contract_violations().is_empty());
+    }
+
+    #[test]
+    fn contract_reports_orphan_duplicate_unfinished_and_regressed_events() {
+        let run = make_run(vec![
+            RunEvent::PhaseTransition {
+                phase: "act".into(),
+                iteration: 2,
+            },
+            RunEvent::PhaseTransition {
+                phase: "think".into(),
+                iteration: 1,
+            },
+            RunEvent::ToolResult {
+                call_id: "orphan".into(),
+                name: "write_file".into(),
+                success: true,
+                output_preview: None,
+                output_truncated: false,
+                duration_ms: 0,
+            },
+            RunEvent::ToolCall {
+                call_id: "pending".into(),
+                name: "shell".into(),
+                args: None,
+                risk: None,
+                duration_ms: 0,
+            },
+            RunEvent::SubAgentRun {
+                agent_name: "reviewer".into(),
+                task: "review".into(),
+                outcome: "unknown".into(),
+            },
+        ]);
+        let violations = TrajectoryReplay::new(run).contract_violations();
+        assert!(violations.iter().any(|value| value.contains("regressed")));
+        assert!(violations.iter().any(|value| value.contains("orphan")));
+        assert!(
+            violations
+                .iter()
+                .any(|value| value.contains("without completion"))
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|value| value.contains("subagent outcome"))
+        );
     }
 }
