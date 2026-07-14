@@ -754,6 +754,10 @@ impl PipelineStage for TraceRecordingStage {
                     }),
                     output_truncated: result.truncated,
                     duration_ms: ctx.duration_ms,
+                    original_bytes: metadata_u64(result, "original_bytes"),
+                    returned_bytes: metadata_u64(result, "returned_bytes"),
+                    estimated_tokens: metadata_usize(result, "estimated_tokens"),
+                    output_handling: result.metadata.get("output_handling").cloned(),
                 })
                 .await;
             if !result.success {
@@ -768,6 +772,22 @@ impl PipelineStage for TraceRecordingStage {
         }
         Ok(())
     }
+}
+
+fn metadata_u64(result: &crate::tools::ToolResult, key: &str) -> u64 {
+    result
+        .metadata
+        .get(key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn metadata_usize(result: &crate::tools::ToolResult, key: &str) -> usize {
+    result
+        .metadata
+        .get(key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 // ── ToolExecutionPipeline ──────────────────────────────────────────
@@ -1163,6 +1183,42 @@ mod tests {
             .ok_or_else(|| ReactError::Other("truncation stage produced no output".to_string()))?;
         assert!(output.contains("Output truncated"));
         assert!(ctx.result.as_ref().is_some_and(|result| result.truncated));
+        let result = ctx
+            .result
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("truncation stage lost tool result".to_string()))?;
+        assert_eq!(
+            result.metadata.get("output_handling").map(String::as_str),
+            Some("truncated")
+        );
+        assert!(metadata_u64(result, "original_bytes") > metadata_u64(result, "returned_bytes"));
+        assert!(metadata_usize(result, "estimated_tokens") > 20);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn truncation_stage_records_inline_output_metrics() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .max_tool_output_tokens(100)
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("short output".to_string());
+
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        let result = ctx
+            .result
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("truncation stage lost tool result".to_string()))?;
+        assert!(!result.truncated);
+        assert_eq!(
+            result.metadata.get("output_handling").map(String::as_str),
+            Some("inline")
+        );
+        assert_eq!(metadata_u64(result, "original_bytes"), 12);
+        assert_eq!(metadata_u64(result, "returned_bytes"), 12);
+        assert!(metadata_usize(result, "estimated_tokens") > 0);
         Ok(())
     }
 

@@ -320,6 +320,10 @@ mod tests {
                 output_preview: None,
                 output_truncated: false,
                 duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
@@ -335,6 +339,10 @@ mod tests {
                 output_preview: None,
                 output_truncated: false,
                 duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
@@ -350,6 +358,10 @@ mod tests {
                 output_preview: None,
                 output_truncated: false,
                 duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
             },
         ]);
         let replay = TrajectoryReplay::new(run);
@@ -375,6 +387,10 @@ mod tests {
                 output_preview: None,
                 output_truncated: false,
                 duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
@@ -390,6 +406,10 @@ mod tests {
                 output_preview: None,
                 output_truncated: false,
                 duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
             },
         ]);
         let replay = TrajectoryReplay::new(run);
@@ -442,6 +462,10 @@ mod tests {
                 output_preview: Some("完成".into()),
                 output_truncated: false,
                 duration_ms: 1,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
             },
             RunEvent::SubAgentRun {
                 agent_name: "reviewer".into(),
@@ -470,6 +494,10 @@ mod tests {
                 output_preview: None,
                 output_truncated: false,
                 duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
             },
             RunEvent::ToolCall {
                 call_id: "pending".into(),

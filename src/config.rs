@@ -136,7 +136,7 @@ impl AppConfig {
                 TokenBudgetConfig::default()
             };
 
-        AgentConfig::standard(
+        let mut config = AgentConfig::standard(
             &self.model.name,
             &self.agent.name,
             &self.agent.system_prompt,
@@ -154,7 +154,11 @@ impl AppConfig {
         .tool_execution(crate::tools::ToolExecutionConfig {
             timeout_ms: self.agent.tool_timeout_ms,
             ..Default::default()
-        })
+        });
+        if self.agent.max_tool_output_tokens > 0 {
+            config = config.max_tool_output_tokens(self.agent.max_tool_output_tokens);
+        }
+        config
     }
 
     /// Whether auto-compression is configured.
@@ -433,9 +437,14 @@ pub struct AgentYamlConfig {
     pub memory_path: String,
     /// Tool execution timeout in milliseconds (default 120_000 = 2 min), used for MCP tools and other long-running calls.
     pub tool_timeout_ms: u64,
+    /// Maximum estimated tokens retained from one tool result before it is
+    /// head/tail truncated. 0 keeps the framework default (unlimited below the
+    /// spill threshold); applications should choose a product-appropriate budget.
+    pub max_tool_output_tokens: usize,
     /// Token limit for context auto-compression. When the estimated token count
     /// exceeds this limit, the configured compressor is triggered automatically.
-    /// Set to 0 to disable auto-compression (default: 0, meaning no limit).
+    /// 0 leaves the effective limit to the model context window or application
+    /// fallback whenever a compression strategy is configured.
     pub token_limit: usize,
     /// Context compression strategy: "summary" (SummaryCompressor, default —
     /// LLM summary, falls back to SlidingWindow on LLM failure), "sliding"
@@ -463,6 +472,7 @@ impl Default for AgentYamlConfig {
             enable_human_in_loop: true,
             memory_path: "~/.echo-agent/memory".to_string(),
             tool_timeout_ms: 120_000,
+            max_tool_output_tokens: 0,
             token_limit: 0,
             // (stage4 P4.3) Default to SummaryCompressor — durable facts are
             // flushed by pre_compaction_flush (E1) before summary compression
@@ -806,6 +816,7 @@ mod tests {
         assert!(config.agent.enable_tools);
         assert!(config.agent.enable_memory);
         assert!(config.agent.enable_human_in_loop);
+        assert_eq!(config.agent.max_tool_output_tokens, 0);
         assert!(!config.channels.qq.enabled);
         assert!(!config.channels.feishu.enabled);
         assert_eq!(config.server.port, 3000);
@@ -822,6 +833,17 @@ mod tests {
         assert!(agent_config.is_memory_enabled());
         assert!(agent_config.is_human_in_loop_enabled());
         assert_eq!(agent_config.get_max_iterations(), 0);
+        assert_eq!(agent_config.get_max_tool_output_tokens(), None);
+    }
+
+    #[test]
+    fn configured_tool_output_budget_reaches_agent_config() {
+        let mut config = AppConfig::default();
+        config.agent.max_tool_output_tokens = 8_000;
+
+        let agent_config = config.to_agent_config();
+
+        assert_eq!(agent_config.get_max_tool_output_tokens(), Some(8_000));
     }
 
     #[test]

@@ -528,6 +528,10 @@ mod tests {
                     output_preview: Some("ok".into()),
                     output_truncated: false,
                     duration_ms: 50,
+                    original_bytes: 0,
+                    returned_bytes: 0,
+                    estimated_tokens: 0,
+                    output_handling: None,
                 },
             ],
             final_output: if status == RunStatus::Completed {

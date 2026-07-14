@@ -799,16 +799,24 @@ impl AgentRunSnapshot {
             match self.spill_tool_output(&output) {
                 Ok(path) => {
                     let preview: String = output.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
+                    let model_output = format!(
+                        "{preview}\n\n[Output spilled to disk: {} ({:.1} MiB). Use read_file with this exact path to read the full output.]",
+                        path.display(),
+                        original_bytes as f64 / 1_048_576.0
+                    );
                     let mut metadata = std::collections::HashMap::new();
                     metadata.insert("output_handling".to_string(), "spilled".to_string());
                     metadata.insert("artifact_path".to_string(), path.display().to_string());
                     metadata.insert("original_bytes".to_string(), original_bytes.to_string());
+                    metadata.insert("returned_bytes".to_string(), model_output.len().to_string());
+                    metadata.insert(
+                        "estimated_tokens".to_string(),
+                        echo_core::tokenizer::HeuristicTokenizer
+                            .count_tokens(&output)
+                            .to_string(),
+                    );
                     return ProcessedToolOutput {
-                        output: format!(
-                            "{preview}\n\n[Output spilled to disk: {} ({:.1} MiB). Use read_file with this exact path to read the full output.]",
-                            path.display(),
-                            original_bytes as f64 / 1_048_576.0
-                        ),
+                        output: model_output,
                         truncated: true,
                         metadata,
                     };
@@ -826,20 +834,31 @@ impl AgentRunSnapshot {
                 .map(|_| TOOL_OUTPUT_SPILL_FAILURE_FALLBACK_TOKENS)
         });
         let Some(max_tokens) = max_tokens else {
+            let estimated_tokens = echo_core::tokenizer::HeuristicTokenizer.count_tokens(&output);
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("output_handling".to_string(), "inline".to_string());
+            metadata.insert("original_bytes".to_string(), original_bytes.to_string());
+            metadata.insert("returned_bytes".to_string(), original_bytes.to_string());
+            metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
             return ProcessedToolOutput {
                 output,
                 truncated: false,
-                metadata: std::collections::HashMap::new(),
+                metadata,
             };
         };
 
         let tokenizer = echo_core::tokenizer::HeuristicTokenizer;
         let estimated_tokens = tokenizer.count_tokens(&output);
         if estimated_tokens <= max_tokens {
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("output_handling".to_string(), "inline".to_string());
+            metadata.insert("original_bytes".to_string(), original_bytes.to_string());
+            metadata.insert("returned_bytes".to_string(), original_bytes.to_string());
+            metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
             return ProcessedToolOutput {
                 output,
                 truncated: false,
-                metadata: std::collections::HashMap::new(),
+                metadata,
             };
         }
 
@@ -870,6 +889,10 @@ impl AgentRunSnapshot {
             .to_string(),
         );
         metadata.insert("original_bytes".to_string(), original_bytes.to_string());
+        metadata.insert(
+            "returned_bytes".to_string(),
+            truncated_output.len().to_string(),
+        );
         metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
         if let Some(error) = spill_error {
             metadata.insert("spill_error".to_string(), error);

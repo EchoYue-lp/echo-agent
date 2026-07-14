@@ -151,6 +151,18 @@ pub enum RunEvent {
         /// Duration of the tool execution in milliseconds.
         #[serde(default)]
         duration_ms: u64,
+        /// Original tool output size before spill/truncation.
+        #[serde(default)]
+        original_bytes: u64,
+        /// Output size actually returned to the model.
+        #[serde(default)]
+        returned_bytes: u64,
+        /// Estimated tokens in the original output.
+        #[serde(default)]
+        estimated_tokens: usize,
+        /// Stable handling label: inline, truncated, spilled, or fallback.
+        #[serde(default)]
+        output_handling: Option<String>,
     },
     /// A tool returned an error.
     ToolError {
@@ -649,6 +661,37 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 130);
         assert_eq!(usage.completion_tokens, 70);
         assert_eq!(usage.total_tokens, 200);
+    }
+
+    #[test]
+    fn legacy_tool_result_defaults_output_metrics()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let raw = r#"{
+            "type":"tool_result",
+            "call_id":"c1",
+            "name":"read_file",
+            "success":true,
+            "output_preview":"ok",
+            "output_truncated":false,
+            "duration_ms":3
+        }"#;
+        let parsed = serde_json::from_str::<RunEvent>(raw)?;
+        if let RunEvent::ToolResult {
+            original_bytes,
+            returned_bytes,
+            estimated_tokens,
+            output_handling,
+            ..
+        } = parsed
+        {
+            assert_eq!(original_bytes, 0);
+            assert_eq!(returned_bytes, 0);
+            assert_eq!(estimated_tokens, 0);
+            assert_eq!(output_handling, None);
+        } else {
+            return Err("legacy payload did not parse as ToolResult".into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
