@@ -649,7 +649,7 @@ impl ReactAgent {
                         confidence = confidence,
                         "🎯 IntentRouter: activating skill"
                     );
-                    if let Err(e) = self.activate_skill_for_context(&skill_name).await {
+                    if let Err(e) = self.activate_skill(&skill_name).await {
                         tracing::warn!(skill = %skill_name, error = %e, "IntentRouter: failed to activate skill");
                     }
                 }

@@ -834,7 +834,7 @@ pub struct HookResult {
     pub metadata: Option<Value>,
     /// For ActivateSkill hooks: skill to activate directly (name + reason).
     /// Populated by `execute_action` when an `ActivateSkill` action matches;
-    /// consumed by `fire_lifecycle_hook` to call `activate_skill_for_context`.
+    /// consumed by `fire_lifecycle_hook` to call `ReactAgent::activate_skill`.
     pub activate_skill: Option<(String, String)>,
 }
 

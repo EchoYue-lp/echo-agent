@@ -437,7 +437,7 @@ impl ReactAgent {
         // On success, clear the field so callers (prepare phase → cache writer)
         // don't also hand it to TriggerSupervisor for a double activation.
         if let Some((ref skill, ref reason)) = result.activate_skill {
-            match self.activate_skill_for_context(skill).await {
+            match self.activate_skill(skill).await {
                 Ok(()) => {
                     let note = format!("已根据上下文自动激活技能 {skill}:{reason}");
                     let mut ctx = self.memory.context.lock().await;

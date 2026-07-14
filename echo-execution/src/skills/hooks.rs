@@ -184,7 +184,7 @@ pub enum HookAction {
         timeout: u64,
     },
     /// Directly activate a skill without going through the LLM.
-    /// The hook engine calls `activate_skill_for_context(skill)` when matched.
+    /// The hook engine calls `ReactAgent::activate_skill(skill)` when matched.
     /// `reason` is surfaced to the model as a system note explaining why.
     ActivateSkill {
         /// Name of the skill to activate (must match a discovered skill).

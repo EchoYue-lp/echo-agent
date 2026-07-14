@@ -1033,6 +1033,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
 
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);
+    let base_system_prompt = agent.config.system_prompt.clone();
 
     agent
         .discover_skills(&[DiscoveryScope::Custom(base.join("skills-a"))])
@@ -1069,6 +1070,28 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         .discover_skills(&[DiscoveryScope::Custom(base.join("skills-b"))])
         .await
         .unwrap();
+
+    assert_eq!(agent.config.system_prompt, base_system_prompt);
+    {
+        let context = agent.memory.context.lock().await;
+        assert!(context.has_projection("echo-agent:skill-catalog"));
+        let catalogs: Vec<_> = context
+            .messages()
+            .iter()
+            .filter(|message| {
+                message.content.as_text_ref().is_some_and(|text| {
+                    text.contains("The following skills") && text.contains("skill-one")
+                })
+            })
+            .collect();
+        assert_eq!(catalogs.len(), 1);
+        assert!(catalogs.first().is_some_and(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.contains("skill-two"))
+        }));
+    }
 
     let second_params = agent
         .tools
@@ -1138,7 +1161,7 @@ async fn intent_router_skill_activation_survives_compression_markers() -> Result
         .await
         .map_err(|error| format!("discover skill: {error}"))?;
     agent
-        .activate_skill_for_context("skill-protected")
+        .activate_skill("skill-protected")
         .await
         .map_err(|error| format!("activate skill: {error}"))?;
 

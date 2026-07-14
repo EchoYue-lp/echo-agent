@@ -28,6 +28,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+const SKILL_CATALOG_PROJECTION: &str = "echo-agent:skill-catalog";
+
 impl ReactAgent {
     // ── Tool registration ────────────────────────────────────────────────────
 
@@ -600,21 +602,14 @@ impl ReactAgent {
             return Ok(names);
         }
 
-        // Inject compact catalog into system prompt
+        // Keep the catalog independently replaceable. Mutating the root system
+        // prompt on every discovery pass duplicates content and invalidates the
+        // provider's longest cacheable prefix.
         if let Some(catalog) = self.tools.skill_registry.catalog_prompt() {
-            self.config
-                .system_prompt
-                .push_str(&format!("\n\n{}", catalog));
-            self.memory
-                .context
-                .try_lock()
-                .map(|mut ctx| ctx.update_system(self.config.system_prompt.clone()))
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "Failed to acquire context lock for skill catalog injection: {}",
-                        e
-                    );
-                });
+            self.memory.context.lock().await.replace_projection(
+                SKILL_CATALOG_PROJECTION,
+                Some(crate::llm::types::Message::system(catalog)),
+            );
         }
 
         // Fire InstructionsLoaded hook
@@ -687,9 +682,23 @@ impl ReactAgent {
             .await
     }
 
-    pub(crate) async fn activate_skill_for_context(&self, skill_name: &str) -> Result<()> {
-        if !self.tools.skill_registry.is_installed(skill_name)
-            || self.tools.skill_registry.is_activated(skill_name)
+    /// Activate one installed skill and inject its instructions into context.
+    ///
+    /// All activation paths should use this method so registry state and model
+    /// context cannot diverge.
+    pub async fn activate_skill(&self, skill_name: &str) -> Result<()> {
+        if !self.tools.skill_registry.is_installed(skill_name) {
+            return Ok(());
+        }
+
+        let projection_marker = format!("echo-agent:skill:{skill_name}");
+        if self.tools.skill_registry.is_activated(skill_name)
+            && self
+                .memory
+                .context
+                .lock()
+                .await
+                .has_projection(projection_marker.as_str())
         {
             return Ok(());
         }
@@ -699,7 +708,7 @@ impl ReactAgent {
         {
             let mut ctx = self.memory.context.lock().await;
             ctx.replace_projection(
-                format!("echo-agent:skill:{skill_name}"),
+                projection_marker,
                 Some(crate::llm::types::Message::system(block)),
             );
         }
