@@ -570,15 +570,16 @@ impl ReactAgent {
         let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
         let mut context = self.memory.context.lock().await;
-        if let Some(runtime_context) = super::context::format_turn_runtime_context(
-            memory_context.as_deref(),
-            ws_block.as_str(),
-        ) {
-            context.push(super::context::runtime_context_note(
-                "turn",
-                &runtime_context,
-            ));
-        }
+        context.replace_projection(
+            super::context::WORKSPACE_CONTEXT_PROJECTION,
+            (!ws_block.trim().is_empty())
+                .then(|| super::context::runtime_context_note("workspace", &ws_block)),
+        );
+        context.replace_tail_projection(
+            super::context::TURN_MEMORY_CONTEXT_PROJECTION,
+            memory_context
+                .map(|body| super::context::runtime_context_note("memory", body.as_str())),
+        );
         context.push(Message::user(message.to_string()));
 
         // Start trace run recording

@@ -666,16 +666,6 @@ impl ReactAgent {
         }
         self.replace_tool(Box::new(script_tool));
 
-        // Protect activated skill content from context compaction.
-        // Messages containing <skill_content will survive compression passes.
-        self.memory
-            .context
-            .try_lock()
-            .map(|mut ctx| ctx.add_protected_marker("<skill_content".to_string()))
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to acquire context lock for protected marker: {}", e);
-            });
-
         info!(
             agent = %self.config.agent_name,
             count = names.len(),
@@ -708,14 +698,16 @@ impl ReactAgent {
         let block = content.to_prompt_block();
         {
             let mut ctx = self.memory.context.lock().await;
-            ctx.add_protected_marker("<skill_content".to_string());
-            ctx.push(crate::llm::types::Message::system(block));
+            ctx.replace_projection(
+                format!("echo-agent:skill:{skill_name}"),
+                Some(crate::llm::types::Message::system(block)),
+            );
         }
 
         tracing::info!(
             agent = %self.config.agent_name,
             skill = %skill_name,
-            "Skill activated and injected as protected skill_content"
+            "Skill activated and injected as a replaceable context projection"
         );
         Ok(())
     }

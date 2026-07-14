@@ -1568,9 +1568,8 @@ fn replace_tool_when_not_exists() {
 // ── recall_long_term_memories injects into the current user turn ─────────────
 
 /// Recalled memories are dynamic per turn, so they must not be appended as
-/// extra system messages where they destabilize the provider's prompt-cache
-/// prefix. They are merged into the current user turn, which also avoids the
-/// older consecutive-user-message failure mode.
+/// permanent system messages where they destabilize the provider's prompt-cache
+/// prefix. The current turn owns one replaceable projection before the request.
 #[tokio::test]
 async fn recall_injects_memories_into_current_user_message() {
     use crate::agent::react::run::types::StreamMode;
@@ -1641,14 +1640,16 @@ async fn recall_injects_memories_into_current_user_message() {
     );
 
     assert!(
-        memory_users[0]
-            .text_content()
+        memory_users
+            .first()
+            .and_then(|message| message.text_content())
             .is_some_and(|c| c.contains("user prefers Rust over Python")),
         "memory_context user message should contain seeded fact"
     );
     assert!(
-        !memory_users[0]
-            .text_content()
+        !memory_users
+            .first()
+            .and_then(|message| message.text_content())
             .is_some_and(|c| c.contains("[current_user_request]") || c.contains("\nRust")),
         "memory_context user message must not duplicate the current request"
     );
@@ -1657,7 +1658,7 @@ async fn recall_injects_memories_into_current_user_message() {
         pair[0].role == Role::User
             && pair[0]
                 .text_content()
-                .is_some_and(|c| c.starts_with("[runtime_context:turn]"))
+                .is_some_and(|c| c.contains("[runtime_context:memory]"))
             && pair[1].role == Role::User
             && pair[1].text_content().is_some_and(|c| c == "Rust")
     });
@@ -1665,6 +1666,30 @@ async fn recall_injects_memories_into_current_user_message() {
         context_then_request,
         "expected runtime context before current request so shared workspace context remains prefix-cacheable"
     );
+
+    drop(ctx);
+    agent
+        .prepare_stream_context(StreamMode::Chat, "unrelated-query")
+        .await;
+    let ctx = agent.memory.context.lock().await;
+    let runtime_contexts: Vec<_> = ctx
+        .messages()
+        .iter()
+        .filter(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content.contains("[runtime_context:memory]"))
+        })
+        .collect();
+    assert!(
+        runtime_contexts.len() <= 1,
+        "turn runtime context must use latest-wins replacement"
+    );
+    assert!(ctx.messages().iter().all(|message| {
+        message
+            .text_content()
+            .is_none_or(|content| !content.contains("user prefers Rust over Python"))
+    }));
 }
 
 // ── save_transcript_projection ──────────────────────────────────────────────

@@ -24,6 +24,7 @@ use echo_core::budget::TokenBudget;
 use echo_core::error::Result;
 use echo_core::llm::types::{ContentPart, Message, MessageContent, Role};
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const PROJECTION_ENVELOPE_PREFIX: &str = "<echo-agent-context-projection-v1>";
@@ -49,6 +50,15 @@ fn projection_envelope_text(message: &Message) -> Option<&str> {
         }),
         MessageContent::Empty => None,
     }
+}
+
+fn projection_marker_prefix(marker: &str) -> Option<String> {
+    if marker.is_empty() {
+        return None;
+    }
+    serde_json::to_string(marker)
+        .ok()
+        .map(|encoded| format!("{PROJECTION_ENVELOPE_PREFIX}\nmarker={encoded}\n"))
 }
 
 /// Callback trait for promoting evicted messages to long-term memory.
@@ -305,8 +315,16 @@ pub struct ContextManager {
     tokenizer: Arc<dyn Tokenizer>,
     /// Content markers that identify protected messages (survive compaction).
     /// Any message whose content contains one of these markers is excluded from compression.
-    /// Used by the skill system to protect activated skill instructions.
+    /// Used for static consumer-defined instructions that must survive compaction.
     protected_markers: Vec<String>,
+    /// Protected content markers whose newest message supersedes older ones.
+    ///
+    /// This is intended for dynamic context such as a worker invocation brief:
+    /// the current value must survive compression, but retaining prior values
+    /// wastes tokens and can give the model conflicting instructions.
+    replaceable_protected_markers: Vec<String>,
+    /// Last marker set emitted by each dynamic projection provider.
+    projection_scopes: HashMap<String, HashSet<String>>,
     /// Optional hard message-count cap (supplementary OOM guard).
     ///
     /// (stage4 P4.3) The primary OOM defense is the token budget (`token_limit`
@@ -360,6 +378,14 @@ impl ContextManager {
     /// + recent messages and discards the earliest in between. Defaults to
     /// `None` (no message-count cap, token-driven, aligned with industry).
     pub fn push(&mut self, message: Message) {
+        if let Some(marker) = self.replaceable_marker_for(&message) {
+            self.messages.retain(|existing| {
+                existing
+                    .content
+                    .as_text_ref()
+                    .is_none_or(|content| !content.contains(marker.as_str()))
+            });
+        }
         self.messages.push(message);
 
         // Optional supplementary hard cap (defaults to None = disabled).
@@ -421,7 +447,9 @@ impl ContextManager {
 
     /// Batch-append messages
     pub fn push_many(&mut self, messages: impl IntoIterator<Item = Message>) {
-        self.messages.extend(messages);
+        for message in messages {
+            self.push(message);
+        }
     }
 
     /// Return all messages currently in the buffer (no compression)
@@ -455,6 +483,7 @@ impl ContextManager {
     /// Messages should include the system prompt as the first entry (if needed).
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+        self.projection_scopes.clear();
     }
 
     /// Estimate the token count of the current context
@@ -477,49 +506,142 @@ impl ContextManager {
     /// Clear the context buffer (preserves configured compressor and protection markers)
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.projection_scopes.clear();
     }
 
     /// Register a content marker that protects messages from compression.
     ///
     /// Any message whose content contains this marker string will be excluded
-    /// from compression passes. This is used by the skill system to protect
-    /// activated skill instructions from being evicted during context compaction.
+    /// from compression passes. This is intended for static consumer-defined
+    /// instructions that must not be evicted during context compaction.
     ///
     /// # Example
     /// ```rust,no_run
     /// # use echo_state::compression::ContextManager;
     /// let mut ctx = ContextManager::builder(4096).build();
-    /// ctx.add_protected_marker("<skill_content".to_string());
+    /// ctx.add_protected_marker("[critical_policy]".to_string());
     /// ```
     pub fn add_protected_marker(&mut self, marker: String) {
-        if !self.protected_markers.contains(&marker) {
+        if !marker.is_empty() && !self.protected_markers.contains(&marker) {
             self.protected_markers.push(marker);
+        }
+    }
+
+    /// Register a protected marker with latest-wins replacement semantics.
+    ///
+    /// Pushing a message containing this marker removes older messages that
+    /// contain the same marker before appending the new value.
+    pub fn add_replaceable_protected_marker(&mut self, marker: String) {
+        if !marker.is_empty() && !self.replaceable_protected_markers.contains(&marker) {
+            self.replaceable_protected_markers.push(marker);
         }
     }
 
     /// Replace marker-tagged model context at the system/history boundary.
     ///
-    /// Projection messages receive a framework-reserved envelope. Existing
-    /// messages with that envelope are removed before current projections are
-    /// inserted, making replacement recoverable after persistence and restore.
+    /// Projection messages receive a framework-reserved envelope. Each supplied
+    /// marker replaces only its previous value. A projection whose message is
+    /// `None` acts as a tombstone for that marker. Unmentioned projections stay
+    /// intact, allowing independent context sources to update safely.
     pub fn apply_projections(&mut self, projections: &[ContextProjection]) {
-        self.messages
-            .retain(|message| !is_context_projection_message(message));
+        let mut replacements = Vec::new();
+        for projection in projections {
+            if projection
+                .message
+                .as_ref()
+                .is_some_and(|message| self.projection_matches(&projection.marker, message))
+            {
+                continue;
+            }
+            self.remove_projection(projection.marker.as_str());
+            if let Some(message) = projection.message.clone()
+                && !projection.marker.is_empty()
+            {
+                replacements.push(Self::wrap_projection_message(
+                    message,
+                    projection.marker.as_str(),
+                ));
+            }
+        }
 
         let boundary = self
             .messages
             .iter()
             .position(|message| message.role != Role::System)
             .unwrap_or(self.messages.len());
-        let current = projections
+        self.messages.splice(boundary..boundary, replacements);
+    }
+
+    /// Apply the complete marker set owned by one dynamic provider.
+    ///
+    /// Markers emitted by this scope on its previous call but omitted now are
+    /// removed. Projections owned by other scopes or direct callers remain.
+    pub fn apply_projection_scope(
+        &mut self,
+        scope: impl Into<String>,
+        projections: &[ContextProjection],
+    ) {
+        let scope = scope.into();
+        if scope.is_empty() {
+            return;
+        }
+        let current: HashSet<String> = projections
             .iter()
             .filter(|projection| !projection.marker.is_empty())
-            .filter_map(|projection| {
-                projection.message.clone().map(|message| {
-                    Self::wrap_projection_message(message, projection.marker.as_str())
-                })
-            });
-        self.messages.splice(boundary..boundary, current);
+            .map(|projection| projection.marker.clone())
+            .collect();
+        if let Some(previous) = self.projection_scopes.remove(scope.as_str()) {
+            for marker in previous.difference(&current) {
+                self.remove_projection(marker);
+            }
+        }
+        self.apply_projections(projections);
+        if !current.is_empty() {
+            self.projection_scopes.insert(scope, current);
+        }
+    }
+
+    /// Replace one framework-owned projection by marker.
+    pub fn replace_projection(&mut self, marker: impl Into<String>, message: Option<Message>) {
+        let marker = marker.into();
+        if marker.is_empty() {
+            return;
+        }
+        self.apply_projections(&[ContextProjection { marker, message }]);
+    }
+
+    /// Replace one framework-owned projection at the tail of current history.
+    ///
+    /// Tail placement is appropriate for per-turn dynamic context because it
+    /// preserves the longest stable prompt prefix for provider KV caches.
+    pub fn replace_tail_projection(&mut self, marker: impl Into<String>, message: Option<Message>) {
+        let marker = marker.into();
+        if marker.is_empty() {
+            return;
+        }
+        if message
+            .as_ref()
+            .is_some_and(|current| self.projection_matches(&marker, current))
+        {
+            return;
+        }
+        self.remove_projection(marker.as_str());
+        if let Some(message) = message {
+            self.push(Self::wrap_projection_message(message, marker.as_str()));
+        }
+    }
+
+    /// Remove one framework-owned projection by exact marker.
+    pub fn remove_projection(&mut self, marker: &str) -> usize {
+        let Some(expected) = projection_marker_prefix(marker) else {
+            return 0;
+        };
+        let before = self.messages.len();
+        self.messages.retain(|message| {
+            projection_envelope_text(message)
+                .is_none_or(|envelope| !envelope.starts_with(expected.as_str()))
+        });
+        before.saturating_sub(self.messages.len())
     }
 
     /// Count messages currently protected by registered content markers.
@@ -530,12 +652,23 @@ impl ContextManager {
             .count()
     }
 
+    /// Estimate tokens currently pinned against compression.
+    pub fn protected_token_estimate(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|message| self.is_protected(message))
+            .map(|message| {
+                let text = message.content.as_text().unwrap_or_default();
+                self.tokenizer.count_tokens(text.as_str())
+            })
+            .sum()
+    }
+
     /// Return whether the context owns a projection with exactly this marker.
     pub fn has_projection(&self, marker: &str) -> bool {
-        let Ok(encoded_marker) = serde_json::to_string(marker) else {
+        let Some(expected) = projection_marker_prefix(marker) else {
             return false;
         };
-        let expected = format!("{PROJECTION_ENVELOPE_PREFIX}\nmarker={encoded_marker}\n");
         self.messages.iter().any(|message| {
             projection_envelope_text(message)
                 .is_some_and(|envelope| envelope.starts_with(expected.as_str()))
@@ -547,14 +680,46 @@ impl ContextManager {
         if is_context_projection_message(message) {
             return true;
         }
-        if self.protected_markers.is_empty() {
-            return false;
-        }
         if let Some(content) = message.content.as_text() {
-            self.protected_markers.iter().any(|m| content.contains(m))
+            self.protected_markers
+                .iter()
+                .chain(self.replaceable_protected_markers.iter())
+                .any(|marker| content.contains(marker))
         } else {
             false
         }
+    }
+
+    fn replaceable_marker_for(&self, message: &Message) -> Option<String> {
+        let content = message.content.as_text_ref()?;
+        self.replaceable_protected_markers
+            .iter()
+            .find(|marker| content.contains(marker.as_str()))
+            .cloned()
+    }
+
+    fn projection_matches(&self, marker: &str, message: &Message) -> bool {
+        let Some(expected_prefix) = projection_marker_prefix(marker) else {
+            return false;
+        };
+        let expected = Self::wrap_projection_message(message.clone(), marker);
+        let Ok(expected_value) = serde_json::to_value(expected) else {
+            return false;
+        };
+        let matching: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|existing| {
+                projection_envelope_text(existing)
+                    .is_some_and(|envelope| envelope.starts_with(expected_prefix.as_str()))
+            })
+            .collect();
+        matching.len() == 1
+            && matching.first().is_some_and(|existing| {
+                serde_json::to_value(existing)
+                    .ok()
+                    .is_some_and(|value| value == expected_value)
+            })
     }
 
     fn wrap_projection_message(mut message: Message, marker: &str) -> Message {
@@ -813,14 +978,17 @@ impl ContextManager {
         for msg in &self.messages {
             let text = msg.content.as_text().unwrap_or_default();
             let tokens = tokenizer.count_tokens(&text);
+            if text.contains("[memory_context]")
+                || text.contains("[Relevant historical memories]")
+                || text.contains("[Related historical memories]")
+            {
+                memory += tokens;
+                continue;
+            }
             match msg.role {
                 Role::System => {
                     if text.contains("[对话历史摘要]") {
                         summary += tokens;
-                    } else if text.contains("[Relevant historical memories]")
-                        || text.contains("[Related historical memories]")
-                    {
-                        memory += tokens;
                     } else {
                         system += tokens;
                     }
@@ -1657,9 +1825,9 @@ impl ContextManagerBuilder {
             tokenizer: self
                 .tokenizer
                 .unwrap_or_else(|| Arc::new(HeuristicTokenizer)),
-            // (stage4 G1) `protected_memory` is a default marker so recalled
-            // memories (wrapped by `format_memory_context`) survive compaction.
-            protected_markers: vec!["protected_memory".to_string()],
+            protected_markers: Vec::new(),
+            replaceable_protected_markers: Vec::new(),
+            projection_scopes: HashMap::new(),
             max_messages: self.max_messages,
             budget: self.budget,
             metrics: CompressionMetrics::new(),
@@ -1747,6 +1915,104 @@ mod tests {
     }
 
     #[test]
+    fn context_projection_update_preserves_other_sources() {
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.apply_projections(&[
+            ContextProjection {
+                marker: "runtime".to_string(),
+                message: Some(Message::user("runtime state".to_string())),
+            },
+            ContextProjection {
+                marker: "skill:review".to_string(),
+                message: Some(Message::system("review instructions".to_string())),
+            },
+        ]);
+
+        ctx.replace_projection("runtime", Some(Message::user("new runtime".to_string())));
+
+        assert!(ctx.has_projection("runtime"));
+        assert!(ctx.has_projection("skill:review"));
+        assert_eq!(ctx.protected_message_count(), 2);
+        assert!(ctx.messages().iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.ends_with("review instructions"))
+        }));
+    }
+
+    #[test]
+    fn unchanged_projection_keeps_its_position_for_prefix_cache_stability() {
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.replace_projection(
+            "workspace",
+            Some(Message::user("stable workspace".to_string())),
+        );
+        ctx.push(Message::user("conversation turn".to_string()));
+        let before = ctx
+            .messages()
+            .iter()
+            .position(|message| is_context_projection_message(message));
+
+        ctx.replace_projection(
+            "workspace",
+            Some(Message::user("stable workspace".to_string())),
+        );
+
+        let after = ctx
+            .messages()
+            .iter()
+            .position(|message| is_context_projection_message(message));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn tail_projection_replaces_dynamic_context_near_latest_turn() {
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.push(Message::user("older history".to_string()));
+        ctx.replace_tail_projection("turn-memory", Some(Message::user("old memory".to_string())));
+        ctx.push(Message::user("previous request".to_string()));
+        ctx.replace_tail_projection(
+            "turn-memory",
+            Some(Message::user("current memory".to_string())),
+        );
+
+        assert!(ctx.messages().iter().all(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_none_or(|text| !text.contains("old memory"))
+        }));
+        assert!(ctx.messages().last().is_some_and(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.ends_with("current memory"))
+        }));
+    }
+
+    #[test]
+    fn projection_scope_removes_only_markers_previously_owned_by_provider() {
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.replace_projection(
+            "skill:review",
+            Some(Message::system("review skill".to_string())),
+        );
+        ctx.apply_projection_scope(
+            "pre-model",
+            &[ContextProjection {
+                marker: "runtime".to_string(),
+                message: Some(Message::user("active runtime".to_string())),
+            }],
+        );
+
+        ctx.apply_projection_scope("pre-model", &[]);
+
+        assert!(!ctx.has_projection("runtime"));
+        assert!(ctx.has_projection("skill:review"));
+    }
+
+    #[test]
     fn context_projection_preserves_unrelated_marker_text() {
         let marker = "runtime-marker";
         let mut ctx = ContextManager::builder(4096)
@@ -1806,7 +2072,7 @@ mod tests {
         let mut restored = ContextManager::builder(4096).build();
         restored.set_messages(restored_messages);
 
-        restored.apply_projections(&[]);
+        restored.replace_projection("runtime", None);
 
         assert!(restored.messages().iter().all(|message| {
             message
@@ -1814,6 +2080,59 @@ mod tests {
                 .as_text_ref()
                 .is_none_or(|text| !text.contains("stale restored projection"))
         }));
+    }
+
+    #[test]
+    fn replaceable_protected_marker_keeps_only_latest_value() {
+        let marker = "[task_context]";
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.add_replaceable_protected_marker(marker.to_string());
+        ctx.push_many([
+            Message::user(format!("{marker} first brief")),
+            Message::assistant("intermediate result".to_string()),
+            Message::user(format!("{marker} current brief")),
+        ]);
+
+        let briefs: Vec<_> = ctx
+            .messages()
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .as_text_ref()
+                    .is_some_and(|text| text.contains(marker))
+            })
+            .collect();
+        assert_eq!(briefs.len(), 1);
+        assert!(briefs.first().is_some_and(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text.ends_with("current brief"))
+        }));
+        assert_eq!(ctx.protected_message_count(), 1);
+        assert!(ctx.protected_token_estimate() > 0);
+        assert!(ctx.messages().iter().any(|message| {
+            message
+                .content
+                .as_text_ref()
+                .is_some_and(|text| text == "intermediate result")
+        }));
+    }
+
+    #[test]
+    fn memory_projection_is_reported_in_memory_token_breakdown() {
+        let mut ctx = ContextManager::builder(4096).build();
+        ctx.replace_projection(
+            "turn-memory",
+            Some(Message::user(
+                "[memory_context] Relevant historical memories: preference".to_string(),
+            )),
+        );
+
+        let breakdown = ctx.token_breakdown(None);
+        assert!(breakdown.memory > 0);
+        assert_eq!(breakdown.user, 0);
     }
 
     fn canonical_test_context() -> ContextManager {

@@ -56,7 +56,7 @@ pub(crate) async fn run_compact(
         tx,
         {
             let mut context = context.lock().await;
-            context.apply_projections(&projections);
+            context.apply_projection_scope("pre-model", &projections);
             context.prepare(None).await
         },
         CompactOutcome::Abandoned

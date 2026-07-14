@@ -7,6 +7,9 @@ use crate::skills::hooks::{HookContext, HookEvent};
 use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
 use tracing::{debug, info, warn};
 
+pub(crate) const TURN_MEMORY_CONTEXT_PROJECTION: &str = "echo-agent:turn-memory-context";
+pub(crate) const WORKSPACE_CONTEXT_PROJECTION: &str = "echo-agent:workspace-context";
+
 /// (stage4 E1) Prompt for the pre-compaction flush LLM call.
 const PRE_COMPACTION_FLUSH_PROMPT: &str = "\
 You are a memory-compaction flusher. The conversation below is about to be \
@@ -487,11 +490,14 @@ impl ReactAgent {
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
 
         let mut context = self.memory.context.lock().await;
-        if let Some(runtime_context) =
-            format_turn_runtime_context(memory_context.as_deref(), ws_block.as_str())
-        {
-            context.push(runtime_context_note("turn", &runtime_context));
-        }
+        context.replace_projection(
+            WORKSPACE_CONTEXT_PROJECTION,
+            (!ws_block.trim().is_empty()).then(|| runtime_context_note("workspace", &ws_block)),
+        );
+        context.replace_tail_projection(
+            TURN_MEMORY_CONTEXT_PROJECTION,
+            memory_context.map(|body| runtime_context_note("memory", body.as_str())),
+        );
         context.push(Message::user(input.to_string()));
         // Drop context lock before hook execution (avoid deadlock with
         // fire_lifecycle_hook's own context acquisition)
@@ -551,11 +557,14 @@ impl ReactAgent {
         let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
 
         let mut context = self.memory.context.lock().await;
-        if let Some(runtime_context) =
-            format_turn_runtime_context(memory_context.as_deref(), ws_block.as_str())
-        {
-            context.push(runtime_context_note("turn", &runtime_context));
-        }
+        context.replace_projection(
+            WORKSPACE_CONTEXT_PROJECTION,
+            (!ws_block.trim().is_empty()).then(|| runtime_context_note("workspace", &ws_block)),
+        );
+        context.replace_tail_projection(
+            TURN_MEMORY_CONTEXT_PROJECTION,
+            memory_context.map(|body| runtime_context_note("memory", body.as_str())),
+        );
         context.push(message.clone());
         drop(context);
 
@@ -606,37 +615,11 @@ pub(crate) fn format_memory_context(items: &[crate::memory::store::StoreItem]) -
     lines.push(
         "[The above memories are for reference; answer the user's CURRENT question.]".to_string(),
     );
-    // (stage4 G1) Wrap in <protected_memory> so compression's protected_markers
-    // keeps recalled memories from being evicted (割裂点7 折中 fix; stage 2
-    // pre_compaction_flush is the thorough fix).
-    format!(
-        "<protected_memory>\n{}\n</protected_memory>",
-        lines.join("\n")
-    )
+    lines.join("\n")
 }
 
 // (stage4 D1) recall helpers (composite_score / age_days_from_storeitem /
 // incr_recall_count) moved to `evolution::recall::MemoryRecaller`.
-
-pub(crate) fn format_turn_runtime_context(
-    memory_context: Option<&str>,
-    workspace_context: &str,
-) -> Option<String> {
-    let mut blocks = Vec::new();
-    if !workspace_context.trim().is_empty() {
-        blocks.push(workspace_context.trim().to_string());
-    }
-    if let Some(memory_context) = memory_context
-        && !memory_context.trim().is_empty()
-    {
-        blocks.push(memory_context.trim().to_string());
-    }
-    if blocks.is_empty() {
-        None
-    } else {
-        Some(blocks.join("\n\n"))
-    }
-}
 
 impl crate::agent::snapshot::AgentRunSnapshot {
     /// (stage4 E1) Pre-compaction flush — a bounded LLM call identifies durable
