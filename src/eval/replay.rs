@@ -273,6 +273,28 @@ impl TrajectoryReplay {
             tool_calls: self.total_tool_calls(),
             tokens_in: self.run.token_usage.prompt_tokens,
             tokens_out: self.run.token_usage.completion_tokens,
+            cached_tokens_in: self.run.token_usage.cached_prompt_tokens,
+            cache_creation_tokens_in: self.run.token_usage.cache_creation_prompt_tokens,
+            cache_hit_rate: self.run.token_usage.cache_hit_rate(),
+            tool_errors: self
+                .run
+                .events
+                .iter()
+                .filter(|event| matches!(event, RunEvent::ToolError { .. }))
+                .count(),
+            max_protected_context_tokens: self
+                .run
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    RunEvent::LlmCall {
+                        protected_context_tokens,
+                        ..
+                    } => Some(*protected_context_tokens),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0),
             file_changes: self.written_files().len(),
             compile_ok: None,
             tests_pass: None,

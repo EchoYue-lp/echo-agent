@@ -213,6 +213,21 @@ pub struct EvalResult {
     /// Estimated output tokens.
     #[serde(default)]
     pub tokens_out: u32,
+    /// Provider-reported input tokens served from prompt cache.
+    #[serde(default)]
+    pub cached_tokens_in: u32,
+    /// Provider-reported input tokens written into prompt cache.
+    #[serde(default)]
+    pub cache_creation_tokens_in: u32,
+    /// Prompt cache read rate for this run.
+    #[serde(default)]
+    pub cache_hit_rate: Option<f64>,
+    /// Tool errors observed in the execution trace.
+    #[serde(default)]
+    pub tool_errors: usize,
+    /// Maximum protected-context token estimate observed before an LLM call.
+    #[serde(default)]
+    pub max_protected_context_tokens: usize,
     /// Number of files changed.
     #[serde(default)]
     pub file_changes: usize,
@@ -237,6 +252,11 @@ impl EvalResult {
             tool_calls: 0,
             tokens_in: 0,
             tokens_out: 0,
+            cached_tokens_in: 0,
+            cache_creation_tokens_in: 0,
+            cache_hit_rate: None,
+            tool_errors: 0,
+            max_protected_context_tokens: 0,
             file_changes: 0,
             compile_ok: None,
             tests_pass: None,
@@ -308,6 +328,21 @@ pub struct EvalReport {
     /// Total tokens out across all cases.
     #[serde(default)]
     pub total_tokens_out: u32,
+    /// Total input tokens served from prompt cache.
+    #[serde(default)]
+    pub total_cached_tokens_in: u32,
+    /// Total input tokens written into prompt cache.
+    #[serde(default)]
+    pub total_cache_creation_tokens_in: u32,
+    /// Aggregate prompt cache read rate.
+    #[serde(default)]
+    pub cache_hit_rate: Option<f64>,
+    /// Total tool errors across all cases.
+    #[serde(default)]
+    pub total_tool_errors: usize,
+    /// Largest protected-context estimate across all cases.
+    #[serde(default)]
+    pub max_protected_context_tokens: usize,
     /// Total files changed across all cases.
     #[serde(default)]
     pub total_file_changes: usize,
@@ -325,10 +360,37 @@ impl EvalReport {
         } else {
             0.0
         };
-        let total_tool_calls: usize = results.iter().map(|r| r.tool_calls).sum();
-        let total_tokens_in: u32 = results.iter().map(|r| r.tokens_in).sum();
-        let total_tokens_out: u32 = results.iter().map(|r| r.tokens_out).sum();
-        let total_file_changes: usize = results.iter().map(|r| r.file_changes).sum();
+        let total_tool_calls = results.iter().fold(0usize, |total, result| {
+            total.saturating_add(result.tool_calls)
+        });
+        let total_tokens_in = results
+            .iter()
+            .fold(0u32, |total, result| total.saturating_add(result.tokens_in));
+        let total_tokens_out = results.iter().fold(0u32, |total, result| {
+            total.saturating_add(result.tokens_out)
+        });
+        let total_cached_tokens_in = results.iter().fold(0u32, |total, result| {
+            total.saturating_add(result.cached_tokens_in)
+        });
+        let total_cache_creation_tokens_in = results.iter().fold(0u32, |total, result| {
+            total.saturating_add(result.cache_creation_tokens_in)
+        });
+        let cache_hit_rate = if total_tokens_in == 0 {
+            None
+        } else {
+            Some(total_cached_tokens_in as f64 / total_tokens_in as f64)
+        };
+        let total_tool_errors = results.iter().fold(0usize, |total, result| {
+            total.saturating_add(result.tool_errors)
+        });
+        let max_protected_context_tokens = results
+            .iter()
+            .map(|r| r.max_protected_context_tokens)
+            .max()
+            .unwrap_or(0);
+        let total_file_changes = results.iter().fold(0usize, |total, result| {
+            total.saturating_add(result.file_changes)
+        });
         // Statistical aggregation
         let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
         let variance = if total > 1 {
@@ -351,6 +413,11 @@ impl EvalReport {
             total_tool_calls,
             total_tokens_in,
             total_tokens_out,
+            total_cached_tokens_in,
+            total_cache_creation_tokens_in,
+            cache_hit_rate,
+            total_tool_errors,
+            max_protected_context_tokens,
             total_file_changes,
             results,
         }

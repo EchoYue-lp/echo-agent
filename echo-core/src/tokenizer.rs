@@ -260,9 +260,9 @@ impl TokenUsageTracker {
 
     /// Record usage from an API response.
     pub fn record_usage(&self, usage: &crate::llm::types::Usage) {
-        let prompt = usage.prompt_tokens.unwrap_or(0);
+        let prompt = usage.effective_prompt_tokens();
         let completion = usage.completion_tokens.unwrap_or(0);
-        self.record(prompt, completion, usage.total_tokens);
+        self.record(prompt, completion, Some(usage.effective_total_tokens()));
         self.total_cached_prompt_tokens
             .fetch_add(usage.cached_prompt_tokens() as u64, Ordering::Relaxed);
         self.total_cache_creation_prompt_tokens.fetch_add(
@@ -295,16 +295,16 @@ impl TokenUsageTracker {
 
     /// Cumulative prompt cache hit rate (0.0–1.0).
     ///
-    /// Computed as `cached_prompt / (prompt + cached_prompt)` across all requests.
+    /// Computed as `cached_prompt / prompt` across all requests. Recorded prompt
+    /// tokens are provider-normalized to include cache reads.
     /// Returns `None` if no requests with prompt tokens have been recorded.
     pub fn cumulative_cache_hit_rate(&self) -> Option<f64> {
         let prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
         let cached = self.total_cached_prompt_tokens.load(Ordering::Relaxed);
-        let total_prompt = prompt.saturating_add(cached);
-        if total_prompt == 0 {
+        if prompt == 0 {
             None
         } else {
-            Some(cached as f64 / total_prompt as f64)
+            Some(cached as f64 / prompt as f64)
         }
     }
 
@@ -484,5 +484,26 @@ mod tests {
         assert_eq!(summary.total_prompt_tokens, 1000);
         assert_eq!(summary.total_cached_prompt_tokens, 980);
         assert_eq!(summary.total_cache_creation_prompt_tokens, 0);
+        assert_eq!(tracker.cumulative_cache_hit_rate(), Some(0.98));
+    }
+
+    #[test]
+    fn test_token_usage_tracker_normalizes_anthropic_cache_reads() {
+        let tracker = TokenUsageTracker::new("test-model");
+        tracker.record_usage(&crate::llm::types::Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(20),
+            total_tokens: Some(120),
+            cache_read_input_tokens: Some(900),
+            cache_creation_input_tokens: Some(50),
+            ..Default::default()
+        });
+
+        let summary = tracker.summary();
+        assert_eq!(summary.total_prompt_tokens, 1050);
+        assert_eq!(summary.total_tokens, 1070);
+        assert_eq!(summary.total_cached_prompt_tokens, 900);
+        assert_eq!(summary.total_cache_creation_prompt_tokens, 50);
+        assert_eq!(tracker.cumulative_cache_hit_rate(), Some(900.0 / 1050.0));
     }
 }

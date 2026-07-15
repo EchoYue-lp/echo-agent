@@ -53,6 +53,7 @@ impl EvalRunner {
         let started = Instant::now();
         let work_dir = self.setup_fixture(case).await;
         let mut result = EvalResult::new(&case.id, true);
+        let mut final_output = None;
 
         // Execute the task — pass workspace dir explicitly, never change global cwd
         let cwd = work_dir
@@ -71,13 +72,7 @@ impl EvalRunner {
         match agent_result {
             Ok(Ok(output)) => {
                 result.duration_ms = started.elapsed().as_millis() as u64;
-                let criteria_result = self
-                    .check_criteria(&case.success_criteria, &output, &case.task, &cwd)
-                    .await;
-                if !criteria_result.success {
-                    result.success = false;
-                }
-                result.metrics.extend(criteria_result.metrics);
+                final_output = Some(output);
             }
             Ok(Err(e)) => {
                 result.duration_ms = started.elapsed().as_millis() as u64;
@@ -91,18 +86,40 @@ impl EvalRunner {
             }
         }
 
-        // Populate metrics from trace (all branches — errors/timeouts also have diagnostic trace value)
-        if let Some(ref store) = self.run_store
+        // Load the trace once. Criteria such as ToolUsed/ToolNotUsed require it,
+        // and observability metrics should come from the same authoritative run.
+        let run = if let Some(ref store) = self.run_store
             && let Some(ref run_id) = result.run_id
             && let Ok(Some(run)) = store.load(run_id).await
         {
-            // Only check constraints on success; on error, just collect metrics
-            if result.success {
-                let violations = self.evaluate_run_constraints(&case.constraints, &run);
-                if !violations.is_empty() {
-                    result.violations = violations;
-                    result.success = false;
-                }
+            Some(run)
+        } else {
+            None
+        };
+
+        if let Some(output) = final_output.as_deref() {
+            let criteria_result = self
+                .check_criteria(
+                    &case.success_criteria,
+                    output,
+                    &case.task,
+                    &cwd,
+                    run.as_ref(),
+                )
+                .await;
+            if !criteria_result.success {
+                result.success = false;
+            }
+            result.metrics.extend(criteria_result.metrics);
+            result.violations.extend(criteria_result.violations);
+        }
+
+        // Populate metrics from trace (all branches — errors/timeouts also have diagnostic trace value)
+        if let Some(run) = run.as_ref() {
+            let violations = self.evaluate_run_constraints(&case.constraints, run);
+            if !violations.is_empty() {
+                result.violations.extend(violations);
+                result.success = false;
             }
             result.tool_calls = run
                 .events
@@ -111,7 +128,27 @@ impl EvalRunner {
                 .count();
             result.tokens_in = run.token_usage.prompt_tokens;
             result.tokens_out = run.token_usage.completion_tokens;
-            let replay = TrajectoryReplay::new(run);
+            result.cached_tokens_in = run.token_usage.cached_prompt_tokens;
+            result.cache_creation_tokens_in = run.token_usage.cache_creation_prompt_tokens;
+            result.cache_hit_rate = run.token_usage.cache_hit_rate();
+            result.tool_errors = run
+                .events
+                .iter()
+                .filter(|event| matches!(event, crate::trace::RunEvent::ToolError { .. }))
+                .count();
+            result.max_protected_context_tokens = run
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::trace::RunEvent::LlmCall {
+                        protected_context_tokens,
+                        ..
+                    } => Some(*protected_context_tokens),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            let replay = TrajectoryReplay::new(run.clone());
             result.file_changes = replay.written_files().len();
         }
 
@@ -160,6 +197,7 @@ impl EvalRunner {
         output: &str,
         task: &str,
         cwd: &Path,
+        run: Option<&Run>,
     ) -> EvalResult {
         match criteria {
             SuccessCriteria::LlmGraded { assertions } => {
@@ -179,7 +217,7 @@ impl EvalRunner {
                     });
                     result
                 } else {
-                    let mut r = EvalResult::new("criteria", true);
+                    let mut r = EvalResult::new("criteria", false);
                     r.violations
                         .push("LlmGraded criteria set but no grader configured".into());
                     r
@@ -211,38 +249,85 @@ impl EvalRunner {
                 }
                 result
             }
-            SuccessCriteria::ToolUsed { tool_name: _ } => {
-                // Tool usage is checked from the trace, not the output.
-                // Mark as pass here; constraint checker handles violations.
-                EvalResult::new("criteria", true)
+            SuccessCriteria::ToolUsed { tool_name } => {
+                let used = run.is_some_and(|run| {
+                    run.events.iter().any(|event| {
+                        matches!(event, crate::trace::RunEvent::ToolCall { name, .. } if name == tool_name)
+                    })
+                });
+                let mut result = EvalResult::new("criteria", used);
+                result.metrics.push(crate::eval::EvalMetric {
+                    name: "tool_used".into(),
+                    score: if used { 1.0 } else { 0.0 },
+                    detail: format!("Required tool: {tool_name}"),
+                });
+                if !used {
+                    result.violations.push(if run.is_some() {
+                        format!("Required tool was not used: {tool_name}")
+                    } else {
+                        format!("Cannot verify required tool without trace: {tool_name}")
+                    });
+                }
+                result
             }
-            SuccessCriteria::ToolNotUsed { tool_name: _ } => EvalResult::new("criteria", true),
+            SuccessCriteria::ToolNotUsed { tool_name } => {
+                let trace_available = run.is_some();
+                let used = run.is_some_and(|run| {
+                    run.events.iter().any(|event| {
+                        matches!(event, crate::trace::RunEvent::ToolCall { name, .. } if name == tool_name)
+                    })
+                });
+                let passed = trace_available && !used;
+                let mut result = EvalResult::new("criteria", passed);
+                result.metrics.push(crate::eval::EvalMetric {
+                    name: "tool_not_used".into(),
+                    score: if passed { 1.0 } else { 0.0 },
+                    detail: format!("Forbidden tool: {tool_name}"),
+                });
+                if !passed {
+                    result.violations.push(if trace_available {
+                        format!("Forbidden tool was used: {tool_name}")
+                    } else {
+                        format!("Cannot verify forbidden tool without trace: {tool_name}")
+                    });
+                }
+                result
+            }
             SuccessCriteria::AllOf(items) => {
                 let mut all_pass = true;
                 let mut metrics = Vec::new();
+                let mut violations = Vec::new();
                 for item in items {
-                    let r = Box::pin(self.check_criteria(item, output, task, cwd)).await;
+                    let r = Box::pin(self.check_criteria(item, output, task, cwd, run)).await;
                     if !r.success {
                         all_pass = false;
+                        violations.extend(r.violations);
                     }
                     metrics.extend(r.metrics);
                 }
                 let mut result = EvalResult::new("criteria", all_pass);
                 result.metrics = metrics;
+                result.violations = violations;
                 result
             }
             SuccessCriteria::AnyOf(items) => {
                 let mut any_pass = false;
                 let mut metrics = Vec::new();
+                let mut violations = Vec::new();
                 for item in items {
-                    let r = Box::pin(self.check_criteria(item, output, task, cwd)).await;
+                    let r = Box::pin(self.check_criteria(item, output, task, cwd, run)).await;
                     if r.success {
                         any_pass = true;
+                    } else {
+                        violations.extend(r.violations);
                     }
                     metrics.extend(r.metrics);
                 }
                 let mut result = EvalResult::new("criteria", any_pass);
                 result.metrics = metrics;
+                if !any_pass {
+                    result.violations = violations;
+                }
                 result
             }
             SuccessCriteria::SweBench {
@@ -415,22 +500,55 @@ impl EvalRunner {
                 format,
             } => {
                 let citation_patterns: Vec<&str> = match format.as_str() {
-                    "pmid" => vec![r"PMID:\s*\d+", r"PMID\s*\d+"],
-                    "doi" => vec![r"10\.\d{4,}/"],
-                    "url" => vec![r"https?://"],
-                    _ => vec![r"PMID:\s*\d+", r"PMID\s*\d+", r"10\.\d{4,}/", r"https?://"],
+                    "pmid" => vec![r"(?i)PMID:?\s*\d+"],
+                    "doi" => vec![r"(?i)10\.\d{4,9}/[-._;()/:A-Z0-9]+"],
+                    "url" => vec![r"https?://[^\s)\]}>]+"],
+                    _ => vec![
+                        r"(?i)PMID:?\s*\d+",
+                        r"(?i)10\.\d{4,9}/[-._;()/:A-Z0-9]+",
+                        r"https?://[^\s)\]}>]+",
+                    ],
                 };
 
-                let mut citation_count = 0usize;
+                let mut citations = Vec::new();
                 for pattern in &citation_patterns {
                     if let Ok(re) = regex::Regex::new(pattern) {
-                        citation_count += re.find_iter(output).count();
+                        citations.extend(re.find_iter(output).map(|matched| {
+                            matched
+                                .as_str()
+                                .trim_end_matches(|character: char| {
+                                    matches!(character, '.' | ',' | ';' | ':')
+                                })
+                                .to_lowercase()
+                        }));
                     }
                 }
+                citations.sort();
+                citations.dedup();
+                let source_text = run.map(|run| {
+                    run.events
+                        .iter()
+                        .filter_map(|event| match event {
+                            crate::trace::RunEvent::ToolResult {
+                                output_preview: Some(preview),
+                                ..
+                            } => Some(preview.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .to_lowercase()
+                });
+                let verified_count = source_text.as_ref().map_or(0, |source| {
+                    citations
+                        .iter()
+                        .filter(|citation| source.contains(citation.as_str()))
+                        .count()
+                });
 
-                let passed = citation_count >= *min_citations;
+                let passed = run.is_some() && verified_count >= *min_citations;
                 let score = if *min_citations > 0 {
-                    (citation_count as f64 / *min_citations as f64).min(1.0)
+                    (verified_count as f64 / *min_citations as f64).min(1.0)
                 } else {
                     1.0
                 };
@@ -440,15 +558,19 @@ impl EvalRunner {
                     name: "citation_valid".into(),
                     score,
                     detail: format!(
-                        "Found {} citations (format: {}, required: {})",
-                        citation_count, format, min_citations
+                        "Found {} citations, verified {} against tool result previews (format: {}, required: {})",
+                        citations.len(), verified_count, format, min_citations
                     ),
                 });
                 if !passed {
-                    result.violations.push(format!(
-                        "Insufficient citations: found {} but need at least {} (format: {})",
-                        citation_count, min_citations, format
-                    ));
+                    result.violations.push(if run.is_some() {
+                        format!(
+                            "Insufficient citations backed by tool result previews: verified {} but need at least {} (format: {})",
+                            verified_count, min_citations, format
+                        )
+                    } else {
+                        "Cannot verify citations without an execution trace".to_string()
+                    });
                 }
                 result
             }
@@ -633,6 +755,8 @@ fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::eval::EvalCase;
+    use crate::trace::{RunEvent, RunStatus, RunTimings, TokenUsage};
+    use chrono::Utc;
 
     #[tokio::test]
     async fn test_runner_output_contains() {
@@ -652,5 +776,111 @@ mod tests {
         };
         // This test just validates the runner doesn't panic on missing agent
         // Actual agent-based testing requires a MockAgent
+    }
+
+    #[tokio::test]
+    async fn trace_tool_criteria_are_enforced() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("eval_trace_{}", uuid::Uuid::new_v4()));
+        let runner = EvalRunner::new(dir.clone());
+        let run = Run {
+            run_id: "run-1".into(),
+            parent_run_id: None,
+            session_id: "session-1".into(),
+            status: RunStatus::Completed,
+            input: "inspect".into(),
+            events: vec![
+                RunEvent::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 1,
+                },
+                RunEvent::ToolResult {
+                    call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    success: true,
+                    output_preview: Some("Source record DOI 10.1234/example.2026".into()),
+                    output_truncated: false,
+                    duration_ms: 1,
+                    original_bytes: 40,
+                    returned_bytes: 40,
+                    estimated_tokens: 10,
+                    output_handling: Some("inline".into()),
+                },
+            ],
+            final_output: Some("done".into()),
+            error: None,
+            token_usage: TokenUsage::default(),
+            timings: RunTimings::default(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+        };
+        let criteria = SuccessCriteria::AllOf(vec![
+            SuccessCriteria::ToolUsed {
+                tool_name: "read_file".into(),
+            },
+            SuccessCriteria::ToolNotUsed {
+                tool_name: "write_file".into(),
+            },
+        ]);
+
+        let passed = runner
+            .check_criteria(&criteria, "done", "inspect", dir.as_path(), Some(&run))
+            .await;
+        if !passed.success {
+            return Err(format!(
+                "expected trace criteria to pass: {:?}",
+                passed.violations
+            ));
+        }
+
+        let missing = runner
+            .check_criteria(
+                &SuccessCriteria::ToolUsed {
+                    tool_name: "write_file".into(),
+                },
+                "done",
+                "inspect",
+                dir.as_path(),
+                Some(&run),
+            )
+            .await;
+        if missing.success {
+            return Err("missing required tool was accepted".into());
+        }
+        let nested_missing = runner
+            .check_criteria(
+                &SuccessCriteria::AllOf(vec![SuccessCriteria::ToolUsed {
+                    tool_name: "write_file".into(),
+                }]),
+                "done",
+                "inspect",
+                dir.as_path(),
+                Some(&run),
+            )
+            .await;
+        if nested_missing.violations.is_empty() {
+            return Err("nested tool failure lost its violation detail".into());
+        }
+        let citation = runner
+            .check_criteria(
+                &SuccessCriteria::CitationValid {
+                    min_citations: 1,
+                    format: "doi".into(),
+                },
+                "Evidence: DOI 10.1234/example.2026",
+                "inspect",
+                dir.as_path(),
+                Some(&run),
+            )
+            .await;
+        if !citation.success {
+            return Err(format!(
+                "source-backed citation was rejected: {:?}",
+                citation.violations
+            ));
+        }
+        Ok(())
     }
 }

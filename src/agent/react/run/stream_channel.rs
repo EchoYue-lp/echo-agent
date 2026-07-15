@@ -21,8 +21,10 @@ use super::types::{StreamInit, StreamMode};
 use crate::agent::AgentEvent;
 use crate::error::Result;
 use crate::llm::types::Message;
+use echo_core::tokenizer::Tokenizer;
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -46,7 +48,7 @@ impl ReactAgent {
         // Concurrent callers may update/clear the agent's shared external
         // context while this invocation is queued, but this snapshot belongs
         // to the invocation that entered here.
-        let legacy_runtime = if invocation.is_none() {
+        let mut legacy_runtime = if invocation.is_none() {
             Some((
                 self.current_run_id
                     .lock()
@@ -93,6 +95,15 @@ impl ReactAgent {
             }
         } else {
             self.start_trace_run(&text).await;
+            if let Some((current_run_id, ..)) = legacy_runtime.as_mut()
+                && current_run_id.is_none()
+            {
+                *current_run_id = self
+                    .current_run_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+            }
         }
         let turn_id = invocation
             .as_ref()
@@ -168,26 +179,23 @@ impl ReactAgent {
                         confidence = confidence,
                         "🎯 Stream IntentRouter: DirectAnswer shortcut"
                     );
-                    let mut snap = make_snapshot(self);
-                    snap.current_run_id = self
-                        .current_run_id
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    snap.external_cancel = self
-                        .external_cancel
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    snap.external_trace_sink = self
-                        .external_trace_sink
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    snap.external_delegation_policy = *self
-                        .external_delegation_policy
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let mut snap = if let Some(invocation) = invocation.as_ref() {
+                        AgentSnapshot::from_agent_with_invocation(self, invocation)
+                    } else {
+                        make_snapshot(self)
+                    };
+                    if let Some((
+                        current_run_id,
+                        external_cancel,
+                        external_trace_sink,
+                        external_delegation_policy,
+                    )) = legacy_runtime.as_ref()
+                    {
+                        snap.current_run_id = current_run_id.clone();
+                        snap.external_cancel = external_cancel.clone();
+                        snap.external_trace_sink = external_trace_sink.clone();
+                        snap.external_delegation_policy = *external_delegation_policy;
+                    }
                     // DirectAnswer uses trimmed [system, user] messages and does
                     // not consume the recalled context, so the recall count is
                     // informational only.
@@ -250,12 +258,12 @@ impl ReactAgent {
             external_cancel,
             external_trace_sink,
             external_delegation_policy,
-        )) = legacy_runtime
+        )) = legacy_runtime.as_ref()
         {
-            snap.current_run_id = current_run_id;
-            snap.external_cancel = external_cancel;
-            snap.external_trace_sink = external_trace_sink;
-            snap.external_delegation_policy = external_delegation_policy;
+            snap.current_run_id = current_run_id.clone();
+            snap.external_cancel = external_cancel.clone();
+            snap.external_trace_sink = external_trace_sink.clone();
+            snap.external_delegation_policy = *external_delegation_policy;
         }
         active_turn_lease.set_steerable(true);
 
@@ -332,7 +340,14 @@ impl AgentSnapshot {
             Message::user(message.to_string()),
         ];
 
-        let stream = super::phases::think::create_llm_stream(self, messages, false).await?;
+        let estimated_context_tokens: usize = messages
+            .iter()
+            .filter_map(|message| message.text_content())
+            .fold(0usize, |total, text| {
+                total.saturating_add(self.calibrated_tokenizer.count_tokens(&text))
+            });
+        let llm_started = Instant::now();
+        let stream = super::phases::think::create_llm_stream(self, messages.clone(), false).await?;
         let mut stream = std::pin::pin!(stream);
         let mut content = String::new();
         let mut last_usage: Option<echo_core::llm::types::Usage> = None;
@@ -373,7 +388,7 @@ impl AgentSnapshot {
         // This mirrors what run_think() does for the full ReAct path.
         let pt = last_usage
             .as_ref()
-            .and_then(|u| u.prompt_tokens)
+            .map(|usage| usage.effective_prompt_tokens())
             .unwrap_or(0) as usize;
         let ct = last_usage
             .as_ref()
@@ -381,8 +396,7 @@ impl AgentSnapshot {
             .unwrap_or(0) as usize;
         let total_tokens = last_usage
             .as_ref()
-            .and_then(|u| u.total_tokens)
-            .map(|t| t as usize)
+            .map(|usage| usage.effective_total_tokens() as usize)
             .unwrap_or_else(|| pt.saturating_add(ct));
         let cached_prompt_tokens = last_usage
             .as_ref()
@@ -393,6 +407,24 @@ impl AgentSnapshot {
             .map(|u| u.cache_creation_prompt_tokens() as usize)
             .unwrap_or(0);
         let usage_reported = last_usage.is_some();
+        if let Some(ref usage) = last_usage {
+            self.token_tracker.record_usage(usage);
+        }
+
+        self.record_event(crate::trace::RunEvent::LlmCall {
+            messages: messages.len(),
+            prompt_tokens: u32::try_from(pt).unwrap_or(u32::MAX),
+            completion_tokens: u32::try_from(ct).unwrap_or(u32::MAX),
+            cached_prompt_tokens: u32::try_from(cached_prompt_tokens).unwrap_or(u32::MAX),
+            cache_creation_prompt_tokens: u32::try_from(cache_creation_prompt_tokens)
+                .unwrap_or(u32::MAX),
+            usage_reported,
+            estimated_context_tokens,
+            protected_context_tokens: 0,
+            protected_message_count: 0,
+            duration_ms: u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+        .await;
 
         let _ = tx
             .send(Ok(AgentEvent::LlmUsage {
@@ -1092,6 +1124,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn value_scoped_direct_answer_records_usage_in_supplied_run() -> Result<()> {
+        use crate::trace::{Run, RunStatus, RunStore, RunTimings, TokenUsage};
+
+        let usage = crate::llm::types::Usage {
+            prompt_tokens: Some(500),
+            completion_tokens: Some(40),
+            total_tokens: Some(540),
+            prompt_tokens_details: Some(crate::llm::types::TokenUsageDetails {
+                cached_tokens: Some(400),
+            }),
+            ..Default::default()
+        };
+        let router = IntentRouter::new(
+            Box::new(AlwaysDirectClassifier),
+            IntentRouterConfig::default(),
+        );
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new().with_response_usage("done", usage),
+            ))
+            .intent_router(router)
+            .system_prompt("You are a test assistant.")
+            .build()?;
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        store
+            .save(Run {
+                run_id: "value-direct-run".into(),
+                parent_run_id: None,
+                session_id: "session".into(),
+                status: RunStatus::Running,
+                input: "run".into(),
+                events: Vec::new(),
+                final_output: None,
+                error: None,
+                token_usage: TokenUsage::default(),
+                timings: RunTimings::default(),
+                started_at: chrono::Utc::now(),
+                finished_at: None,
+            })
+            .await?;
+        agent.set_run_store(store.clone());
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: None,
+                run_id: Some("value-direct-run".to_string()),
+                turn_id: None,
+                execution_id: None,
+                message_id: None,
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            }),
+            working_dir: None,
+            cancel: None,
+            disabled_tools: None,
+            run_budget: None,
+        };
+
+        let stream = agent
+            .execute_stream_with_invocation_context(
+                "run",
+                crate::agent::CancellationToken::new(),
+                invocation,
+            )
+            .await?;
+        let _: Vec<_> = stream.collect().await;
+        let run = store
+            .load("value-direct-run")
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("supplied run missing".into()))?;
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            crate::trace::RunEvent::LlmCall {
+                prompt_tokens: 500,
+                cached_prompt_tokens: 400,
+                usage_reported: true,
+                ..
+            }
+        )));
+        assert!(agent.current_run_id().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn non_streaming_direct_answer_routes_through_projection_boundary() -> Result<()> {
         let llm = Arc::new(MockLlmClient::new().with_response("normal loop answer"));
         let agent = agent_with_direct_router_and_projection(llm.clone())?;
@@ -1403,6 +1519,61 @@ mod tests {
                 .text_content()
                 .is_some_and(|text| text.contains("iteration budget is nearly exhausted"))
         }));
+    }
+
+    #[tokio::test]
+    async fn react_stream_records_real_usage_in_run_trace() -> Result<()> {
+        use crate::trace::RunStore;
+
+        let usage = crate::llm::types::Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(80),
+            total_tokens: Some(1080),
+            prompt_tokens_details: Some(crate::llm::types::TokenUsageDetails {
+                cached_tokens: Some(750),
+            }),
+            ..Default::default()
+        };
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        let mut agent =
+            agent_with_mock_llm(MockLlmClient::new().with_response_usage("done", usage));
+        agent.set_run_store(store.clone());
+
+        let events = collect_events(&agent, "run").await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::LlmUsage {
+                prompt_tokens: 1000,
+                cached_prompt_tokens: 750,
+                usage_reported: true,
+                ..
+            }
+        )));
+        let summary = store
+            .list_all(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::error::ReactError::Other("trace summary missing".into()))?;
+        let run = store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("trace run missing".into()))?;
+        assert!(
+            run.events.iter().any(|event| matches!(
+                event,
+                crate::trace::RunEvent::LlmCall {
+                    cached_prompt_tokens: 750,
+                    usage_reported: true,
+                    ..
+                }
+            )),
+            "LLM usage event missing from trace: {:?}",
+            run.events
+        );
+        assert_eq!(summary.token_usage.prompt_tokens, 1000);
+        assert_eq!(summary.token_usage.cached_prompt_tokens, 750);
+        Ok(())
     }
 
     #[tokio::test]

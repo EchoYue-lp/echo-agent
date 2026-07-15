@@ -45,6 +45,7 @@ fn make_run(id: &str, input: &str, events: Vec<RunEvent>, status: RunStatus) -> 
             prompt_tokens: 500,
             completion_tokens: 200,
             total_tokens: 700,
+            ..Default::default()
         },
         timings: RunTimings {
             total_duration_ms: 2000,

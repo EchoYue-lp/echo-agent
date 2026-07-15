@@ -543,6 +543,7 @@ mod tests {
                 prompt_tokens: 200,
                 completion_tokens: 100,
                 total_tokens: 300,
+                ..Default::default()
             },
             timings: RunTimings {
                 total_duration_ms: 1000,

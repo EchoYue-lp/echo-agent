@@ -11,6 +11,7 @@ use crate::llm::types::Message;
 use crate::llm::{ChatRequest, chat};
 use futures::future::join_all;
 use serde_json::Value;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
@@ -737,16 +738,50 @@ impl ReactAgent {
             crate::llm::types::Message::user(message.to_string()),
         ];
 
-        let (response, _usage, _finish_reason) =
-            self.call_llm_with_retry(&messages, vec![]).await?;
+        let llm_started = Instant::now();
+        let (response, usage, _finish_reason) = self.call_llm_with_retry(&messages, vec![]).await?;
         let content = response.content.as_text().unwrap_or_default().to_string();
+        let prompt_tokens = usage
+            .as_ref()
+            .map(|value| value.effective_prompt_tokens())
+            .unwrap_or(0);
+        let completion_tokens = usage
+            .as_ref()
+            .and_then(|value| value.completion_tokens)
+            .unwrap_or(0);
+        let cached_prompt_tokens = usage
+            .as_ref()
+            .map(|value| value.cached_prompt_tokens())
+            .unwrap_or(0);
+        let cache_creation_prompt_tokens = usage
+            .as_ref()
+            .map(|value| value.cache_creation_prompt_tokens())
+            .unwrap_or(0);
+        if let Some(ref usage) = usage {
+            self.token_tracker.record_usage(usage);
+        }
+        let estimated_context_tokens = {
+            use echo_core::tokenizer::Tokenizer;
+            messages
+                .iter()
+                .filter_map(|value| value.text_content())
+                .fold(0usize, |total, text| {
+                    total.saturating_add(self.calibrated_tokenizer.count_tokens(&text))
+                })
+        };
 
         // Record trace
         self.record_trace_event(crate::trace::RunEvent::LlmCall {
             messages: messages.len(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            duration_ms: 0,
+            prompt_tokens,
+            completion_tokens,
+            cached_prompt_tokens,
+            cache_creation_prompt_tokens,
+            usage_reported: usage.is_some(),
+            estimated_context_tokens,
+            protected_context_tokens: 0,
+            protected_message_count: 0,
+            duration_ms: u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
         .await;
 

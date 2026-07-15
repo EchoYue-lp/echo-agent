@@ -8,10 +8,12 @@ use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::{ReactError, Result};
 use crate::llm::types::{Message, Role, ToolDefinition};
+use echo_core::tokenizer::Tokenizer;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
 
 /// LLM-call phase: stream chunks, derive content / tool calls / token counts.
@@ -77,6 +79,20 @@ pub(crate) async fn run_think(
         }
     }
 
+    let estimated_context_tokens: usize = messages
+        .iter()
+        .filter_map(|message| message.text_content())
+        .fold(0usize, |total, text| {
+            total.saturating_add(snap.calibrated_tokenizer.count_tokens(&text))
+        });
+    let (protected_message_count, protected_context_tokens) = {
+        let context = context.lock().await;
+        (
+            context.protected_message_count(),
+            context.protected_token_estimate(),
+        )
+    };
+    let llm_started = Instant::now();
     let mut llm_stream = Box::pin(try_send_or!(
         tx,
         create_llm_stream(snap, messages.clone(), final_only).await,
@@ -105,7 +121,7 @@ pub(crate) async fn run_think(
 
     let pt = last_usage
         .as_ref()
-        .and_then(|u| u.prompt_tokens)
+        .map(|usage| usage.effective_prompt_tokens())
         .unwrap_or(0) as usize;
     let ct = last_usage
         .as_ref()
@@ -113,8 +129,7 @@ pub(crate) async fn run_think(
         .unwrap_or(0) as usize;
     let total_tokens = last_usage
         .as_ref()
-        .and_then(|u| u.total_tokens)
-        .map(|t| t as usize)
+        .map(|usage| usage.effective_total_tokens() as usize)
         .unwrap_or_else(|| pt.saturating_add(ct));
     let cached_prompt_tokens = last_usage
         .as_ref()
@@ -126,12 +141,26 @@ pub(crate) async fn run_think(
         .unwrap_or(0);
     let usage_reported = last_usage.is_some();
 
+    snap.record_event(crate::trace::RunEvent::LlmCall {
+        messages: messages.len(),
+        prompt_tokens: u32::try_from(pt).unwrap_or(u32::MAX),
+        completion_tokens: u32::try_from(ct).unwrap_or(u32::MAX),
+        cached_prompt_tokens: u32::try_from(cached_prompt_tokens).unwrap_or(u32::MAX),
+        cache_creation_prompt_tokens: u32::try_from(cache_creation_prompt_tokens)
+            .unwrap_or(u32::MAX),
+        usage_reported,
+        estimated_context_tokens,
+        protected_context_tokens,
+        protected_message_count,
+        duration_ms: u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+    .await;
+
     // Feed the actual prompt-token count back into the CalibratedTokenizer so
     // future context-window / compression estimates converge to the model's
     // real tokenization. Without this the calibration factor stays at 1.0 and
     // the tokenizer is no more accurate than the raw heuristic.
     if pt > 0 {
-        use echo_core::tokenizer::Tokenizer;
         let estimated: usize = messages
             .iter()
             .filter_map(|m| m.text_content())

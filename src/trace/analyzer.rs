@@ -512,6 +512,12 @@ mod tests {
                     messages: 1,
                     prompt_tokens: 100,
                     completion_tokens: 50,
+                    cached_prompt_tokens: 80,
+                    cache_creation_prompt_tokens: 0,
+                    usage_reported: true,
+                    estimated_context_tokens: 95,
+                    protected_context_tokens: 20,
+                    protected_message_count: 1,
                     duration_ms: 200,
                 },
                 RunEvent::ToolCall {
@@ -548,6 +554,7 @@ mod tests {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
+                ..Default::default()
             },
             timings: crate::trace::RunTimings {
                 total_duration_ms: 300,
@@ -586,6 +593,7 @@ mod tests {
                 prompt_tokens: 80,
                 completion_tokens: 40,
                 total_tokens: 120,
+                ..Default::default()
             },
             timings: crate::trace::RunTimings {
                 total_duration_ms: 200,

@@ -684,6 +684,36 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Provider-normalized prompt tokens processed by the model, including
+    /// tokens served from prompt cache.
+    ///
+    /// OpenAI-compatible and DeepSeek responses already include cached tokens
+    /// in `prompt_tokens`. Anthropic reports cache reads and cache writes
+    /// separately, so both are added back for context-window and cache metrics.
+    pub fn effective_prompt_tokens(&self) -> u32 {
+        let prompt = self.prompt_tokens.unwrap_or(0);
+        if self.cache_read_input_tokens.is_some() || self.cache_creation_input_tokens.is_some() {
+            prompt
+                .saturating_add(self.cached_prompt_tokens())
+                .saturating_add(self.cache_creation_prompt_tokens())
+        } else {
+            prompt
+        }
+    }
+
+    /// Provider-normalized total tokens processed for this response.
+    pub fn effective_total_tokens(&self) -> u32 {
+        if self.cache_read_input_tokens.is_some() || self.cache_creation_input_tokens.is_some() {
+            self.effective_prompt_tokens()
+                .saturating_add(self.completion_tokens.unwrap_or(0))
+        } else {
+            self.total_tokens.unwrap_or_else(|| {
+                self.effective_prompt_tokens()
+                    .saturating_add(self.completion_tokens.unwrap_or(0))
+            })
+        }
+    }
+
     /// Provider-normalized prompt tokens read from cache.
     ///
     /// Checks in priority order:
@@ -716,23 +746,15 @@ impl Usage {
     /// - OpenAI / DeepSeek / compatible: `prompt_tokens` is the **total** (includes cached).
     ///   Per DeepSeek docs: `prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens`.
     ///   → rate = cached / prompt_tokens
-    /// - Anthropic: `input_tokens` (mapped to `prompt_tokens`) **excludes** `cache_read_input_tokens`.
-    ///   → rate = cached / (prompt_tokens + cached)
+    /// - Anthropic: `input_tokens` (mapped to `prompt_tokens`) excludes both
+    ///   cache reads and cache writes.
+    ///   → rate = cached / (prompt_tokens + cache_read + cache_creation)
     ///
-    /// We detect the Anthropic path by presence of `cache_read_input_tokens`;
+    /// We detect the Anthropic path by presence of either Anthropic cache field;
     /// all other providers use the inclusive-total formula.
     pub fn cache_hit_rate(&self) -> Option<f64> {
         let cached = self.cached_prompt_tokens();
-        // Anthropic semantics: input_tokens excludes cache reads.
-        if self.cache_read_input_tokens.is_some() {
-            let total = self.prompt_tokens.unwrap_or(0).saturating_add(cached);
-            if total == 0 {
-                return None;
-            }
-            return Some(cached as f64 / total as f64);
-        }
-        // OpenAI / DeepSeek / compatible: prompt_tokens is the total (includes cached).
-        let total = self.prompt_tokens.unwrap_or(0);
+        let total = self.effective_prompt_tokens();
         if total == 0 {
             return None;
         }
@@ -1077,6 +1099,8 @@ mod tests {
 
         assert_eq!(usage.cached_prompt_tokens(), 900);
         assert_eq!(usage.cache_creation_prompt_tokens(), 64);
+        assert_eq!(usage.effective_prompt_tokens(), 1964);
+        assert_eq!(usage.effective_total_tokens(), 1984);
     }
 
     #[test]
@@ -1144,6 +1168,22 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(usage.cache_hit_rate(), Some(0.9));
+        assert_eq!(usage.effective_prompt_tokens(), 1000);
+    }
+
+    #[test]
+    fn anthropic_cache_creation_counts_toward_effective_context() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(20),
+            total_tokens: Some(120),
+            cache_creation_input_tokens: Some(900),
+            ..Default::default()
+        };
+
+        assert_eq!(usage.effective_prompt_tokens(), 1000);
+        assert_eq!(usage.effective_total_tokens(), 1020);
+        assert_eq!(usage.cache_hit_rate(), Some(0.0));
     }
 
     #[test]

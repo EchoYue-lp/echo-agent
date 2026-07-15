@@ -72,6 +72,33 @@ pub struct Run {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
+impl Run {
+    /// Append an event and update the run-level aggregates derived from it.
+    pub fn push_event(&mut self, event: RunEvent) {
+        if let RunEvent::LlmCall {
+            prompt_tokens,
+            completion_tokens,
+            cached_prompt_tokens,
+            cache_creation_prompt_tokens,
+            usage_reported,
+            duration_ms,
+            ..
+        } = &event
+        {
+            self.token_usage.add_llm_call(
+                *prompt_tokens,
+                *completion_tokens,
+                *cached_prompt_tokens,
+                *cache_creation_prompt_tokens,
+                *usage_reported,
+            );
+            self.timings.llm_duration_ms =
+                self.timings.llm_duration_ms.saturating_add(*duration_ms);
+        }
+        self.events.push(event);
+    }
+}
+
 // ── RunStatus ────────────────────────────────────────────────────────
 
 /// Execution status of a run.
@@ -117,6 +144,24 @@ pub enum RunEvent {
         prompt_tokens: u32,
         /// Completion tokens received.
         completion_tokens: u32,
+        /// Prompt tokens served from provider cache.
+        #[serde(default)]
+        cached_prompt_tokens: u32,
+        /// Prompt tokens written into provider cache.
+        #[serde(default)]
+        cache_creation_prompt_tokens: u32,
+        /// Whether the provider returned usage metadata for this call.
+        #[serde(default)]
+        usage_reported: bool,
+        /// Local estimate of message-context tokens before the request.
+        #[serde(default)]
+        estimated_context_tokens: usize,
+        /// Estimated tokens pinned against context compression.
+        #[serde(default)]
+        protected_context_tokens: usize,
+        /// Messages pinned against context compression.
+        #[serde(default)]
+        protected_message_count: usize,
         /// Elapsed milliseconds for this LLM call.
         duration_ms: u64,
     },
@@ -271,6 +316,18 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     /// Total tokens (prompt + completion).
     pub total_tokens: u32,
+    /// Prompt tokens served from provider cache.
+    #[serde(default)]
+    pub cached_prompt_tokens: u32,
+    /// Prompt tokens written into provider cache.
+    #[serde(default)]
+    pub cache_creation_prompt_tokens: u32,
+    /// LLM calls whose provider returned usage metadata.
+    #[serde(default)]
+    pub usage_reported_calls: u32,
+    /// LLM calls whose provider omitted usage metadata.
+    #[serde(default)]
+    pub usage_missing_calls: u32,
 }
 
 impl TokenUsage {
@@ -281,6 +338,36 @@ impl TokenUsage {
         self.total_tokens = self
             .total_tokens
             .saturating_add(prompt.saturating_add(completion));
+    }
+
+    /// Accumulate one provider usage report with cache diagnostics.
+    pub fn add_llm_call(
+        &mut self,
+        prompt: u32,
+        completion: u32,
+        cached_prompt: u32,
+        cache_creation_prompt: u32,
+        usage_reported: bool,
+    ) {
+        self.add(prompt, completion);
+        self.cached_prompt_tokens = self.cached_prompt_tokens.saturating_add(cached_prompt);
+        self.cache_creation_prompt_tokens = self
+            .cache_creation_prompt_tokens
+            .saturating_add(cache_creation_prompt);
+        if usage_reported {
+            self.usage_reported_calls = self.usage_reported_calls.saturating_add(1);
+        } else {
+            self.usage_missing_calls = self.usage_missing_calls.saturating_add(1);
+        }
+    }
+
+    /// Provider-reported prompt cache read rate.
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        if self.prompt_tokens == 0 || self.usage_reported_calls == 0 {
+            None
+        } else {
+            Some(self.cached_prompt_tokens as f64 / self.prompt_tokens as f64)
+        }
     }
 }
 
@@ -341,7 +428,7 @@ pub trait RunStore: Send + Sync {
     /// that support efficient append (e.g. JSONL) should override this.
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
         if let Some(mut run) = self.load(run_id).await? {
-            run.events.push(event);
+            run.push_event(event);
             self.save(run).await?;
         }
         Ok(())
@@ -590,7 +677,7 @@ impl RunStore for JsonlRunStore {
             Some(run) => run,
             None => return Ok(()),
         };
-        run.events.push(event);
+        run.push_event(event);
         self.save(run).await
     }
 }
@@ -661,6 +748,81 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 130);
         assert_eq!(usage.completion_tokens, 70);
         assert_eq!(usage.total_tokens, 200);
+    }
+
+    #[test]
+    fn token_usage_tracks_cache_and_missing_usage() {
+        let mut usage = TokenUsage::default();
+        usage.add_llm_call(1000, 50, 800, 20, true);
+        usage.add_llm_call(0, 0, 0, 0, false);
+
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.cached_prompt_tokens, 800);
+        assert_eq!(usage.cache_creation_prompt_tokens, 20);
+        assert_eq!(usage.usage_reported_calls, 1);
+        assert_eq!(usage.usage_missing_calls, 1);
+        assert_eq!(usage.cache_hit_rate(), Some(0.8));
+    }
+
+    #[tokio::test]
+    async fn append_llm_event_updates_run_aggregates()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = InMemoryRunStore::new();
+        store.save(make_run("r-usage", "s-usage")).await?;
+        store
+            .append_event(
+                "r-usage",
+                RunEvent::LlmCall {
+                    messages: 4,
+                    prompt_tokens: 1000,
+                    completion_tokens: 80,
+                    cached_prompt_tokens: 750,
+                    cache_creation_prompt_tokens: 20,
+                    usage_reported: true,
+                    estimated_context_tokens: 980,
+                    protected_context_tokens: 240,
+                    protected_message_count: 3,
+                    duration_ms: 125,
+                },
+            )
+            .await?;
+
+        let run = store
+            .load("r-usage")
+            .await?
+            .ok_or("run missing after append")?;
+        assert_eq!(run.token_usage.prompt_tokens, 1000);
+        assert_eq!(run.token_usage.cached_prompt_tokens, 750);
+        assert_eq!(run.timings.llm_duration_ms, 125);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_llm_call_defaults_observability_metrics()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let parsed = serde_json::from_str::<RunEvent>(
+            r#"{"type":"llm_call","messages":2,"prompt_tokens":10,"completion_tokens":3,"duration_ms":5}"#,
+        )?;
+        if let RunEvent::LlmCall {
+            cached_prompt_tokens,
+            cache_creation_prompt_tokens,
+            usage_reported,
+            estimated_context_tokens,
+            protected_context_tokens,
+            protected_message_count,
+            ..
+        } = parsed
+        {
+            assert_eq!(cached_prompt_tokens, 0);
+            assert_eq!(cache_creation_prompt_tokens, 0);
+            assert!(!usage_reported);
+            assert_eq!(estimated_context_tokens, 0);
+            assert_eq!(protected_context_tokens, 0);
+            assert_eq!(protected_message_count, 0);
+        } else {
+            return Err("legacy payload did not parse as LlmCall".into());
+        }
+        Ok(())
     }
 
     #[test]
