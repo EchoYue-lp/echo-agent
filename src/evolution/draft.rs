@@ -50,6 +50,8 @@ pub struct SkillDraftGenerator<'a> {
     echo_agent_dir: PathBuf,
     /// ChangeLog for recording mutations.
     change_log: &'a dyn ChangeLog,
+    curator: Curator,
+    require_curator_transition: bool,
 }
 
 impl<'a> SkillDraftGenerator<'a> {
@@ -58,7 +60,16 @@ impl<'a> SkillDraftGenerator<'a> {
         Self {
             echo_agent_dir,
             change_log,
+            curator: Curator::default_path(CuratorConfig::default()),
+            require_curator_transition: false,
         }
+    }
+
+    /// Use a consumer-supplied curator state file.
+    pub fn with_curator(mut self, curator: Curator) -> Self {
+        self.curator = curator;
+        self.require_curator_transition = true;
+        self
     }
 
     /// Generate a draft SKILL.md from a named candidate.
@@ -100,9 +111,18 @@ impl<'a> SkillDraftGenerator<'a> {
         std::fs::write(&skill_md_path, &content)?;
 
         // 4. Promote in the evolution-owned Curator lifecycle.
-        let curator = Curator::default_path(CuratorConfig::default());
-        if let Err(e) = curator.promote_to_draft(name) {
-            tracing::warn!("Failed to promote '{}' to draft: {}", name, e);
+        match self.curator.promote_to_draft_at(name, Some(&skill_md_path)) {
+            Ok(true) => {}
+            Ok(false) if self.require_curator_transition => {
+                return Err(ReactError::Other(format!(
+                    "candidate '{name}' is not in Candidate lifecycle state"
+                )));
+            }
+            Err(error) if self.require_curator_transition => return Err(error),
+            Ok(false) => tracing::warn!("Candidate '{}' was not registered with Curator", name),
+            Err(error) => {
+                tracing::warn!("Failed to promote '{}' to draft: {}", name, error);
+            }
         }
 
         // 5. Record in audit log.

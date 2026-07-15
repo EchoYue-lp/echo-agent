@@ -72,6 +72,7 @@ pub use security::{
     SecurityConfig, SecurityVerdict,
 };
 pub use triggers::{
-    ExplicitSaveRecord, ToolFailureRecord, ToolSequenceRecord, ToolSuccessRecord, TriggerContext,
-    TriggerDetector, TriggerMatch,
+    ExplicitSaveRecord, MemoryTriggerDisposition, MemoryTriggerSink, ToolFailureRecord,
+    ToolSequenceRecord, ToolSuccessRecord, TriggerContext, TriggerDetector, TriggerEvidence,
+    TriggerMatch,
 };

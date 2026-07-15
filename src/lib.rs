@@ -214,8 +214,8 @@ pub mod prelude {
         builtin::{FileSystemSkill, ShellSkill},
         external::{
             ActivateSkillTool, DiscoveryScope, PromptContext, ReadSkillResourceTool,
-            RunSkillScriptTool, SkillContent, SkillDescriptor, SkillLoader, SkillResourceEntry,
-            SkillResourceKind, SkillSource,
+            RunSkillScriptTool, SkillContent, SkillDescriptor, SkillLoadPolicy, SkillLoader,
+            SkillResourceEntry, SkillResourceKind, SkillSource,
         },
         hooks::{
             CompressHookStats, HookAction, HookContext, HookEvent, HookEventCategory, HookRegistry,

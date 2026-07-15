@@ -136,6 +136,7 @@ pub struct SkillCandidateDetector {
     pub min_observations: usize,
     /// Maximum candidates to propose per scan. Default: 5.
     pub max_candidates_per_scan: usize,
+    curator: Curator,
 }
 
 impl Default for SkillCandidateDetector {
@@ -143,6 +144,7 @@ impl Default for SkillCandidateDetector {
         Self {
             min_observations: 3,
             max_candidates_per_scan: 5,
+            curator: Curator::default_path(CuratorConfig::default()),
         }
     }
 }
@@ -158,7 +160,14 @@ impl SkillCandidateDetector {
         Self {
             min_observations,
             max_candidates_per_scan,
+            curator: Curator::default_path(CuratorConfig::default()),
         }
+    }
+
+    /// Use a consumer-supplied curator state file.
+    pub fn with_curator(mut self, curator: Curator) -> Self {
+        self.curator = curator;
+        self
     }
 
     /// Run a detection pass against the typed memory store.
@@ -268,8 +277,7 @@ impl SkillCandidateDetector {
                     .await?;
 
                 // Register with the evolution-owned Curator lifecycle.
-                let curator = Curator::default_path(CuratorConfig::default());
-                if let Err(e) = curator.register_candidate(&key) {
+                if let Err(e) = self.curator.register_candidate(&key) {
                     tracing::warn!("Failed to register candidate '{}': {}", key, e);
                 }
 

@@ -526,7 +526,10 @@ impl ReactAgent {
     ///
     /// The LLM can then decide which skills to activate on demand.
     pub async fn discover_skills(&mut self, scopes: &[DiscoveryScope]) -> Result<Vec<String>> {
-        let mut loader = SkillLoader::new();
+        let mut loader = match &self.skill_load_policy {
+            Some(policy) => SkillLoader::new().with_policy(policy.clone()),
+            None => SkillLoader::new(),
+        };
         let descriptors = loader.discover(scopes).await?;
 
         if descriptors.is_empty() {
@@ -669,6 +672,78 @@ impl ReactAgent {
         );
 
         Ok(names)
+    }
+
+    /// Remove already-discovered skills that are no longer allowed by the
+    /// current product policy, then refresh catalog and progressive tools.
+    pub async fn reconcile_skill_load_policy(&mut self) -> Vec<String> {
+        let Some(policy) = &self.skill_load_policy else {
+            return Vec::new();
+        };
+        let removed: Vec<String> = self
+            .tools
+            .skill_registry
+            .list_descriptors()
+            .into_iter()
+            .filter(|descriptor| !policy.allows(descriptor))
+            .map(|descriptor| descriptor.name.clone())
+            .collect();
+        if removed.is_empty() {
+            return removed;
+        }
+
+        for name in &removed {
+            self.tools.skill_registry.remove_descriptor(name);
+            self.tools
+                .hook_registry
+                .write()
+                .await
+                .unregister(&crate::skills::hooks::HookSource::Skill(name.clone()));
+            self.memory
+                .context
+                .lock()
+                .await
+                .replace_projection(format!("echo-agent:skill:{name}"), None);
+        }
+
+        if let Some(shared) = &self.tools.progressive_skill_registry {
+            let mut registry = shared.write().await;
+            for name in &removed {
+                registry.remove_descriptor(name);
+            }
+        }
+
+        let catalog = self
+            .tools
+            .skill_registry
+            .catalog_prompt()
+            .map(crate::llm::types::Message::system);
+        self.memory
+            .context
+            .lock()
+            .await
+            .replace_projection(SKILL_CATALOG_PROJECTION, catalog);
+
+        if let Some(shared) = self.tools.progressive_skill_registry.clone() {
+            let available_names = self.tools.skill_registry.available_names();
+            self.replace_tool(Box::new(ActivateSkillTool::new(
+                shared.clone(),
+                available_names,
+            )));
+            self.replace_tool(Box::new(ReadSkillResourceTool::new(shared.clone())));
+            let mut script_tool = RunSkillScriptTool::new(shared);
+            if let Some(manager) = &self.tools.sandbox_manager {
+                script_tool = script_tool.with_sandbox_manager(manager.clone());
+            }
+            self.replace_tool(Box::new(script_tool));
+        }
+
+        info!(
+            agent = %self.config.agent_name,
+            skills = ?removed,
+            "Skills removed by load policy reconciliation"
+        );
+        removed
     }
 
     /// Backward-compatible: discover skills from a single directory.

@@ -14,6 +14,7 @@
 //! | `ExplicitSave` | `/remember` command or `remember` tool | 1.00 | `UserPreference` |
 
 use echo_core::memory::types::{MemorySource, MemoryType};
+use futures::future::BoxFuture;
 use std::collections::HashMap;
 
 use super::security::InputTrustLevel;
@@ -37,6 +38,35 @@ pub struct TriggerMatch {
     pub trust_level: InputTrustLevel,
     /// A suggested key for storage.
     pub suggested_key: String,
+    /// Exact source excerpts supporting this trigger.
+    pub evidence: Vec<TriggerEvidence>,
+}
+
+/// One exact excerpt supporting a detected trigger.
+#[derive(Debug, Clone)]
+pub struct TriggerEvidence {
+    /// Origin of the excerpt, such as `user`, `assistant`, or `tool_error`.
+    pub source_role: String,
+    /// Verbatim excerpt used by the detector.
+    pub quote: String,
+}
+
+/// Result returned by an application-supplied trigger sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryTriggerDisposition {
+    /// Continue with the framework's default durable-memory write.
+    Persist,
+    /// The sink captured the trigger and owns its subsequent lifecycle.
+    Captured,
+}
+
+/// Optional application hook for routing detected triggers before persistence.
+pub trait MemoryTriggerSink: Send + Sync {
+    /// Route one detected trigger.
+    fn on_trigger<'a>(
+        &'a self,
+        trigger: &'a TriggerMatch,
+    ) -> BoxFuture<'a, std::result::Result<MemoryTriggerDisposition, String>>;
 }
 
 // ── Context records ────────────────────────────────────────────────────
@@ -199,6 +229,10 @@ impl TriggerDetector {
             topic,
             trust_level: InputTrustLevel::Trusted,
             suggested_key: key,
+            evidence: vec![TriggerEvidence {
+                source_role: "user".to_string(),
+                quote: save.content.clone(),
+            }],
         })
     }
 
@@ -235,6 +269,16 @@ impl TriggerDetector {
             topic,
             trust_level: InputTrustLevel::Trusted,
             suggested_key: key,
+            evidence: vec![
+                TriggerEvidence {
+                    source_role: "user".to_string(),
+                    quote: truncate_content(user_msg, 200),
+                },
+                TriggerEvidence {
+                    source_role: "assistant".to_string(),
+                    quote: truncate_content(assistant_msg, 100),
+                },
+            ],
         })
     }
 
@@ -272,6 +316,24 @@ impl TriggerDetector {
             topic,
             trust_level: InputTrustLevel::Assistant,
             suggested_key: key,
+            evidence: vec![
+                TriggerEvidence {
+                    source_role: "tool_error".to_string(),
+                    quote: format!(
+                        "{}: {}",
+                        failure.tool_name,
+                        truncate_content(&failure.error, 160)
+                    ),
+                },
+                TriggerEvidence {
+                    source_role: "tool_output".to_string(),
+                    quote: format!(
+                        "{}: {}",
+                        success.tool_name,
+                        truncate_content(&success.output_summary, 160)
+                    ),
+                },
+            ],
         })
     }
 
@@ -313,6 +375,19 @@ impl TriggerDetector {
             topic,
             trust_level: InputTrustLevel::Assistant,
             suggested_key: key,
+            evidence: ctx
+                .tool_sequences
+                .iter()
+                .filter(|record| record.tool_name == tool_name)
+                .take(3)
+                .map(|record| TriggerEvidence {
+                    source_role: "tool_sequence".to_string(),
+                    quote: format!(
+                        "{} in session {} at {}",
+                        record.tool_name, record.session_id, record.timestamp
+                    ),
+                })
+                .collect(),
         })
     }
 }
@@ -439,16 +514,12 @@ fn generate_key(source: MemorySource, content: &str) -> String {
 
 /// Truncate content to a maximum length, appending "..." if truncated.
 fn truncate_content(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(max_len).collect();
+    if chars.next().is_some() {
+        format!("{prefix}...")
     } else {
-        let end = s
-            .char_indices()
-            .take_while(|(i, _)| *i < max_len)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(max_len);
-        format!("{}...", &s[..end])
+        prefix
     }
 }
 
@@ -466,8 +537,24 @@ mod tests {
         };
         let matches = detector.detect(&ctx);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].source, MemorySource::UserCorrection);
-        assert_eq!(matches[0].confidence, 0.90);
+        let Some(detected) = matches.first() else {
+            return;
+        };
+        assert_eq!(detected.source, MemorySource::UserCorrection);
+        assert_eq!(detected.confidence, 0.90);
+        assert_eq!(detected.evidence.len(), 2);
+        assert!(
+            detected
+                .evidence
+                .iter()
+                .any(|item| item.source_role == "user")
+        );
+    }
+
+    #[test]
+    fn truncate_content_counts_unicode_characters() {
+        assert_eq!(truncate_content("中文🙂abc", 3), "中文🙂...");
+        assert_eq!(truncate_content("中文", 3), "中文");
     }
 
     #[test]

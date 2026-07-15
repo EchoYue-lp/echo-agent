@@ -104,6 +104,21 @@ impl SkillRegistry {
         self.register_descriptor(descriptor);
     }
 
+    /// Remove one file-based descriptor and all of its activation metadata.
+    pub fn remove_descriptor(&mut self, name: &str) -> bool {
+        let removed = self.descriptors.remove(name).is_some();
+        self.legacy_instructions.remove(name);
+        self.activated
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(name);
+        self.active_sandbox_policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(name);
+        removed
+    }
+
     /// Attach a sandbox manager used for inline command execution during activation.
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
         self.sandbox = Some(manager);

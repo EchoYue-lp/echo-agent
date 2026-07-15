@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
@@ -54,6 +55,16 @@ pub enum DiscoveryScope {
     Custom(PathBuf),
 }
 
+/// Product-supplied authority for deciding whether a discovered skill may load.
+///
+/// The framework intentionally knows nothing about product lifecycle files. A
+/// consumer can implement this trait using its own enabled/disabled or curator
+/// state while the loader remains a reusable discovery primitive.
+pub trait SkillLoadPolicy: Send + Sync {
+    /// Return `true` when this descriptor may enter the runtime catalog.
+    fn allows(&self, descriptor: &SkillDescriptor) -> bool;
+}
+
 // -- SkillLoader --
 
 /// Multi-scope skill loader with agentskills.io-compliant parsing.
@@ -72,6 +83,8 @@ pub struct SkillLoader {
     /// Legacy instructions from frontmatter, keyed by skill name.
     /// Preserved for activation when SKILL.md body is empty.
     legacy_instructions: HashMap<String, String>,
+    /// Optional authority consulted after parsing and before registration.
+    policy: Option<Arc<dyn SkillLoadPolicy>>,
 }
 
 impl SkillLoader {
@@ -79,7 +92,14 @@ impl SkillLoader {
         Self {
             descriptors: HashMap::new(),
             legacy_instructions: HashMap::new(),
+            policy: None,
         }
+    }
+
+    /// Install a product-owned skill loading policy.
+    pub fn with_policy(mut self, policy: Arc<dyn SkillLoadPolicy>) -> Self {
+        self.policy = Some(policy);
+        self
     }
 
     /// Discover skills from multiple scopes.
@@ -102,6 +122,18 @@ impl SkillLoader {
                 }
                 let found = self.scan_directory(&dir, 0).await?;
                 for (desc, legacy_instr) in found {
+                    if self
+                        .policy
+                        .as_ref()
+                        .is_some_and(|policy| !policy.allows(&desc))
+                    {
+                        info!(
+                            skill = %desc.name,
+                            path = %desc.location.display(),
+                            "Skill excluded by load policy"
+                        );
+                        continue;
+                    }
                     if let Some(existing) = self.descriptors.get(&desc.name) {
                         warn!(
                             "Skill '{}' at '{}' shadowed by existing at '{}'",
@@ -666,6 +698,43 @@ resources:
             names
         );
         assert_eq!(descs.len(), 3, "expected 3 skills (1 flat + 2 nested)");
+    }
+
+    #[tokio::test]
+    async fn load_policy_excludes_disallowed_descriptor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        struct DenyBlocked;
+        impl SkillLoadPolicy for DenyBlocked {
+            fn allows(&self, descriptor: &SkillDescriptor) -> bool {
+                descriptor.name != "blocked"
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("echo_skill_policy_{}", uuid::Uuid::new_v4()));
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(root.clone());
+        for name in ["allowed", "blocked"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name} skill\n---\nbody"),
+            )?;
+        }
+
+        let mut loader = SkillLoader::new().with_policy(Arc::new(DenyBlocked));
+        let descriptors = loader.discover_from_dir(&root).await?;
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors.first().map(|value| value.name.as_str()),
+            Some("allowed")
+        );
+        Ok(())
     }
 
     #[test]

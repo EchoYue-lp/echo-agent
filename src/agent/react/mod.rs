@@ -234,6 +234,12 @@ pub struct ReactAgent {
     /// Runtime state consumed by TriggerDetector between turns.
     pub(crate) memory_trigger_state: Arc<std::sync::Mutex<MemoryTriggerRuntimeState>>,
 
+    /// Optional product-owned sink for proposal and review workflows.
+    pub(crate) memory_trigger_sink: Option<Arc<dyn crate::evolution::MemoryTriggerSink>>,
+
+    /// Optional product-owned authority for file-based skill discovery.
+    pub(crate) skill_load_policy: Option<Arc<dyn crate::skills::external::SkillLoadPolicy>>,
+
     /// Shared slot for hook→classifier communication.
     /// Written by prepare phase after UserPromptSubmit hooks resolve
     /// (fire_lifecycle_hook → activate_skill); read by TriggerSupervisor
@@ -530,6 +536,8 @@ impl ReactAgent {
             memory_trigger_state: Arc::new(std::sync::Mutex::new(
                 MemoryTriggerRuntimeState::default(),
             )),
+            memory_trigger_sink: None,
+            skill_load_policy: None,
             hook_activation_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -587,6 +595,22 @@ impl ReactAgent {
     /// bypassed the agent's shared instance).
     pub fn memory_layer_manager(&self) -> Option<&Arc<crate::evolution::MemoryLayerManager>> {
         self.memory_layer_manager.as_ref()
+    }
+
+    /// Route runtime memory triggers through an application-owned sink.
+    pub fn set_memory_trigger_sink(
+        &mut self,
+        sink: Option<Arc<dyn crate::evolution::MemoryTriggerSink>>,
+    ) {
+        self.memory_trigger_sink = sink;
+    }
+
+    /// Set the authority consulted by all subsequent file-based skill discovery.
+    pub fn set_skill_load_policy(
+        &mut self,
+        policy: Option<Arc<dyn crate::skills::external::SkillLoadPolicy>>,
+    ) {
+        self.skill_load_policy = policy;
     }
 
     /// Create an Agent from a configuration file.

@@ -379,12 +379,12 @@ There are three automatic memory paths with strictly divided responsibilities to
 
 | System | Primary responsibility | Should NOT do |
 |--------|----------------------|---------------|
-| `TriggerDetector` (runtime) | Lightweight online discovery of new memory during a conversation (user preferences, corrections, verified error resolutions, repeated workflows) | Session-archive summarization, `.echo-agent/project.md` writes |
-| `AutoMemory` (framework+app) | Session-end/manual-trigger archive summarization (extract observations, classify, write typed memory; app layer may write `project.md`) | Compression/eviction, runtime policy scheduling |
+| `TriggerDetector` (runtime) | Lightweight online discovery with exact source excerpts; direct persistence remains the framework default, while products may install `MemoryTriggerSink` | Session-archive summarization, product review policy |
+| `AutoMemory` (framework+app) | Session-end/manual-trigger observation extraction; the framework exposes an optional typed-memory writer, while EKO queues evidence candidates | Compression/eviction, runtime policy scheduling |
 | `memory_promoter` (compression path) | Lifecycle management of messages compressed/evicted due to token pressure (persist, evict, demote) | New-preference discovery, UI-triggered extraction |
 | `BackgroundReviewer` (explicit/app-scheduled) | Evidence-linked JSON candidate from a finished run; proposal-only by default | Automatic durable writes or product scheduling policy |
 
-> Key constraint: any typed memory that must enter runtime recall **must** go through the framework's `MemoryLayerManager::write_memory`; the product layer does not maintain its own category/type/key/write rules.
+> Key constraint: any accepted typed memory that enters runtime recall **must** go through `MemoryLayerManager::write_memory`. EKO keeps inferred TriggerDetector/AutoMemory/BackgroundReviewer output in its workspace JSONL Review Inbox until the user accepts it.
 
 ---
 
@@ -406,6 +406,8 @@ There are three automatic memory paths with strictly divided responsibilities to
     _drafts/<name>/SKILL.md        # draft skills
   curator_state.json               # Curator state
 ```
+
+Framework consumers may choose another path. EKO injects workspace-scoped files under `.eko/evolution/`, including `evidence-candidates.jsonl` and `curator-state.json`.
 
 ## Store Namespaces
 

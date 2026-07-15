@@ -372,12 +372,12 @@ for report in monitor.analyze_all_skills().await? {
 
 | 系统 | 主要职责 | 不应承担 |
 |------|---------|---------|
-| `TriggerDetector`（运行时） | 在线对话中轻量发现新记忆（用户偏好、纠正、已验证的错误解决、重复工作流） | 会话归档总结、`.echo-agent/project.md` 写入 |
-| `AutoMemory`（框架+应用） | 会话结束/手动触发时的归档总结（提取观察、分类、写入 typed memory，应用层可写 `project.md`） | 压缩淘汰、运行时策略调度 |
+| `TriggerDetector`（运行时） | 在线轻量发现并附带精确来源摘录；框架默认可直接持久化，产品也可安装 `MemoryTriggerSink` 接管 | 会话归档总结、产品审阅策略 |
+| `AutoMemory`（框架+应用） | 会话结束/手动触发时提取观察；框架保留可选 typed-memory writer，EKO 则生成证据候选 | 压缩淘汰、运行时策略调度 |
 | `memory_promoter`（压缩路径） | 因 token 压力被压缩/淘汰的消息的生命周期管理（长期化、淘汰、降级） | 新偏好发现、UI 触发的提取 |
 | `BackgroundReviewer`（显式/应用调度） | 从已完成 run 生成带证据 JSON 候选，默认只提案 | 自动长期写入或产品调度策略 |
 
-> 关键约束：任何需要进入运行时 recall 的 typed memory，**必须**统一走框架的 `MemoryLayerManager::write_memory`，产品层不自行维护 category/type/key/write 规则。
+> 关键约束：任何被接受并进入运行时 recall 的 typed memory，**必须**统一走框架的 `MemoryLayerManager::write_memory`。EKO 会先把 TriggerDetector/AutoMemory/BackgroundReviewer 的推断结果放进 workspace JSONL Review Inbox，用户采纳后才写入。
 
 ---
 
@@ -399,6 +399,8 @@ for report in monitor.analyze_all_skills().await? {
     _drafts/<name>/SKILL.md        # 草稿技能
   curator_state.json               # Curator 状态
 ```
+
+框架复用方可以选择其它路径。EKO 注入 workspace scope，使用 `.eko/evolution/evidence-candidates.jsonl` 与 `.eko/evolution/curator-state.json`。
 
 ## Store 命名空间
 

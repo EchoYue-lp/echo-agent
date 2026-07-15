@@ -71,6 +71,28 @@ impl ReactAgent {
         let mut consumed_error_resolution = false;
         let mut consumed_repeated_workflow = false;
         for trigger in triggers {
+            if let Some(sink) = &self.memory_trigger_sink {
+                match sink.on_trigger(&trigger).await {
+                    Ok(crate::evolution::MemoryTriggerDisposition::Captured) => {
+                        consumed_error_resolution |=
+                            matches!(trigger.source, crate::memory::MemorySource::ErrorResolution);
+                        consumed_repeated_workflow |= matches!(
+                            trigger.source,
+                            crate::memory::MemorySource::RepeatedWorkflow
+                        );
+                        continue;
+                    }
+                    Ok(crate::evolution::MemoryTriggerDisposition::Persist) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            key = %trigger.suggested_key,
+                            %error,
+                            "Memory trigger sink failed; falling back to durable write"
+                        );
+                    }
+                }
+            }
+
             let meta =
                 crate::memory::MemoryMeta::new(trigger.memory_type, trigger.source, trigger.topic)
                     .with_confidence(trigger.confidence);

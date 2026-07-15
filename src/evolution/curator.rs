@@ -51,6 +51,9 @@ pub enum SkillLifecycle {
 pub struct SkillMeta {
     /// Skill name.
     pub name: String,
+    /// Concrete `SKILL.md` path used as the runtime loading identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     /// Current lifecycle state.
     pub lifecycle: SkillLifecycle,
     /// When the skill was first created.
@@ -322,15 +325,31 @@ impl Curator {
 
     /// Register a new skill or update an existing one's last-used timestamp.
     pub fn touch_skill(&self, name: &str, agent_created: bool) -> Result<()> {
+        self.touch_skill_at(name, None, agent_created)
+    }
+
+    /// Register or touch a skill while binding its concrete `SKILL.md` path.
+    pub fn touch_skill_at(
+        &self,
+        name: &str,
+        path: Option<&std::path::Path>,
+        agent_created: bool,
+    ) -> Result<()> {
+        let normalized_path = path.map(normalize_skill_path);
         self.with_locked_state(|state| {
             let now = chrono::Utc::now();
             if let Some(meta) = state.skills.get_mut(name) {
                 meta.last_used_at = now;
+                if normalized_path.is_some() {
+                    meta.path = normalized_path.clone();
+                    meta.last_modified_at = now;
+                }
             } else {
                 state.skills.insert(
                     name.to_string(),
                     SkillMeta {
                         name: name.to_string(),
+                        path: normalized_path.clone(),
                         lifecycle: SkillLifecycle::Active,
                         created_at: now,
                         last_used_at: now,
@@ -347,9 +366,19 @@ impl Curator {
 
     /// Register a new skill candidate (discovered from memory patterns).
     pub fn register_candidate(&self, name: &str) -> Result<()> {
+        self.register_candidate_at(name, None)
+    }
+
+    /// Register a candidate and optionally bind a future draft path.
+    pub fn register_candidate_at(&self, name: &str, path: Option<&std::path::Path>) -> Result<()> {
+        let normalized_path = path.map(normalize_skill_path);
         self.with_locked_state(|state| {
-            if state.skills.contains_key(name) {
-                // Already registered, skip.
+            if let Some(meta) = state.skills.get_mut(name) {
+                if normalized_path.is_some() && meta.path != normalized_path {
+                    meta.path = normalized_path.clone();
+                    meta.last_modified_at = chrono::Utc::now();
+                    return Ok(((), true));
+                }
                 return Ok(((), false));
             }
             let now = chrono::Utc::now();
@@ -357,6 +386,7 @@ impl Curator {
                 name.to_string(),
                 SkillMeta {
                     name: name.to_string(),
+                    path: normalized_path.clone(),
                     lifecycle: SkillLifecycle::Candidate,
                     created_at: now,
                     last_used_at: now,
@@ -372,12 +402,21 @@ impl Curator {
 
     /// Promote a Candidate skill to Draft.
     pub fn promote_to_draft(&self, name: &str) -> Result<bool> {
+        self.promote_to_draft_at(name, None)
+    }
+
+    /// Promote a Candidate to Draft and bind the generated draft path.
+    pub fn promote_to_draft_at(&self, name: &str, path: Option<&std::path::Path>) -> Result<bool> {
+        let normalized_path = path.map(normalize_skill_path);
         self.with_locked_state(|state| {
             let now = chrono::Utc::now();
             if let Some(meta) = state.skills.get_mut(name)
                 && meta.lifecycle == SkillLifecycle::Candidate
             {
                 meta.lifecycle = SkillLifecycle::Draft;
+                if normalized_path.is_some() {
+                    meta.path = normalized_path.clone();
+                }
                 meta.last_modified_at = now;
                 return Ok((true, true));
             }
@@ -387,17 +426,35 @@ impl Curator {
 
     /// Promote a Draft skill to Active.
     pub fn promote_to_active(&self, name: &str) -> Result<bool> {
+        self.promote_to_active_at(name, None)
+    }
+
+    /// Promote a Draft to Active and bind the authoritative runtime path.
+    pub fn promote_to_active_at(&self, name: &str, path: Option<&std::path::Path>) -> Result<bool> {
+        let normalized_path = path.map(normalize_skill_path);
         self.with_locked_state(|state| {
             let now = chrono::Utc::now();
             if let Some(meta) = state.skills.get_mut(name)
                 && meta.lifecycle == SkillLifecycle::Draft
             {
                 meta.lifecycle = SkillLifecycle::Active;
+                if normalized_path.is_some() {
+                    meta.path = normalized_path.clone();
+                }
                 meta.last_modified_at = now;
                 return Ok((true, true));
             }
             Ok((false, false))
         })
+    }
+
+    /// Return lifecycle metadata for one concrete `SKILL.md` path.
+    pub fn skill_for_path(&self, path: &std::path::Path) -> Option<SkillMeta> {
+        let normalized = normalize_skill_path(path);
+        self.load_state()
+            .skills
+            .into_values()
+            .find(|meta| meta.path.as_ref() == Some(&normalized))
     }
 
     /// Deprecate a skill, optionally specifying which skill supersedes it.
@@ -577,6 +634,10 @@ impl Drop for CuratorLockGuard {
     }
 }
 
+fn normalize_skill_path(path: &std::path::Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +658,24 @@ mod tests {
         assert_eq!(status.active, 1);
         assert_eq!(status.stale, 0);
         assert_eq!(status.archived, 0);
+    }
+
+    #[test]
+    fn test_tracks_skill_by_concrete_path() -> Result<()> {
+        let curator = temp_curator();
+        let skill_path = std::env::temp_dir()
+            .join("echo-curator-path-test")
+            .join("SKILL.md");
+        curator.touch_skill_at("path-skill", Some(&skill_path), true)?;
+
+        let Some(meta) = curator.skill_for_path(&skill_path) else {
+            return Err(crate::error::ReactError::Other(
+                "skill path was not tracked".to_string(),
+            ));
+        };
+        assert_eq!(meta.name, "path-skill");
+        assert_eq!(meta.lifecycle, SkillLifecycle::Active);
+        Ok(())
     }
 
     #[test]
@@ -874,6 +953,7 @@ mod tests {
                 "should-not-persist".to_string(),
                 SkillMeta {
                     name: "should-not-persist".to_string(),
+                    path: None,
                     lifecycle: SkillLifecycle::Candidate,
                     created_at: chrono::Utc::now(),
                     last_used_at: chrono::Utc::now(),
