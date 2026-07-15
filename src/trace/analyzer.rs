@@ -7,7 +7,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::trace::{RunEvent, RunStatus, RunStore, TokenUsage};
@@ -106,6 +107,58 @@ pub struct ErrorPattern {
     /// Last occurrence timestamp.
     #[serde(with = "crate::utils::time::option_local_rfc3339")]
     pub last_seen: Option<DateTime<Utc>>,
+}
+
+/// Stable high-level class for a tool failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFailureClass {
+    Timeout,
+    PermissionDenied,
+    NotFound,
+    InvalidArguments,
+    Network,
+    Dependency,
+    Cancelled,
+    Unknown,
+}
+
+/// A recurring tool failure grouped without exposing raw tool arguments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolFailurePattern {
+    /// Tool that failed.
+    pub tool_name: String,
+    /// Deterministic failure class.
+    pub error_class: ToolFailureClass,
+    /// Normalized error preview used for grouping.
+    pub pattern: String,
+    /// Structural shape of the input, excluding argument values.
+    pub input_shape: String,
+    /// Number of failure occurrences.
+    pub occurrence_count: usize,
+    /// Number of distinct runs containing the failure.
+    pub distinct_run_count: usize,
+    /// Run IDs containing the failure.
+    pub run_ids: Vec<String>,
+    /// Repeated identical attempts after the first failure in the same run.
+    pub ineffective_retry_count: usize,
+    /// First run start containing the pattern.
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
+    pub first_seen: Option<DateTime<Utc>>,
+    /// Last run finish containing the pattern.
+    #[serde(with = "crate::utils::time::option_local_rfc3339")]
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
+/// Tool reliability summary across a bounded set of stored runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolReliabilityReport {
+    pub run_count: usize,
+    pub total_calls: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub ineffective_retry_count: usize,
+    pub failure_patterns: Vec<ToolFailurePattern>,
 }
 
 // ── TraceAnalyzer ──────────────────────────────────────────────────────
@@ -218,6 +271,7 @@ impl TraceAnalyzer {
 
         for summary in &summaries {
             if let Some(run) = self.run_store.load(&summary.run_id).await? {
+                let mut failed_call_ids = HashSet::new();
                 for event in &run.events {
                     match event {
                         RunEvent::ToolCall {
@@ -233,17 +287,24 @@ impl TraceAnalyzer {
                                 acc.max_duration_ms = *duration_ms;
                             }
                         }
-                        RunEvent::ToolResult { name, success, .. } => {
+                        RunEvent::ToolResult {
+                            call_id,
+                            name,
+                            success,
+                            ..
+                        } => {
                             if let Some(acc) = tool_data.get_mut(name) {
                                 if *success {
                                     acc.success_count += 1;
-                                } else {
+                                } else if failed_call_ids.insert(call_id.clone()) {
                                     acc.failure_count += 1;
                                 }
                             }
                         }
-                        RunEvent::ToolError { name, .. } => {
-                            if let Some(acc) = tool_data.get_mut(name) {
+                        RunEvent::ToolError { call_id, name, .. } => {
+                            if failed_call_ids.insert(call_id.clone())
+                                && let Some(acc) = tool_data.get_mut(name)
+                            {
                                 acc.failure_count += 1;
                             }
                         }
@@ -414,6 +475,108 @@ impl TraceAnalyzer {
         Ok(result)
     }
 
+    /// Analyze tool reliability for runs at or after `after`.
+    ///
+    /// Tool arguments are used only to detect repeated identical attempts in one
+    /// run. Returned patterns expose a structural input shape, never raw values.
+    pub async fn tool_reliability_report(
+        &self,
+        limit: usize,
+        after: Option<DateTime<Utc>>,
+    ) -> crate::error::Result<ToolReliabilityReport> {
+        let summaries = self.run_store.list_all(limit).await?;
+        let mut report = ToolReliabilityReport::default();
+        let mut patterns: HashMap<String, ToolFailureAccumulator> = HashMap::new();
+
+        for summary in summaries
+            .iter()
+            .filter(|summary| after.is_none_or(|after| summary.started_at >= after))
+        {
+            let Some(run) = self.run_store.load(&summary.run_id).await? else {
+                continue;
+            };
+            report.run_count = report.run_count.saturating_add(1);
+            let mut calls: HashMap<String, ToolCallContext> = HashMap::new();
+            let mut attempts: HashMap<String, usize> = HashMap::new();
+            let mut failed_call_ids = HashSet::new();
+
+            for event in &run.events {
+                match event {
+                    RunEvent::ToolCall {
+                        call_id,
+                        name,
+                        args,
+                        ..
+                    } => {
+                        report.total_calls = report.total_calls.saturating_add(1);
+                        calls.insert(
+                            call_id.clone(),
+                            ToolCallContext {
+                                tool_name: name.clone(),
+                                input_shape: json_shape(args.as_ref()),
+                                args_key: json_identity(args.as_ref()),
+                            },
+                        );
+                    }
+                    RunEvent::ToolResult {
+                        call_id,
+                        name,
+                        success,
+                        output_preview,
+                        ..
+                    } => {
+                        if *success {
+                            report.success_count = report.success_count.saturating_add(1);
+                        } else {
+                            if failed_call_ids.insert(call_id.clone()) {
+                                report.failure_count = report.failure_count.saturating_add(1);
+                                let message = output_preview
+                                    .as_deref()
+                                    .unwrap_or("tool returned an unsuccessful result");
+                                record_tool_failure(
+                                    &mut patterns,
+                                    &mut attempts,
+                                    &run,
+                                    calls.get(call_id),
+                                    name,
+                                    message,
+                                );
+                            }
+                        }
+                    }
+                    RunEvent::ToolError {
+                        call_id,
+                        name,
+                        message,
+                    } if failed_call_ids.insert(call_id.clone()) => {
+                        report.failure_count = report.failure_count.saturating_add(1);
+                        record_tool_failure(
+                            &mut patterns,
+                            &mut attempts,
+                            &run,
+                            calls.get(call_id),
+                            name,
+                            message,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut failure_patterns = patterns
+            .into_values()
+            .map(|accumulator| accumulator.into_pattern())
+            .collect::<Vec<_>>();
+        failure_patterns.sort_by_key(|pattern| std::cmp::Reverse(pattern.occurrence_count));
+        report.ineffective_retry_count = failure_patterns
+            .iter()
+            .map(|pattern| pattern.ineffective_retry_count)
+            .sum();
+        report.failure_patterns = failure_patterns;
+        Ok(report)
+    }
+
     /// List all sessions (unique session IDs from stored runs).
     pub async fn list_sessions(&self, limit: usize) -> crate::error::Result<Vec<String>> {
         let summaries = self.run_store.list_all(limit).await?;
@@ -459,6 +622,45 @@ struct ErrorAccumulator {
     last_seen: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone)]
+struct ToolCallContext {
+    tool_name: String,
+    input_shape: String,
+    args_key: String,
+}
+
+#[derive(Default)]
+struct ToolFailureAccumulator {
+    tool_name: String,
+    error_class: Option<ToolFailureClass>,
+    pattern: String,
+    input_shape: String,
+    occurrence_count: usize,
+    run_ids: HashMap<String, ()>,
+    ineffective_retry_count: usize,
+    first_seen: Option<DateTime<Utc>>,
+    last_seen: Option<DateTime<Utc>>,
+}
+
+impl ToolFailureAccumulator {
+    fn into_pattern(self) -> ToolFailurePattern {
+        let mut run_ids = self.run_ids.into_keys().collect::<Vec<_>>();
+        run_ids.sort();
+        ToolFailurePattern {
+            tool_name: self.tool_name,
+            error_class: self.error_class.unwrap_or(ToolFailureClass::Unknown),
+            pattern: self.pattern,
+            input_shape: self.input_shape,
+            occurrence_count: self.occurrence_count,
+            distinct_run_count: run_ids.len(),
+            run_ids,
+            ineffective_retry_count: self.ineffective_retry_count,
+            first_seen: self.first_seen,
+            last_seen: self.last_seen,
+        }
+    }
+}
+
 impl ErrorAccumulator {
     fn update_time(&mut self, started_at: DateTime<Utc>, finished_at: Option<DateTime<Utc>>) {
         if self.first_seen.is_none() || started_at < self.first_seen.unwrap() {
@@ -491,6 +693,183 @@ fn normalize_error(msg: &str) -> String {
         }
     }
     result
+}
+
+fn classify_tool_failure(message: &str) -> ToolFailureClass {
+    let normalized = message.to_lowercase();
+    if normalized.contains("timeout")
+        || normalized.contains("timed out")
+        || normalized.contains("超时")
+    {
+        ToolFailureClass::Timeout
+    } else if normalized.contains("permission denied")
+        || normalized.contains("access denied")
+        || normalized.contains("not permitted")
+        || normalized.contains("权限不足")
+        || normalized.contains("拒绝访问")
+    {
+        ToolFailureClass::PermissionDenied
+    } else if normalized.contains("not found")
+        || normalized.contains("no such file")
+        || normalized.contains("未找到")
+        || normalized.contains("不存在")
+    {
+        ToolFailureClass::NotFound
+    } else if normalized.contains("invalid argument")
+        || normalized.contains("invalid parameter")
+        || normalized.contains("missing parameter")
+        || normalized.contains("无效参数")
+        || normalized.contains("缺少参数")
+    {
+        ToolFailureClass::InvalidArguments
+    } else if normalized.contains("network")
+        || normalized.contains("connection")
+        || normalized.contains("dns")
+        || normalized.contains("网络")
+        || normalized.contains("连接")
+    {
+        ToolFailureClass::Network
+    } else if normalized.contains("dependency")
+        || normalized.contains("module")
+        || normalized.contains("package")
+        || normalized.contains("依赖")
+        || normalized.contains("模块")
+        || normalized.contains("软件包")
+    {
+        ToolFailureClass::Dependency
+    } else if normalized.contains("cancelled")
+        || normalized.contains("canceled")
+        || normalized.contains("取消")
+    {
+        ToolFailureClass::Cancelled
+    } else {
+        ToolFailureClass::Unknown
+    }
+}
+
+fn json_shape(value: Option<&serde_json::Value>) -> String {
+    json_shape_at(value, 0)
+}
+
+fn json_shape_at(value: Option<&serde_json::Value>, depth: usize) -> String {
+    if depth >= 4 {
+        return "nested".to_string();
+    }
+    match value {
+        None | Some(serde_json::Value::Null) => "none".to_string(),
+        Some(serde_json::Value::Bool(_)) => "bool".to_string(),
+        Some(serde_json::Value::Number(_)) => "number".to_string(),
+        Some(serde_json::Value::String(_)) => "string".to_string(),
+        Some(serde_json::Value::Array(values)) => {
+            let item_shape = values
+                .first()
+                .map(|value| json_shape_at(Some(value), depth.saturating_add(1)))
+                .unwrap_or_else(|| "empty".to_string());
+            format!("array<{item_shape}>")
+        }
+        Some(serde_json::Value::Object(values)) => {
+            let mut fields = values
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{key}:{}",
+                        json_shape_at(Some(value), depth.saturating_add(1))
+                    )
+                })
+                .collect::<Vec<_>>();
+            fields.sort();
+            fields.truncate(24);
+            format!("object{{{}}}", fields.join(","))
+        }
+    }
+}
+
+fn json_identity(value: Option<&serde_json::Value>) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_json_value(value, 0, &mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn hash_json_value<H: Hasher>(value: Option<&serde_json::Value>, depth: usize, hasher: &mut H) {
+    if depth >= 8 {
+        "nested".hash(hasher);
+        return;
+    }
+    match value {
+        None | Some(serde_json::Value::Null) => "null".hash(hasher),
+        Some(serde_json::Value::Bool(value)) => value.hash(hasher),
+        Some(serde_json::Value::Number(value)) => value.to_string().hash(hasher),
+        Some(serde_json::Value::String(value)) => value.hash(hasher),
+        Some(serde_json::Value::Array(values)) => {
+            "array".hash(hasher);
+            values.len().hash(hasher);
+            for value in values.iter().take(32) {
+                hash_json_value(Some(value), depth.saturating_add(1), hasher);
+            }
+        }
+        Some(serde_json::Value::Object(values)) => {
+            "object".hash(hasher);
+            values.len().hash(hasher);
+            let mut fields = values.iter().collect::<Vec<_>>();
+            fields.sort_by_key(|(left, _)| *left);
+            for (key, value) in fields.into_iter().take(32) {
+                key.hash(hasher);
+                hash_json_value(Some(value), depth.saturating_add(1), hasher);
+            }
+        }
+    }
+}
+
+fn record_tool_failure(
+    patterns: &mut HashMap<String, ToolFailureAccumulator>,
+    attempts: &mut HashMap<String, usize>,
+    run: &crate::trace::Run,
+    call: Option<&ToolCallContext>,
+    event_tool_name: &str,
+    message: &str,
+) {
+    let tool_name = call
+        .map(|context| context.tool_name.as_str())
+        .unwrap_or(event_tool_name);
+    let input_shape = call
+        .map(|context| context.input_shape.as_str())
+        .unwrap_or("unknown");
+    let args_key = call.map(|context| context.args_key.as_str()).unwrap_or("");
+    let error_class = classify_tool_failure(message);
+    let pattern = normalize_error(message)
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let grouping_pattern = if error_class == ToolFailureClass::Unknown {
+        pattern.as_str()
+    } else {
+        "classified"
+    };
+    let key = format!("{tool_name}|{error_class:?}|{input_shape}|{grouping_pattern}");
+    let attempt_key = format!("{key}|{args_key}");
+    let prior_attempts = attempts.entry(attempt_key).or_insert(0);
+    let is_retry = *prior_attempts > 0;
+    *prior_attempts = prior_attempts.saturating_add(1);
+
+    let accumulator = patterns.entry(key).or_default();
+    accumulator.tool_name = tool_name.to_string();
+    accumulator.error_class = Some(error_class);
+    accumulator.pattern = pattern;
+    accumulator.input_shape = input_shape.to_string();
+    accumulator.occurrence_count = accumulator.occurrence_count.saturating_add(1);
+    accumulator.run_ids.insert(run.run_id.clone(), ());
+    if is_retry {
+        accumulator.ineffective_retry_count = accumulator.ineffective_retry_count.saturating_add(1);
+    }
+    accumulator.first_seen = match accumulator.first_seen {
+        Some(first_seen) => Some(first_seen.min(run.started_at)),
+        None => Some(run.started_at),
+    };
+    let last_seen = run.finished_at.unwrap_or(run.started_at);
+    accumulator.last_seen = match accumulator.last_seen {
+        Some(current) => Some(current.max(last_seen)),
+        None => Some(last_seen),
+    };
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────
@@ -706,6 +1085,115 @@ mod tests {
                 .associated_tools
                 .contains(&"write_file".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn tool_reliability_groups_cross_run_failures_and_retries() -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryRunStore::new());
+        let args = serde_json::json!({"path": "/protected/config"});
+        let mut first = make_run("r1", "s1", RunStatus::Failed);
+        first.events = vec![
+            RunEvent::ToolCall {
+                call_id: "c1".into(),
+                name: "write_file".into(),
+                args: Some(args.clone()),
+                risk: None,
+                duration_ms: 10,
+            },
+            RunEvent::ToolResult {
+                call_id: "c1".into(),
+                name: "write_file".into(),
+                success: false,
+                output_preview: Some("Permission denied: /protected/config".into()),
+                output_truncated: false,
+                duration_ms: 10,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
+            },
+            RunEvent::ToolError {
+                call_id: "c1".into(),
+                name: "write_file".into(),
+                message: "Permission denied: /protected/config".into(),
+            },
+            RunEvent::ToolCall {
+                call_id: "c2".into(),
+                name: "write_file".into(),
+                args: Some(args),
+                risk: None,
+                duration_ms: 10,
+            },
+            RunEvent::ToolResult {
+                call_id: "c2".into(),
+                name: "write_file".into(),
+                success: false,
+                output_preview: Some("Permission denied: /protected/config".into()),
+                output_truncated: false,
+                duration_ms: 10,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
+            },
+            RunEvent::ToolError {
+                call_id: "c2".into(),
+                name: "write_file".into(),
+                message: "Permission denied: /protected/config".into(),
+            },
+        ];
+        let mut second = make_run("r2", "s1", RunStatus::Failed);
+        second.events = vec![
+            RunEvent::ToolCall {
+                call_id: "c3".into(),
+                name: "write_file".into(),
+                args: Some(serde_json::json!({"path": "/other/config"})),
+                risk: None,
+                duration_ms: 10,
+            },
+            RunEvent::ToolResult {
+                call_id: "c3".into(),
+                name: "write_file".into(),
+                success: false,
+                output_preview: Some("Access denied: /other/config".into()),
+                output_truncated: false,
+                duration_ms: 10,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
+            },
+            RunEvent::ToolError {
+                call_id: "c3".into(),
+                name: "write_file".into(),
+                message: "Access denied: /other/config".into(),
+            },
+        ];
+        store.save(first).await?;
+        store.save(second).await?;
+
+        let analyzer = TraceAnalyzer::new(store);
+        let usage = analyzer.tool_usage_stats(100).await?;
+        let write_stats = usage
+            .iter()
+            .find(|stats| stats.name == "write_file")
+            .ok_or_else(|| crate::error::ReactError::Other("missing write_file stats".into()))?;
+        assert_eq!(write_stats.failure_count, 3);
+
+        let report = analyzer.tool_reliability_report(100, None).await?;
+        assert_eq!(report.total_calls, 3);
+        assert_eq!(report.failure_count, 3);
+        assert_eq!(report.ineffective_retry_count, 1);
+        let pattern = report
+            .failure_patterns
+            .first()
+            .ok_or_else(|| crate::error::ReactError::Other("missing failure pattern".into()))?;
+        assert_eq!(pattern.error_class, ToolFailureClass::PermissionDenied);
+        assert_eq!(pattern.occurrence_count, 3);
+        assert_eq!(pattern.distinct_run_count, 2);
+        assert_eq!(pattern.ineffective_retry_count, 1);
+        assert!(!pattern.input_shape.contains("protected"));
+        Ok(())
     }
 
     #[tokio::test]

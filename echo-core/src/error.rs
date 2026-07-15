@@ -71,6 +71,9 @@ pub enum MemoryError {
     /// Unsupported operation
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
+    /// A reviewed mutation proposal no longer matches current memory state.
+    #[error("Stale proposal: {0}")]
+    StaleProposal(String),
 }
 
 impl From<std::io::Error> for MemoryError {

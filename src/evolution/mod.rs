@@ -57,7 +57,7 @@ pub use dreaming::{Dreaming, DreamingAction, DreamingConfig, DreamingDecision, D
 pub use health::{HealthBreakdown, HealthStatus, SkillHealthMonitor, SkillHealthReport};
 pub use layer::{
     HotEntryMeta, LayerChangeResult, MemoryFile, MemoryLayer, MemoryLayerManager,
-    MemoryWriteObserver,
+    MemoryWriteObserver, is_stale_memory_proposal_error,
 };
 pub use merge::{SimilarityBreakdown, SkillMergeProposal, SkillMerger, SkillSimilarityDetector};
 pub use patch::{PatchType, SkillPatch, SkillPatcher};

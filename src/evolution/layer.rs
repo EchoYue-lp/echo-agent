@@ -60,6 +60,24 @@ fn merge_plan_error(message: impl Into<String>) -> ReactError {
     ReactError::Config(Box::new(ConfigError::ConfigFileError(message.into())))
 }
 
+fn stale_merge_plan_error(message: impl Into<String>) -> ReactError {
+    ReactError::Memory(Box::new(echo_core::error::MemoryError::StaleProposal(
+        message.into(),
+    )))
+}
+
+/// Return whether an error means a reviewed memory proposal is no longer current.
+pub fn is_stale_memory_proposal_error(error: &ReactError) -> bool {
+    matches!(
+        error,
+        ReactError::Memory(memory_error)
+            if matches!(
+                memory_error.as_ref(),
+                echo_core::error::MemoryError::StaleProposal(_)
+            )
+    )
+}
+
 // ── Constants ──────────────────────────────────────────────────────────
 
 /// Namespace for the unified typed-memory store (stage4: warm+cold+L3 all
@@ -560,7 +578,9 @@ impl MemoryLayerManager {
                     .collect();
                 current_keys == expected_keys
             })
-            .ok_or_else(|| merge_plan_error("memory conflict changed; refresh Review Inbox"))?;
+            .ok_or_else(|| {
+                stale_merge_plan_error("memory conflict changed; refresh Review Inbox")
+            })?;
 
         for expected in &proposal.members {
             let current = group
@@ -572,7 +592,7 @@ impl MemoryLayerManager {
                 || current.meta.status != expected.status
                 || (current.meta.confidence - expected.confidence).abs() > f32::EPSILON
             {
-                return Err(merge_plan_error(
+                return Err(stale_merge_plan_error(
                     "memory conflict content or metadata changed; refresh Review Inbox",
                 ));
             }
@@ -581,7 +601,7 @@ impl MemoryLayerManager {
         let current_proposal = MemoryConflictProposal::from_group(&group)
             .ok_or_else(|| merge_plan_error("memory conflict has no primary candidate"))?;
         if current_proposal.recommended_primary_key != proposal.recommended_primary_key {
-            return Err(merge_plan_error(
+            return Err(stale_merge_plan_error(
                 "memory conflict recommendation changed; refresh Review Inbox",
             ));
         }

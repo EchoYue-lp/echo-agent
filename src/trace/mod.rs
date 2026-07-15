@@ -26,7 +26,10 @@ use tokio::sync::RwLock;
 pub use crate::error::Result;
 
 // Re-export analyzer types for convenience
-pub use analyzer::{ErrorPattern, SessionSummary, TokenBreakdown, ToolUsageStats, TraceAnalyzer};
+pub use analyzer::{
+    ErrorPattern, SessionSummary, TokenBreakdown, ToolFailureClass, ToolFailurePattern,
+    ToolReliabilityReport, ToolUsageStats, TraceAnalyzer,
+};
 
 // ── Run ──────────────────────────────────────────────────────────────
 

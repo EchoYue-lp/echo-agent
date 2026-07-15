@@ -1,4 +1,4 @@
-//! Skill execution telemetry — tracks skill activation, usage, and success/failure metrics.
+//! Skill execution telemetry — tracks tool reliability while skills are active.
 //!
 //! Provides `SkillTelemetryStore` which wraps the framework `Store` trait to persist
 //! telemetry data under the `["agent", "skill_telemetry"]` namespace.
@@ -11,7 +11,7 @@ use tracing::warn;
 
 use echo_core::memory::Store;
 
-/// A single skill execution record.
+/// A single tool execution observed while a skill is active.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillExecutionRecord {
     /// Name of the skill that was activated.
@@ -37,7 +37,7 @@ pub struct SkillExecutionRecord {
 pub struct SkillTelemetry {
     /// Skill name.
     pub skill_name: String,
-    /// Total number of activations.
+    /// Total number of tool observations while this skill was active.
     pub activation_count: u64,
     /// Number of successful activations.
     pub success_count: u64,
@@ -255,10 +255,10 @@ fn epoch_millis() -> u64 {
 
 /// Truncate a string to at most 200 characters.
 fn truncate_to_200(s: &str) -> String {
-    if s.len() <= 200 {
+    if s.chars().count() <= 200 {
         s.to_string()
     } else {
-        s[..200].to_string()
+        s.chars().take(200).collect()
     }
 }
 
@@ -312,6 +312,13 @@ mod tests {
         assert_eq!(t.failure_count, 1);
         assert_eq!(t.common_failures.len(), 1);
         assert_eq!(t.common_failures[0].error_snippet, "timeout error");
+    }
+
+    #[test]
+    fn failure_snippet_truncation_is_utf8_safe() {
+        let input = "错".repeat(250);
+        let truncated = truncate_to_200(&input);
+        assert_eq!(truncated.chars().count(), 200);
     }
 
     #[test]
