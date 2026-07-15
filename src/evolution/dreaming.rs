@@ -30,6 +30,10 @@ pub struct DreamingConfig {
     /// Cap on how many memories a single pass promotes to hot (avoids flooding
     /// MEMORY.md / the system prompt stable prefix in one run).
     pub max_promoted_per_run: usize,
+    /// A high-recall memory must also have been used within this window before
+    /// it can be promoted or revived. This prevents lifetime recall counts from
+    /// making an obsolete fact permanently hot-eligible.
+    pub promotion_recency_days: u32,
     /// A memory older than this many days AND below `low_recall_threshold` is
     /// demoted to Archived (staleness decay, not deletion).
     pub stale_age_days: u32,
@@ -42,6 +46,7 @@ impl Default for DreamingConfig {
         Self {
             recall_count_threshold: 5,
             max_promoted_per_run: 20,
+            promotion_recency_days: 30,
             stale_age_days: 30,
             low_recall_threshold: 1,
         }
@@ -61,6 +66,25 @@ pub struct DreamingReport {
     pub revived: usize,
     /// Stale low-recall Active memories demoted to Archived.
     pub demoted: usize,
+    /// Explainable deterministic changes applied by this pass.
+    pub decisions: Vec<DreamingDecision>,
+}
+
+/// One deterministic maintenance action applied by Dreaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DreamingAction {
+    Revived,
+    PromotedToHot,
+    Archived,
+}
+
+#[derive(Debug, Clone)]
+pub struct DreamingDecision {
+    pub key: String,
+    pub action: DreamingAction,
+    pub recall_count: u32,
+    pub inactive_days: f64,
+    pub reason: String,
 }
 
 // ── Dreaming ───────────────────────────────────────────────────────────
@@ -87,8 +111,7 @@ impl Dreaming {
     /// Run one Dreaming pass over the unified `["agent","memories"]` namespace.
     ///
     /// Best-effort per-memory: a revive/promote/demote error on one memory is
-    /// logged (via `unwrap_or` / `is_ok`) and does not abort the pass. Returns a
-    /// summary report.
+    /// logged and does not abort the pass. Returns a summary report.
     pub async fn run(&self) -> crate::error::Result<DreamingReport> {
         let now = now_secs();
         let entries = self
@@ -105,26 +128,50 @@ impl Dreaming {
             if e.meta.status == MemoryStatus::Superseded {
                 continue;
             }
-            let age_days = age_days(e.raw.created_at, now);
+            let inactive_days = age_days(e.meta.last_recalled_at.unwrap_or(e.raw.created_at), now);
 
             // 1. Promote high-recall memories (incl Archived) to hot. G2: revive
             //    Archived→Active first because `is_hot_eligible()` requires
             //    `status == Active` (otherwise every Archived memory would fail
             //    the gate regardless of confidence/stability).
             if e.meta.recall_count >= self.config.recall_count_threshold
+                && inactive_days <= self.config.promotion_recency_days as f64
                 && report.promoted < self.config.max_promoted_per_run
             {
-                if e.meta.status == MemoryStatus::Archived
-                    && self
-                        .layer_manager
-                        .revive_archived(&e.key)
-                        .await
-                        .unwrap_or(false)
-                {
-                    report.revived += 1;
+                if e.meta.status == MemoryStatus::Archived {
+                    match self.layer_manager.revive_archived(&e.key).await {
+                        Ok(true) => {
+                            report.revived += 1;
+                            report.decisions.push(DreamingDecision {
+                                key: e.key.clone(),
+                                action: DreamingAction::Revived,
+                                recall_count: e.meta.recall_count,
+                                inactive_days,
+                                reason: "archived memory was recalled frequently and recently"
+                                    .to_string(),
+                            });
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(key = %e.key, %error, "Dreaming failed to revive memory");
+                        }
+                    }
                 }
-                if let Ok(Some(_)) = self.layer_manager.consider_promotion(&e.key).await {
-                    report.promoted += 1;
+                match self.layer_manager.consider_promotion(&e.key).await {
+                    Ok(Some(_)) => {
+                        report.promoted += 1;
+                        report.decisions.push(DreamingDecision {
+                            key: e.key.clone(),
+                            action: DreamingAction::PromotedToHot,
+                            recall_count: e.meta.recall_count,
+                            inactive_days,
+                            reason: "memory met deterministic hot-layer eligibility".to_string(),
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(key = %e.key, %error, "Dreaming failed to promote memory");
+                    }
                 }
             }
 
@@ -133,14 +180,28 @@ impl Dreaming {
             //    recallable with decay and can be revived by a future pass).
             if e.meta.status == MemoryStatus::Active
                 && e.meta.recall_count < self.config.low_recall_threshold
-                && age_days > self.config.stale_age_days as f64
-                && self
+                && inactive_days > self.config.stale_age_days as f64
+            {
+                match self
                     .layer_manager
                     .demote(&e.key, "dreaming: stale + low recall")
                     .await
-                    .is_ok()
-            {
-                report.demoted += 1;
+                {
+                    Ok(_) => {
+                        report.demoted += 1;
+                        report.decisions.push(DreamingDecision {
+                            key: e.key.clone(),
+                            action: DreamingAction::Archived,
+                            recall_count: e.meta.recall_count,
+                            inactive_days,
+                            reason: "memory exceeded the inactivity window with low recall"
+                                .to_string(),
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(key = %e.key, %error, "Dreaming failed to archive memory");
+                    }
+                }
             }
         }
 
@@ -226,6 +287,7 @@ mod tests {
             report.promoted, 1,
             "hot-eligible revived memory promoted to hot"
         );
+        assert_eq!(report.decisions.len(), 2);
         // Promoted memory is removed from the warm layer (now in MEMORY.md).
         let warm = lm
             .list_warm_memories(&MemoryFilter::new())
@@ -298,5 +360,34 @@ mod tests {
         assert_eq!(report.scanned, 1);
         assert_eq!(report.promoted, 0, "low-recall not promoted");
         assert_eq!(report.demoted, 0, "fresh memory not demoted (not stale)");
+    }
+
+    #[tokio::test]
+    async fn dreaming_does_not_promote_old_lifetime_recall_count() -> crate::error::Result<()> {
+        let (lm, store) = make_manager();
+        let mut meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "user",
+        )
+        .with_confidence(0.9)
+        .with_recall_weight(0.9);
+        meta.status = MemoryStatus::Archived;
+        meta.recall_count = 10;
+        let value = TypedMemoryValue::new("old preference", meta).to_value()?;
+        let mut item = StoreItem::new(
+            vec!["agent".to_string(), "memories".to_string()],
+            "old_recall".to_string(),
+            value,
+        );
+        item.created_at = now_secs().saturating_sub(90 * 86400);
+        store.put_raw(item).await;
+
+        let report = Dreaming::new(lm, DreamingConfig::default()).run().await?;
+
+        assert_eq!(report.revived, 0);
+        assert_eq!(report.promoted, 0);
+        assert!(report.decisions.is_empty());
+        Ok(())
     }
 }

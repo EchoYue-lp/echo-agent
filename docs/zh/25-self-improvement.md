@@ -253,9 +253,9 @@ let filter = ChangeFilter::new()
 // 日志文件：.echo-agent/evolution/change-log.jsonl
 ```
 
-### 记忆审查与 GC — `MemoryReviewer`
+### 记忆审查与确定性维护
 
-记忆会积累。审查器对暖层做陈旧度评分、冲突检测和归档；语义合并默认只提案、不执行：
+记忆会积累。`MemoryReviewer` 只对暖层做陈旧度评分和冲突检测，不修改内容或状态；`Dreaming` 独立执行基于 recall/inactivity 的确定性晋升、复活和归档，并返回可解释的 decision report。语义冲突必须由产品层显式采纳后再调用合并原语：
 
 ```
 staleness = age·0.35 + low_usage·0.20 + instability·0.20 + contradiction·0.20 + source_weakness·0.05
@@ -263,23 +263,22 @@ staleness = age·0.35 + low_usage·0.20 + instability·0.20 + contradiction·0.2
 
 | 陈旧度 | 状态 |
 |--------|------|
-| < 0.40 | Active |
-| 0.40–0.65 | Stale |
-| 0.65–0.85 | Deprecated |
-| ≥ 0.85 | Archived（降级到冷层） |
+| < 0.35 | Active |
+| 0.35–0.50 | Active（建议审查） |
+| 0.50–0.65 | Superseded 候选 |
+| ≥ 0.65 | Archived 候选 |
 
 ```rust
 use echo_agent::evolution::{MemoryReviewer, ReviewConfig};
 
 let reviewer = MemoryReviewer::new();
 let report = reviewer
-    .review(&typed_store, &layer_manager, &change_log, &ReviewConfig::default())
+    .review(&typed_store, &ReviewConfig::default())
     .await?;
-// report.archived / report.merges_applied / report.superseded_keys
+// report.staleness_suggestions / report.conflict_proposals
 ```
 
-`ReviewConfig::default()` 默认关闭 session-end review，并设置
-`max_merges_per_review = 0`。产品可手动触发或显式配置其它 cadence，但不应和 Dreaming 重复维护。
+`ReviewConfig::default()` 默认关闭 session-end review，单次最多返回 10 个冲突建议、每个建议最多 16 条成员，以限制 JSONL 和上下文增长。框架保留显式 `MemoryMerger`，但 reviewer 不会自行调用；应用应在用户确认后执行，并保存 before snapshot 以支持撤销。
 
 ### 带证据的运行回顾 — `BackgroundReviewer`
 

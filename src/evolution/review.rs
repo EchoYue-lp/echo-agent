@@ -1,4 +1,4 @@
-//! Memory review and garbage collection — scan, score, conflict-detect, merge, archive.
+//! Memory review analysis and explicit conflict resolution.
 //!
 //! Phase 2 of the evolution system. Phase 1 gave memories typed metadata, layered
 //! storage (hot/warm/cold), and an audit log, but memories were never re-evaluated
@@ -8,9 +8,9 @@
 //!   contradiction, and source-weakness factors (replaces `MemoryMeta::base_staleness`).
 //! - [`ConflictDetector`] — groups memories sharing the same topic + type with
 //!   different content hashes.
-//! - [`MemoryMerger`] — merges a conflict group into one primary entry, superseding
-//!   the rest (first real use of `MemoryStatus::Superseded` and `ChangeType::Merge`).
-//! - [`MemoryReviewer`] — orchestrator: scan → score → detect → merge → archive.
+//! - [`MemoryMerger`] — explicit mutation primitive that merges a user-approved
+//!   conflict group into one primary entry and supersedes the rest.
+//! - [`MemoryReviewer`] — analysis-only orchestrator: scan → score → propose.
 //!
 //! # Status thresholds
 //!
@@ -27,10 +27,9 @@
 //! | `0.50–0.65`| Superseded candidate         |
 //! | `≥ 0.65`   | Archived candidate           |
 //!
-//! The reviewer only mutates entries that cross the archive threshold (≥ 0.65):
-//! it demotes them to cold and marks them `MemoryStatus::Archived`. Entries in the
-//! 0.35–0.65 band are surfaced in the report but left in place — a human (or a
-//! future LLM-assisted reviewer) decides whether to act.
+//! The reviewer never mutates memories. Deterministic scheduled maintenance is
+//! owned by [`super::dreaming::Dreaming`]; semantic conflict resolution requires
+//! an explicit caller to invoke [`MemoryMerger`].
 
 use chrono::{DateTime, Duration, Utc};
 use echo_core::memory::types::{MemoryMeta, MemoryStatus, MemoryType};
@@ -39,7 +38,6 @@ use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemor
 use std::collections::HashMap;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use super::layer::MemoryLayerManager;
 use crate::error::Result;
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -74,9 +72,8 @@ impl StalenessScorer {
     /// Score a single entry.
     ///
     /// `has_contradiction` should be `true` when the [`ConflictDetector`] found
-    /// this entry in a conflict group. Because detection runs after the initial
-    /// scoring pass in the reviewer, callers typically score twice — first with
-    /// `false`, then re-score the conflicted entries with `true`.
+    /// this entry in a conflict group. The reviewer detects conflicts before its
+    /// single scoring pass.
     pub fn score(
         &self,
         entry: &TypedMemoryEntry,
@@ -124,9 +121,9 @@ pub struct StalenessReport {
     pub key: String,
     /// Aggregate staleness (0.0–1.0).
     pub staleness: f32,
-    /// Time-since-creation/update factor.
+    /// Time since the latest recall, falling back to creation time.
     pub age_factor: f32,
-    /// Low-revision-count factor (proxy for low usage).
+    /// Low-recall-count factor.
     pub usage_factor: f32,
     /// `1.0 - stability`.
     pub instability_factor: f32,
@@ -138,12 +135,14 @@ pub struct StalenessReport {
     pub recommended_status: MemoryStatus,
 }
 
-/// Compute the age factor from the entry's most recent timestamp.
+/// Compute the age factor from the entry's most recent recall activity.
 ///
 /// `<7d → 0.0`, `7–30d → 0.2`, `30–90d → 0.5`, `>90d → 0.8`.
 fn age_factor(entry: &TypedMemoryEntry, now: DateTime<Utc>) -> f32 {
-    // Prefer updated_at (last revision), fall back to created_at.
-    let secs = entry.raw.updated_at.max(entry.raw.created_at);
+    // Metadata-only recall updates also change StoreItem::updated_at, so using
+    // that field would make telemetry writes look like semantic edits. Keep a
+    // dedicated recall timestamp and otherwise fall back to creation time.
+    let secs = entry.meta.last_recalled_at.unwrap_or(entry.raw.created_at);
     let Some(then) = DateTime::<Utc>::from_timestamp(secs as i64, 0) else {
         // Unparseable timestamp — treat as unknown-age (neutral).
         return 0.2;
@@ -235,7 +234,7 @@ impl ConflictDetector {
             }
             let group_entries = members
                 .into_iter()
-                .map(|(_, idx)| entries[idx].clone())
+                .filter_map(|(_, idx)| entries.get(idx).cloned())
                 .collect();
             groups.push(ConflictGroup {
                 topic,
@@ -264,6 +263,83 @@ pub struct ConflictGroup {
     pub entries: Vec<TypedMemoryEntry>,
 }
 
+/// One member of a semantic memory-conflict proposal.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemoryConflictMember {
+    pub key: String,
+    pub content: String,
+    pub confidence: f32,
+    pub status: MemoryStatus,
+    pub recall_count: u32,
+    pub updated_at: u64,
+}
+
+/// Analysis-only proposal describing a conflict that needs an explicit choice.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemoryConflictProposal {
+    pub topic: String,
+    pub memory_type: MemoryType,
+    pub recommended_primary_key: String,
+    pub members: Vec<MemoryConflictMember>,
+}
+
+/// Exact pre-merge state used to undo an explicitly approved merge.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryMergeSnapshot {
+    pub key: String,
+    pub content: String,
+    pub meta: MemoryMeta,
+}
+
+/// Result of applying one conflict proposal.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AppliedMemoryMerge {
+    pub primary_key: String,
+    pub superseded_keys: Vec<String>,
+    pub before: Vec<MemoryMergeSnapshot>,
+}
+
+impl MemoryConflictProposal {
+    pub(crate) fn from_group(group: &ConflictGroup) -> Option<Self> {
+        let ordered = ordered_conflict_entries(group);
+        let recommended_primary_key = ordered.first()?.key.clone();
+        let members = ordered
+            .into_iter()
+            .map(|entry| MemoryConflictMember {
+                key: entry.key,
+                content: entry.content,
+                confidence: entry.meta.confidence,
+                status: entry.meta.status,
+                recall_count: entry.meta.recall_count,
+                updated_at: entry.raw.updated_at,
+            })
+            .collect();
+        Some(Self {
+            topic: group.topic.clone(),
+            memory_type: group.memory_type,
+            recommended_primary_key,
+            members,
+        })
+    }
+}
+
+fn ordered_conflict_entries(group: &ConflictGroup) -> Vec<TypedMemoryEntry> {
+    let mut ordered = group.entries.clone();
+    ordered.sort_by(|a, b| {
+        b.meta
+            .confidence
+            .partial_cmp(&a.meta.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.raw
+                    .updated_at
+                    .cmp(&a.raw.updated_at)
+                    .then_with(|| a.key.cmp(&b.key))
+            })
+    });
+    ordered
+}
+
 /// Content hash for conflict comparison — FNV-1a over trimmed content.
 ///
 /// Matches the existing dedup hash in `memory_promoter.rs` so the two systems
@@ -279,7 +355,7 @@ fn content_hash(content: &str) -> u64 {
 /// Merge policy:
 /// - The entry with the highest `confidence` wins (ties broken by recency of
 ///   `updated_at`, then by key for determinism).
-/// - The primary's content is annotated with `(merged from N similar entries)`.
+/// - The primary's content stays verbatim; provenance is stored in audit data.
 /// - Secondary entries are rewritten with `status = Superseded`,
 ///   `superseded_by = <primary key>`, and their `revision_count` is folded into
 ///   the primary's.
@@ -325,19 +401,7 @@ impl<'a> MemoryMerger<'a> {
 
         // Pick the primary: highest confidence, then most recent updated_at,
         // then key (deterministic tiebreak).
-        let mut ordered = group.entries.clone();
-        ordered.sort_by(|a, b| {
-            b.meta
-                .confidence
-                .partial_cmp(&a.meta.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    b.raw
-                        .updated_at
-                        .cmp(&a.raw.updated_at)
-                        .then_with(|| a.key.cmp(&b.key))
-                })
-        });
+        let ordered = ordered_conflict_entries(group);
 
         let primary = match ordered.first() {
             Some(p) => p.clone(),
@@ -356,13 +420,8 @@ impl<'a> MemoryMerger<'a> {
             .map(|e| e.meta.revision_count)
             .sum::<u32>();
 
-        // Rewrite the primary: annotate content, bump revision_count, keep its
-        // own confidence/stability (it already won on quality).
-        let merged_content = format!(
-            "{} (merged from {} similar entries)",
-            primary.content.trim(),
-            group.entries.len()
-        );
+        // Preserve the selected fact verbatim. Merge provenance belongs in
+        // metadata/audit records, not in model-visible memory content.
         let primary_meta = MemoryMeta {
             revision_count: combined_revision_count.max(primary.meta.revision_count),
             ..primary.meta.clone()
@@ -371,7 +430,7 @@ impl<'a> MemoryMerger<'a> {
             .put_typed(
                 crate::evolution::layer::WARM_NAMESPACE,
                 &primary.key,
-                &merged_content,
+                &primary.content,
                 primary_meta.clone(),
             )
             .await?;
@@ -431,7 +490,7 @@ impl<'a> MemoryMerger<'a> {
     ) -> Result<()> {
         let mut builder =
             ChangeEntryBuilder::new(EntityType::Memory, key, ChangeType::Merge).reason(reason);
-        builder = builder.trigger("memory_reviewer".to_string());
+        builder = builder.trigger("explicit_memory_merge".to_string());
         builder = builder.after(serde_json::json!({
             "superseded_by": superseded_by,
             "group_size": group_size,
@@ -443,7 +502,7 @@ impl<'a> MemoryMerger<'a> {
 
 // ── MemoryReviewer (orchestrator) ──────────────────────────────────────
 
-/// Orchestrates a full review pass: scan → score → detect conflicts → merge → archive.
+/// Orchestrates an analysis-only review pass: scan → score → propose.
 pub struct MemoryReviewer {
     scorer: StalenessScorer,
     conflict_detector: ConflictDetector,
@@ -454,12 +513,11 @@ pub struct MemoryReviewer {
 pub struct ReviewConfig {
     /// Run a review when the session ends. Default: `false`.
     pub review_on_session_end: bool,
-    /// Run a review every N memory writes. Default: `50`.
-    pub review_every_n_writes: u64,
-    /// Cap on conflict groups merged per pass. Default: `10`.
+    /// Cap on conflict proposals returned per pass. Default: `10`.
     pub max_conflicts_per_review: usize,
-    /// Cap on merges applied per pass. Default: `0` (proposal-only).
-    pub max_merges_per_review: usize,
+    /// Maximum members allowed in one proposal. Larger groups are reported but
+    /// omitted from actionable output to bound JSONL and prompt growth.
+    pub max_conflict_members: usize,
     /// Run skill candidate detection during review. Default: `true`.
     pub detect_skill_candidates: bool,
     /// Auto-generate draft SKILL.md for new candidates. Default: `false`.
@@ -470,32 +528,29 @@ impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
             review_on_session_end: false,
-            review_every_n_writes: 50,
             max_conflicts_per_review: 10,
-            max_merges_per_review: 0,
+            max_conflict_members: 16,
             detect_skill_candidates: true,
             auto_generate_drafts: false,
         }
     }
 }
 
-/// A single mutation performed during a review pass.
+/// A single proposal produced during a review pass.
 #[derive(Debug, Clone)]
 pub enum ReviewChange {
-    /// A memory changed status (e.g. Active → Archived).
-    StatusTransition {
+    /// A memory crossed the staleness review threshold.
+    StalenessSuggested {
         key: String,
-        from: MemoryStatus,
-        to: MemoryStatus,
+        recommended_status: MemoryStatus,
         staleness: f32,
     },
-    /// A conflict group was merged into one primary.
-    Merge {
-        primary_key: String,
-        superseded_keys: Vec<String>,
+    /// A semantic conflict needs an explicit primary selection.
+    ConflictProposed {
+        topic: String,
+        recommended_primary_key: String,
+        member_keys: Vec<String>,
     },
-    /// A memory was archived (demoted to cold + status Archived).
-    Archive { key: String, staleness: f32 },
     /// A new skill candidate was proposed from observed patterns.
     CandidateProposed { name: String, sample_count: usize },
     /// A draft SKILL.md was generated from a candidate.
@@ -507,19 +562,19 @@ pub enum ReviewChange {
 pub struct ReviewReport {
     /// Total entries scanned in the warm layer.
     pub total_scanned: usize,
-    /// Entries whose staleness crossed the flag threshold (≥ 0.40).
+    /// Entries whose staleness crossed the flag threshold (≥ 0.35).
     pub stale_count: usize,
     /// Conflict groups found.
     pub conflict_groups: usize,
-    /// Merges actually applied.
-    pub merges_applied: usize,
-    /// Archives actually applied.
-    pub archives_applied: usize,
+    /// Explainable staleness suggestions; no status is changed by the reviewer.
+    pub staleness_suggestions: Vec<StalenessReport>,
+    /// Semantic conflict proposals capped by `max_conflicts_per_review`.
+    pub conflict_proposals: Vec<MemoryConflictProposal>,
     /// Skill candidates proposed during this review.
     pub candidates_proposed: usize,
     /// Draft SKILL.md files generated during this review.
     pub drafts_generated: usize,
-    /// Individual mutations, in application order.
+    /// Individual proposals, in deterministic order.
     pub changes: Vec<ReviewChange>,
 }
 
@@ -532,24 +587,13 @@ impl MemoryReviewer {
         }
     }
 
-    /// Run a full review pass against the warm layer.
+    /// Analyze the warm layer without mutating it.
     ///
-    /// Algorithm:
-    /// 1. List all warm-layer entries (`MemoryFilter::new()`).
-    /// 2. Detect conflict groups; re-score conflicted entries with the
-    ///    contradiction factor turned on.
-    /// 3. Archive entries with staleness ≥ 0.65 (demote to cold + `Archived`).
-    /// 4. Merge conflict groups up to `max_merges_per_review`.
-    /// 5. Re-evaluate hot-layer entries' demotion score with the freshly computed
-    ///    staleness; demote any that now exceed the hot budget via the layer
-    ///    manager's normal enforcement path.
-    /// 6. Record every mutation through the change log (archive/merge do this
-    ///    themselves; status-only transitions are recorded here).
+    /// Deterministic lifecycle maintenance belongs to `Dreaming`; semantic
+    /// conflict resolution belongs to an explicit `MemoryMerger` caller.
     pub async fn review(
         &self,
         typed_store: &TypedMemoryStore,
-        layer_manager: &MemoryLayerManager,
-        change_log: &dyn ChangeLog,
         config: &ReviewConfig,
     ) -> Result<ReviewReport> {
         let now = Utc::now();
@@ -568,7 +612,12 @@ impl MemoryReviewer {
         }
 
         // ── 2. Conflict detection ──
-        let conflict_groups = self.conflict_detector.detect(&entries);
+        let reviewable_entries: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.meta.status != MemoryStatus::Superseded)
+            .cloned()
+            .collect();
+        let conflict_groups = self.conflict_detector.detect(&reviewable_entries);
         // Collect the set of keys that participate in any conflict group so the
         // scoring pass can flag them.
         let mut conflicted_keys: std::collections::HashSet<String> =
@@ -586,100 +635,35 @@ impl MemoryReviewer {
             let has_contradiction = conflicted_keys.contains(&entry.key);
             scored.push(self.scorer.score(entry, now, has_contradiction));
         }
-        report.stale_count = scored
-            .iter()
-            .filter(|r| r.staleness >= STALENESS_ACTIVE_MAX)
-            .count();
-
-        // ── 4. Archive high-staleness entries (≥ 0.65) ──
-        // Build a key → current status lookup so we only record real transitions.
-        let status_by_key: HashMap<String, MemoryStatus> = entries
-            .iter()
-            .map(|e| (e.key.clone(), e.meta.status))
+        report.staleness_suggestions = scored
+            .into_iter()
+            .filter(|entry| entry.staleness >= STALENESS_ACTIVE_MAX)
             .collect();
-        for report_entry in &scored {
-            if report_entry.staleness < STALENESS_ARCHIVE_MIN {
-                continue;
-            }
-            let Some(current_status) = status_by_key.get(&report_entry.key) else {
-                continue;
-            };
-            // Skip entries already archived — they may still live in warm until
-            // demotion, but we don't want to re-record an Archive change.
-            if *current_status == MemoryStatus::Archived {
-                continue;
-            }
-
-            match layer_manager
-                .demote(&report_entry.key, "staleness-based archival")
-                .await
-            {
-                Ok(_) => {
-                    // (stage4 B1) `demote` now marks status=Archived in place in the
-                    // unified namespace, so no separate locate+update_meta is needed
-                    // (the old block targeted the now-removed COLD_NAMESPACE).
-                    report.archives_applied += 1;
-                    report.changes.push(ReviewChange::Archive {
-                        key: report_entry.key.clone(),
-                        staleness: report_entry.staleness,
-                    });
-                    report.changes.push(ReviewChange::StatusTransition {
-                        key: report_entry.key.clone(),
-                        from: *current_status,
-                        to: MemoryStatus::Archived,
-                        staleness: report_entry.staleness,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        key = %report_entry.key,
-                        error = %e,
-                        "review: failed to archive stale entry"
-                    );
-                }
-            }
+        report.stale_count = report.staleness_suggestions.len();
+        for suggestion in &report.staleness_suggestions {
+            report.changes.push(ReviewChange::StalenessSuggested {
+                key: suggestion.key.clone(),
+                recommended_status: suggestion.recommended_status,
+                staleness: suggestion.staleness,
+            });
         }
 
-        // ── 5. Merge conflict groups ──
-        let merger = MemoryMerger::new(typed_store, change_log);
-        let mut merges_this_pass = 0usize;
-        for group in conflict_groups.iter().take(config.max_conflicts_per_review) {
-            if merges_this_pass >= config.max_merges_per_review {
-                break;
-            }
-            // Skip groups whose primary was just archived.
-            if group
-                .entries
-                .iter()
-                .all(|e| status_by_key.get(&e.key) == Some(&MemoryStatus::Archived))
-            {
-                continue;
-            }
-            match merger.merge_group(group).await {
-                Ok(result) if !result.superseded_keys.is_empty() => {
-                    merges_this_pass += 1;
-                    report.merges_applied += 1;
-                    report.changes.push(ReviewChange::Merge {
-                        primary_key: result.primary_key,
-                        superseded_keys: result.superseded_keys,
-                    });
-                }
-                Ok(_) => { /* group too small to merge — nothing to record */ }
-                Err(e) => {
-                    tracing::warn!(
-                        topic = %group.topic,
-                        error = %e,
-                        "review: failed to merge conflict group"
-                    );
-                }
-            }
-        }
-
-        // ── 6. Re-evaluate hot-layer budget with fresh staleness ──
-        // enforce_hot_budget uses its own demotion score; calling it here lets any
-        // newly-stale hot entries flow back to warm. Errors are non-fatal.
-        if let Err(e) = layer_manager.enforce_hot_budget().await {
-            tracing::warn!(error = %e, "review: hot-budget enforcement failed");
+        report.conflict_proposals = conflict_groups
+            .iter()
+            .filter(|group| group.entries.len() <= config.max_conflict_members)
+            .take(config.max_conflicts_per_review)
+            .filter_map(MemoryConflictProposal::from_group)
+            .collect();
+        for proposal in &report.conflict_proposals {
+            report.changes.push(ReviewChange::ConflictProposed {
+                topic: proposal.topic.clone(),
+                recommended_primary_key: proposal.recommended_primary_key.clone(),
+                member_keys: proposal
+                    .members
+                    .iter()
+                    .map(|member| member.key.clone())
+                    .collect(),
+            });
         }
 
         Ok(report)
@@ -696,7 +680,6 @@ impl Default for MemoryReviewer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::layer::MemoryLayer;
     use super::*;
     use echo_core::memory::store::StoreItem;
     use echo_core::memory::types::MemorySource;
@@ -845,10 +828,11 @@ mod tests {
     }
 
     #[test]
-    fn review_defaults_do_not_run_or_merge_automatically() {
+    fn review_defaults_are_manual_and_proposal_only() {
         let config = ReviewConfig::default();
         assert!(!config.review_on_session_end);
-        assert_eq!(config.max_merges_per_review, 0);
+        assert_eq!(config.max_conflicts_per_review, 10);
+        assert_eq!(config.max_conflict_members, 16);
     }
 
     // ── ConflictDetector ──
@@ -973,13 +957,13 @@ mod tests {
         assert_eq!(result.primary_key, "high");
         assert_eq!(result.superseded_keys, vec!["low".to_string()]);
 
-        // Primary content should carry the merge annotation.
+        // Primary content stays verbatim; provenance belongs in audit metadata.
         let primary = typed
             .get_typed(crate::evolution::layer::WARM_NAMESPACE, "high")
             .await
             .unwrap()
             .unwrap();
-        assert!(primary.content.contains("merged from 2 similar entries"));
+        assert_eq!(primary.content, "Build uses cargo 1.80");
 
         // Secondary should be Superseded with superseded_by pointing at the primary.
         let secondary = typed
@@ -1016,20 +1000,13 @@ mod tests {
 
     // ── MemoryReviewer end-to-end ──
 
-    fn make_layer_manager(store: Arc<dyn echo_core::memory::store::Store>) -> MemoryLayerManager {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
-        MemoryLayerManager::new(dir, store, Box::new(NullChangeLog))
-    }
-
     #[tokio::test]
-    async fn test_review_archives_stale_and_merges_conflicts() {
+    async fn test_review_reports_stale_and_conflicts_without_mutation() {
         let mem_store = Arc::new(InMemoryStore::new());
         let store: Arc<dyn echo_core::memory::store::Store> = mem_store.clone();
         let typed = TypedMemoryStore::new(store.clone());
-        let layer_mgr = make_layer_manager(store.clone());
-        let log = NullChangeLog;
 
-        // (1) A very stale entry → should be archived.
+        // (1) A very stale entry → should be reported as an archive candidate.
         let stale_meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::L3Promotion, "old")
             .with_confidence(0.30)
             .with_stability(0.20);
@@ -1056,7 +1033,7 @@ mod tests {
             mem_store.put_raw(past).await;
         }
 
-        // (2) Two conflicting entries on the same topic → should be merged.
+        // (2) Two conflicting entries on the same topic → should produce a proposal.
         let c1 = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "build")
             .with_confidence(0.95);
         let c2 = MemoryMeta::new(
@@ -1102,40 +1079,63 @@ mod tests {
             .await
             .unwrap();
 
-        let config = ReviewConfig {
-            max_merges_per_review: 5,
-            ..ReviewConfig::default()
-        };
-        let report = MemoryReviewer::new()
-            .review(&typed, &layer_mgr, &log, &config)
-            .await
-            .unwrap();
+        let config = ReviewConfig::default();
+        let report = MemoryReviewer::new().review(&typed, &config).await.unwrap();
 
         assert_eq!(report.total_scanned, 4);
         assert!(
-            report.archives_applied >= 1,
-            "should archive the stale entry"
+            report
+                .staleness_suggestions
+                .iter()
+                .any(|s| s.key == "stale")
         );
-        assert!(
-            report.merges_applied >= 1,
-            "should merge the conflict group"
+        assert_eq!(report.conflict_proposals.len(), 1);
+        assert_eq!(
+            report.conflict_proposals[0].recommended_primary_key,
+            "build_a"
         );
 
-        // (stage4 B1) The stale entry is Archived in place (unified ns), not
-        // moved to a cold layer.
-        let loc = layer_mgr.locate("stale").await;
-        let (layer, entry) = loc.expect("stale entry should still be present");
-        assert_eq!(layer, MemoryLayer::Warm);
-        assert_eq!(entry.meta.status, MemoryStatus::Archived);
-
-        // The lower-confidence conflict entry should be superseded.
+        // Analysis must not archive or merge anything.
+        let stale = typed
+            .get_typed(crate::evolution::layer::WARM_NAMESPACE, "stale")
+            .await
+            .unwrap()
+            .expect("stale entry remains present");
+        assert_eq!(stale.meta.status, MemoryStatus::Active);
         let build_b = typed
             .get_typed(crate::evolution::layer::WARM_NAMESPACE, "build_b")
             .await
-            .unwrap();
-        if let Some(entry) = build_b {
-            assert_eq!(entry.meta.status, MemoryStatus::Superseded);
-            assert_eq!(entry.meta.superseded_by.as_deref(), Some("build_a"));
+            .unwrap()
+            .expect("conflict member remains present");
+        assert_eq!(build_b.meta.status, MemoryStatus::Active);
+        assert_eq!(build_b.content, "Build uses cargo 1.70");
+    }
+
+    #[tokio::test]
+    async fn review_omits_oversized_conflict_proposals() -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryStore::new());
+        let typed = TypedMemoryStore::new(store);
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "oversized",
+        );
+        for index in 0..17 {
+            typed
+                .put_typed(
+                    crate::evolution::layer::WARM_NAMESPACE,
+                    &format!("member_{index}"),
+                    &format!("value_{index}"),
+                    meta.clone(),
+                )
+                .await?;
         }
+        let report = MemoryReviewer::new()
+            .review(&typed, &ReviewConfig::default())
+            .await?;
+
+        assert_eq!(report.conflict_groups, 1);
+        assert!(report.conflict_proposals.is_empty());
+        Ok(())
     }
 }

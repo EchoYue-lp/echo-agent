@@ -44,15 +44,21 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
+use super::review::{
+    AppliedMemoryMerge, ConflictDetector, MemoryConflictProposal, MemoryMergeSnapshot, MemoryMerger,
+};
 use super::security::{EvolutionSecurityGuard, InputTrustLevel};
 use echo_core::error::{ConfigError, ReactError};
 
 /// Alias for layer operation results.
 type Result<T> = std::result::Result<T, ReactError>;
+
+fn merge_plan_error(message: impl Into<String>) -> ReactError {
+    ReactError::Config(Box::new(ConfigError::ConfigFileError(message.into())))
+}
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -116,6 +122,9 @@ pub struct HotEntryMeta {
     pub confidence: f32,
     /// Stability score (0.0-1.0).
     pub stability: f32,
+    /// Recall importance used by warm-layer ranking.
+    #[serde(default = "default_hot_recall_weight")]
+    pub recall_weight: f32,
     /// Source of this memory.
     pub source: MemorySource,
     /// Topic category.
@@ -123,6 +132,15 @@ pub struct HotEntryMeta {
     /// Risk level.
     #[serde(default)]
     pub risk: MemoryRisk,
+    /// Number of semantic revisions accumulated before promotion.
+    #[serde(default)]
+    pub revision_count: u32,
+    /// Number of successful recalls accumulated before promotion.
+    #[serde(default)]
+    pub recall_count: u32,
+    /// Last successful recall timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_recalled_at: Option<u64>,
     /// When this entry was promoted to hot (ISO 8601).
     pub last_promoted: String,
 }
@@ -130,11 +148,20 @@ pub struct HotEntryMeta {
 impl HotEntryMeta {
     /// Convert to a MemoryMeta for reconstruction.
     fn to_memory_meta(&self) -> MemoryMeta {
-        MemoryMeta::new(self.memory_type, self.source, &self.topic)
+        let mut meta = MemoryMeta::new(self.memory_type, self.source, &self.topic)
             .with_confidence(self.confidence)
             .with_stability(self.stability)
-            .with_risk(self.risk)
+            .with_recall_weight(self.recall_weight)
+            .with_risk(self.risk);
+        meta.revision_count = self.revision_count;
+        meta.recall_count = self.recall_count;
+        meta.last_recalled_at = self.last_recalled_at;
+        meta
     }
+}
+
+fn default_hot_recall_weight() -> f32 {
+    0.5
 }
 
 // ── MemoryFile ─────────────────────────────────────────────────────────
@@ -186,10 +213,6 @@ pub struct MemoryLayerManager {
     change_log: Box<dyn ChangeLog>,
     /// Security guard for write-time checks (secret scan, injection, rate limit).
     security_guard: EvolutionSecurityGuard,
-    /// Shared write counter for triggering periodic reviews.
-    write_counter: Arc<AtomicU64>,
-    /// Number of writes between automatic reviews.
-    review_every_n_writes: u64,
     /// Optional observer called after a real memory write succeeds.
     write_observer: Option<Arc<dyn MemoryWriteObserver>>,
 }
@@ -248,31 +271,14 @@ impl MemoryLayerManager {
             typed_store: TypedMemoryStore::new(store),
             change_log,
             security_guard: EvolutionSecurityGuard::default_config(),
-            write_counter: Arc::new(AtomicU64::new(0)),
-            review_every_n_writes: 50,
             write_observer: None,
         }
-    }
-
-    /// Configure the review trigger threshold and shared write counter.
-    ///
-    /// Pass the same `Arc<AtomicU64>` that your [`ReviewIntegration`] uses so
-    /// the layer manager can increment it on every write.
-    pub fn with_review_trigger(mut self, counter: Arc<AtomicU64>, every_n: u64) -> Self {
-        self.write_counter = counter;
-        self.review_every_n_writes = every_n;
-        self
     }
 
     /// Configure a write observer invoked after successful real memory writes.
     pub fn with_write_observer(mut self, observer: Arc<dyn MemoryWriteObserver>) -> Self {
         self.write_observer = Some(observer);
         self
-    }
-
-    /// Get a clone of the shared write counter (for external readers like `ReviewIntegration`).
-    pub fn write_counter(&self) -> Arc<AtomicU64> {
-        self.write_counter.clone()
     }
 
     // ── Reading ─────────────────────────────────────────────────────
@@ -419,6 +425,16 @@ impl MemoryLayerManager {
                 .typed_store
                 .update_meta(WARM_NAMESPACE, key, meta)
                 .await?;
+            if updated {
+                self.record_change(
+                    key,
+                    ChangeType::Promote,
+                    Some("archived"),
+                    Some("warm"),
+                    "recent high-recall activity revived archived memory",
+                    "dreaming",
+                )?;
+            }
             return Ok(updated);
         }
         Ok(false)
@@ -498,6 +514,123 @@ impl MemoryLayerManager {
     /// high-recall memories worth promoting and stale low-recall ones to demote.
     pub async fn list_warm_memories(&self, filter: &MemoryFilter) -> Result<Vec<TypedMemoryEntry>> {
         self.typed_store.list_typed(WARM_NAMESPACE, filter).await
+    }
+
+    /// Apply a previously reviewed semantic-conflict proposal.
+    ///
+    /// The current warm-layer conflict must still exactly match the proposal;
+    /// stale proposals fail before any mutation. The returned snapshots are the
+    /// authoritative undo payload for the caller's review log.
+    pub async fn apply_merge_proposal(
+        &self,
+        proposal: &MemoryConflictProposal,
+    ) -> Result<AppliedMemoryMerge> {
+        if proposal.members.len() < 2 {
+            return Err(merge_plan_error(
+                "memory merge proposal requires at least two members",
+            ));
+        }
+
+        let entries = self
+            .typed_store
+            .list_typed(WARM_NAMESPACE, &MemoryFilter::new())
+            .await?;
+        let expected_keys: std::collections::HashSet<&str> = proposal
+            .members
+            .iter()
+            .map(|member| member.key.as_str())
+            .collect();
+        if expected_keys.len() != proposal.members.len() {
+            return Err(merge_plan_error(
+                "memory merge proposal contains duplicate member keys",
+            ));
+        }
+
+        let group = ConflictDetector::new()
+            .detect(&entries)
+            .into_iter()
+            .find(|group| {
+                if group.topic != proposal.topic || group.memory_type != proposal.memory_type {
+                    return false;
+                }
+                let current_keys: std::collections::HashSet<&str> = group
+                    .entries
+                    .iter()
+                    .map(|entry| entry.key.as_str())
+                    .collect();
+                current_keys == expected_keys
+            })
+            .ok_or_else(|| merge_plan_error("memory conflict changed; refresh Review Inbox"))?;
+
+        for expected in &proposal.members {
+            let current = group
+                .entries
+                .iter()
+                .find(|entry| entry.key == expected.key)
+                .ok_or_else(|| merge_plan_error("memory conflict member disappeared"))?;
+            if current.content != expected.content
+                || current.meta.status != expected.status
+                || (current.meta.confidence - expected.confidence).abs() > f32::EPSILON
+            {
+                return Err(merge_plan_error(
+                    "memory conflict content or metadata changed; refresh Review Inbox",
+                ));
+            }
+        }
+
+        let current_proposal = MemoryConflictProposal::from_group(&group)
+            .ok_or_else(|| merge_plan_error("memory conflict has no primary candidate"))?;
+        if current_proposal.recommended_primary_key != proposal.recommended_primary_key {
+            return Err(merge_plan_error(
+                "memory conflict recommendation changed; refresh Review Inbox",
+            ));
+        }
+
+        let before = group
+            .entries
+            .iter()
+            .map(|entry| MemoryMergeSnapshot {
+                key: entry.key.clone(),
+                content: entry.content.clone(),
+                meta: entry.meta.clone(),
+            })
+            .collect();
+        let result = MemoryMerger::new(&self.typed_store, self.change_log.as_ref())
+            .merge_group(&group)
+            .await?;
+        Ok(AppliedMemoryMerge {
+            primary_key: result.primary_key,
+            superseded_keys: result.superseded_keys,
+            before,
+        })
+    }
+
+    /// Restore the warm-layer content and typed metadata captured before a merge.
+    pub async fn restore_merge_snapshots(&self, snapshots: &[MemoryMergeSnapshot]) -> Result<()> {
+        if snapshots.len() < 2 {
+            return Err(merge_plan_error(
+                "memory merge undo requires at least two snapshots",
+            ));
+        }
+        for snapshot in snapshots {
+            self.typed_store
+                .put_typed(
+                    WARM_NAMESPACE,
+                    &snapshot.key,
+                    &snapshot.content,
+                    snapshot.meta.clone(),
+                )
+                .await?;
+            self.record_change(
+                &snapshot.key,
+                ChangeType::Update,
+                Some("merged"),
+                Some("warm"),
+                "user undid an approved memory merge",
+                "review_inbox_undo",
+            )?;
+        }
+        Ok(())
     }
 
     /// Consider promoting a warm entry to hot if eligible and space exists.
@@ -680,16 +813,6 @@ impl MemoryLayerManager {
         self.typed_store
             .put_typed(WARM_NAMESPACE, key, &safe_content, meta.clone())
             .await?;
-
-        // Increment write counter and check if review should be triggered.
-        let count = self.write_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if count.is_multiple_of(self.review_every_n_writes) {
-            tracing::info!(
-                count,
-                threshold = self.review_every_n_writes,
-                "Memory write counter reached review threshold"
-            );
-        }
 
         // Record the creation
         self.record_change(
@@ -892,9 +1015,13 @@ impl MemoryLayerManager {
             memory_type: entry.meta.memory_type,
             confidence: entry.meta.confidence,
             stability: entry.meta.stability,
+            recall_weight: entry.meta.recall_weight,
             source: entry.meta.source,
             topic: entry.meta.topic.clone(),
             risk: entry.meta.risk,
+            revision_count: entry.meta.revision_count,
+            recall_count: entry.meta.recall_count,
+            last_recalled_at: entry.meta.last_recalled_at,
             last_promoted: crate::utils::time::now_local().to_rfc3339(),
         };
 
@@ -1270,9 +1397,13 @@ entries:
                 memory_type: MemoryType::UserPreference,
                 confidence: 0.95,
                 stability: 0.85,
+                recall_weight: 0.8,
                 source: MemorySource::ExplicitSave,
                 topic: "style".to_string(),
                 risk: MemoryRisk::Low,
+                revision_count: 2,
+                recall_count: 4,
+                last_recalled_at: Some(1_750_000_000),
                 last_promoted: "2026-06-15T10:00:00Z".to_string(),
             }],
             body: "- **[test_key]** User prefers concise output.\n".to_string(),
@@ -1327,9 +1458,13 @@ entries:
             memory_type: MemoryType::UserPreference,
             confidence: 0.95,
             stability: 0.90,
+            recall_weight: 0.8,
             source: MemorySource::ExplicitSave,
             topic: "style".to_string(),
             risk: MemoryRisk::Low,
+            revision_count: 0,
+            recall_count: 0,
+            last_recalled_at: None,
             last_promoted: "2026-06-15T10:00:00Z".to_string(),
         };
 
@@ -1338,9 +1473,13 @@ entries:
             memory_type: MemoryType::CommandPattern,
             confidence: 0.50,
             stability: 0.30,
+            recall_weight: 0.4,
             source: MemorySource::AutoExtracted,
             topic: "build".to_string(),
             risk: MemoryRisk::Low,
+            revision_count: 0,
+            recall_count: 0,
+            last_recalled_at: None,
             last_promoted: "2026-06-15T10:00:00Z".to_string(),
         };
 
@@ -1424,6 +1563,96 @@ entries:
         // Not eligible → should stay in warm
         assert!(result.is_none());
         assert!(manager.read_hot_content().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approved_merge_can_be_restored_exactly() -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryStore::new());
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let manager = MemoryLayerManager::new(dir, store, Box::new(NullChangeLog));
+        let high = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "build")
+            .with_confidence(0.95);
+        let low = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "build",
+        )
+        .with_confidence(0.55);
+        manager
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "build_a", "Build uses cargo", high)
+            .await?;
+        manager
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "build_b", "Build uses make", low)
+            .await?;
+        let entries = manager.list_warm_memories(&MemoryFilter::new()).await?;
+        let group = ConflictDetector::new()
+            .detect(&entries)
+            .into_iter()
+            .next()
+            .ok_or_else(|| merge_plan_error("expected conflict"))?;
+        let proposal = MemoryConflictProposal::from_group(&group)
+            .ok_or_else(|| merge_plan_error("expected proposal"))?;
+
+        let applied = manager.apply_merge_proposal(&proposal).await?;
+        let secondary = manager
+            .typed_store
+            .get_typed(WARM_NAMESPACE, "build_b")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected secondary"))?;
+        assert_eq!(secondary.meta.status, MemoryStatus::Superseded);
+
+        manager.restore_merge_snapshots(&applied.before).await?;
+        let restored = manager
+            .typed_store
+            .get_typed(WARM_NAMESPACE, "build_b")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected restored secondary"))?;
+        assert_eq!(restored.meta.status, MemoryStatus::Active);
+        assert_eq!(restored.content, "Build uses make");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_merge_proposal_fails_before_mutation() -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryStore::new());
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let manager = MemoryLayerManager::new(dir, store, Box::new(NullChangeLog));
+        let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "build");
+        manager
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "a", "cargo", meta.clone())
+            .await?;
+        manager
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "b", "make", meta.clone())
+            .await?;
+        let entries = manager.list_warm_memories(&MemoryFilter::new()).await?;
+        let group = ConflictDetector::new()
+            .detect(&entries)
+            .into_iter()
+            .next()
+            .ok_or_else(|| merge_plan_error("expected conflict"))?;
+        let proposal = MemoryConflictProposal::from_group(&group)
+            .ok_or_else(|| merge_plan_error("expected proposal"))?;
+        manager
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "b", "ninja", meta)
+            .await?;
+
+        assert!(manager.apply_merge_proposal(&proposal).await.is_err());
+        let a = manager
+            .typed_store
+            .get_typed(WARM_NAMESPACE, "a")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected primary"))?;
+        assert_eq!(a.meta.status, MemoryStatus::Active);
+        Ok(())
     }
 
     #[tokio::test]

@@ -65,7 +65,11 @@ impl MemoryRecaller {
         let keys: Vec<String> = scored.iter().map(|(_, e)| e.raw.key.clone()).collect();
         tokio::spawn(async move {
             for key in keys {
-                let _ = incr_recall_count(&typed_for_count, &["agent", "memories"], &key).await;
+                if let Err(error) =
+                    incr_recall_count(&typed_for_count, &["agent", "memories"], &key).await
+                {
+                    tracing::debug!(%key, %error, "failed to update memory recall telemetry");
+                }
             }
         });
 
@@ -98,6 +102,7 @@ async fn incr_recall_count(
     if let Some(entry) = typed.get_typed(ns, key).await? {
         let mut meta = entry.meta;
         meta.recall_count = meta.recall_count.saturating_add(1);
+        meta.last_recalled_at = Some(crate::utils::time::now_secs());
         typed.update_meta(ns, key, meta).await?;
     }
     Ok(())

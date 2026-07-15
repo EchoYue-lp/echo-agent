@@ -53,7 +53,7 @@ pub use background_review::{
 pub use candidate::{CandidateReport, SkillCandidate, SkillCandidateDetector};
 pub use curator::{Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle, SkillMeta};
 pub use draft::{DraftResult, SkillDraftGenerator};
-pub use dreaming::{Dreaming, DreamingConfig, DreamingReport};
+pub use dreaming::{Dreaming, DreamingAction, DreamingConfig, DreamingDecision, DreamingReport};
 pub use health::{HealthBreakdown, HealthStatus, SkillHealthMonitor, SkillHealthReport};
 pub use layer::{
     HotEntryMeta, LayerChangeResult, MemoryFile, MemoryLayer, MemoryLayerManager,
@@ -63,8 +63,9 @@ pub use merge::{SimilarityBreakdown, SkillMergeProposal, SkillMerger, SkillSimil
 pub use patch::{PatchType, SkillPatch, SkillPatcher};
 pub use recall::MemoryRecaller;
 pub use review::{
-    ConflictDetector, ConflictGroup, MemoryMerger, MemoryReviewer, MergeResult, ReviewChange,
-    ReviewConfig, ReviewReport, StalenessReport, StalenessScorer,
+    AppliedMemoryMerge, ConflictDetector, ConflictGroup, MemoryConflictMember,
+    MemoryConflictProposal, MemoryMergeSnapshot, MemoryMerger, MemoryReviewer, MergeResult,
+    ReviewChange, ReviewConfig, ReviewReport, StalenessReport, StalenessScorer,
 };
 pub use runtime_integration::MemoryRuntimeIntegrationBuilder;
 pub use security::{

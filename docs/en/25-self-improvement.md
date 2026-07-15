@@ -254,10 +254,13 @@ let filter = ChangeFilter::new()
 // log file: .echo-agent/evolution/change-log.jsonl
 ```
 
-### Memory Review and GC — `MemoryReviewer`
+### Memory Review and Deterministic Maintenance
 
-Memory accumulates. The reviewer scores the warm layer for staleness, detects
-conflicts, and can archive entries. Semantic merges are proposal-only by default:
+Memory accumulates. `MemoryReviewer` only scores warm-layer staleness and detects
+conflicts; it does not mutate content or status. `Dreaming` separately applies
+deterministic recall/inactivity-based promotion, revival, and archival while
+returning an explainable decision report. Semantic conflicts require an explicit
+product-level approval before invoking the merge primitive:
 
 ```
 staleness = age·0.35 + low_usage·0.20 + instability·0.20 + contradiction·0.20 + source_weakness·0.05
@@ -265,24 +268,26 @@ staleness = age·0.35 + low_usage·0.20 + instability·0.20 + contradiction·0.2
 
 | Staleness | Status |
 |-----------|--------|
-| < 0.40 | Active |
-| 0.40–0.65 | Stale |
-| 0.65–0.85 | Deprecated |
-| ≥ 0.85 | Archived (demoted to cold) |
+| < 0.35 | Active |
+| 0.35–0.50 | Active (review suggested) |
+| 0.50–0.65 | Superseded candidate |
+| ≥ 0.65 | Archived candidate |
 
 ```rust
 use echo_agent::evolution::{MemoryReviewer, ReviewConfig};
 
 let reviewer = MemoryReviewer::new();
 let report = reviewer
-    .review(&typed_store, &layer_manager, &change_log, &ReviewConfig::default())
+    .review(&typed_store, &ReviewConfig::default())
     .await?;
-// report.archived / report.merges_applied / report.superseded_keys
+// report.staleness_suggestions / report.conflict_proposals
 ```
 
-`ReviewConfig::default()` disables session-end review and sets
-`max_merges_per_review = 0`. Product integrations can run it manually or opt into
-another cadence, but should not duplicate Dreaming maintenance.
+`ReviewConfig::default()` disables session-end review and returns at most ten
+conflict proposals with at most sixteen members each, bounding JSONL and context
+growth. The framework retains an explicit `MemoryMerger`, but the reviewer never
+invokes it. Applications should execute it only after user approval and retain
+the before snapshot for undo.
 
 ### Evidence-linked Run Review — `BackgroundReviewer`
 

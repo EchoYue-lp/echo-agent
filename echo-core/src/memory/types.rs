@@ -213,6 +213,13 @@ pub struct MemoryMeta {
     /// self-evolution (recall-frequency-driven promotion).
     #[serde(default)]
     pub recall_count: u32,
+    /// Last successful recall timestamp (Unix seconds).
+    ///
+    /// Kept separately from `StoreItem::updated_at`: incrementing recall
+    /// telemetry rewrites metadata and would otherwise look like a semantic
+    /// content edit to staleness logic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_recalled_at: Option<u64>,
     /// If this memory was superseded, key of the replacement memory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
@@ -238,6 +245,7 @@ impl MemoryMeta {
             topic: topic.into(),
             revision_count: 0,
             recall_count: 0,
+            last_recalled_at: None,
             superseded_by: None,
         }
     }
@@ -324,6 +332,7 @@ impl Default for MemoryMeta {
             topic: String::new(),
             revision_count: 0,
             recall_count: 0,
+            last_recalled_at: None,
             superseded_by: None,
         }
     }
@@ -526,6 +535,7 @@ mod tests {
         );
         assert_eq!(m.recall_weight, 0.8);
         assert_eq!(m.recall_count, 0);
+        assert_eq!(m.last_recalled_at, None);
     }
 
     #[test]

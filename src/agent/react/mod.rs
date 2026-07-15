@@ -590,7 +590,7 @@ impl ReactAgent {
 
     /// (stage4 F1) Access the shared layer manager so app-side write paths
     /// (e.g. session-end auto-memory) route through the same instance the agent
-    /// uses — shared security guard, audit log, and write counter/observer
+    /// uses — shared security guard, audit log, and write observer
     /// (割裂点 6: previously app paths built a fresh per-call manager that
     /// bypassed the agent's shared instance).
     pub fn memory_layer_manager(&self) -> Option<&Arc<crate::evolution::MemoryLayerManager>> {

@@ -1,21 +1,18 @@
 //! Runtime wiring helpers for layered memory.
 //!
 //! This module owns framework-level plumbing only: layer manager creation,
-//! change-log construction, shared write counters, and write observers. Product
-//! lifecycle policy such as session-end review scheduling remains in app code.
+//! change-log construction and write observers. Product
+//! lifecycle policy and scheduling remain in app code.
 
 use super::{ChangeLog, JsonlChangeLog, MemoryLayerManager, MemoryWriteObserver};
 use crate::memory::Store;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 /// Builds a [`MemoryLayerManager`] with consistent runtime wiring.
 pub struct MemoryRuntimeIntegrationBuilder {
     echo_agent_dir: PathBuf,
     store: Arc<dyn Store>,
-    write_counter: Option<Arc<AtomicU64>>,
-    review_every_n_writes: u64,
     write_observer: Option<Arc<dyn MemoryWriteObserver>>,
     change_log_path: Option<PathBuf>,
 }
@@ -26,23 +23,9 @@ impl MemoryRuntimeIntegrationBuilder {
         Self {
             echo_agent_dir,
             store,
-            write_counter: None,
-            review_every_n_writes: 50,
             write_observer: None,
             change_log_path: None,
         }
-    }
-
-    /// Share an external write counter with the layer manager.
-    pub fn write_counter(mut self, counter: Arc<AtomicU64>) -> Self {
-        self.write_counter = Some(counter);
-        self
-    }
-
-    /// Configure the review trigger threshold observed by the layer manager.
-    pub fn review_every_n_writes(mut self, every_n: u64) -> Self {
-        self.review_every_n_writes = every_n.max(1);
-        self
     }
 
     /// Register an observer called after successful real memory writes.
@@ -78,16 +61,11 @@ impl MemoryRuntimeIntegrationBuilder {
 
     /// Create the fully wired layer manager.
     pub fn build_layer_manager(&self) -> MemoryLayerManager {
-        let counter = self
-            .write_counter
-            .clone()
-            .unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
         let mut layer_manager = MemoryLayerManager::new(
             self.echo_agent_dir.clone(),
             self.store.clone(),
             self.create_change_log(),
-        )
-        .with_review_trigger(counter, self.review_every_n_writes);
+        );
 
         if let Some(observer) = &self.write_observer {
             layer_manager = layer_manager.with_write_observer(observer.clone());
@@ -118,19 +96,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_wires_counter_observer_and_change_log() {
+    async fn builder_wires_observer_and_change_log() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let echo_agent_dir = temp_dir.path().join(".echo-agent");
         let store = Arc::new(InMemoryStore::new());
-        let counter = Arc::new(AtomicU64::new(0));
         let observer_count = Arc::new(AtomicUsize::new(0));
         let observer = Arc::new(CountingObserver {
             count: observer_count.clone(),
         });
 
         let manager = MemoryRuntimeIntegrationBuilder::new(echo_agent_dir.clone(), store)
-            .write_counter(counter.clone())
-            .review_every_n_writes(7)
             .write_observer(observer)
             .build_layer_manager();
 
@@ -145,7 +120,6 @@ mod tests {
             .await
             .expect("write memory");
 
-        assert_eq!(counter.load(Ordering::Relaxed), 1);
         assert_eq!(observer_count.load(Ordering::Relaxed), 1);
         assert!(
             echo_agent_dir
