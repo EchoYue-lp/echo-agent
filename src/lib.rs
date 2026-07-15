@@ -7,16 +7,17 @@
 //!   ↓ 提供 Run, RunEvent, RunStore 等执行追踪数据
 //! eval (评测框架) [feature = "eval"]
 //!   ↓ 基于 trace 数据运行 EvalCase，生成 EvalReport
-//! improve (自动优化) [feature = "improve"]
-//!   ↓ 分析 trace 和 eval 结果，优化 prompt/skill，管理 Curator 生命周期
+//! improve (离线辅助) [feature = "improve"]
+//!   ├─ 显式导出微调轨迹
+//!   └─ 与 eval 同时启用时，分析评测结果并生成改进建议
 //! evolution (结构化演化)
-//!   └─ 管理 typed memory、change audit、security、skill 生命周期
+//!   └─ 管理 typed memory、证据候选、change audit、security、skill 生命周期
 //! ```
 //!
 //! - [`trace`]: 执行追踪基础设施 — 完整记录单次执行的 Run/RunEvent/RunStore
 //! - [`eval`]: 评测框架 — 定义 EvalCase/SuccessCriteria，基于 trace 运行评测
-//! - [`improve`]: 自动优化 — 分析 trace 检测失败模式，生成改进建议
-//! - [`evolution`]: 结构化演化 — typed memory、change audit、security、skill lifecycle
+//! - [`improve`]: 离线辅助 — 显式轨迹导出；与 `eval` 同时启用时提供离线评测优化
+//! - [`evolution`]: 结构化演化 — typed memory、证据候选、change audit、security、skill lifecycle
 //!
 
 #![doc = include_str!("../README.md")]

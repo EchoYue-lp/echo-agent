@@ -338,5 +338,6 @@ The downstream consumers (`eval`, `improve`) are behind their own feature flags,
 [dependencies]
 echo_agent = { version = "0.2" }  # tracing always included
 echo_agent = { version = "0.2", features = ["eval"] }  # + eval replay
-echo_agent = { version = "0.2", features = ["improve"] }  # + self-improvement analysis
+echo_agent = { version = "0.2", features = ["improve"] }  # + trajectory and lifecycle helpers
+echo_agent = { version = "0.2", features = ["improve", "eval"] }  # + eval-driven analysis
 ```

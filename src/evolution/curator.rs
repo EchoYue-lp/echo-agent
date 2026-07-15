@@ -179,12 +179,8 @@ impl CuratorState {
 /// Only operates on agent-created skills. Pinned skills are exempt.
 /// Skill lifecycle curator backed by a JSON state file.
 ///
-/// **Concurrency note**: each `Curator` instance independently reads and writes
-/// the state file (`load_state` → mutate → `save_state`). Callers that create
-/// multiple `Curator` instances sharing the same state path (e.g. `candidate.rs`
-/// and `draft.rs` both calling `Curator::default_path()`) risk lost-update races.
-/// Intent: a future PR should introduce a shared `Arc<Mutex<Curator>>` or
-/// file-level advisory lock to serialise access.
+/// Read-modify-write operations are serialized with an advisory file lock shared
+/// by all `Curator` instances that use the same state path.
 pub struct Curator {
     config: CuratorConfig,
     state_path: PathBuf,
@@ -226,14 +222,20 @@ impl Curator {
     /// [`with_locked_state`] instead — that holds the lock across load, mutate,
     /// and save in a single critical section.
     ///
-    /// The lock is an OS advisory lock (`fs2::FileExt::lock_exclusive`) on a
+    /// The lock is an OS advisory lock (`fs2::FileExt::try_lock_exclusive`) on a
     /// sidecar file. It is **kill-safe**: if this process dies (kill -9, panic,
     /// power loss), the OS closes the fd and the lock is released automatically.
     /// This is the critical difference from the previous `create_new` sidecar
     /// design, whose lock file survived a crash and deadlocked every future
     /// locker forever (P0 — Curator TOCTOU).
     pub fn load_state(&self) -> CuratorState {
-        let _guard = self.acquire_lock();
+        let _guard = match self.acquire_lock() {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                tracing::warn!(%error, "curator: state read proceeding without lock");
+                None
+            }
+        };
         CuratorState::load(&self.state_path)
     }
 
@@ -242,7 +244,7 @@ impl Curator {
     /// Holds an exclusive lock for the duration of the write only. Callers that
     /// need load-mutate-save atomicity must use [`with_locked_state`].
     pub fn save_state(&self, state: &CuratorState) -> Result<()> {
-        let _guard = self.acquire_lock();
+        let _guard = self.acquire_lock()?;
         state.save(&self.state_path)
     }
 
@@ -261,7 +263,7 @@ impl Curator {
     where
         F: FnOnce(&mut CuratorState) -> Result<(T, bool)>,
     {
-        let _guard = self.acquire_lock();
+        let _guard = self.acquire_lock()?;
         let mut state = CuratorState::load(&self.state_path);
         let (result, dirty) = f(&mut state)?;
         if dirty {
@@ -272,72 +274,50 @@ impl Curator {
 
     /// Acquire an exclusive advisory lock on a sidecar `.lock` file.
     ///
-    /// Blocks until the lock is available (with a bounded number of retries
-    /// before giving up — see `MAX_ATTEMPTS`). Returns a guard whose `Drop`
-    /// releases the lock. Because the lock is `flock`-based, it is released
-    /// automatically on process death; the sidecar file is best-effort cleaned
-    /// up on drop and is not relied upon for correctness.
-    fn acquire_lock(&self) -> CuratorLockGuard {
+    /// Retries non-blockingly for a bounded period. Returns a guard whose `Drop`
+    /// releases the lock. The sidecar file is intentionally persistent: deleting
+    /// it after unlock could let another process create a different inode and
+    /// bypass an existing lock.
+    fn acquire_lock(&self) -> Result<CuratorLockGuard> {
         let lock_path = self.state_path.with_extension("json.lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         // Ensure the sidecar file exists (does not fail if already present).
         // `truncate(false)` keeps any existing content (irrelevant for flock,
         // but avoids clobbering a file another process just created).
-        let file = match std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&lock_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                // Non-fatal: fall back to an unnamed temp file so the guard
-                // type is uniform. flock on such a handle is a no-op, which
-                // preserves single-process correctness (no deadlock) while
-                // degrading to lockless under concurrency.
-                tracing::warn!(error = %e, path = ?lock_path, "curator: failed to open lock sidecar; continuing lockless");
-                tempfile::tempfile().unwrap_or_else(|_| {
-                    std::fs::File::create("/dev/null")
-                        .unwrap_or_else(|_| panic!("curator: could not open any lock file"))
-                })
-            }
-        };
+            .open(&lock_path)?;
 
-        // Bounded retry loop. `flock(LOCK_EX)` blocks per call; we cap total
-        // attempts so a wedged peer can't hang the executor indefinitely (the
-        // prior implementation spun forever on a stale sidecar file).
-        const MAX_ATTEMPTS: u32 = 600; // ~10 min at 1s backoff
-        const BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+        const MAX_ATTEMPTS: u32 = 25;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_millis(40);
 
         let mut last_err = None;
         for _ in 0..MAX_ATTEMPTS {
-            match file.lock_exclusive() {
+            match file.try_lock_exclusive() {
                 Ok(()) => {
-                    return CuratorLockGuard {
-                        file: Some(file),
-                        path: Some(lock_path),
-                    };
+                    return Ok(CuratorLockGuard { file: Some(file) });
                 }
                 Err(e) => {
-                    // Any error here means retry after backoff.
                     last_err = Some(e);
                     std::thread::sleep(BACKOFF);
                 }
             }
         }
 
-        // Exhausted retries: log and proceed lockless rather than panic. This
-        // is bounded — the process is not wedged forever (unlike before).
-        tracing::error!(
-            error = ?last_err,
-            attempts = MAX_ATTEMPTS,
-            "curator: could not acquire lock after retries; proceeding WITHOUT a lock (TOCTOU risk under concurrency)"
-        );
-        CuratorLockGuard {
-            file: Some(file),
-            path: Some(lock_path),
-        }
+        Err(crate::error::ReactError::Other(format!(
+            "curator: could not acquire lock at {} after {} attempts: {}",
+            lock_path.display(),
+            MAX_ATTEMPTS,
+            last_err
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unknown lock error".to_string())
+        )))
     }
 
     /// Register a new skill or update an existing one's last-used timestamp.
@@ -575,7 +555,8 @@ pub struct CuratorStatus {
 ///
 /// Created by `Curator::acquire_lock()`. On drop, the lock is explicitly
 /// released (`unlock`) and the fd closed — which also releases the OS advisory
-/// lock as a safety net. The sidecar file is best-effort removed.
+/// lock as a safety net. The sidecar file remains in place so every process
+/// locks the same inode.
 ///
 /// Kill-safety relies on the OS releasing the flock when the fd is closed
 /// (including on process death), NOT on the Drop running. So even if a process
@@ -583,7 +564,6 @@ pub struct CuratorStatus {
 /// blocked.
 struct CuratorLockGuard {
     file: Option<std::fs::File>,
-    path: Option<std::path::PathBuf>,
 }
 
 impl Drop for CuratorLockGuard {
@@ -593,11 +573,6 @@ impl Drop for CuratorLockGuard {
             // releases the OS advisory lock.
             let _ = file.unlock();
             drop(file);
-        }
-        // Best-effort sidecar cleanup. Failure here is harmless: the file is
-        // just an empty marker; its existence does not imply a held lock.
-        if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(&path);
         }
     }
 }

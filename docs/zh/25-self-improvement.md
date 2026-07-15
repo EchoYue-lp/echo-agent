@@ -14,7 +14,8 @@
    │
    ├─ 运行中 ──────── TriggerDetector（在线发现新记忆）──┐
    ├─ 压缩淘汰 ────── memory_promoter（生命周期管理）──┤
-   └─ 会话/任务结束 ─ BackgroundReviewer（深度回顾）──┤
+   ├─ 用户显式/应用调度 ─ BackgroundReviewer ─ ReviewCandidate（提案）
+   └─ 已确认/显式记忆证据 ───────────────────────────┤
                                                        ▼
                                     MemoryLayerManager（热/暖/冷分层）
                                                        │
@@ -40,7 +41,7 @@
 
 ## 安全模型
 
-所有建议性变更都需要人工审查。系统**不会自动**：
+语义提案需要人工审查。确定性的记忆维护、用户显式保存/纠正路径可以自动写入，但系统**不会自动**：
 
 - 修改核心运行时代码
 - 放松安全策略 / 更改权限规则
@@ -254,7 +255,7 @@ let filter = ChangeFilter::new()
 
 ### 记忆审查与 GC — `MemoryReviewer`
 
-记忆会积累。审查器对暖层做陈旧度评分、冲突检测、合并、归档：
+记忆会积累。审查器对暖层做陈旧度评分、冲突检测和归档；语义合并默认只提案、不执行：
 
 ```
 staleness = age·0.35 + low_usage·0.20 + instability·0.20 + contradiction·0.20 + source_weakness·0.05
@@ -277,7 +278,12 @@ let report = reviewer
 // report.archived / report.merges_applied / report.superseded_keys
 ```
 
-产品层通过 `ReviewIntegration` 调度：每 50 次记忆写入或会话结束时自动触发，也可用 `/memory-review` 手动触发。
+`ReviewConfig::default()` 默认关闭 session-end review，并设置
+`max_merges_per_review = 0`。产品可手动触发或显式配置其它 cadence，但不应和 Dreaming 重复维护。
+
+### 带证据的运行回顾 — `BackgroundReviewer`
+
+`BackgroundReviewer` 把 run transcript 当作不可信证据，只接受包含精确引用的严格 JSON，返回结构化 `ReviewCandidate`。默认只提案，不写长期记忆。只有框架复用方显式开启 `auto_persist_user_preferences` 时，才可能把高置信用户偏好写成 Draft memory。单次回顾输出上限为 512 token。
 
 ### 技能生命周期与自创建
 
@@ -369,7 +375,7 @@ for report in monitor.analyze_all_skills().await? {
 | `TriggerDetector`（运行时） | 在线对话中轻量发现新记忆（用户偏好、纠正、已验证的错误解决、重复工作流） | 会话归档总结、`.echo-agent/project.md` 写入 |
 | `AutoMemory`（框架+应用） | 会话结束/手动触发时的归档总结（提取观察、分类、写入 typed memory，应用层可写 `project.md`） | 压缩淘汰、运行时策略调度 |
 | `memory_promoter`（压缩路径） | 因 token 压力被压缩/淘汰的消息的生命周期管理（长期化、淘汰、降级） | 新偏好发现、UI 触发的提取 |
-| `BackgroundReviewer`（应用调度） | 完成 run 后异步深度回顾，提取高价值记忆与改进信号 | GUI/TUI/CLI 产品调度策略 |
+| `BackgroundReviewer`（显式/应用调度） | 从已完成 run 生成带证据 JSON 候选，默认只提案 | 自动长期写入或产品调度策略 |
 
 > 关键约束：任何需要进入运行时 recall 的 typed memory，**必须**统一走框架的 `MemoryLayerManager::write_memory`，产品层不自行维护 category/type/key/write 规则。
 
@@ -418,7 +424,11 @@ for report in monitor.analyze_all_skills().await? {
 echo_agent = { version = "0.2", features = ["improve"] }
 ```
 
-> 使用 `EvalDrivenImprovement` / `ImprovementLoop` 时需同时启用 `eval`（`improve` 依赖它）。
+基础 `improve` feature 提供显式轨迹导出和兼容 re-export。`BackgroundReviewer` 与 `Curator` 属于默认 `evolution` 模块。评测驱动分析需要同时启用两个 feature：
+
+```toml
+echo_agent = { version = "0.2", features = ["improve", "eval"] }
+```
 
 自进化系统**不内置于 Agent 循环**，而是作为独立的分析/演化 pass 运行，保持 Agent 轻量：
 

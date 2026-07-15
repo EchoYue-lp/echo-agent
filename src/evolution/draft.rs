@@ -8,7 +8,7 @@
 //!
 //! Phase 3 uses deterministic templates (no LLM call). This keeps the system
 //! fast, free, and reproducible. A future iteration can add LLM-assisted
-//! refinement via [`PromptGenerator`](crate::improve::PromptGenerator).
+//! refinement through the optional eval-driven improvement pipeline.
 
 use std::path::PathBuf;
 
@@ -16,11 +16,9 @@ use echo_state::memory::typed_store::TypedMemoryStore;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
 use super::candidate::{CANDIDATE_NAMESPACE, SkillCandidate};
+use super::curator::{Curator, CuratorConfig};
 use crate::error::Result;
 use echo_core::error::ReactError;
-
-#[cfg(feature = "improve")]
-use super::curator::{Curator, CuratorConfig};
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -101,13 +99,10 @@ impl<'a> SkillDraftGenerator<'a> {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(&skill_md_path, &content)?;
 
-        // 4. Promote in Curator lifecycle (if improve feature is enabled).
-        #[cfg(feature = "improve")]
-        {
-            let curator = Curator::default_path(CuratorConfig::default());
-            if let Err(e) = curator.promote_to_draft(name) {
-                tracing::warn!("Failed to promote '{}' to draft: {}", name, e);
-            }
+        // 4. Promote in the evolution-owned Curator lifecycle.
+        let curator = Curator::default_path(CuratorConfig::default());
+        if let Err(e) = curator.promote_to_draft(name) {
+            tracing::warn!("Failed to promote '{}' to draft: {}", name, e);
         }
 
         // 5. Record in audit log.

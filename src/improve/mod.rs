@@ -1,9 +1,10 @@
-//! Self-improvement pipeline — analyze failures and suggest improvements.
+//! Evolution helpers and optional eval-driven improvement.
 //!
 //! # Overview
 //!
-//! The improvement system analyzes completed [`Run`](crate::trace::Run) traces
-//! to detect failure patterns and generate human-reviewable improvement suggestions.
+//! The base `improve` feature provides explicit trajectory export plus compatibility
+//! re-exports for evolution types. Eval-driven analysis is available only when the
+//! `eval` feature is enabled as well.
 //!
 //! # Safety
 //!
@@ -13,20 +14,18 @@
 //! - Change permission rules
 //! - Publish or deploy anything
 //!
-//! # Component Usage Status
+//! # Components
 //!
-//! ## Active Components (Integrated in echo-agent-cli)
+//! - [`TrajectorySaver`] — Optional ShareGPT JSONL export for framework consumers
+//!   that explicitly build fine-tuning datasets.
+//! - [`BackgroundReviewer`] and [`Curator`] — Compatibility re-exports from
+//!   [`evolution`](crate::evolution). Product integrations should use that module directly.
+//! ## Eval-Driven Improvement (`improve` + `eval`)
 //!
-//! - [`TrajectorySaver`] — Automatically saves conversation trajectories to `~/.echo-agent/trajectories/` in ShareGPT JSONL format.
-//! - [`BackgroundReviewer`] — LLM-based conversation review that extracts memories and skill suggestions.
-//! - [`Curator`] — Manages skill lifecycle (Active → Stale → Archived, with Candidate/Draft/Deprecated extensions).
-//! - [`Analyzer`] — Statically analyzes Run traces to detect failure patterns.
-//!
-//! ## Eval-Driven Improvement
-//!
-//! - [`ImprovementLoop`] — Iterative prompt optimization loop.
-//! - [`EvalDrivenImprovement`] — Unified entry point wrapping ImprovementLoop with HTML reports.
-//! - [`PromptGenerator`] — LLM-driven prompt improvement generator.
+//! - `Analyzer` — Statically analyzes Run traces to detect failure patterns.
+//! - `ImprovementLoop` — Iterative prompt optimization loop.
+//! - `EvalDrivenImprovement` — Unified entry point wrapping ImprovementLoop with HTML reports.
+//! - `PromptGenerator` — LLM-driven prompt improvement generator.
 //!
 //! # Complementary Module: `evolution`
 //!
@@ -38,31 +37,46 @@
 //!
 //! - Trajectories: `~/.echo-agent/trajectories/YYYY-MM-DD.jsonl`
 //! - Curator state: `~/.echo-agent/curator_state.json`
-//! - Background review memories: Memory store under `["background_reviews"]` namespace
+//! - Background review candidates: returned to the caller; optional user-preference
+//!   persistence uses the configured evolution memory layer
 
-pub mod analyzer;
 pub mod background_review;
-pub mod eval_improvement;
-pub mod generator;
-pub mod r#loop;
 pub mod trajectory;
+
+#[cfg(feature = "eval")]
+pub mod analyzer;
+#[cfg(feature = "eval")]
+pub mod eval_improvement;
+#[cfg(feature = "eval")]
+pub mod generator;
+#[cfg(feature = "eval")]
+pub mod r#loop;
 
 // Re-export Curator types from evolution module
 pub use crate::evolution::curator::{
     Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle,
 };
-pub use analyzer::Analyzer;
-pub use background_review::{BackgroundReviewConfig, BackgroundReviewer, ReviewOutcome};
-pub use eval_improvement::EvalDrivenImprovement;
-pub use generator::PromptGenerator;
-pub use r#loop::{ImprovementLoop, LoopResult};
+pub use background_review::{
+    BackgroundReviewConfig, BackgroundReviewer, ReviewCandidate, ReviewCandidateKind, ReviewOutcome,
+};
 pub use trajectory::{TrajectoryEntry, TrajectorySaver, TrajectoryStats};
 
+#[cfg(feature = "eval")]
+pub use analyzer::Analyzer;
+#[cfg(feature = "eval")]
+pub use eval_improvement::EvalDrivenImprovement;
+#[cfg(feature = "eval")]
+pub use generator::PromptGenerator;
+#[cfg(feature = "eval")]
+pub use r#loop::{ImprovementLoop, LoopResult};
+
+#[cfg(feature = "eval")]
 use serde::{Deserialize, Serialize};
 
 // ── CritiqueIssue ────────────────────────────────────────────────────
 
 /// A specific issue found in a run trace.
+#[cfg(feature = "eval")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CritiqueIssue {
     /// Agent wrote to a file without reading it first.
@@ -85,6 +99,7 @@ pub enum CritiqueIssue {
 // ── ImprovementSuggestion ────────────────────────────────────────────
 
 /// A concrete, human-reviewable improvement suggestion.
+#[cfg(feature = "eval")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImprovementSuggestion {
@@ -114,6 +129,7 @@ pub enum ImprovementSuggestion {
 // ── RunCritique ──────────────────────────────────────────────────────
 
 /// Complete analysis of a single run.
+#[cfg(feature = "eval")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunCritique {
     /// The run being analyzed.
@@ -128,6 +144,7 @@ pub struct RunCritique {
     pub suggestions: Vec<ImprovementSuggestion>,
 }
 
+#[cfg(feature = "eval")]
 impl RunCritique {
     /// Create an empty critique for a run.
     pub fn new(run_id: &str, success: bool) -> Self {

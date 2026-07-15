@@ -12,10 +12,8 @@ use echo_state::skill_telemetry::{SkillTelemetry, SkillTelemetryStore};
 use serde::{Deserialize, Serialize};
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use crate::error::Result;
-
-#[cfg(feature = "improve")]
 use super::curator::Curator;
+use crate::error::Result;
 
 // Re-export SkillDescriptor from echo-execution for use in this module.
 // The actual type lives in echo_execution::skills::external::types.
@@ -217,28 +215,20 @@ impl SkillSimilarityDetector {
 pub struct SkillMerger {
     #[allow(dead_code)]
     store: Arc<dyn Store>,
-    #[cfg(feature = "improve")]
     curator: Curator,
 }
 
 impl SkillMerger {
     /// Create a new merger.
-    #[cfg(feature = "improve")]
     pub fn new(store: Arc<dyn Store>, curator: Curator) -> Self {
         Self { store, curator }
-    }
-
-    /// Create a new merger (without Curator when improve feature is disabled).
-    #[cfg(not(feature = "improve"))]
-    pub fn new(store: Arc<dyn Store>) -> Self {
-        Self { store }
     }
 
     /// Execute a merge proposal: update the primary skill descriptor and
     /// deprecate the secondary skill.
     ///
     /// The `primary_descriptor` is updated in-place with merged triggers, paths,
-    /// and tools. The deprecated skill is marked via the Curator (if available).
+    /// and tools. The deprecated skill is marked via the Curator.
     pub async fn execute_merge(
         &self,
         proposal: &SkillMergeProposal,
@@ -272,13 +262,10 @@ impl SkillMerger {
             primary_descriptor.allowed_tools = merged_tools.into_iter().collect();
         }
 
-        // Mark the deprecated skill in the curator (if improve feature is enabled).
-        #[cfg(feature = "improve")]
-        {
-            let _ = self
-                .curator
-                .deprecate_skill(&proposal.deprecated_skill, Some(&proposal.primary_skill));
-        }
+        // Mark the deprecated skill in the evolution-owned Curator.
+        let _ = self
+            .curator
+            .deprecate_skill(&proposal.deprecated_skill, Some(&proposal.primary_skill));
 
         // Record the merge in the change log.
         let merge_key = format!("{}__{}", proposal.skill_a, proposal.skill_b);
@@ -526,18 +513,12 @@ mod tests {
         assert!(proposal.similarity_score >= MERGE_THRESHOLD);
     }
 
-    #[cfg(feature = "improve")]
     fn make_merger(store: Arc<dyn Store>) -> SkillMerger {
         use crate::evolution::curator::{Curator, CuratorConfig};
         let config = CuratorConfig::default();
         let state_path = std::env::temp_dir().join("echo-agent-test-curator-state.json");
         let curator = Curator::new(config, state_path);
         SkillMerger::new(store, curator)
-    }
-
-    #[cfg(not(feature = "improve"))]
-    fn make_merger(store: Arc<dyn Store>) -> SkillMerger {
-        SkillMerger::new(store)
     }
 
     #[tokio::test]

@@ -12,10 +12,8 @@
 //!
 //! # Related Modules
 //!
-//! This module works closely with:
-//! - [`improve`](crate::improve) — Eval-driven prompt optimization and trajectory analysis
-//! - [`trace`](crate::trace) — Execution tracing infrastructure
-//! - [`eval`](crate::eval) — Evaluation framework
+//! This module works closely with `trace` for execution evidence. Offline
+//! evaluation and prompt optimization remain separate optional capabilities.
 //!
 //! # Safety
 //!
@@ -25,7 +23,6 @@
 
 pub mod audit;
 pub mod auto_memory;
-#[cfg(feature = "improve")]
 pub mod background_review;
 pub mod candidate;
 pub mod curator;
@@ -50,8 +47,9 @@ pub use auto_memory::{
     format_observations_for_memory, observation_memory_key, observation_memory_type,
     write_observations_to_memory_layer,
 };
-#[cfg(feature = "improve")]
-pub use background_review::{BackgroundReviewConfig, BackgroundReviewer, ReviewOutcome};
+pub use background_review::{
+    BackgroundReviewConfig, BackgroundReviewer, ReviewCandidate, ReviewCandidateKind, ReviewOutcome,
+};
 pub use candidate::{CandidateReport, SkillCandidate, SkillCandidateDetector};
 pub use curator::{Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle, SkillMeta};
 pub use draft::{DraftResult, SkillDraftGenerator};

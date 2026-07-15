@@ -5,5 +5,5 @@
 //! to compile while new code uses `echo_agent::evolution`.
 
 pub use crate::evolution::background_review::{
-    BackgroundReviewConfig, BackgroundReviewer, ReviewOutcome,
+    BackgroundReviewConfig, BackgroundReviewer, ReviewCandidate, ReviewCandidateKind, ReviewOutcome,
 };

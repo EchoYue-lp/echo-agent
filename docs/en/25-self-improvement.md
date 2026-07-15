@@ -14,7 +14,8 @@ Run the Agent
    │
    ├─ during run ──── TriggerDetector (online memory discovery) ──┐
    ├─ compress/evict ─ memory_promoter (lifecycle mgmt) ──────────┤
-   └─ session/task end ─ BackgroundReviewer (deep review) ────────┤
+   ├─ explicit/app-scheduled ─ BackgroundReviewer ─ ReviewCandidate (proposal)
+   └─ accepted/explicit memory evidence ──────────────────────────┤
                                                                   ▼
                                           MemoryLayerManager (hot/warm/cold tiers)
                                                                   │
@@ -40,7 +41,8 @@ As tasks get harder and edge cases accumulate, Agent performance degrades. Witho
 
 ## Safety Model
 
-All advisory changes require human review. The system **never automatically**:
+Semantic proposals require human review. Deterministic memory maintenance and
+explicit user-save/correction paths may write automatically, but the system **never automatically**:
 
 - Modifies core runtime code
 - Relaxes safety policies / changes permission rules
@@ -254,7 +256,8 @@ let filter = ChangeFilter::new()
 
 ### Memory Review and GC — `MemoryReviewer`
 
-Memory accumulates. The reviewer scores the warm layer for staleness, detects conflicts, merges, and archives:
+Memory accumulates. The reviewer scores the warm layer for staleness, detects
+conflicts, and can archive entries. Semantic merges are proposal-only by default:
 
 ```
 staleness = age·0.35 + low_usage·0.20 + instability·0.20 + contradiction·0.20 + source_weakness·0.05
@@ -277,7 +280,17 @@ let report = reviewer
 // report.archived / report.merges_applied / report.superseded_keys
 ```
 
-The product layer schedules this via `ReviewIntegration`: auto-triggers every 50 memory writes or at session end, and can be run manually via `/memory-review`.
+`ReviewConfig::default()` disables session-end review and sets
+`max_merges_per_review = 0`. Product integrations can run it manually or opt into
+another cadence, but should not duplicate Dreaming maintenance.
+
+### Evidence-linked Run Review — `BackgroundReviewer`
+
+`BackgroundReviewer` treats the run transcript as untrusted evidence and requires
+strict JSON output with an exact quote. It returns a structured `ReviewCandidate`;
+the default is proposal-only. Only framework consumers that explicitly enable
+`auto_persist_user_preferences` may persist a high-confidence user preference,
+and that write is stored as Draft memory. The review response is capped at 512 tokens.
 
 ### Skill Lifecycle and Auto-Creation
 
@@ -369,7 +382,7 @@ There are three automatic memory paths with strictly divided responsibilities to
 | `TriggerDetector` (runtime) | Lightweight online discovery of new memory during a conversation (user preferences, corrections, verified error resolutions, repeated workflows) | Session-archive summarization, `.echo-agent/project.md` writes |
 | `AutoMemory` (framework+app) | Session-end/manual-trigger archive summarization (extract observations, classify, write typed memory; app layer may write `project.md`) | Compression/eviction, runtime policy scheduling |
 | `memory_promoter` (compression path) | Lifecycle management of messages compressed/evicted due to token pressure (persist, evict, demote) | New-preference discovery, UI-triggered extraction |
-| `BackgroundReviewer` (app-scheduled) | Async deep review after a finished run, extracting high-value memory and improvement signals | GUI/TUI/CLI product scheduling policy |
+| `BackgroundReviewer` (explicit/app-scheduled) | Evidence-linked JSON candidate from a finished run; proposal-only by default | Automatic durable writes or product scheduling policy |
 
 > Key constraint: any typed memory that must enter runtime recall **must** go through the framework's `MemoryLayerManager::write_memory`; the product layer does not maintain its own category/type/key/write rules.
 
@@ -418,7 +431,13 @@ There are three automatic memory paths with strictly divided responsibilities to
 echo_agent = { version = "0.2", features = ["improve"] }
 ```
 
-> Using `EvalDrivenImprovement` / `ImprovementLoop` requires `eval` too (`improve` depends on it).
+The base `improve` feature provides explicit trajectory export and compatibility
+re-exports. `BackgroundReviewer` and `Curator` belong to the default `evolution`
+module. Eval-driven analysis requires both features:
+
+```toml
+echo_agent = { version = "0.2", features = ["improve", "eval"] }
+```
 
 The self-evolution system is **not built into the Agent loop**; it runs as an independent analysis/evolution pass, keeping the Agent lightweight:
 

@@ -338,5 +338,6 @@ let runner = AgentRunner::new(agent)
 [dependencies]
 echo_agent = { version = "0.2" }                          # 追踪始终包含
 echo_agent = { version = "0.2", features = ["eval"] }     # + 评估回放
-echo_agent = { version = "0.2", features = ["improve"] }  # + 自进化分析
+echo_agent = { version = "0.2", features = ["improve"] }  # + 轨迹与生命周期辅助
+echo_agent = { version = "0.2", features = ["improve", "eval"] } # + 评测驱动分析
 ```

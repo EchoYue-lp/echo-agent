@@ -23,10 +23,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use crate::error::Result;
-
-#[cfg(feature = "improve")]
 use super::curator::{Curator, CuratorConfig};
+use crate::error::Result;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -269,13 +267,10 @@ impl SkillCandidateDetector {
                     )
                     .await?;
 
-                // Register with Curator lifecycle (if improve feature is enabled).
-                #[cfg(feature = "improve")]
-                {
-                    let curator = Curator::default_path(CuratorConfig::default());
-                    if let Err(e) = curator.register_candidate(&key) {
-                        tracing::warn!("Failed to register candidate '{}': {}", key, e);
-                    }
+                // Register with the evolution-owned Curator lifecycle.
+                let curator = Curator::default_path(CuratorConfig::default());
+                if let Err(e) = curator.register_candidate(&key) {
+                    tracing::warn!("Failed to register candidate '{}': {}", key, e);
                 }
 
                 // Record in audit log.
@@ -350,7 +345,7 @@ fn extract_tool_names(entries: &[TypedMemoryEntry]) -> Vec<String> {
         let lower = content.to_lowercase();
         // Scan for "tool" mentions and extract the following name.
         for (idx, _) in lower.match_indices("tool") {
-            let after = &lower[idx + 4..]; // skip "tool"
+            let after = lower.get(idx.saturating_add(4)..).unwrap_or_default();
             let name = extract_tool_name_after_keyword(after);
             if !name.is_empty() && seen.insert(name.to_string()) && tools.len() < 8 {
                 tools.push(name.to_string());
@@ -371,12 +366,12 @@ fn extract_tool_name_after_keyword(after: &str) -> String {
     if let Some(rest) = s.strip_prefix('\'')
         && let Some(end) = rest.find('\'')
     {
-        return rest[..end].to_string();
+        return rest.get(..end).unwrap_or_default().to_string();
     }
     if let Some(rest) = s.strip_prefix('"')
         && let Some(end) = rest.find('"')
     {
-        return rest[..end].to_string();
+        return rest.get(..end).unwrap_or_default().to_string();
     }
     // Unquoted: take the first word (alphanumeric + dashes/underscores).
     s.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')

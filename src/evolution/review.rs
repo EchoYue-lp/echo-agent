@@ -160,10 +160,12 @@ fn age_factor(entry: &TypedMemoryEntry, now: DateTime<Utc>) -> f32 {
     }
 }
 
-/// Low-usage factor. Since the Store does not track access counts, we use
-/// `revision_count` as a proxy: `1.0 - min(revision_count / 3.0, 1.0)`.
+/// Low-usage factor based on actual recall telemetry.
+///
+/// `recall_count` is incremented by the shared recall path and is the same
+/// signal consumed by Dreaming. Revision count measures edits, not usefulness.
 fn low_usage_factor(meta: &MemoryMeta) -> f32 {
-    1.0 - (meta.revision_count as f32 / 3.0).min(1.0)
+    1.0 - (meta.recall_count as f32 / 3.0).min(1.0)
 }
 
 /// Map a staleness score to a recommended status.
@@ -346,7 +348,7 @@ impl<'a> MemoryMerger<'a> {
                 });
             }
         };
-        let secondaries = &ordered[1..];
+        let secondaries = ordered.get(1..).unwrap_or_default();
 
         let combined_revision_count = group
             .entries
@@ -450,13 +452,13 @@ pub struct MemoryReviewer {
 /// Tunable knobs for a review pass.
 #[derive(Debug, Clone)]
 pub struct ReviewConfig {
-    /// Run a review when the session ends. Default: `true`.
+    /// Run a review when the session ends. Default: `false`.
     pub review_on_session_end: bool,
     /// Run a review every N memory writes. Default: `50`.
     pub review_every_n_writes: u64,
     /// Cap on conflict groups merged per pass. Default: `10`.
     pub max_conflicts_per_review: usize,
-    /// Cap on merges applied per pass. Default: `5`.
+    /// Cap on merges applied per pass. Default: `0` (proposal-only).
     pub max_merges_per_review: usize,
     /// Run skill candidate detection during review. Default: `true`.
     pub detect_skill_candidates: bool,
@@ -467,10 +469,10 @@ pub struct ReviewConfig {
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
-            review_on_session_end: true,
+            review_on_session_end: false,
             review_every_n_writes: 50,
             max_conflicts_per_review: 10,
-            max_merges_per_review: 5,
+            max_merges_per_review: 0,
             detect_skill_candidates: true,
             auto_generate_drafts: false,
         }
@@ -824,11 +826,11 @@ mod tests {
     }
 
     #[test]
-    fn test_revision_count_lowers_usage_factor() {
+    fn test_recall_count_lowers_usage_factor() {
         let scorer = StalenessScorer::new();
         let meta_low = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "t");
         let mut meta_high = meta_low.clone();
-        meta_high.revision_count = 5;
+        meta_high.recall_count = 5;
 
         let entry_low = make_entry("a", "x", meta_low, now_secs());
         let entry_high = make_entry("b", "x", meta_high, now_secs());
@@ -836,10 +838,17 @@ mod tests {
         let r_high = scorer.score(&entry_high, Utc::now(), false);
         assert!(
             r_high.usage_factor < r_low.usage_factor,
-            "more revisions ⇒ lower usage factor"
+            "more recalls ⇒ lower usage factor"
         );
         assert!(r_low.usage_factor > 0.0);
         assert_eq!(r_high.usage_factor, 0.0);
+    }
+
+    #[test]
+    fn review_defaults_do_not_run_or_merge_automatically() {
+        let config = ReviewConfig::default();
+        assert!(!config.review_on_session_end);
+        assert_eq!(config.max_merges_per_review, 0);
     }
 
     // ── ConflictDetector ──
@@ -1093,7 +1102,10 @@ mod tests {
             .await
             .unwrap();
 
-        let config = ReviewConfig::default();
+        let config = ReviewConfig {
+            max_merges_per_review: 5,
+            ..ReviewConfig::default()
+        };
         let report = MemoryReviewer::new()
             .review(&typed, &layer_mgr, &log, &config)
             .await
