@@ -16,13 +16,36 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 pub use echo_core::tools::{
-    Tool, ToolContext, ToolExecutionConfig, ToolOutputChannel, ToolParameters, ToolRegistrar,
-    ToolResult, ToolRiskLevel, ToolStreamEvent,
+    Tool, ToolContext, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolOutputChannel,
+    ToolParameters, ToolRecoveryAction, ToolRegistrar, ToolResult, ToolRiskLevel, ToolSideEffect,
+    ToolStreamEvent,
 };
+
+fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let exponent = attempt.saturating_sub(1).min(5);
+    let base = configured_ms
+        .saturating_mul(1_u64 << exponent)
+        .max(retry_after_ms.unwrap_or(0))
+        .min(30_000);
+    if base == 0 {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    attempt.hash(&mut hasher);
+    configured_ms.hash(&mut hasher);
+    if let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        elapsed.as_nanos().hash(&mut hasher);
+    }
+    let jitter_cap = base.saturating_div(4).max(1);
+    base.saturating_add(hasher.finish() % jitter_cap)
+        .min(30_000)
+}
 
 impl ToolRegistrar for ToolManager {
     fn register(&mut self, tool: Box<dyn Tool>) {
-        (&*self).register(tool);
+        ToolManager::register(self, tool);
     }
 }
 
@@ -49,10 +72,10 @@ pub struct ToolManager {
 impl ToolManager {
     pub fn get_openai_tools(&self) -> Vec<ToolDefinition> {
         let current_version = self.definitions_version.load(Ordering::Acquire);
-        if let Some(ref cached) = *self.cached_definitions.read() {
-            if cached.0 == current_version {
-                return cached.1.clone();
-            }
+        if let Some(ref cached) = *self.cached_definitions.read()
+            && cached.0 == current_version
+        {
+            return cached.1.clone();
         }
         // Version mismatch or cache empty — rebuild.
         let mut definitions: Vec<ToolDefinition> = self
@@ -226,27 +249,23 @@ impl ToolManager {
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
 
         // 并发控制：获取信号量许可（读/写分离）
-        let is_read = crate::risk::ToolRiskClassifier::classify(tool_name)
-            == crate::risk::ToolRiskCategory::ReadOnly;
+        let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
 
         // Check result cache for read-only tools
         if is_read {
             let params_json = serde_json::to_string(&parameters).unwrap_or_default();
             let cache_key = (tool_name.to_string(), params_json);
-            if let Some((result, ts)) = self.result_cache.read().get(&cache_key) {
-                if ts.elapsed() < std::time::Duration::from_secs(60) {
-                    tracing::debug!("Tool result cache hit: {tool_name}");
-                    return Ok(result.clone());
-                }
+            if let Some((result, ts)) = self.result_cache.read().get(&cache_key)
+                && ts.elapsed() < std::time::Duration::from_secs(60)
+            {
+                tracing::debug!("Tool result cache hit: {tool_name}");
+                return Ok(result.clone());
             }
         }
 
         let _permit = if is_read {
             if let Some(sem) = &self.read_semaphore {
-                match sem.acquire().await {
-                    Ok(permit) => Some(permit),
-                    Err(_) => None,
-                }
+                sem.acquire().await.ok()
             } else {
                 None
             }
@@ -275,10 +294,15 @@ impl ToolManager {
         };
 
         let mut last_err: Option<echo_core::error::ReactError> = None;
+        let mut next_retry_after_ms = None;
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let delay_ms = self.config.retry_delay_ms * (1u64 << (attempt as u64 - 1).min(5));
+                let delay_ms = retry_delay_ms(
+                    self.config.retry_delay_ms,
+                    next_retry_after_ms.take(),
+                    attempt,
+                );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 
@@ -297,11 +321,29 @@ impl ToolManager {
             };
 
             match result {
-                Ok(r) => return Ok(r),
-                Err(e) if attempt < max_retries => {
-                    last_err = Some(e);
+                Ok(result) if result.success => return Ok(result),
+                Ok(result)
+                    if attempt < max_retries
+                        && result
+                            .failure
+                            .as_ref()
+                            .is_some_and(ToolFailure::allows_automatic_retry) =>
+                {
+                    next_retry_after_ms = result
+                        .failure
+                        .as_ref()
+                        .and_then(|failure| failure.retry_after_ms);
                 }
-                Err(e) => return Err(e),
+                Ok(result) => return Ok(result),
+                Err(error) if attempt < max_retries => {
+                    let failure = ToolFailure::from_error(&error, !is_read);
+                    if failure.allows_automatic_retry() {
+                        last_err = Some(error);
+                    } else {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
             }
         }
 
@@ -348,8 +390,7 @@ impl ToolManager {
             .get_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
 
-        let is_read = crate::risk::ToolRiskClassifier::classify(tool_name)
-            == crate::risk::ToolRiskCategory::ReadOnly;
+        let is_read = tool.risk_level() == ToolRiskLevel::ReadOnly;
 
         let _permit = if is_read {
             if let Some(sem) = &self.read_semaphore {
@@ -390,10 +431,15 @@ impl ToolManager {
             0
         };
         let mut last_err: Option<echo_core::error::ReactError> = None;
+        let mut next_retry_after_ms = None;
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let delay_ms = self.config.retry_delay_ms * (1u64 << (attempt as u64 - 1).min(5));
+                let delay_ms = retry_delay_ms(
+                    self.config.retry_delay_ms,
+                    next_retry_after_ms.take(),
+                    attempt,
+                );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 
@@ -408,6 +454,7 @@ impl ToolManager {
                     match event {
                         ToolStreamEvent::Complete(result) => return Ok(result),
                         event @ ToolStreamEvent::Output { .. } => {
+                            output_forwarded = true;
                             if let Some(tx) = event_tx.as_ref() {
                                 tx.send(event)
                                     .await
@@ -415,7 +462,6 @@ impl ToolManager {
                                         tool: tool_name.to_string(),
                                         message: "Tool stream receiver closed".into(),
                                     })?;
-                                output_forwarded = true;
                             }
                         }
                         event @ ToolStreamEvent::Progress { .. } => {
@@ -452,11 +498,30 @@ impl ToolManager {
             };
 
             match result {
-                Ok(result) => return Ok(result),
-                Err(e) if attempt < max_retries && !output_forwarded => {
-                    last_err = Some(e);
+                Ok(result) if result.success => return Ok(result),
+                Ok(result)
+                    if attempt < max_retries
+                        && !output_forwarded
+                        && result
+                            .failure
+                            .as_ref()
+                            .is_some_and(ToolFailure::allows_automatic_retry) =>
+                {
+                    next_retry_after_ms = result
+                        .failure
+                        .as_ref()
+                        .and_then(|failure| failure.retry_after_ms);
                 }
-                Err(e) => return Err(e),
+                Ok(result) => return Ok(result),
+                Err(error) if attempt < max_retries && !output_forwarded => {
+                    let failure = ToolFailure::from_error(&error, !is_read);
+                    if failure.allows_automatic_retry() {
+                        last_err = Some(error);
+                    } else {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
             }
         }
 
@@ -479,6 +544,7 @@ mod execute_with_context_tests {
     use futures::Stream;
     use std::path::PathBuf;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
 
     /// Records the `ToolContext` it was called with, so we can verify
@@ -492,6 +558,122 @@ mod execute_with_context_tests {
     }
 
     struct DelayedStreamingTool;
+
+    struct RetryOnceTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for RetryOnceTool {
+        fn name(&self) -> &str {
+            "retry_once"
+        }
+
+        fn description(&self) -> &str {
+            "returns one transient failure, then succeeds"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                if call == 0 {
+                    return Ok(ToolResult::error("temporary outage").with_failure(
+                        ToolFailure::new(ToolFailureCategory::Transient).retryable(),
+                    ));
+                }
+                Ok(ToolResult::success("recovered"))
+            })
+        }
+    }
+
+    struct InvalidArgumentsTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for InvalidArgumentsTool {
+        fn name(&self) -> &str {
+            "invalid_arguments"
+        }
+
+        fn description(&self) -> &str {
+            "always rejects the arguments"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    "missing query",
+                ))
+            })
+        }
+    }
+
+    struct OutputThenTransientFailureTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for OutputThenTransientFailureTool {
+        fn name(&self) -> &str {
+            "output_then_fail"
+        }
+
+        fn description(&self) -> &str {
+            "emits output before a transient failure"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("unused")) })
+        }
+
+        fn execute_stream_with_context<'a>(
+            &'a self,
+            _params: ToolParameters,
+            _ctx: &ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>,
+        > {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let failure = ToolResult::error("temporary outage")
+                    .with_failure(ToolFailure::new(ToolFailureCategory::Transient).retryable());
+                Ok(Box::pin(futures::stream::iter(vec![
+                    ToolStreamEvent::Output {
+                        channel: ToolOutputChannel::Stdout,
+                        chunk: "partial".to_string(),
+                    },
+                    ToolStreamEvent::Complete(failure),
+                ]))
+                    as Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send>>)
+            })
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+    }
 
     impl Tool for DelayedStreamingTool {
         fn name(&self) -> &str {
@@ -660,6 +842,91 @@ mod execute_with_context_tests {
             .expect("streaming task should join")
             .expect("streaming tool should complete");
         assert_eq!(result.output, "done");
+    }
+
+    #[tokio::test]
+    async fn retries_only_explicit_transient_failures() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: true,
+            max_retries: 2,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        manager.register(Box::new(RetryOnceTool {
+            calls: Arc::clone(&calls),
+        }));
+
+        let result = manager
+            .execute_tool("retry_once", ToolParameters::new())
+            .await?;
+
+        assert!(result.success);
+        assert_eq!(result.output, "recovered");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_arguments_are_not_retried() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: true,
+            max_retries: 2,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        manager.register(Box::new(InvalidArgumentsTool {
+            calls: Arc::clone(&calls),
+        }));
+
+        let result = manager
+            .execute_tool("invalid_arguments", ToolParameters::new())
+            .await?;
+
+        assert!(!result.success);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            result.failure.map(|failure| failure.category),
+            Some(ToolFailureCategory::InvalidArguments)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_output_prevents_automatic_retry() -> echo_core::error::Result<()> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: true,
+            max_retries: 2,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        manager.register(Box::new(OutputThenTransientFailureTool {
+            calls: Arc::clone(&calls),
+        }));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+
+        let result = manager
+            .execute_tool_stream_with_context(
+                "output_then_fail",
+                ToolParameters::new(),
+                &ToolContext::default(),
+                Some(event_tx),
+            )
+            .await?;
+        let event = event_rx.recv().await;
+
+        assert!(matches!(event, Some(ToolStreamEvent::Output { .. })));
+        assert!(!result.success);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        Ok(())
     }
 
     #[test]

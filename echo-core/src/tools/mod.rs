@@ -3,7 +3,7 @@
 pub mod permission;
 pub mod skill;
 
-use crate::error::Result;
+use crate::error::{ReactError, Result, SandboxError, ToolError};
 use crate::sandbox::SandboxExecutor;
 use futures::future::BoxFuture;
 use futures::stream::{self, Stream};
@@ -11,6 +11,244 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+
+/// Stable failure category shared by tool execution, traces, checkpoints, and UIs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFailureCategory {
+    InvalidArguments,
+    Unavailable,
+    Timeout,
+    Cancelled,
+    Transient,
+    Permanent,
+    PartialSideEffect,
+}
+
+impl ToolFailureCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArguments => "invalid_arguments",
+            Self::Unavailable => "unavailable",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+            Self::PartialSideEffect => "partial_side_effect",
+        }
+    }
+}
+
+/// What must happen before the same logical tool operation can continue.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRecoveryAction {
+    CorrectArguments,
+    Retry,
+    RestoreThenRetry,
+    VerifyThenRetry,
+    Stop,
+}
+
+impl ToolRecoveryAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CorrectArguments => "correct_arguments",
+            Self::Retry => "retry",
+            Self::RestoreThenRetry => "restore_then_retry",
+            Self::VerifyThenRetry => "verify_then_retry",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// Whether an unsuccessful attempt may already have changed external state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSideEffect {
+    None,
+    Possible,
+    Confirmed,
+}
+
+/// Structured recovery facts for an unsuccessful tool result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolFailure {
+    pub category: ToolFailureCategory,
+    pub recovery: ToolRecoveryAction,
+    pub side_effect: ToolSideEffect,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub postcondition: Option<String>,
+}
+
+impl ToolFailure {
+    pub fn new(category: ToolFailureCategory) -> Self {
+        let recovery = match category {
+            ToolFailureCategory::InvalidArguments => ToolRecoveryAction::CorrectArguments,
+            ToolFailureCategory::Unavailable => ToolRecoveryAction::RestoreThenRetry,
+            ToolFailureCategory::Timeout | ToolFailureCategory::PartialSideEffect => {
+                ToolRecoveryAction::VerifyThenRetry
+            }
+            ToolFailureCategory::Transient => ToolRecoveryAction::Retry,
+            ToolFailureCategory::Cancelled | ToolFailureCategory::Permanent => {
+                ToolRecoveryAction::Stop
+            }
+        };
+        let side_effect = if category == ToolFailureCategory::PartialSideEffect {
+            ToolSideEffect::Possible
+        } else {
+            ToolSideEffect::None
+        };
+        Self {
+            category,
+            recovery,
+            side_effect,
+            retry_after_ms: None,
+            idempotency_key: None,
+            postcondition: None,
+        }
+    }
+
+    pub fn retryable(mut self) -> Self {
+        if matches!(
+            self.category,
+            ToolFailureCategory::Unavailable
+                | ToolFailureCategory::Timeout
+                | ToolFailureCategory::Transient
+        ) {
+            self.recovery = ToolRecoveryAction::Retry;
+        }
+        self
+    }
+
+    pub fn with_retry_after(mut self, retry_after_ms: u64) -> Self {
+        self.retry_after_ms = Some(retry_after_ms);
+        self
+    }
+
+    pub fn with_side_effect(mut self, side_effect: ToolSideEffect) -> Self {
+        self.side_effect = side_effect;
+        if side_effect != ToolSideEffect::None && self.idempotency_key.is_none() {
+            self.recovery = ToolRecoveryAction::VerifyThenRetry;
+        }
+        self
+    }
+
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    pub fn with_postcondition(mut self, postcondition: impl Into<String>) -> Self {
+        self.postcondition = Some(postcondition.into());
+        self
+    }
+
+    /// Automatic replay is deliberately narrower than "might recover".
+    pub fn allows_automatic_retry(&self) -> bool {
+        matches!(
+            self.category,
+            ToolFailureCategory::Unavailable
+                | ToolFailureCategory::Timeout
+                | ToolFailureCategory::Transient
+        ) && self.recovery == ToolRecoveryAction::Retry
+            && (self.side_effect == ToolSideEffect::None || self.idempotency_key.is_some())
+    }
+
+    /// Conservatively classify framework execution errors.
+    pub fn from_error(error: &ReactError, may_have_side_effects: bool) -> Self {
+        let possible_side_effect = |mut failure: Self| {
+            if may_have_side_effects {
+                if matches!(
+                    failure.category,
+                    ToolFailureCategory::Unavailable
+                        | ToolFailureCategory::Transient
+                        | ToolFailureCategory::Permanent
+                ) {
+                    failure.category = ToolFailureCategory::PartialSideEffect;
+                }
+                return failure.with_side_effect(ToolSideEffect::Possible);
+            }
+            failure
+        };
+        match error {
+            ReactError::Tool(tool_error) => match tool_error.as_ref() {
+                ToolError::MissingParameter(_)
+                | ToolError::InvalidParameter { .. }
+                | ToolError::InvalidPath { .. }
+                | ToolError::AccessDenied { .. }
+                | ToolError::FileTooLarge { .. } => {
+                    Self::new(ToolFailureCategory::InvalidArguments)
+                }
+                ToolError::Timeout(_) => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Timeout).retryable())
+                }
+                ToolError::NotFound(_) | ToolError::ExecutionFailed { .. } => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Permanent))
+                }
+            },
+            ReactError::Sandbox(sandbox_error) => match sandbox_error.as_ref() {
+                SandboxError::Unavailable(_) | SandboxError::StartFailed(_) => {
+                    Self::new(ToolFailureCategory::Unavailable)
+                }
+                SandboxError::Timeout(_) => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Timeout).retryable())
+                }
+                SandboxError::ResourceExceeded(_)
+                | SandboxError::PermissionDenied(_)
+                | SandboxError::IoError(_) => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Permanent))
+                }
+            },
+            ReactError::Io(io_error) => match io_error.kind() {
+                std::io::ErrorKind::TimedOut => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Timeout).retryable())
+                }
+                std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Transient).retryable())
+                }
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                    Self::new(ToolFailureCategory::InvalidArguments)
+                }
+                _ => possible_side_effect(Self::new(ToolFailureCategory::Permanent)),
+            },
+            #[cfg(feature = "mcp")]
+            ReactError::Mcp(mcp_error) => match mcp_error.as_ref() {
+                crate::error::McpError::ConnectionFailed(_)
+                | crate::error::McpError::InitializationFailed(_)
+                | crate::error::McpError::TransportClosed => {
+                    let failure = Self::new(ToolFailureCategory::Unavailable);
+                    if may_have_side_effects {
+                        possible_side_effect(failure)
+                    } else {
+                        failure.retryable()
+                    }
+                }
+                crate::error::McpError::ToolCallFailed { code: -32602, .. } => {
+                    Self::new(ToolFailureCategory::InvalidArguments)
+                }
+                crate::error::McpError::ToolCallFailed {
+                    code: -32603 | -32099..=-32000,
+                    ..
+                } => possible_side_effect(Self::new(ToolFailureCategory::Transient).retryable()),
+                crate::error::McpError::ProtocolError(_)
+                | crate::error::McpError::ToolCallFailed { .. } => {
+                    possible_side_effect(Self::new(ToolFailureCategory::Permanent))
+                }
+            },
+            _ => possible_side_effect(Self::new(ToolFailureCategory::Permanent)),
+        }
+    }
+}
 
 /// Classifies the kind of result a tool produced.
 ///
@@ -59,6 +297,9 @@ pub struct ToolResult {
     pub output: String,
     /// Error message when `success` is false.
     pub error: Option<String>,
+    /// Structured failure and recovery facts when `success` is false.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub failure: Option<ToolFailure>,
     /// Optional binary output (mutually exclusive with `output` in practice).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bytes: Option<Vec<u8>>,
@@ -85,6 +326,7 @@ impl ToolResult {
             success: true,
             output: output.into(),
             error: None,
+            failure: None,
             bytes: None,
             data: None,
             truncated: false,
@@ -104,6 +346,7 @@ impl ToolResult {
             success: true,
             output,
             error: None,
+            failure: None,
             bytes: None,
             data: Some(data),
             truncated: false,
@@ -119,6 +362,7 @@ impl ToolResult {
             success: true,
             output: output.into(),
             error: None,
+            failure: None,
             bytes: None,
             data: None,
             truncated: false,
@@ -136,6 +380,7 @@ impl ToolResult {
             success: false,
             output: String::new(),
             error: Some(error.into()),
+            failure: Some(ToolFailure::new(ToolFailureCategory::Permanent)),
             bytes: None,
             data: None,
             truncated: false,
@@ -151,6 +396,7 @@ impl ToolResult {
             success: true,
             output: String::new(),
             error: None,
+            failure: None,
             bytes: Some(bytes),
             data: None,
             truncated: false,
@@ -175,6 +421,28 @@ impl ToolResult {
     pub fn with_error(mut self, error: impl Into<String>) -> Self {
         self.success = false;
         self.error = Some(error.into());
+        if self.failure.is_none() {
+            self.failure = Some(ToolFailure::new(ToolFailureCategory::Permanent));
+        }
+        self
+    }
+
+    /// Construct a failed result with an explicit category.
+    pub fn failure(category: ToolFailureCategory, error: impl Into<String>) -> Self {
+        let mut result = Self::error(error);
+        result.failure = Some(ToolFailure::new(category));
+        result
+    }
+
+    /// Construct a failed result that requires corrected arguments.
+    pub fn invalid_arguments(error: impl Into<String>) -> Self {
+        Self::failure(ToolFailureCategory::InvalidArguments, error)
+    }
+
+    /// Replace structured recovery facts on an unsuccessful result.
+    pub fn with_failure(mut self, failure: ToolFailure) -> Self {
+        self.success = false;
+        self.failure = Some(failure);
         self
     }
 
@@ -273,7 +541,7 @@ impl Default for ToolExecutionConfig {
     fn default() -> Self {
         Self {
             timeout_ms: 30_000,
-            retry_on_fail: false,
+            retry_on_fail: true,
             max_retries: 2,
             retry_delay_ms: 200,
             max_concurrency: None,
@@ -719,6 +987,8 @@ pub struct ToolContext {
     pub turn_id: Option<String>,
     /// 当前 run 内的一次具体执行标识。
     pub execution_id: Option<String>,
+    /// Stable identity for this logical tool call and all of its retry attempts.
+    pub call_id: Option<String>,
     /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
@@ -735,6 +1005,7 @@ impl std::fmt::Debug for ToolContext {
             .field("run_id", &self.run_id)
             .field("turn_id", &self.turn_id)
             .field("execution_id", &self.execution_id)
+            .field("call_id", &self.call_id)
             .field(
                 "cancel",
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
@@ -772,6 +1043,17 @@ mod tool_context_tests {
         assert!(ctx.delegation_policy.is_none());
     }
 
+    #[test]
+    fn permanent_and_partial_failures_cannot_be_made_automatically_retryable() {
+        let permanent = ToolFailure::new(ToolFailureCategory::Permanent).retryable();
+        let partial = ToolFailure::new(ToolFailureCategory::PartialSideEffect)
+            .with_idempotency_key("call-1")
+            .retryable();
+
+        assert!(!permanent.allows_automatic_retry());
+        assert!(!partial.allows_automatic_retry());
+    }
+
     // ── stage4 P4.1: cache_user_id single-source ────────────────────────────
     // The external cache_user_id channel (ExternalRunContext.cache_user_id +
     // ToolContext.cache_user_id) was dead — no tool ever read ToolContext's
@@ -801,6 +1083,7 @@ mod tool_context_tests {
             run_id: None,
             turn_id: None,
             execution_id: None,
+            call_id: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,

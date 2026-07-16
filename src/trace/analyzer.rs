@@ -109,19 +109,8 @@ pub struct ErrorPattern {
     pub last_seen: Option<DateTime<Utc>>,
 }
 
-/// Stable high-level class for a tool failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolFailureClass {
-    Timeout,
-    PermissionDenied,
-    NotFound,
-    InvalidArguments,
-    Network,
-    Dependency,
-    Cancelled,
-    Unknown,
-}
+/// Backward-compatible name for the runtime tool failure category.
+pub type ToolFailureClass = crate::tools::ToolFailureCategory;
 
 /// A recurring tool failure grouped without exposing raw tool arguments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -518,36 +507,14 @@ impl TraceAnalyzer {
                             },
                         );
                     }
-                    RunEvent::ToolResult {
-                        call_id,
-                        name,
-                        success,
-                        output_preview,
-                        ..
-                    } => {
-                        if *success {
-                            report.success_count = report.success_count.saturating_add(1);
-                        } else {
-                            if failed_call_ids.insert(call_id.clone()) {
-                                report.failure_count = report.failure_count.saturating_add(1);
-                                let message = output_preview
-                                    .as_deref()
-                                    .unwrap_or("tool returned an unsuccessful result");
-                                record_tool_failure(
-                                    &mut patterns,
-                                    &mut attempts,
-                                    &run,
-                                    calls.get(call_id),
-                                    name,
-                                    message,
-                                );
-                            }
-                        }
+                    RunEvent::ToolResult { success: true, .. } => {
+                        report.success_count = report.success_count.saturating_add(1);
                     }
                     RunEvent::ToolError {
                         call_id,
                         name,
                         message,
+                        failure,
                     } if failed_call_ids.insert(call_id.clone()) => {
                         report.failure_count = report.failure_count.saturating_add(1);
                         record_tool_failure(
@@ -557,6 +524,7 @@ impl TraceAnalyzer {
                             calls.get(call_id),
                             name,
                             message,
+                            failure.as_ref(),
                         );
                     }
                     _ => {}
@@ -648,7 +616,7 @@ impl ToolFailureAccumulator {
         run_ids.sort();
         ToolFailurePattern {
             tool_name: self.tool_name,
-            error_class: self.error_class.unwrap_or(ToolFailureClass::Unknown),
+            error_class: self.error_class.unwrap_or(ToolFailureClass::Permanent),
             pattern: self.pattern,
             input_shape: self.input_shape,
             occurrence_count: self.occurrence_count,
@@ -708,16 +676,14 @@ fn classify_tool_failure(message: &str) -> ToolFailureClass {
         || normalized.contains("权限不足")
         || normalized.contains("拒绝访问")
     {
-        ToolFailureClass::PermissionDenied
+        ToolFailureClass::Permanent
     } else if normalized.contains("not found")
         || normalized.contains("no such file")
         || normalized.contains("未找到")
         || normalized.contains("不存在")
-    {
-        ToolFailureClass::NotFound
-    } else if normalized.contains("invalid argument")
         || normalized.contains("invalid parameter")
         || normalized.contains("missing parameter")
+        || normalized.contains("invalid argument")
         || normalized.contains("无效参数")
         || normalized.contains("缺少参数")
     {
@@ -728,7 +694,7 @@ fn classify_tool_failure(message: &str) -> ToolFailureClass {
         || normalized.contains("网络")
         || normalized.contains("连接")
     {
-        ToolFailureClass::Network
+        ToolFailureClass::Transient
     } else if normalized.contains("dependency")
         || normalized.contains("module")
         || normalized.contains("package")
@@ -736,14 +702,14 @@ fn classify_tool_failure(message: &str) -> ToolFailureClass {
         || normalized.contains("模块")
         || normalized.contains("软件包")
     {
-        ToolFailureClass::Dependency
+        ToolFailureClass::Unavailable
     } else if normalized.contains("cancelled")
         || normalized.contains("canceled")
         || normalized.contains("取消")
     {
         ToolFailureClass::Cancelled
     } else {
-        ToolFailureClass::Unknown
+        ToolFailureClass::Permanent
     }
 }
 
@@ -827,6 +793,7 @@ fn record_tool_failure(
     call: Option<&ToolCallContext>,
     event_tool_name: &str,
     message: &str,
+    failure: Option<&crate::tools::ToolFailure>,
 ) {
     let tool_name = call
         .map(|context| context.tool_name.as_str())
@@ -835,16 +802,14 @@ fn record_tool_failure(
         .map(|context| context.input_shape.as_str())
         .unwrap_or("unknown");
     let args_key = call.map(|context| context.args_key.as_str()).unwrap_or("");
-    let error_class = classify_tool_failure(message);
+    let error_class = failure
+        .map(|failure| failure.category)
+        .unwrap_or_else(|| classify_tool_failure(message));
     let pattern = normalize_error(message)
         .chars()
         .take(200)
         .collect::<String>();
-    let grouping_pattern = if error_class == ToolFailureClass::Unknown {
-        pattern.as_str()
-    } else {
-        "classified"
-    };
+    let grouping_pattern = "classified";
     let key = format!("{tool_name}|{error_class:?}|{input_shape}|{grouping_pattern}");
     let attempt_key = format!("{key}|{args_key}");
     let prior_attempts = attempts.entry(attempt_key).or_insert(0);
@@ -964,6 +929,7 @@ mod tests {
                     call_id: "c2".into(),
                     name: "write_file".into(),
                     message: "Permission denied: cannot write to /etc/config".to_string(),
+                    failure: None,
                 },
             ],
             final_output: None,
@@ -1116,6 +1082,7 @@ mod tests {
                 call_id: "c1".into(),
                 name: "write_file".into(),
                 message: "Permission denied: /protected/config".into(),
+                failure: None,
             },
             RunEvent::ToolCall {
                 call_id: "c2".into(),
@@ -1140,6 +1107,7 @@ mod tests {
                 call_id: "c2".into(),
                 name: "write_file".into(),
                 message: "Permission denied: /protected/config".into(),
+                failure: None,
             },
         ];
         let mut second = make_run("r2", "s1", RunStatus::Failed);
@@ -1167,6 +1135,7 @@ mod tests {
                 call_id: "c3".into(),
                 name: "write_file".into(),
                 message: "Access denied: /other/config".into(),
+                failure: None,
             },
         ];
         store.save(first).await?;
@@ -1188,11 +1157,46 @@ mod tests {
             .failure_patterns
             .first()
             .ok_or_else(|| crate::error::ReactError::Other("missing failure pattern".into()))?;
-        assert_eq!(pattern.error_class, ToolFailureClass::PermissionDenied);
+        assert_eq!(pattern.error_class, ToolFailureClass::Permanent);
         assert_eq!(pattern.occurrence_count, 3);
         assert_eq!(pattern.distinct_run_count, 2);
         assert_eq!(pattern.ineffective_retry_count, 1);
         assert!(!pattern.input_shape.contains("protected"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_reliability_prefers_structured_failure_category() -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryRunStore::new());
+        let mut run = make_run("structured", "s1", RunStatus::Failed);
+        run.events = vec![
+            RunEvent::ToolCall {
+                call_id: "c1".into(),
+                name: "web_search".into(),
+                args: Some(serde_json::json!({"query": "rust"})),
+                risk: None,
+                duration_ms: 5,
+            },
+            RunEvent::ToolError {
+                call_id: "c1".into(),
+                name: "web_search".into(),
+                message: "permission denied wording from an upstream proxy".into(),
+                failure: Some(crate::tools::ToolFailure::new(
+                    crate::tools::ToolFailureCategory::Transient,
+                )),
+            },
+        ];
+        store.save(run).await?;
+
+        let report = TraceAnalyzer::new(store)
+            .tool_reliability_report(10, None)
+            .await?;
+        let pattern = report
+            .failure_patterns
+            .first()
+            .ok_or_else(|| crate::error::ReactError::Other("missing failure pattern".into()))?;
+
+        assert_eq!(pattern.error_class, ToolFailureClass::Transient);
         Ok(())
     }
 

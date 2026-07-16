@@ -237,9 +237,10 @@ impl McpClient {
         let resp = self.transport.send(req).await?;
 
         if let Some(err) = resp.error {
-            return Err(ReactError::Mcp(Box::new(McpError::ToolCallFailed(
-                format!("工具 '{}' 调用失败: {}", name, err.message),
-            ))));
+            return Err(ReactError::Mcp(Box::new(McpError::ToolCallFailed {
+                code: err.code,
+                message: format!("工具 '{}' 调用失败: {}", name, err.message),
+            })));
         }
 
         let result: McpToolCallResult = serde_json::from_value(resp.result.unwrap_or(Value::Null))?;

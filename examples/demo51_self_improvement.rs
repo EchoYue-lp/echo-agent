@@ -115,6 +115,7 @@ async fn demo_analyzer() {
                 call_id: "c2".into(),
                 name: "shell".into(),
                 message: "command not found".into(),
+                failure: None,
             },
             RunEvent::ToolCall {
                 call_id: "c3".into(),
@@ -127,6 +128,7 @@ async fn demo_analyzer() {
                 call_id: "c3".into(),
                 name: "shell".into(),
                 message: "command not found".into(),
+                failure: None,
             },
             RunEvent::ToolCall {
                 call_id: "c4".into(),
@@ -139,6 +141,7 @@ async fn demo_analyzer() {
                 call_id: "c4".into(),
                 name: "shell".into(),
                 message: "command not found".into(),
+                failure: None,
             },
         ],
         RunStatus::Failed,

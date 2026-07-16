@@ -117,7 +117,7 @@ impl Tool for RepoMapTool {
                     base.join(path_str)
                 };
                 if !resolved.starts_with(base) {
-                    return Ok(ToolResult::error(format!(
+                    return Ok(ToolResult::invalid_arguments(format!(
                         "Path '{}' is outside the allowed directory scope",
                         path_str
                     )));
@@ -128,7 +128,7 @@ impl Tool for RepoMapTool {
             };
 
             if !root.exists() {
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
                     root.display()
                 )));

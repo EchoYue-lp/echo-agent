@@ -144,7 +144,7 @@ impl Tool for GrepTool {
                     base.join(path_str)
                 };
                 if !resolved.starts_with(base) {
-                    return Ok(ToolResult::error(format!(
+                    return Ok(ToolResult::invalid_arguments(format!(
                         "Path '{}' is outside the allowed directory scope",
                         path_str
                     )));
@@ -155,7 +155,7 @@ impl Tool for GrepTool {
             };
 
             if !search_path.exists() {
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
                     search_path.display()
                 )));

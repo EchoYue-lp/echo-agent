@@ -1,14 +1,51 @@
 use super::resolve_path;
 use echo_core::error::ToolError;
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
+use echo_core::tools::{
+    Tool, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult, ToolRiskLevel,
+    ToolSideEffect,
+};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tokio::fs;
 
 // Re-export encoding_rs for encoding detection
 use encoding_rs;
+
+fn content_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn file_idempotency_key(
+    ctx: &echo_core::tools::ToolContext,
+    tool_name: &str,
+    path: &std::path::Path,
+    hash: &str,
+) -> String {
+    ctx.call_id
+        .clone()
+        .unwrap_or_else(|| format!("{tool_name}:{}:{hash}", path.display()))
+}
+
+fn partial_file_failure(
+    ctx: &echo_core::tools::ToolContext,
+    tool_name: &str,
+    path: &std::path::Path,
+    hash: &str,
+    message: impl Into<String>,
+) -> ToolResult {
+    ToolResult::error(message).with_failure(
+        ToolFailure::new(ToolFailureCategory::PartialSideEffect)
+            .with_side_effect(ToolSideEffect::Possible)
+            .with_idempotency_key(file_idempotency_key(ctx, tool_name, path, hash))
+            .with_postcondition(format!(
+                "read '{}' and compare content_hash with {hash} before retrying",
+                path.display()
+            )),
+    )
+}
 // ── CreateFileTool ────────────────────────────────────────────────────────────
 pub struct CreateFileTool {
     base_dir: Option<PathBuf>,
@@ -77,10 +114,10 @@ impl Tool for CreateFileTool {
             )?;
 
             if path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "File already exists: {}",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("File already exists: {}", path.display()),
+                ));
             }
 
             // Auto-create parent directory
@@ -179,16 +216,16 @@ impl Tool for DeleteFileTool {
             )?;
 
             if !path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "File does not exist: {}",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("File does not exist: {}", path.display()),
+                ));
             }
             if !path.is_file() {
-                return Ok(ToolResult::error(format!(
-                    "'{}' is not a file",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("'{}' is not a file", path.display()),
+                ));
             }
 
             // Create git checkpoint before deletion
@@ -333,16 +370,16 @@ impl Tool for ReadFileTool {
             )?;
 
             if !path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "File does not exist: {}",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("File does not exist: {}", path.display()),
+                ));
             }
             if !path.is_file() {
-                return Ok(ToolResult::error(format!(
-                    "'{}' is not a file",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("'{}' is not a file", path.display()),
+                ));
             }
 
             // Read file bytes
@@ -356,6 +393,7 @@ impl Tool for ReadFileTool {
             // Auto-detect encoding (prefer UTF-8, fall back to GBK)
             let content = String::from_utf8(bytes.clone())
                 .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
+            let hash = content_hash(&bytes);
 
             let lines: Vec<&str> = content.lines().collect();
             let total_lines = lines.len();
@@ -371,14 +409,16 @@ impl Tool for ReadFileTool {
             let end = (start + effective_limit).min(total_lines);
 
             if start >= total_lines {
-                return Ok(ToolResult::success_json(serde_json::json!({
-                    "error": format!("Offset {} exceeds total lines ({})", offset, total_lines),
-                    "total_lines": total_lines
-                })));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("Offset {offset} exceeds total lines ({total_lines})"),
+                ));
             }
 
             // Build structured output
-            let preview_lines: Vec<Value> = lines[start..end]
+            let preview_lines: Vec<Value> = lines
+                .get(start..end)
+                .unwrap_or_default()
                 .iter()
                 .enumerate()
                 .map(|(idx, line)| {
@@ -391,6 +431,7 @@ impl Tool for ReadFileTool {
 
             let result = serde_json::json!({
                 "file": path_str,
+                "content_hash": hash,
                 "total_lines": total_lines,
                 "start_line": start + 1,
                 "end_line": end,
@@ -453,6 +494,10 @@ impl Tool for WriteFileTool {
                 "content": {
                     "type": "string",
                     "description": "Text content to write"
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": "Optional SHA-256 content_hash returned by read_file; the write is rejected if the file changed"
                 }
             },
             "required": ["path", "content"]
@@ -474,6 +519,7 @@ impl Tool for WriteFileTool {
                 .get("content")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
+            let expected_hash = parameters.get("expected_hash").and_then(Value::as_str);
 
             let path = resolve_path(
                 "write_file",
@@ -482,14 +528,50 @@ impl Tool for WriteFileTool {
                 ctx.working_dir.as_deref(),
             )?;
 
+            if let Some(expected_hash) = expected_hash {
+                let current = match tokio::fs::read(&path).await {
+                    Ok(current) => current,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(ToolResult::failure(
+                            ToolFailureCategory::InvalidArguments,
+                            format!(
+                                "File '{}' no longer exists; expected content_hash {expected_hash}",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Ok(ToolResult::failure(
+                            ToolFailureCategory::Permanent,
+                            format!("Failed to verify '{}': {error}", path.display()),
+                        ));
+                    }
+                };
+                let actual_hash = content_hash(&current);
+                if actual_hash != expected_hash {
+                    return Ok(ToolResult::failure(
+                        ToolFailureCategory::InvalidArguments,
+                        format!(
+                            "File '{}' changed since it was read (expected {expected_hash}, actual {actual_hash})",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+
+            let target_hash = content_hash(content.as_bytes());
+
             // Auto-create parent directory
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        tool: "write_file".to_string(),
-                        message: format!("Failed to create directory: {}", e),
-                    }
-                })?;
+                if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                    return Ok(partial_file_failure(
+                        ctx,
+                        "write_file",
+                        &path,
+                        &target_hash,
+                        format!("Failed to create directory: {error}"),
+                    ));
+                }
             }
 
             // Create git checkpoint before mutation (only if file already exists)
@@ -504,12 +586,15 @@ impl Tool for WriteFileTool {
             };
 
             let bytes = content.len();
-            tokio::fs::write(&path, content)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "write_file".to_string(),
-                    message: format!("Failed to write: {}", e),
-                })?;
+            if let Err(error) = tokio::fs::write(&path, content).await {
+                return Ok(partial_file_failure(
+                    ctx,
+                    "write_file",
+                    &path,
+                    &target_hash,
+                    format!("Failed to write: {error}"),
+                ));
+            }
 
             let mut result = ToolResult::success(format!(
                 "Successfully wrote {} bytes to '{}'",
@@ -520,6 +605,17 @@ impl Tool for WriteFileTool {
             if let Some(tag) = checkpoint_tag {
                 result = result.with_meta("git_checkpoint", tag);
             }
+
+            result = result
+                .with_meta("content_hash", target_hash.clone())
+                .with_meta(
+                    "idempotency_key",
+                    file_idempotency_key(ctx, "write_file", &path, &target_hash),
+                )
+                .with_meta(
+                    "postcondition",
+                    format!("content_hash('{}') == {target_hash}", path.display()),
+                );
 
             Ok(result)
         })
@@ -728,10 +824,10 @@ impl Tool for UpdateFileTool {
             )?;
 
             if !path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "File does not exist: {}",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("File does not exist: {}", path.display()),
+                ));
             }
 
             let content =
@@ -743,10 +839,13 @@ impl Tool for UpdateFileTool {
                     })?;
 
             if !content.contains(old_content) {
-                return Ok(ToolResult::error(format!(
-                    "Specified content not found in file, replacement failed: {}",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!(
+                        "Specified content not found in file, replacement failed: {}",
+                        path.display()
+                    ),
+                ));
             }
 
             let updated = content.replacen(old_content, new_content, 1);
@@ -848,22 +947,22 @@ impl Tool for MoveFileTool {
             )?;
 
             if !old_path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "Source file does not exist: {}",
-                    old_path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("Source file does not exist: {}", old_path.display()),
+                ));
             }
             if !old_path.is_file() {
-                return Ok(ToolResult::error(format!(
-                    "'{}' is not a file",
-                    old_path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("'{}' is not a file", old_path.display()),
+                ));
             }
             if new_path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "Target path already exists: {}",
-                    new_path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("Target path already exists: {}", new_path.display()),
+                ));
             }
             // Auto-create target parent directory
             if let Some(parent) = new_path.parent() {
@@ -968,16 +1067,16 @@ impl Tool for ListDirTool {
             )?;
 
             if !path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "Directory does not exist: {}",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("Directory does not exist: {}", path.display()),
+                ));
             }
             if !path.is_dir() {
-                return Ok(ToolResult::error(format!(
-                    "'{}' is not a directory",
-                    path.display()
-                )));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    format!("'{}' is not a directory", path.display()),
+                ));
             }
 
             let mut entries =
@@ -1117,5 +1216,57 @@ mod worktree_cwd_tests {
         );
 
         let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_stale_content_hash() -> Result<(), String> {
+        let wt = unique_dir("echo-files-hash");
+        let path = wt.join("tracked.txt");
+        std::fs::write(&path, "first").map_err(|error| error.to_string())?;
+        let context = ToolContext {
+            working_dir: Some(wt.clone()),
+            call_id: Some("call-write-1".to_string()),
+            ..Default::default()
+        };
+
+        let read = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("tracked.txt"))]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let old_hash = read
+            .data
+            .as_ref()
+            .and_then(|data| data.get("content_hash"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "read_file did not return content_hash".to_string())?
+            .to_string();
+        std::fs::write(&path, "external change").map_err(|error| error.to_string())?;
+
+        let write = WriteFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("tracked.txt")),
+                    ("content".to_string(), json!("agent change")),
+                    ("expected_hash".to_string(), json!(old_hash)),
+                ]),
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert!(!write.success);
+        assert_eq!(
+            write.failure.map(|failure| failure.category),
+            Some(ToolFailureCategory::InvalidArguments)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+            "external change"
+        );
+        let _ = std::fs::remove_dir_all(&wt);
+        Ok(())
     }
 }

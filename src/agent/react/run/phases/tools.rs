@@ -211,14 +211,15 @@ pub(crate) async fn run_tools(
                                 AgentEvent::ToolError {
                                     call_id: id.clone(),
                                     name: fname.clone(),
-                                    error: error.to_string(),
+                                    error: error.error.to_string(),
+                                    failure: error.failure.clone(),
                                 },
                                 IterOutcome::Abandoned
                             );
                             context.lock().await.push(Message::tool_result(
                                 id,
                                 fname.clone(),
-                                format!("[Error] {error}"),
+                                format!("[Error] {}", error.error),
                             ));
                             // Checkpoint on tool error for recovery
                             snap.save_runtime_checkpoint(
@@ -315,14 +316,15 @@ pub(crate) async fn run_tools(
                     AgentEvent::ToolError {
                         call_id: id.clone(),
                         name: fname.clone(),
-                        error: error.to_string(),
+                        error: error.error.to_string(),
+                        failure: error.failure.clone(),
                     },
                     IterOutcome::Abandoned
                 );
                 context.lock().await.push(Message::tool_result(
                     id,
                     fname.clone(),
-                    format!("[Error] {error}"),
+                    format!("[Error] {}", error.error),
                 ));
                 // Checkpoint on tool error for recovery
                 snap.save_runtime_checkpoint(context, Some(format!("Tool error: {fname}")))

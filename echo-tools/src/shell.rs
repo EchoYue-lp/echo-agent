@@ -8,8 +8,8 @@ use echo_core::sandbox::{
 };
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
-    Tool, ToolContext, ToolOutputChannel, ToolParameters, ToolResult, ToolResultKind,
-    ToolRiskLevel, ToolStreamEvent,
+    Tool, ToolContext, ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters,
+    ToolResult, ToolResultKind, ToolRiskLevel, ToolSideEffect, ToolStreamEvent,
 };
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
@@ -419,7 +419,8 @@ impl Tool for ShellTool {
                     return Ok(result);
                 }
             }
-            Ok(ToolResult::error(
+            Ok(ToolResult::failure(
+                ToolFailureCategory::Permanent,
                 "Shell execution stream ended without a completion event",
             ))
         })
@@ -452,16 +453,22 @@ impl Tool for ShellTool {
             match self.check_command_safety(command) {
                 CommandSafety::Safe => {}
                 CommandSafety::RequiresApproval(reason) => {
-                    return Ok(single_complete_stream(ToolResult::error(format!(
-                        "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
-                        reason, command
-                    ))));
+                    return Ok(single_complete_stream(ToolResult::failure(
+                        ToolFailureCategory::Permanent,
+                        format!(
+                            "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
+                            reason, command
+                        ),
+                    )));
                 }
                 CommandSafety::Dangerous(reason) => {
-                    return Ok(single_complete_stream(ToolResult::error(format!(
-                        "🚫 Safety rejection: {}\nCommand: {}\n\nTo perform this operation, please execute it manually in the terminal.",
-                        reason, command
-                    ))));
+                    return Ok(single_complete_stream(ToolResult::failure(
+                        ToolFailureCategory::Permanent,
+                        format!(
+                            "🚫 Safety rejection: {}\nCommand: {}\n\nTo perform this operation, please execute it manually in the terminal.",
+                            reason, command
+                        ),
+                    )));
                 }
             }
 
@@ -593,7 +600,7 @@ fn start_sandbox_stream<'a>(
                 .err()
                 .map(|error| format!("Sandbox execution failed: {error}"))
                 .unwrap_or_else(|| "Sandbox execution failed".to_string());
-            let result = ToolResult::error(message)
+            let result = ToolResult::failure(ToolFailureCategory::Unavailable, message)
                 .with_meta("duration_ms", "0")
                 .with_meta("exit_code", "-1")
                 .with_meta(
@@ -922,7 +929,20 @@ fn build_tool_result(
                 "Command execution failed, exit code: {exit_code}\nstdout: {stdout_text}\nstderr: {stderr_text}"
             )
         };
-        ToolResult::error(message).with_output(final_output)
+        let failure = if timed_out {
+            ToolFailure::new(ToolFailureCategory::Timeout)
+                .with_side_effect(ToolSideEffect::Possible)
+                .with_postcondition(
+                    "verify the process stopped and inspect command targets before retrying",
+                )
+        } else {
+            ToolFailure::new(ToolFailureCategory::Permanent)
+                .with_side_effect(ToolSideEffect::Possible)
+                .with_postcondition("inspect command output and affected targets before continuing")
+        };
+        ToolResult::error(message)
+            .with_failure(failure)
+            .with_output(final_output)
     };
     result.kind = ToolResultKind::CommandOutput {
         exit_code: Some(exit_code),
@@ -946,6 +966,7 @@ fn tool_result_from_execution(
     result: echo_core::sandbox::ExecutionResult,
     working_dir: Option<&std::path::PathBuf>,
 ) -> ToolResult {
+    let timed_out = result.timed_out;
     let stdout_bytes = if result.stdout_bytes == 0 {
         u64::try_from(result.stdout.len()).unwrap_or(u64::MAX)
     } else {
@@ -965,10 +986,22 @@ fn tool_result_from_execution(
         )
     } else {
         let final_output = combined_process_output(&result.stdout, &result.stderr);
+        let failure = if timed_out {
+            ToolFailure::new(ToolFailureCategory::Timeout)
+                .with_side_effect(ToolSideEffect::Possible)
+                .with_postcondition(
+                    "verify the sandbox process stopped and inspect command targets before retrying",
+                )
+        } else {
+            ToolFailure::new(ToolFailureCategory::Permanent)
+                .with_side_effect(ToolSideEffect::Possible)
+                .with_postcondition("inspect command output and affected targets before continuing")
+        };
         ToolResult::error(format!(
             "Command execution failed, exit code: {}\nstdout: {}\nstderr: {}",
             result.exit_code, result.stdout, result.stderr
         ))
+        .with_failure(failure)
         .with_output(final_output)
     };
     tool_result.kind = ToolResultKind::CommandOutput {
@@ -1345,6 +1378,14 @@ mod tests {
         assert_eq!(
             result.metadata.get("stderr_bytes").map(String::as_str),
             Some("6")
+        );
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.category),
+            Some(ToolFailureCategory::Permanent)
+        );
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.side_effect),
+            Some(ToolSideEffect::Possible)
         );
 
         let _ = std::fs::remove_file(script);

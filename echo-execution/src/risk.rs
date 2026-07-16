@@ -111,13 +111,13 @@ impl ToolRiskClassifier {
                 format!("Running: {command} — risk: arbitrary command execution")
             }
             ToolRiskCategory::GitWrite => {
-                format!("Git write to repository — risk: repository state change")
+                "Git write to repository — risk: repository state change".to_string()
             }
             ToolRiskCategory::DatabaseWrite => {
-                format!("Database modification — risk: data corruption")
+                "Database modification — risk: data corruption".to_string()
             }
             ToolRiskCategory::NetworkCall => {
-                format!("Network request — risk: data may leave this machine")
+                "Network request — risk: data may leave this machine".to_string()
             }
             ToolRiskCategory::Destructive => {
                 format!("DELETING {path} — risk: irreversible data loss")

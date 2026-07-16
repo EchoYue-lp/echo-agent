@@ -166,7 +166,8 @@ pub mod prelude {
         DefaultPermissionPolicy, PermissionDecision, PermissionPolicy, ToolPermission,
     };
     pub use crate::tools::{
-        Tool, ToolExecutionConfig, ToolParameters, ToolResult, ToolRiskLevel, ToolStreamEvent,
+        Tool, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolParameters,
+        ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolSideEffect, ToolStreamEvent,
     };
 
     // Web Tools

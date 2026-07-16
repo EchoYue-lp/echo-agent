@@ -637,12 +637,11 @@ fn matches_hook(matcher: &str, context: &HookContext) -> bool {
     }
 
     // Tool events: match against tool_name
-    if context.event.is_tool_event() {
-        if let Some(ref tool_name) = context.tool_name {
-            if matches_tool_name(matcher, tool_name) {
-                return true;
-            }
-        }
+    if context.event.is_tool_event()
+        && let Some(ref tool_name) = context.tool_name
+        && matches_tool_name(matcher, tool_name)
+    {
+        return true;
     }
 
     // Non-tool events (Lifecycle, Subagent, Task): match against context.matcher hint
@@ -658,17 +657,17 @@ fn matches_hook(matcher: &str, context: &HookContext) -> bool {
                 return true;
             }
             // Try each part as a glob pattern
-            if let Ok(pattern) = glob::Pattern::new(part) {
-                if pattern.matches(hint) {
-                    return true;
-                }
+            if let Ok(pattern) = glob::Pattern::new(part)
+                && pattern.matches(hint)
+            {
+                return true;
             }
         }
         // Try full matcher as glob
-        if let Ok(pattern) = glob::Pattern::new(matcher) {
-            if pattern.matches(hint) {
-                return true;
-            }
+        if let Ok(pattern) = glob::Pattern::new(matcher)
+            && pattern.matches(hint)
+        {
+            return true;
         }
     }
 
@@ -687,15 +686,15 @@ fn matches_tool_name(matcher: &str, tool_name: &str) -> bool {
             .any(|part| matches_tool_name(part.trim(), tool_name));
     }
     // Glob matching
-    if let Ok(pattern) = glob::Pattern::new(matcher) {
-        if pattern.matches(tool_name) {
-            return true;
-        }
+    if let Ok(pattern) = glob::Pattern::new(matcher)
+        && pattern.matches(tool_name)
+    {
+        return true;
     }
     // Prefix match for patterns like "Bash" matching "Bash(git:*)"
     if tool_name.starts_with(matcher)
         && tool_name.len() > matcher.len()
-        && tool_name.as_bytes()[matcher.len()] == b'('
+        && tool_name.as_bytes().get(matcher.len()) == Some(&b'(')
     {
         return true;
     }
@@ -906,9 +905,7 @@ async fn execute_command_hook(
 ) -> HookResult {
     // Reject source_dir containing shell-special characters that could break
     // out of the substituted position when passed to bash -c (P1 — shell injection).
-    if source_dir
-        .contains(|c: char| matches!(c, '$' | '`' | '(' | ')' | ';' | '|' | '&' | '<' | '>'))
-    {
+    if source_dir.contains(['$', '`', '(', ')', ';', '|', '&', '<', '>']) {
         return HookResult {
             block: true,
             block_reason: Some(format!(
@@ -1316,10 +1313,10 @@ fn parse_hook_output(stdout: &str, exit_code: i32) -> HookResult {
             result.retry = true;
         }
 
-        if let Some(meta) = json.get("metadata") {
-            if !meta.is_null() {
-                result.metadata = Some(meta.clone());
-            }
+        if let Some(meta) = json.get("metadata")
+            && !meta.is_null()
+        {
+            result.metadata = Some(meta.clone());
         }
     } else if exit_code == 0 {
         // Non-JSON stdout on exit 0: treat as injected context

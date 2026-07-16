@@ -13,7 +13,7 @@ use super::providers::duckduckgo::DuckDuckGoProvider;
 use super::providers::tavily::TavilyProvider;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::Value;
 
@@ -27,10 +27,6 @@ const MAX_ALLOWED_RESULTS: usize = 10;
 pub struct WebSearchTool {
     provider: Box<dyn SearchProvider>,
     default_max_results: usize,
-    /// Maximum retry attempts (default 3)
-    max_retries: u32,
-    /// Base delay for exponential backoff in milliseconds (default 1000ms)
-    base_delay_ms: u64,
 }
 
 impl WebSearchTool {
@@ -39,8 +35,6 @@ impl WebSearchTool {
         Self {
             provider,
             default_max_results: DEFAULT_MAX_RESULTS,
-            max_retries: 3,
-            base_delay_ms: 1000,
         }
     }
 
@@ -86,18 +80,6 @@ impl WebSearchTool {
         self
     }
 
-    /// Set maximum retry attempts (default 3)
-    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
-        self
-    }
-
-    /// Set base delay for exponential backoff in milliseconds (default 1000ms)
-    pub fn with_base_delay_ms(mut self, base_delay_ms: u64) -> Self {
-        self.base_delay_ms = base_delay_ms;
-        self
-    }
-
     /// Get the current Provider name
     pub fn provider_name(&self) -> &str {
         self.provider.name()
@@ -130,10 +112,6 @@ impl Tool for WebSearchTool {
                     "type": "integer",
                     "description": format!("Maximum number of results (default {}, max {})", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
                 },
-                "retries": {
-                    "type": "integer",
-                    "description": "Maximum retry attempts (default 3, max 5)"
-                }
             },
             "required": ["query"]
         })
@@ -147,7 +125,10 @@ impl Tool for WebSearchTool {
                 .ok_or_else(|| ToolError::MissingParameter("query".to_string()))?;
 
             if query.trim().is_empty() {
-                return Ok(ToolResult::error("Search query cannot be empty"));
+                return Ok(ToolResult::failure(
+                    ToolFailureCategory::InvalidArguments,
+                    "Search query cannot be empty",
+                ));
             }
 
             let max_results = parameters
@@ -157,70 +138,26 @@ impl Tool for WebSearchTool {
 
             let max_results = max_results.clamp(1, MAX_ALLOWED_RESULTS);
 
-            // Extract retries parameter (default 3, max 5)
-            let max_retries = parameters
-                .get("retries")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(self.max_retries as u64)
-                .min(5) as u32; // Cap at 5 retries
-
             tracing::info!(
-                "WebSearch: query='{}', max_results={}, provider={}, max_retries={}",
+                "WebSearch: query='{}', max_results={}, provider={}",
                 query,
                 max_results,
-                self.provider.name(),
-                max_retries
+                self.provider.name()
             );
-
-            // Retry loop with exponential backoff
-            let mut last_error = None;
-            for attempt in 0..=max_retries {
-                if attempt > 0 {
-                    // Exponential backoff: base_delay * 2^(attempt-1)
-                    let delay_ms = self.base_delay_ms * 2u64.pow(attempt - 1);
-                    tracing::info!(
-                        "WebSearch: retry attempt {}/{}, waiting {}ms",
-                        attempt,
-                        max_retries,
-                        delay_ms
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                }
-
-                match self.provider.search(query, max_results).await {
-                    Ok(results) => {
-                        return Ok(ToolResult::success_json(
-                            serde_json::to_value(&results).unwrap_or_default(),
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "WebSearch: attempt {}/{} failed: {}",
-                            attempt + 1,
-                            max_retries + 1,
-                            e
-                        );
-                        last_error = Some(e);
-                    }
-                }
-            }
-
-            // All retries exhausted
-            let error_msg = if let Some(e) = last_error {
-                format!(
-                    "Search failed after {} attempts (provider: {}): {}",
-                    max_retries + 1,
-                    self.provider.name(),
-                    e
-                )
-            } else {
-                format!(
-                    "Search failed (provider: {}): unknown error",
+            match self.provider.search(query, max_results).await {
+                Ok(results) => Ok(ToolResult::success_json(
+                    serde_json::to_value(&results).unwrap_or_default(),
+                )),
+                Err(error) => Ok(ToolResult::error(format!(
+                    "Search provider '{}' failed: {error}",
                     self.provider.name()
-                )
-            };
-
-            Ok(ToolResult::error(error_msg))
+                ))
+                .with_failure(
+                    ToolFailure::new(ToolFailureCategory::Transient)
+                        .retryable()
+                        .with_retry_after(1_000),
+                )),
+            }
         })
     }
 }
@@ -325,74 +262,37 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_retry_configuration() {
-        let tool = WebSearchTool::with_duckduckgo();
-        assert_eq!(tool.max_retries, 3);
-        assert_eq!(tool.base_delay_ms, 1000);
-
-        let tool = WebSearchTool::with_duckduckgo()
-            .with_max_retries(5)
-            .with_base_delay_ms(500);
-        assert_eq!(tool.max_retries, 5);
-        assert_eq!(tool.base_delay_ms, 500);
-    }
-
     #[tokio::test]
-    async fn test_retry_succeeds_after_failures() {
-        // Provider fails 2 times, succeeds on 3rd attempt (within 3 retries)
+    async fn transient_failure_is_returned_to_the_central_retry_policy() {
         let (provider, counter) = FailNTimesProvider::new(2);
-        let tool = WebSearchTool::new(Box::new(provider))
-            .with_max_retries(3)
-            .with_base_delay_ms(10); // Short delay for fast tests
+        let tool = WebSearchTool::new(Box::new(provider));
 
         let mut params = std::collections::HashMap::new();
         params.insert("query".to_string(), serde_json::json!("test"));
 
         let result = tool.execute(params).await.unwrap();
-        assert!(result.success, "Should succeed after retries: {:?}", result);
-        assert_eq!(counter.load(Ordering::SeqCst), 3); // 2 failures + 1 success
-    }
-
-    #[tokio::test]
-    async fn test_retry_exhausted_returns_error() {
-        // Provider always fails, retries exhausted
-        let tool = WebSearchTool::new(Box::new(AlwaysFailProvider))
-            .with_max_retries(2)
-            .with_base_delay_ms(10);
-
-        let mut params = std::collections::HashMap::new();
-        params.insert("query".to_string(), serde_json::json!("test"));
-
-        let result = tool.execute(params).await.unwrap();
-        assert!(!result.success, "Should fail after retries exhausted");
-        let error_msg = result.error.unwrap_or_default();
+        assert!(!result.success);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert!(
-            error_msg.contains("failed after"),
-            "Expected 'failed after' message, got: {}",
-            error_msg
+            result
+                .failure
+                .as_ref()
+                .is_some_and(ToolFailure::allows_automatic_retry)
         );
     }
 
     #[tokio::test]
-    async fn test_retry_per_call_cap_at_5() {
-        // Request 10 retries, should be capped at 5
-        let tool = WebSearchTool::new(Box::new(AlwaysFailProvider))
-            .with_max_retries(3)
-            .with_base_delay_ms(10);
+    async fn provider_failure_is_classified_as_transient() {
+        let tool = WebSearchTool::new(Box::new(AlwaysFailProvider));
 
         let mut params = std::collections::HashMap::new();
         params.insert("query".to_string(), serde_json::json!("test"));
-        params.insert("retries".to_string(), serde_json::json!(10));
 
         let result = tool.execute(params).await.unwrap();
         assert!(!result.success);
-        let error_msg = result.error.unwrap_or_default();
-        // Should mention 6 attempts (0..=5, capped from 10 to 5)
-        assert!(
-            error_msg.contains("6 attempts"),
-            "Expected 6 attempts (1 initial + 5 retries capped), got: {}",
-            error_msg
+        assert_eq!(
+            result.failure.map(|failure| failure.category),
+            Some(ToolFailureCategory::Transient)
         );
     }
 }

@@ -438,6 +438,7 @@ impl PipelineStage for ExecuteStage {
             run_id: snapshot.current_run_id.clone(),
             turn_id: snapshot.current_turn_id.clone(),
             execution_id: snapshot.current_execution_id.clone(),
+            call_id: Some(ctx.call_id.clone()),
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,
@@ -505,6 +506,11 @@ impl PipelineStage for ExecuteStage {
                 .await
         };
 
+        let may_have_side_effects = snapshot
+            .tools
+            .tool_manager
+            .get_tool(&ctx.tool_name)
+            .is_none_or(|tool| tool.risk_level() != crate::tools::ToolRiskLevel::ReadOnly);
         let result = match execution_result {
             Ok(r) => r,
             Err(e) => {
@@ -534,6 +540,10 @@ impl PipelineStage for ExecuteStage {
                     success: false,
                     output: String::new(),
                     error: Some(err_msg),
+                    failure: Some(crate::tools::ToolFailure::from_error(
+                        &e,
+                        may_have_side_effects,
+                    )),
                     bytes: None,
                     data: None,
                     truncated: false,
@@ -766,6 +776,7 @@ impl PipelineStage for TraceRecordingStage {
                         call_id: ctx.call_id.clone(),
                         name: ctx.tool_name.clone(),
                         message: result.error.clone().unwrap_or_default(),
+                        failure: result.failure.clone(),
                     })
                     .await;
             }
@@ -948,6 +959,34 @@ mod tests {
     }
 
     struct InterleavingTool;
+
+    struct InvalidResultTool;
+
+    impl Tool for InvalidResultTool {
+        fn name(&self) -> &str {
+            "invalid_result"
+        }
+
+        fn description(&self) -> &str {
+            "returns a classified unsuccessful result"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async {
+                Ok(ToolResult::failure(
+                    crate::tools::ToolFailureCategory::InvalidArguments,
+                    "missing query",
+                ))
+            })
+        }
+    }
 
     impl Tool for InterleavingTool {
         fn name(&self) -> &str {
@@ -1260,6 +1299,39 @@ mod tests {
         let truncation = names.iter().position(|name| *name == "truncation");
         let trace = names.iter().position(|name| *name == "trace_recording");
         assert!(matches!((truncation, trace), (Some(left), Some(right)) if left < right));
+    }
+
+    #[tokio::test]
+    async fn unsuccessful_tool_result_remains_a_terminal_failure() -> crate::error::Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .enable_tools()
+            .tool(Box::new(InvalidResultTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let result = snapshot
+            .execute_tool_with_policy(
+                "call-invalid".to_string(),
+                "invalid_result",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        let failure = match result {
+            Ok(_) => {
+                return Err(crate::error::ReactError::Other(
+                    "unsuccessful ToolResult was projected as success".to_string(),
+                ));
+            }
+            Err(failure) => failure,
+        };
+
+        assert_eq!(
+            failure.failure.category,
+            crate::tools::ToolFailureCategory::InvalidArguments
+        );
+        Ok(())
     }
 
     #[tokio::test]

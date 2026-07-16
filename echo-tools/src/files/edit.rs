@@ -127,14 +127,14 @@ impl Tool for EditFileTool {
             )?;
 
             if !path.exists() {
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "File does not exist: {}",
                     path.display()
                 )));
             }
 
             if !path.is_file() {
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "'{}' is not a file",
                     path.display()
                 )));
@@ -161,7 +161,7 @@ impl Tool for EditFileTool {
                         s
                     ));
                 }
-                return Ok(ToolResult::error(msg));
+                return Ok(ToolResult::invalid_arguments(msg));
             }
 
             // Count occurrences
@@ -169,7 +169,7 @@ impl Tool for EditFileTool {
             if count > 1 && !replace_all {
                 let occurrences = find_occurrence_lines(&original, old_content);
                 let occ_strs: Vec<String> = occurrences.iter().map(|n| n.to_string()).collect();
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "old_content found {} times in '{}'. Set replace_all=true to replace all, or narrow old_content to match a unique occurrence.\nOccurrences at lines: {}",
                     count,
                     path.display(),

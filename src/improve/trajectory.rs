@@ -147,6 +147,7 @@ impl TrajectorySaver {
                     call_id,
                     name,
                     message,
+                    ..
                 } => {
                     if let Some(pos) = pending_tool_calls.iter().position(|(id, _)| id == call_id) {
                         let (_, tool_msg) = pending_tool_calls.remove(pos);

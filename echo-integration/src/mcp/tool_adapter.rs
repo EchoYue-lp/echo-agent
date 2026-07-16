@@ -5,7 +5,10 @@ use futures::future::BoxFuture;
 use super::client::McpClient;
 use super::types::{McpContent, McpTool, McpToolCallResult};
 use echo_core::error::Result;
-use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolResultKind, ToolRiskLevel};
+use echo_core::tools::{
+    Tool, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult, ToolResultKind,
+    ToolRiskLevel,
+};
 
 /// 将 MCP 工具适配为框架的 `Tool` trait
 ///
@@ -143,7 +146,16 @@ impl Tool for McpToolAdapter {
     fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
         Box::pin(async move {
             let args = serde_json::Value::Object(parameters.into_iter().collect());
-            let result = self.client.call_tool(&self.tool.name, args).await?;
+            let result = match self.client.call_tool(&self.tool.name, args).await {
+                Ok(result) => result,
+                Err(error) => {
+                    let may_have_side_effects = self.risk_level() != ToolRiskLevel::ReadOnly;
+                    let mut result = ToolResult::error(error.to_string())
+                        .with_failure(ToolFailure::from_error(&error, may_have_side_effects));
+                    self.attach_result_metadata(&mut result, "protocol_error");
+                    return Ok(result);
+                }
+            };
             let result_type = mcp_result_type(&result);
 
             let text = McpClient::content_to_text(&result.content);
@@ -153,7 +165,7 @@ impl Tool for McpToolAdapter {
             // and map `isError` to the structured-error kind. The text view
             // remains a human-readable concatenation for the LLM.
             if result.is_error {
-                let mut tr = ToolResult::error(text);
+                let mut tr = ToolResult::failure(ToolFailureCategory::Permanent, text);
                 if let Some(structured) = result.structured_content {
                     tr = tr.with_data(structured);
                     tr.kind = ToolResultKind::StructuredError {

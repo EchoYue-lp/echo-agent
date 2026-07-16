@@ -247,6 +247,7 @@ mod tests {
                     call_id: "test_call".into(),
                     name: "shell".into(),
                     message: "fail1".into(),
+                    failure: None,
                 },
                 RunEvent::ToolCall {
                     call_id: "test_call".into(),
@@ -259,6 +260,7 @@ mod tests {
                     call_id: "test_call".into(),
                     name: "shell".into(),
                     message: "fail2".into(),
+                    failure: None,
                 },
                 RunEvent::ToolCall {
                     call_id: "test_call".into(),
@@ -271,6 +273,7 @@ mod tests {
                     call_id: "test_call".into(),
                     name: "shell".into(),
                     message: "fail3".into(),
+                    failure: None,
                 },
             ],
             RunStatus::Failed,

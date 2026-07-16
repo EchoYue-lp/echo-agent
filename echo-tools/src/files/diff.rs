@@ -99,7 +99,7 @@ impl Tool for DiffTool {
                 .unwrap_or(3) as usize;
 
             if path_b_str.is_none() && content_b.is_none() {
-                return Ok(ToolResult::error(
+                return Ok(ToolResult::invalid_arguments(
                     "Either path_b or content_b must be provided.".to_string(),
                 ));
             }
@@ -112,7 +112,7 @@ impl Tool for DiffTool {
             )?;
 
             if !path_a.exists() {
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "File does not exist: {}",
                     path_a.display()
                 )));
@@ -136,7 +136,7 @@ impl Tool for DiffTool {
                     ctx.working_dir.as_deref(),
                 )?;
                 if !path_b.exists() {
-                    return Ok(ToolResult::error(format!(
+                    return Ok(ToolResult::invalid_arguments(format!(
                         "File does not exist: {}",
                         path_b.display()
                     )));

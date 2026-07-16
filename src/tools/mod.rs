@@ -93,8 +93,8 @@ pub mod execution {
 }
 
 pub use echo_execution::tools::{
-    Tool, ToolExecutionConfig, ToolManager, ToolOutputChannel, ToolParameters, ToolResult,
-    ToolRiskLevel, ToolStreamEvent,
+    Tool, ToolExecutionConfig, ToolFailure, ToolFailureCategory, ToolManager, ToolOutputChannel,
+    ToolParameters, ToolRecoveryAction, ToolResult, ToolRiskLevel, ToolSideEffect, ToolStreamEvent,
 };
 
 // ── Common file tool classification ──────────────────────────────────────────

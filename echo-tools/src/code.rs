@@ -378,6 +378,7 @@ mod tests {
             run_id: None,
             turn_id: None,
             execution_id: None,
+            call_id: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,

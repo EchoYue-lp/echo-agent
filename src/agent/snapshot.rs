@@ -10,7 +10,7 @@ use crate::agent::InterventionCallback;
 use crate::audit::AuditLogger;
 use crate::memory::snapshot::SnapshotManager;
 use crate::skills::hooks::HookRegistry;
-use crate::tools::{ToolExecutionConfig, ToolManager};
+use crate::tools::{ToolExecutionConfig, ToolFailure, ToolManager};
 use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
 use echo_core::llm::types::{Message, Role};
@@ -28,6 +28,11 @@ pub(crate) struct ProcessedToolOutput {
     pub output: String,
     pub truncated: bool,
     pub metadata: std::collections::HashMap<String, String>,
+}
+
+pub(crate) struct ToolCallFailure {
+    pub error: crate::error::ReactError,
+    pub failure: ToolFailure,
 }
 
 fn is_internal_transcript_message(message: &Message) -> bool {
@@ -1072,7 +1077,7 @@ impl AgentRunSnapshot {
         stream_tx: Option<
             tokio::sync::mpsc::Sender<(String, String, crate::tools::ToolStreamEvent)>,
         >,
-    ) -> futures::future::BoxFuture<'a, std::result::Result<String, crate::error::ReactError>> {
+    ) -> futures::future::BoxFuture<'a, std::result::Result<String, ToolCallFailure>> {
         Box::pin(async move {
             // Use the unified pipeline for consistent behavior
             let pipeline = self
@@ -1112,17 +1117,43 @@ impl AgentRunSnapshot {
                     }
 
                     // Return the final output (after guard + truncation)
-                    if let Some(output) = ctx.output {
-                        Ok(output)
-                    } else if let Some(result) = ctx.result {
-                        Ok(result.output)
-                    } else {
-                        Err(crate::error::ReactError::Other(
-                            "Pipeline completed without result".into(),
-                        ))
+                    if let Some(result) = ctx.result {
+                        if result.success {
+                            return Ok(ctx.output.unwrap_or(result.output));
+                        }
+                        let message = result.error.unwrap_or_else(|| result.output.clone());
+                        let failure = result.failure.unwrap_or_else(|| {
+                            ToolFailure::new(crate::tools::ToolFailureCategory::Permanent)
+                        });
+                        return Err(ToolCallFailure {
+                            error: crate::error::ToolError::ExecutionFailed {
+                                tool: tool_name.to_string(),
+                                message,
+                            }
+                            .into(),
+                            failure,
+                        });
                     }
+                    Err(ToolCallFailure {
+                        error: crate::error::ReactError::Other(
+                            "Pipeline completed without result".into(),
+                        ),
+                        failure: ToolFailure::new(crate::tools::ToolFailureCategory::Permanent),
+                    })
                 }
-                Err(e) => Err(e),
+                Err(error) => {
+                    let may_have_side_effects = self
+                        .tools
+                        .tool_manager
+                        .get_tool(tool_name)
+                        .is_none_or(|tool| {
+                            tool.risk_level() != crate::tools::ToolRiskLevel::ReadOnly
+                        });
+                    Err(ToolCallFailure {
+                        failure: ToolFailure::from_error(&error, may_have_side_effects),
+                        error,
+                    })
+                }
             }
         })
     }

@@ -211,6 +211,8 @@ pub enum SubagentEvent {
         result: String,
         /// Whether the tool call succeeded.
         success: bool,
+        /// Structured failure facts when `success` is false.
+        failure: Option<crate::tools::ToolFailure>,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).

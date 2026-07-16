@@ -59,6 +59,7 @@ polars = { version = "0.53", features = ["lazy", "csv", "json", "parquet", "dtyp
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "any"], optional = true }
 quick-xml = { version = "0.37", features = ["serialize"], optional = true }
 urlencoding = "2"
+sha2 = "0.10"
 
 [package.metadata.docs.rs]
 all-features = true

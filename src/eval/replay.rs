@@ -457,6 +457,7 @@ mod tests {
                 call_id: "test_call".into(),
                 name: "read_file".into(),
                 message: "not found".into(),
+                failure: None,
             },
         ]);
         let replay = TrajectoryReplay::new(run);

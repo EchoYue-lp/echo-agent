@@ -240,9 +240,9 @@ pub enum McpError {
     /// Protocol error
     #[error("Protocol error: {0}")]
     ProtocolError(String),
-    /// Tool call failed
-    #[error("Tool call failed: {0}")]
-    ToolCallFailed(String),
+    /// Tool call failed with a JSON-RPC error code.
+    #[error("Tool call failed ({code}): {message}")]
+    ToolCallFailed { code: i32, message: String },
     /// Transport channel closed
     #[error("MCP transport closed unexpectedly")]
     TransportClosed,

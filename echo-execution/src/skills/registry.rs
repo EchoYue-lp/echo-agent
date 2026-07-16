@@ -203,12 +203,12 @@ impl SkillRegistry {
         let mut any_restricted = false;
 
         for name in activated.iter() {
-            if let Some(desc) = self.descriptors.get(name) {
-                if !desc.allowed_tools.is_empty() {
-                    any_restricted = true;
-                    for tool in &desc.allowed_tools {
-                        allowed.insert(tool.clone());
-                    }
+            if let Some(desc) = self.descriptors.get(name)
+                && !desc.allowed_tools.is_empty()
+            {
+                any_restricted = true;
+                for tool in &desc.allowed_tools {
+                    allowed.insert(tool.clone());
                 }
             }
         }
@@ -313,14 +313,14 @@ impl SkillRegistry {
         let resources = enumerate_resources(skill_dir).await;
 
         // Store sandbox policy if declared
-        if let Some(ref policy) = descriptor.sandbox {
-            if policy.is_constraining() {
-                let mut guard = self
-                    .active_sandbox_policies
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                guard.insert(name.to_string(), policy.clone());
-            }
+        if let Some(ref policy) = descriptor.sandbox
+            && policy.is_constraining()
+        {
+            let mut guard = self
+                .active_sandbox_policies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.insert(name.to_string(), policy.clone());
         }
 
         {

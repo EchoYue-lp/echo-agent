@@ -110,7 +110,7 @@ impl Tool for GlobTool {
                     base.join(path_str)
                 };
                 if !resolved.starts_with(base) {
-                    return Ok(ToolResult::error(format!(
+                    return Ok(ToolResult::invalid_arguments(format!(
                         "Path '{}' is outside the allowed directory scope",
                         path_str
                     )));
@@ -121,14 +121,14 @@ impl Tool for GlobTool {
             };
 
             if !search_path.exists() {
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
                     search_path.display()
                 )));
             }
 
             if !search_path.is_dir() {
-                return Ok(ToolResult::error(format!(
+                return Ok(ToolResult::invalid_arguments(format!(
                     "Path is not a directory: {}",
                     search_path.display()
                 )));

@@ -199,6 +199,8 @@ pub enum AgentEvent {
         name: String,
         /// Error message
         error: String,
+        /// Structured classification and recovery facts.
+        failure: crate::tools::ToolFailure,
     },
     /// Streaming tool progress / output event (not a terminal lifecycle event).
     ToolStream {

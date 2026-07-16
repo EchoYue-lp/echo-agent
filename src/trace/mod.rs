@@ -220,6 +220,9 @@ pub enum RunEvent {
         name: String,
         /// Error message.
         message: String,
+        /// Structured failure facts. `None` is accepted for legacy trace fixtures.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<crate::tools::ToolFailure>,
     },
     /// An error occurred at the run level.
     #[allow(dead_code)]

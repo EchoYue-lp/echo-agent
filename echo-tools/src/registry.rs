@@ -402,12 +402,15 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "shell")]
     use echo_core::tools::{Tool, ToolRegistrar};
 
     /// A registrar that collects the names of every tool registered into it.
+    #[cfg(feature = "shell")]
     struct Collector {
         names: std::sync::Mutex<Vec<String>>,
     }
+    #[cfg(feature = "shell")]
     impl ToolRegistrar for Collector {
         fn register(&mut self, tool: Box<dyn Tool>) {
             self.names.lock().unwrap().push(tool.name().to_string());

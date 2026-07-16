@@ -1061,6 +1061,7 @@ impl SubagentExecutor {
                             name,
                             result: output,
                             success: true,
+                            failure: None,
                             execution_id: execution_id.clone(),
                             run_id: run_id.clone(),
                         });
@@ -1069,6 +1070,7 @@ impl SubagentExecutor {
                     call_id,
                     name,
                     error,
+                    failure,
                 } => {
                     registry
                         .event_bus()
@@ -1079,6 +1081,7 @@ impl SubagentExecutor {
                             name,
                             result: error,
                             success: false,
+                            failure: Some(failure),
                             execution_id: execution_id.clone(),
                             run_id: run_id.clone(),
                         });

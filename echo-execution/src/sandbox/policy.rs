@@ -316,8 +316,10 @@ mod tests {
 
     #[test]
     fn test_standard_level_safe_command() {
-        let mut policy = SandboxPolicy::default();
-        policy.default_level = SecurityLevel::Standard;
+        let policy = SandboxPolicy {
+            default_level: SecurityLevel::Standard,
+            ..Default::default()
+        };
         let cmd = SandboxCommand::shell("ls -la");
         // Standard -> base = Process, safe command -> None -> max(Process, None) = Process
         assert_eq!(policy.evaluate(&cmd), IsolationLevel::Process);
@@ -325,8 +327,10 @@ mod tests {
 
     #[test]
     fn test_standard_level_script_interpreter() {
-        let mut policy = SandboxPolicy::default();
-        policy.default_level = SecurityLevel::Standard;
+        let policy = SandboxPolicy {
+            default_level: SecurityLevel::Standard,
+            ..Default::default()
+        };
         let cmd = SandboxCommand::shell("python3 script.py");
         // Standard -> base = Process, python3 -> OsSandbox -> max(Process, OsSandbox) = OsSandbox
         assert_eq!(policy.evaluate(&cmd), IsolationLevel::OsSandbox);

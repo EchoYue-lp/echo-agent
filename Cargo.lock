@@ -1223,6 +1223,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha2",
  "shlex",
  "similar",
  "sqlx",

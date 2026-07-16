@@ -594,15 +594,14 @@ fn configure_command_process(_command: &mut Command, _max_memory_bytes: Option<u
 
 async fn cleanup_child_process(child: &mut tokio::process::Child) {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        if let Err(e) = std::process::Command::new("kill")
+    if let Some(pid) = child.id()
+        && let Err(e) = std::process::Command::new("kill")
             .args(["-KILL", &format!("-{pid}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-        {
-            tracing::warn!("Failed to send SIGKILL to process group {pid}: {e}");
-        }
+    {
+        tracing::warn!("Failed to send SIGKILL to process group {pid}: {e}");
     }
 
     if let Err(e) = child.kill().await {
