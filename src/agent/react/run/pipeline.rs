@@ -439,6 +439,7 @@ impl PipelineStage for ExecuteStage {
             turn_id: snapshot.current_turn_id.clone(),
             execution_id: snapshot.current_execution_id.clone(),
             call_id: Some(ctx.call_id.clone()),
+            output_artifacts: snapshot.config.tool_output_artifacts.clone(),
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
             delegation_policy: snapshot.external_delegation_policy,
@@ -660,7 +661,15 @@ impl PipelineStage for TruncationStage {
             .as_deref()
             .or_else(|| ctx.result.as_ref().map(|r| r.output.as_str()))
             .unwrap_or("");
-        let processed = snapshot.process_tool_output(raw.to_string());
+        let existing_artifact = ctx.result.as_ref().and_then(|result| {
+            echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(&result.metadata)
+        });
+        let processed = snapshot.process_tool_output_for_call(
+            raw.to_string(),
+            &ctx.call_id,
+            &ctx.tool_name,
+            existing_artifact,
+        );
         if let Some(result) = ctx.result.as_mut() {
             result.truncated = processed.truncated;
             result.metadata.extend(processed.metadata);
@@ -768,6 +777,7 @@ impl PipelineStage for TraceRecordingStage {
                     returned_bytes: metadata_u64(result, "returned_bytes"),
                     estimated_tokens: metadata_usize(result, "estimated_tokens"),
                     output_handling: result.metadata.get("output_handling").cloned(),
+                    artifact: trace_artifact(result),
                 })
                 .await;
             if !result.success {
@@ -799,6 +809,21 @@ fn metadata_usize(result: &crate::tools::ToolResult, key: &str) -> usize {
         .get(key)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0)
+}
+
+fn trace_artifact(
+    result: &crate::tools::ToolResult,
+) -> Option<crate::trace::ToolOutputArtifactTrace> {
+    Some(crate::trace::ToolOutputArtifactTrace {
+        path: result.metadata.get("artifact_path")?.clone(),
+        bytes: metadata_u64(result, "artifact_bytes"),
+        sha256: result.metadata.get("artifact_sha256")?.clone(),
+        retention: result
+            .metadata
+            .get("artifact_retention")
+            .cloned()
+            .unwrap_or_else(|| "unspecified".to_string()),
+    })
 }
 
 // ── ToolExecutionPipeline ──────────────────────────────────────────
@@ -1156,6 +1181,10 @@ mod tests {
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
             .working_dir(working_dir.path())
+            .tool_output_artifacts(echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                working_dir.path(),
+                "test",
+            ))
             .build()?;
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
         let original = format!("{}END", "中文🙂\n".repeat(300_000));
@@ -1178,7 +1207,7 @@ mod tests {
             .ok_or_else(|| ReactError::Other("spill metadata lacks artifact_path".to_string()))?;
         assert!(std::path::Path::new(artifact_path).starts_with(working_dir.path()));
         assert!(ctx.output.as_deref().is_some_and(|output| {
-            output.contains("Output spilled to disk") && output.contains(artifact_path)
+            output.contains("Full output artifact") && output.contains(artifact_path)
         }));
 
         let read_tool = crate::tools::files::files::ReadFileTool::new();
@@ -1202,6 +1231,11 @@ mod tests {
             std::fs::read_to_string(artifact_path).ok().as_deref(),
             Some(original.as_str())
         );
+        let trace_artifact = trace_artifact(result)
+            .ok_or_else(|| ReactError::Other("trace lost artifact descriptor".to_string()))?;
+        assert_eq!(trace_artifact.path.as_str(), artifact_path.as_str());
+        assert_eq!(trace_artifact.sha256.len(), 64);
+        assert_eq!(trace_artifact.retention, "test");
         Ok(())
     }
 
@@ -1268,6 +1302,10 @@ mod tests {
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
             .working_dir(working_dir_file.path())
+            .tool_output_artifacts(echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                working_dir_file.path().join("artifacts"),
+                "test",
+            ))
             .build()?;
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
         let mut ctx = completed_context("失败回退🙂".repeat(300_000));

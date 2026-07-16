@@ -6,6 +6,9 @@ use echo_core::error::{Result, ToolError};
 use echo_core::sandbox::{
     SandboxCommand, SandboxExecutor, SandboxOutputChannel, SandboxStreamEvent,
 };
+use echo_core::tools::artifact::{
+    ToolOutputArtifactIdentity, ToolOutputArtifactRef, ToolOutputArtifactWriter,
+};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
     Tool, ToolContext, ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters,
@@ -478,6 +481,7 @@ impl Tool for ShellTool {
                 .clone()
                 .or_else(|| std::env::current_dir().ok());
             let timeout = Duration::from_secs(timeout_secs);
+            let artifact_capture = ArtifactCapture::new(&ctx, self.name());
 
             if let Some(sandbox) = sandbox {
                 let mut sandbox_cmd = if has_metacharacters {
@@ -497,7 +501,12 @@ impl Tool for ShellTool {
                 if let Some(dir) = &working_dir {
                     sandbox_cmd = sandbox_cmd.with_working_dir(dir);
                 }
-                Ok(start_sandbox_stream(sandbox, sandbox_cmd, working_dir))
+                Ok(start_sandbox_stream(
+                    sandbox,
+                    sandbox_cmd,
+                    working_dir,
+                    artifact_capture,
+                ))
             } else {
                 let parts = parse_command(self.name(), command)?;
                 let Some(program) = parts.first() else {
@@ -512,6 +521,7 @@ impl Tool for ShellTool {
                     parts.get(1..).unwrap_or_default(),
                     working_dir,
                     timeout,
+                    artifact_capture,
                 )
             }
         })
@@ -556,6 +566,7 @@ fn start_direct_stream<'a>(
     args: &[String],
     working_dir: Option<std::path::PathBuf>,
     timeout: Duration,
+    artifact_capture: ArtifactCapture,
 ) -> Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>> {
     let mut command = Command::new(program);
     command
@@ -579,7 +590,16 @@ fn start_direct_stream<'a>(
     let stderr = child.stderr.take();
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        run_direct_child(&mut child, stdout, stderr, tx, working_dir, timeout).await;
+        run_direct_child(
+            &mut child,
+            stdout,
+            stderr,
+            tx,
+            working_dir,
+            timeout,
+            artifact_capture,
+        )
+        .await;
     });
     Ok(receiver_stream(rx))
 }
@@ -588,6 +608,7 @@ fn start_sandbox_stream<'a>(
     sandbox: Arc<dyn SandboxExecutor>,
     command: SandboxCommand,
     working_dir: Option<std::path::PathBuf>,
+    mut artifact_capture: ArtifactCapture,
 ) -> Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>> {
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
@@ -626,16 +647,21 @@ fn start_sandbox_stream<'a>(
                 return;
             };
             let mapped = match event {
-                SandboxStreamEvent::Output { channel, chunk } => ToolStreamEvent::Output {
-                    channel: match channel {
+                SandboxStreamEvent::Output { channel, chunk } => {
+                    let tool_channel = match channel {
                         SandboxOutputChannel::Stdout => ToolOutputChannel::Stdout,
                         SandboxOutputChannel::Stderr => ToolOutputChannel::Stderr,
-                    },
-                    chunk,
-                },
-                SandboxStreamEvent::Complete(result) => ToolStreamEvent::Complete(
-                    tool_result_from_execution(result, working_dir.as_ref()),
-                ),
+                    };
+                    artifact_capture.push(tool_channel.clone(), &chunk);
+                    ToolStreamEvent::Output {
+                        channel: tool_channel,
+                        chunk,
+                    }
+                }
+                SandboxStreamEvent::Complete(result) => {
+                    let result = tool_result_from_execution(result, working_dir.as_ref());
+                    ToolStreamEvent::Complete(artifact_capture.finish(result))
+                }
             };
             if tx.send(mapped).await.is_err() {
                 return;
@@ -652,6 +678,7 @@ async fn run_direct_child(
     tx: mpsc::Sender<ToolStreamEvent>,
     working_dir: Option<std::path::PathBuf>,
     timeout: Duration,
+    mut artifact_capture: ArtifactCapture,
 ) {
     let start = Instant::now();
     let deadline = tokio::time::sleep(timeout);
@@ -676,14 +703,14 @@ async fn run_direct_child(
             }
             _ = &mut deadline => {
                 cleanup_direct_child(child).await;
-                let result = build_tool_result(
+                let result = artifact_capture.finish(build_tool_result(
                     -1,
                     retained_stdout,
                     retained_stderr,
                     start.elapsed(),
                     working_dir.as_ref(),
                     true,
-                );
+                ));
                 let _ = tx.send(ToolStreamEvent::Complete(result)).await;
                 return;
             }
@@ -696,11 +723,12 @@ async fn run_direct_child(
                 match read {
                     Ok(0) => {
                         stdout = None;
-                        if let Some(chunk) = stdout_decoder.finish()
-                            && send_output(&tx, ToolOutputChannel::Stdout, chunk).await.is_err()
-                        {
-                            cleanup_direct_child(child).await;
-                            return;
+                        if let Some(chunk) = stdout_decoder.finish() {
+                            artifact_capture.push(ToolOutputChannel::Stdout, &chunk);
+                            if send_output(&tx, ToolOutputChannel::Stdout, chunk).await.is_err() {
+                                cleanup_direct_child(child).await;
+                                return;
+                            }
                         }
                     }
                     Ok(count) => {
@@ -711,6 +739,7 @@ async fn run_direct_child(
                             .saturating_add(retained_stderr.bytes.len());
                         retained_stdout.push(bytes, MAX_RETAINED_OUTPUT_BYTES.saturating_sub(retained));
                         for chunk in stdout_decoder.push(bytes) {
+                            artifact_capture.push(ToolOutputChannel::Stdout, &chunk);
                             if send_output(&tx, ToolOutputChannel::Stdout, chunk).await.is_err() {
                                 cleanup_direct_child(child).await;
                                 return;
@@ -729,11 +758,12 @@ async fn run_direct_child(
                 match read {
                     Ok(0) => {
                         stderr = None;
-                        if let Some(chunk) = stderr_decoder.finish()
-                            && send_output(&tx, ToolOutputChannel::Stderr, chunk).await.is_err()
-                        {
-                            cleanup_direct_child(child).await;
-                            return;
+                        if let Some(chunk) = stderr_decoder.finish() {
+                            artifact_capture.push(ToolOutputChannel::Stderr, &chunk);
+                            if send_output(&tx, ToolOutputChannel::Stderr, chunk).await.is_err() {
+                                cleanup_direct_child(child).await;
+                                return;
+                            }
                         }
                     }
                     Ok(count) => {
@@ -744,6 +774,7 @@ async fn run_direct_child(
                             .saturating_add(retained_stderr.bytes.len());
                         retained_stderr.push(bytes, MAX_RETAINED_OUTPUT_BYTES.saturating_sub(retained));
                         for chunk in stderr_decoder.push(bytes) {
+                            artifact_capture.push(ToolOutputChannel::Stderr, &chunk);
                             if send_output(&tx, ToolOutputChannel::Stderr, chunk).await.is_err() {
                                 cleanup_direct_child(child).await;
                                 return;
@@ -767,14 +798,14 @@ async fn run_direct_child(
     }
 
     let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
-    let result = build_tool_result(
+    let result = artifact_capture.finish(build_tool_result(
         exit_code,
         retained_stdout,
         retained_stderr,
         start.elapsed(),
         working_dir.as_ref(),
         false,
-    );
+    ));
     let _ = tx.send(ToolStreamEvent::Complete(result)).await;
 }
 
@@ -829,6 +860,92 @@ struct RetainedOutput {
     bytes: Vec<u8>,
     total_bytes: u64,
     truncated: bool,
+}
+
+struct ArtifactCapture {
+    writer: Option<ToolOutputArtifactWriter>,
+    error: Option<String>,
+}
+
+impl ArtifactCapture {
+    fn new(ctx: &ToolContext, tool_name: &str) -> Self {
+        let writer = ctx.output_artifacts.clone().map(|config| {
+            ToolOutputArtifactWriter::new(
+                config,
+                ToolOutputArtifactIdentity::from_context(ctx, tool_name),
+            )
+        });
+        Self {
+            writer,
+            error: None,
+        }
+    }
+
+    fn push(&mut self, channel: ToolOutputChannel, text: &str) {
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        if let Err(error) = writer.push_channel(channel, text) {
+            tracing::warn!(error = %error, "shell output artifact write failed");
+            self.error = Some(error.to_string());
+            self.writer = None;
+        }
+    }
+
+    fn finish(&mut self, mut result: ToolResult) -> ToolResult {
+        let artifact = match self.writer.take() {
+            Some(writer) => match writer.finish() {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    tracing::warn!(error = %error, "shell output artifact finalize failed");
+                    self.error = Some(error.to_string());
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(artifact) = artifact {
+            apply_artifact(&artifact, &mut result);
+        } else if let Some(error) = self.error.take() {
+            result
+                .metadata
+                .insert("artifact_status".to_string(), "write_failed".to_string());
+            result.metadata.insert("artifact_error".to_string(), error);
+        }
+        result
+    }
+}
+
+fn apply_artifact(artifact: &ToolOutputArtifactRef, result: &mut ToolResult) {
+    let original_bytes = result
+        .metadata
+        .get("stdout_bytes")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(
+            result
+                .metadata
+                .get("stderr_bytes")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0),
+        );
+    artifact.extend_metadata(&mut result.metadata);
+    result
+        .metadata
+        .insert("output_handling".to_string(), "spilled".to_string());
+    result.metadata.insert(
+        "original_bytes".to_string(),
+        if original_bytes == 0 {
+            artifact.payload_bytes
+        } else {
+            original_bytes
+        }
+        .to_string(),
+    );
+    result.truncated = true;
+    result
+        .metadata
+        .insert("output_truncated".to_string(), "true".to_string());
 }
 
 impl RetainedOutput {
@@ -1463,6 +1580,80 @@ mod tests {
             Some("1100000")
         );
         let _ = std::fs::remove_file(script);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_stream_spills_complete_ten_megabyte_artifact()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let script = create_test_script(
+            "artifact",
+            "#!/bin/sh\nhead -c 10500000 /dev/zero | tr '\\000' x\n",
+        );
+        let artifact_root = std::env::temp_dir().join(format!(
+            "echo-shell-artifact-{}-{}",
+            std::process::id(),
+            nanoid_counter()
+        ));
+        let tool = ShellTool::new_permissive();
+        let mut params = HashMap::new();
+        params.insert(
+            "command".to_string(),
+            serde_json::json!(script.display().to_string()),
+        );
+        let context = ToolContext {
+            conversation_id: Some("conversation-10mb".to_string()),
+            run_id: Some("run-10mb".to_string()),
+            call_id: Some("call-10mb".to_string()),
+            output_artifacts: Some(echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                &artifact_root,
+                "test",
+            )),
+            ..ToolContext::default()
+        };
+        let mut stream = tool.execute_stream_with_context(params, &context).await?;
+        let mut complete = None;
+        while let Some(event) = stream.next().await {
+            if let ToolStreamEvent::Complete(result) = event {
+                complete = Some(result);
+            }
+        }
+
+        let result = complete.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "missing shell completion",
+            )
+        })?;
+        let artifact_path = result
+            .metadata
+            .get("artifact_path")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing artifact path")
+            })?;
+        let artifact = std::fs::read(&artifact_path)?;
+        assert!(result.success);
+        assert!(result.truncated);
+        assert_eq!(result.output.len(), MAX_RETAINED_OUTPUT_BYTES);
+        assert!(artifact.len() >= 10_500_000);
+        assert_eq!(
+            result
+                .metadata
+                .get("artifact_retention")
+                .map(String::as_str),
+            Some("test")
+        );
+        assert!(
+            result
+                .metadata
+                .get("artifact_sha256")
+                .is_some_and(|hash| hash.len() == 64)
+        );
+
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_dir_all(artifact_root);
+        Ok(())
     }
 
     #[cfg(unix)]

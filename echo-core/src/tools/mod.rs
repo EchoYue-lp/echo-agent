@@ -1,5 +1,6 @@
 //! Tool system core trait and types
 
+pub mod artifact;
 pub mod permission;
 pub mod skill;
 
@@ -990,6 +991,10 @@ pub struct ToolContext {
     pub execution_id: Option<String>,
     /// Stable identity for this logical tool call and all of its retry attempts.
     pub call_id: Option<String>,
+    /// Optional application-selected root and retention policy for complete
+    /// tool-output artifacts. Streaming tools should use this instead of
+    /// retaining unbounded output in memory.
+    pub output_artifacts: Option<artifact::ToolOutputArtifactConfig>,
     /// 跨 spawn 安全的取消令牌（值传递，非 task_local）。
     pub cancel: Option<std::sync::Arc<tokio_util::sync::CancellationToken>>,
     /// 跨 spawn 安全的 trace 回传（值传递）。
@@ -1007,6 +1012,7 @@ impl std::fmt::Debug for ToolContext {
             .field("turn_id", &self.turn_id)
             .field("execution_id", &self.execution_id)
             .field("call_id", &self.call_id)
+            .field("output_artifacts", &self.output_artifacts)
             .field(
                 "cancel",
                 &self.cancel.as_ref().map(|_| "<CancellationToken>"),
@@ -1085,6 +1091,7 @@ mod tool_context_tests {
             turn_id: None,
             execution_id: None,
             call_id: None,
+            output_artifacts: None,
             cancel: None,
             trace_sink: None,
             delegation_policy: None,

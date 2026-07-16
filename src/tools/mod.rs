@@ -66,6 +66,10 @@ pub mod security {
     pub use echo_tools::security::*;
 }
 pub mod permission;
+/// Complete oversized tool-output artifacts (re-export from echo_core).
+pub mod artifact {
+    pub use echo_core::tools::artifact::*;
+}
 /// Shell tool (re-export from echo_tools)
 pub mod shell {
     pub use echo_tools::shell::*;

@@ -79,6 +79,7 @@ pub struct ReactAgentBuilder {
     max_snapshots: usize,
     response_format: Option<ResponseFormat>,
     max_tool_output_tokens: Option<usize>,
+    tool_output_artifacts: Option<echo_core::tools::artifact::ToolOutputArtifactConfig>,
     circuit_breaker_config: Option<CircuitBreakerConfig>,
     sandbox_manager: Option<Arc<SandboxManager>>,
     run_store: Option<Arc<dyn RunStore>>,
@@ -153,6 +154,7 @@ impl ReactAgentBuilder {
             max_snapshots: 10,
             response_format: None,
             max_tool_output_tokens: None,
+            tool_output_artifacts: None,
             circuit_breaker_config: None,
             sandbox_manager: None,
             run_store: None,
@@ -482,6 +484,16 @@ impl ReactAgentBuilder {
     /// Prevents a single tool call from overflowing the context window.
     pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
         self.max_tool_output_tokens = Some(max);
+        self
+    }
+
+    /// Store complete oversized tool output under the supplied application
+    /// directory while keeping only a bounded projection in model context.
+    pub fn tool_output_artifacts(
+        mut self,
+        config: echo_core::tools::artifact::ToolOutputArtifactConfig,
+    ) -> Self {
+        self.tool_output_artifacts = Some(config);
         self
     }
 
@@ -855,6 +867,9 @@ impl ReactAgentBuilder {
         }
         if let Some(max) = self.max_tool_output_tokens {
             config = config.max_tool_output_tokens(max);
+        }
+        if let Some(artifact_config) = self.tool_output_artifacts {
+            config = config.tool_output_artifacts(Some(artifact_config));
         }
 
         for callback in self.callbacks {

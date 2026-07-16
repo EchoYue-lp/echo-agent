@@ -143,6 +143,10 @@ pub struct AgentConfig {
     /// Maximum token count for a single tool output (None = no limit).
     /// Automatically truncated when exceeded, with a `[Output truncated, N tokens total]` hint appended.
     pub(crate) max_tool_output_tokens: Option<usize>,
+    /// Complete tool-output artifact policy. Applications can redirect the
+    /// generic temporary default to a durable product-owned directory.
+    pub(crate) tool_output_artifacts:
+        std::sync::Mutex<Option<echo_core::tools::artifact::ToolOutputArtifactConfig>>,
     /// LLM temperature parameter (0.0–2.0, None means use model default)
     pub(crate) temperature: Option<f32>,
     /// Maximum generation token count (None means use model default)
@@ -236,6 +240,9 @@ impl AgentConfig {
             conversation_id: None,
             response_format: None,
             max_tool_output_tokens: None,
+            tool_output_artifacts: std::sync::Mutex::new(Some(
+                echo_core::tools::artifact::ToolOutputArtifactConfig::default(),
+            )),
             temperature: None,
             max_tokens: None,
             cache_user_id: None,
@@ -892,6 +899,28 @@ impl AgentConfig {
     pub fn max_tool_output_tokens(mut self, max: usize) -> Self {
         self.max_tool_output_tokens = Some(max);
         self
+    }
+
+    /// Set the directory and retention policy used for complete tool-output
+    /// artifacts. Passing `None` disables artifact persistence.
+    pub fn tool_output_artifacts(
+        self,
+        config: Option<echo_core::tools::artifact::ToolOutputArtifactConfig>,
+    ) -> Self {
+        *self
+            .tool_output_artifacts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
+        self
+    }
+
+    pub fn get_tool_output_artifacts(
+        &self,
+    ) -> Option<echo_core::tools::artifact::ToolOutputArtifactConfig> {
+        self.tool_output_artifacts
+            .lock()
+            .ok()
+            .and_then(|config| config.clone())
     }
 
     /// Get maximum token count for a single tool output

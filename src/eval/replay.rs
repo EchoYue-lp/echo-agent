@@ -346,6 +346,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
@@ -365,6 +366,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
@@ -384,6 +386,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
         ]);
         let replay = TrajectoryReplay::new(run);
@@ -413,6 +416,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::ToolCall {
                 call_id: "test_call".into(),
@@ -432,6 +436,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
         ]);
         let replay = TrajectoryReplay::new(run);
@@ -489,6 +494,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::SubAgentRun {
                 agent_name: "reviewer".into(),
@@ -521,6 +527,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::ToolCall {
                 call_id: "pending".into(),

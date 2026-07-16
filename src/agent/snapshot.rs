@@ -15,11 +15,8 @@ use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
 use echo_core::llm::types::{Message, Role};
 use echo_core::tokenizer::Tokenizer;
-use std::io::Write as _;
 use std::sync::Arc;
 
-const TOOL_OUTPUT_SPILL_THRESHOLD_BYTES: usize = 1_048_576;
-const TOOL_OUTPUT_SPILL_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 const TOOL_OUTPUT_PREVIEW_CHARS: usize = 500;
 const TOOL_OUTPUT_SPILL_FAILURE_FALLBACK_TOKENS: usize = 8_000;
 
@@ -98,6 +95,7 @@ pub struct RuntimeConfig {
     pub llm_max_retries: usize,
     pub llm_retry_delay_ms: u64,
     pub max_tool_output_tokens: Option<usize>,
+    pub tool_output_artifacts: Option<echo_core::tools::artifact::ToolOutputArtifactConfig>,
     pub tool_execution: ToolExecutionConfig,
     pub callbacks: Vec<Arc<dyn AgentCallback>>,
     /// How often to save runtime checkpoints (0 = only at end, N = every N iterations).
@@ -137,6 +135,7 @@ impl RuntimeConfig {
             llm_max_retries: config.llm_max_retries,
             llm_retry_delay_ms: config.llm_retry_delay_ms,
             max_tool_output_tokens: config.max_tool_output_tokens,
+            tool_output_artifacts: config.get_tool_output_artifacts(),
             tool_execution: config.tool_execution.clone(),
             callbacks: config.callbacks.to_vec(),
             react_checkpoint_interval: config.react_checkpoint_interval,
@@ -820,39 +819,69 @@ impl AgentRunSnapshot {
 
     /// Apply the single authoritative spill/truncation policy for tool output.
     pub(crate) fn process_tool_output(&self, output: String) -> ProcessedToolOutput {
-        let original_bytes = output.len();
+        self.process_tool_output_for_call(output, "unscoped", "tool", None)
+    }
+
+    pub(crate) fn process_tool_output_for_call(
+        &self,
+        output: String,
+        call_id: &str,
+        tool_name: &str,
+        existing_artifact: Option<echo_core::tools::artifact::ToolOutputArtifactRef>,
+    ) -> ProcessedToolOutput {
+        let inline_bytes = output.len();
         let mut spill_error = None;
-        if original_bytes >= TOOL_OUTPUT_SPILL_THRESHOLD_BYTES {
-            match self.spill_tool_output(&output) {
-                Ok(path) => {
-                    let preview: String = output.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
-                    let model_output = format!(
-                        "{preview}\n\n[Output spilled to disk: {} ({:.1} MiB). Use read_file with this exact path to read the full output.]",
-                        path.display(),
-                        original_bytes as f64 / 1_048_576.0
-                    );
-                    let mut metadata = std::collections::HashMap::new();
-                    metadata.insert("output_handling".to_string(), "spilled".to_string());
-                    metadata.insert("artifact_path".to_string(), path.display().to_string());
-                    metadata.insert("original_bytes".to_string(), original_bytes.to_string());
-                    metadata.insert("returned_bytes".to_string(), model_output.len().to_string());
-                    metadata.insert(
-                        "estimated_tokens".to_string(),
-                        echo_core::tokenizer::HeuristicTokenizer
-                            .count_tokens(&output)
-                            .to_string(),
-                    );
-                    return ProcessedToolOutput {
-                        output: model_output,
-                        truncated: true,
-                        metadata,
-                    };
-                }
+        let artifact = existing_artifact.or_else(|| {
+            let config = self.config.tool_output_artifacts.clone()?;
+            if inline_bytes < config.threshold_bytes {
+                return None;
+            }
+            let identity = echo_core::tools::artifact::ToolOutputArtifactIdentity {
+                conversation_id: self.config.conversation_id.clone(),
+                run_id: self
+                    .current_run_id
+                    .clone()
+                    .or_else(|| self.current_turn_id.clone()),
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+            };
+            match echo_core::tools::artifact::persist_tool_output(config, identity, &output) {
+                Ok(artifact) => artifact,
                 Err(error) => {
-                    tracing::warn!(error = %error, "tool output spill failed; falling back to token truncation");
+                    tracing::warn!(error = %error, "tool output artifact write failed; falling back to token truncation");
                     spill_error = Some(error.to_string());
+                    None
                 }
             }
+        });
+
+        if let Some(artifact) = artifact {
+            let preview: String = output.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
+            let model_output = format!(
+                "{preview}\n\n[Full output artifact: {} ({:.1} MiB, sha256 {}). Use read_file with this exact path when more detail is needed.]",
+                artifact.path.display(),
+                artifact.payload_bytes as f64 / 1_048_576.0,
+                artifact.sha256.chars().take(12).collect::<String>(),
+            );
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("output_handling".to_string(), "spilled".to_string());
+            metadata.insert(
+                "original_bytes".to_string(),
+                artifact.payload_bytes.to_string(),
+            );
+            metadata.insert("returned_bytes".to_string(), model_output.len().to_string());
+            metadata.insert(
+                "estimated_tokens".to_string(),
+                echo_core::tokenizer::HeuristicTokenizer
+                    .count_tokens(&output)
+                    .to_string(),
+            );
+            artifact.extend_metadata(&mut metadata);
+            return ProcessedToolOutput {
+                output: model_output,
+                truncated: true,
+                metadata,
+            };
         }
 
         let max_tokens = self.config.max_tool_output_tokens.or_else(|| {
@@ -864,8 +893,8 @@ impl AgentRunSnapshot {
             let estimated_tokens = echo_core::tokenizer::HeuristicTokenizer.count_tokens(&output);
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("output_handling".to_string(), "inline".to_string());
-            metadata.insert("original_bytes".to_string(), original_bytes.to_string());
-            metadata.insert("returned_bytes".to_string(), original_bytes.to_string());
+            metadata.insert("original_bytes".to_string(), inline_bytes.to_string());
+            metadata.insert("returned_bytes".to_string(), inline_bytes.to_string());
             metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
             return ProcessedToolOutput {
                 output,
@@ -879,8 +908,8 @@ impl AgentRunSnapshot {
         if estimated_tokens <= max_tokens {
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("output_handling".to_string(), "inline".to_string());
-            metadata.insert("original_bytes".to_string(), original_bytes.to_string());
-            metadata.insert("returned_bytes".to_string(), original_bytes.to_string());
+            metadata.insert("original_bytes".to_string(), inline_bytes.to_string());
+            metadata.insert("returned_bytes".to_string(), inline_bytes.to_string());
             metadata.insert("estimated_tokens".to_string(), estimated_tokens.to_string());
             return ProcessedToolOutput {
                 output,
@@ -915,7 +944,7 @@ impl AgentRunSnapshot {
             }
             .to_string(),
         );
-        metadata.insert("original_bytes".to_string(), original_bytes.to_string());
+        metadata.insert("original_bytes".to_string(), inline_bytes.to_string());
         metadata.insert(
             "returned_bytes".to_string(),
             truncated_output.len().to_string(),
@@ -934,21 +963,6 @@ impl AgentRunSnapshot {
     /// Backward-compatible string view used by legacy internal call sites.
     pub async fn truncate_tool_output(&self, output: String) -> String {
         self.process_tool_output(output).output
-    }
-
-    fn spill_tool_output(&self, output: &str) -> std::io::Result<std::path::PathBuf> {
-        let spill_dir = self
-            .config
-            .working_dir
-            .as_ref()
-            .map(|working_dir| working_dir.join(".echo-agent").join("spill"))
-            .unwrap_or_else(|| std::env::temp_dir().join("echo_agent_spill"));
-        std::fs::create_dir_all(&spill_dir)?;
-        cleanup_old_tool_output_spills(&spill_dir, TOOL_OUTPUT_SPILL_MAX_AGE);
-        let mut file = tempfile::NamedTempFile::new_in(&spill_dir)?;
-        file.write_all(output.as_bytes())?;
-        let (_, path) = file.keep().map_err(|error| error.error)?;
-        Ok(path)
     }
 
     // ── Lifecycle hook fan-out ───────────────────────────────────────
@@ -1156,28 +1170,6 @@ impl AgentRunSnapshot {
                 }
             }
         })
-    }
-}
-
-fn cleanup_old_tool_output_spills(dir: &std::path::Path, max_age: std::time::Duration) {
-    let now = std::time::SystemTime::now();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let expired = entry
-            .metadata()
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > max_age);
-        if expired {
-            let _ = std::fs::remove_file(path);
-        }
     }
 }
 

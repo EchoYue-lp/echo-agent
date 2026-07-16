@@ -807,6 +807,7 @@ mod tests {
                     returned_bytes: 40,
                     estimated_tokens: 10,
                     output_handling: Some("inline".into()),
+                    artifact: None,
                 },
             ],
             final_output: Some("done".into()),

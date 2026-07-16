@@ -1185,6 +1185,26 @@ impl ReactAgent {
         self.config.working_dir.lock().ok().and_then(|g| g.clone())
     }
 
+    /// Update the application-selected tool-output artifact policy.
+    pub fn set_tool_output_artifacts(
+        &self,
+        config: Option<echo_core::tools::artifact::ToolOutputArtifactConfig>,
+    ) {
+        match self.config.tool_output_artifacts.lock() {
+            Ok(mut current) => *current = config,
+            Err(error) => tracing::warn!(
+                error = %error,
+                "Could not update tool-output artifact configuration"
+            ),
+        }
+    }
+
+    pub fn tool_output_artifacts(
+        &self,
+    ) -> Option<echo_core::tools::artifact::ToolOutputArtifactConfig> {
+        self.config.get_tool_output_artifacts()
+    }
+
     /// Get the current conversation history messages (read-only).
     pub async fn get_messages(&self) -> Vec<crate::llm::types::Message> {
         self.memory.context.lock().await.messages().to_vec()

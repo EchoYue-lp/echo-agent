@@ -595,6 +595,7 @@ mod tests {
                     returned_bytes: 0,
                     estimated_tokens: 0,
                     output_handling: None,
+                    artifact: None,
                 },
             ],
             final_output: Some("Fixed the auth bug by adding null check on token.".into()),

@@ -882,6 +882,7 @@ mod tests {
                     returned_bytes: 0,
                     estimated_tokens: 0,
                     output_handling: None,
+                    artifact: None,
                 },
             ],
             final_output: if status == RunStatus::Completed {
@@ -1077,6 +1078,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::ToolError {
                 call_id: "c1".into(),
@@ -1102,6 +1104,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::ToolError {
                 call_id: "c2".into(),
@@ -1130,6 +1133,7 @@ mod tests {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             RunEvent::ToolError {
                 call_id: "c3".into(),

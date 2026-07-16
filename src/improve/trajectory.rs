@@ -321,6 +321,7 @@ mod tests {
                     returned_bytes: 0,
                     estimated_tokens: 0,
                     output_handling: None,
+                    artifact: None,
                 },
             ],
             final_output: Some("The file foo.txt contains: Hello, world!".into()),
