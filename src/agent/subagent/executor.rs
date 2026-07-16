@@ -250,6 +250,7 @@ impl SubagentExecutor {
                 iterations: 0,
                 tokens_used: None,
                 was_truncated: false,
+                cancelled: true,
                 mode: req.mode_override.clone().unwrap_or(ExecutionMode::Fork),
                 isolation_observed: ObservedIsolation::Unknown,
                 usage: None,
@@ -838,6 +839,7 @@ impl SubagentExecutor {
             iterations: 1,
             tokens_used: None, // team doesn't aggregate worker tokens (follow-up)
             was_truncated: false,
+            cancelled: false,
             mode: ExecutionMode::Team,
             isolation_observed: ObservedIsolation::Worker,
             usage: None,
@@ -1028,24 +1030,34 @@ impl SubagentExecutor {
                         run_id: run_id.clone(),
                     });
                 }
-                AgentEvent::ToolCall { name, args, .. } => {
+                AgentEvent::ToolCall {
+                    call_id,
+                    name,
+                    args,
+                } => {
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolStarted {
                             parent: parent.to_string(),
                             agent: subagent.to_string(),
+                            call_id,
                             name,
                             args,
                             execution_id: execution_id.clone(),
                             run_id: run_id.clone(),
                         });
                 }
-                AgentEvent::ToolResult { name, output, .. } => {
+                AgentEvent::ToolResult {
+                    call_id,
+                    name,
+                    output,
+                } => {
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolCompleted {
                             parent: parent.to_string(),
                             agent: subagent.to_string(),
+                            call_id,
                             name,
                             result: output,
                             success: true,
@@ -1053,12 +1065,17 @@ impl SubagentExecutor {
                             run_id: run_id.clone(),
                         });
                 }
-                AgentEvent::ToolError { name, error, .. } => {
+                AgentEvent::ToolError {
+                    call_id,
+                    name,
+                    error,
+                } => {
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolCompleted {
                             parent: parent.to_string(),
                             agent: subagent.to_string(),
+                            call_id,
                             name,
                             result: error,
                             success: false,
@@ -1108,6 +1125,7 @@ impl SubagentExecutor {
             iterations: 1,
             tokens_used,
             was_truncated: false,
+            cancelled,
             mode,
             isolation_observed: ObservedIsolation::Unknown,
             usage,
@@ -1344,6 +1362,7 @@ impl SubagentExecutor {
                     iterations: 0,
                     tokens_used: None,
                     was_truncated: false,
+                    cancelled: true,
                     mode: ExecutionMode::Fork,
                     isolation_observed: ObservedIsolation::Unknown,
                     usage: None,
@@ -1782,6 +1801,7 @@ mod tests {
 
         let result = executor.dispatch(req).await.unwrap();
         assert!(result.output.contains("Cancelled"));
+        assert!(result.cancelled);
     }
 
     #[tokio::test]

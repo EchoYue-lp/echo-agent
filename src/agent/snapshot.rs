@@ -703,7 +703,29 @@ impl AgentRunSnapshot {
         input: &serde_json::Value,
     ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
         if let Some(ref service) = self.permission_service {
-            let decision = service.check(tool_name, input).await?;
+            let permissions = self
+                .tools
+                .tool_manager
+                .get_tool(tool_name)
+                .map(|tool| tool.permissions())
+                .unwrap_or_default();
+            let check = service.check_with_permissions(tool_name, input, &permissions);
+            tokio::pin!(check);
+            let decision = if let Some(cancel) = self.cancel_token.as_ref() {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(echo_core::error::ReactError::Agent(Box::new(
+                            echo_core::error::AgentError::Cancelled(format!(
+                                "permission request for tool '{tool_name}'"
+                            )),
+                        )));
+                    }
+                    decision = &mut check => decision?,
+                }
+            } else {
+                check.await?
+            };
             match decision {
                 echo_core::tools::permission::PermissionDecision::Allow => Ok(None),
                 echo_core::tools::permission::PermissionDecision::Deny { reason } => {
@@ -1140,6 +1162,48 @@ mod transcript_filter_tests {
 
     struct NamedTool(&'static str);
 
+    #[cfg(feature = "human-loop")]
+    struct ApprovalTool;
+
+    #[cfg(feature = "human-loop")]
+    impl Tool for ApprovalTool {
+        fn name(&self) -> &str {
+            "approval_tool"
+        }
+
+        fn description(&self) -> &str {
+            "tool that requires write approval"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+            vec![echo_core::tools::permission::ToolPermission::Write]
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    struct PendingApprovalProvider;
+
+    #[cfg(feature = "human-loop")]
+    impl crate::human_loop::HumanLoopProvider for PendingApprovalProvider {
+        fn request(
+            &self,
+            _request: crate::human_loop::HumanLoopRequest,
+        ) -> futures::future::BoxFuture<'_, Result<crate::human_loop::HumanLoopResponse>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
     impl Tool for NamedTool {
         fn name(&self) -> &str {
             self.0
@@ -1159,6 +1223,46 @@ mod transcript_filter_tests {
         ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
             Box::pin(async { Ok(ToolResult::success("ok")) })
         }
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn permission_wait_stops_when_invocation_is_cancelled() -> Result<()> {
+        let permission_service = Arc::new(crate::human_loop::PermissionService::from_provider(
+            Arc::new(PendingApprovalProvider),
+        ));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(permission_service)
+            .tool(Box::new(ApprovalTool))
+            .build()?;
+        let cancel = crate::agent::CancellationToken::new();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel.clone()),
+            ..Default::default()
+        };
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        let input = serde_json::json!({});
+        let approval = snapshot.check_tool_approval("approval_tool", &input);
+        tokio::pin!(approval);
+
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), approval)
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other("approval cancellation timed out".into())
+            })?;
+        let error = match outcome {
+            Ok(_) => {
+                return Err(crate::error::ReactError::Other(
+                    "cancelled permission wait unexpectedly approved the tool".into(),
+                ));
+            }
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("permission request"));
+        Ok(())
     }
 
     fn tool_names(snapshot: &AgentRunSnapshot) -> Vec<String> {

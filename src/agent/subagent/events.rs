@@ -186,6 +186,8 @@ pub enum SubagentEvent {
         parent: String,
         /// Name of the subagent invoking a tool.
         agent: String,
+        /// Stable tool-call identity emitted by the model.
+        call_id: String,
         /// Tool name.
         name: String,
         /// Tool arguments.
@@ -201,6 +203,8 @@ pub enum SubagentEvent {
         parent: String,
         /// Name of the subagent that invoked a tool.
         agent: String,
+        /// Stable tool-call identity matching [`Self::DispatchToolStarted`].
+        call_id: String,
         /// Tool name.
         name: String,
         /// Tool result or error text.

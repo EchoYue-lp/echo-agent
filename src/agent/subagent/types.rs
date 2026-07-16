@@ -304,6 +304,12 @@ pub struct SubagentResult {
     pub tokens_used: Option<usize>,
     /// Whether the output was truncated due to token limits.
     pub was_truncated: bool,
+    /// Whether execution ended because its cancellation token fired.
+    ///
+    /// Cancellation is a terminal fact, not a successful textual result. The
+    /// output remains populated for diagnostics, while callers use this flag
+    /// to avoid marking the parent task completed.
+    pub cancelled: bool,
     /// Execution mode that was used.
     pub mode: ExecutionMode,
     /// Isolation boundary actually established before model execution.
@@ -331,6 +337,7 @@ impl SubagentResult {
             iterations: 1,
             tokens_used: None,
             was_truncated: false,
+            cancelled: false,
             mode: ExecutionMode::Sync,
             isolation_observed: ObservedIsolation::Unknown,
             usage: None,
@@ -360,6 +367,7 @@ impl SubagentResult {
             iterations,
             tokens_used: None,
             was_truncated: false,
+            cancelled: false,
             mode: ExecutionMode::Fork,
             isolation_observed: ObservedIsolation::Unknown,
             usage: None,
