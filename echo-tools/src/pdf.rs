@@ -393,10 +393,12 @@ fn extract_text_from_stream(content: &[u8], limits: &ResourceLimits) -> String {
         .size_limit(limits.regex_max_size)
         .dfa_size_limit(limits.regex_max_size)
         .build()
-        .unwrap();
-    for cap in tj_regex.captures_iter(&content_str) {
-        if let Some(text) = cap.get(1) {
-            text_parts.push(text.as_str().to_string());
+        .ok();
+    if let Some(tj_regex) = tj_regex {
+        for cap in tj_regex.captures_iter(&content_str) {
+            if let Some(text) = cap.get(1) {
+                text_parts.push(text.as_str().to_string());
+            }
         }
     }
 
@@ -405,12 +407,14 @@ fn extract_text_from_stream(content: &[u8], limits: &ResourceLimits) -> String {
         .size_limit(limits.regex_max_size)
         .dfa_size_limit(limits.regex_max_size)
         .build()
-        .unwrap();
-    for cap in hex_regex.captures_iter(&content_str) {
-        if let Some(hex) = cap.get(1) {
-            // Try decoding hex to text
-            if let Ok(decoded) = hex_decode(hex.as_str()) {
-                text_parts.push(decoded);
+        .ok();
+    if let Some(hex_regex) = hex_regex {
+        for cap in hex_regex.captures_iter(&content_str) {
+            if let Some(hex) = cap.get(1) {
+                // Try decoding hex to text
+                if let Ok(decoded) = hex_decode(hex.as_str()) {
+                    text_parts.push(decoded);
+                }
             }
         }
     }
@@ -420,17 +424,19 @@ fn extract_text_from_stream(content: &[u8], limits: &ResourceLimits) -> String {
         .size_limit(limits.regex_max_size)
         .dfa_size_limit(limits.regex_max_size)
         .build()
-        .unwrap();
+        .ok();
     let str_regex = regex::RegexBuilder::new(r"\(([^)]*)\)")
         .size_limit(limits.regex_max_size)
         .dfa_size_limit(limits.regex_max_size)
         .build()
-        .unwrap();
-    for cap in tj_array_regex.captures_iter(&content_str) {
-        if let Some(arr_content) = cap.get(1) {
-            for str_cap in str_regex.captures_iter(arr_content.as_str()) {
-                if let Some(s) = str_cap.get(1) {
-                    text_parts.push(s.as_str().to_string());
+        .ok();
+    if let (Some(tj_array_regex), Some(str_regex)) = (tj_array_regex, str_regex) {
+        for cap in tj_array_regex.captures_iter(&content_str) {
+            if let Some(arr_content) = cap.get(1) {
+                for str_cap in str_regex.captures_iter(arr_content.as_str()) {
+                    if let Some(s) = str_cap.get(1) {
+                        text_parts.push(s.as_str().to_string());
+                    }
                 }
             }
         }

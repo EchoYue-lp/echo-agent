@@ -187,6 +187,8 @@ impl InterruptState {
 
 /// Return type of run_until_interrupt
 #[derive(Debug)]
+// Keep the public result variants unboxed to preserve the workflow API.
+#[allow(clippy::large_enum_variant)]
 pub enum RunUntilInterruptResult {
     /// Execution completed
     Completed(GraphResult),

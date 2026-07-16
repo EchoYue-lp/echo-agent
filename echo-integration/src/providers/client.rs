@@ -274,7 +274,10 @@ pub async fn stream_post(
                         );
                         Err(timeout_error("overall", timeout))
                     } else {
-                        unreachable!()
+                        Err(LlmError::NetworkError(
+                            "LLM stream timeout future completed without a configured timeout"
+                                .to_string(),
+                        ))
                     }
                 }
                 result = async {

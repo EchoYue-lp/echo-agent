@@ -503,17 +503,15 @@ impl ToolRunner<RegressionToolParams> for RegressionTool {
         let y_mean: f64 =
             y.iter().filter_map(|x| *x).sum::<f64>() / y.iter().filter_map(|x| *x).count() as f64;
         let mut total_ss = 0.0;
-        for y_val in y.iter() {
-            if let Some(v) = y_val {
-                total_ss += (v - y_mean).powi(2);
-            }
+        for v in y.iter().flatten() {
+            total_ss += (v - y_mean).powi(2);
         }
         let mut coefficients = Vec::new();
         let mut predicted: Vec<f64> = vec![y_mean; y.len()];
 
         for feat_name in &features {
             let feat_col = df
-                .column(*feat_name)
+                .column(feat_name)
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: TOOL_NAME.to_string(),
                     message: format!("Feature column '{}' not found: {}", feat_name, e),
@@ -525,7 +523,7 @@ impl ToolRunner<RegressionToolParams> for RegressionTool {
                 }
                 .into());
             }
-            let (mean_x, std_x, n) = column_mean_std(&df, *feat_name)?;
+            let (mean_x, std_x, n) = column_mean_std(&df, feat_name)?;
             if n < 3 || std_x == 0.0 {
                 coefficients.push(serde_json::json!({ "feature": feat_name, "slope": 0.0, "intercept": y_mean, "r_squared": 0.0, "p_value": 1.0, "note": "Insufficient variance or sample size" }));
                 continue;
@@ -647,7 +645,7 @@ impl ToolRunner<DescriptiveAdvancedToolParams> for DescriptiveAdvancedTool {
             df.get_column_names()
                 .into_iter()
                 .filter(|name| {
-                    df.column(*name)
+                    df.column(name)
                         .map(|c| is_numeric(c.dtype()))
                         .unwrap_or(false)
                 })
@@ -687,7 +685,7 @@ impl ToolRunner<DescriptiveAdvancedToolParams> for DescriptiveAdvancedTool {
                     message: format!("Convert '{}' to f64 failed: {}", col_name, e),
                 })?
                 .into_iter()
-                .filter_map(|opt| opt)
+                .flatten()
                 .collect();
             let n = values.len();
             if n < 3 {

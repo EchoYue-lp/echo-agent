@@ -10,7 +10,7 @@ use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reqwest::Client;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::Arc;
 use tracing::Instrument;
 use tracing::info_span;
@@ -46,7 +46,7 @@ impl<A: ProviderAdapter> AdapterClient<A> {
                 .parse()
                 .map_err(|e| LlmError::NetworkError(format!("Invalid auth header: {e}")))?,
         );
-        headers.insert("Content-Type", "application/json".parse().unwrap());
+        headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         let cache_policy = adapter.cache_policy();
         Ok(Self {
             client: Arc::new(

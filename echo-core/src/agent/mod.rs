@@ -123,6 +123,8 @@ impl std::fmt::Debug for AgentInvocationContext {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
+// Boxing ToolStream would break the public event contract for every consumer.
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     // ── LLM Interaction ──────────────────────────────────────────────────────────
     /// LLM is generating a token (streaming)

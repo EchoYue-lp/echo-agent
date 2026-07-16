@@ -673,7 +673,7 @@ impl Tool for DataStatsTool {
                                 / (n - 1) as f64;
                         let stddev = variance.sqrt();
 
-                        let median = if n % 2 == 0 {
+                        let median = if n.is_multiple_of(2) {
                             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
                         } else {
                             sorted[n / 2]
@@ -2805,14 +2805,21 @@ fn df_to_json(df: &DataFrame) -> Result<Value> {
         .collect();
 
     // Build records from pre-extracted column data
-    let mut records = Vec::with_capacity(height);
-    for i in 0..height {
-        let mut record = serde_json::Map::with_capacity(columns.len());
-        for (j, col_name) in columns.iter().enumerate() {
-            record.insert(col_name.clone(), col_data[j][i].clone());
-        }
-        records.push(Value::Object(record));
-    }
+    let records = (0..height)
+        .map(|row_index| {
+            let record = columns
+                .iter()
+                .zip(&col_data)
+                .map(|(column_name, values)| {
+                    (
+                        column_name.clone(),
+                        values.get(row_index).cloned().unwrap_or(Value::Null),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            Value::Object(record)
+        })
+        .collect();
 
     Ok(Value::Array(records))
 }
@@ -2884,90 +2891,82 @@ fn parse_filter_expression(expr_str: &str) -> Result<Expr> {
         })
     };
 
+    let compile_filter_regex = |pattern: String| -> Result<regex::Regex> {
+        regex::Regex::new(&pattern).map_err(|error| {
+            ToolError::ExecutionFailed {
+                tool: "data".to_string(),
+                message: format!("Failed to compile filter parser regex: {error}"),
+            }
+            .into()
+        })
+    };
+
     // Numeric comparisons (supports negative numbers: -?[\d.]+)
-    // >=
-    let re = regex::Regex::new(&format!(r#"^{}\s*>=\s*(-?[\d.]+)$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
+    let re = compile_filter_regex(format!(r#"^{}\s*(>=|<=|!=|==|>|<)\s*(-?[\d.]+)$"#, col_pat))?;
+    if let Some(cap) = re.captures(s)
+        && let (Some(operator), Some(value)) = (cap.get(3), cap.get(4))
+    {
         let col_name = extract_col(&cap);
-        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
-        return Ok(col(col_name.as_str()).gt_eq(lit(val)));
-    }
-    // <=
-    let re = regex::Regex::new(&format!(r#"^{}\s*<=\s*(-?[\d.]+)$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
-        return Ok(col(col_name.as_str()).lt_eq(lit(val)));
-    }
-    // !=
-    let re = regex::Regex::new(&format!(r#"^{}\s*!=\s*(-?[\d.]+)$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
-        return Ok(col(col_name.as_str()).neq(lit(val)));
-    }
-    // == (numeric)
-    let re = regex::Regex::new(&format!(r#"^{}\s*==\s*(-?[\d.]+)$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
-        return Ok(col(col_name.as_str()).eq(lit(val)));
-    }
-    // >
-    let re = regex::Regex::new(&format!(r#"^{}\s*>\s*(-?[\d.]+)$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
-        return Ok(col(col_name.as_str()).gt(lit(val)));
-    }
-    // <
-    let re = regex::Regex::new(&format!(r#"^{}\s*<\s*(-?[\d.]+)$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = parse_num(cap.get(3).unwrap().as_str(), expr_str)?;
-        return Ok(col(col_name.as_str()).lt(lit(val)));
+        let val = parse_num(value.as_str(), expr_str)?;
+        let column = col(col_name.as_str());
+        return match operator.as_str() {
+            ">=" => Ok(column.gt_eq(lit(val))),
+            "<=" => Ok(column.lt_eq(lit(val))),
+            "!=" => Ok(column.neq(lit(val))),
+            "==" => Ok(column.eq(lit(val))),
+            ">" => Ok(column.gt(lit(val))),
+            "<" => Ok(column.lt(lit(val))),
+            _ => Err(ToolError::InvalidParameter {
+                name: "filter".to_string(),
+                message: format!("Unsupported numeric operator in filter: '{}'", expr_str),
+            }
+            .into()),
+        };
     }
 
     // String comparison: col == "value" or col != "value"
-    let re = regex::Regex::new(&format!(r#"^{}\s*==\s*"([^"]+)"$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
+    let re = compile_filter_regex(format!(r#"^{}\s*(==|!=)\s*"([^"]+)"$"#, col_pat))?;
+    if let Some(cap) = re.captures(s)
+        && let (Some(operator), Some(value)) = (cap.get(3), cap.get(4))
+    {
         let col_name = extract_col(&cap);
-        let val = cap.get(3).unwrap().as_str();
-        return Ok(col(col_name.as_str()).eq(lit(val)));
-    }
-    let re = regex::Regex::new(&format!(r#"^{}\s*!=\s*"([^"]+)"$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = cap.get(3).unwrap().as_str();
-        return Ok(col(col_name.as_str()).neq(lit(val)));
+        return if operator.as_str() == "==" {
+            Ok(col(col_name.as_str()).eq(lit(value.as_str())))
+        } else {
+            Ok(col(col_name.as_str()).neq(lit(value.as_str())))
+        };
     }
 
     // String contains/starts_with/ends_with
-    let re = regex::Regex::new(&format!(r#"^{}\s+contains\s+"([^"]+)"$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
+    let re = compile_filter_regex(format!(
+        r#"^{}\s+(contains|starts_with|ends_with)\s+"([^"]+)"$"#,
+        col_pat
+    ))?;
+    if let Some(cap) = re.captures(s)
+        && let (Some(operator), Some(value)) = (cap.get(3), cap.get(4))
+    {
         let col_name = extract_col(&cap);
-        let val = cap.get(3).unwrap().as_str();
-        return Ok(col(col_name.as_str()).str().contains(lit(val), false));
-    }
-    let re = regex::Regex::new(&format!(r#"^{}\s+starts_with\s+"([^"]+)"$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = cap.get(3).unwrap().as_str();
-        return Ok(col(col_name.as_str()).str().starts_with(lit(val)));
-    }
-    let re = regex::Regex::new(&format!(r#"^{}\s+ends_with\s+"([^"]+)"$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
-        let col_name = extract_col(&cap);
-        let val = cap.get(3).unwrap().as_str();
-        return Ok(col(col_name.as_str()).str().ends_with(lit(val)));
+        let string_column = col(col_name.as_str()).str();
+        return match operator.as_str() {
+            "contains" => Ok(string_column.contains(lit(value.as_str()), false)),
+            "starts_with" => Ok(string_column.starts_with(lit(value.as_str()))),
+            "ends_with" => Ok(string_column.ends_with(lit(value.as_str()))),
+            _ => Err(ToolError::InvalidParameter {
+                name: "filter".to_string(),
+                message: format!("Unsupported string operator in filter: '{}'", expr_str),
+            }
+            .into()),
+        };
     }
 
     // IN expression: col in ("a", "b", "c")
-    let re = regex::Regex::new(&format!(r#"(?s)^{}\s+in\s*\((.+)\)$"#, col_pat)).unwrap();
-    if let Some(cap) = re.captures(s) {
+    let re = compile_filter_regex(format!(r#"(?s)^{}\s+in\s*\((.+)\)$"#, col_pat))?;
+    if let Some(cap) = re.captures(s)
+        && let Some(values) = cap.get(3)
+    {
         let col_name = extract_col(&cap);
-        let vals_str = cap.get(3).unwrap().as_str();
-        let vals: Vec<String> = vals_str
+        let vals: Vec<String> = values
+            .as_str()
             .split(',')
             .map(|v| v.trim().trim_matches('"').to_string())
             .collect();
@@ -3003,10 +3002,11 @@ fn find_separator_outside_quotes(expr: &str, separator: &str) -> Option<usize> {
         if bytes[i] == b'"' {
             in_quotes = !in_quotes;
         }
-        if !in_quotes && i + separator.len() <= expr.len() {
-            if &bytes[i..i + separator.len()] == sep_bytes {
-                return Some(i);
-            }
+        if !in_quotes
+            && i + separator.len() <= expr.len()
+            && &bytes[i..i + separator.len()] == sep_bytes
+        {
+            return Some(i);
         }
     }
     None
@@ -3114,13 +3114,12 @@ fn compute_covariance(s1: &Series, s2: &Series) -> f64 {
     let mut count = 0;
 
     for i in 0..s1.len() {
-        if let (Ok(v1), Ok(v2)) = (s1.get(i), s2.get(i)) {
-            if let (Some(val1), Some(val2)) =
+        if let (Ok(v1), Ok(v2)) = (s1.get(i), s2.get(i))
+            && let (Some(val1), Some(val2)) =
                 (v1.try_extract::<f64>().ok(), v2.try_extract::<f64>().ok())
-            {
-                sum += (val1 - mean1) * (val2 - mean2);
-                count += 1;
-            }
+        {
+            sum += (val1 - mean1) * (val2 - mean2);
+            count += 1;
         }
     }
 
@@ -3252,7 +3251,7 @@ impl Tool for CorrelateTool {
                 df.get_column_names()
                     .into_iter()
                     .filter(|col| {
-                        df.column(*col)
+                        df.column(col)
                             .map(|s| s.dtype().is_numeric())
                             .unwrap_or(false)
                     })
@@ -3487,7 +3486,7 @@ impl Tool for PivotTool {
             //           South  | 300 | null
 
             // Step 1: group by (index_cols + columns_col) and aggregate values
-            let mut group_cols: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+            let mut group_cols: Vec<Expr> = index_cols.iter().map(col).collect();
             group_cols.push(col(columns_str));
 
             let mut agg_exprs = Vec::new();
@@ -3541,7 +3540,7 @@ impl Tool for PivotTool {
                 .collect();
 
             // Step 3: For each pivot value, filter + rename value columns, then join
-            let index_exprs: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+            let index_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 
             // Start with the unique index rows
             let index_names: Arc<[PlSmallStr]> = index_cols
@@ -3581,7 +3580,7 @@ impl Tool for PivotTool {
                         .select(
                             index_cols
                                 .iter()
-                                .map(|c| col(c))
+                                .map(col)
                                 .chain(std::iter::once(col(val_col).alias(new_col_name.as_str())))
                                 .collect::<Vec<_>>(),
                         )
@@ -3592,8 +3591,8 @@ impl Tool for PivotTool {
                         })?;
 
                     // Left join with result
-                    let left_on: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
-                    let right_on: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+                    let left_on: Vec<Expr> = index_cols.iter().map(col).collect();
+                    let right_on: Vec<Expr> = index_cols.iter().map(col).collect();
                     result = result
                         .lazy()
                         .join(

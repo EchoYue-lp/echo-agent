@@ -457,7 +457,7 @@ impl Tool for TextExportTool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use echo_core::tools::Tool;
     use std::io::Write;
 

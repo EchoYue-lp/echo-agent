@@ -227,12 +227,9 @@ impl PermissionService {
 
     /// 设置权限模式
     pub fn with_mode(self, mode: PermissionMode) -> Self {
-        let mut config = self
-            .config
-            .try_write()
-            .expect("PermissionService not yet shared");
-        config.mode = mode;
-        drop(config);
+        if let Ok(mut config) = self.config.try_write() {
+            config.mode = mode;
+        }
         self
     }
 

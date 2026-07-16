@@ -102,6 +102,7 @@ async fn demo_analyzer() {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             // shell 工具反复失败
             RunEvent::ToolCall {
@@ -203,6 +204,7 @@ async fn demo_critique_aggregation() {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
         ],
         RunStatus::Completed,
@@ -230,6 +232,7 @@ async fn demo_critique_aggregation() {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
         ],
         RunStatus::Completed,
@@ -351,6 +354,7 @@ async fn demo_trajectory_saver() {
                 returned_bytes: 13,
                 estimated_tokens: 4,
                 output_handling: None,
+                artifact: None,
             },
         ],
         RunStatus::Completed,

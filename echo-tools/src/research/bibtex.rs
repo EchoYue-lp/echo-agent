@@ -225,22 +225,22 @@ fn extract_arxiv_primary_class(arxiv_id: &str, paper: &Value) -> Option<String> 
         return prefix.split('.').next().map(|s| s.to_string());
     }
     // New format "2301.12345" — try fields_of_study from paper metadata
-    if let Some(fields) = paper.get("fields_of_study").and_then(|v| v.as_array()) {
-        if let Some(first) = fields.first().and_then(|f| f.as_str()) {
-            // Map common field names to arxiv categories
-            let mapped = match first {
-                "Computer Science" => "cs",
-                "Mathematics" => "math",
-                "Physics" => "physics",
-                "Statistics" => "stat",
-                "Electrical Engineering" => "eess",
-                "Economics" => "econ",
-                "Quantitative Biology" => "q-bio",
-                "Quantitative Finance" => "q-fin",
-                _ => return Some(first.to_lowercase().replace(' ', "-")),
-            };
-            return Some(mapped.to_string());
-        }
+    if let Some(fields) = paper.get("fields_of_study").and_then(|v| v.as_array())
+        && let Some(first) = fields.first().and_then(|f| f.as_str())
+    {
+        // Map common field names to arxiv categories
+        let mapped = match first {
+            "Computer Science" => "cs",
+            "Mathematics" => "math",
+            "Physics" => "physics",
+            "Statistics" => "stat",
+            "Electrical Engineering" => "eess",
+            "Economics" => "econ",
+            "Quantitative Biology" => "q-bio",
+            "Quantitative Finance" => "q-fin",
+            _ => return Some(first.to_lowercase().replace(' ', "-")),
+        };
+        return Some(mapped.to_string());
     }
     None
 }

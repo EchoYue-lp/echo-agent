@@ -493,16 +493,16 @@ fn content_hash(value: &serde_json::Value) -> u64 {
 /// Checks both `item.expires_at` (metadata) and `item.value["expires_at"]` (JSON).
 fn is_item_valid(item: &StoreItem, now: u64) -> bool {
     // Check metadata field first
-    if let Some(exp) = item.expires_at {
-        if exp <= now {
-            return false;
-        }
+    if let Some(exp) = item.expires_at
+        && exp <= now
+    {
+        return false;
     }
     // Also check JSON value for embedded expiry (used by MemoryPromoter)
-    if let Some(exp) = item.value.get("expires_at").and_then(|v| v.as_u64()) {
-        if exp <= now {
-            return false;
-        }
+    if let Some(exp) = item.value.get("expires_at").and_then(|v| v.as_u64())
+        && exp <= now
+    {
+        return false;
     }
     true
 }

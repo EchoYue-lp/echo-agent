@@ -174,7 +174,7 @@ impl PlanValidator {
             for edge in &plan.edges {
                 dep_map
                     .entry(edge.from.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(edge.to.clone());
             }
 

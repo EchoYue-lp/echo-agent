@@ -229,7 +229,9 @@ impl WsClient {
 
         self.service_id = service_id_str.parse().unwrap_or(0);
 
-        let parsed_url = url::Url::parse(&ws_url).unwrap();
+        let parsed_url = url::Url::parse(&ws_url).map_err(|error| {
+            ChannelError::InvalidConfig(format!("Invalid Feishu WebSocket URL: {error}"))
+        })?;
         self.conn_id = parsed_url
             .query_pairs()
             .find(|(k, _)| k == "device_id")
@@ -491,7 +493,12 @@ impl WsClient {
 
             let all_received = fragments.iter().all(|f| f.is_some());
             if all_received {
-                let combined: Vec<u8> = fragments.iter().flat_map(|f| f.clone().unwrap()).collect();
+                let combined: Vec<u8> = fragments
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .flatten()
+                    .copied()
+                    .collect();
                 drop(entry);
                 self.fragment_cache.remove(&cache_key);
                 return Some(Some(combined));

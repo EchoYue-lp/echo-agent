@@ -81,11 +81,11 @@ impl SchedulerRunner {
                 // Check if next_run is within the window
                 if next >= window_start && next <= now {
                     // Prevent double-fire
-                    if let Some(last) = last_fired.get(&task.id) {
-                        if (now - *last).num_seconds() < 30 {
-                            debug!(task = %task.name, "Skipping double-fire");
-                            continue;
-                        }
+                    if let Some(last) = last_fired.get(&task.id)
+                        && (now - *last).num_seconds() < 30
+                    {
+                        debug!(task = %task.name, "Skipping double-fire");
+                        continue;
                     }
                     last_fired.insert(task.id.clone(), now);
                     to_fire.push(task.clone());

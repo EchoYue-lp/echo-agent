@@ -128,10 +128,10 @@ impl Tool for DiffTool {
 
             let (content_b_val, label_b) = if let Some(content) = content_b {
                 (content.to_string(), "<provided content>".to_string())
-            } else {
+            } else if let Some(path_b_str) = path_b_str {
                 let path_b = resolve_path(
                     "diff",
-                    path_b_str.unwrap(),
+                    path_b_str,
                     &self.base_dir,
                     ctx.working_dir.as_deref(),
                 )?;
@@ -149,6 +149,10 @@ impl Tool for DiffTool {
                             message: format!("Failed to read {}: {}", path_b.display(), e),
                         })?;
                 (content, path_b.display().to_string())
+            } else {
+                return Ok(ToolResult::invalid_arguments(
+                    "Either path_b or content_b must be provided.".to_string(),
+                ));
             };
 
             let label_a = path_a.display().to_string();

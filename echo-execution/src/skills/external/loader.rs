@@ -629,8 +629,8 @@ resources:
     /// 必须能被发现(B2 修复前只能找到扁平 skills/<name>/SKILL.md)。
     #[tokio::test]
     async fn scan_directory_finds_nested_category_skills() {
-        // 用 std 临时目录(不引入 tempfile dev-dep,因 echo_execution 非 workspace
-        // 成员,不能有 dev-dependencies)。用进程 id + 原子计数保证唯一,测试结束清理。
+        // 用 std 临时目录避免为单个测试增加 dev-dependency。用进程 id + 原子计数
+        // 保证唯一,测试结束清理。
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let uid = COUNTER.fetch_add(1, Ordering::SeqCst);

@@ -41,8 +41,9 @@ fn verify_feishu_signature(
 ) -> bool {
     let msg = format!("{}\n{}\n{}", timestamp, nonce, body);
 
-    let mut mac =
-        HmacSha256::new_from_slice(signing_key.as_bytes()).expect("HMAC can take key of any size");
+    let Ok(mut mac) = HmacSha256::new_from_slice(signing_key.as_bytes()) else {
+        return false;
+    };
     mac.update(msg.as_bytes());
     let computed = mac.finalize().into_bytes();
 
@@ -69,6 +70,12 @@ struct WebhookState {
     processed_events: DashMap<String, Instant>,
 }
 
+fn empty_response(status: axum::http::StatusCode) -> axum::response::Response {
+    let mut response = axum::response::Response::new(axum::body::Body::empty());
+    *response.status_mut() = status;
+    response
+}
+
 /// Handle Feishu event
 async fn handle_event(
     State(state): State<Arc<WebhookState>>,
@@ -86,11 +93,7 @@ async fn handle_event(
         let actual_token = body.get("header").and_then(|h| h["token"].as_str());
         if actual_token != Some(expected_token.as_str()) {
             warn!("Feishu webhook: verification_token mismatch");
-            return axum::response::Response::builder()
-                .status(axum::http::StatusCode::UNAUTHORIZED)
-                .body(axum::body::Body::empty())
-                .unwrap()
-                .into_response();
+            return empty_response(axum::http::StatusCode::UNAUTHORIZED);
         }
     }
 
@@ -114,11 +117,7 @@ async fn handle_event(
 
         if !verify_feishu_signature(signing_key, timestamp, nonce, &body_str, signature) {
             warn!("Feishu webhook: signature verification failed (timing-safe)");
-            return axum::response::Response::builder()
-                .status(axum::http::StatusCode::UNAUTHORIZED)
-                .body(axum::body::Body::empty())
-                .unwrap()
-                .into_response();
+            return empty_response(axum::http::StatusCode::UNAUTHORIZED);
         }
 
         debug!("Feishu webhook: signature verification passed");

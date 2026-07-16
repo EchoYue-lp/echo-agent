@@ -562,16 +562,16 @@ impl Tool for WriteFileTool {
             let target_hash = content_hash(content.as_bytes());
 
             // Auto-create parent directory
-            if let Some(parent) = path.parent() {
-                if let Err(error) = tokio::fs::create_dir_all(parent).await {
-                    return Ok(partial_file_failure(
-                        ctx,
-                        "write_file",
-                        &path,
-                        &target_hash,
-                        format!("Failed to create directory: {error}"),
-                    ));
-                }
+            if let Some(parent) = path.parent()
+                && let Err(error) = tokio::fs::create_dir_all(parent).await
+            {
+                return Ok(partial_file_failure(
+                    ctx,
+                    "write_file",
+                    &path,
+                    &target_hash,
+                    format!("Failed to create directory: {error}"),
+                ));
             }
 
             // Create git checkpoint before mutation (only if file already exists)

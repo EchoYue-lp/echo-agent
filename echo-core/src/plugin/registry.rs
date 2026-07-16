@@ -263,7 +263,7 @@ impl PluginRegistry {
         if let Some(rest) = url.strip_prefix("https://") {
             let host = rest.split('/').next().unwrap_or("");
             let host = host.split(':').next().unwrap_or(host);
-            let host = host.split('@').last().unwrap_or(host);
+            let host = host.split('@').next_back().unwrap_or(host);
             // Check for IPv4 literals in the host — reject private IPs
             if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
                 let octets = ip.octets();
@@ -470,12 +470,12 @@ impl PluginRegistry {
         }
 
         // Hooks
-        if let Some(ref paths) = manifest.components.hooks {
-            if let Some(p) = paths.first() {
-                let path = resolve_plugin_path(root, p);
-                if path.is_file() {
-                    resolved.hooks_file = Some(path);
-                }
+        if let Some(ref paths) = manifest.components.hooks
+            && let Some(p) = paths.first()
+        {
+            let path = resolve_plugin_path(root, p);
+            if path.is_file() {
+                resolved.hooks_file = Some(path);
             }
         }
 
@@ -496,22 +496,22 @@ impl PluginRegistry {
         }
 
         // LSP servers
-        if let Some(ref paths) = manifest.components.lsp_servers {
-            if let Some(p) = paths.first() {
-                let path = resolve_plugin_path(root, p);
-                if path.is_file() {
-                    resolved.lsp_config_file = Some(path);
-                }
+        if let Some(ref paths) = manifest.components.lsp_servers
+            && let Some(p) = paths.first()
+        {
+            let path = resolve_plugin_path(root, p);
+            if path.is_file() {
+                resolved.lsp_config_file = Some(path);
             }
         }
 
         // Monitors
-        if let Some(ref paths) = manifest.components.monitors {
-            if let Some(p) = paths.first() {
-                let path = resolve_plugin_path(root, p);
-                if path.is_file() {
-                    resolved.monitors_file = Some(path);
-                }
+        if let Some(ref paths) = manifest.components.monitors
+            && let Some(p) = paths.first()
+        {
+            let path = resolve_plugin_path(root, p);
+            if path.is_file() {
+                resolved.monitors_file = Some(path);
             }
         }
 
@@ -521,13 +521,13 @@ impl PluginRegistry {
                 let path = resolve_plugin_path(root, p);
                 if path.is_file() {
                     resolved.theme_files.push(path);
-                } else if path.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&path) {
-                        for entry in entries.flatten() {
-                            let p = entry.path();
-                            if p.extension().is_some_and(|e| e == "json") {
-                                resolved.theme_files.push(p);
-                            }
+                } else if path.is_dir()
+                    && let Ok(entries) = std::fs::read_dir(&path)
+                {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.extension().is_some_and(|e| e == "json") {
+                            resolved.theme_files.push(p);
                         }
                     }
                 }
@@ -540,13 +540,13 @@ impl PluginRegistry {
                 let path = resolve_plugin_path(root, p);
                 if path.is_file() {
                     resolved.output_style_files.push(path);
-                } else if path.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&path) {
-                        for entry in entries.flatten() {
-                            let p = entry.path();
-                            if p.extension().is_some_and(|e| e == "md") {
-                                resolved.output_style_files.push(p);
-                            }
+                } else if path.is_dir()
+                    && let Ok(entries) = std::fs::read_dir(&path)
+                {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.extension().is_some_and(|e| e == "md") {
+                            resolved.output_style_files.push(p);
                         }
                     }
                 }

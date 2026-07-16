@@ -300,6 +300,8 @@ async fn demo_task_management() -> Result<()> {
             TaskStatus::Blocked(_) => "🔒",
             TaskStatus::TimedOut { .. } => "⏰",
             TaskStatus::Retrying { .. } => "🔄",
+            TaskStatus::Skipped => "⏭️",
+            TaskStatus::Paused(_) => "⏸️",
         };
         println!("    {} {} - {}", status_icon, task.id, task.description);
     }

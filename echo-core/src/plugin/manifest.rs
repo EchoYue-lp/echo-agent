@@ -472,7 +472,7 @@ fn is_kebab_case(s: &str) -> bool {
 fn is_valid_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !s.chars().next().unwrap().is_ascii_digit()
+        && s.chars().next().is_some_and(|c| !c.is_ascii_digit())
 }
 
 /// Loose semver check: accepts "MAJOR.MINOR.PATCH" with optional pre-release.

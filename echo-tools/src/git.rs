@@ -35,7 +35,7 @@ pub struct GitStatusTool {
 impl ToolRunner<GitStatusToolParams> for GitStatusTool {
     async fn run(&self, params: GitStatusToolParams) -> Result<ToolResult> {
         let repo_path = params.repo_path.as_deref().unwrap_or(".");
-        let output = run_git(&repo_path, &["status", "--short"])?;
+        let output = run_git(repo_path, &["status", "--short"])?;
         if output.is_empty() {
             Ok(ToolResult::success("Working directory clean, no changes"))
         } else {
@@ -99,7 +99,7 @@ impl Tool for GitDiffTool {
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
-            let repo_path = effective_repo_path(&repo_path, ctx);
+            let repo_path = effective_repo_path(repo_path, ctx);
 
             let mut args = vec!["diff"];
             let staged = parameters
@@ -194,7 +194,7 @@ impl Tool for GitLogTool {
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
-            let repo_path = effective_repo_path(&repo_path, ctx);
+            let repo_path = effective_repo_path(repo_path, ctx);
 
             let count = parameters
                 .get("count")
@@ -305,7 +305,7 @@ impl Tool for GitBlameTool {
             args.push(file_path.to_string());
 
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(&repo_path, &str_args)?;
+            let output = run_git(repo_path, &str_args)?;
             Ok(ToolResult::success(output))
         })
     }
@@ -366,7 +366,7 @@ impl Tool for GitBranchTool {
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
-            let repo_path = effective_repo_path(&repo_path, ctx);
+            let repo_path = effective_repo_path(repo_path, ctx);
 
             let action;
             let args: Vec<String>;
@@ -450,7 +450,7 @@ impl Tool for GitCommitTool {
                 .get("repo_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
-            let repo_path = effective_repo_path(&repo_path, ctx);
+            let repo_path = effective_repo_path(repo_path, ctx);
             let message = parameters
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -498,10 +498,10 @@ fn effective_repo_path(user_repo_path: &str, ctx: &echo_core::tools::ToolContext
         return ".".to_string();
     }
     // Relative path: join with working_dir if set
-    if !std::path::Path::new(user_repo_path).is_absolute() {
-        if let Some(dir) = &ctx.working_dir {
-            return dir.join(user_repo_path).to_string_lossy().to_string();
-        }
+    if !std::path::Path::new(user_repo_path).is_absolute()
+        && let Some(dir) = &ctx.working_dir
+    {
+        return dir.join(user_repo_path).to_string_lossy().to_string();
     }
     user_repo_path.to_string()
 }

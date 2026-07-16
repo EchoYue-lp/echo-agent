@@ -257,10 +257,11 @@ impl ToolFailure {
 /// This enriches [`ToolResult`] so downstream consumers (CLI rendering,
 /// trace analysis, eval scoring) can handle results appropriately without
 /// parsing the raw output string.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind_type", rename_all = "snake_case")]
 pub enum ToolResultKind {
     /// Plain text output.
+    #[default]
     Text,
     /// Structured JSON data (also available in `ToolResult.data`).
     Json,
@@ -279,12 +280,6 @@ pub enum ToolResultKind {
     CommandOutput { exit_code: Option<i32> },
     /// A structured error with an error code.
     StructuredError { error_code: String },
-}
-
-impl Default for ToolResultKind {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 /// 工具执行结果
@@ -502,6 +497,8 @@ pub enum ToolOutputChannel {
 /// delivery to the UI / caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
+// Complete stays inline to preserve the public stream event API.
+#[allow(clippy::large_enum_variant)]
 pub enum ToolStreamEvent {
     /// Progress notification with optional percentage (0-100).
     Progress {
@@ -573,9 +570,7 @@ impl ParamValue {
             serde_json::Value::String(s) => Self::String(s.clone()),
             serde_json::Value::Number(n) => Self::Number(n.as_f64().unwrap_or(0.0)),
             serde_json::Value::Bool(b) => Self::Bool(*b),
-            serde_json::Value::Array(arr) => {
-                Self::Array(arr.iter().map(|v| Self::from_json(v)).collect())
-            }
+            serde_json::Value::Array(arr) => Self::Array(arr.iter().map(Self::from_json).collect()),
             serde_json::Value::Object(obj) => Self::Object(
                 obj.iter()
                     .map(|(k, v)| (k.clone(), Self::from_json(v)))

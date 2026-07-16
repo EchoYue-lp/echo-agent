@@ -168,36 +168,33 @@ impl ContentGuardResult {
 // ── 默认正则模式 ──────────────────────────────────────────────────────────
 
 fn build_default_patterns() -> Vec<(PiiType, Regex)> {
-    vec![
+    [
         // 中国手机号：1[3-9]xxxxxxxxx
-        (PiiType::PhoneCn, Regex::new(r"1[3-9]\d{9}").unwrap()),
+        (PiiType::PhoneCn, r"1[3-9]\d{9}"),
         // 中国身份证号（18位）
         (
             PiiType::IdCardCn,
-            Regex::new(
-                r"\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b",
-            )
-            .unwrap(),
+            r"\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b",
         ),
         // 邮箱
         (
             PiiType::Email,
-            Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap(),
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
         ),
         // API Key：OpenAI (sk-), Anthropic (sk-ant-), GitHub (ghp_)
         (
             PiiType::ApiKey,
-            Regex::new(
-                r"\b(sk-(?:ant-)?[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{36,}|xai-[A-Za-z0-9]{16,})\b",
-            )
-            .unwrap(),
+            r"\b(sk-(?:ant-)?[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{36,}|xai-[A-Za-z0-9]{16,})\b",
         ),
         // 信用卡号：Visa (4xxx) / MasterCard (5xxx)，16位
         (
             PiiType::CreditCard,
-            Regex::new(r"\b[45]\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b").unwrap(),
+            r"\b[45]\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b",
         ),
     ]
+    .into_iter()
+    .filter_map(|(pii_type, pattern)| Regex::new(pattern).ok().map(|regex| (pii_type, regex)))
+    .collect()
 }
 
 // ── Guard trait 实现 ─────────────────────────────────────────────────────

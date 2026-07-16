@@ -143,7 +143,7 @@ mod tests {
             .filter(|m| {
                 m.tool_call_id
                     .as_ref()
-                    .map_or(true, |id| !tool_call_ids.contains(id))
+                    .is_none_or(|id| !tool_call_ids.contains(id))
             })
             .collect();
 
@@ -464,15 +464,15 @@ mod tests {
             .collect();
 
         for msg in &output.messages {
-            if msg.role == Role::Assistant {
-                if let Some(ref tcs) = msg.tool_calls {
-                    for tc in tcs {
-                        assert!(
-                            tool_result_ids.contains(&tc.id),
-                            "Tool call {} has no matching result (orphaned)",
-                            tc.id
-                        );
-                    }
+            if msg.role == Role::Assistant
+                && let Some(ref tcs) = msg.tool_calls
+            {
+                for tc in tcs {
+                    assert!(
+                        tool_result_ids.contains(&tc.id),
+                        "Tool call {} has no matching result (orphaned)",
+                        tc.id
+                    );
                 }
             }
         }

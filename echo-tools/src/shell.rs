@@ -652,7 +652,7 @@ fn start_sandbox_stream<'a>(
                         SandboxOutputChannel::Stdout => ToolOutputChannel::Stdout,
                         SandboxOutputChannel::Stderr => ToolOutputChannel::Stderr,
                     };
-                    artifact_capture.push(tool_channel.clone(), &chunk);
+                    artifact_capture.push(tool_channel, &chunk);
                     ToolStreamEvent::Output {
                         channel: tool_channel,
                         chunk,

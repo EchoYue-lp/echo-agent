@@ -16,6 +16,7 @@ echo-orchestration/target/
 echo-macros/target/
 echo-integration/target/
 echo-tools/target/
+# Workspace members share the root lockfile; ignore stale member lockfiles.
 */Cargo.lock
 
 # Worktree directories

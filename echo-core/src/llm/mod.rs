@@ -111,9 +111,10 @@ pub trait LlmClient: Send + Sync {
 /// Maps to provider-specific APIs:
 /// - OpenAI: `"auto"`, `"none"`, `"required"`, `{"type": "function", "function": {"name": "..."}}`
 /// - Anthropic: `{"type": "auto"}`, `{"type": "any"}`, `{"type": "tool", "name": "..."}`
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ToolChoice {
     /// Let the model decide whether to call tools (default).
+    #[default]
     Auto,
     /// Force the model NOT to call any tools.
     None,
@@ -121,12 +122,6 @@ pub enum ToolChoice {
     Required,
     /// Force the model to call a specific tool by name.
     Function { name: String },
-}
-
-impl Default for ToolChoice {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl ToolChoice {

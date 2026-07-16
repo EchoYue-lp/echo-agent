@@ -81,25 +81,34 @@ impl BackgroundTaskState {
         self.exit_code = Some(exit_code);
         self.stdout = stdout;
         self.stderr = stderr;
-        self.completed_at = Some(super::time::now_secs());
-        self.duration_ms = (self.completed_at.unwrap() - self.started_at) * 1000;
-        self.checkpoint_at = super::time::now_secs();
+        let completed_at = super::time::now_secs();
+        self.completed_at = Some(completed_at);
+        self.duration_ms = completed_at
+            .saturating_sub(self.started_at)
+            .saturating_mul(1000);
+        self.checkpoint_at = completed_at;
     }
 
     /// Mark task as failed
     pub fn mark_failed(&mut self, error: impl Into<String>) {
         self.status = TaskStatus::Failed(error.into());
-        self.completed_at = Some(super::time::now_secs());
-        self.duration_ms = (self.completed_at.unwrap() - self.started_at) * 1000;
-        self.checkpoint_at = super::time::now_secs();
+        let completed_at = super::time::now_secs();
+        self.completed_at = Some(completed_at);
+        self.duration_ms = completed_at
+            .saturating_sub(self.started_at)
+            .saturating_mul(1000);
+        self.checkpoint_at = completed_at;
     }
 
     /// Mark task as cancelled
     pub fn mark_cancelled(&mut self) {
         self.status = TaskStatus::Cancelled;
-        self.completed_at = Some(super::time::now_secs());
-        self.duration_ms = (self.completed_at.unwrap() - self.started_at) * 1000;
-        self.checkpoint_at = super::time::now_secs();
+        let completed_at = super::time::now_secs();
+        self.completed_at = Some(completed_at);
+        self.duration_ms = completed_at
+            .saturating_sub(self.started_at)
+            .saturating_mul(1000);
+        self.checkpoint_at = completed_at;
     }
 
     /// Check if task is terminal

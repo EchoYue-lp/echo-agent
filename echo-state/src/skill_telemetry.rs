@@ -240,7 +240,7 @@ impl SkillTelemetryStore {
             }
         }
 
-        result.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+        result.sort_by_key(|telemetry| std::cmp::Reverse(telemetry.last_used));
         Ok(result)
     }
 }

@@ -172,10 +172,7 @@ impl DuckDuckGoProvider {
         // Abstract as the first result
         if !api_resp.abstract_text.is_empty() && !api_resp.abstract_url.is_empty() {
             results.push(SearchResult {
-                title: api_resp
-                    .heading
-                    .or_else(|| Some(query.to_string()))
-                    .unwrap(),
+                title: api_resp.heading.unwrap_or_else(|| query.to_string()),
                 url: api_resp.abstract_url,
                 snippet: truncate_chars(&api_resp.abstract_text, 300),
             });

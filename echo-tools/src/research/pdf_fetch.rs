@@ -165,25 +165,24 @@ fn extract_pdf_metadata_from_doc(doc: &lopdf::Document) -> Value {
     let mut meta = serde_json::json!({ "pages": page_count });
 
     // Extract info dictionary fields (title, author, subject, creator, producer, creation date)
-    if let Ok(info_obj) = doc.trailer.get(b"Info") {
-        if let Ok(info_dict) = info_obj.as_dict() {
-            let fields = [
-                ("Title", "title"),
-                ("Author", "author"),
-                ("Subject", "subject"),
-                ("Creator", "creator"),
-                ("Producer", "producer"),
-                ("CreationDate", "creation_date"),
-                ("ModDate", "modification_date"),
-            ];
-            for (pdf_key, json_key) in &fields {
-                if let Ok(text_obj) = info_dict.get(pdf_key.as_bytes()) {
-                    if let Ok(text_str) = text_obj.as_str() {
-                        meta[json_key] = serde_json::Value::String(
-                            String::from_utf8_lossy(text_str).to_string(),
-                        );
-                    }
-                }
+    if let Ok(info_obj) = doc.trailer.get(b"Info")
+        && let Ok(info_dict) = info_obj.as_dict()
+    {
+        let fields = [
+            ("Title", "title"),
+            ("Author", "author"),
+            ("Subject", "subject"),
+            ("Creator", "creator"),
+            ("Producer", "producer"),
+            ("CreationDate", "creation_date"),
+            ("ModDate", "modification_date"),
+        ];
+        for (pdf_key, json_key) in &fields {
+            if let Ok(text_obj) = info_dict.get(pdf_key.as_bytes())
+                && let Ok(text_str) = text_obj.as_str()
+            {
+                meta[json_key] =
+                    serde_json::Value::String(String::from_utf8_lossy(text_str).to_string());
             }
         }
     }

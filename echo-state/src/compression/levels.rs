@@ -298,16 +298,17 @@ impl AdaptiveCompressor {
         }
 
         // L4: Auto Compact — LLM summarization (only if LLM client is configured)
-        if tokens > self.config.l4_compact_threshold_tokens && tokens > target_tokens {
-            if let Some(llm) = &self.llm {
-                let (saved, evicted, summary) =
-                    self.apply_l4_compact(messages, llm.as_ref(), focus).await;
-                tokens = tokens.saturating_sub(saved);
-                if saved > 0 {
-                    levels_applied.push("L4:Compact".to_string());
-                    all_evicted.extend(evicted);
-                    l4_summary = summary;
-                }
+        if tokens > self.config.l4_compact_threshold_tokens
+            && tokens > target_tokens
+            && let Some(llm) = &self.llm
+        {
+            let (saved, evicted, summary) =
+                self.apply_l4_compact(messages, llm.as_ref(), focus).await;
+            tokens = tokens.saturating_sub(saved);
+            if saved > 0 {
+                levels_applied.push("L4:Compact".to_string());
+                all_evicted.extend(evicted);
+                l4_summary = summary;
             }
         }
 
@@ -333,7 +334,7 @@ impl AdaptiveCompressor {
     }
 
     /// L1: Remove tool outputs that exceed max_output_tokens.
-    fn apply_l1_snip(&self, messages: &mut Vec<Message>) -> usize {
+    fn apply_l1_snip(&self, messages: &mut [Message]) -> usize {
         let mut saved = 0;
         let max_tokens = self.config.l1_max_output_tokens;
 
@@ -402,7 +403,7 @@ impl AdaptiveCompressor {
     }
 
     /// L2: Truncate tool outputs to keep first/last N lines.
-    fn apply_l2_micro(&self, messages: &mut Vec<Message>) -> usize {
+    fn apply_l2_micro(&self, messages: &mut [Message]) -> usize {
         let mut saved = 0;
         let keep = self.config.l2_keep_lines;
 

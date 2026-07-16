@@ -59,13 +59,13 @@ impl TrajectoryReplay {
 
         for event in &self.run.events {
             match event {
-                RunEvent::ToolCall { call_id, name, .. } => {
+                RunEvent::ToolCall { call_id, name, .. }
                     if pending.insert(call_id.clone(), name.clone()).is_some()
-                        || completed.contains_key(call_id)
-                    {
-                        violations.push(format!("duplicate tool call id: {call_id}"));
-                    }
+                        || completed.contains_key(call_id) =>
+                {
+                    violations.push(format!("duplicate tool call id: {call_id}"));
                 }
+                RunEvent::ToolCall { .. } => {}
                 RunEvent::ToolResult {
                     call_id, name, ..
                 } => match pending.remove(call_id) {

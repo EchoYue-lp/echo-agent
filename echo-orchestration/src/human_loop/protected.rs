@@ -7,6 +7,18 @@
 use regex::Regex;
 use serde_json::Value;
 use std::env;
+use std::sync::LazyLock;
+
+static QUOTED_PATH_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#""([^"]*)"|'([^']*)'"#).ok());
+static DIRECT_PATH_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"(?:^|\s)((?:/|\./|~/|\.)[^\s"'`$(){}|;&<>]*|/[^\s"'`$(){}|;&<>]+)"#).ok()
+});
+static ENV_VAR_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"#).ok()
+});
+static COMMAND_SUBSTITUTION_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"\$\(([^)]+)\)|`([^`]+)`"#).ok());
 
 /// 默认受保护路径模式
 const DEFAULT_PROTECTED_PATTERNS: &[&str] = &[
@@ -203,13 +215,14 @@ fn extract_paths_from_bash_command(cmd: &str) -> Vec<String> {
     let expanded = expand_env_vars_and_tilde(cmd);
 
     // 提取引号内的字符串（单引号和双引号），它们可能包含路径
-    let quoted_re = Regex::new(r#""([^"]*)"|'([^']*)'"#).unwrap();
-    for cap in quoted_re.captures_iter(&expanded) {
-        if let Some(quoted) = cap.get(1).or_else(|| cap.get(2)) {
-            let quoted_str = quoted.as_str();
-            // 如果引号内的字符串看起来像路径，添加到列表
-            if looks_like_path(quoted_str) {
-                paths.push(quoted_str.to_string());
+    if let Some(quoted_re) = QUOTED_PATH_RE.as_ref() {
+        for cap in quoted_re.captures_iter(&expanded) {
+            if let Some(quoted) = cap.get(1).or_else(|| cap.get(2)) {
+                let quoted_str = quoted.as_str();
+                // 如果引号内的字符串看起来像路径，添加到列表
+                if looks_like_path(quoted_str) {
+                    paths.push(quoted_str.to_string());
+                }
             }
         }
     }
@@ -217,16 +230,18 @@ fn extract_paths_from_bash_command(cmd: &str) -> Vec<String> {
     // 使用正则表达式提取所有看起来像路径的字符串
     // 匹配：以 /, ./, ~/, . 开头的字符串，或者包含 / 的字符串
     // 排除明显的非路径 token（如命令选项）
-    let path_re =
-        Regex::new(r#"(?:^|\s)((?:/|\./|~/|\.)[^\s"'`$(){}|;&<>]*|/[^\s"'`$(){}|;&<>]+)"#).unwrap();
-
-    for cap in path_re.captures_iter(&expanded) {
-        if let Some(matched) = cap.get(1) {
-            let path = matched.as_str().trim();
-            // 过滤掉明显的非路径（如单个点、双点）和已处理的引号内容
-            if !path.is_empty() && path != "." && path != ".." && !paths.contains(&path.to_string())
-            {
-                paths.push(path.to_string());
+    if let Some(path_re) = DIRECT_PATH_RE.as_ref() {
+        for cap in path_re.captures_iter(&expanded) {
+            if let Some(matched) = cap.get(1) {
+                let path = matched.as_str().trim();
+                // 过滤掉明显的非路径（如单个点、双点）和已处理的引号内容
+                if !path.is_empty()
+                    && path != "."
+                    && path != ".."
+                    && !paths.iter().any(|existing| existing == path)
+                {
+                    paths.push(path.to_string());
+                }
             }
         }
     }
@@ -261,14 +276,17 @@ fn expand_env_vars_and_tilde(cmd: &str) -> String {
     }
 
     // 展开环境变量 $VAR 和 ${VAR}，使用正则确保完整匹配
-    let re = Regex::new(r#"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"#).unwrap();
-
-    result = re
-        .replace_all(&result, |caps: &regex::Captures| {
-            let var_name = caps.get(1).or_else(|| caps.get(2)).unwrap().as_str();
-            env::var(var_name).unwrap_or_else(|_| caps[0].to_string())
-        })
-        .to_string();
+    if let Some(re) = ENV_VAR_RE.as_ref() {
+        result = re
+            .replace_all(&result, |caps: &regex::Captures| {
+                let original = caps.get(0).map_or("", |matched| matched.as_str());
+                caps.get(1)
+                    .or_else(|| caps.get(2))
+                    .and_then(|matched| env::var(matched.as_str()).ok())
+                    .unwrap_or_else(|| original.to_string())
+            })
+            .to_string();
+    }
 
     result
 }
@@ -277,7 +295,9 @@ fn expand_env_vars_and_tilde(cmd: &str) -> String {
 fn extract_paths_from_command_substitution(cmd: &str, paths: &mut Vec<String>) {
     // 使用栈来避免无限递归，最大深度为5
     let mut stack = vec![(cmd.to_string(), 0)];
-    let re = Regex::new(r#"\$\(([^)]+)\)|`([^`]+)`"#).unwrap();
+    let Some(re) = COMMAND_SUBSTITUTION_RE.as_ref() else {
+        return;
+    };
 
     while let Some((current_cmd, depth)) = stack.pop() {
         if depth >= 5 {

@@ -75,35 +75,35 @@ impl MemoryFilter {
 
     /// Check if a memory entry matches this filter.
     pub fn matches(&self, entry: &TypedMemoryEntry) -> bool {
-        if let Some(ref mt) = self.memory_type {
-            if entry.meta.memory_type != *mt {
-                return false;
-            }
+        if let Some(ref mt) = self.memory_type
+            && entry.meta.memory_type != *mt
+        {
+            return false;
         }
-        if let Some(ref st) = self.status {
-            if entry.meta.status != *st {
-                return false;
-            }
+        if let Some(ref st) = self.status
+            && entry.meta.status != *st
+        {
+            return false;
         }
-        if let Some(min_c) = self.min_confidence {
-            if entry.meta.confidence < min_c {
-                return false;
-            }
+        if let Some(min_c) = self.min_confidence
+            && entry.meta.confidence < min_c
+        {
+            return false;
         }
-        if let Some(ref topic) = self.topic {
-            if entry.meta.topic != *topic {
-                return false;
-            }
+        if let Some(ref topic) = self.topic
+            && entry.meta.topic != *topic
+        {
+            return false;
         }
-        if let Some(ref src) = self.source {
-            if entry.meta.source != *src {
-                return false;
-            }
+        if let Some(ref src) = self.source
+            && entry.meta.source != *src
+        {
+            return false;
         }
-        if let Some(max_r) = self.max_risk {
-            if risk_order(&entry.meta.risk) > risk_order(&max_r) {
-                return false;
-            }
+        if let Some(max_r) = self.max_risk
+            && risk_order(&entry.meta.risk) > risk_order(&max_r)
+        {
+            return false;
         }
         true
     }

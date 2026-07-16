@@ -202,11 +202,14 @@ impl TraceAnalyzer {
             total_tokens = total_tokens.saturating_add(summary.token_usage.total_tokens);
             total_duration_ms += summary.total_duration_ms;
 
-            if first_started_at.is_none() || summary.started_at < first_started_at.unwrap() {
+            if first_started_at
+                .as_ref()
+                .is_none_or(|first| summary.started_at < *first)
+            {
                 first_started_at = Some(summary.started_at);
             }
             if let Some(fa) = summary.finished_at
-                && (last_finished_at.is_none() || fa > last_finished_at.unwrap())
+                && last_finished_at.as_ref().is_none_or(|last| fa > *last)
             {
                 last_finished_at = Some(fa);
             }
@@ -631,11 +634,15 @@ impl ToolFailureAccumulator {
 
 impl ErrorAccumulator {
     fn update_time(&mut self, started_at: DateTime<Utc>, finished_at: Option<DateTime<Utc>>) {
-        if self.first_seen.is_none() || started_at < self.first_seen.unwrap() {
+        if self
+            .first_seen
+            .as_ref()
+            .is_none_or(|first| started_at < *first)
+        {
             self.first_seen = Some(started_at);
         }
         if let Some(fa) = finished_at
-            && (self.last_seen.is_none() || fa > self.last_seen.unwrap())
+            && self.last_seen.as_ref().is_none_or(|last| fa > *last)
         {
             self.last_seen = Some(fa);
         }

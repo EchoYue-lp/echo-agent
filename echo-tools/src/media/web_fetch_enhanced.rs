@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
+static HTML_TAG_RE: OnceLock<Option<regex::Regex>> = OnceLock::new();
 
 fn build_client() -> &'static Client {
     CLIENT.get_or_init(|| {
@@ -99,8 +100,13 @@ impl WebFetchToolEnhanced {
                     e
                 );
                 // Fallback: simple tag removal
-                let re = regex::Regex::new(r"<[^>]+>").unwrap();
-                re.replace_all(html, "").to_string()
+                HTML_TAG_RE
+                    .get_or_init(|| regex::Regex::new(r"<[^>]+>").ok())
+                    .as_ref()
+                    .map_or_else(
+                        || html.to_string(),
+                        |re| re.replace_all(html, "").to_string(),
+                    )
             }
         }
     }

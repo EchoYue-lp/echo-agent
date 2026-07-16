@@ -218,10 +218,10 @@ impl<T: Send + 'static> BackgroundTask<T> {
             // Check if the result is already present (non-blocking).
             {
                 let mut cell = self.result.lock().await;
-                if cell.is_some() {
-                    // Take and return. Only the first observer gets it; later
-                    // callers fall through to status-based reporting.
-                    return cell.take().unwrap();
+                if let Some(result) = cell.take() {
+                    // Only the first observer gets it; later callers fall
+                    // through to status-based reporting.
+                    return result;
                 }
             }
 

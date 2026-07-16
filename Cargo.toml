@@ -1,3 +1,25 @@
+[workspace]
+members = [
+    "echo-core",
+    "echo-macros",
+    "echo-execution",
+    "echo-integration",
+    "echo-tools",
+    "echo-state",
+    "echo-orchestration",
+]
+default-members = [
+    ".",
+    "echo-core",
+    "echo-macros",
+    "echo-execution",
+    "echo-integration",
+    "echo-tools",
+    "echo-state",
+    "echo-orchestration",
+]
+resolver = "3"
+
 [package]
 name = "echo_agent"
 version = "0.2.0"

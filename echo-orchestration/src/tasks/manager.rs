@@ -371,8 +371,9 @@ impl TaskManager {
                 if self.tasks.contains_key(dep_id) {
                     match visited.get(dep_id).copied() {
                         Some(VisitState::Visiting) => {
-                            let cycle_start = path.iter().position(|id| id == dep_id).unwrap();
-                            cycles.push(path[cycle_start..].to_vec());
+                            if let Some(cycle_start) = path.iter().position(|id| id == dep_id) {
+                                cycles.push(path[cycle_start..].to_vec());
+                            }
                         }
                         Some(VisitState::Visited) => {}
                         None => {

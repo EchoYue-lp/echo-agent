@@ -97,7 +97,7 @@ impl AgentProfile {
     /// Get top N tools sorted by usage count (descending).
     pub fn top_tools(&self, n: usize) -> Vec<&ToolUsageStats> {
         let mut tools: Vec<_> = self.tool_usage.values().collect();
-        tools.sort_by(|a, b| b.usage_count.cmp(&a.usage_count));
+        tools.sort_by_key(|tool| std::cmp::Reverse(tool.usage_count));
         tools.truncate(n);
         tools
     }
@@ -234,7 +234,7 @@ impl UserProfile {
     /// Get top N common tasks sorted by frequency (descending).
     pub fn top_tasks(&self, n: usize) -> Vec<&TaskPattern> {
         let mut tasks: Vec<_> = self.common_tasks.iter().collect();
-        tasks.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.frequency));
         tasks.truncate(n);
         tasks
     }

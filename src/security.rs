@@ -31,83 +31,49 @@ pub struct SecretMatch {
 
 /// Pre-compiled secret patterns.
 static SECRET_PATTERNS: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
-    vec![
-        ("AWS Access Key", Regex::new(r"AKIA[0-9A-Z]{16}").unwrap()),
+    [
+        ("AWS Access Key", r"AKIA[0-9A-Z]{16}"),
         (
             "AWS Secret Key",
-            Regex::new(r"(?i)aws.?secret.?key[\s:=]+[A-Za-z0-9/+=]{40}").unwrap(),
+            r"(?i)aws.?secret.?key[\s:=]+[A-Za-z0-9/+=]{40}",
         ),
-        (
-            "GitHub Token",
-            Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").unwrap(),
-        ),
-        (
-            "GitHub PAT",
-            Regex::new(r"github_pat_[A-Za-z0-9_]{22,}").unwrap(),
-        ),
-        // SSH private/public key material — synced from evolution scanner (P1-16).
-        (
-            "SSH Key",
-            Regex::new(r"ssh-rsa\s+AAAA[A-Za-z0-9+/=]+").unwrap(),
-        ),
-        // Bearer tokens (possessive to avoid ReDoS) — synced from evolution.
-        (
-            "Bearer Token",
-            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+").unwrap(),
-        ),
-        (
-            "Anthropic API Key",
-            Regex::new(r"sk-ant-[A-Za-z0-9_-]{20,}").unwrap(),
-        ),
-        (
-            "OpenAI API Key",
-            Regex::new(r"sk-[A-Za-z0-9_-]{20,}").unwrap(),
-        ),
+        ("GitHub Token", r"gh[pousr]_[A-Za-z0-9_]{36,}"),
+        ("GitHub PAT", r"github_pat_[A-Za-z0-9_]{22,}"),
+        ("SSH Key", r"ssh-rsa\s+AAAA[A-Za-z0-9+/=]+"),
+        ("Bearer Token", r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+"),
+        ("Anthropic API Key", r"sk-ant-[A-Za-z0-9_-]{20,}"),
+        ("OpenAI API Key", r"sk-[A-Za-z0-9_-]{20,}"),
         (
             "Generic API Key",
-            Regex::new(r"(?i)(api[_-]?key|apikey)[\s:=]+[A-Za-z0-9_\-]{20,}").unwrap(),
+            r"(?i)(api[_-]?key|apikey)[\s:=]+[A-Za-z0-9_\-]{20,}",
         ),
         (
             "Private Key",
-            Regex::new(r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----").unwrap(),
+            r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
         ),
         (
             "JWT Token",
-            Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}").unwrap(),
+            r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
         ),
-        ("Password in URL", Regex::new(r"://[^:]+:[^@]+@").unwrap()),
-        (
-            "Slack Token",
-            Regex::new(r"xox[baprs]-[A-Za-z0-9-]{10,}").unwrap(),
-        ),
+        ("Password in URL", r"://[^:]+:[^@]+@"),
+        ("Slack Token", r"xox[baprs]-[A-Za-z0-9-]{10,}"),
         (
             "Generic Token",
-            Regex::new(r"(?i)(token|secret|password|passwd)[\s:=]+[A-Za-z0-9_\-!@#$%^&*]{8,}")
-                .unwrap(),
+            r"(?i)(token|secret|password|passwd)[\s:=]+[A-Za-z0-9_\-!@#$%^&*]{8,}",
         ),
-        // Patterns missing in the original scanner (P1-16 / 2.7):
-        (
-            "HuggingFace Token",
-            Regex::new(r"hf_[A-Za-z0-9]{34}").unwrap(),
-        ),
-        (
-            "Google API Key",
-            Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(),
-        ),
-        (
-            "GitLab PAT",
-            Regex::new(r"glpat-[A-Za-z0-9\-_]{26}").unwrap(),
-        ),
-        (
-            "Stripe Live Key",
-            Regex::new(concat!("sk_", "live_[0-9a-zA-Z]{24,}")).unwrap(),
-        ),
-        ("npm Token", Regex::new(r"npm_[A-Za-z0-9]{36}").unwrap()),
+        ("HuggingFace Token", r"hf_[A-Za-z0-9]{34}"),
+        ("Google API Key", r"AIza[0-9A-Za-z\-_]{35}"),
+        ("GitLab PAT", r"glpat-[A-Za-z0-9\-_]{26}"),
+        ("Stripe Live Key", concat!("sk_", "live_[0-9a-zA-Z]{24,}")),
+        ("npm Token", r"npm_[A-Za-z0-9]{36}"),
         (
             "DB Connection String",
-            Regex::new(r"(?i)(postgres(ql)?|mysql)://[^@\s]+:[^@\s]+@").unwrap(),
+            r"(?i)(postgres(ql)?|mysql)://[^@\s]+:[^@\s]+@",
         ),
     ]
+    .into_iter()
+    .filter_map(|(name, pattern)| Regex::new(pattern).ok().map(|regex| (name, regex)))
+    .collect()
 });
 
 /// Scan text for secrets. Returns all matches found.

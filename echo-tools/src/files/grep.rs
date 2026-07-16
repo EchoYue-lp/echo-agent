@@ -217,12 +217,11 @@ async fn search_file(
     total_matches: &mut usize,
 ) -> Result<()> {
     // Check glob filter
-    if let Some(glob) = glob_filter {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if !glob_matches(glob, name) {
-                return Ok(());
-            }
-        }
+    if let Some(glob) = glob_filter
+        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        && !glob_matches(glob, name)
+    {
+        return Ok(());
     }
 
     // Skip binary files and large files
@@ -294,18 +293,17 @@ async fn walk_and_search(
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         // Skip hidden directories and common ignore patterns
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.')
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && (name.starts_with('.')
                 || name == "target"
                 || name == "node_modules"
                 || name == "__pycache__"
                 || name == ".git"
                 || name == "vendor"
                 || name == "build"
-                || name == "dist"
-            {
-                continue;
-            }
+                || name == "dist")
+        {
+            continue;
         }
         entry_paths.push(path);
     }
@@ -347,21 +345,21 @@ async fn walk_and_search(
 /// Simple glob matching supporting * and ? wildcards
 fn glob_matches(pattern: &str, name: &str) -> bool {
     // Handle brace patterns like *.{rs,ts}
-    if pattern.contains('{') && pattern.contains('}') {
-        if let Some(start) = pattern.find('{') {
-            if let Some(end) = pattern.find('}') {
-                let prefix = &pattern[..start];
-                let suffix = &pattern[end + 1..];
-                let alternatives: Vec<&str> = pattern[start + 1..end].split(',').collect();
-                for alt in alternatives {
-                    let full = format!("{}{}{}", prefix, alt.trim(), suffix);
-                    if glob_matches_simple(&full, name) {
-                        return true;
-                    }
-                }
-                return false;
+    if pattern.contains('{')
+        && pattern.contains('}')
+        && let Some(start) = pattern.find('{')
+        && let Some(end) = pattern.find('}')
+    {
+        let prefix = &pattern[..start];
+        let suffix = &pattern[end + 1..];
+        let alternatives: Vec<&str> = pattern[start + 1..end].split(',').collect();
+        for alt in alternatives {
+            let full = format!("{}{}{}", prefix, alt.trim(), suffix);
+            if glob_matches_simple(&full, name) {
+                return true;
             }
         }
+        return false;
     }
 
     glob_matches_simple(pattern, name)

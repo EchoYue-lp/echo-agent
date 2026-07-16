@@ -211,8 +211,10 @@ pub struct Milestone {
 /// Plan-level verification strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PlanVerificationStrategy {
     /// Verify each task independently
+    #[default]
     PerTask,
     /// Verify at each milestone
     PerMilestone,
@@ -222,43 +224,29 @@ pub enum PlanVerificationStrategy {
     Continuous,
 }
 
-impl Default for PlanVerificationStrategy {
-    fn default() -> Self {
-        Self::PerTask
-    }
-}
-
 /// Estimated complexity level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Complexity {
     Low,
+    #[default]
     Medium,
     High,
-}
-
-impl Default for Complexity {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 /// Fallback strategy if plan fails
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PlanFallbackStrategy {
     /// Replan with new strategy
+    #[default]
     Replan,
     /// Ask user for guidance
     AskUser,
     /// Abort execution
     Abort,
-}
-
-impl Default for PlanFallbackStrategy {
-    fn default() -> Self {
-        Self::Replan
-    }
 }
 
 impl PlanSpec {

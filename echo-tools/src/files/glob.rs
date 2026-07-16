@@ -176,30 +176,27 @@ async fn walk_glob(
         }
 
         // Skip hidden and common ignored directories
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.')
-                    || name == "target"
-                    || name == "node_modules"
-                    || name == "__pycache__"
-                    || name == ".git"
-                    || name == "vendor"
-                    || name == "build"
-                    || name == "dist"
-                {
-                    continue;
-                }
-            }
+        if path.is_dir()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && (name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "__pycache__"
+                || name == ".git"
+                || name == "vendor"
+                || name == "build"
+                || name == "dist")
+        {
+            continue;
         }
 
         if path.is_dir() {
             Box::pin(walk_glob(&path, pattern, max_results, results)).await;
-        } else if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if glob_pattern_matches(pattern, name, &path) {
-                    results.push(path.display().to_string());
-                }
-            }
+        } else if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && glob_pattern_matches(pattern, name, &path)
+        {
+            results.push(path.display().to_string());
         }
     }
 }

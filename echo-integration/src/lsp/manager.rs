@@ -139,7 +139,7 @@ impl LspManager {
         let mut statuses = Vec::new();
 
         // Running servers
-        for (_lang, client) in &self.clients {
+        for client in self.clients.values() {
             let client = client.read().await;
             statuses.push(client.status());
         }

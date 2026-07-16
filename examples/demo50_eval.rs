@@ -186,6 +186,7 @@ async fn demo_trajectory_replay() {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             // 读取另一个文件
             RunEvent::ToolCall {
@@ -206,6 +207,7 @@ async fn demo_trajectory_replay() {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
             // 再次写入
             RunEvent::ToolCall {
@@ -226,6 +228,7 @@ async fn demo_trajectory_replay() {
                 returned_bytes: 0,
                 estimated_tokens: 0,
                 output_handling: None,
+                artifact: None,
             },
         ],
         RunStatus::Completed,
@@ -286,6 +289,7 @@ async fn demo_regression_suite() {
                     returned_bytes: 0,
                     estimated_tokens: 0,
                     output_handling: None,
+                    artifact: None,
                 },
             ],
             RunStatus::Completed,
@@ -312,6 +316,7 @@ async fn demo_regression_suite() {
                     returned_bytes: 0,
                     estimated_tokens: 0,
                     output_handling: None,
+                    artifact: None,
                 },
             ],
             RunStatus::Completed,

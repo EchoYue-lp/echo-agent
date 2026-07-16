@@ -183,10 +183,10 @@ impl VisibilityHorizonCompressor {
         }
 
         // 5. Inject Global Objective if configured
-        if self.config.enable_global_objective {
-            if let Some(ref objective) = self.config.global_objective {
-                self.inject_global_objective(messages, objective);
-            }
+        if self.config.enable_global_objective
+            && let Some(ref objective) = self.config.global_objective
+        {
+            self.inject_global_objective(messages, objective);
         }
 
         evicted
@@ -199,64 +199,64 @@ impl VisibilityHorizonCompressor {
 
         while i < messages.len() {
             // Look for assistant messages with tool_calls
-            if messages[i].role == Role::Assistant {
-                if let Some(ref tool_calls) = messages[i].tool_calls {
-                    if tool_calls.is_empty() {
-                        i += 1;
-                        continue;
-                    }
-
-                    let assistant_idx = i;
-                    let tool_names: Vec<String> = tool_calls
-                        .iter()
-                        .map(|tc| tc.function.name.clone())
-                        .collect();
-
-                    // Scan forward for tool result messages
-                    let result_start = i + 1;
-                    let mut result_end = result_start;
-                    let mut success_count = 0;
-                    let mut total_count = 0;
-                    let mut result_tokens = 0;
-                    let mut errors = Vec::new();
-
-                    while result_end < messages.len() && messages[result_end].role == Role::Tool {
-                        let content = messages[result_end].content.as_text().unwrap_or_default();
-                        result_tokens += self.tokenizer.count_tokens(&content);
-
-                        // Heuristic: if content starts with "[Error" or "[error", count as failure
-                        if content.trim_start().starts_with("[Error")
-                            || content.trim_start().starts_with("[error")
-                        {
-                            errors.push(content.chars().take(100).collect());
-                        } else {
-                            success_count += 1;
-                        }
-                        total_count += 1;
-                        result_end += 1;
-                    }
-
-                    // Count user turns after this group
-                    let user_turns_after = messages[result_end..]
-                        .iter()
-                        .filter(|m| m.role == Role::User)
-                        .count();
-
-                    groups.push(ToolGroup {
-                        assistant_idx,
-                        result_start,
-                        result_end,
-                        tool_names,
-                        success_count,
-                        total_count,
-                        result_tokens,
-                        errors,
-                        user_turns_after,
-                    });
-
-                    i = result_end;
+            if messages[i].role == Role::Assistant
+                && let Some(ref tool_calls) = messages[i].tool_calls
+            {
+                if tool_calls.is_empty() {
+                    i += 1;
                     continue;
                 }
+
+                let assistant_idx = i;
+                let tool_names: Vec<String> = tool_calls
+                    .iter()
+                    .map(|tc| tc.function.name.clone())
+                    .collect();
+
+                // Scan forward for tool result messages
+                let result_start = i + 1;
+                let mut result_end = result_start;
+                let mut success_count = 0;
+                let mut total_count = 0;
+                let mut result_tokens = 0;
+                let mut errors = Vec::new();
+
+                while result_end < messages.len() && messages[result_end].role == Role::Tool {
+                    let content = messages[result_end].content.as_text().unwrap_or_default();
+                    result_tokens += self.tokenizer.count_tokens(&content);
+
+                    // Heuristic: if content starts with "[Error" or "[error", count as failure
+                    if content.trim_start().starts_with("[Error")
+                        || content.trim_start().starts_with("[error")
+                    {
+                        errors.push(content.chars().take(100).collect());
+                    } else {
+                        success_count += 1;
+                    }
+                    total_count += 1;
+                    result_end += 1;
+                }
+
+                // Count user turns after this group
+                let user_turns_after = messages[result_end..]
+                    .iter()
+                    .filter(|m| m.role == Role::User)
+                    .count();
+
+                groups.push(ToolGroup {
+                    assistant_idx,
+                    result_start,
+                    result_end,
+                    tool_names,
+                    success_count,
+                    total_count,
+                    result_tokens,
+                    errors,
+                    user_turns_after,
+                });
+
+                i = result_end;
+                continue;
             }
             i += 1;
         }
@@ -315,15 +315,14 @@ impl VisibilityHorizonCompressor {
         let objective_text = format!("{} {}", objective_marker, objective);
 
         // Check if already injected
-        if let Some(first) = messages.first() {
-            if first.role == Role::System
-                && first
-                    .content
-                    .as_text()
-                    .is_some_and(|t| t.contains(objective_marker))
-            {
-                return; // already present
-            }
+        if let Some(first) = messages.first()
+            && first.role == Role::System
+            && first
+                .content
+                .as_text()
+                .is_some_and(|t| t.contains(objective_marker))
+        {
+            return; // already present
         }
 
         // Insert at the beginning
@@ -821,14 +820,10 @@ mod tests {
         // Verify no orphaned assistant tool_calls without matching results
         let mut orphaned = 0;
         for (i, msg) in messages.iter().enumerate() {
-            if msg.role == Role::Assistant && msg.tool_calls.is_some() {
-                let tc_ids: Vec<&str> = msg
-                    .tool_calls
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .map(|tc| tc.id.as_str())
-                    .collect();
+            if msg.role == Role::Assistant
+                && let Some(tool_calls) = msg.tool_calls.as_ref()
+            {
+                let tc_ids: Vec<&str> = tool_calls.iter().map(|tc| tc.id.as_str()).collect();
                 for id in &tc_ids {
                     let has_result = messages[i + 1..]
                         .iter()

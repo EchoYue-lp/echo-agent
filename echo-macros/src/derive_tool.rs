@@ -27,7 +27,6 @@
 //! - `ReadFileToolParams` struct with `Deserialize + JsonSchema`
 //! - Full `impl Tool for ReadFileTool` (name, description, parameters, execute, etc.)
 
-use proc_macro_crate;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Attribute, Data, DeriveInput, Fields, Ident, LitStr, Token};

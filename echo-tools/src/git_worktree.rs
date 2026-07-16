@@ -167,14 +167,14 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<ManagedWorktree>, String> 
             current_branch.clear();
         } else if let Some(branch) = line.strip_prefix("branch ") {
             current_branch = branch.replace("refs/heads/", "");
-        } else if line.is_empty() {
-            if let Some(path) = current_path.take() {
-                worktrees.push(ManagedWorktree {
-                    path,
-                    branch: current_branch.clone(),
-                    managed: false,
-                });
-            }
+        } else if line.is_empty()
+            && let Some(path) = current_path.take()
+        {
+            worktrees.push(ManagedWorktree {
+                path,
+                branch: current_branch.clone(),
+                managed: false,
+            });
         }
     }
     // Handle last entry

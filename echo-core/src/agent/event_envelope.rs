@@ -241,14 +241,14 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
         }
 
         match &event.payload {
-            AgentEvent::ToolCall { call_id, .. } => {
+            AgentEvent::ToolCall { call_id, .. }
                 if tool_calls
                     .insert(call_id.clone(), event.event_id.clone())
-                    .is_some()
-                {
-                    violations.push(format!("duplicate in-flight tool call: {call_id}"));
-                }
+                    .is_some() =>
+            {
+                violations.push(format!("duplicate in-flight tool call: {call_id}"));
             }
+            AgentEvent::ToolCall { .. } => {}
             AgentEvent::ToolResult { call_id, .. } | AgentEvent::ToolError { call_id, .. } => {
                 match tool_calls.remove(call_id) {
                     Some(parent_id) if event.parent_event_id.as_ref() == Some(&parent_id) => {}
@@ -330,7 +330,7 @@ mod tests {
         let events = events.into_iter().collect::<Result<Vec<_>>>()?;
 
         assert_eq!(events.len(), 3);
-        assert_eq!(events.get(0).map(|event| event.sequence), Some(1));
+        assert_eq!(events.first().map(|event| event.sequence), Some(1));
         assert_eq!(events.get(1).map(|event| event.sequence), Some(2));
         assert_eq!(events.get(2).map(|event| event.sequence), Some(3));
         assert_eq!(

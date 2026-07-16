@@ -202,13 +202,10 @@ pub fn infer_context_window(_provider: &str, model_name: &str) -> Option<u32> {
     } else if lower.starts_with("claude-fable-5")
         || lower.starts_with("claude-opus-4-8")
         || lower.starts_with("claude-sonnet-5")
+        || lower.starts_with("deepseek-v4")
+        || lower.starts_with("qwen3.7-max")
+        || lower.starts_with("qwen3.7-plus")
     {
-        Some(1_000_000)
-    } else if lower.starts_with("deepseek-v4") {
-        Some(1_000_000)
-    } else if lower.starts_with("qwen3.7-max") {
-        Some(1_000_000)
-    } else if lower.starts_with("qwen3.7-plus") {
         Some(1_000_000)
     } else if lower.starts_with("kimi-k2.7") || lower.starts_with("kimi-k2.6") {
         Some(256_000)
@@ -428,16 +425,16 @@ fn resolve_thinking_protocol(lower_model: &str, provider: &str) -> ThinkingProto
         if let Some(rest) = lower_model.strip_prefix("claude-") {
             for seg in rest.split('-') {
                 // Try X.Y form first (e.g. "4.7").
-                if let Some((maj_s, min_s)) = seg.split_once('.') {
-                    if let (Ok(maj), Ok(min)) = (maj_s.parse::<u32>(), min_s.parse::<u32>()) {
-                        if maj > 4 || (maj == 4 && min >= 7) {
-                            return T::AnthropicAdaptive;
-                        }
-                        if maj == 4 && min == 6 {
-                            return T::AnthropicEffort;
-                        }
-                        break;
+                if let Some((maj_s, min_s)) = seg.split_once('.')
+                    && let (Ok(maj), Ok(min)) = (maj_s.parse::<u32>(), min_s.parse::<u32>())
+                {
+                    if maj > 4 || (maj == 4 && min >= 7) {
+                        return T::AnthropicAdaptive;
                     }
+                    if maj == 4 && min == 6 {
+                        return T::AnthropicEffort;
+                    }
+                    break;
                 }
                 // Bare integer major (e.g. "5" in `claude-5-sonnet`).
                 if let Ok(maj) = seg.parse::<u32>() {

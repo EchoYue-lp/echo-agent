@@ -376,7 +376,7 @@ impl ContextManager {
     /// `max_messages` cap (if set via builder) is a supplementary backstop:
     /// when exceeded, a sliding-window degradation preserves system + protected
     /// + recent messages and discards the earliest in between. Defaults to
-    /// `None` (no message-count cap, token-driven, aligned with industry).
+    ///   `None` (no message-count cap, token-driven, aligned with industry).
     pub fn push(&mut self, message: Message) {
         if let Some(marker) = self.replaceable_marker_for(&message) {
             self.messages.retain(|existing| {
@@ -1260,10 +1260,10 @@ impl ContextManager {
                 Ok(output) => {
                     let compacted = before.saturating_sub(output.messages.len());
                     let evicted_count = output.evicted.len();
-                    if evicted_count > 0 {
-                        if let Some(ref promoter) = self.memory_promoter {
-                            promoter.promote(&output.evicted).await;
-                        }
+                    if evicted_count > 0
+                        && let Some(ref promoter) = self.memory_promoter
+                    {
+                        promoter.promote(&output.evicted).await;
                     }
                     if compacted > 0 {
                         tracing::debug!(
@@ -1580,10 +1580,10 @@ fn sanitize_tool_call_pairing(messages: &[Message]) -> (Vec<Message>, Vec<ToolPa
                 let ids: HashSet<String> = tcs.iter().map(|tc| tc.id.clone()).collect();
                 assistant_tool_calls.insert(i, ids);
             }
-        } else if msg.role == Role::Tool {
-            if let Some(ref id) = msg.tool_call_id {
-                available_results.insert(id.clone());
-            }
+        } else if msg.role == Role::Tool
+            && let Some(ref id) = msg.tool_call_id
+        {
+            available_results.insert(id.clone());
         }
     }
 
@@ -1952,7 +1952,7 @@ mod tests {
         let before = ctx
             .messages()
             .iter()
-            .position(|message| is_context_projection_message(message));
+            .position(is_context_projection_message);
 
         ctx.replace_projection(
             "workspace",
@@ -1962,7 +1962,7 @@ mod tests {
         let after = ctx
             .messages()
             .iter()
-            .position(|message| is_context_projection_message(message));
+            .position(is_context_projection_message);
         assert_eq!(before, after);
     }
 

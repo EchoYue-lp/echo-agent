@@ -149,8 +149,9 @@ fn chunk_by_sentences(text: &str, chunk_size: usize, _overlap: usize) -> Vec<Str
     if !current.trim().is_empty() {
         if !chunks.is_empty() && current.len() < chunk_size / 3 {
             // Merge small remainder into previous chunk
-            let last = chunks.pop().unwrap();
-            chunks.push(format!("{} {}", last, current.trim()));
+            if let Some(last) = chunks.pop() {
+                chunks.push(format!("{} {}", last, current.trim()));
+            }
         } else {
             chunks.push(current.trim().to_string());
         }
@@ -167,13 +168,10 @@ static GLOBAL_EMBEDDER: OnceLock<Arc<dyn echo_core::memory::Embedder>> = OnceLoc
 
 /// Set the embedder used by all RAG tools.
 ///
-/// # Panics
-///
-/// Panics if called more than once.
+/// The first configured embedder wins. Repeated calls are ignored so startup
+/// wiring remains idempotent across shared registries.
 pub fn set_rag_embedder(embedder: Arc<dyn echo_core::memory::Embedder>) {
-    if GLOBAL_EMBEDDER.set(embedder).is_err() {
-        panic!("rag embedder already set");
-    }
+    let _ = GLOBAL_EMBEDDER.set(embedder);
 }
 
 /// Generate embeddings for a batch of texts

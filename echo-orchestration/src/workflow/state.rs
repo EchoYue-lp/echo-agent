@@ -303,12 +303,6 @@ impl SharedState {
         serde_json::to_string_pretty(&*inner).map_err(|e| StateError::Serialize(e.to_string()))
     }
 
-    /// Convenience method: export as JSON snapshot, unwraps on failure
-    pub fn snapshot_unwrap(&self) -> String {
-        self.snapshot()
-            .unwrap_or_else(|e| panic!("SharedState::snapshot_unwrap: {e}"))
-    }
-
     /// Export as JSON Value, returns Result
     pub fn to_json_value(&self) -> StateResult<serde_json::Value> {
         let inner = self
@@ -316,12 +310,6 @@ impl SharedState {
             .read()
             .map_err(|e| StateError::LockPoisoned(e.to_string()))?;
         serde_json::to_value(&*inner).map_err(|e| StateError::Serialize(e.to_string()))
-    }
-
-    /// Convenience method: export as JSON Value, unwraps on failure
-    pub fn to_json(&self) -> serde_json::Value {
-        self.to_json_value()
-            .unwrap_or_else(|e| panic!("SharedState::to_json: {e}"))
     }
 
     /// Restore from JSON Value

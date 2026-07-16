@@ -1143,10 +1143,11 @@ mod tests {
     // is set, and omits it entirely when None.
 
     fn chat_request_with_user(user: Option<&str>) -> ChatRequest {
-        let mut req = ChatRequest::default();
-        req.messages = vec![Message::user("hi".to_string())];
-        req.user_id = user.map(|s| s.to_string());
-        req
+        ChatRequest {
+            messages: vec![Message::user("hi".to_string())],
+            user_id: user.map(str::to_string),
+            ..ChatRequest::default()
+        }
     }
 
     #[test]
@@ -1199,14 +1200,16 @@ mod tests {
         // Main-path shape: Some(CacheHints { breakpoints: vec![], .. }). The
         // provider recomputes the layout from request.messages+tools itself
         // (it does not read hints.segments), so segments can be default.
-        let mut req = ChatRequest::default();
-        req.messages = messages;
-        req.tools = Some(tools);
-        req.cache_hints = Some(CacheHints {
-            breakpoints: vec![],
-            stable_prefix_hash: Some("deadbeef".to_string()),
-            segments: Default::default(),
-        });
+        let req = ChatRequest {
+            messages,
+            tools: Some(tools),
+            cache_hints: Some(CacheHints {
+                breakpoints: vec![],
+                stable_prefix_hash: Some("deadbeef".to_string()),
+                segments: Default::default(),
+            }),
+            ..ChatRequest::default()
+        };
 
         let client = AnthropicClient::new("sk-xxx".to_string(), "claude-sonnet-4-6".to_string());
         let body = serde_json::to_value(client.convert_request(&req)).expect("serialize");

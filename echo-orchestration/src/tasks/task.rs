@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 /// Task type classification
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TaskType {
     /// Discovery: search, read, analyze
     Discovery,
     /// Implementation: modify, create, implement
+    #[default]
     Implementation,
     /// Verification: test, verify, check
     Verification,
@@ -18,12 +20,6 @@ pub enum TaskType {
     Background,
     /// Delegation: delegate to sub-agent
     Delegation,
-}
-
-impl Default for TaskType {
-    fn default() -> Self {
-        Self::Implementation
-    }
 }
 
 /// Task input specification
@@ -67,10 +63,12 @@ pub enum OutputType {
 /// Context scope for task execution
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ContextScope {
     /// Only include task description
     Minimal,
     /// Include relevant files/artifacts
+    #[default]
     Relevant,
     /// Inherit parent context
     Full,
@@ -78,28 +76,18 @@ pub enum ContextScope {
     Isolated,
 }
 
-impl Default for ContextScope {
-    fn default() -> Self {
-        Self::Relevant
-    }
-}
-
 /// Risk level classification
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RiskLevel {
     /// Read-only, no side effects
     Low,
     /// Write operations, reversible
+    #[default]
     Medium,
     /// Write operations, irreversible, requires verification
     High,
-}
-
-impl Default for RiskLevel {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 /// Verification specification
@@ -139,6 +127,7 @@ impl Default for VerificationSpec {
 /// Verification type
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum VerificationType {
     Command,
     FileExists,
@@ -146,45 +135,32 @@ pub enum VerificationType {
     Test,
     HumanReview,
     LlmReview,
+    #[default]
     None,
-}
-
-impl Default for VerificationType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Fallback strategy on verification failure
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum FallbackStrategy {
     Retry,
     Replan,
     AskUser,
+    #[default]
     Abort,
-}
-
-impl Default for FallbackStrategy {
-    fn default() -> Self {
-        Self::Abort
-    }
 }
 
 /// Checkpoint policy
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CheckpointPolicy {
     AfterEach,
     OnMilestone,
+    #[default]
     OnFailure,
     Never,
-}
-
-impl Default for CheckpointPolicy {
-    fn default() -> Self {
-        Self::OnFailure
-    }
 }
 
 /// Task execution attempt record

@@ -402,7 +402,11 @@ impl Agent for FailingMockAgent {
         task: &'a str,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
-            let err = self.execute(task).await.unwrap_err();
+            let err = self.execute(task).await.err().unwrap_or_else(|| {
+                ReactError::Agent(Box::new(AgentError::InitializationFailed(
+                    "FailingMockAgent unexpectedly completed".to_string(),
+                )))
+            });
             let event_stream = stream::once(async move { Err(err) });
             Ok(Box::pin(event_stream) as BoxStream<'a, Result<AgentEvent>>)
         })

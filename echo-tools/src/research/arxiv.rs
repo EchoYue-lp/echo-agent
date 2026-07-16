@@ -240,31 +240,26 @@ fn parse_arxiv_atom(xml: &str) -> Result<Vec<Value>> {
             Ok(Event::End(e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 match tag.as_str() {
-                    "entry" => {
-                        if in_entry {
-                            // Extract arxiv ID from URL
-                            let clean_id =
-                                arxiv_id.rsplit('/').next().unwrap_or(&arxiv_id).to_string();
+                    "entry" if in_entry => {
+                        // Extract arxiv ID from URL
+                        let clean_id = arxiv_id.rsplit('/').next().unwrap_or(&arxiv_id).to_string();
 
-                            papers.push(serde_json::json!({
-                                "arxiv_id": clean_id,
-                                "title": title.trim(),
-                                "authors": authors,
-                                "abstract": summary.trim(),
-                                "published": published,
-                                "pdf_url": pdf_url,
-                                "categories": categories,
-                            }));
-                            in_entry = false;
-                        }
+                        papers.push(serde_json::json!({
+                            "arxiv_id": clean_id,
+                            "title": title.trim(),
+                            "authors": authors,
+                            "abstract": summary.trim(),
+                            "published": published,
+                            "pdf_url": pdf_url,
+                            "categories": categories,
+                        }));
+                        in_entry = false;
                     }
-                    "author" => {
-                        if in_author {
-                            if !author_name.is_empty() {
-                                authors.push(author_name.clone());
-                            }
-                            in_author = false;
+                    "author" if in_author => {
+                        if !author_name.is_empty() {
+                            authors.push(author_name.clone());
                         }
+                        in_author = false;
                     }
                     _ => {}
                 }

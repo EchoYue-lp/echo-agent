@@ -72,6 +72,10 @@ impl MemoryScope {
     }
 
     /// Parse from a string.
+    ///
+    /// This intentionally returns `Option` and accepts aliases, unlike a
+    /// strict `FromStr` implementation.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "user" => Some(Self::User),

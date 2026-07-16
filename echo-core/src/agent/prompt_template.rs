@@ -86,9 +86,9 @@ fn parse_template(template: &str) -> Vec<TemplateElement> {
                         let tag_content = &after_open[..cpos];
                         let tag_content_trimmed = tag_content.trim();
 
-                        if tag_content_trimmed.starts_with("#if ") {
+                        if let Some(if_variable) = tag_content_trimmed.strip_prefix("#if ") {
                             // Conditional start: {{#if variable_name}}
-                            let var_name = tag_content_trimmed[4..].trim();
+                            let var_name = if_variable.trim();
                             elements.push(TemplateElement::ConditionalStart {
                                 name: var_name.to_string(),
                             });
@@ -143,7 +143,7 @@ fn render_elements(elements: &[TemplateElement], variables: &HashMap<String, Str
                 let value = variables
                     .get(name)
                     .map(|s| s.as_str())
-                    .or_else(|| default.as_deref());
+                    .or(default.as_deref());
                 result.push_str(value.unwrap_or(""));
                 i += 1;
             }
@@ -152,8 +152,8 @@ fn render_elements(elements: &[TemplateElement], variables: &HashMap<String, Str
                 let mut else_index = None;
                 let mut end_index = None;
                 let mut depth = 0;
-                for j in (i + 1)..elements.len() {
-                    match &elements[j] {
+                for (j, element) in elements.iter().enumerate().skip(i.saturating_add(1)) {
+                    match element {
                         TemplateElement::ConditionalStart { .. } => depth += 1,
                         TemplateElement::ConditionalEnd => {
                             if depth == 0 {
@@ -169,7 +169,7 @@ fn render_elements(elements: &[TemplateElement], variables: &HashMap<String, Str
                     }
                 }
 
-                let has_value = variables.contains_key(name) && !variables[name].is_empty();
+                let has_value = variables.get(name).is_some_and(|value| !value.is_empty());
                 let end = end_index.unwrap_or(elements.len());
 
                 if has_value {
@@ -183,7 +183,7 @@ fn render_elements(elements: &[TemplateElement], variables: &HashMap<String, Str
                     result.push_str(&render_elements(block, variables));
                 }
 
-                i = end + 1;
+                i = end.saturating_add(1);
             }
             TemplateElement::ConditionalElse | TemplateElement::ConditionalEnd => {
                 // These should be consumed by ConditionalStart rendering above.

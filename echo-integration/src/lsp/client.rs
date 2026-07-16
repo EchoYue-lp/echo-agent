@@ -175,17 +175,16 @@ impl StdioLspClient {
                 }
             } else if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
                 // Server notification
-                if method == "textDocument/publishDiagnostics" {
-                    if let Some(params) = value.get("params") {
-                        if let Some(uri) = params.get("uri").and_then(|v| v.as_str()) {
-                            let diagnostics: Vec<Diagnostic> = params
-                                .get("diagnostics")
-                                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                .unwrap_or_default();
-                            let mut cache = diagnostics_cache.lock().await;
-                            cache.insert(uri.to_string(), diagnostics);
-                        }
-                    }
+                if method == "textDocument/publishDiagnostics"
+                    && let Some(params) = value.get("params")
+                    && let Some(uri) = params.get("uri").and_then(|v| v.as_str())
+                {
+                    let diagnostics: Vec<Diagnostic> = params
+                        .get("diagnostics")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    let mut cache = diagnostics_cache.lock().await;
+                    cache.insert(uri.to_string(), diagnostics);
                 }
             }
         }

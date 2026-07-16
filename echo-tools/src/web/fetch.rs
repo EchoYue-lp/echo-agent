@@ -23,6 +23,9 @@ const DEFAULT_TEXT_WIDTH: usize = 120;
 /// memory exhaustion from large or malicious payloads.
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
+static HTML_TAG_RE: OnceLock<Option<regex::Regex>> = OnceLock::new();
+static WHITESPACE_RE: OnceLock<Option<regex::Regex>> = OnceLock::new();
+
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
 fn build_client() -> &'static Client {
@@ -93,12 +96,20 @@ impl WebFetchTool {
                     e
                 );
                 // Fallback: strip HTML tags with a simple regex, then collapse whitespace
-                let re = regex::Regex::new(r"<[^>]*>").unwrap();
-                let stripped = re.replace_all(html, " ");
-                let collapsed = regex::Regex::new(r"[ \t\r\n]+")
-                    .unwrap()
-                    .replace_all(&stripped, "\n");
-                collapsed.trim().to_string()
+                let stripped = HTML_TAG_RE
+                    .get_or_init(|| regex::Regex::new(r"<[^>]*>").ok())
+                    .as_ref()
+                    .map_or_else(
+                        || html.to_string(),
+                        |re| re.replace_all(html, " ").to_string(),
+                    );
+                WHITESPACE_RE
+                    .get_or_init(|| regex::Regex::new(r"[ \t\r\n]+").ok())
+                    .as_ref()
+                    .map_or_else(
+                        || stripped.trim().to_string(),
+                        |re| re.replace_all(&stripped, "\n").trim().to_string(),
+                    )
             }
         }
     }

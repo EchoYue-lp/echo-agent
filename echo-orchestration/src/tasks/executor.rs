@@ -694,6 +694,9 @@ impl TaskExecutor {
     }
 
     /// Run a single task with retry logic
+    // These values form one internal execution context; grouping them is a
+    // separate executor refactor, not part of workspace migration.
+    #[allow(clippy::too_many_arguments)]
     async fn run_task_with_retry(
         task: Task,
         manager: Arc<TaskManager>,
@@ -809,13 +812,11 @@ impl TaskExecutor {
                         }
 
                         // Immediately persist timed-out task to store
-                        if let Some(ref store) = task_store {
-                            if let Some(task_snapshot) = manager.get_task(&task_id) {
-                                if let Err(e) = store.save_task(&task_snapshot).await {
+                        if let Some(ref store) = task_store
+                            && let Some(task_snapshot) = manager.get_task(&task_id)
+                                && let Err(e) = store.save_task(&task_snapshot).await {
                                     warn!(task_id = %task_id, error = %e, "Failed to persist timed-out task");
                                 }
-                            }
-                        }
 
                         return result;
                     }
@@ -838,45 +839,45 @@ impl TaskExecutor {
                     );
 
                     // Verify task completion if verifier is set
-                    if let Some(ref verifier) = verifier {
-                        if let Some(task_snapshot) = manager.get_task(&task_id) {
-                            match verifier.verify(&task_snapshot).await {
-                                Ok(verification_result) => {
-                                    if verification_result.passed {
-                                        info!(task_id = %task_id, "Task verification passed");
-                                    } else {
-                                        warn!(task_id = %task_id, "Task verification failed: {}", verification_result.output);
-                                        let fail_reason = format!(
-                                            "Verification failed: {}",
-                                            verification_result.output
-                                        );
+                    if let Some(ref verifier) = verifier
+                        && let Some(task_snapshot) = manager.get_task(&task_id)
+                    {
+                        match verifier.verify(&task_snapshot).await {
+                            Ok(verification_result) => {
+                                if verification_result.passed {
+                                    info!(task_id = %task_id, "Task verification passed");
+                                } else {
+                                    warn!(task_id = %task_id, "Task verification failed: {}", verification_result.output);
+                                    let fail_reason = format!(
+                                        "Verification failed: {}",
+                                        verification_result.output
+                                    );
 
-                                        // ── Replanner: verification failure trigger ──
-                                        Self::try_replan_on_failure(
-                                            replanner.clone(),
-                                            &manager,
-                                            &task_id,
-                                            &fail_reason,
-                                        )
-                                        .await;
+                                    // ── Replanner: verification failure trigger ──
+                                    Self::try_replan_on_failure(
+                                        replanner.clone(),
+                                        &manager,
+                                        &task_id,
+                                        &fail_reason,
+                                    )
+                                    .await;
 
-                                        // Mark as failed due to verification failure
-                                        let _ = manager.update_task_status(
-                                            &task_id,
-                                            TaskStatus::Failed(fail_reason.clone()),
-                                        );
-                                        return TaskExecutionResult::failure(
-                                            &task_id,
-                                            fail_reason,
-                                            start.elapsed(),
-                                            current_attempt,
-                                        );
-                                    }
+                                    // Mark as failed due to verification failure
+                                    let _ = manager.update_task_status(
+                                        &task_id,
+                                        TaskStatus::Failed(fail_reason.clone()),
+                                    );
+                                    return TaskExecutionResult::failure(
+                                        &task_id,
+                                        fail_reason,
+                                        start.elapsed(),
+                                        current_attempt,
+                                    );
                                 }
-                                Err(e) => {
-                                    warn!(task_id = %task_id, error = %e, "Verification error");
-                                    // Continue with completion even if verification errors
-                                }
+                            }
+                            Err(e) => {
+                                warn!(task_id = %task_id, error = %e, "Verification error");
+                                // Continue with completion even if verification errors
                             }
                         }
                     }
@@ -905,12 +906,11 @@ impl TaskExecutor {
                     }
 
                     // Immediately persist completed task to store (close crash window)
-                    if let Some(ref store) = task_store {
-                        if let Some(task_snapshot) = manager.get_task(&task_id) {
-                            if let Err(e) = store.save_task(&task_snapshot).await {
-                                warn!(task_id = %task_id, error = %e, "Failed to persist completed task");
-                            }
-                        }
+                    if let Some(ref store) = task_store
+                        && let Some(task_snapshot) = manager.get_task(&task_id)
+                        && let Err(e) = store.save_task(&task_snapshot).await
+                    {
+                        warn!(task_id = %task_id, error = %e, "Failed to persist completed task");
                     }
 
                     return TaskExecutionResult::success(
@@ -1037,12 +1037,11 @@ impl TaskExecutor {
                     );
 
                     // Immediately persist failed task to store (close crash window)
-                    if let Some(ref store) = task_store {
-                        if let Some(task_snapshot) = manager.get_task(&task_id) {
-                            if let Err(e) = store.save_task(&task_snapshot).await {
-                                warn!(task_id = %task_id, error = %e, "Failed to persist failed task");
-                            }
-                        }
+                    if let Some(ref store) = task_store
+                        && let Some(task_snapshot) = manager.get_task(&task_id)
+                        && let Err(e) = store.save_task(&task_snapshot).await
+                    {
+                        warn!(task_id = %task_id, error = %e, "Failed to persist failed task");
                     }
 
                     return TaskExecutionResult::failure(

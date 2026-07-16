@@ -299,12 +299,13 @@ fn parse_pubmed_xml(xml: &str) -> Result<Vec<Value>> {
                     "last_name" if in_author => author_last = text,
                     "fore_name" if in_author => author_first = text,
                     "mesh_descriptor" if in_mesh_heading => mesh_descriptor = text,
-                    "article_id" if in_article => {
+                    "article_id"
+                        if in_article
                         // Check if this is a DOI by looking at IdType attribute
                         // (we already consumed the start event, so check text content)
-                        if text.contains("10.") {
-                            doi = text;
-                        }
+                        && text.contains("10.") =>
+                    {
+                        doi = text;
                     }
                     _ => {}
                 }
@@ -329,20 +330,18 @@ fn parse_pubmed_xml(xml: &str) -> Result<Vec<Value>> {
             Ok(Event::End(e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 match tag.as_str() {
-                    "PubmedArticle" => {
-                        if in_article {
-                            papers.push(serde_json::json!({
-                                "pmid": pmid,
-                                "title": title.trim(),
-                                "authors": authors,
-                                "abstract": abstract_text.trim(),
-                                "journal": journal.trim(),
-                                "year": year,
-                                "doi": doi,
-                                "mesh_terms": mesh_terms,
-                            }));
-                            in_article = false;
-                        }
+                    "PubmedArticle" if in_article => {
+                        papers.push(serde_json::json!({
+                            "pmid": pmid,
+                            "title": title.trim(),
+                            "authors": authors,
+                            "abstract": abstract_text.trim(),
+                            "journal": journal.trim(),
+                            "year": year,
+                            "doi": doi,
+                            "mesh_terms": mesh_terms,
+                        }));
+                        in_article = false;
                     }
                     "MedlineCitation" => {
                         in_medline_citation = false;
@@ -350,20 +349,18 @@ fn parse_pubmed_xml(xml: &str) -> Result<Vec<Value>> {
                     "Journal" => {
                         in_journal = false;
                     }
-                    "Author" => {
-                        if in_author {
-                            let name = if !author_last.is_empty() && !author_first.is_empty() {
-                                format!("{} {}", author_last, author_first)
-                            } else if !author_last.is_empty() {
-                                author_last.clone()
-                            } else {
-                                String::new()
-                            };
-                            if !name.is_empty() {
-                                authors.push(name);
-                            }
-                            in_author = false;
+                    "Author" if in_author => {
+                        let name = if !author_last.is_empty() && !author_first.is_empty() {
+                            format!("{} {}", author_last, author_first)
+                        } else if !author_last.is_empty() {
+                            author_last.clone()
+                        } else {
+                            String::new()
+                        };
+                        if !name.is_empty() {
+                            authors.push(name);
                         }
+                        in_author = false;
                     }
                     "MeshHeading" => {
                         if in_mesh_heading && !mesh_descriptor.is_empty() {

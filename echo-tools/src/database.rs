@@ -28,7 +28,7 @@ fn ensure_drivers_installed() {
     INSTALLED.get_or_init(|| {
         // install_default_drivers installs every driver feature compiled into
         // sqlx (sqlite/postgres/mysql as enabled in Cargo.toml). Idempotent.
-        let _ = sqlx::any::install_default_drivers();
+        sqlx::any::install_default_drivers();
     });
 }
 

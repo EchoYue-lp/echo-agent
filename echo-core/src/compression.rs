@@ -245,10 +245,10 @@ impl StructuredSummary {
             return Some(s);
         }
         // Try extracting from markdown code fences
-        if let Some(json) = extract_json_from_text(response) {
-            if let Ok(s) = Self::from_json(&json) {
-                return Some(s);
-            }
+        if let Some(json) = extract_json_from_text(response)
+            && let Ok(s) = Self::from_json(&json)
+        {
+            return Some(s);
         }
         None
     }
@@ -431,12 +431,12 @@ fn extract_json_from_text(text: &str) -> Option<String> {
         }
     }
     // Try finding { ... } block
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            let candidate = text.get(start..=end)?.to_string();
-            if candidate.chars().count() >= 10 {
-                return Some(candidate);
-            }
+    if let Some(start) = text.find('{')
+        && let Some(end) = text.rfind('}')
+    {
+        let candidate = text.get(start..=end)?.to_string();
+        if candidate.chars().count() >= 10 {
+            return Some(candidate);
         }
     }
     None

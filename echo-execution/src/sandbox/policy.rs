@@ -66,21 +66,24 @@ static SAFE_LOCAL_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 
 /// 需要高隔离的危险模式（正则表达式）
 static DANGEROUS_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
-    vec![
-        (r"\bcurl\b", Regex::new(r"\bcurl\b").unwrap()),
-        (r"\bwget\b", Regex::new(r"\bwget\b").unwrap()),
-        (r"\bnc\b", Regex::new(r"\bnc\b").unwrap()),
-        (r"\bncat\b", Regex::new(r"\bncat\b").unwrap()),
-        (r"\beval\b", Regex::new(r"\beval\b").unwrap()),
-        (r"\bexec\b", Regex::new(r"\bexec\b").unwrap()),
-        (r"\brm\s+-rf\b", Regex::new(r"\brm\s+-rf\b").unwrap()),
-        (r"\bdd\s+", Regex::new(r"\bdd\s+").unwrap()),
-        (r">\s*/dev/", Regex::new(r">\s*/dev/").unwrap()),
-        (r"\|\s*bash\b", Regex::new(r"\|\s*bash\b").unwrap()),
-        (r"\|\s*sh\b", Regex::new(r"\|\s*sh\b").unwrap()),
-        (r"\$\(", Regex::new(r"\$\(").unwrap()),
-        (r"`", Regex::new(r"`").unwrap()),
+    [
+        r"\bcurl\b",
+        r"\bwget\b",
+        r"\bnc\b",
+        r"\bncat\b",
+        r"\beval\b",
+        r"\bexec\b",
+        r"\brm\s+-rf\b",
+        r"\bdd\s+",
+        r">\s*/dev/",
+        r"\|\s*bash\b",
+        r"\|\s*sh\b",
+        r"\$\(",
+        r"`",
     ]
+    .into_iter()
+    .filter_map(|pattern| Regex::new(pattern).ok().map(|regex| (pattern, regex)))
+    .collect()
 });
 
 impl Default for SandboxPolicy {

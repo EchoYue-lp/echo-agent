@@ -134,10 +134,10 @@ fn extract_quality_score(review_text: &str) -> u32 {
     // Fallback heuristic: look for "Score: <number>" pattern
     for line in review_text.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Score:") {
-            if let Ok(score) = rest.trim().parse::<u32>() {
-                return score.min(100);
-            }
+        if let Some(rest) = line.strip_prefix("Score:")
+            && let Ok(score) = rest.trim().parse::<u32>()
+        {
+            return score.min(100);
         }
     }
 
@@ -172,8 +172,12 @@ fn build_writing_graph(agent: &SharedAgent) -> Result<Graph> {
             Box::pin(async move {
                 // Config values are pre-set in state by run_writing_pipeline().
                 let topic: String = state.get("topic").unwrap_or_default();
-                let audience: String = state.get("audience").unwrap_or_else(|| "general readers".to_string());
-                let format: String = state.get("format").unwrap_or_else(|| "blog post".to_string());
+                let audience: String = state
+                    .get("audience")
+                    .unwrap_or_else(|| "general readers".to_string());
+                let format: String = state
+                    .get("format")
+                    .unwrap_or_else(|| "blog post".to_string());
 
                 // Store prompt templates for downstream nodes
                 let _ = state.set(
@@ -198,15 +202,14 @@ fn build_writing_graph(agent: &SharedAgent) -> Result<Graph> {
                 );
                 let _ = state.set(
                     "tpl_review",
-                    format!(
-                        "You are a critical reviewer. Review the draft provided and evaluate it on: \
+                    "You are a critical reviewer. Review the draft provided and evaluate it on: \
                          clarity, coherence, accuracy, audience fit, and overall quality. \
                          Score the draft from 0 to 100. \
                          At the very beginning of your response, output exactly: \
                          QUALITY_SCORE: <number> \
                          Then provide specific, actionable feedback for improvement. \
-                         Output the review with quality score.",
-                    ),
+                         Output the review with quality score."
+                        .to_string(),
                 );
                 let _ = state.set(
                     "tpl_revise",
@@ -271,10 +274,7 @@ fn build_writing_graph(agent: &SharedAgent) -> Result<Graph> {
             Box::pin(async move {
                 let tpl: String = state.get("tpl_review").unwrap_or_default();
                 let draft_text: String = state.get("draft").unwrap_or_default();
-                let prompt = format!(
-                    "{}\n\nHere is the draft to review:\n{}",
-                    tpl, draft_text,
-                );
+                let prompt = format!("{}\n\nHere is the draft to review:\n{}", tpl, draft_text,);
                 let _ = state.set("review_prompt", prompt);
                 Ok(())
             })
@@ -343,10 +343,7 @@ fn build_writing_graph(agent: &SharedAgent) -> Result<Graph> {
             Box::pin(async move {
                 let tpl: String = state.get("tpl_finalize").unwrap_or_default();
                 let draft_text: String = state.get("draft").unwrap_or_default();
-                let prompt = format!(
-                    "{}\n\nHere is the content to polish:\n{}",
-                    tpl, draft_text,
-                );
+                let prompt = format!("{}\n\nHere is the content to polish:\n{}", tpl, draft_text,);
                 let _ = state.set("finalize_prompt", prompt);
                 Ok(())
             })

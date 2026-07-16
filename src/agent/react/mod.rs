@@ -659,8 +659,6 @@ impl ReactAgent {
         // project. They can stay in the system prompt since they don't
         // change between requests within the same workspace.
         #[cfg(feature = "project-rules")]
-        let mut prompt = prompt;
-        #[cfg(feature = "project-rules")]
         if config.auto_project_rules {
             let wd = config
                 .working_dir

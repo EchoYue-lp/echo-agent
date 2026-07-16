@@ -158,11 +158,13 @@ mod tests {
                 && (json.contains("+") || {
                     // 找时间部分后的偏移：...HH:MM:SS[.fff]±HH:MM
                     json.rfind('T')
-                        .and_then(|i| json[i..].find(|c| c == '+' || c == '-').map(|j| i + j))
+                        .and_then(|i| {
+                            json.get(i..)
+                                .and_then(|suffix| suffix.find(['+', '-']).map(|j| i + j))
+                        })
                         .is_some_and(|off| {
-                            json[off..]
-                                .chars()
-                                .nth(1)
+                            json.get(off..)
+                                .and_then(|suffix| suffix.chars().nth(1))
                                 .is_some_and(|c| c.is_ascii_digit())
                         })
                 });

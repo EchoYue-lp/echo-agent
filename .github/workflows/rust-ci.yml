@@ -20,33 +20,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo fmt --all --check
+      - run: cargo fmt --all -- --check
       # --locked: fail if Cargo.lock would need updating, so CI never silently
-  # regresses dependency versions vs the committed lockfile.
-  - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-  - run: cargo test --workspace --all-targets --all-features --locked
-  # Verify the framework still compiles with no optional features (the
-  # minimal-deps build). Scoped to the library crate — some inline test
-  # modules assume feature-gated trait methods and don't build under
-  # --no-default-features, which is fine for a lib-only smoke check.
-  - run: cargo check --workspace --lib --no-default-features --locked
-  # ── Safety grep gates (6-11) ────────────────────────────────────────
-  # Ban panicking APIs and UTF-8 byte-slicing in PRODUCTION source (src/ and
-  # sub-crate src/), excluding test modules. AGENTS.md forbids these; this CI
-  # step keeps the ban enforced rather than relying on review.
-  #
-  # We scope to non-test files by excluding lines inside `#[cfg(test)]` blocks
-  # (a coarse but effective heuristic via grep -v). Test code may legitimately
-  # use .unwrap().
-  - name: Ban .expect() / panic! / unreachable! / todo! in non-test src
-    run: |
-      set -e
-      offending=$(grep -rn '\.expect(\|panic!\|unreachable!\|todo!' \
-        --include='*.rs' src/ echo-core/src echo-execution/src echo-integration/src \
-        echo-orchestration/src echo-state/src echo-tools/src 2>/dev/null \
-        | grep -v '#\[cfg(test)\]' || true)
-      if [ -n "$offending" ]; then
-        echo "::error::Panicking API found in non-test source (AGENTS.md violation):"
-        echo "$offending"
-        exit 1
-      fi
+      # regresses dependency versions vs the committed lockfile.
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      # Verify every workspace library still compiles with no optional features.
+      - run: cargo check --workspace --lib --no-default-features --locked
+      # Compile production targets without test cfg, then deny panicking APIs.
+      # This avoids the false positives produced by source-text grep on inline
+      # #[cfg(test)] modules while covering every workspace library and binary.
+      - name: Ban panicking APIs in production targets
+        run: >-
+          cargo clippy --workspace --lib --bins --all-features --locked --
+          -D clippy::unwrap_used
+          -D clippy::expect_used
+          -D clippy::panic
+          -D clippy::unreachable

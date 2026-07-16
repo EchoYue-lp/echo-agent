@@ -18,6 +18,8 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 512;
 
 /// Lifecycle event emitted by the TaskManager
 #[derive(Debug, Clone, Serialize)]
+// Created carries the complete public Task snapshot; boxing would break consumers.
+#[allow(clippy::large_enum_variant)]
 pub enum TaskEvent {
     Created {
         task: Task,

@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 /// Parallel execution strategy
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ParallelStrategy {
     /// Read-only tasks can run in parallel
+    #[default]
     ReadOnlyParallel,
     /// Write tasks must run serially
     WriteSerial,
@@ -18,12 +20,6 @@ pub enum ParallelStrategy {
     WriteWorktreeIsolated,
     /// Background tasks run separately
     BackgroundSeparate,
-}
-
-impl Default for ParallelStrategy {
-    fn default() -> Self {
-        Self::ReadOnlyParallel
-    }
 }
 
 /// File change record for conflict detection

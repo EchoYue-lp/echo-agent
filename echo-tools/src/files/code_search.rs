@@ -222,7 +222,7 @@ impl Tool for CodeSearchTool {
                         .and_then(|v| v.as_str())
                         .unwrap_or("any");
 
-                    let file_filter = glob_pattern.map(|g| glob_to_regex(g));
+                    let file_filter = glob_pattern.map(glob_to_regex).transpose()?;
 
                     let results = search_symbols(
                         &search_path,
@@ -288,6 +288,9 @@ enum RgError {
 ///
 /// Returns `Err(RgError::NotAvailable)` when the binary is not found,
 /// signaling the caller to fall back to the built-in search.
+// These arguments mirror ripgrep's independent command flags. Grouping them
+// would obscure the adapter without reducing call-site complexity.
+#[allow(clippy::too_many_arguments)]
 async fn try_ripgrep_search(
     search_path: &Path,
     query: &str,
@@ -355,10 +358,10 @@ async fn try_ripgrep_search(
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Check for real errors (exit code 2 = error)
-    if let Some(code) = output.status.code() {
-        if code == 2 {
-            return Err(RgError::Failed(format!("rg error: {}", stderr.trim())));
-        }
+    if let Some(code) = output.status.code()
+        && code == 2
+    {
+        return Err(RgError::Failed(format!("rg error: {}", stderr.trim())));
     }
 
     // Parse JSON output
@@ -596,15 +599,14 @@ async fn search_directory(
             let path = entry.path();
 
             // Skip hidden directories and common build artifacts
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.')
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && (name.starts_with('.')
                     || name == "node_modules"
                     || name == "target"
                     || name == "__pycache__"
-                    || name == ".git"
-                {
-                    continue;
-                }
+                    || name == ".git")
+            {
+                continue;
             }
 
             if path.is_dir() {
@@ -669,20 +671,20 @@ async fn search_file(
                 return Ok(());
             }
 
-            if let Some(captures) = regex.captures(line) {
-                if let Some(name_match) = captures.name("name") {
-                    let name = name_match.as_str();
+            if let Some(captures) = regex.captures(line)
+                && let Some(name_match) = captures.name("name")
+            {
+                let name = name_match.as_str();
 
-                    // Check if symbol matches the search pattern
-                    if symbol_regex.is_match(name) {
-                        results.push(SymbolResult {
-                            file: file.to_path_buf(),
-                            line: line_num + 1,
-                            name: name.to_string(),
-                            symbol_type: sym_type.to_string(),
-                            context: Some(line.to_string()),
-                        });
-                    }
+                // Check if symbol matches the search pattern
+                if symbol_regex.is_match(name) {
+                    results.push(SymbolResult {
+                        file: file.to_path_buf(),
+                        line: line_num + 1,
+                        name: name.to_string(),
+                        symbol_type: sym_type.to_string(),
+                        context: Some(line.to_string()),
+                    });
                 }
             }
         }
@@ -779,12 +781,14 @@ fn get_language_patterns(extension: &str) -> Vec<(&'static str, &'static str)> {
     }
 }
 
-/// Convert glob pattern to regex
-fn glob_to_regex(glob: &str) -> Regex {
-    let regex_str = glob
-        .replace(".", r"\.")
-        .replace("*", ".*")
-        .replace("?", ".");
-    let pattern = format!("^{}$", regex_str);
-    Regex::new(&pattern).unwrap_or_else(|_| Regex::new(".*").unwrap())
+/// Convert a glob pattern to the fallback search regex.
+fn glob_to_regex(glob: &str) -> Result<Regex> {
+    let regex_str = regex::escape(glob).replace(r"\*", ".*").replace(r"\?", ".");
+    Regex::new(&format!("^{regex_str}$")).map_err(|error| {
+        ToolError::InvalidParameter {
+            name: "glob".to_string(),
+            message: format!("Invalid glob pattern: {error}"),
+        }
+        .into()
+    })
 }

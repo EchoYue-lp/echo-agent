@@ -281,7 +281,7 @@ fn extract_markdown_section<'a>(raw: &'a str, heading: &str) -> Option<&'a str> 
     let end = body
         .find("\n## ")
         .or_else(|| body.find("\n# "))
-        .unwrap_or_else(|| body.len());
+        .unwrap_or(body.len());
     body.get(..end)
 }
 
@@ -428,7 +428,7 @@ mod tests {
     fn split_output_truncates_utf8_safely_without_heading() {
         let raw: String = "中文"
             .chars()
-            .chain(std::iter::repeat('x').take(2000))
+            .chain(std::iter::repeat_n('x', 2000))
             .collect();
         let (summary, _) = split_subagent_output(&raw);
         assert_eq!(summary.chars().count(), DEFAULT_SUMMARY_CHARS);

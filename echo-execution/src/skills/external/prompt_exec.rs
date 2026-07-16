@@ -33,24 +33,23 @@ use crate::skills::minimal_env;
 const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Pre-compiled regex for block command syntax: ```! ... ```
-static BLOCK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").expect("valid block regex"));
+static BLOCK_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"```!\s*\n?([\s\S]*?)\n?```").ok());
 
 /// Pre-compiled regex for inline command syntax: !`...`
-static INLINE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|\s)!`([^`]+)`").expect("valid inline regex"));
+static INLINE_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)!`([^`]+)`").ok());
 
 /// Pre-compiled regex for detecting block command markers.
-static BLOCK_MARKER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"```!\s*\n?").expect("valid block marker regex"));
+static BLOCK_MARKER_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"```!\s*\n?").ok());
 
 /// Pre-compiled regex for detecting inline command markers.
-static INLINE_MARKER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|\s)!`[^`]*`").expect("valid inline marker regex"));
+static INLINE_MARKER_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)!`[^`]*`").ok());
 
 /// Pre-compiled regex for SOH-delimited placeholders.
-static PLACEHOLDER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\x01CMD_OUT_\d+\x01").expect("valid placeholder regex"));
+static PLACEHOLDER_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"\x01CMD_OUT_\d+\x01").ok());
 
 /// Source of a skill (affects security policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,31 +177,37 @@ struct CmdRegion {
 fn extract_command_regions(content: &str) -> Vec<CmdRegion> {
     let mut regions: Vec<CmdRegion> = Vec::new();
 
-    for cap in BLOCK_RE.captures_iter(content) {
-        let m = cap.get(0).unwrap();
-        regions.push(CmdRegion {
-            start: m.start(),
-            end: m.end(),
-            command_text: cap
-                .get(1)
-                .map(|m| m.as_str().trim())
-                .unwrap_or("")
-                .to_string(),
-            is_block: true,
-        });
+    if let Some(block_re) = BLOCK_RE.as_ref() {
+        for cap in block_re.captures_iter(content) {
+            if let Some(matched) = cap.get(0) {
+                regions.push(CmdRegion {
+                    start: matched.start(),
+                    end: matched.end(),
+                    command_text: cap
+                        .get(1)
+                        .map(|m| m.as_str().trim())
+                        .unwrap_or("")
+                        .to_string(),
+                    is_block: true,
+                });
+            }
+        }
     }
-    for cap in INLINE_RE.captures_iter(content) {
-        let m = cap.get(0).unwrap();
-        regions.push(CmdRegion {
-            start: m.start(),
-            end: m.end(),
-            command_text: cap
-                .get(1)
-                .map(|m| m.as_str().trim())
-                .unwrap_or("")
-                .to_string(),
-            is_block: false,
-        });
+    if let Some(inline_re) = INLINE_RE.as_ref() {
+        for cap in inline_re.captures_iter(content) {
+            if let Some(matched) = cap.get(0) {
+                regions.push(CmdRegion {
+                    start: matched.start(),
+                    end: matched.end(),
+                    command_text: cap
+                        .get(1)
+                        .map(|m| m.as_str().trim())
+                        .unwrap_or("")
+                        .to_string(),
+                    is_block: false,
+                });
+            }
+        }
     }
 
     regions.sort_by_key(|r| r.start);
@@ -211,12 +216,20 @@ fn extract_command_regions(content: &str) -> Vec<CmdRegion> {
 
 /// Check if content contains block or inline command markers.
 fn has_command_markers(content: &str) -> bool {
-    BLOCK_MARKER_RE.is_match(content) || INLINE_MARKER_RE.is_match(content)
+    BLOCK_MARKER_RE
+        .as_ref()
+        .is_some_and(|regex| regex.is_match(content))
+        || INLINE_MARKER_RE
+            .as_ref()
+            .is_some_and(|regex| regex.is_match(content))
 }
 
 /// Remove placeholder markers from content.
 fn strip_placeholders(content: &str) -> String {
-    PLACEHOLDER_RE.replace_all(content, "").to_string()
+    PLACEHOLDER_RE.as_ref().map_or_else(
+        || content.to_string(),
+        |regex| regex.replace_all(content, "").to_string(),
+    )
 }
 
 /// Substitute template variables in skill content.
@@ -252,7 +265,10 @@ fn substitute_variables(content: &str, ctx: &PromptContext) -> String {
 async fn execute_block_commands(content: &str, ctx: &PromptContext) -> String {
     // Pattern: ```! followed by optional newline, then command(s), then ```
     let mut result = content.to_string();
-    let matches: Vec<_> = BLOCK_RE.captures_iter(content).collect();
+    let matches: Vec<_> = BLOCK_RE
+        .as_ref()
+        .map(|regex| regex.captures_iter(content).collect())
+        .unwrap_or_default();
 
     // Process in reverse order so byte offsets remain valid
     for cap in matches.into_iter().rev() {
@@ -281,7 +297,10 @@ async fn execute_block_commands(content: &str, ctx: &PromptContext) -> String {
 #[cfg(test)]
 async fn execute_inline_commands(content: &str, ctx: &PromptContext) -> String {
     let mut result = content.to_string();
-    let matches: Vec<_> = INLINE_RE.captures_iter(content).collect();
+    let matches: Vec<_> = INLINE_RE
+        .as_ref()
+        .map(|regex| regex.captures_iter(content).collect())
+        .unwrap_or_default();
 
     for cap in matches.into_iter().rev() {
         let full_match = match cap.get(0) {

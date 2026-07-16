@@ -248,19 +248,18 @@ impl Tool for ExcelInfoTool {
                         for col in 0..fw {
                             if let Some(formula_str) =
                                 formula_range.get_value((row as u32, col as u32))
+                                && !formula_str.is_empty()
                             {
-                                if !formula_str.is_empty() {
-                                    formula_count += 1;
-                                    if sample_formulas.len() < 5 {
-                                        // Get the cell reference (e.g. "A10")
-                                        let col_letter = col_to_letter(col);
-                                        sample_formulas.push(format!(
-                                            "{}{}={}",
-                                            col_letter,
-                                            row + 1,
-                                            formula_str
-                                        ));
-                                    }
+                                formula_count += 1;
+                                if sample_formulas.len() < 5 {
+                                    // Get the cell reference (e.g. "A10")
+                                    let col_letter = col_to_letter(col);
+                                    sample_formulas.push(format!(
+                                        "{}{}={}",
+                                        col_letter,
+                                        row + 1,
+                                        formula_str
+                                    ));
                                 }
                             }
                         }
@@ -659,10 +658,10 @@ fn resolve_sheet_name(sheets: &[String], sheet_name: Option<&str>) -> String {
     match sheet_name {
         Some(name) => {
             // Try parsing as index
-            if let Ok(idx) = name.parse::<usize>() {
-                if idx < sheets.len() {
-                    return sheets[idx].clone();
-                }
+            if let Ok(idx) = name.parse::<usize>()
+                && idx < sheets.len()
+            {
+                return sheets[idx].clone();
             }
             // Otherwise treat as literal name
             name.to_string()
@@ -995,7 +994,7 @@ impl Tool for ExcelWriteTool {
                             }
                             _ => {
                                 worksheet
-                                    .write_string(row, col as u16, &value.to_string())
+                                    .write_string(row, col as u16, value.to_string())
                                     .map_err(write_err)?;
                             }
                         }
@@ -1342,7 +1341,7 @@ impl Tool for ExcelLoadTool {
                         let ext = std::path::Path::new(out)
                             .extension()
                             .and_then(|e| e.to_str())
-                            .unwrap_or(&*format);
+                            .unwrap_or(format);
                         let stem_out = std::path::Path::new(out).file_stem().unwrap_or_default();
                         let parent_out = std::path::Path::new(out)
                             .parent()

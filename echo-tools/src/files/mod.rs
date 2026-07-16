@@ -92,25 +92,24 @@ fn resolve_path(
             }
             Err(_) => {
                 // File doesn't exist yet (write operation) — canonicalize parent directory
-                if let Some(parent) = normalized.parent() {
-                    if parent != Path::new("") {
-                        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
-                            let canonical_base = std::fs::canonicalize(&normalized_base)
-                                .unwrap_or_else(|_| normalized_base.clone());
-                            if !canonical_parent.starts_with(&canonical_base) {
-                                return Err(ToolError::ExecutionFailed {
-                                    tool: tool.to_string(),
-                                    message: format!(
-                                        "Parent directory of '{}' resolves outside allowed scope",
-                                        path_str
-                                    ),
-                                }
-                                .into());
-                            }
-                            let filename = normalized.file_name().unwrap_or_default();
-                            return Ok(canonical_parent.join(filename));
+                if let Some(parent) = normalized.parent()
+                    && parent != Path::new("")
+                    && let Ok(canonical_parent) = std::fs::canonicalize(parent)
+                {
+                    let canonical_base = std::fs::canonicalize(&normalized_base)
+                        .unwrap_or_else(|_| normalized_base.clone());
+                    if !canonical_parent.starts_with(&canonical_base) {
+                        return Err(ToolError::ExecutionFailed {
+                            tool: tool.to_string(),
+                            message: format!(
+                                "Parent directory of '{}' resolves outside allowed scope",
+                                path_str
+                            ),
                         }
+                        .into());
                     }
+                    let filename = normalized.file_name().unwrap_or_default();
+                    return Ok(canonical_parent.join(filename));
                 }
                 // Fallback: return textually normalized path if parent doesn't exist
                 normalized

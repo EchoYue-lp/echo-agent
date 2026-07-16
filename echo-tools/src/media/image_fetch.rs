@@ -121,7 +121,10 @@ impl ImageFetchTool {
 
 impl Default for ImageFetchTool {
     fn default() -> Self {
-        Self::new().expect("Failed to build ImageFetchTool")
+        Self {
+            client: Client::new(),
+            timeout_secs: 30,
+        }
     }
 }
 

@@ -193,7 +193,7 @@ impl Tool for OutlierDetectionTool {
                     df.get_column_names()
                         .into_iter()
                         .filter(|name| {
-                            df.column(*name)
+                            df.column(name)
                                 .map(|c| is_numeric(c.dtype()))
                                 .unwrap_or(false)
                         })
@@ -227,7 +227,7 @@ impl Tool for OutlierDetectionTool {
                         message: format!("Convert '{}' to f64 failed: {}", col_name, e),
                     })?
                     .into_iter()
-                    .filter_map(|opt| opt)
+                    .flatten()
                     .collect();
                 if values.len() < 4 {
                     columns_json.push(serde_json::json!({ "name": col_name, "n_valid": values.len(), "error": "Need at least 4 values" }));
@@ -355,15 +355,13 @@ impl Tool for ConsistencyCheckTool {
                     let mut numeric_count = 0usize;
                     let mut empty_count = 0usize;
                     let mut total_valid = 0usize;
-                    for opt in ca.into_iter() {
-                        if let Some(s) = opt {
-                            total_valid += 1;
-                            if s.trim().parse::<f64>().is_ok() {
-                                numeric_count += 1;
-                            }
-                            if s.trim().is_empty() {
-                                empty_count += 1;
-                            }
+                    for s in ca.into_iter().flatten() {
+                        total_valid += 1;
+                        if s.trim().parse::<f64>().is_ok() {
+                            numeric_count += 1;
+                        }
+                        if s.trim().is_empty() {
+                            empty_count += 1;
                         }
                     }
                     if total_valid > 0 && numeric_count as f64 / total_valid as f64 > 0.8 {
@@ -387,7 +385,7 @@ impl Tool for ConsistencyCheckTool {
                             message: format!("Convert '{}' to f64 failed: {}", col_name, e),
                         })?
                         .into_iter()
-                        .filter_map(|opt| opt)
+                        .flatten()
                         .collect();
                     let negatives = values.iter().filter(|&&v| v < 0.0).count();
                     if negatives > 0 && negatives < values.len() / 10 {

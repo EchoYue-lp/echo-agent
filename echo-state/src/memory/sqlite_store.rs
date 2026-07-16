@@ -291,10 +291,8 @@ impl SqliteStore {
             })
             .map_err(|e| echo_core::error::MemoryError::IoError(format!("batch fetch: {}", e)))?;
         let mut raw: Vec<(String, String, i64, i64)> = Vec::with_capacity(keys.len());
-        for r in rows {
-            if let Ok(item) = r {
-                raw.push(item);
-            }
+        for item in rows.flatten() {
+            raw.push(item);
         }
         let score_map: std::collections::HashMap<&str, f32> = keys
             .iter()
@@ -361,10 +359,8 @@ impl SqliteStore {
             })
             .map_err(|e| echo_core::error::MemoryError::IoError(format!("batch fetch: {}", e)))?;
         let mut raw: Vec<(String, String, i64, i64)> = Vec::with_capacity(keys.len());
-        for r in rows {
-            if let Ok(item) = r {
-                raw.push(item);
-            }
+        for item in rows.flatten() {
+            raw.push(item);
         }
         let score_map: std::collections::HashMap<&str, Option<f32>> = keys_with_scores
             .iter()
@@ -405,7 +401,12 @@ impl SqliteStore {
         let ns_key = namespace.join("/");
         let embedder = match &self.embedder {
             Some(e) => e,
-            None => return self.inner_search(namespace, query_text, limit),
+            None => {
+                return Err(echo_core::error::MemoryError::Unsupported(
+                    "semantic search requires an embedder-backed SqliteStore".to_string(),
+                )
+                .into());
+            }
         };
         let query_vec = embedder
             .embed(query_text)
@@ -453,48 +454,6 @@ impl SqliteStore {
         drop(conn);
         let conn2 = self.open_connection()?;
         self.fetch_items(&conn2, namespace, &ns_key, &keys, None)
-    }
-
-    fn inner_search(
-        &self,
-        namespace: &[&str],
-        _query: &str,
-        limit: usize,
-    ) -> Result<Vec<StoreItem>> {
-        let conn = self.open_connection()?;
-        let ns_key = namespace.join("/");
-        let mut stmt = conn
-            .prepare(
-                "SELECT key, value, created_at, updated_at FROM store_items \
-             WHERE namespace = ?1 ORDER BY updated_at DESC LIMIT ?2",
-            )
-            .map_err(|e| {
-                echo_core::error::MemoryError::IoError(format!("prepare inner search: {}", e))
-            })?;
-        let rows: Vec<(String, String, i64, i64)> = stmt
-            .query_map(params![&ns_key, limit as i64], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .map_err(|e| echo_core::error::MemoryError::IoError(format!("inner search: {}", e)))?
-            .filter_map(|r| r.ok())
-            .collect();
-        let mut results = Vec::with_capacity(rows.len());
-        for (i, (key, value_str, created_at, updated_at)) in rows.iter().enumerate() {
-            if let Ok(value) = serde_json::from_str::<Value>(value_str) {
-                results.push(StoreItem {
-                    namespace: namespace.iter().map(|s| s.to_string()).collect(),
-                    key: key.clone(),
-                    value,
-                    created_at: *created_at as u64,
-                    updated_at: *updated_at as u64,
-                    score: Some(1.0 / (i as f32 + 1.0)),
-                    importance: 5.0,
-                    last_accessed: None,
-                    expires_at: None,
-                });
-            }
-        }
-        Ok(results)
     }
 
     fn max_candidates() -> usize {

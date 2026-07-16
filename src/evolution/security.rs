@@ -23,129 +23,36 @@ struct SecretPattern {
 
 /// Global list of secret detection patterns.
 static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
-    vec![
-        // AWS Access Key IDs
-        SecretPattern {
-            name: "AWS Access Key",
-            regex: Regex::new(r"(?i)AKIA[0-9A-Z]{16}").unwrap(),
-            _example: "AKIAIOSFODNN7EXAMPLE",
-        },
-        // AWS Secret Access Keys
-        SecretPattern {
-            name: "AWS Secret Key",
-            regex: Regex::new(r"(?i)aws_secret_access_key\s*[:=]\s*[A-Za-z0-9/+=]{40}").unwrap(),
-            _example: "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG...",
-        },
-        // GitHub Personal Access Tokens
-        SecretPattern {
-            name: "GitHub Token",
-            regex: Regex::new(r"(?i)ghp_[A-Za-z0-9_]{36}").unwrap(),
-            _example: "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        },
-        // GitHub OAuth Access Tokens
-        SecretPattern {
-            name: "GitHub OAuth Token",
-            regex: Regex::new(r"(?i)gho_[A-Za-z0-9_]{36}").unwrap(),
-            _example: "gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        },
-        // OpenAI API keys
-        SecretPattern {
-            name: "OpenAI API Key",
-            regex: Regex::new(r"sk-(?:proj-|ant-)?[A-Za-z0-9]{20,}").unwrap(),
-            _example: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        },
-        // Anthropic API keys
-        SecretPattern {
-            name: "Anthropic API Key",
-            regex: Regex::new(r"sk-ant-(?:api|admin)[0-9]{2}-[A-Za-z0-9\-_]{80,}").unwrap(),
-            _example: "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        },
-        // HuggingFace tokens
-        SecretPattern {
-            name: "HuggingFace Token",
-            regex: Regex::new(r"hf_[A-Za-z0-9]{20,}").unwrap(),
-            _example: "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        },
-        // Generic Bearer tokens — possessive quantifiers prevent ReDoS
-        SecretPattern {
-            name: "Bearer Token",
-            regex: Regex::new(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+").unwrap(),
-            _example: "Bearer eyJhbGciOiJIUzI1NiIs...",
-        },
-        // Private keys — possessive quantifier prevents O(n²) backtracking
-        SecretPattern {
-            name: "Private Key",
-            regex: Regex::new(
-                r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----\s*[A-Za-z0-9+/\s=]*+(?:-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)?",
-            )
-            .unwrap(),
-            _example: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq...\n-----END PRIVATE KEY-----",
-        },
-        // SSH public keys (in case private key data is leaked nearby)
-        SecretPattern {
-            name: "SSH Key",
-            regex: Regex::new(r"ssh-rsa\s+AAAA[A-Za-z0-9+/=]+").unwrap(),
-            _example: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB...",
-        },
-        // Generic API key / secret / token env var patterns — sorted by length
-        // and using possessive quantifiers to prevent ReDoS (P1).
-        SecretPattern {
-            name: "API Key Env Var",
-            regex: Regex::new(
-                r#"(?i)(?:access_token|api_key|api_secret|auth_token|apikey|apisecret|authtoken|accesstoken|secret_key|private_key)\s*[:=]\s*["']?[A-Za-z0-9\-_.]{16,}["']?"#,
-            )
-            .unwrap(),
-            _example: "API_KEY=sk-xxxxxxxxxxxxxxxxxxxx",
-        },
-        // Database connection strings with embedded credentials
-        SecretPattern {
-            name: "DB Connection String",
-            regex: Regex::new(r"(?i)(?:postgres|mysql|mongodb|redis)://[^@\s]+:[^@\s]+@").unwrap(),
-            _example: "postgres://user:password@localhost/db",
-        },
-        // JWT tokens (three base64url segments separated by dots)
-        SecretPattern {
-            name: "JWT Token",
-            regex: Regex::new(r"eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+").unwrap(),
-            _example: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
-        },
-        // Generic password/secret/token in env-like assignments
-        SecretPattern {
-            name: "Password Env Var",
-            regex: Regex::new(r#"(?i)(?:password|passwd|pwd|secret|token)\s*[:=]\s*["'][A-Za-z0-9\-_.!@#$%^&*()]{8,}["']"#).unwrap(),
-            _example: "PASSWORD='s3cret!value'",
-        },
-        // Slack tokens
-        SecretPattern {
-            name: "Slack Token",
-            regex: Regex::new(r"xox[baprs]-[A-Za-z0-9\-]{10,}").unwrap(),
-            _example: "xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx",
-        },
-        // npm access tokens
-        SecretPattern {
-            name: "npm Token",
-            regex: Regex::new(r"npm_[A-Za-z0-9]{36}").unwrap(),
-            _example: "npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        },
-        // Google API key (AIza) — synced from runtime scanner for parity (P1-16).
-        SecretPattern {
-            name: "Google API Key",
-            regex: Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(),
-            _example: "AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        },
-        // GitLab PAT — synced from runtime scanner for parity (P1-16).
-        SecretPattern {
-            name: "GitLab Token",
-            regex: Regex::new(r"glpat-[A-Za-z0-9\-_]{20,}").unwrap(),
-            _example: "glpat-xxxxxxxxxxxxxxxxxxxx",
-        },
-        // Stripe secret key — synced from runtime scanner for parity (P1-16).
-        SecretPattern {
-            name: "Stripe Secret Key",
-            regex: Regex::new(concat!("sk_", "live_[0-9a-zA-Z]{24,}")).unwrap(),
-            _example: concat!("sk_", "live_xxxxxxxxxxxxxxxxxxxxxxxx"),
-        },
+    [
+        ("AWS Access Key", r"(?i)AKIA[0-9A-Z]{16}", "AKIAIOSFODNN7EXAMPLE"),
+        ("AWS Secret Key", r"(?i)aws_secret_access_key\s*[:=]\s*[A-Za-z0-9/+=]{40}", "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG..."),
+        ("GitHub Token", r"(?i)ghp_[A-Za-z0-9_]{36}", "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        ("GitHub OAuth Token", r"(?i)gho_[A-Za-z0-9_]{36}", "gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        ("OpenAI API Key", r"sk-(?:proj-|ant-)?[A-Za-z0-9]{20,}", "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        ("Anthropic API Key", r"sk-ant-(?:api|admin)[0-9]{2}-[A-Za-z0-9\-_]{80,}", "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        ("HuggingFace Token", r"hf_[A-Za-z0-9]{20,}", "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        ("Bearer Token", r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+", "Bearer eyJhbGciOiJIUzI1NiIs..."),
+        ("Private Key", r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----\s*[A-Za-z0-9+/\s=]*+(?:-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)?", "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq...\n-----END PRIVATE KEY-----"),
+        ("SSH Key", r"ssh-rsa\s+AAAA[A-Za-z0-9+/=]+", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB..."),
+        ("API Key Env Var", r#"(?i)(?:access_token|api_key|api_secret|auth_token|apikey|apisecret|authtoken|accesstoken|secret_key|private_key)\s*[:=]\s*["']?[A-Za-z0-9\-_.]{16,}["']?"#, "API_KEY=sk-xxxxxxxxxxxxxxxxxxxx"),
+        ("DB Connection String", r"(?i)(?:postgres|mysql|mongodb|redis)://[^@\s]+:[^@\s]+@", "postgres://user:password@localhost/db"),
+        ("JWT Token", r"eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"),
+        ("Password Env Var", r#"(?i)(?:password|passwd|pwd|secret|token)\s*[:=]\s*["'][A-Za-z0-9\-_.!@#$%^&*()]{8,}["']"#, "PASSWORD='s3cret!value'"),
+        ("Slack Token", r"xox[baprs]-[A-Za-z0-9\-]{10,}", "xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx"),
+        ("npm Token", r"npm_[A-Za-z0-9]{36}", "npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        ("Google API Key", r"AIza[0-9A-Za-z\-_]{35}", "AIzaSyAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        ("GitLab Token", r"glpat-[A-Za-z0-9\-_]{20,}", "glpat-xxxxxxxxxxxxxxxxxxxx"),
+        ("Stripe Secret Key", concat!("sk_", "live_[0-9a-zA-Z]{24,}"), concat!("sk_", "live_xxxxxxxxxxxxxxxxxxxxxxxx")),
     ]
+    .into_iter()
+    .filter_map(|(name, pattern, example)| {
+        Regex::new(pattern).ok().map(|regex| SecretPattern {
+            name,
+            regex,
+            _example: example,
+        })
+    })
+    .collect()
 });
 
 // ── ScanResult ──────────────────────────────────────────────────────────

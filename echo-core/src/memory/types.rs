@@ -82,10 +82,11 @@ impl MemoryType {
 ///
 /// High-risk memories (from untrusted sources or containing sensitive content)
 /// require additional review before promotion to hot memory or rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryRisk {
     /// Low risk — can be automatically processed and promoted.
+    #[default]
     Low,
     /// Medium risk — may need review before promotion.
     Medium,
@@ -94,32 +95,21 @@ pub enum MemoryRisk {
     High,
 }
 
-impl Default for MemoryRisk {
-    fn default() -> Self {
-        Self::Low
-    }
-}
-
 // ── MemoryStatus ────────────────────────────────────────────────────────
 
 /// Lifecycle status of a memory entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
     /// Newly created, not yet confirmed or stabilized.
     Draft,
     /// Confirmed and in active use.
+    #[default]
     Active,
     /// Replaced by a newer memory entry. `superseded_by` in `MemoryMeta` points to the replacement.
     Superseded,
     /// Archived — no longer active, kept for traceability.
     Archived,
-}
-
-impl Default for MemoryStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 // ── MemorySource ────────────────────────────────────────────────────────

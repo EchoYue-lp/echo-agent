@@ -175,7 +175,7 @@ impl DiffCheckVerifier {
         let output = timeout(
             Duration::from_secs(self.timeout_secs),
             Command::new("git")
-                .args(&["diff", "--name-only", path])
+                .args(["diff", "--name-only", path])
                 .output(),
         )
         .await

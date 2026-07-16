@@ -347,8 +347,7 @@ fn extract_rust_symbols(content: &str) -> Vec<String> {
             if let Some(name) = extract_type_name(trimmed, "type") {
                 symbols.push(format!("type {}", name));
             }
-        } else if trimmed.starts_with("impl ") {
-            let rest = &trimmed[5..];
+        } else if let Some(rest) = trimmed.strip_prefix("impl ") {
             let name = rest.split_whitespace().next().unwrap_or("");
             if !name.is_empty() {
                 symbols.push(format!("impl {}", name));
@@ -377,13 +376,8 @@ fn extract_python_symbols(content: &str) -> Vec<String> {
             if !name.is_empty() {
                 symbols.push(format!("{} {}", prefix, name));
             }
-        } else if trimmed.starts_with("class ") {
-            let rest = &trimmed[6..];
-            let name = rest
-                .split(|c: char| c == '(' || c == ':' || c == '{')
-                .next()
-                .unwrap_or("")
-                .trim();
+        } else if let Some(rest) = trimmed.strip_prefix("class ") {
+            let name = rest.split(['(', ':', '{']).next().unwrap_or("").trim();
             if !name.is_empty() {
                 symbols.push(format!("class {}", name));
             }
@@ -417,11 +411,7 @@ fn extract_js_symbols(content: &str) -> Vec<String> {
             } else {
                 &trimmed[6..]
             };
-            let name = rest
-                .split(|c: char| c == ' ' || c == '{')
-                .next()
-                .unwrap_or("")
-                .trim();
+            let name = rest.split([' ', '{']).next().unwrap_or("").trim();
             if !name.is_empty() {
                 symbols.push(format!("class {}", name));
             }
@@ -431,11 +421,7 @@ fn extract_js_symbols(content: &str) -> Vec<String> {
             } else {
                 &trimmed[10..]
             };
-            let name = rest
-                .split(|c: char| c == ' ' || c == '{')
-                .next()
-                .unwrap_or("")
-                .trim();
+            let name = rest.split([' ', '{']).next().unwrap_or("").trim();
             if !name.is_empty() {
                 symbols.push(format!("interface {}", name));
             }
@@ -448,8 +434,7 @@ fn extract_go_symbols(content: &str) -> Vec<String> {
     let mut symbols = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("func ") {
-            let rest = &trimmed[5..];
+        if let Some(rest) = trimmed.strip_prefix("func ") {
             // Handle method receivers: func (r *Receiver) Name(...)
             let name_part = if rest.starts_with('(') {
                 // Method with receiver
@@ -580,10 +565,7 @@ fn extract_type_name(line: &str, keyword: &str) -> Option<String> {
     let rest = line
         .trim_start_matches("pub ")
         .trim_start_matches(&format!("{} ", keyword));
-    let name = rest
-        .split(|c: char| c == ' ' || c == '{' || c == '<' || c == ';')
-        .next()?
-        .trim();
+    let name = rest.split([' ', '{', '<', ';']).next()?.trim();
     if name.is_empty() {
         None
     } else {
@@ -594,10 +576,7 @@ fn extract_type_name(line: &str, keyword: &str) -> Option<String> {
 fn extract_java_type_name(line: &str, keyword: &str) -> Option<String> {
     let idx = line.find(keyword)?;
     let rest = &line[idx + keyword.len()..];
-    let name = rest
-        .split(|c: char| c == ' ' || c == '{' || c == '<')
-        .next()?
-        .trim();
+    let name = rest.split([' ', '{', '<']).next()?.trim();
     if name.is_empty() {
         None
     } else {

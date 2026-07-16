@@ -142,9 +142,8 @@ where
     E: fmt::Display,
     P: Fn(&E) -> bool,
 {
-    let mut last_err: Option<E> = None;
-
-    for attempt in 0..=policy.max_retries {
+    let mut attempt = 0_u32;
+    loop {
         if attempt > 0 {
             let delay = policy.delay_for(attempt);
             warn!(
@@ -165,13 +164,11 @@ where
             }
             Err(e) if attempt < policy.max_retries && is_retryable(&e) => {
                 warn!(attempt, error = %e, "Retryable error");
-                last_err = Some(e);
+                attempt = attempt.saturating_add(1);
             }
             Err(e) => return Err(e),
         }
     }
-
-    Err(last_err.expect("with_retry_if: invariants guarantee last_err is set after retry loop"))
 }
 
 /// Execute an async operation with the given retry policy (all errors are considered retryable).

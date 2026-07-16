@@ -1094,20 +1094,23 @@ fn redact_string_secrets(s: &str) -> String {
     // Possessive quantifiers prevent ReDoS backtracking.
     static PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
-        vec![
+        [
             // Bearer tokens
-            regex::Regex::new(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+").unwrap(),
+            r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]++=*+",
             // OpenAI keys
-            regex::Regex::new(r"sk-(?:proj-|ant-)?[A-Za-z0-9]{20,}").unwrap(),
+            r"sk-(?:proj-|ant-)?[A-Za-z0-9]{20,}",
             // GitHub tokens
-            regex::Regex::new(r"gh[posur]_[A-Za-z0-9]{20,}").unwrap(),
+            r"gh[posur]_[A-Za-z0-9]{20,}",
             // HuggingFace tokens
-            regex::Regex::new(r"hf_[A-Za-z0-9]{20,}").unwrap(),
+            r"hf_[A-Za-z0-9]{20,}",
             // Anthropic keys
-            regex::Regex::new(r"sk-ant-[A-Za-z0-9\-_]{20,}").unwrap(),
+            r"sk-ant-[A-Za-z0-9\-_]{20,}",
             // DB connection strings with embedded creds
-            regex::Regex::new(r"(?i)(postgres|mysql|mongodb|redis)://[^@\s]+:[^@\s]+@").unwrap(),
+            r"(?i)(postgres|mysql|mongodb|redis)://[^@\s]+:[^@\s]+@",
         ]
+        .into_iter()
+        .filter_map(|pattern| regex::Regex::new(pattern).ok())
+        .collect()
     });
     let mut out = s.to_string();
     for p in patterns {

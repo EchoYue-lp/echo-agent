@@ -189,17 +189,13 @@ impl PolicyRule {
 /// Execution mode decision
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ExecutionMode {
     /// Execute directly without planning
+    #[default]
     DirectExecute,
     /// Trigger planning mode
     Plan { reason: String },
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        Self::DirectExecute
-    }
 }
 
 /// Planning context for policy evaluation
@@ -360,8 +356,10 @@ mod tests {
 
     #[test]
     fn test_disabled_policy() {
-        let mut policy = PlanningPolicy::default();
-        policy.enabled = false;
+        let policy = PlanningPolicy {
+            enabled: false,
+            ..PlanningPolicy::default()
+        };
 
         let mut context = PlanningContext::new("Complex task");
         context.estimated_artifacts = 10;
