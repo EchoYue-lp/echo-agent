@@ -198,6 +198,7 @@ impl ToolFailure {
                 SandboxError::Timeout(_) => {
                     possible_side_effect(Self::new(ToolFailureCategory::Timeout).retryable())
                 }
+                SandboxError::Cancelled(_) => Self::new(ToolFailureCategory::Cancelled),
                 SandboxError::ResourceExceeded(_)
                 | SandboxError::PermissionDenied(_)
                 | SandboxError::IoError(_) => {

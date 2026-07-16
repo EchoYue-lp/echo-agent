@@ -260,6 +260,9 @@ pub enum SandboxError {
     /// Execution timeout
     #[error("Sandbox timeout: {0}")]
     Timeout(String),
+    /// Execution cancelled by the owning run.
+    #[error("Sandbox execution cancelled: {0}")]
+    Cancelled(String),
     /// Resource limit exceeded
     #[error("Resource exceeded: {0}")]
     ResourceExceeded(String),

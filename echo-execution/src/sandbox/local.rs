@@ -901,6 +901,7 @@ fn local_execution_result(
         duration,
         sandbox_type: sandbox_type.to_string(),
         timed_out,
+        cancelled: false,
         output_truncated: stdout.truncated || stderr.truncated,
         stdout_bytes: stdout.total_bytes,
         stderr_bytes: stderr.total_bytes,
@@ -1100,8 +1101,10 @@ fn merge_limits_into_config(mut config: LocalConfig, limits: &ResourceLimits) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::agent::CancellationToken;
     use echo_core::sandbox::{SandboxOutputChannel, SandboxStreamEvent};
     use futures::StreamExt;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_local_sandbox_echo() {
@@ -1226,6 +1229,44 @@ mod tests {
         let result = sandbox.execute(cmd).await.unwrap();
         assert!(result.timed_out);
         assert!(!result.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn controlled_execution_cancellation_stops_process_group()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let sandbox = LocalSandbox::new(LocalConfig {
+            enable_os_sandbox: false,
+            ..Default::default()
+        });
+        let temp_dir = std::env::temp_dir().join(format!(
+            "echo-local-cancel-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temp_dir)?;
+        let marker = temp_dir.join("should-not-exist");
+        let command =
+            SandboxCommand::shell("sleep 0.2; touch should-not-exist").with_working_dir(&temp_dir);
+        let cancel = Arc::new(CancellationToken::new());
+        let cancel_after_start = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_after_start.cancel();
+        });
+
+        let result = sandbox
+            .execute_with_limits_and_cancel(command, ResourceLimits::default(), Some(cancel))
+            .await;
+        assert!(matches!(
+            result,
+            Err(echo_core::error::ReactError::Sandbox(error))
+                if matches!(*error, SandboxError::Cancelled(_))
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!marker.exists());
+        std::fs::remove_dir_all(temp_dir)?;
+        Ok(())
     }
 
     #[tokio::test]

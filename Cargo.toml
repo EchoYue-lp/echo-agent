@@ -134,7 +134,7 @@ calamine = { version = "0.26", optional = true }
 docx-rs = { version = "0.4", optional = true }
 encoding_rs = { version = "0.8", optional = true }
 polars = { version = "0.53", features = ["lazy", "csv", "json", "parquet", "dtype-full", "strings", "is_in", "regex"], optional = true }
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "any"], optional = true }
 
 [[example]]

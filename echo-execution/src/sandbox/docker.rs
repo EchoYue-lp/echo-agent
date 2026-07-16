@@ -17,10 +17,11 @@ use echo_core::error::Result;
 use echo_core::error::SandboxError;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 const SANDBOX_LABEL: &str = "echo-sandbox=true";
 const DOCKER_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -320,6 +321,164 @@ impl DockerSandbox {
             .output()
             .await;
     }
+
+    async fn execute_with_limits_controlled(
+        &self,
+        command: SandboxCommand,
+        limits: Option<ResourceLimits>,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> Result<ExecutionResult> {
+        if !Self::check_docker().await {
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::Unavailable("Docker is not available".to_string()),
+            )));
+        }
+
+        let timeout = limits
+            .as_ref()
+            .and_then(|value| value.cpu_time_secs)
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(command.timeout);
+        let docker_args = self.build_docker_create_args(&command, limits.as_ref())?;
+        let start = Instant::now();
+
+        let output = Command::new("docker")
+            .args(&docker_args)
+            .output()
+            .await
+            .map_err(|error| {
+                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
+                    "Failed to create docker container: {error}"
+                ))))
+            })?;
+
+        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if container_id.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::StartFailed(format!("Failed to get container ID: {stderr}")),
+            )));
+        }
+
+        let mut start_cmd = Command::new("docker");
+        let attach_flag = if command.stdin.is_some() { "-ai" } else { "-a" };
+        start_cmd
+            .args(["start", attach_flag, &container_id])
+            .stdin(if command.stdin.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        let mut child = match start_cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                Self::remove_container(&container_id).await;
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::StartFailed(format!("Failed to start docker container: {error}")),
+                )));
+            }
+        };
+
+        if let Some(input) = command.stdin.as_deref()
+            && let Some(mut stdin) = child.stdin.take()
+            && let Err(error) = stdin.write_all(input.as_bytes()).await
+        {
+            let _ = child.kill().await;
+            Self::remove_container(&container_id).await;
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!("Failed to write docker stdin: {error}")),
+            )));
+        }
+
+        enum WaitOutcome {
+            Completed(std::io::Result<std::process::Output>),
+            TimedOut,
+            Cancelled,
+        }
+
+        let mut wait = Box::pin(tokio::time::timeout(timeout, child.wait_with_output()));
+        let outcome = if let Some(cancel) = cancel {
+            tokio::select! {
+                _ = cancel.cancelled() => WaitOutcome::Cancelled,
+                result = &mut wait => match result {
+                    Ok(output) => WaitOutcome::Completed(output),
+                    Err(_) => WaitOutcome::TimedOut,
+                },
+            }
+        } else {
+            match wait.as_mut().await {
+                Ok(output) => WaitOutcome::Completed(output),
+                Err(_) => WaitOutcome::TimedOut,
+            }
+        };
+        drop(wait);
+
+        match outcome {
+            WaitOutcome::Completed(Ok(output)) => {
+                Self::remove_container(&container_id).await;
+                let stdout_bytes = u64::try_from(output.stdout.len()).unwrap_or(u64::MAX);
+                let stderr_bytes = u64::try_from(output.stderr.len()).unwrap_or(u64::MAX);
+                let mut result = ExecutionResult {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    duration: start.elapsed(),
+                    sandbox_type: "docker".to_string(),
+                    timed_out: false,
+                    cancelled: false,
+                    output_truncated: false,
+                    stdout_bytes,
+                    stderr_bytes,
+                };
+                if let Some(max_output_bytes) =
+                    limits.as_ref().and_then(|value| value.max_output_bytes)
+                {
+                    result.enforce_output_limit(max_output_bytes);
+                }
+                Ok(result)
+            }
+            WaitOutcome::Completed(Err(error)) => {
+                Self::remove_container(&container_id).await;
+                Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(format!("Docker IO error: {error}")),
+                )))
+            }
+            WaitOutcome::TimedOut => {
+                Self::remove_container(&container_id).await;
+                Ok(ExecutionResult {
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: format!("Docker execution timed out after {}s", timeout.as_secs()),
+                    duration: start.elapsed(),
+                    sandbox_type: "docker".to_string(),
+                    timed_out: true,
+                    cancelled: false,
+                    output_truncated: false,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                })
+            }
+            WaitOutcome::Cancelled => {
+                Self::remove_container(&container_id).await;
+                Ok(ExecutionResult {
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: "Docker execution cancelled by owning run".to_string(),
+                    duration: start.elapsed(),
+                    sandbox_type: "docker".to_string(),
+                    timed_out: false,
+                    cancelled: true,
+                    output_truncated: false,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                })
+            }
+        }
+    }
 }
 
 impl SandboxExecutor for DockerSandbox {
@@ -340,110 +499,7 @@ impl SandboxExecutor for DockerSandbox {
     }
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
-        Box::pin(async move {
-            if !Self::check_docker().await {
-                return Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::Unavailable("Docker is not available".to_string()),
-                )));
-            }
-
-            let timeout = command.timeout;
-            let docker_args = self.build_docker_create_args(&command, None)?;
-
-            let start = Instant::now();
-
-            let output = Command::new("docker")
-                .args(&docker_args)
-                .output()
-                .await
-                .map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(
-                        format!("Failed to create docker container: {e}"),
-                    )))
-                })?;
-
-            let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if container_id.is_empty() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::StartFailed(format!("Failed to get container ID: {stderr}")),
-                )));
-            }
-
-            // 启动并等待结果
-            let mut start_cmd = Command::new("docker");
-            let attach_flag = if command.stdin.is_some() { "-ai" } else { "-a" };
-            start_cmd
-                .args(["start", attach_flag, &container_id])
-                .stdin(if command.stdin.is_some() {
-                    std::process::Stdio::piped()
-                } else {
-                    std::process::Stdio::null()
-                })
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-
-            let mut child = start_cmd.spawn().map_err(|e| {
-                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
-                    "Failed to start docker container: {e}"
-                ))))
-            })?;
-
-            if let Some(input) = command.stdin.as_deref()
-                && let Some(mut stdin) = child.stdin.take()
-            {
-                stdin.write_all(input.as_bytes()).await.map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
-                        "Failed to write docker stdin: {e}"
-                    ))))
-                })?;
-            }
-
-            match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                Ok(Ok(output)) => {
-                    // 清理容器
-                    Self::remove_container(&container_id).await;
-
-                    Ok(ExecutionResult {
-                        exit_code: output.status.code().unwrap_or(-1),
-                        stdout_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
-                        stderr_bytes: u64::try_from(output.stderr.len()).unwrap_or(u64::MAX),
-                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                        duration: start.elapsed(),
-                        sandbox_type: "docker".to_string(),
-                        timed_out: false,
-                        output_truncated: false,
-                    })
-                }
-                Ok(Err(e)) => {
-                    Self::remove_container(&container_id).await;
-                    Err(echo_core::error::ReactError::Sandbox(Box::new(
-                        SandboxError::IoError(format!("Docker IO error: {e}")),
-                    )))
-                }
-                Err(_) => {
-                    // 超时：强制 kill 容器
-                    let _ = Command::new("docker")
-                        .args(["kill", &container_id])
-                        .output()
-                        .await;
-                    Self::remove_container(&container_id).await;
-
-                    Ok(ExecutionResult {
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: format!("Docker execution timed out after {}s", timeout.as_secs()),
-                        duration: start.elapsed(),
-                        sandbox_type: "docker".to_string(),
-                        timed_out: true,
-                        output_truncated: false,
-                        stdout_bytes: 0,
-                        stderr_bytes: 0,
-                    })
-                }
-            }
-        })
+        Box::pin(self.execute_with_limits_controlled(command, None, None))
     }
 
     fn execute_with_limits(
@@ -451,148 +507,17 @@ impl SandboxExecutor for DockerSandbox {
         command: SandboxCommand,
         limits: ResourceLimits,
     ) -> BoxFuture<'_, Result<ExecutionResult>> {
-        Box::pin(async move {
-            if !Self::check_docker().await {
-                return Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::Unavailable("Docker is not available".to_string()),
-                )));
-            }
-
-            let timeout = limits
-                .cpu_time_secs
-                .map(std::time::Duration::from_secs)
-                .unwrap_or(command.timeout);
-
-            let docker_args = self.build_docker_create_args(&command, Some(&limits))?;
-
-            let start = Instant::now();
-
-            let output = Command::new("docker")
-                .args(&docker_args)
-                .output()
-                .await
-                .map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(
-                        format!("Failed to create docker container: {e}"),
-                    )))
-                })?;
-
-            let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if container_id.is_empty() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::StartFailed(format!("Failed to get container ID: {stderr}")),
-                )));
-            }
-
-            let mut start_cmd = Command::new("docker");
-            let attach_flag = if command.stdin.is_some() { "-ai" } else { "-a" };
-            start_cmd
-                .args(["start", attach_flag, &container_id])
-                .stdin(if command.stdin.is_some() {
-                    std::process::Stdio::piped()
-                } else {
-                    std::process::Stdio::null()
-                })
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-
-            let mut child = start_cmd.spawn().map_err(|e| {
-                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
-                    "Failed to start docker container: {e}"
-                ))))
-            })?;
-
-            if let Some(input) = command.stdin.as_deref()
-                && let Some(mut stdin) = child.stdin.take()
-            {
-                stdin.write_all(input.as_bytes()).await.map_err(|e| {
-                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
-                        "Failed to write docker stdin: {e}"
-                    ))))
-                })?;
-            }
-
-            match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                Ok(Ok(output)) => {
-                    Self::remove_container(&container_id).await;
-
-                    let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    let stdout_bytes = u64::try_from(output.stdout.len()).unwrap_or(u64::MAX);
-                    let stderr_bytes = u64::try_from(output.stderr.len()).unwrap_or(u64::MAX);
-                    let mut output_truncated = false;
-
-                    if let Some(max) = limits.max_output_bytes {
-                        let max = max as usize;
-                        if stdout.len() > max {
-                            stdout = truncate_output_to_bytes(&stdout, max);
-                            stdout.push_str("\n... [output truncated]");
-                            output_truncated = true;
-                        }
-                        if stderr.len() > max {
-                            stderr = truncate_output_to_bytes(&stderr, max);
-                            stderr.push_str("\n... [output truncated]");
-                            output_truncated = true;
-                        }
-                    }
-
-                    Ok(ExecutionResult {
-                        exit_code: output.status.code().unwrap_or(-1),
-                        stdout,
-                        stderr,
-                        duration: start.elapsed(),
-                        sandbox_type: "docker".to_string(),
-                        timed_out: false,
-                        output_truncated,
-                        stdout_bytes,
-                        stderr_bytes,
-                    })
-                }
-                Ok(Err(e)) => {
-                    Self::remove_container(&container_id).await;
-                    Err(echo_core::error::ReactError::Sandbox(Box::new(
-                        SandboxError::IoError(format!("Docker IO error: {e}")),
-                    )))
-                }
-                Err(_) => {
-                    let _ = Command::new("docker")
-                        .args(["kill", &container_id])
-                        .output()
-                        .await;
-                    Self::remove_container(&container_id).await;
-
-                    Ok(ExecutionResult {
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: format!("Docker execution timed out after {}s", timeout.as_secs()),
-                        duration: start.elapsed(),
-                        sandbox_type: "docker".to_string(),
-                        timed_out: true,
-                        output_truncated: false,
-                        stdout_bytes: 0,
-                        stderr_bytes: 0,
-                    })
-                }
-            }
-        })
+        Box::pin(self.execute_with_limits_controlled(command, Some(limits), None))
     }
-}
 
-fn truncate_output_to_bytes(output: &str, max_bytes: usize) -> String {
-    let mut retained_bytes = 0_usize;
-    output
-        .chars()
-        .take_while(|character| {
-            let next = retained_bytes.saturating_add(character.len_utf8());
-            if next > max_bytes {
-                false
-            } else {
-                retained_bytes = next;
-                true
-            }
-        })
-        .collect()
+    fn execute_with_limits_and_cancel(
+        &self,
+        command: SandboxCommand,
+        limits: ResourceLimits,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> BoxFuture<'_, Result<ExecutionResult>> {
+        Box::pin(self.execute_with_limits_controlled(command, Some(limits), cancel))
+    }
 }
 
 // ── 单元测试 ────────────────────────────────────────────────────────────────

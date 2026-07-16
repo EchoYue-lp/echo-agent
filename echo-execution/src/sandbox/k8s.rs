@@ -17,9 +17,11 @@ use echo_core::error::Result;
 use echo_core::error::SandboxError;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 /// K8s 沙箱配置
@@ -154,6 +156,7 @@ impl K8sSandbox {
         &self,
         command: &SandboxCommand,
         limits: Option<&ResourceLimits>,
+        cancel: Option<Arc<CancellationToken>>,
     ) -> Result<ExecutionResult> {
         let pod_name = format!("echo-sandbox-{}", uuid::Uuid::new_v4().simple());
         let image = self.select_image(command);
@@ -171,7 +174,7 @@ impl K8sSandbox {
                 .unwrap_or(self.config.memory_request.clone());
             let ml = l
                 .memory_bytes
-                .map(|b| format!("{}", b * 2))
+                .map(|b| b.saturating_mul(2).to_string())
                 .unwrap_or(self.config.memory_limit.clone());
             (
                 self.config.cpu_request.clone(),
@@ -272,6 +275,7 @@ impl K8sSandbox {
         });
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let start = Instant::now();
 
@@ -283,18 +287,42 @@ impl K8sSandbox {
 
         if let Some(input) = command.stdin.as_deref()
             && let Some(mut stdin) = child.stdin.take()
+            && let Err(error) = stdin.write_all(input.as_bytes()).await
         {
-            stdin.write_all(input.as_bytes()).await.map_err(|e| {
-                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
-                    "Failed to write kubectl stdin: {e}"
-                ))))
-            })?;
+            let _ = child.kill().await;
+            self.delete_pod(&pod_name).await;
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!("Failed to write kubectl stdin: {error}")),
+            )));
         }
 
-        match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
+        enum WaitOutcome {
+            Completed(std::io::Result<std::process::Output>),
+            TimedOut,
+            Cancelled,
+        }
+
+        let mut wait = Box::pin(tokio::time::timeout(timeout, child.wait_with_output()));
+        let outcome = if let Some(cancel) = cancel {
+            tokio::select! {
+                _ = cancel.cancelled() => WaitOutcome::Cancelled,
+                result = &mut wait => match result {
+                    Ok(output) => WaitOutcome::Completed(output),
+                    Err(_) => WaitOutcome::TimedOut,
+                },
+            }
+        } else {
+            match wait.as_mut().await {
+                Ok(output) => WaitOutcome::Completed(output),
+                Err(_) => WaitOutcome::TimedOut,
+            }
+        };
+        drop(wait);
+
+        match outcome {
+            WaitOutcome::Completed(Ok(output)) => {
                 self.delete_pod(&pod_name).await;
-                Ok(ExecutionResult {
+                let mut result = ExecutionResult {
                     exit_code: output.status.code().unwrap_or(-1),
                     stdout_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
                     stderr_bytes: u64::try_from(output.stderr.len()).unwrap_or(u64::MAX),
@@ -303,16 +331,21 @@ impl K8sSandbox {
                     duration: start.elapsed(),
                     sandbox_type: "k8s".to_string(),
                     timed_out: false,
+                    cancelled: false,
                     output_truncated: false,
-                })
+                };
+                if let Some(max_output_bytes) = limits.and_then(|value| value.max_output_bytes) {
+                    result.enforce_output_limit(max_output_bytes);
+                }
+                Ok(result)
             }
-            Ok(Err(e)) => {
+            WaitOutcome::Completed(Err(error)) => {
                 self.delete_pod(&pod_name).await;
                 Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::IoError(format!("kubectl IO error: {e}")),
+                    SandboxError::IoError(format!("kubectl IO error: {error}")),
                 )))
             }
-            Err(_) => {
+            WaitOutcome::TimedOut => {
                 // 超时时删除 Pod 并等待确认
                 self.delete_pod(&pod_name).await;
 
@@ -323,6 +356,22 @@ impl K8sSandbox {
                     duration: start.elapsed(),
                     sandbox_type: "k8s".to_string(),
                     timed_out: true,
+                    cancelled: false,
+                    output_truncated: false,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                })
+            }
+            WaitOutcome::Cancelled => {
+                self.delete_pod(&pod_name).await;
+                Ok(ExecutionResult {
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: "K8s Pod execution cancelled by owning run".to_string(),
+                    duration: start.elapsed(),
+                    sandbox_type: "k8s".to_string(),
+                    timed_out: false,
+                    cancelled: true,
                     output_truncated: false,
                     stdout_bytes: 0,
                     stderr_bytes: 0,
@@ -392,7 +441,7 @@ impl SandboxExecutor for K8sSandbox {
     }
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
-        Box::pin(async move { self.run_pod(&command, None).await })
+        Box::pin(async move { self.run_pod(&command, None, None).await })
     }
 
     fn execute_with_limits(
@@ -400,7 +449,16 @@ impl SandboxExecutor for K8sSandbox {
         command: SandboxCommand,
         limits: ResourceLimits,
     ) -> BoxFuture<'_, Result<ExecutionResult>> {
-        Box::pin(async move { self.run_pod(&command, Some(&limits)).await })
+        Box::pin(async move { self.run_pod(&command, Some(&limits), None).await })
+    }
+
+    fn execute_with_limits_and_cancel(
+        &self,
+        command: SandboxCommand,
+        limits: ResourceLimits,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> BoxFuture<'_, Result<ExecutionResult>> {
+        Box::pin(async move { self.run_pod(&command, Some(&limits), cancel).await })
     }
 }
 

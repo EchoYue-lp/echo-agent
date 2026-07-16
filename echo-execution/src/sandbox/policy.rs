@@ -159,7 +159,10 @@ impl SandboxPolicy {
         };
 
         if !self.auto_escalate {
-            return base_level;
+            return command
+                .minimum_isolation
+                .map(|required| required.max(base_level))
+                .unwrap_or(base_level);
         }
 
         // 根据命令内容可能升级隔离级别
@@ -180,11 +183,16 @@ impl SandboxPolicy {
             base_level
         };
 
-        if let Some(max_level) = self.max_isolation_level {
+        let policy_level = if let Some(max_level) = self.max_isolation_level {
             evaluated.min(max_level)
         } else {
             evaluated
-        }
+        };
+
+        command
+            .minimum_isolation
+            .map(|required| required.max(policy_level))
+            .unwrap_or(policy_level)
     }
 
     /// 分析命令所需的隔离级别
@@ -288,6 +296,14 @@ mod tests {
         let cmd = SandboxCommand::shell("rm -rf /tmp/test");
         // trusted 模式不升级
         assert_eq!(policy.evaluate(&cmd), IsolationLevel::None);
+    }
+
+    #[test]
+    fn trusted_policy_honors_command_minimum_isolation() {
+        let policy = SandboxPolicy::trusted();
+        let cmd =
+            SandboxCommand::shell("echo safe").with_minimum_isolation(IsolationLevel::OsSandbox);
+        assert_eq!(policy.evaluate(&cmd), IsolationLevel::OsSandbox);
     }
 
     #[test]

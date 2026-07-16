@@ -17,6 +17,7 @@ use futures::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 /// 沙箱管理器：统一调度三层沙箱
@@ -47,7 +48,22 @@ impl SandboxExecutor for SandboxManager {
     }
 
     fn is_available(&self) -> BoxFuture<'_, bool> {
-        Box::pin(async { true })
+        Box::pin(async move {
+            if self.local.is_available().await {
+                return true;
+            }
+            if let Some(docker) = &self.docker
+                && docker.is_available().await
+            {
+                return true;
+            }
+            if let Some(k8s) = &self.k8s
+                && k8s.is_available().await
+            {
+                return true;
+            }
+            false
+        })
     }
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
@@ -60,7 +76,7 @@ impl SandboxExecutor for SandboxManager {
     ) -> BoxFuture<'a, Result<Pin<Box<dyn Stream<Item = SandboxStreamEvent> + Send + 'a>>>> {
         Box::pin(async move {
             let required = self.policy.evaluate(&command);
-            let executor = self.select_executor(required)?;
+            let executor = self.select_executor(required).await?;
             let actual = executor.isolation_level();
             if actual < required && !self.allow_fallback {
                 return Err(echo_core::error::ReactError::Sandbox(Box::new(
@@ -89,6 +105,7 @@ impl SandboxExecutor for SandboxManager {
                                 duration: std::time::Duration::ZERO,
                                 sandbox_type: executor_name,
                                 timed_out: false,
+                                cancelled: false,
                                 output_truncated: false,
                                 stdout_bytes: 0,
                                 stderr_bytes,
@@ -124,6 +141,19 @@ impl SandboxExecutor for SandboxManager {
         limits: ResourceLimits,
     ) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move { SandboxManager::execute_with_limits(self, command, limits).await })
+    }
+
+    fn execute_with_limits_and_cancel(
+        &self,
+        command: SandboxCommand,
+        limits: ResourceLimits,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> BoxFuture<'_, Result<ExecutionResult>> {
+        Box::pin(async move {
+            let required = self.policy.evaluate_with_limits(&command, Some(&limits));
+            self.execute_at_level(command, required, Some(limits), cancel)
+                .await
+        })
     }
 
     fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
@@ -218,10 +248,8 @@ impl SandboxManager {
 
     /// True iff a containerized sandbox (Docker or k8s) is configured.
     ///
-    /// The Tauri `execute_sandbox` IPC uses this to gate frontend-driven code
-    /// execution: without a real container, executing LLM-/frontend-supplied
-    /// code runs it directly on the host (the `local_only()` fallback),
-    /// which is an RCE primitive for any XSS that reaches the IPC surface.
+    /// Products can use this for code-execution features whose contract
+    /// explicitly requires container isolation instead of a local backend.
     pub fn has_container_sandbox(&self) -> bool {
         self.docker.is_some() || self.k8s.is_some()
     }
@@ -244,7 +272,8 @@ impl SandboxManager {
     /// 执行命令（自动选择沙箱层）
     pub async fn execute(&self, command: SandboxCommand) -> Result<ExecutionResult> {
         let required_level = self.policy.evaluate(&command);
-        self.execute_at_level(command, required_level, None).await
+        self.execute_at_level(command, required_level, None, None)
+            .await
     }
 
     /// 执行命令并限制资源
@@ -254,7 +283,7 @@ impl SandboxManager {
         limits: ResourceLimits,
     ) -> Result<ExecutionResult> {
         let required_level = self.policy.evaluate_with_limits(&command, Some(&limits));
-        self.execute_at_level(command, required_level, Some(limits))
+        self.execute_at_level(command, required_level, Some(limits), None)
             .await
     }
 
@@ -264,9 +293,10 @@ impl SandboxManager {
         command: SandboxCommand,
         required: IsolationLevel,
         limits: Option<ResourceLimits>,
+        cancel: Option<Arc<CancellationToken>>,
     ) -> Result<ExecutionResult> {
         // 选择满足要求的最佳执行器
-        let executor = self.select_executor(required)?;
+        let executor = self.select_executor(required).await?;
 
         // 当允许 fallback 时，可能会选择低于所需隔离级别的执行器。
         let actual = executor.isolation_level();
@@ -296,7 +326,11 @@ impl SandboxManager {
         );
 
         match limits {
-            Some(limits) => executor.execute_with_limits(command, limits).await,
+            Some(limits) => {
+                executor
+                    .execute_with_limits_and_cancel(command, limits, cancel)
+                    .await
+            }
             None => executor.execute(command).await,
         }
     }
@@ -307,21 +341,23 @@ impl SandboxManager {
     /// 如果没有执行器满足要求，根据 `allow_fallback` 决定：
     /// - `true`: 返回可用执行器中隔离最强的一层（实际隔离级别可能低于要求）
     /// - `false`: 返回错误
-    fn select_executor(
+    async fn select_executor(
         &self,
         required: IsolationLevel,
     ) -> std::result::Result<Arc<dyn SandboxExecutor>, echo_core::error::ReactError> {
         // 优先选择满足要求的最轻量执行器，避免把低风险命令路由到更重的层。
-        if self.local.isolation_level() >= required {
+        if self.local.isolation_level() >= required && self.local.is_available().await {
             return Ok(self.local.clone());
         }
         if let Some(ref docker) = self.docker
             && docker.isolation_level() >= required
+            && docker.is_available().await
         {
             return Ok(docker.clone());
         }
         if let Some(ref k8s) = self.k8s
             && k8s.isolation_level() >= required
+            && k8s.is_available().await
         {
             return Ok(k8s.clone());
         }
@@ -329,12 +365,22 @@ impl SandboxManager {
         // 没有执行器满足要求
         if self.allow_fallback {
             // 降级时选择可用执行器中隔离最强的一层。
-            let best_available: Arc<dyn SandboxExecutor> = if let Some(ref k8s) = self.k8s {
+            let best_available: Arc<dyn SandboxExecutor> = if let Some(ref k8s) = self.k8s
+                && k8s.is_available().await
+            {
                 k8s.clone()
-            } else if let Some(ref docker) = self.docker {
+            } else if let Some(ref docker) = self.docker
+                && docker.is_available().await
+            {
                 docker.clone()
-            } else {
+            } else if self.local.is_available().await {
                 self.local.clone()
+            } else {
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::Unavailable(
+                        "No configured sandbox executor is available".to_string(),
+                    ),
+                )));
             };
 
             warn!(
@@ -414,27 +460,38 @@ mod tests {
         assert_eq!(result.stdout.trim(), "sandbox_test");
     }
 
-    #[test]
-    fn test_select_executor_none() {
+    #[tokio::test]
+    async fn test_select_executor_none() -> Result<()> {
         let manager = SandboxManager::local_only();
-        let executor = manager.select_executor(IsolationLevel::None).unwrap();
+        let executor = manager.select_executor(IsolationLevel::None).await?;
         assert_eq!(executor.name(), "local");
+        Ok(())
     }
 
-    #[test]
-    fn test_select_executor_container_fallback() {
+    #[tokio::test]
+    async fn test_select_executor_container_fallback() -> Result<()> {
         let mut manager = SandboxManager::local_only();
         manager.allow_fallback = true;
         // No docker available, should fallback to local
-        let executor = manager.select_executor(IsolationLevel::Container).unwrap();
+        let executor = manager.select_executor(IsolationLevel::Container).await?;
         assert_eq!(executor.name(), "local");
+        Ok(())
     }
 
-    #[test]
-    fn test_select_executor_container_no_fallback() {
+    #[tokio::test]
+    async fn test_select_executor_container_no_fallback() {
         let mut manager = SandboxManager::local_only();
         manager.allow_fallback = false;
-        let result = manager.select_executor(IsolationLevel::Container);
+        let result = manager.select_executor(IsolationLevel::Container).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn command_minimum_isolation_blocks_process_only_manager() {
+        let manager = SandboxManager::local_only();
+        let command =
+            SandboxCommand::shell("echo unsafe").with_minimum_isolation(IsolationLevel::OsSandbox);
+        let result = manager.execute(command).await;
         assert!(result.is_err());
     }
 
