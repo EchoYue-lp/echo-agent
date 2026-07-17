@@ -38,6 +38,11 @@ fn make_run(id: &str, input: &str, events: Vec<RunEvent>, status: RunStatus) -> 
     Run {
         run_id: id.to_string(),
         parent_run_id: None,
+        agent_name: "demo-eval".to_string(),
+        model: "demo-model".to_string(),
+        provider: None,
+        turn_id: None,
+        execution_id: None,
         session_id: "demo_session".into(),
         status,
         input: input.to_string(),

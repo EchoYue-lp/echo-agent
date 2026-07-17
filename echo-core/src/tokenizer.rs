@@ -476,6 +476,7 @@ mod tests {
             total_tokens: Some(1020),
             prompt_tokens_details: Some(crate::llm::types::TokenUsageDetails {
                 cached_tokens: Some(980),
+                ..Default::default()
             }),
             ..Default::default()
         });

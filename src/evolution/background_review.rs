@@ -571,6 +571,11 @@ mod tests {
         Run {
             run_id: "test-review-1".into(),
             parent_run_id: None,
+            agent_name: String::new(),
+            model: String::new(),
+            provider: None,
+            turn_id: None,
+            execution_id: None,
             session_id: "sess-1".into(),
             status: RunStatus::Completed,
             input: "Fix the bug in auth.rs".into(),

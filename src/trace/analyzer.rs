@@ -855,6 +855,11 @@ mod tests {
         Run {
             run_id: id.to_string(),
             parent_run_id: None,
+            agent_name: String::new(),
+            model: String::new(),
+            provider: None,
+            turn_id: None,
+            execution_id: None,
             session_id: session.to_string(),
             status,
             input: "test input".to_string(),
@@ -869,6 +874,9 @@ mod tests {
                     estimated_context_tokens: 95,
                     protected_context_tokens: 20,
                     protected_message_count: 1,
+                    context_limit_tokens: 0,
+                    context_breakdown: Default::default(),
+                    cache_fingerprint: Default::default(),
                     duration_ms: 200,
                 },
                 RunEvent::ToolCall {
@@ -922,6 +930,11 @@ mod tests {
         Run {
             run_id: id.to_string(),
             parent_run_id: None,
+            agent_name: String::new(),
+            model: String::new(),
+            provider: None,
+            turn_id: None,
+            execution_id: None,
             session_id: session.to_string(),
             status: RunStatus::Failed,
             input: "test".to_string(),

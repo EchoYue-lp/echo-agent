@@ -541,6 +541,10 @@ impl ReactAgent {
             }
         }
 
+        // Trace identity is independent from the product run identity and is
+        // established before the first observable execution phase.
+        self.start_trace_run(message).await;
+
         // Phase: Recall
         turn.advance(crate::agent::turn::TurnPhase::Recall);
         self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
@@ -582,9 +586,6 @@ impl ReactAgent {
                 .map(|body| super::context::runtime_context_note("memory", body.as_str())),
         );
         context.push(Message::user(message.to_string()));
-
-        // Start trace run recording
-        self.start_trace_run(message).await;
 
         Ok(recalled)
     }
@@ -631,7 +632,27 @@ impl ReactAgent {
                         confidence = confidence,
                         "🎯 IntentRouter: DirectAnswer shortcut"
                     );
-                    return self.direct_answer(message).await;
+                    return match self.direct_answer(message).await {
+                        Ok(answer) => {
+                            self.finalize_trace_run(
+                                crate::trace::RunStatus::Completed,
+                                Some(&answer),
+                                None,
+                            )
+                            .await;
+                            Ok(answer)
+                        }
+                        Err(error) => {
+                            let error_text = error.to_string();
+                            self.finalize_trace_run(
+                                crate::trace::RunStatus::Failed,
+                                None,
+                                Some(error_text.as_str()),
+                            )
+                            .await;
+                            Err(error)
+                        }
+                    };
                 }
                 crate::intent::Intent::DirectAnswer { confidence } => {
                     tracing::debug!(
@@ -781,6 +802,12 @@ impl ReactAgent {
             estimated_context_tokens,
             protected_context_tokens: 0,
             protected_message_count: 0,
+            context_limit_tokens: self.config.token_limit,
+            context_breakdown: crate::trace::LlmContextBreakdown::estimate(
+                &messages,
+                self.calibrated_tokenizer.as_ref(),
+            ),
+            cache_fingerprint: super::phases::think::cache_fingerprint(&messages, None),
             duration_ms: u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
         .await;

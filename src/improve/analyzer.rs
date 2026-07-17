@@ -177,6 +177,11 @@ mod tests {
         Run {
             run_id: "test".into(),
             parent_run_id: None,
+            agent_name: String::new(),
+            model: String::new(),
+            provider: None,
+            turn_id: None,
+            execution_id: None,
             session_id: "s1".into(),
             status,
             input: "test".into(),

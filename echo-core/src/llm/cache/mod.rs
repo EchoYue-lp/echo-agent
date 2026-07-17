@@ -13,5 +13,5 @@
 pub mod diagnostic;
 pub mod layout;
 
-pub use diagnostic::stable_prefix_hash;
+pub use diagnostic::{PromptCacheFingerprint, prompt_cache_fingerprint, stable_prefix_hash};
 pub use layout::{BreakpointTarget, CacheHints, PromptCacheLayout, SegmentRange, SegmentRanges};

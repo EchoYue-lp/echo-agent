@@ -40,7 +40,28 @@ pub struct Run {
     pub run_id: String,
 
     /// Parent run ID for sub-agent invocations.
+    #[serde(default)]
     pub parent_run_id: Option<String>,
+
+    /// Agent invocation identity.
+    #[serde(default)]
+    pub agent_name: String,
+
+    /// Model used by this invocation.
+    #[serde(default)]
+    pub model: String,
+
+    /// Provider used by this invocation, when known.
+    #[serde(default)]
+    pub provider: Option<String>,
+
+    /// Product turn correlated with this trace invocation.
+    #[serde(default)]
+    pub turn_id: Option<String>,
+
+    /// Concrete worker/tool execution correlated with this trace invocation.
+    #[serde(default)]
+    pub execution_id: Option<String>,
 
     /// Session this run belongs to.
     pub session_id: String,
@@ -100,6 +121,25 @@ impl Run {
         }
         self.events.push(event);
     }
+
+    fn summary(&self) -> RunSummary {
+        RunSummary {
+            run_id: self.run_id.clone(),
+            parent_run_id: self.parent_run_id.clone(),
+            session_id: self.session_id.clone(),
+            agent_name: self.agent_name.clone(),
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+            turn_id: self.turn_id.clone(),
+            execution_id: self.execution_id.clone(),
+            status: self.status,
+            input_preview: self.input.chars().take(80).collect(),
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            token_usage: self.token_usage,
+            total_duration_ms: self.timings.total_duration_ms,
+        }
+    }
 }
 
 // ── RunStatus ────────────────────────────────────────────────────────
@@ -118,6 +158,67 @@ pub enum RunStatus {
     Failed,
     /// Run was cancelled.
     Cancelled,
+}
+
+/// Local estimated context distribution for one LLM request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LlmContextBreakdown {
+    pub system_tokens: usize,
+    pub user_tokens: usize,
+    pub assistant_tokens: usize,
+    pub tool_tokens: usize,
+    pub summary_tokens: usize,
+    pub memory_tokens: usize,
+}
+
+impl LlmContextBreakdown {
+    pub fn estimate(
+        messages: &[echo_core::llm::types::Message],
+        tokenizer: &dyn echo_core::tokenizer::Tokenizer,
+    ) -> Self {
+        use echo_core::llm::types::Role;
+
+        let mut breakdown = Self::default();
+        for message in messages {
+            let text = message.content.as_text().unwrap_or_default();
+            let tokens = tokenizer.count_tokens(text.as_str());
+            if text.contains("[memory_context]")
+                || text.contains("[Relevant historical memories]")
+                || text.contains("[Related historical memories]")
+            {
+                breakdown.memory_tokens = breakdown.memory_tokens.saturating_add(tokens);
+                continue;
+            }
+            match message.role {
+                Role::System if text.contains("[对话历史摘要]") => {
+                    breakdown.summary_tokens = breakdown.summary_tokens.saturating_add(tokens);
+                }
+                Role::System => {
+                    breakdown.system_tokens = breakdown.system_tokens.saturating_add(tokens);
+                }
+                Role::User => {
+                    breakdown.user_tokens = breakdown.user_tokens.saturating_add(tokens);
+                }
+                Role::Assistant => {
+                    breakdown.assistant_tokens = breakdown.assistant_tokens.saturating_add(tokens);
+                }
+                Role::Tool => {
+                    breakdown.tool_tokens = breakdown.tool_tokens.saturating_add(tokens);
+                }
+                Role::Custom(_) => {}
+            }
+        }
+        breakdown
+    }
+
+    pub fn total_tokens(&self) -> usize {
+        self.system_tokens
+            .saturating_add(self.user_tokens)
+            .saturating_add(self.assistant_tokens)
+            .saturating_add(self.tool_tokens)
+            .saturating_add(self.summary_tokens)
+            .saturating_add(self.memory_tokens)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,8 +274,29 @@ pub enum RunEvent {
         /// Messages pinned against context compression.
         #[serde(default)]
         protected_message_count: usize,
+        /// Configured context/compression limit for this invocation.
+        #[serde(default)]
+        context_limit_tokens: usize,
+        /// Local estimate grouped by context role/source.
+        #[serde(default)]
+        context_breakdown: LlmContextBreakdown,
+        /// Canonical cache-relevant request fingerprints.
+        #[serde(default)]
+        cache_fingerprint: echo_core::llm::cache::PromptCacheFingerprint,
         /// Elapsed milliseconds for this LLM call.
         duration_ms: u64,
+    },
+    /// Context compression completed at a meaningful run boundary.
+    ContextCompression {
+        source: String,
+        before_messages: usize,
+        after_messages: usize,
+        before_tokens: usize,
+        after_tokens: usize,
+        #[serde(default)]
+        protected_context_tokens: usize,
+        #[serde(default)]
+        protected_message_count: usize,
     },
     /// A tool was called.
     ToolCall {
@@ -407,7 +529,19 @@ pub struct RunTimings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummary {
     pub run_id: String,
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
     pub session_id: String,
+    #[serde(default)]
+    pub agent_name: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub execution_id: Option<String>,
     pub status: RunStatus,
     pub input_preview: String,
     #[serde(with = "crate::utils::time::local_rfc3339")]
@@ -438,6 +572,16 @@ pub trait RunStore: Send + Sync {
 
     /// List all runs, newest first (limited to `limit` entries).
     async fn list_all(&self, limit: usize) -> Result<Vec<RunSummary>>;
+
+    /// List trace invocations correlated with one product/business run.
+    async fn list_by_parent_run(&self, parent_run_id: &str) -> Result<Vec<RunSummary>> {
+        Ok(self
+            .list_all(usize::MAX)
+            .await?
+            .into_iter()
+            .filter(|run| run.parent_run_id.as_deref() == Some(parent_run_id))
+            .collect())
+    }
 
     /// Append a single event to an existing run (without rewriting the entire run).
     ///
@@ -503,16 +647,7 @@ impl RunStore for InMemoryRunStore {
         let mut summaries: Vec<RunSummary> = runs
             .values()
             .filter(|r| r.session_id == session_id)
-            .map(|r| RunSummary {
-                run_id: r.run_id.clone(),
-                session_id: r.session_id.clone(),
-                status: r.status,
-                input_preview: r.input.chars().take(80).collect(),
-                started_at: r.started_at,
-                finished_at: r.finished_at,
-                token_usage: r.token_usage,
-                total_duration_ms: r.timings.total_duration_ms,
-            })
+            .map(Run::summary)
             .collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
@@ -521,19 +656,7 @@ impl RunStore for InMemoryRunStore {
 
     async fn list_all(&self, limit: usize) -> Result<Vec<RunSummary>> {
         let runs = self.runs.read().await;
-        let mut summaries: Vec<RunSummary> = runs
-            .values()
-            .map(|r| RunSummary {
-                run_id: r.run_id.clone(),
-                session_id: r.session_id.clone(),
-                status: r.status,
-                input_preview: r.input.chars().take(80).collect(),
-                started_at: r.started_at,
-                finished_at: r.finished_at,
-                token_usage: r.token_usage,
-                total_duration_ms: r.timings.total_duration_ms,
-            })
-            .collect();
+        let mut summaries: Vec<RunSummary> = runs.values().map(Run::summary).collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
         summaries.truncate(limit);
@@ -650,16 +773,7 @@ impl RunStore for JsonlRunStore {
         let mut summaries: Vec<RunSummary> = cache
             .values()
             .filter(|r| r.session_id == session_id)
-            .map(|r| RunSummary {
-                run_id: r.run_id.clone(),
-                session_id: r.session_id.clone(),
-                status: r.status,
-                input_preview: r.input.chars().take(80).collect(),
-                started_at: r.started_at,
-                finished_at: r.finished_at,
-                token_usage: r.token_usage,
-                total_duration_ms: r.timings.total_duration_ms,
-            })
+            .map(Run::summary)
             .collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
@@ -668,19 +782,7 @@ impl RunStore for JsonlRunStore {
 
     async fn list_all(&self, limit: usize) -> Result<Vec<RunSummary>> {
         let cache = self.cache.read().await;
-        let mut summaries: Vec<RunSummary> = cache
-            .values()
-            .map(|r| RunSummary {
-                run_id: r.run_id.clone(),
-                session_id: r.session_id.clone(),
-                status: r.status,
-                input_preview: r.input.chars().take(80).collect(),
-                started_at: r.started_at,
-                finished_at: r.finished_at,
-                token_usage: r.token_usage,
-                total_duration_ms: r.timings.total_duration_ms,
-            })
-            .collect();
+        let mut summaries: Vec<RunSummary> = cache.values().map(Run::summary).collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
         summaries.truncate(limit);
@@ -709,6 +811,11 @@ mod tests {
         Run {
             run_id: id.to_string(),
             parent_run_id: None,
+            agent_name: String::new(),
+            model: String::new(),
+            provider: None,
+            turn_id: None,
+            execution_id: None,
             session_id: session.to_string(),
             status: RunStatus::Completed,
             input: "test input".to_string(),
@@ -799,6 +906,9 @@ mod tests {
                     estimated_context_tokens: 980,
                     protected_context_tokens: 240,
                     protected_message_count: 3,
+                    context_limit_tokens: 0,
+                    context_breakdown: Default::default(),
+                    cache_fingerprint: Default::default(),
                     duration_ms: 125,
                 },
             )

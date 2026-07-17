@@ -153,10 +153,11 @@ pub struct ReactAgent {
     /// with events, token usage, and timings.
     pub run_store: Option<Arc<dyn crate::trace::RunStore>>,
 
-    /// The currently active run ID. Set at the start of `run_react_loop` or
-    /// streaming execution; cleared when the run completes. Used to associate
-    /// trace events with the correct run.
+    /// Product/business run ID propagated into tools and projections.
     pub current_run_id: std::sync::Mutex<Option<String>>,
+
+    /// Unique trace invocation ID used only by the framework run store.
+    pub current_trace_run_id: std::sync::Mutex<Option<String>>,
 
     /// 外部 run 级上下文（跨 spawn 安全，值传递）。
     ///
@@ -513,6 +514,7 @@ impl ReactAgent {
             dispatch_catalog_handle,
             run_store: None,
             current_run_id: std::sync::Mutex::new(None),
+            current_trace_run_id: std::sync::Mutex::new(None),
             external_cancel: std::sync::Mutex::new(None),
             external_trace_sink: std::sync::Mutex::new(None),
             external_delegation_policy: std::sync::Mutex::new(None),
@@ -1822,7 +1824,7 @@ impl ReactAgent {
     /// Also publishes trace lifecycle to global event bus for audit subscribers.
     pub(crate) async fn record_trace_event(&self, event: crate::trace::RunEvent) {
         let run_id = self
-            .current_run_id
+            .current_trace_run_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
@@ -1833,62 +1835,50 @@ impl ReactAgent {
         }
     }
 
-    /// Start a new trace run and set it as the current run.
-    ///
-    /// **Does NOT overwrite** a run_id already set by `set_external_context`.
-    /// The product layer (e.g. `launch_unified_run`) calls
-    /// `set_external_context` to inject the TaskRuntime run_id BEFORE the
-    /// agent's ReAct loop starts. If we overwrote it here with a trace-only
-    /// `run_{uuid}`, downstream tools (`task_create`, `execute_plan`) would
-    /// read the trace id from `current_run_id` and operate on the wrong
-    /// TaskRuntime store entry (no matching `RunCreated` event → plan.json
-    /// never materialises → "stuck in executing" bug).
-    pub(crate) async fn start_trace_run(&self, input: &str) {
-        if let Some(ref store) = self.run_store {
-            // If the product layer already set a run_id via set_external_context,
-            // keep it — trace events will be recorded under that id, which is
-            // the correct TaskRuntime run_id.
-            let existing = self
-                .current_run_id
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            if existing.is_some() {
-                return;
-            }
-            let run_id = format!("run_{}", uuid::Uuid::new_v4());
-            let run = crate::trace::Run {
-                run_id: run_id.clone(),
-                parent_run_id: None,
-                session_id: self.config.session_id.clone().unwrap_or_default(),
-                status: crate::trace::RunStatus::Running,
-                input: input.to_string(),
-                events: vec![],
-                final_output: None,
-                error: None,
-                token_usage: crate::trace::TokenUsage::default(),
-                timings: crate::trace::RunTimings::default(),
-                started_at: chrono::Utc::now(),
-                finished_at: None,
-            };
-            *self
-                .current_run_id
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(run_id);
-            if let Err(e) = store.save(run).await {
-                tracing::warn!(error = %e, "Failed to save trace run on start");
-            }
-        }
+    /// Start a unique trace invocation while preserving any product run ID.
+    pub(crate) async fn start_trace_run(&self, input: &str) -> Option<String> {
+        let parent_run_id = self
+            .current_run_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let trace_run_id = self
+            .start_scoped_trace_run(input, parent_run_id.as_deref(), None, None, None)
+            .await?;
+        *self
+            .current_trace_run_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(trace_run_id.clone());
+        Some(trace_run_id)
     }
 
-    /// Start a trace run without mutating the agent-wide current run id.
-    pub(crate) async fn start_scoped_trace_run(&self, input: &str) -> Option<String> {
+    /// Start a trace run without mutating the agent-wide product run id.
+    pub(crate) async fn start_scoped_trace_run(
+        &self,
+        input: &str,
+        parent_run_id: Option<&str>,
+        conversation_id: Option<&str>,
+        turn_id: Option<&str>,
+        execution_id: Option<&str>,
+    ) -> Option<String> {
         let store = self.run_store.as_ref()?;
         let run_id = format!("run_{}", uuid::Uuid::new_v4());
         let run = crate::trace::Run {
             run_id: run_id.clone(),
-            parent_run_id: None,
-            session_id: self.config.session_id.clone().unwrap_or_default(),
+            parent_run_id: parent_run_id.map(str::to_string),
+            agent_name: self.config.agent_name.clone(),
+            model: self.config.model_name.clone(),
+            provider: self
+                .config
+                .model_profile
+                .as_ref()
+                .map(|profile| profile.provider.clone()),
+            turn_id: turn_id.map(str::to_string),
+            execution_id: execution_id.map(str::to_string),
+            session_id: conversation_id
+                .map(str::to_string)
+                .or_else(|| self.config.session_id.clone())
+                .unwrap_or_default(),
             status: crate::trace::RunStatus::Running,
             input: input.to_string(),
             events: vec![],
@@ -1905,8 +1895,31 @@ impl ReactAgent {
         Some(run_id)
     }
 
+    pub(crate) async fn finalize_scoped_trace_run(
+        &self,
+        trace_run_id: Option<&str>,
+        status: crate::trace::RunStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) {
+        let Some(run_id) = trace_run_id else {
+            return;
+        };
+        let Some(store) = self.run_store.as_ref() else {
+            return;
+        };
+        if let Ok(Some(mut run)) = store.load(run_id).await {
+            run.status = status;
+            run.final_output = output.map(str::to_string);
+            run.error = error.map(str::to_string);
+            run.finished_at = Some(chrono::Utc::now());
+            if let Err(error) = store.save(run).await {
+                tracing::warn!(error = %error, run_id, "Failed to finalize scoped trace run");
+            }
+        }
+    }
+
     /// Finalize the current trace run (completed or failed).
-    #[allow(dead_code)]
     pub(crate) async fn finalize_trace_run(
         &self,
         status: crate::trace::RunStatus,
@@ -1914,7 +1927,7 @@ impl ReactAgent {
         error: Option<&str>,
     ) {
         let run_id = self
-            .current_run_id
+            .current_trace_run_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();

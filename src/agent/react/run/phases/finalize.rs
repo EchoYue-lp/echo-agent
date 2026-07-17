@@ -279,7 +279,7 @@ mod tests {
     use crate::agent::snapshot::AgentRunSnapshot;
     use crate::trace::{InMemoryRunStore, RunStatus, RunStore};
 
-    /// Build a snapshot whose `current_run_id` is wired up so trace
+    /// Build a snapshot whose `trace_run_id` is wired up so trace
     /// finalization can update the in-memory run store.
     async fn snap_with_trace(
         agent_name: &str,
@@ -289,12 +289,7 @@ mod tests {
         agent.set_run_store(store.clone());
         agent.start_trace_run("test input").await;
 
-        let mut snap = AgentRunSnapshot::from_agent(&agent);
-        snap.current_run_id = agent
-            .current_run_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let snap = AgentRunSnapshot::from_agent(&agent);
         (snap, store, agent)
     }
 
@@ -323,7 +318,7 @@ mod tests {
         );
 
         // Trace should be marked Failed.
-        let run_id = snap.current_run_id.clone().expect("run_id must be set");
+        let run_id = snap.trace_run_id.clone().expect("run_id must be set");
         let run = store
             .load(&run_id)
             .await
@@ -354,7 +349,7 @@ mod tests {
             "expected MaxIterationsExceeded error, got: {msg}",
         );
 
-        let run_id = snap.current_run_id.clone().expect("run_id must be set");
+        let run_id = snap.trace_run_id.clone().expect("run_id must be set");
         let run = store
             .load(&run_id)
             .await

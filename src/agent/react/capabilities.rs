@@ -255,6 +255,23 @@ impl ReactAgent {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("manual"))
             .await;
         let (stats, checkpoint) = self.memory.context.lock().await.force_compress(40).await?;
+        let (protected_message_count, protected_context_tokens) = {
+            let context = self.memory.context.lock().await;
+            (
+                context.protected_message_count(),
+                context.protected_token_estimate(),
+            )
+        };
+        self.record_trace_event(crate::trace::RunEvent::ContextCompression {
+            source: "manual".to_string(),
+            before_messages: stats.before_count,
+            after_messages: stats.after_count,
+            before_tokens: stats.before_tokens,
+            after_tokens: stats.after_tokens,
+            protected_context_tokens,
+            protected_message_count,
+        })
+        .await;
         self.fire_post_compact_hook("manual", &stats).await;
         Ok((stats, checkpoint))
     }
@@ -1107,6 +1124,8 @@ mod tests {
     use super::*;
     use crate::agent::AgentCallback;
     use crate::agent::config::AgentConfig;
+    use crate::llm::types::Message;
+    use crate::trace::RunStore;
 
     struct IdentifiedCallback {
         id: &'static str,
@@ -1134,5 +1153,34 @@ mod tests {
 
         assert_eq!(agent.config.callbacks.len(), 1);
         assert_eq!(agent.config.callbacks[0].callback_id(), Some("task-b"));
+    }
+
+    #[tokio::test]
+    async fn manual_compression_is_recorded_in_durable_trace() -> crate::error::Result<()> {
+        let config = AgentConfig::minimal("test-model", "helper");
+        let mut agent = ReactAgent::new(config);
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        agent.set_run_store(store.clone());
+        let trace_run_id = agent
+            .start_trace_run("manual compress")
+            .await
+            .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .push(Message::user("manual compression input".to_string()));
+
+        let _ = agent.force_compress_context().await?;
+        let run = store
+            .load(&trace_run_id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("trace data missing".to_string()))?;
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            crate::trace::RunEvent::ContextCompression { source, .. } if source == "manual"
+        )));
+        Ok(())
     }
 }

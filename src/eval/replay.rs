@@ -312,6 +312,11 @@ mod tests {
         Run {
             run_id: "test_run".into(),
             parent_run_id: None,
+            agent_name: String::new(),
+            model: String::new(),
+            provider: None,
+            turn_id: None,
+            execution_id: None,
             session_id: "test_session".into(),
             status: RunStatus::Completed,
             input: "test".into(),

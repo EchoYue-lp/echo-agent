@@ -78,7 +78,9 @@ fn filter_user_visible_transcript(messages: &[Message]) -> Vec<Message> {
 pub struct RuntimeConfig {
     pub agent_name: String,
     pub model_name: String,
+    pub provider: Option<String>,
     pub max_iterations: usize,
+    pub token_limit: usize,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub supports_tool_choice_none: bool,
     pub session_id: Option<String>,
@@ -118,7 +120,12 @@ impl RuntimeConfig {
         Self {
             agent_name: config.agent_name.clone(),
             model_name: config.model_name.clone(),
+            provider: config
+                .model_profile
+                .as_ref()
+                .map(|profile| profile.provider.clone()),
             max_iterations: config.max_iterations,
+            token_limit: config.token_limit,
             run_budget: config.run_budget.clone(),
             supports_tool_choice_none: config
                 .model_profile
@@ -293,6 +300,9 @@ pub struct AgentRunSnapshot {
     pub run_store: Option<Arc<dyn RunStore>>,
     /// Current run ID.
     pub current_run_id: Option<String>,
+    /// Unique trace invocation ID. This is intentionally distinct from the
+    /// product/business run ID in `current_run_id`.
+    pub trace_run_id: Option<String>,
     /// Current user-input/agent turn ID.
     pub current_turn_id: Option<String>,
     /// Current concrete worker/tool execution ID.
@@ -392,6 +402,15 @@ impl AgentRunSnapshot {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone()
             },
+            trace_run_id: if invocation.is_some() {
+                None
+            } else {
+                agent
+                    .current_trace_run_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            },
             current_turn_id: runtime.and_then(|context| context.turn_id.clone()),
             current_execution_id: runtime.and_then(|context| context.execution_id.clone()),
             external_cancel: if let Some(context) = invocation {
@@ -444,7 +463,7 @@ impl AgentRunSnapshot {
     /// Record a trace event if a run store is attached.
     pub async fn record_event(&self, event: RunEvent) {
         if let Some(ref store) = self.run_store
-            && let Some(ref run_id) = self.current_run_id
+            && let Some(ref run_id) = self.trace_run_id
         {
             let _ = store.append_event(run_id, event).await;
         }
@@ -453,7 +472,7 @@ impl AgentRunSnapshot {
     /// Finalize the current trace run (completed or failed).
     pub async fn finalize_run(&self, status: RunStatus, output: Option<&str>, error: Option<&str>) {
         if let Some(ref store) = self.run_store
-            && let Some(ref run_id) = self.current_run_id
+            && let Some(ref run_id) = self.trace_run_id
             && let Ok(Some(mut run)) = store.load(run_id).await
         {
             run.status = status;

@@ -11,7 +11,6 @@ use crate::llm::types::{Message, Role, ToolDefinition};
 use echo_core::tokenizer::Tokenizer;
 use futures::StreamExt;
 use std::collections::HashMap;
-use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
@@ -85,6 +84,10 @@ pub(crate) async fn run_think(
         .fold(0usize, |total, text| {
             total.saturating_add(snap.calibrated_tokenizer.count_tokens(&text))
         });
+    let context_breakdown =
+        crate::trace::LlmContextBreakdown::estimate(&messages, snap.calibrated_tokenizer.as_ref());
+    let request_tools = tools_for_request(snap, final_only);
+    let cache_fingerprint = cache_fingerprint(&messages, request_tools.as_deref());
     let (protected_message_count, protected_context_tokens) = {
         let context = context.lock().await;
         (
@@ -152,6 +155,9 @@ pub(crate) async fn run_think(
         estimated_context_tokens,
         protected_context_tokens,
         protected_message_count,
+        context_limit_tokens: snap.config.token_limit,
+        context_breakdown,
+        cache_fingerprint,
         duration_ms: u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
     .await;
@@ -258,12 +264,7 @@ pub(crate) async fn create_llm_stream(
         Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
     >,
 > {
-    let tools = if snap.config.enable_tool && !final_only {
-        let t = snap.tools.tools_for_llm();
-        if t.is_empty() { None } else { Some(t) }
-    } else {
-        None
-    };
+    let tools = tools_for_request(snap, final_only);
     log_prompt_cache_shape(&messages, tools.as_deref());
     let cancel = snap.cancel_token.clone();
 
@@ -388,114 +389,77 @@ pub(crate) async fn create_llm_stream(
     Ok(stream)
 }
 
+fn tools_for_request(snap: &AgentRunSnapshot, final_only: bool) -> Option<Vec<ToolDefinition>> {
+    if !snap.config.enable_tool || final_only {
+        return None;
+    }
+    let tools = snap.tools.tools_for_llm();
+    (!tools.is_empty()).then_some(tools)
+}
+
+pub(crate) fn cache_fingerprint(
+    messages: &[Message],
+    tools: Option<&[ToolDefinition]>,
+) -> echo_core::llm::cache::PromptCacheFingerprint {
+    let layout =
+        echo_core::llm::cache::PromptCacheLayout::from_messages(messages, tools.unwrap_or(&[]));
+    echo_core::llm::cache::prompt_cache_fingerprint(
+        layout.system,
+        layout.canonical,
+        layout.tools,
+        layout.history,
+    )
+}
+
 fn log_prompt_cache_shape(messages: &[Message], tools: Option<&[ToolDefinition]>) {
-    let shape = PromptCacheShape::from_messages(messages, tools);
+    let fingerprint = cache_fingerprint(messages, tools);
+    let leading_system_messages = messages
+        .iter()
+        .take_while(|message| matches!(message.role, Role::System))
+        .count();
+    let cwd_system_messages = messages
+        .iter()
+        .filter(|message| {
+            matches!(message.role, Role::System)
+                && message
+                    .text_content()
+                    .is_some_and(|text| text.contains("Current working directory:"))
+        })
+        .count();
+    let memory_system_messages = messages
+        .iter()
+        .filter(|message| {
+            matches!(message.role, Role::System)
+                && message
+                    .text_content()
+                    .is_some_and(|text| text.contains("[memory_context]"))
+        })
+        .count();
     tracing::debug!(
         target: "echo_agent::prompt_cache",
-        prefix_hash = %shape.prefix_hash,
-        message_count = shape.message_count,
-        leading_system_messages = shape.leading_system_messages,
-        cwd_system_messages = shape.cwd_system_messages,
-        memory_system_messages = shape.memory_system_messages,
-        tool_count = shape.tool_count,
+        prefix_hash = %fingerprint.stable_prefix_hash,
+        system_prefix_hash = %fingerprint.system_prefix_hash,
+        tools_schema_hash = %fingerprint.tools_schema_hash,
+        message_count = messages.len(),
+        leading_system_messages,
+        cwd_system_messages,
+        memory_system_messages,
+        tool_count = fingerprint.tool_count,
         "LLM prompt cache shape"
     );
-    if shape.cwd_system_messages > 1 {
+    if cwd_system_messages > 1 {
         tracing::warn!(
             target: "echo_agent::prompt_cache",
-            cwd_system_messages = shape.cwd_system_messages,
+            cwd_system_messages,
             "Multiple cwd system messages found; prompt-cache prefix is likely unstable"
         );
     }
-    if shape.memory_system_messages > 0 {
+    if memory_system_messages > 0 {
         tracing::warn!(
             target: "echo_agent::prompt_cache",
-            memory_system_messages = shape.memory_system_messages,
+            memory_system_messages,
             "Dynamic memory context is present as a system message; prompt-cache prefix is likely unstable"
         );
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromptCacheShape {
-    prefix_hash: String,
-    message_count: usize,
-    leading_system_messages: usize,
-    cwd_system_messages: usize,
-    memory_system_messages: usize,
-    tool_count: usize,
-}
-
-impl PromptCacheShape {
-    fn from_messages(messages: &[Message], tools: Option<&[ToolDefinition]>) -> Self {
-        let leading_system_messages = messages
-            .iter()
-            .take_while(|message| matches!(message.role, Role::System))
-            .count();
-        let cwd_system_messages = messages
-            .iter()
-            .filter(|message| {
-                matches!(message.role, Role::System)
-                    && message
-                        .text_content()
-                        .is_some_and(|text| text.contains("Current working directory:"))
-            })
-            .count();
-        let memory_system_messages = messages
-            .iter()
-            .filter(|message| {
-                matches!(message.role, Role::System)
-                    && message
-                        .text_content()
-                        .is_some_and(|text| text.contains("[memory_context]"))
-            })
-            .count();
-        let tool_count = tools.map(|defs| defs.len()).unwrap_or(0);
-        let mut hasher = StableFnv64::new();
-        for message in messages.iter().take(leading_system_messages) {
-            hasher.write_str(message.role.as_str());
-            if let Some(text) = message.text_content() {
-                hasher.write_str(&text);
-            }
-        }
-        if let Some(defs) = tools
-            && let Ok(serialized) = serde_json::to_string(defs)
-        {
-            hasher.write_str(&serialized);
-        }
-        Self {
-            prefix_hash: format!("{:016x}", hasher.finish()),
-            message_count: messages.len(),
-            leading_system_messages,
-            cwd_system_messages,
-            memory_system_messages,
-            tool_count,
-        }
-    }
-}
-
-struct StableFnv64(u64);
-
-impl StableFnv64 {
-    fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn write_str(&mut self, value: &str) {
-        self.write(value.as_bytes());
-    }
-}
-
-impl Hasher for StableFnv64 {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
     }
 }
 
@@ -504,7 +468,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_cache_shape_hash_ignores_non_prefix_user_turns() {
+    fn prompt_cache_fingerprint_isolates_stable_system_from_history() {
         let first = vec![
             Message::system("stable system".to_string()),
             Message::user("first request".to_string()),
@@ -514,25 +478,34 @@ mod tests {
             Message::user("second request".to_string()),
         ];
 
-        let first_shape = PromptCacheShape::from_messages(&first, None);
-        let second_shape = PromptCacheShape::from_messages(&second, None);
+        let first_shape = cache_fingerprint(&first, None);
+        let second_shape = cache_fingerprint(&second, None);
 
-        assert_eq!(first_shape.prefix_hash, second_shape.prefix_hash);
-        assert_eq!(first_shape.leading_system_messages, 1);
-        assert_eq!(second_shape.leading_system_messages, 1);
+        assert_eq!(
+            first_shape.system_prefix_hash,
+            second_shape.system_prefix_hash
+        );
+        assert_ne!(
+            first_shape.stable_prefix_hash,
+            second_shape.stable_prefix_hash
+        );
     }
 
     #[test]
-    fn prompt_cache_shape_counts_duplicate_cwd_system_messages() {
-        let messages = vec![
+    fn duplicate_system_messages_change_system_component_hash() {
+        let duplicate = vec![
             Message::system("Current working directory: /tmp/a".to_string()),
             Message::system("Current working directory: /tmp/a".to_string()),
             Message::user("hello".to_string()),
         ];
+        let single = vec![
+            Message::system("Current working directory: /tmp/a".to_string()),
+            Message::user("hello".to_string()),
+        ];
 
-        let shape = PromptCacheShape::from_messages(&messages, None);
+        let duplicate = cache_fingerprint(&duplicate, None);
+        let single = cache_fingerprint(&single, None);
 
-        assert_eq!(shape.leading_system_messages, 2);
-        assert_eq!(shape.cwd_system_messages, 2);
+        assert_ne!(duplicate.system_prefix_hash, single.system_prefix_hash);
     }
 }

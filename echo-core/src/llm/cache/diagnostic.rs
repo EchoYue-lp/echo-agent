@@ -1,5 +1,21 @@
 use crate::llm::types::{Message, ToolDefinition};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Cache-relevant request fingerprints recorded with one model call.
+///
+/// `stable_prefix_hash` covers the full provider-cacheable prefix, including
+/// conversation history. Component hashes isolate changes in the stable
+/// system/canonical prefix and tool schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheFingerprint {
+    pub stable_prefix_hash: String,
+    pub system_prefix_hash: String,
+    pub tools_schema_hash: String,
+    pub history_hash: String,
+    pub stable_prefix_message_count: usize,
+    pub tool_count: usize,
+}
 
 /// 计算稳定前缀的 SHA-256 哈希（canonical 序列化），用于日志观测缓存失效。
 ///
@@ -31,8 +47,58 @@ pub fn stable_prefix_hash(
 
     let result = hasher.finalize();
     // 16 位 hex 前缀足够诊断用，日志可读
-    let hex: String = result[..8].iter().map(|b| format!("{:02x}", b)).collect();
-    hex
+    result
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Build canonical component fingerprints for cache diagnostics.
+pub fn prompt_cache_fingerprint(
+    system: &[Message],
+    canonical: &[Message],
+    tools: &[ToolDefinition],
+    history: &[Message],
+) -> PromptCacheFingerprint {
+    let mut stable_prefix = Sha256::new();
+    let mut system_prefix = Sha256::new();
+    let mut tools_schema = Sha256::new();
+    let mut history_hash = Sha256::new();
+
+    for message in system.iter().chain(canonical.iter()) {
+        hash_message(&mut stable_prefix, message);
+        hash_message(&mut system_prefix, message);
+    }
+    for tool in tools {
+        hash_tool(&mut stable_prefix, tool);
+        hash_tool(&mut tools_schema, tool);
+    }
+    for message in history {
+        hash_message(&mut stable_prefix, message);
+        hash_message(&mut history_hash, message);
+    }
+
+    PromptCacheFingerprint {
+        stable_prefix_hash: finish_hash(stable_prefix),
+        system_prefix_hash: finish_hash(system_prefix),
+        tools_schema_hash: finish_hash(tools_schema),
+        history_hash: finish_hash(history_hash),
+        stable_prefix_message_count: system
+            .len()
+            .saturating_add(canonical.len())
+            .saturating_add(history.len()),
+        tool_count: tools.len(),
+    }
+}
+
+fn finish_hash(hasher: Sha256) -> String {
+    let result = hasher.finalize();
+    result
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn hash_message(hasher: &mut Sha256, m: &Message) {
@@ -87,6 +153,26 @@ mod tests {
         );
         // history 增长导致 hash 变化（符合预期：新消息进入前缀）
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn component_hashes_isolate_history_changes() {
+        let system = &[Message::system("stable".to_string())];
+        let first = prompt_cache_fingerprint(system, &[], &[], &[Message::user("one".to_string())]);
+        let second = prompt_cache_fingerprint(
+            system,
+            &[],
+            &[],
+            &[
+                Message::user("one".to_string()),
+                Message::user("two".to_string()),
+            ],
+        );
+
+        assert_eq!(first.system_prefix_hash, second.system_prefix_hash);
+        assert_eq!(first.tools_schema_hash, second.tools_schema_hash);
+        assert_ne!(first.history_hash, second.history_hash);
+        assert_ne!(first.stable_prefix_hash, second.stable_prefix_hash);
     }
 
     #[test]

@@ -43,12 +43,12 @@ impl ReactAgent {
         let text = init.text.clone();
         let message = init.message.clone();
         let label = init.label.clone();
-        let mut invocation = init.invocation;
+        let invocation = init.invocation;
         // Capture value-carried run metadata before the execution mutex wait.
         // Concurrent callers may update/clear the agent's shared external
         // context while this invocation is queued, but this snapshot belongs
         // to the invocation that entered here.
-        let mut legacy_runtime = if invocation.is_none() {
+        let legacy_runtime = if invocation.is_none() {
             Some((
                 self.current_run_id
                     .lock()
@@ -76,34 +76,37 @@ impl ReactAgent {
         // entire stream lifetime.
         let execution_guard = self.execution_mutex.clone().lock_owned().await;
 
-        // Start trace run BEFORE prepare. Value-scoped invocations never write
-        // the agent-wide current_run_id; legacy calls retain the old behavior.
-        if let Some(invocation) = invocation.as_mut() {
-            if invocation.runtime.is_none()
-                && let Some(run_id) = self.start_scoped_trace_run(&text).await
-            {
-                invocation.runtime = Some(echo_core::tools::ExternalRunContext {
-                    conversation_id: self.config.conversation_id.clone(),
-                    run_id: Some(run_id),
-                    turn_id: None,
-                    execution_id: None,
-                    message_id: None,
-                    cancel: None,
-                    trace_sink: None,
-                    delegation_policy: None,
-                });
-            }
+        // Start a unique trace invocation BEFORE prepare. Product run identity
+        // remains in ExternalRunContext and is only used as correlation.
+        let trace_run_id;
+        if let Some(invocation) = invocation.as_ref() {
+            let parent_run_id = invocation
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.run_id.clone());
+            let conversation_id = invocation
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.conversation_id.clone());
+            let trace_turn_id = invocation
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.turn_id.clone());
+            let execution_id = invocation
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.execution_id.clone());
+            trace_run_id = self
+                .start_scoped_trace_run(
+                    &text,
+                    parent_run_id.as_deref(),
+                    conversation_id.as_deref(),
+                    trace_turn_id.as_deref(),
+                    execution_id.as_deref(),
+                )
+                .await;
         } else {
-            self.start_trace_run(&text).await;
-            if let Some((current_run_id, ..)) = legacy_runtime.as_mut()
-                && current_run_id.is_none()
-            {
-                *current_run_id = self
-                    .current_run_id
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
-            }
+            trace_run_id = self.start_trace_run(&text).await;
         }
         let turn_id = invocation
             .as_ref()
@@ -156,6 +159,13 @@ impl ReactAgent {
                         "Request blocked by safety guard: {reason}"
                     ))))
                     .await;
+                self.finalize_scoped_trace_run(
+                    trace_run_id.as_deref(),
+                    crate::trace::RunStatus::Failed,
+                    None,
+                    Some(reason),
+                )
+                .await;
                 // Drop the owned guard to release the execution mutex — the
                 // spawned task normally owns it, but we short-circuited.
                 drop(execution_guard);
@@ -196,13 +206,29 @@ impl ReactAgent {
                         snap.external_trace_sink = external_trace_sink.clone();
                         snap.external_delegation_policy = *external_delegation_policy;
                     }
+                    snap.trace_run_id = trace_run_id.clone();
                     // DirectAnswer uses trimmed [system, user] messages and does
                     // not consume the recalled context, so the recall count is
                     // informational only.
                     let _ = recalled;
-                    let content = snap
+                    let content = match snap
                         .direct_answer_stream(&self.config.system_prompt, &text, &tx)
-                        .await?;
+                        .await
+                    {
+                        Ok(content) => content,
+                        Err(error) => {
+                            let error_text = error.to_string();
+                            snap.finalize_run(
+                                crate::trace::RunStatus::Failed,
+                                None,
+                                Some(error_text.as_str()),
+                            )
+                            .await;
+                            return Err(error);
+                        }
+                    };
+                    snap.finalize_run(crate::trace::RunStatus::Completed, Some(&content), None)
+                        .await;
                     // Push assistant message so the agent remembers this turn.
                     self.memory
                         .context
@@ -265,6 +291,7 @@ impl ReactAgent {
             snap.external_trace_sink = external_trace_sink.clone();
             snap.external_delegation_policy = *external_delegation_policy;
         }
+        snap.trace_run_id = trace_run_id;
         active_turn_lease.set_steerable(true);
 
         tokio::spawn(async move {
@@ -422,6 +449,12 @@ impl AgentSnapshot {
             estimated_context_tokens,
             protected_context_tokens: 0,
             protected_message_count: 0,
+            context_limit_tokens: self.config.token_limit,
+            context_breakdown: crate::trace::LlmContextBreakdown::estimate(
+                &messages,
+                self.calibrated_tokenizer.as_ref(),
+            ),
+            cache_fingerprint: super::phases::think::cache_fingerprint(&messages, None),
             duration_ms: u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
         .await;
@@ -1124,8 +1157,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn value_scoped_direct_answer_records_usage_in_supplied_run() -> Result<()> {
-        use crate::trace::{Run, RunStatus, RunStore, RunTimings, TokenUsage};
+    async fn value_scoped_direct_answer_records_usage_in_child_trace() -> Result<()> {
+        use crate::trace::RunStore;
 
         let usage = crate::llm::types::Usage {
             prompt_tokens: Some(500),
@@ -1133,6 +1166,7 @@ mod tests {
             total_tokens: Some(540),
             prompt_tokens_details: Some(crate::llm::types::TokenUsageDetails {
                 cached_tokens: Some(400),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -1148,22 +1182,6 @@ mod tests {
             .system_prompt("You are a test assistant.")
             .build()?;
         let store = Arc::new(crate::trace::InMemoryRunStore::new());
-        store
-            .save(Run {
-                run_id: "value-direct-run".into(),
-                parent_run_id: None,
-                session_id: "session".into(),
-                status: RunStatus::Running,
-                input: "run".into(),
-                events: Vec::new(),
-                final_output: None,
-                error: None,
-                token_usage: TokenUsage::default(),
-                timings: RunTimings::default(),
-                started_at: chrono::Utc::now(),
-                finished_at: None,
-            })
-            .await?;
         agent.set_run_store(store.clone());
         let invocation = echo_core::agent::AgentInvocationContext {
             runtime: Some(echo_core::tools::ExternalRunContext {
@@ -1190,10 +1208,18 @@ mod tests {
             )
             .await?;
         let _: Vec<_> = stream.collect().await;
-        let run = store
-            .load("value-direct-run")
+        let child = store
+            .list_by_parent_run("value-direct-run")
             .await?
-            .ok_or_else(|| crate::error::ReactError::Other("supplied run missing".into()))?;
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::error::ReactError::Other("child trace missing".into()))?;
+        assert_ne!(child.run_id, "value-direct-run");
+        assert_eq!(child.parent_run_id.as_deref(), Some("value-direct-run"));
+        let run = store
+            .load(&child.run_id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("child trace run missing".into()))?;
         assert!(run.events.iter().any(|event| matches!(
             event,
             crate::trace::RunEvent::LlmCall {
@@ -1531,6 +1557,7 @@ mod tests {
             total_tokens: Some(1080),
             prompt_tokens_details: Some(crate::llm::types::TokenUsageDetails {
                 cached_tokens: Some(750),
+                ..Default::default()
             }),
             ..Default::default()
         };

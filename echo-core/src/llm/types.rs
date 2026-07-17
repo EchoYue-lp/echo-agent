@@ -737,7 +737,16 @@ impl Usage {
 
     /// Provider-normalized prompt tokens written into cache.
     pub fn cache_creation_prompt_tokens(&self) -> u32 {
-        self.cache_creation_input_tokens.unwrap_or(0)
+        self.prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cache_write_tokens)
+            .or_else(|| {
+                self.input_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.cache_write_tokens)
+            })
+            .or(self.cache_creation_input_tokens)
+            .unwrap_or(0)
     }
 
     /// Prompt cache hit rate in [0.0, 1.0].
@@ -768,6 +777,9 @@ pub struct TokenUsageDetails {
     /// Tokens served from provider-side prompt cache.
     #[serde(default)]
     pub cached_tokens: Option<u32>,
+    /// Tokens written into provider-side prompt cache.
+    #[serde(default)]
+    pub cache_write_tokens: Option<u32>,
 }
 
 // ── Streaming Response Types ───────────────────────────────────────────────────
@@ -1084,6 +1096,22 @@ mod tests {
 
         assert_eq!(usage.cached_prompt_tokens(), 980);
         assert_eq!(usage.cache_creation_prompt_tokens(), 0);
+    }
+
+    #[test]
+    fn usage_reads_openai_cache_write_tokens() -> Result<(), serde_json::Error> {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 1200,
+            "completion_tokens": 40,
+            "prompt_tokens_details": {
+                "cached_tokens": 800,
+                "cache_write_tokens": 200
+            }
+        }))?;
+
+        assert_eq!(usage.cached_prompt_tokens(), 800);
+        assert_eq!(usage.cache_creation_prompt_tokens(), 200);
+        Ok(())
     }
 
     #[test]

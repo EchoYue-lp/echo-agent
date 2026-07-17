@@ -63,6 +63,23 @@ pub(crate) async fn run_compact(
     );
 
     if let Some(ref stats) = prepare_result.compressed {
+        let (protected_message_count, protected_context_tokens) = {
+            let context = context.lock().await;
+            (
+                context.protected_message_count(),
+                context.protected_token_estimate(),
+            )
+        };
+        snap.record_event(crate::trace::RunEvent::ContextCompression {
+            source: "auto".to_string(),
+            before_messages: stats.before_count,
+            after_messages: stats.after_count,
+            before_tokens: stats.before_tokens,
+            after_tokens: stats.after_tokens,
+            protected_context_tokens,
+            protected_message_count,
+        })
+        .await;
         yield_event_or!(
             tx,
             AgentEvent::ContextCompressed {
@@ -106,8 +123,12 @@ mod tests {
     use crate::agent::ReactAgent;
     use crate::agent::config::AgentConfig;
     use crate::agent::snapshot::AgentRunSnapshot;
-    use crate::compression::{ContextProjection, PreModelContextProjector, ProjectionContext};
+    use crate::compression::{
+        ContextProjection, PreModelContextProjector, ProjectionContext,
+        compressor::SlidingWindowCompressor,
+    };
     use crate::llm::types::{Message, Role};
+    use crate::trace::RunStore;
     use futures::future::BoxFuture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -210,6 +231,43 @@ mod tests {
             .await
             .expect("run_compact must succeed for non-zero iteration");
         assert!(matches!(outcome, CompactOutcome::Continue(_)));
+    }
+
+    #[tokio::test]
+    async fn run_compact_records_auto_compression_in_durable_trace() -> Result<()> {
+        let mut config = AgentConfig::new("test-model", "agent", "sys");
+        config.token_limit = 4;
+        let mut agent = ReactAgent::new(config);
+        agent.set_compressor(SlidingWindowCompressor::new(1)).await;
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        agent.set_run_store(store.clone());
+        let trace_run_id = agent
+            .start_trace_run("compress")
+            .await
+            .ok_or_else(|| crate::error::ReactError::Other("trace run missing".to_string()))?;
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.push(Message::user(
+                "first message with enough text to cross the tiny budget".to_string(),
+            ));
+            context.push(Message::assistant(
+                "second message with enough text to force compression".to_string(),
+            ));
+        }
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+
+        let outcome = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
+        assert!(matches!(outcome, CompactOutcome::Continue(_)));
+        let run = store
+            .load(&trace_run_id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("trace data missing".to_string()))?;
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            crate::trace::RunEvent::ContextCompression { source, .. } if source == "auto"
+        )));
+        Ok(())
     }
 
     #[tokio::test]
