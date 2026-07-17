@@ -287,13 +287,14 @@ mod tests {
         let result = SubagentResult {
             agent_name: "w".into(),
             output: "done".into(),
-            summary: String::new(),
-            artifacts: Vec::new(),
+            outcome: crate::agent::subagent::types::SubagentOutcome {
+                status: crate::agent::subagent::types::SubagentStatus::Completed,
+                ..crate::agent::subagent::types::SubagentOutcome::default()
+            },
             duration: std::time::Duration::from_millis(100),
             iterations: 1,
             tokens_used: None,
             was_truncated: false,
-            cancelled: false,
             mode: crate::agent::subagent::types::ExecutionMode::Teammate,
             isolation_observed: crate::agent::subagent::types::ObservedIsolation::Worker,
             usage: None,

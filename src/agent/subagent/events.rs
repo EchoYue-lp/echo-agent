@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
 
-use super::types::{ExecutionMode, ObservedIsolation};
+use super::types::{ExecutionMode, ObservedIsolation, SubagentOutcome, SubagentStatus};
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 128;
 
@@ -71,6 +71,8 @@ pub enum SubagentEvent {
         iterations: Option<u64>,
         /// Final output text produced by the subagent.
         output: String,
+        /// Structured terminal result consumed by the parent/application.
+        result: SubagentOutcome,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).
@@ -84,6 +86,10 @@ pub enum SubagentEvent {
         agent: String,
         /// Error message describing the failure.
         error: String,
+        /// Failed or timed-out terminal status.
+        status: SubagentStatus,
+        /// Structured terminal result, including remaining work.
+        result: SubagentOutcome,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).
@@ -95,6 +101,8 @@ pub enum SubagentEvent {
         parent: String,
         /// Name of the subagent whose dispatch was cancelled.
         agent: String,
+        /// Structured cancelled result.
+        result: SubagentOutcome,
         /// Stable execution id (see [`Self::DispatchStarted::execution_id`]).
         execution_id: Option<String>,
         /// Parent run id (see [`Self::DispatchStarted::run_id`]).

@@ -1,6 +1,10 @@
 //! Subagent core types — definitions, execution modes, and results
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -236,8 +240,162 @@ impl SubagentDefinition {
 
 // ── Subagent Result ───────────────────────────────────────────────────────────
 
-/// Default char budget for parent-facing summary when no `## Summary` heading.
+/// Default char budget for parent-facing summary when no structured result exists.
 const DEFAULT_SUMMARY_CHARS: usize = 1200;
+const SUBAGENT_RESULT_CONTRACT_VERSION: u32 = 1;
+const MAX_RESULT_ITEMS: usize = 64;
+const MAX_DETAIL_CHARS: usize = 500;
+const MAX_PATH_CHARS: usize = 2048;
+const MAX_KIND_CHARS: usize = 80;
+
+/// Runtime-owned terminal status for one subagent dispatch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    Completed,
+    #[default]
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl SubagentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// Availability and integrity facts for one artifact returned by a subagent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentArtifact {
+    pub path: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub producer_execution_id: Option<String>,
+    #[serde(default)]
+    pub available: bool,
+}
+
+/// Result of one verification command or check.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentVerificationStatus {
+    Passed,
+    Failed,
+    #[default]
+    NotRun,
+}
+
+/// Whether verification evidence came from observed tool execution or worker output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentVerificationSource {
+    Observed,
+    #[default]
+    Reported,
+}
+
+/// Structured evidence for one verification check.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentVerification {
+    pub check: String,
+    pub status: SubagentVerificationStatus,
+    #[serde(default)]
+    pub details: String,
+    #[serde(default)]
+    pub source: SubagentVerificationSource,
+}
+
+/// Files the subagent reports or the runtime observes reading and writing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentTouchedFiles {
+    #[serde(default)]
+    pub read: Vec<String>,
+    #[serde(default)]
+    pub written: Vec<String>,
+}
+
+/// Parent-facing, serializable result contract for a subagent dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentOutcome {
+    /// `1` for the explicit JSON contract; `0` for a legacy text fallback.
+    pub contract_version: u32,
+    /// Runtime-owned terminal status. Model-provided status is always ignored.
+    pub status: SubagentStatus,
+    pub summary: String,
+    #[serde(default)]
+    pub artifacts: Vec<SubagentArtifact>,
+    #[serde(default)]
+    pub verification: Vec<SubagentVerification>,
+    #[serde(default)]
+    pub remaining_work: Vec<String>,
+    #[serde(default)]
+    pub touched_files: SubagentTouchedFiles,
+}
+
+impl Default for SubagentOutcome {
+    fn default() -> Self {
+        Self {
+            contract_version: 0,
+            status: SubagentStatus::Failed,
+            summary: String::new(),
+            artifacts: Vec::new(),
+            verification: Vec::new(),
+            remaining_work: Vec::new(),
+            touched_files: SubagentTouchedFiles::default(),
+        }
+    }
+}
+
+impl SubagentOutcome {
+    pub fn terminal(
+        status: SubagentStatus,
+        summary: impl Into<String>,
+        remaining_work: Vec<String>,
+    ) -> Self {
+        Self {
+            contract_version: SUBAGENT_RESULT_CONTRACT_VERSION,
+            status,
+            summary: summary.into(),
+            artifacts: Vec::new(),
+            verification: Vec::new(),
+            remaining_work,
+            touched_files: SubagentTouchedFiles::default(),
+        }
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.status == SubagentStatus::Completed
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ReportedSubagentOutcome {
+    #[serde(default)]
+    contract_version: u32,
+    #[allow(dead_code)]
+    #[serde(default)]
+    status: Option<SubagentStatus>,
+    summary: String,
+    #[serde(default)]
+    artifacts: Vec<SubagentArtifact>,
+    #[serde(default)]
+    verification: Vec<SubagentVerification>,
+    #[serde(default)]
+    remaining_work: Vec<String>,
+    #[serde(default)]
+    touched_files: SubagentTouchedFiles,
+}
 
 /// Split raw subagent output into a parent-facing summary and artifact paths.
 ///
@@ -272,6 +430,206 @@ pub fn split_subagent_output(raw: &str) -> (String, Vec<String>) {
     (summary, artifacts)
 }
 
+/// Parse the explicit `## Result` JSON contract, falling back to a bounded summary.
+///
+/// The caller supplies the terminal status. A model cannot turn a failed, cancelled,
+/// or timed-out execution into `completed` by returning a different JSON value.
+pub fn parse_subagent_outcome(
+    raw: &str,
+    status: SubagentStatus,
+    execution_id: Option<&str>,
+    working_dir: Option<&Path>,
+) -> SubagentOutcome {
+    let reported = extract_markdown_section(raw, "Result")
+        .and_then(extract_fenced_json)
+        .and_then(|json| serde_json::from_str::<ReportedSubagentOutcome>(json).ok())
+        .filter(|result| result.contract_version == SUBAGENT_RESULT_CONTRACT_VERSION);
+
+    let mut outcome = if let Some(reported) = reported {
+        SubagentOutcome {
+            contract_version: SUBAGENT_RESULT_CONTRACT_VERSION,
+            status,
+            summary: reported
+                .summary
+                .trim()
+                .chars()
+                .take(DEFAULT_SUMMARY_CHARS)
+                .collect(),
+            artifacts: reported.artifacts,
+            verification: reported
+                .verification
+                .into_iter()
+                .map(|mut verification| {
+                    // Only runtime-observed tool events may create observed evidence.
+                    verification.source = SubagentVerificationSource::Reported;
+                    verification
+                })
+                .collect(),
+            remaining_work: bounded_unique(
+                reported.remaining_work,
+                MAX_RESULT_ITEMS,
+                MAX_DETAIL_CHARS,
+            ),
+            touched_files: SubagentTouchedFiles {
+                read: bounded_unique(
+                    reported.touched_files.read,
+                    MAX_RESULT_ITEMS,
+                    MAX_PATH_CHARS,
+                ),
+                written: bounded_unique(
+                    reported.touched_files.written,
+                    MAX_RESULT_ITEMS,
+                    MAX_PATH_CHARS,
+                ),
+            },
+        }
+    } else {
+        let (summary, artifact_paths) = split_subagent_output(raw);
+        SubagentOutcome {
+            contract_version: 0,
+            status,
+            summary,
+            artifacts: artifact_paths
+                .into_iter()
+                .map(|path| SubagentArtifact {
+                    path,
+                    kind: String::new(),
+                    bytes: None,
+                    sha256: None,
+                    producer_execution_id: execution_id.map(str::to_string),
+                    available: false,
+                })
+                .collect(),
+            verification: Vec::new(),
+            remaining_work: Vec::new(),
+            touched_files: SubagentTouchedFiles::default(),
+        }
+    };
+
+    normalize_outcome(&mut outcome);
+    hydrate_artifacts(&mut outcome.artifacts, execution_id, working_dir);
+    normalize_outcome(&mut outcome);
+    outcome
+}
+
+fn extract_fenced_json(section: &str) -> Option<&str> {
+    let marker = "```json";
+    let start = section.find(marker)?.saturating_add(marker.len());
+    let after = section.get(start..)?;
+    let end = after.find("```")?;
+    after.get(..end).map(str::trim)
+}
+
+fn bounded_unique(values: Vec<String>, max_items: usize, max_chars: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .map(|value| bounded_text(value.trim(), max_chars))
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .take(max_items)
+        .collect()
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn keep_latest<T>(values: &mut Vec<T>, max_items: usize) {
+    let excess = values.len().saturating_sub(max_items);
+    if excess > 0 {
+        values.drain(..excess);
+    }
+}
+
+pub(crate) fn normalize_outcome(outcome: &mut SubagentOutcome) {
+    outcome.summary = bounded_text(outcome.summary.trim(), DEFAULT_SUMMARY_CHARS);
+    keep_latest(&mut outcome.artifacts, MAX_RESULT_ITEMS);
+    for artifact in &mut outcome.artifacts {
+        artifact.path = bounded_text(artifact.path.trim(), MAX_PATH_CHARS);
+        artifact.kind = bounded_text(artifact.kind.trim(), MAX_KIND_CHARS);
+    }
+    outcome
+        .artifacts
+        .retain(|artifact| !artifact.path.is_empty());
+
+    keep_latest(&mut outcome.verification, MAX_RESULT_ITEMS);
+    for verification in &mut outcome.verification {
+        verification.check = bounded_text(verification.check.trim(), MAX_DETAIL_CHARS);
+        verification.details = bounded_text(verification.details.trim(), MAX_DETAIL_CHARS);
+    }
+    outcome
+        .verification
+        .retain(|verification| !verification.check.is_empty());
+
+    outcome.remaining_work = bounded_unique(
+        std::mem::take(&mut outcome.remaining_work),
+        MAX_RESULT_ITEMS,
+        MAX_DETAIL_CHARS,
+    );
+    outcome.touched_files.read = bounded_unique(
+        std::mem::take(&mut outcome.touched_files.read),
+        MAX_RESULT_ITEMS,
+        MAX_PATH_CHARS,
+    );
+    outcome.touched_files.written = bounded_unique(
+        std::mem::take(&mut outcome.touched_files.written),
+        MAX_RESULT_ITEMS,
+        MAX_PATH_CHARS,
+    );
+}
+
+fn hydrate_artifacts(
+    artifacts: &mut [SubagentArtifact],
+    execution_id: Option<&str>,
+    working_dir: Option<&Path>,
+) {
+    for artifact in artifacts {
+        artifact.producer_execution_id = execution_id.map(str::to_string);
+        let raw_path = PathBuf::from(&artifact.path);
+        let resolved = if raw_path.is_absolute() {
+            raw_path
+        } else if let Some(root) = working_dir {
+            root.join(raw_path)
+        } else {
+            raw_path
+        };
+        let Ok(metadata) = resolved.metadata() else {
+            artifact.available = false;
+            artifact.bytes = None;
+            artifact.sha256 = None;
+            continue;
+        };
+        if !metadata.is_file() {
+            artifact.available = false;
+            artifact.bytes = None;
+            artifact.sha256 = None;
+            continue;
+        }
+        artifact.path = resolved.to_string_lossy().to_string();
+        artifact.bytes = Some(metadata.len());
+        artifact.sha256 = hash_file(&resolved);
+        artifact.available = artifact.sha256.is_some();
+    }
+}
+
+fn hash_file(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        if let Some(chunk) = buffer.get(..read) {
+            hasher.update(chunk);
+        } else {
+            return None;
+        }
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 fn extract_markdown_section<'a>(raw: &'a str, heading: &str) -> Option<&'a str> {
     let needle = format!("## {heading}");
     let start = raw.find(&needle)?;
@@ -292,10 +650,8 @@ pub struct SubagentResult {
     pub agent_name: String,
     /// Final output text (full detail for UI / storage).
     pub output: String,
-    /// Concise summary for the parent LLM. Filled by [`Self::with_structured`].
-    pub summary: String,
-    /// Artifact paths extracted from `## Artifacts` (may be empty).
-    pub artifacts: Vec<String>,
+    /// Runtime-owned structured terminal outcome.
+    pub outcome: SubagentOutcome,
     /// Execution duration.
     pub duration: Duration,
     /// Number of iterations used.
@@ -304,12 +660,6 @@ pub struct SubagentResult {
     pub tokens_used: Option<usize>,
     /// Whether the output was truncated due to token limits.
     pub was_truncated: bool,
-    /// Whether execution ended because its cancellation token fired.
-    ///
-    /// Cancellation is a terminal fact, not a successful textual result. The
-    /// output remains populated for diagnostics, while callers use this flag
-    /// to avoid marking the parent task completed.
-    pub cancelled: bool,
     /// Execution mode that was used.
     pub mode: ExecutionMode,
     /// Isolation boundary actually established before model execution.
@@ -331,18 +681,19 @@ impl SubagentResult {
         Self {
             agent_name: agent_name.to_string(),
             output,
-            summary: String::new(),
-            artifacts: Vec::new(),
+            outcome: SubagentOutcome {
+                status: SubagentStatus::Completed,
+                ..SubagentOutcome::default()
+            },
             duration,
             iterations: 1,
             tokens_used: None,
             was_truncated: false,
-            cancelled: false,
             mode: ExecutionMode::Sync,
             isolation_observed: ObservedIsolation::Unknown,
             usage: None,
         }
-        .with_structured()
+        .with_structured(None, None)
     }
 
     /// Create a result for a forked (non-blocking) subagent execution.
@@ -361,26 +712,54 @@ impl SubagentResult {
         Self {
             agent_name: agent_name.to_string(),
             output,
-            summary: String::new(),
-            artifacts: Vec::new(),
+            outcome: SubagentOutcome {
+                status: SubagentStatus::Completed,
+                ..SubagentOutcome::default()
+            },
             duration,
             iterations,
             tokens_used: None,
             was_truncated: false,
-            cancelled: false,
             mode: ExecutionMode::Fork,
             isolation_observed: ObservedIsolation::Unknown,
             usage: None,
         }
-        .with_structured()
+        .with_structured(None, None)
     }
 
-    /// Fill [`Self::summary`] / [`Self::artifacts`] from [`Self::output`].
-    pub fn with_structured(mut self) -> Self {
-        let (summary, artifacts) = split_subagent_output(&self.output);
-        self.summary = summary;
-        self.artifacts = artifacts;
+    /// Fill the structured outcome from the explicit result contract or fallback text.
+    pub fn with_structured(
+        mut self,
+        execution_id: Option<&str>,
+        working_dir: Option<&Path>,
+    ) -> Self {
+        let status = self.outcome.status;
+        self.outcome = parse_subagent_outcome(&self.output, status, execution_id, working_dir);
         self
+    }
+
+    pub fn cancelled(
+        agent_name: impl Into<String>,
+        output: impl Into<String>,
+        mode: ExecutionMode,
+    ) -> Self {
+        let output = output.into();
+        Self {
+            agent_name: agent_name.into(),
+            outcome: SubagentOutcome::terminal(
+                SubagentStatus::Cancelled,
+                output.clone(),
+                vec![output.clone()],
+            ),
+            output,
+            duration: Duration::ZERO,
+            iterations: 0,
+            tokens_used: None,
+            was_truncated: false,
+            mode,
+            isolation_observed: ObservedIsolation::Unknown,
+            usage: None,
+        }
     }
 }
 
@@ -480,5 +859,64 @@ mod tests {
         let result = SubagentResult::sync_result("a", "ok".into(), Duration::from_millis(100));
         assert_eq!(result.mode, ExecutionMode::Sync);
         assert_eq!(result.output, "ok");
+        assert_eq!(result.outcome.status, SubagentStatus::Completed);
+    }
+
+    #[test]
+    fn structured_result_ignores_model_status_and_hydrates_artifact() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_path = dir.path().join("report.txt");
+        std::fs::write(&artifact_path, "result").map_err(|error| error.to_string())?;
+        let raw = "## Result\n```json\n{\"contract_version\":1,\"status\":\"completed\",\"summary\":\"done\",\"artifacts\":[{\"path\":\"report.txt\",\"kind\":\"report\"}],\"verification\":[{\"check\":\"cargo test\",\"status\":\"passed\",\"source\":\"observed\"}],\"remaining_work\":[],\"touched_files\":{\"read\":[],\"written\":[\"report.txt\"]}}\n```";
+        let outcome = parse_subagent_outcome(
+            raw,
+            SubagentStatus::TimedOut,
+            Some("task-1:1"),
+            Some(dir.path()),
+        );
+        assert_eq!(outcome.status, SubagentStatus::TimedOut);
+        assert_eq!(outcome.contract_version, 1);
+        let artifact = outcome
+            .artifacts
+            .first()
+            .ok_or_else(|| "artifact missing".to_string())?;
+        assert!(artifact.available);
+        assert_eq!(artifact.sha256.as_deref().map(str::len), Some(64));
+        assert_eq!(artifact.producer_execution_id.as_deref(), Some("task-1:1"));
+        assert!(matches!(
+            outcome.verification.first(),
+            Some(SubagentVerification {
+                source: SubagentVerificationSource::Reported,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn structured_result_bounds_utf8_evidence() -> Result<(), String> {
+        let long = "中".repeat(600);
+        let remaining_work: Vec<String> = (0..70).map(|index| format!("{index}-{long}")).collect();
+        let payload = serde_json::json!({
+            "contract_version": 1,
+            "status": "completed",
+            "summary": long.repeat(3),
+            "artifacts": [],
+            "verification": [],
+            "remaining_work": remaining_work,
+            "touched_files": { "read": [], "written": [] }
+        });
+        let raw = format!("## Result\n```json\n{payload}\n```");
+        let outcome = parse_subagent_outcome(&raw, SubagentStatus::Completed, None, None);
+
+        assert_eq!(outcome.summary.chars().count(), DEFAULT_SUMMARY_CHARS);
+        assert_eq!(outcome.remaining_work.len(), MAX_RESULT_ITEMS);
+        assert!(
+            outcome
+                .remaining_work
+                .iter()
+                .all(|item| item.chars().count() <= MAX_DETAIL_CHARS)
+        );
+        Ok(())
     }
 }

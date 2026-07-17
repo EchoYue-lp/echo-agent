@@ -26,13 +26,15 @@ pub use context_builder::{ContextBuilder, SubagentOutput};
 pub use events::{SubagentEvent, SubagentEventBus};
 pub use executor::{
     BackgroundSubagentHandle, DispatchRequest, SubagentExecutor, SubagentExecutorConfig,
-    TeammateHandle,
+    TeammateHandle, merge_observed_evidence,
 };
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use registry::SubagentRegistry;
 pub use types::{
-    ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentDefinition, SubagentKind,
-    SubagentResult, split_subagent_output,
+    ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentArtifact, SubagentDefinition,
+    SubagentKind, SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,
+    SubagentVerification, SubagentVerificationSource, SubagentVerificationStatus,
+    parse_subagent_outcome, split_subagent_output,
 };
 pub use workspace::{
     DataWorkspaceFactory, DataWorkspaceHandle, NoWorkspaceFactory, SharedDataWorkspaceFactory,

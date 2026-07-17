@@ -1,6 +1,6 @@
-use crate::agent::subagent::ExecutionMode;
 use crate::agent::subagent::context::{ContextInheritance, SubagentContext};
 use crate::agent::subagent::executor::SubagentExecutor;
+use crate::agent::subagent::{ExecutionMode, SubagentOutcome};
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::agent::CancellationToken;
@@ -9,6 +9,12 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+fn serialize_parent_result(
+    outcome: &SubagentOutcome,
+) -> std::result::Result<String, serde_json::Error> {
+    serde_json::to_string(outcome)
+}
 
 /// Factory for lazily building parent context at dispatch time.
 ///
@@ -298,18 +304,20 @@ impl AgentDispatchTool {
                 match executor.dispatch(req).await {
                     Ok(result) => {
                         info!(target_agent = %agent_name, "Subagent completed successfully");
-                        let parent_facing = if result.summary.trim().is_empty() {
-                            result.output.clone()
-                        } else {
-                            result.summary.clone()
-                        };
                         debug!(
                             target_agent = %agent_name,
-                            summary = %parent_facing,
+                            summary = %result.outcome.summary,
                             output_chars = result.output.chars().count(),
                             "Subagent result"
                         );
-                        Ok(ToolResult::success(parent_facing))
+                        Ok(serialize_parent_result(&result.outcome)
+                            .map(ToolResult::success)
+                            .unwrap_or_else(|error| {
+                                ToolResult::error(format!(
+                                    "SubAgent '{}' result serialization failed: {}",
+                                    agent_name, error
+                                ))
+                            }))
                     }
                     Err(e) => {
                         warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
@@ -336,8 +344,9 @@ impl Tool for AgentDispatchTool {
          to start the SubAgent without blocking (returns started + execution_id; \
          completion arrives via events / chat note). For complex read-only \
          investigation, prefer multiple agent_tool calls in one turn so \
-         independent SubAgents run in parallel. Use only agent_name values listed \
-         in the schema."
+         independent SubAgents run in parallel. Synchronous completion returns a \
+         JSON result with status, summary, artifacts, verification, remaining_work, \
+         and touched_files. Use only agent_name values listed in the schema."
     }
 
     /// `agent_tool` dispatches a subagent that runs its own multi-step ReAct
@@ -420,6 +429,28 @@ impl Tool for AgentDispatchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronous_parent_result_preserves_structured_contract() -> Result<(), String> {
+        let outcome = SubagentOutcome {
+            contract_version: 1,
+            status: crate::agent::subagent::SubagentStatus::TimedOut,
+            summary: "partial result".to_string(),
+            artifacts: Vec::new(),
+            verification: Vec::new(),
+            remaining_work: vec!["finish verification".to_string()],
+            touched_files: crate::agent::subagent::SubagentTouchedFiles {
+                read: vec!["src/lib.rs".to_string()],
+                written: Vec::new(),
+            },
+        };
+        let serialized = serialize_parent_result(&outcome).map_err(|error| error.to_string())?;
+        let decoded: SubagentOutcome =
+            serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+
+        assert_eq!(decoded, outcome);
+        Ok(())
+    }
 
     #[test]
     fn default_dispatch_policy_starts_at_root() {

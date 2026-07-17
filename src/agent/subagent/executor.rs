@@ -7,6 +7,7 @@ use crate::error::{AgentError, ReactError, Result};
 use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
 use echo_core::llm::types::Message;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -16,7 +17,11 @@ use super::context::SubagentContext;
 use super::events::SubagentEvent;
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
 use super::registry::SubagentRegistry;
-use super::types::{ExecutionMode, ObservedIsolation, SubagentResult};
+use super::types::{
+    ExecutionMode, ObservedIsolation, SubagentArtifact, SubagentOutcome, SubagentResult,
+    SubagentStatus, SubagentTouchedFiles, SubagentVerification, SubagentVerificationSource,
+    SubagentVerificationStatus,
+};
 use crate::tasks::NestedDelegationPolicy;
 
 // ── Dispatch Request ──────────────────────────────────────────────────────────
@@ -80,6 +85,96 @@ impl DispatchRequest {
             max_delegate_depth: 3,
         }
     }
+}
+
+/// Map framework errors to the runtime-owned subagent terminal status.
+pub fn subagent_status_from_error(error: &ReactError) -> SubagentStatus {
+    match error {
+        ReactError::Agent(agent_error) => match agent_error.as_ref() {
+            AgentError::Timeout(_) => SubagentStatus::TimedOut,
+            AgentError::Interrupted | AgentError::Cancelled(_) => SubagentStatus::Cancelled,
+            _ => SubagentStatus::Failed,
+        },
+        _ => SubagentStatus::Failed,
+    }
+}
+
+fn verification_check_from_tool(name: &str, args: &serde_json::Value) -> Option<String> {
+    let normalized = name.to_ascii_lowercase().replace('-', "_");
+    if !matches!(
+        normalized.as_str(),
+        "shell" | "bash" | "terminal" | "run_code" | "execute_command"
+    ) {
+        return None;
+    }
+    ["command", "cmd", "code", "script"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn file_access_from_tool(name: &str, args: &serde_json::Value) -> Option<(bool, String)> {
+    let normalized = name.to_ascii_lowercase().replace('-', "_");
+    let write = normalized.contains("write")
+        || normalized.contains("edit")
+        || normalized.contains("delete")
+        || normalized.contains("patch");
+    let read = normalized.contains("read")
+        || normalized.contains("search")
+        || normalized.contains("glob")
+        || normalized.contains("grep");
+    if !write && !read {
+        return None;
+    }
+    ["path", "file_path", "target", "directory"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|path| (write, path.to_string()))
+}
+
+fn bounded_detail(text: &str) -> String {
+    text.chars().take(500).collect()
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+/// Merge runtime-observed evidence into a parsed result.
+///
+/// Observed checks replace older facts for the same exact check, while file
+/// access and artifacts are unioned under the shared result bounds.
+pub fn merge_observed_evidence(
+    outcome: &mut SubagentOutcome,
+    verification: Vec<SubagentVerification>,
+    touched_files: SubagentTouchedFiles,
+    artifacts: Vec<SubagentArtifact>,
+) {
+    for observed in verification {
+        outcome
+            .verification
+            .retain(|existing| existing.check != observed.check);
+        outcome.verification.push(observed);
+    }
+    for path in touched_files.read {
+        push_unique(&mut outcome.touched_files.read, path);
+    }
+    for path in touched_files.written {
+        push_unique(&mut outcome.touched_files.written, path);
+    }
+    for artifact in artifacts {
+        outcome
+            .artifacts
+            .retain(|existing| existing.path != artifact.path);
+        outcome.artifacts.push(artifact);
+    }
+    super::types::normalize_outcome(outcome);
 }
 
 // ── Teammate Handle ───────────────────────────────────────────────────────────
@@ -241,20 +336,11 @@ impl SubagentExecutor {
         // (与 dispatch_teammate:704 的 "Cancelled before execution" 语义一致;
         //  test_dispatch_cancelled 验证此行为。)
         if parent_cancel.is_cancelled() {
-            return Ok(SubagentResult {
-                agent_name: req.agent_name.clone(),
-                output: "Cancelled before execution".into(),
-                summary: String::new(),
-                artifacts: Vec::new(),
-                duration: std::time::Duration::ZERO,
-                iterations: 0,
-                tokens_used: None,
-                was_truncated: false,
-                cancelled: true,
-                mode: req.mode_override.clone().unwrap_or(ExecutionMode::Fork),
-                isolation_observed: ObservedIsolation::Unknown,
-                usage: None,
-            });
+            return Ok(SubagentResult::cancelled(
+                req.agent_name.clone(),
+                "Cancelled before execution",
+                req.mode_override.clone().unwrap_or(ExecutionMode::Fork),
+            ));
         }
 
         loop {
@@ -406,18 +492,31 @@ impl SubagentExecutor {
                         "subagent_dispatch_complete"
                     );
 
-                    self.registry
-                        .event_bus()
-                        .emit(SubagentEvent::DispatchCompleted {
-                            parent: req_parent_agent.clone(),
-                            agent: req_agent_name.clone(),
-                            duration_ms: duration.as_millis() as u64,
-                            tokens_used: sub_result.tokens_used.map(|t| t as u64),
-                            iterations: Some(sub_result.iterations as u64),
-                            output: sub_result.output.clone(),
-                            execution_id: event_execution_id.clone(),
-                            run_id: event_run_id.clone(),
-                        });
+                    if sub_result.outcome.status == SubagentStatus::Cancelled {
+                        self.registry
+                            .event_bus()
+                            .emit(SubagentEvent::DispatchCancelled {
+                                parent: req_parent_agent.clone(),
+                                agent: req_agent_name.clone(),
+                                result: sub_result.outcome.clone(),
+                                execution_id: event_execution_id.clone(),
+                                run_id: event_run_id.clone(),
+                            });
+                    } else {
+                        self.registry
+                            .event_bus()
+                            .emit(SubagentEvent::DispatchCompleted {
+                                parent: req_parent_agent.clone(),
+                                agent: req_agent_name.clone(),
+                                duration_ms: duration.as_millis() as u64,
+                                tokens_used: sub_result.tokens_used.map(|t| t as u64),
+                                iterations: Some(sub_result.iterations as u64),
+                                output: sub_result.output.clone(),
+                                result: sub_result.outcome.clone(),
+                                execution_id: event_execution_id.clone(),
+                                run_id: event_run_id.clone(),
+                            });
+                    }
 
                     if self.config.enable_hooks {
                         self.hooks.after_dispatch(&hook_ctx, &sub_result).await;
@@ -435,10 +534,16 @@ impl SubagentExecutor {
                         executor(ctx).await;
                     }
 
-                    return Ok(sub_result.with_structured());
+                    return Ok(sub_result);
                 }
                 Err(e) => {
                     let error_str = e.to_string();
+                    let status = subagent_status_from_error(&e);
+                    let terminal_result = SubagentOutcome::terminal(
+                        status,
+                        error_str.clone(),
+                        vec![error_str.clone()],
+                    );
                     warn!(
                         parent = %req_parent_agent,
                         subagent = %req_agent_name,
@@ -447,79 +552,101 @@ impl SubagentExecutor {
                         "subagent_dispatch_failed"
                     );
 
+                    if status == SubagentStatus::Cancelled {
+                        self.registry
+                            .event_bus()
+                            .emit(SubagentEvent::DispatchCancelled {
+                                parent: req_parent_agent.clone(),
+                                agent: req_agent_name.clone(),
+                                result: terminal_result,
+                                execution_id: event_execution_id.clone(),
+                                run_id: event_run_id.clone(),
+                            });
+                        return Err(e);
+                    }
+
+                    if self.config.enable_hooks {
+                        let decision = self.hooks.on_failure(&hook_ctx, &error_str).await;
+                        match decision {
+                            super::hooks::SubagentRetryDecision::Delegate { alternative_agent } => {
+                                if let Some(child_policy) = delegation_policy.child_policy() {
+                                    info!(
+                                        from = %hook_ctx.subagent_name,
+                                        to = %alternative_agent,
+                                        depth = child_policy.delegate_depth,
+                                        "Delegating to alternative subagent"
+                                    );
+                                    retry_count = retry_count.saturating_add(1);
+                                    let rt_ctx = req.runtime_context.clone();
+                                    let retry_msg = req.message.clone();
+                                    req = DispatchRequest {
+                                        agent_name: alternative_agent,
+                                        task: hook_ctx.task.clone(),
+                                        mode_override: Some(hook_ctx.execution_mode.clone()),
+                                        cancel: parent_cancel.child_token(),
+                                        parent_agent: hook_ctx.parent_agent.clone(),
+                                        parent_context: None,
+                                        delegation_policy: child_policy,
+                                        runtime_context: rt_ctx,
+                                        message: retry_msg,
+                                        background: false,
+                                    };
+                                    // This attempt is recoverable, so it is not a terminal event.
+                                    continue;
+                                }
+                                warn!(
+                                    agent = %hook_ctx.subagent_name,
+                                    max_depth = delegation_policy.max_delegate_depth,
+                                    "subagent delegation rejected at depth limit"
+                                );
+                            }
+                            super::hooks::SubagentRetryDecision::Retry { delay_secs } => {
+                                if retry_count < max_retries {
+                                    info!(
+                                        delay_secs,
+                                        attempt = retry_count.saturating_add(2),
+                                        "Retrying subagent dispatch"
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                                    retry_count = retry_count.saturating_add(1);
+                                    let rt_ctx = req.runtime_context.clone();
+                                    let retry_msg = req.message.clone();
+                                    req = DispatchRequest {
+                                        agent_name: hook_ctx.subagent_name.clone(),
+                                        task: hook_ctx.task.clone(),
+                                        mode_override: Some(hook_ctx.execution_mode.clone()),
+                                        cancel: parent_cancel.child_token(),
+                                        parent_agent: hook_ctx.parent_agent.clone(),
+                                        parent_context: None,
+                                        delegation_policy,
+                                        runtime_context: rt_ctx,
+                                        message: retry_msg,
+                                        background: false,
+                                    };
+                                    // This attempt is recoverable, so it is not a terminal event.
+                                    continue;
+                                }
+                                warn!(
+                                    agent = %hook_ctx.subagent_name,
+                                    max_retries,
+                                    "subagent retry limit reached"
+                                );
+                            }
+                            super::hooks::SubagentRetryDecision::Fail => {}
+                        }
+                    }
+
                     self.registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchFailed {
                             parent: req_parent_agent.clone(),
                             agent: req_agent_name.clone(),
                             error: error_str.clone(),
+                            status,
+                            result: terminal_result,
                             execution_id: event_execution_id.clone(),
                             run_id: event_run_id.clone(),
                         });
-
-                    if self.config.enable_hooks {
-                        let decision = self.hooks.on_failure(&hook_ctx, &error_str).await;
-                        match decision {
-                            super::hooks::SubagentRetryDecision::Delegate { alternative_agent } => {
-                                let Some(child_policy) = delegation_policy.child_policy() else {
-                                    return Err(ReactError::Other(format!(
-                                        "Delegation depth exceeded (max {}): agent '{}'",
-                                        delegation_policy.max_delegate_depth,
-                                        hook_ctx.subagent_name
-                                    )));
-                                };
-                                info!(
-                                    from = %hook_ctx.subagent_name,
-                                    to = %alternative_agent,
-                                    depth = child_policy.delegate_depth,
-                                    "Delegating to alternative subagent"
-                                );
-                                retry_count += 1;
-                                let rt_ctx = req.runtime_context.clone();
-                                let retry_msg = req.message.clone();
-                                req = DispatchRequest {
-                                    agent_name: alternative_agent,
-                                    task: hook_ctx.task.clone(),
-                                    mode_override: Some(hook_ctx.execution_mode.clone()),
-                                    cancel: parent_cancel.child_token(),
-                                    parent_agent: hook_ctx.parent_agent.clone(),
-                                    parent_context: None,
-                                    delegation_policy: child_policy,
-                                    runtime_context: rt_ctx,
-                                    message: retry_msg,
-                                    background: false,
-                                };
-                                // Loop instead of recursing
-                                continue;
-                            }
-                            super::hooks::SubagentRetryDecision::Retry { delay_secs } => {
-                                info!(
-                                    delay_secs,
-                                    attempt = retry_count + 1,
-                                    "Retrying subagent dispatch"
-                                );
-                                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                                retry_count += 1;
-                                let rt_ctx = req.runtime_context.clone();
-                                let retry_msg = req.message.clone();
-                                req = DispatchRequest {
-                                    agent_name: hook_ctx.subagent_name.clone(),
-                                    task: hook_ctx.task.clone(),
-                                    mode_override: Some(hook_ctx.execution_mode.clone()),
-                                    cancel: parent_cancel.child_token(),
-                                    parent_agent: hook_ctx.parent_agent.clone(),
-                                    parent_context: None,
-                                    delegation_policy,
-                                    runtime_context: rt_ctx,
-                                    message: retry_msg,
-                                    background: false,
-                                };
-                                // Loop instead of recursing
-                                continue;
-                            }
-                            super::hooks::SubagentRetryDecision::Fail => {}
-                        }
-                    }
 
                     // Fire unified SubagentStop hook (failure)
                     if let Some(ref executor) = self.config.unified_hook_executor {
@@ -644,7 +771,11 @@ impl SubagentExecutor {
             })?;
 
         let child_token = req.cancel.child_token();
-        let task = req.task.clone();
+        let task = Self::enhance_task(
+            &req.task,
+            req.parent_context.as_ref(),
+            registered.definition.inherit_history,
+        );
         let agent_name = req.agent_name.clone();
         let parent_agent = req.parent_agent.clone();
         let registry = self.registry.clone();
@@ -685,10 +816,10 @@ impl SubagentExecutor {
                         Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
                     }
                     _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
-                        Err(ReactError::Other(format!(
+                        Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
                             "Teammate '{}' timed out after {}s",
                             agent_name, timeout_secs
-                        )))
+                        )))))
                     }
                     r = Self::execute_agent_streaming(
                         registry,
@@ -825,25 +956,40 @@ impl SubagentExecutor {
         let team_agent = builder.build();
 
         let start = std::time::Instant::now();
-        let result = team_agent
-            .execute(&req.task)
-            .await
-            .map_err(|e| crate::error::ReactError::Other(format!("Team execution failed: {e}")))?;
+        let task = Self::enhance_task(
+            &req.task,
+            req.parent_context.as_ref(),
+            registered.definition.inherit_history,
+        );
+        let result = team_agent.execute(&task).await.map_err(|error| {
+            if error.to_ascii_lowercase().contains("timed out") {
+                crate::error::ReactError::Agent(Box::new(AgentError::Timeout(error)))
+            } else {
+                crate::error::ReactError::Other(format!("Team execution failed: {error}"))
+            }
+        })?;
 
         Ok(SubagentResult {
             agent_name: req.agent_name.clone(),
             output: result,
-            summary: String::new(),
-            artifacts: Vec::new(),
+            outcome: SubagentOutcome {
+                status: SubagentStatus::Completed,
+                ..SubagentOutcome::default()
+            },
             duration: start.elapsed(),
             iterations: 1,
             tokens_used: None, // team doesn't aggregate worker tokens (follow-up)
             was_truncated: false,
-            cancelled: false,
             mode: ExecutionMode::Team,
             isolation_observed: ObservedIsolation::Worker,
             usage: None,
-        })
+        }
+        .with_structured(
+            req.runtime_context
+                .as_ref()
+                .and_then(|context| context.execution_id.as_deref()),
+            std::env::current_dir().ok().as_deref(),
+        ))
     }
 
     // ── Internal dispatch methods ──────────────────────────────────────────
@@ -871,48 +1017,60 @@ impl SubagentExecutor {
         parent_ctx: Option<&super::context::SubagentContext>,
         inherit_history: Option<usize>,
     ) -> String {
-        let Some(ctx) = parent_ctx else {
-            return task.to_string();
-        };
-
         let mut parts = Vec::new();
-        if !ctx.system_prompt.is_empty() {
-            parts.push(format!("[Inherited System Context]\n{}", ctx.system_prompt));
+        if let Some(ctx) = parent_ctx {
+            if !ctx.system_prompt.is_empty() {
+                parts.push(format!("[Inherited System Context]\n{}", ctx.system_prompt));
+            }
+
+            // Pick the message slice dictated by inherit_history.
+            // Some(0) = everything already in ctx.messages (capped upstream);
+            // Some(n) = last n; None = none.
+            let selected: &[echo_core::llm::types::Message] = match inherit_history {
+                None => &[],
+                Some(0) => &ctx.messages,
+                Some(n) => {
+                    let start = ctx.messages.len().saturating_sub(n);
+                    ctx.messages.get(start..).unwrap_or_default()
+                }
+            };
+
+            if !selected.is_empty() {
+                let history: Vec<String> = selected
+                    .iter()
+                    .filter_map(|m| {
+                        m.content
+                            .as_text()
+                            .map(|c| format!("[{}] {}", m.role.as_str(), c))
+                    })
+                    .collect();
+                if !history.is_empty() {
+                    parts.push(format!(
+                        "[Inherited Conversation History]\n{}",
+                        history.join("\n")
+                    ));
+                }
+            }
         }
 
-        // Pick the message slice dictated by inherit_history.
-        // Some(0) = everything already in ctx.messages (capped upstream);
-        // Some(n) = last n; None = none.
-        let selected: &[echo_core::llm::types::Message] = match inherit_history {
-            None => &[],
-            Some(0) => &ctx.messages,
-            Some(n) => {
-                let start = ctx.messages.len().saturating_sub(n);
-                &ctx.messages[start..]
-            }
-        };
-
-        if !selected.is_empty() {
-            let history: Vec<String> = selected
-                .iter()
-                .filter_map(|m| {
-                    m.content
-                        .as_text()
-                        .map(|c| format!("[{}] {}", m.role.as_str(), c))
-                })
-                .collect();
-            if !history.is_empty() {
-                parts.push(format!(
-                    "[Inherited Conversation History]\n{}",
-                    history.join("\n")
-                ));
-            }
-        }
-        if parts.is_empty() {
+        let enriched = if parts.is_empty() {
             task.to_string()
         } else {
             format!("{}\n\n---\n\n{}", parts.join("\n\n"), task)
+        };
+        if enriched.contains("## Result") && enriched.contains("\"contract_version\":1") {
+            return enriched;
         }
+        format!(
+            "{enriched}\n\n[Subagent Result Contract]\nEnd with `## Result` and exactly one fenced JSON object:\n\
+             ```json\n\
+             {{\"contract_version\":1,\"status\":\"completed\",\"summary\":\"bounded result\",\
+             \"artifacts\":[{{\"path\":\"actual path\",\"kind\":\"file|report|chart|other\"}}],\
+             \"verification\":[{{\"check\":\"exact check\",\"status\":\"passed|failed|not_run\",\
+             \"details\":\"bounded evidence\",\"source\":\"reported\"}}],\"remaining_work\":[],\
+             \"touched_files\":{{\"read\":[],\"written\":[]}}}}\n\
+             ```\nRuntime owns terminal status and observed evidence. Report only real paths and checks; put incomplete or blocked work in remaining_work."
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -930,6 +1088,10 @@ impl SubagentExecutor {
         execution_id: Option<String>,
         run_id: Option<String>,
     ) -> Result<SubagentResult> {
+        let artifact_base_dir = invocation
+            .working_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
         // Multimodal path: when a Message is supplied, run it so the worker
         // sees images/files. Falls back to the text task otherwise.
         let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation);
@@ -949,6 +1111,11 @@ impl SubagentExecutor {
         let mut completion_tokens: usize = 0;
         let mut cancelled = false;
         let mut usage_stats = super::usage::LlmUsageStats::default();
+        let mut pending_verification = HashMap::<String, String>::new();
+        let mut pending_file_access = HashMap::<String, (bool, String)>::new();
+        let mut observed_verification = Vec::new();
+        let mut touched_files = SubagentTouchedFiles::default();
+        let mut observed_artifacts = Vec::new();
 
         while let Some(event_result) = stream.next().await {
             let event = event_result?.payload;
@@ -1035,6 +1202,12 @@ impl SubagentExecutor {
                     name,
                     args,
                 } => {
+                    if let Some(check) = verification_check_from_tool(&name, &args) {
+                        pending_verification.insert(call_id.clone(), check);
+                    }
+                    if let Some(access) = file_access_from_tool(&name, &args) {
+                        pending_file_access.insert(call_id.clone(), access);
+                    }
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolStarted {
@@ -1052,6 +1225,21 @@ impl SubagentExecutor {
                     name,
                     output,
                 } => {
+                    if let Some(check) = pending_verification.remove(&call_id) {
+                        observed_verification.push(SubagentVerification {
+                            check,
+                            status: SubagentVerificationStatus::Passed,
+                            details: bounded_detail(&output),
+                            source: SubagentVerificationSource::Observed,
+                        });
+                    }
+                    if let Some((write, path)) = pending_file_access.remove(&call_id) {
+                        if write {
+                            push_unique(&mut touched_files.written, path);
+                        } else {
+                            push_unique(&mut touched_files.read, path);
+                        }
+                    }
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolCompleted {
@@ -1072,6 +1260,15 @@ impl SubagentExecutor {
                     error,
                     failure,
                 } => {
+                    if let Some(check) = pending_verification.remove(&call_id) {
+                        observed_verification.push(SubagentVerification {
+                            check,
+                            status: SubagentVerificationStatus::Failed,
+                            details: bounded_detail(&error),
+                            source: SubagentVerificationSource::Observed,
+                        });
+                    }
+                    pending_file_access.remove(&call_id);
                     registry
                         .event_bus()
                         .emit(SubagentEvent::DispatchToolCompleted {
@@ -1086,18 +1283,31 @@ impl SubagentExecutor {
                             run_id: run_id.clone(),
                         });
                 }
+                AgentEvent::ToolStream {
+                    event: echo_core::tools::ToolStreamEvent::Complete(result),
+                    ..
+                } => {
+                    if let Some(artifact) =
+                        echo_core::tools::artifact::ToolOutputArtifactRef::from_metadata(
+                            &result.metadata,
+                        )
+                    {
+                        observed_artifacts.push(SubagentArtifact {
+                            path: artifact.path.to_string_lossy().to_string(),
+                            kind: "tool_log".to_string(),
+                            bytes: Some(artifact.artifact_bytes),
+                            sha256: Some(artifact.sha256),
+                            producer_execution_id: execution_id.clone(),
+                            available: artifact.path.is_file(),
+                        });
+                    }
+                }
                 AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
                     output = answer;
                 }
                 AgentEvent::FinalAnswer(_) => {}
                 AgentEvent::Cancelled => {
                     cancelled = true;
-                    registry.event_bus().emit(SubagentEvent::DispatchCancelled {
-                        parent: parent.to_string(),
-                        agent: subagent.to_string(),
-                        execution_id: execution_id.clone(),
-                        run_id: run_id.clone(),
-                    });
                     break;
                 }
                 AgentEvent::Error { source, message } => {
@@ -1119,20 +1329,37 @@ impl SubagentExecutor {
             None
         };
 
-        Ok(SubagentResult {
+        let status = if cancelled {
+            SubagentStatus::Cancelled
+        } else {
+            SubagentStatus::Completed
+        };
+        let mut result = SubagentResult {
             agent_name: subagent.to_string(),
             output,
-            summary: String::new(),
-            artifacts: Vec::new(),
+            outcome: SubagentOutcome {
+                status,
+                ..SubagentOutcome::default()
+            },
             duration: start.elapsed(),
             iterations: 1,
             tokens_used,
             was_truncated: false,
-            cancelled,
             mode,
             isolation_observed: ObservedIsolation::Unknown,
             usage,
-        })
+        }
+        .with_structured(execution_id.as_deref(), artifact_base_dir.as_deref());
+        if cancelled {
+            result.outcome.remaining_work = vec!["cancelled during execution".to_string()];
+        }
+        merge_observed_evidence(
+            &mut result.outcome,
+            observed_verification,
+            touched_files,
+            observed_artifacts,
+        );
+        Ok(result)
     }
 
     /// Sync mode: lock the agent, execute, return.
@@ -1179,8 +1406,8 @@ impl SubagentExecutor {
         if timeout_secs > 0 {
             tokio::select! {
                 biased;
-                _ = cancel.cancelled() => Err(ReactError::Other(format!(
-                    "Sync subagent '{}' cancelled", req.agent_name
+                _ = cancel.cancelled() => Err(ReactError::Agent(Box::new(
+                    AgentError::Cancelled(format!("Sync subagent '{}' cancelled", req.agent_name))
                 ))),
                 r = tokio::time::timeout(
                     Duration::from_secs(timeout_secs),
@@ -1200,10 +1427,10 @@ impl SubagentExecutor {
                     )
                 ) => match r {
                     Ok(r) => r,
-                    Err(_) => Err(ReactError::Other(format!(
+                    Err(_) => Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
                         "Sync subagent '{}' timed out after {}s",
                         req.agent_name, timeout_secs
-                    ))),
+                    ))))),
                 },
             }
         } else {
@@ -1356,20 +1583,13 @@ impl SubagentExecutor {
 
             // Check cancellation
             if cancel.is_cancelled() {
-                return Ok(SubagentResult {
-                    agent_name: agent_name.clone(),
-                    output: "Cancelled before execution".into(),
-                    summary: String::new(),
-                    artifacts: Vec::new(),
-                    duration: start.elapsed(),
-                    iterations: 0,
-                    tokens_used: None,
-                    was_truncated: false,
-                    cancelled: true,
-                    mode: ExecutionMode::Fork,
-                    isolation_observed: ObservedIsolation::Unknown,
-                    usage: None,
-                });
+                let mut result = SubagentResult::cancelled(
+                    agent_name.clone(),
+                    "Cancelled before execution",
+                    ExecutionMode::Fork,
+                );
+                result.duration = start.elapsed();
+                return Ok(result);
             }
 
             let agent = agent_arc.as_ref();
@@ -1445,8 +1665,8 @@ impl SubagentExecutor {
             let mut result = if timeout_secs > 0 {
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => Err(ReactError::Other(format!(
-                        "Fork subagent '{}' cancelled", agent_name
+                    _ = cancel.cancelled() => Err(ReactError::Agent(Box::new(
+                        AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
                     ))),
                     r = tokio::time::timeout(
                         Duration::from_secs(timeout_secs),
@@ -1467,18 +1687,18 @@ impl SubagentExecutor {
                     ) => {
                         match r {
                             Ok(r) => r,
-                            Err(_) => Err(ReactError::Other(format!(
+                            Err(_) => Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
                                 "Fork subagent '{}' timed out after {}s",
                                 agent_name, timeout_secs
-                            ))),
+                            ))))),
                         }
                     }
                 }
             } else {
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => Err(ReactError::Other(format!(
-                        "Fork subagent '{}' cancelled", agent_name
+                    _ = cancel.cancelled() => Err(ReactError::Agent(Box::new(
+                        AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
                     ))),
                     r = Self::execute_agent_streaming(
                         registry,
@@ -1562,12 +1782,44 @@ impl SubagentExecutor {
 mod tests {
     use super::*;
     use crate::agent::subagent::context::SubagentContext;
-    use crate::testing::MockAgent;
+    use crate::testing::{FailingMockAgent, MockAgent};
+
+    struct DelegateFailedDispatch;
+
+    #[async_trait::async_trait]
+    impl super::super::hooks::SubagentHooks for DelegateFailedDispatch {
+        async fn on_failure(
+            &self,
+            _ctx: &super::super::hooks::SubagentHookContext,
+            _error: &str,
+        ) -> super::super::hooks::SubagentRetryDecision {
+            super::super::hooks::SubagentRetryDecision::Delegate {
+                alternative_agent: "recovery".to_string(),
+            }
+        }
+    }
 
     async fn make_executor() -> (Arc<SubagentRegistry>, SubagentExecutor) {
         let registry = Arc::new(SubagentRegistry::new());
         let executor = SubagentExecutor::new(registry.clone(), SubagentExecutorConfig::default());
         (registry, executor)
+    }
+
+    fn collect_terminal_events(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<SubagentEvent>>,
+    ) -> Vec<Arc<SubagentEvent>> {
+        let mut terminal_events = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if matches!(
+                event.as_ref(),
+                SubagentEvent::DispatchCompleted { .. }
+                    | SubagentEvent::DispatchFailed { .. }
+                    | SubagentEvent::DispatchCancelled { .. }
+            ) {
+                terminal_events.push(event);
+            }
+        }
+        terminal_events
     }
 
     /// Build a SubagentContext with N numbered user messages and no system prompt.
@@ -1593,16 +1845,66 @@ mod tests {
     }
 
     #[test]
-    fn enhance_task_no_context_returns_task_unchanged() {
-        let out = SubagentExecutor::enhance_task("do thing", None, None);
-        assert_eq!(out, "do thing");
+    fn merge_observed_evidence_keeps_latest_check_result() {
+        let mut outcome = SubagentOutcome {
+            verification: vec![SubagentVerification {
+                check: "cargo test".to_string(),
+                status: SubagentVerificationStatus::Passed,
+                details: "model claim".to_string(),
+                source: SubagentVerificationSource::Reported,
+            }],
+            ..SubagentOutcome::default()
+        };
+        merge_observed_evidence(
+            &mut outcome,
+            vec![
+                SubagentVerification {
+                    check: "cargo test".to_string(),
+                    status: SubagentVerificationStatus::Failed,
+                    details: "first run failed".to_string(),
+                    source: SubagentVerificationSource::Observed,
+                },
+                SubagentVerification {
+                    check: "cargo test".to_string(),
+                    status: SubagentVerificationStatus::Passed,
+                    details: "retry passed".to_string(),
+                    source: SubagentVerificationSource::Observed,
+                },
+            ],
+            SubagentTouchedFiles::default(),
+            Vec::new(),
+        );
+        assert!(matches!(
+            outcome.verification.as_slice(),
+            [SubagentVerification {
+                status: SubagentVerificationStatus::Passed,
+                source: SubagentVerificationSource::Observed,
+                ..
+            }]
+        ));
     }
 
     #[test]
-    fn enhance_task_empty_fresh_context_leaves_task_alone() {
+    fn enhance_task_no_context_appends_result_contract() {
+        let out = SubagentExecutor::enhance_task("do thing", None, None);
+        assert!(out.starts_with("do thing"));
+        assert!(out.contains("## Result"));
+        assert!(out.contains("\"contract_version\":1"));
+    }
+
+    #[test]
+    fn enhance_task_empty_fresh_context_still_appends_result_contract() {
         let ctx = super::super::context::SubagentContext::empty();
         let out = SubagentExecutor::enhance_task("do thing", Some(&ctx), None);
-        assert_eq!(out, "do thing");
+        assert!(out.starts_with("do thing"));
+        assert!(out.contains("## Result"));
+    }
+
+    #[test]
+    fn enhance_task_does_not_duplicate_existing_result_contract() {
+        let task = "do thing\n\n## Result\n```json\n{\"contract_version\":1}\n```";
+        let out = SubagentExecutor::enhance_task(task, None, None);
+        assert_eq!(out, task);
     }
 
     #[test]
@@ -1804,7 +2106,193 @@ mod tests {
 
         let result = executor.dispatch(req).await.unwrap();
         assert!(result.output.contains("Cancelled"));
-        assert!(result.cancelled);
+        assert_eq!(result.outcome.status, SubagentStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn recovered_dispatch_emits_only_one_terminal_event() -> Result<()> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let mut hooks = super::super::hooks::SubagentHookRegistry::new();
+        hooks.register(Arc::new(DelegateFailedDispatch));
+        let executor = SubagentExecutor::with_hooks(
+            registry.clone(),
+            SubagentExecutorConfig::default(),
+            hooks,
+        );
+        registry
+            .register(
+                super::super::types::SubagentDefinition::new("primary", "Primary"),
+                Box::new(FailingMockAgent::new("primary", "first attempt failed")),
+            )
+            .await;
+        registry
+            .register(
+                super::super::types::SubagentDefinition::new("recovery", "Recovery"),
+                Box::new(MockAgent::new("recovery").with_response("recovered")),
+            )
+            .await;
+        let mut events = registry.event_bus().subscribe();
+
+        let result = executor
+            .dispatch(DispatchRequest {
+                agent_name: "primary".to_string(),
+                task: "recover this task".to_string(),
+                mode_override: None,
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await?;
+        assert_eq!(result.outcome.status, SubagentStatus::Completed);
+
+        let terminal_events = collect_terminal_events(&mut events);
+        assert_eq!(terminal_events.len(), 1);
+        assert!(matches!(
+            terminal_events.first().map(AsRef::as_ref),
+            Some(SubagentEvent::DispatchCompleted { result, .. })
+                if result.status == SubagentStatus::Completed
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_dispatch_emits_failed_terminal_status() -> std::result::Result<(), String> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                super::super::types::SubagentDefinition::new("failing", "Failing"),
+                Box::new(FailingMockAgent::new("failing", "boom")),
+            )
+            .await;
+        let mut events = registry.event_bus().subscribe();
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "failing".to_string(),
+                task: "fail".to_string(),
+                mode_override: None,
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| "failing worker unexpectedly completed".to_string())?;
+        assert_eq!(subagent_status_from_error(&error), SubagentStatus::Failed);
+        let terminal_events = collect_terminal_events(&mut events);
+        assert!(matches!(
+            terminal_events.as_slice(),
+            [event]
+                if matches!(
+                    event.as_ref(),
+                    SubagentEvent::DispatchFailed {
+                        status: SubagentStatus::Failed,
+                        ..
+                    }
+                )
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn running_dispatch_cancel_emits_cancelled_terminal_status()
+    -> std::result::Result<(), String> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                super::super::types::SubagentDefinition::new("slow-cancel", "Slow cancel"),
+                Box::new(MockAgent::new("slow-cancel").with_delay_ms(500)),
+            )
+            .await;
+        let mut events = registry.event_bus().subscribe();
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            trigger.cancel();
+        });
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "slow-cancel".to_string(),
+                task: "wait".to_string(),
+                mode_override: None,
+                cancel,
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| "cancelled worker unexpectedly completed".to_string())?;
+        assert_eq!(
+            subagent_status_from_error(&error),
+            SubagentStatus::Cancelled
+        );
+        let terminal_events = collect_terminal_events(&mut events);
+        assert!(matches!(
+            terminal_events.as_slice(),
+            [event]
+                if matches!(event.as_ref(), SubagentEvent::DispatchCancelled { result, .. }
+                    if result.status == SubagentStatus::Cancelled)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timed_out_dispatch_emits_timed_out_terminal_status() -> std::result::Result<(), String>
+    {
+        let (registry, executor) = make_executor().await;
+        let mut definition =
+            super::super::types::SubagentDefinition::new("slow-timeout", "Slow timeout");
+        definition.timeout_secs = 1;
+        registry
+            .register(
+                definition,
+                Box::new(MockAgent::new("slow-timeout").with_delay_ms(1_500)),
+            )
+            .await;
+        let mut events = registry.event_bus().subscribe();
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "slow-timeout".to_string(),
+                task: "wait".to_string(),
+                mode_override: None,
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| "timed-out worker unexpectedly completed".to_string())?;
+        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        let terminal_events = collect_terminal_events(&mut events);
+        assert!(matches!(
+            terminal_events.as_slice(),
+            [event]
+                if matches!(
+                    event.as_ref(),
+                    SubagentEvent::DispatchFailed {
+                        status: SubagentStatus::TimedOut,
+                        result,
+                        ..
+                    } if result.status == SubagentStatus::TimedOut
+                )
+        ));
+        Ok(())
     }
 
     #[tokio::test]
