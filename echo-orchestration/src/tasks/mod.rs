@@ -40,8 +40,8 @@ pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use replanner::{LlmReplanner, ReplanDecision, ReplanTrigger, Replanner, RuleBasedReplanner};
 pub use runtime::{
     ConcurrencyLimits, DagExecutionState, DagRefresh, NestedDelegationPolicy, RuntimeTask,
-    RuntimeTaskKind, RuntimeTaskStatus, SuggestedTask, TaskExecutionSummary, TaskId, TaskWorker,
-    TaskWorkerContext,
+    RuntimeTaskKind, RuntimeTaskStatus, SuggestedTask, TaskExecutionSummary, TaskId, TaskSubagent,
+    TaskSubagentContext,
 };
 pub use scheduler::{
     ConflictDetector, FileChangeRecord, ParallelStrategy, SchedulePlan, TaskConflict, TaskScheduler,

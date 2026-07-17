@@ -132,20 +132,20 @@ pub struct RuntimeTask {
 /// Concurrency caps for a generic task runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConcurrencyLimits {
-    /// Max simultaneous worker agents.
-    pub max_concurrent_workers: usize,
+    /// Max simultaneous Subagents.
+    pub max_concurrent_subagents: usize,
     /// Max simultaneous mutating tasks.
     pub max_concurrent_writes: usize,
     /// Max simultaneous shell/verification tasks.
     pub max_concurrent_shells: usize,
-    /// Max simultaneous LLM calls across workers.
+    /// Max simultaneous LLM calls across Subagents.
     pub max_parallel_llm_calls: usize,
 }
 
 impl Default for ConcurrencyLimits {
     fn default() -> Self {
         Self {
-            max_concurrent_workers: 4,
+            max_concurrent_subagents: 4,
             max_concurrent_writes: 4,
             max_concurrent_shells: 1,
             max_parallel_llm_calls: 4,
@@ -153,16 +153,16 @@ impl Default for ConcurrencyLimits {
     }
 }
 
-/// Product-neutral context passed to a task worker.
+/// Product-neutral context passed to a task Subagent.
 #[derive(Debug, Clone)]
-pub struct TaskWorkerContext {
+pub struct TaskSubagentContext {
     pub run_id: String,
     pub cancel: CancellationToken,
     pub concurrency_limits: ConcurrencyLimits,
     pub delegation_policy: NestedDelegationPolicy,
 }
 
-impl TaskWorkerContext {
+impl TaskSubagentContext {
     pub fn new(run_id: impl Into<String>) -> Self {
         Self {
             run_id: run_id.into(),
@@ -199,7 +199,7 @@ impl TaskWorkerContext {
     }
 }
 
-/// A bounded follow-up task proposed by a worker.
+/// A bounded follow-up task proposed by a Subagent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestedTask {
     pub title: String,
@@ -217,7 +217,7 @@ pub struct SuggestedTask {
 pub struct TaskExecutionSummary {
     pub run_id: String,
     pub task_id: TaskId,
-    pub worker_agent: String,
+    pub subagent_name: String,
     pub completed_work: Vec<String>,
     pub files_read: Vec<String>,
     pub files_changed: Vec<String>,
@@ -231,15 +231,15 @@ pub struct TaskExecutionSummary {
     pub created_at: DateTime<Utc>,
 }
 
-/// Product-neutral worker contract.
+/// Product-neutral Subagent contract.
 ///
-/// The framework defines the contract; products decide which concrete worker
+/// The framework defines the contract; products decide which concrete Subagent
 /// implementation, tools, storage, and UI event mapping to use.
 #[async_trait]
-pub trait TaskWorker: Send + Sync {
+pub trait TaskSubagent: Send + Sync {
     async fn execute(
         &self,
-        context: TaskWorkerContext,
+        context: TaskSubagentContext,
         task: RuntimeTask,
         dependency_summaries: Vec<TaskExecutionSummary>,
     ) -> Result<TaskExecutionSummary>;
@@ -374,7 +374,7 @@ pub struct DagRefresh {
 mod tests {
     use super::{
         ConcurrencyLimits, NestedDelegationPolicy, RuntimeTaskKind, RuntimeTaskStatus,
-        TaskWorkerContext,
+        TaskSubagentContext,
     };
     use crate::tasks::runtime::{DagExecutionState, RuntimeTask};
     use std::str::FromStr;
@@ -419,10 +419,10 @@ mod tests {
     }
 
     #[test]
-    fn task_worker_context_builds_child_delegation_context() {
-        let context = TaskWorkerContext::new("run-1")
+    fn task_subagent_context_builds_child_delegation_context() {
+        let context = TaskSubagentContext::new("run-1")
             .with_concurrency_limits(ConcurrencyLimits {
-                max_concurrent_workers: 2,
+                max_concurrent_subagents: 2,
                 max_concurrent_writes: 1,
                 max_concurrent_shells: 1,
                 max_parallel_llm_calls: 2,
@@ -436,10 +436,10 @@ mod tests {
         let child = context.child_delegation_context();
 
         assert!(child.is_some());
-        let child = child.unwrap_or_else(|| TaskWorkerContext::new("missing"));
+        let child = child.unwrap_or_else(|| TaskSubagentContext::new("missing"));
         assert_eq!(child.run_id, "run-1");
         assert_eq!(child.delegation_policy.delegate_depth, 1);
-        assert_eq!(child.concurrency_limits.max_concurrent_workers, 2);
+        assert_eq!(child.concurrency_limits.max_concurrent_subagents, 2);
         assert!(!child.delegation_policy.can_delegate());
     }
 

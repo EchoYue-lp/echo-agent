@@ -3,7 +3,7 @@
 //! Provides [`register_all_tools`] which registers every enabled domain tool
 //! into any type implementing [`ToolRegistrar`](echo_core::tools::ToolRegistrar).
 //! [`register_readonly_tools`] registers only read-only tools (no shell, no
-//! file writes) — used by read-only subagent workers.
+//! file writes) — used by read-only Subagents.
 
 use echo_core::tools::ToolRegistrar;
 
@@ -15,8 +15,8 @@ use echo_core::tools::ToolRegistrar;
 /// code_search, git read ops (status/diff/log/blame), web search/fetch,
 /// data read/profile, research search, media read/extract, statistics.
 ///
-/// Used by `build_readonly_worker_agent` so that "readonly" workers are
-/// physically incapable of mutating state, not just prompt-constrained.
+/// Used when constructing read-only Subagents so they are physically incapable
+/// of mutating state, not just prompt-constrained.
 #[allow(unused_variables)]
 pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
     // ── files (read-only subset) ──────────────────────────────────────────
@@ -202,7 +202,7 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
         tool_manager.register(Box::new(ShellTool::new()));
         // Sprint 10b: inline code execution (Python/R/JS/...). Same shell
         // feature gate; writer toolset only (readonly subset excludes it —
-        // readonly workers shouldn't run arbitrary code).
+        // readonly Subagents shouldn't run arbitrary code).
         tool_manager.register(Box::new(crate::code::RunCodeTool::new()));
     }
 
@@ -435,7 +435,7 @@ mod tests {
     }
 
     /// Sprint 10b: the readonly subset must NOT include `run_code` (it's a
-    /// writer/execute primitive; readonly workers shouldn't run arbitrary code).
+    /// writer/execute primitive; readonly Subagents shouldn't run arbitrary code).
     #[test]
     #[cfg(feature = "shell")]
     fn register_readonly_tools_excludes_run_code() {
