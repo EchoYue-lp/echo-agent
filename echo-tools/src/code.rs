@@ -1,8 +1,9 @@
-//! Inline code execution tool (Sprint 10b).
+//! Sandboxed inline or persisted-script execution.
 //!
-//! Lets a subagent execute arbitrary Python/R/JS/... code snippets. The code
-//! automatically runs inside `ctx.working_dir` (the worker's isolated tmpdir
-//! for data/research workers — Sprint 10's `DataWorkspaceFactory` chain).
+//! Lets a subagent execute arbitrary Python/R/JS/... code snippets or a
+//! reviewable script already saved inside `ctx.working_dir`. Persisted scripts
+//! are executed directly by the language runtime rather than being read back
+//! into another inline wrapper.
 //!
 //! `run_code` is an agent-controlled arbitrary-code primitive, so it always
 //! requires an OS-level or stronger [`SandboxExecutor`]. Interactive terminals
@@ -22,14 +23,13 @@ use echo_core::tools::{
     ToolResultKind, ToolRiskLevel, ToolSideEffect,
 };
 use futures::future::BoxFuture;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Languages supported by [`RunCodeTool`]. All use arg-based execution
-/// (`-c`/`-e` flag) for consistency with the existing `Code` backend
-/// (`local.rs`/`docker.rs`). (Switching all languages to stdin-based
-/// execution to avoid ARG_MAX is a cross-cutting future follow-up, not
-/// in scope for Sprint 10b — see D-10b-stdin-1.)
+/// Languages supported by [`RunCodeTool`]. Inline code uses the existing
+/// arg-based `Code` backend; persisted scripts use a direct interpreter
+/// program invocation.
 const SUPPORTED_LANGUAGES: &[&str] = &[
     "python",
     "python3",
@@ -69,7 +69,78 @@ fn validate_language(language: &str) -> Result<String> {
     }
 }
 
-/// Inline code execution tool.
+fn script_program(language: &str) -> Result<&'static str> {
+    match language {
+        "python" | "python3" => Ok("python3"),
+        "r" => Ok("Rscript"),
+        "javascript" | "js" | "node" => Ok("node"),
+        "ruby" => Ok("ruby"),
+        "perl" => Ok("perl"),
+        "php" => Ok("php"),
+        "bash" => Ok("bash"),
+        "sh" => Ok("sh"),
+        _ => Err(ReactError::from(ToolError::InvalidParameter {
+            name: "language".to_string(),
+            message: format!("No script runtime is configured for '{language}'"),
+        })),
+    }
+}
+
+fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result<PathBuf> {
+    let trimmed = script_path.trim();
+    if trimmed.is_empty() {
+        return Err(ReactError::from(ToolError::InvalidParameter {
+            name: "script_path".to_string(),
+            message: "Script path cannot be empty".to_string(),
+        }));
+    }
+
+    let relative = Path::new(trimmed);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ReactError::from(ToolError::InvalidParameter {
+            name: "script_path".to_string(),
+            message: "Script path must stay inside the execution working directory".to_string(),
+        }));
+    }
+
+    let base = match working_dir {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().map_err(|error| ToolError::ExecutionFailed {
+            tool: "run_code".to_string(),
+            message: format!("Cannot resolve the current working directory: {error}"),
+        })?,
+    };
+    let canonical_base = base
+        .canonicalize()
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "run_code".to_string(),
+            message: format!("Cannot access the execution working directory: {error}"),
+        })?;
+    let resolved = base.join(relative);
+    let canonical_script = resolved
+        .canonicalize()
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "run_code".to_string(),
+            message: format!("Cannot access script '{trimmed}': {error}"),
+        })?;
+    if !canonical_script.starts_with(&canonical_base) || !canonical_script.is_file() {
+        return Err(ReactError::from(ToolError::InvalidParameter {
+            name: "script_path".to_string(),
+            message: "Script must be a file inside the execution working directory".to_string(),
+        }));
+    }
+
+    Ok(relative.to_path_buf())
+}
+
+/// Sandboxed inline or persisted-script execution tool.
 pub struct RunCodeTool {
     /// Interior-mutable so `Tool::set_sandbox` (a `&self` method) can inject
     /// the executor after construction (via `set_sandbox_manager` →
@@ -124,7 +195,7 @@ impl Tool for RunCodeTool {
     }
 
     fn description(&self) -> &str {
-        "执行一段代码(Python/R/JavaScript/...)。代码自动在当前任务工作目录(working_dir)中运行 — 无需创建新目录,直接读写当前目录文件即可。返回 stdout/stderr/exit code。"
+        "在当前任务工作目录中执行 Python/R/JavaScript 等代码。正式分析应先保存脚本，再通过 script_path 直接执行已审阅文件；临时探索可使用 code。两者不能同时提供。返回 stdout/stderr/exit code。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -138,14 +209,22 @@ impl Tool for RunCodeTool {
                 },
                 "code": {
                     "type": "string",
-                    "description": "要执行的代码片段。"
+                    "description": "要执行的临时代码片段；与 script_path 二选一。"
+                },
+                "script_path": {
+                    "type": "string",
+                    "description": "working_dir 内已经保存并审阅的脚本相对路径；与 code 二选一。"
                 },
                 "timeout": {
                     "type": "integer",
                     "description": "超时秒数(可选,默认 60,上限 300)。"
                 }
             },
-            "required": ["language", "code"]
+            "required": ["language"],
+            "oneOf": [
+                {"required": ["code"], "not": {"required": ["script_path"]}},
+                {"required": ["script_path"], "not": {"required": ["code"]}}
+            ]
         })
     }
 
@@ -188,8 +267,39 @@ impl Tool for RunCodeTool {
 
             let code = parameters
                 .get("code")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ReactError::from(ToolError::MissingParameter("code".to_string())))?;
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty());
+            let script_path = parameters
+                .get("script_path")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty());
+            let (mut sandbox_cmd, execution_mode, persisted_script) = match (code, script_path) {
+                (Some(code), None) => (SandboxCommand::code(&language, code), "inline", None),
+                (None, Some(script_path)) => {
+                    let relative = validate_script_path(script_path, ctx.working_dir.as_deref())?;
+                    let program = script_program(&language)?;
+                    (
+                        SandboxCommand::program(
+                            program,
+                            vec![relative.to_string_lossy().to_string()],
+                        ),
+                        "script",
+                        Some(relative),
+                    )
+                }
+                (Some(_), Some(_)) => {
+                    return Err(ReactError::from(ToolError::InvalidParameter {
+                        name: "code/script_path".to_string(),
+                        message: "Provide exactly one of code or script_path".to_string(),
+                    }));
+                }
+                (None, None) => {
+                    return Err(ReactError::from(ToolError::InvalidParameter {
+                        name: "code/script_path".to_string(),
+                        message: "Provide exactly one of code or script_path".to_string(),
+                    }));
+                }
+            };
 
             let timeout_secs = parameters
                 .get("timeout")
@@ -198,10 +308,9 @@ impl Tool for RunCodeTool {
                 .clamp(1, 300);
             let timeout_duration = Duration::from_secs(timeout_secs);
 
-            // 2. Build the sandbox command, binding the worker's working_dir.
+            // 2. Bind the Subagent working directory and minimum isolation.
             //    `with_timeout` takes a Duration (echo-core/src/sandbox.rs:148).
-            let mut sandbox_cmd = SandboxCommand::code(&language, code)
-                .with_minimum_isolation(IsolationLevel::OsSandbox);
+            sandbox_cmd = sandbox_cmd.with_minimum_isolation(IsolationLevel::OsSandbox);
             if let Some(dir) = &ctx.working_dir {
                 sandbox_cmd = sandbox_cmd.with_working_dir(dir.clone());
             }
@@ -249,12 +358,20 @@ impl Tool for RunCodeTool {
                 .execute_with_limits_and_cancel(sandbox_cmd, limits, ctx.cancel.clone())
                 .await
             {
-                Ok(result) => Ok(tool_result_from_execution(
-                    result,
-                    ctx.working_dir.as_ref(),
-                    sandbox.isolation_level(),
-                    self.max_output_bytes,
-                )),
+                Ok(result) => {
+                    let mut tool_result = tool_result_from_execution(
+                        result,
+                        ctx.working_dir.as_ref(),
+                        sandbox.isolation_level(),
+                        self.max_output_bytes,
+                    )
+                    .with_meta("execution_mode", execution_mode);
+                    if let Some(script) = persisted_script {
+                        tool_result = tool_result
+                            .with_meta("script_path", script.to_string_lossy().to_string());
+                    }
+                    Ok(tool_result)
+                }
                 Err(error) => Ok(sandbox_error_result(error)),
             }
         })
@@ -470,6 +587,15 @@ mod tests {
         .collect()
     }
 
+    fn script_params(language: &str, script_path: &str) -> HashMap<String, serde_json::Value> {
+        [
+            ("language".to_string(), serde_json::json!(language)),
+            ("script_path".to_string(), serde_json::json!(script_path)),
+        ]
+        .into_iter()
+        .collect()
+    }
+
     #[test]
     fn validate_language_lowercases_and_accepts_known() -> Result<()> {
         assert_eq!(validate_language("Python")?, "python");
@@ -546,7 +672,7 @@ mod tests {
         let sandbox = recording_sandbox(IsolationLevel::OsSandbox, true, success_execution("ok"));
         let captured: Arc<RecordingSandbox> = sandbox.clone();
         let tool = RunCodeTool::new().with_sandbox(sandbox);
-        let working_dir = std::path::PathBuf::from("/tmp/eko-data-worker-xyz");
+        let working_dir = std::path::PathBuf::from("/tmp/eko-data-subagent-xyz");
         let ctx = ToolContext {
             working_dir: Some(working_dir.clone()),
             ..ToolContext::default()
@@ -579,6 +705,99 @@ mod tests {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_code_executes_persisted_script_directly() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        std::fs::write(workspace.path().join("analysis.py"), "print('reviewed')\n")?;
+        let sandbox = recording_sandbox(IsolationLevel::OsSandbox, true, success_execution("ok"));
+        let captured = sandbox.clone();
+        let ctx = ToolContext {
+            working_dir: Some(workspace.path().to_path_buf()),
+            ..ToolContext::default()
+        };
+
+        let result = RunCodeTool::new()
+            .with_sandbox(sandbox)
+            .execute_with_context(script_params("python", "analysis.py"), &ctx)
+            .await?;
+        assert!(result.success);
+        assert_eq!(
+            result.metadata.get("execution_mode").map(String::as_str),
+            Some("script")
+        );
+        assert_eq!(
+            result.metadata.get("script_path").map(String::as_str),
+            Some("analysis.py")
+        );
+
+        let seen = captured
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| ReactError::Other("sandbox call was not recorded".to_string()))?;
+        match seen.command.kind {
+            CommandKind::Program { program, args } => {
+                assert_eq!(program, "python3");
+                assert_eq!(args, vec!["analysis.py".to_string()]);
+            }
+            _ => {
+                return Err(ReactError::Other(
+                    "expected direct program sandbox command".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_code_rejects_ambiguous_or_escaping_script_inputs() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        std::fs::write(workspace.path().join("analysis.py"), "print(1)\n")?;
+        let ctx = ToolContext {
+            working_dir: Some(workspace.path().to_path_buf()),
+            ..ToolContext::default()
+        };
+        let tool = RunCodeTool::new();
+
+        let mut ambiguous = script_params("python", "analysis.py");
+        ambiguous.insert("code".to_string(), serde_json::json!("print(2)"));
+        assert!(tool.execute_with_context(ambiguous, &ctx).await.is_err());
+        assert!(
+            tool.execute_with_context(script_params("python", "../analysis.py"), &ctx)
+                .await
+                .is_err()
+        );
+        assert!(
+            tool.execute_with_context(script_params("python", "missing.py"), &ctx)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_code_rejects_script_symlink_outside_working_dir() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::NamedTempFile::new()?;
+        symlink(outside.path(), workspace.path().join("analysis.py"))?;
+        let ctx = ToolContext {
+            working_dir: Some(workspace.path().to_path_buf()),
+            ..ToolContext::default()
+        };
+
+        assert!(
+            RunCodeTool::new()
+                .execute_with_context(script_params("python", "analysis.py"), &ctx)
+                .await
+                .is_err()
+        );
         Ok(())
     }
 

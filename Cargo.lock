@@ -1229,6 +1229,7 @@ dependencies = [
  "shlex",
  "similar",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
  "url",

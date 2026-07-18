@@ -58,8 +58,19 @@ This tool is appropriate for model selection and data-quality exploration. It mu
 3. Write `analysis.py` or `analysis.R` into the task working directory.
 4. Use mature libraries such as SciPy/statsmodels or established R packages.
 5. Record the input SHA-256, package versions, random seed, parameters, diagnostics, warnings, and result paths.
-6. Execute the persisted script through `run_code`.
+6. Execute the persisted script through `run_code` with `script_path`; do not
+   read it back into a second inline wrapper.
 7. Review the code and outputs with the user; edit and rerun the same artifact when needed.
+
+```json
+{
+  "tool": "run_code",
+  "parameters": {
+    "language": "python",
+    "script_path": "analysis.py"
+  }
+}
+```
 
 Example OLS pattern:
 

@@ -58,8 +58,18 @@ EKO 以 coding 为主。内置数据工具负责查看、清洗、转换、汇�
 3. 在任务 working directory 中写入 `analysis.py` 或 `analysis.R`。
 4. 使用 SciPy/statsmodels 或成熟 R 包。
 5. 记录输入 SHA-256、包版本、随机种子、参数、诊断、告警和结果路径。
-6. 通过 `run_code` 执行已经保存的同一脚本。
+6. 通过 `run_code` 的 `script_path` 直接执行已经保存的同一脚本，不要读回后再套一层内联代码。
 7. 用户可在对话中审阅、修改并重新运行该 artifact。
+
+```json
+{
+  "tool": "run_code",
+  "parameters": {
+    "language": "python",
+    "script_path": "analysis.py"
+  }
+}
+```
 
 OLS 示例模式：
 
