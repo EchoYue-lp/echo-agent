@@ -87,6 +87,12 @@ pub mod media {
     pub use echo_tools::media::*;
 }
 
+/// Scholarly search and reference-manager clients (re-export from echo_tools).
+#[cfg(feature = "research")]
+pub mod research {
+    pub use echo_tools::research::*;
+}
+
 /// LSP tools — language server integration
 #[cfg(feature = "lsp")]
 pub mod lsp;

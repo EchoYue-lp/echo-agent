@@ -20,7 +20,7 @@ Domain tools for the [echo-agent](https://crates.io/crates/echo_agent) framework
 | `database` | DatabaseTool (sqlx-based queries) | sqlx |
 | `git` | GitTool | — |
 | `rag` | RAG retrieval tool | uuid |
-| `research` | ArXiv search, Semantic Scholar, PDF fetch, BibTeX generation | reqwest, scraper |
+| `research` | Paper search, PDF/BibTeX tools, OpenAlex/Crossref/Europe PMC/Zotero clients | reqwest, quick-xml |
 
 ## Usage
 
