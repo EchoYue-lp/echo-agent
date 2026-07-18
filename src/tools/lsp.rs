@@ -6,7 +6,7 @@
 use echo_core::error::Result;
 use echo_core::lsp::{DiagnosticSeverity, LspClient, Position};
 use echo_core::tools::{Tool, ToolParameters, ToolResult};
-use echo_integration::lsp::LspManager;
+use echo_integration::lsp::{LspManager, StdioLspClient};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -61,13 +61,17 @@ impl Tool for LspDiagnosticsTool {
             let uri = path_to_uri(file_path);
             let manager = self.lsp_manager.read().await;
 
-            let Some((_lang, client)) = manager.get_client_for_file(file_path).await else {
-                return Ok(ToolResult::error(format!(
-                    "No language server running for file: {file_path}. \
-                     Start one with /lsp start <language>."
-                )));
+            let client = match open_file_for_lsp(&manager, file_path, &uri).await {
+                Ok(Some(client)) => client,
+                Ok(None) => {
+                    return Ok(ToolResult::error(format!(
+                        "No language server running for file: {file_path}"
+                    )));
+                }
+                Err(error) => return Ok(ToolResult::error(error)),
             };
 
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             let client = client.read().await;
             match client.diagnostics(&uri).await {
                 Ok(diagnostics) => {
@@ -163,10 +167,14 @@ impl Tool for LspGotoDefinitionTool {
             };
 
             let manager = self.lsp_manager.read().await;
-            let Some((_lang, client)) = manager.get_client_for_file(file_path).await else {
-                return Ok(ToolResult::error(format!(
-                    "No language server for: {file_path}"
-                )));
+            let client = match open_file_for_lsp(&manager, file_path, &uri).await {
+                Ok(Some(client)) => client,
+                Ok(None) => {
+                    return Ok(ToolResult::error(format!(
+                        "No language server for: {file_path}"
+                    )));
+                }
+                Err(error) => return Ok(ToolResult::error(error)),
             };
 
             let client = client.read().await;
@@ -256,10 +264,14 @@ impl Tool for LspFindReferencesTool {
             };
 
             let manager = self.lsp_manager.read().await;
-            let Some((_lang, client)) = manager.get_client_for_file(file_path).await else {
-                return Ok(ToolResult::error(format!(
-                    "No language server for: {file_path}"
-                )));
+            let client = match open_file_for_lsp(&manager, file_path, &uri).await {
+                Ok(Some(client)) => client,
+                Ok(None) => {
+                    return Ok(ToolResult::error(format!(
+                        "No language server for: {file_path}"
+                    )));
+                }
+                Err(error) => return Ok(ToolResult::error(error)),
             };
 
             let client = client.read().await;
@@ -349,10 +361,14 @@ impl Tool for LspHoverTool {
             };
 
             let manager = self.lsp_manager.read().await;
-            let Some((_lang, client)) = manager.get_client_for_file(file_path).await else {
-                return Ok(ToolResult::error(format!(
-                    "No language server for: {file_path}"
-                )));
+            let client = match open_file_for_lsp(&manager, file_path, &uri).await {
+                Ok(Some(client)) => client,
+                Ok(None) => {
+                    return Ok(ToolResult::error(format!(
+                        "No language server for: {file_path}"
+                    )));
+                }
+                Err(error) => return Ok(ToolResult::error(error)),
             };
 
             let client = client.read().await;
@@ -438,6 +454,26 @@ impl Tool for LspStatusTool {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+async fn open_file_for_lsp(
+    manager: &LspManager,
+    file_path: &str,
+    uri: &str,
+) -> std::result::Result<Option<Arc<RwLock<StdioLspClient>>>, String> {
+    let Some((language, client)) = manager.get_client_for_file(file_path).await else {
+        return Ok(None);
+    };
+    let text = tokio::fs::read_to_string(file_path)
+        .await
+        .map_err(|error| format!("Cannot read {file_path} before LSP request: {error}"))?;
+    client
+        .write()
+        .await
+        .did_open(uri, &language, &text)
+        .await
+        .map_err(|error| format!("LSP didOpen failed for {file_path}: {error}"))?;
+    Ok(Some(client))
+}
 
 /// Convert a file path to a file:// URI.
 fn path_to_uri(path: &str) -> String {

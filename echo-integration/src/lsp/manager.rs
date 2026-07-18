@@ -73,10 +73,13 @@ impl LspManager {
         // Initialize with project root
         let root_uri = self.project_root_uri.as_deref().unwrap_or("file:///");
 
-        client
-            .initialize(root_uri)
-            .await
-            .map_err(|e| format!("Failed to initialize {language} server: {e}"))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client.initialize(root_uri),
+        )
+        .await
+        .map_err(|_| format!("Timed out initializing {language} server"))?
+        .map_err(|e| format!("Failed to initialize {language} server: {e}"))?;
 
         self.clients
             .insert(language.to_string(), Arc::new(RwLock::new(client)));
@@ -181,7 +184,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_load_config() {
+    fn test_load_config() -> Result<(), String> {
         let mut manager = LspManager::new();
         let config = LspConfig::from_yaml(
             r#"
@@ -197,17 +200,17 @@ languages:
     args: []
     extensions: [".rs"]
 "#,
-        )
-        .unwrap();
+        )?;
 
         manager.load_config(&config);
         assert_eq!(manager.configured_languages().len(), 2);
         assert!(manager.configured_languages().contains(&"python"));
         assert!(manager.configured_languages().contains(&"rust"));
+        Ok(())
     }
 
     #[test]
-    fn test_extension_mapping() {
+    fn test_extension_mapping() -> Result<(), String> {
         let mut manager = LspManager::new();
         let config = LspConfig::from_yaml(
             r#"
@@ -218,13 +221,13 @@ languages:
     args: []
     extensions: [".py"]
 "#,
-        )
-        .unwrap();
+        )?;
 
         manager.load_config(&config);
         assert_eq!(
             manager.extension_map.get(".py"),
             Some(&"python".to_string())
         );
+        Ok(())
     }
 }

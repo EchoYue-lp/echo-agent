@@ -51,3 +51,6 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
