@@ -52,7 +52,7 @@
 | [32 - 插件系统](32-plugin-system.md) | Plugin | PluginManifest、PluginRegistry、PluginScope、生命周期管理 |
 | [33 - Headless 模式](33-headless-mode.md) | Headless | 非交互执行、CI/CD 集成、JSON 输出、exit_code |
 | [34 - Git 隔离](34-git-isolation.md) | Git Worktree / Checkpoint | 并行子代理隔离、worktree 管理、文件操作回滚 |
-| [35 - 流水线](35-pipelines.md) | Data Pipeline / Writing Pipeline | 数据处理流水线、写作流水线、质量循环 |
+| [35 - 流水线](35-pipelines.md) | Data Pipeline / Writing Pipeline | 代码优先可复现分析、写作质量循环 |
 | [36 - 数据质量与统计](36-data-quality-statistics.md) | Data Quality / Statistics | 数据画像、异常检测、描述统计、相关性分析 |
 | [37 - 代码搜索](37-code-search.md) | Code Search | Ripgrep、结构化输出、glob/type 过滤、50KB 上限 |
 | [38 - Agent 工厂与模式](38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | 模式切换、本地化、模板渲染 |

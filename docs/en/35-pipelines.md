@@ -2,64 +2,62 @@
 
 ## What It Is
 
-Pipelines are **pre-built multi-stage workflows** built on top of Graph Workflow, encapsulating common Agent task patterns:
+Pipelines are pre-built workflows built on top of Graph Workflow, encapsulating common Agent task patterns:
 
 | Pipeline | Stages | Description |
 |----------|--------|-------------|
-| [`data_pipeline`] | load_data → profile → analyze → visualize → summarize | End-to-end data analysis |
+| [`data_pipeline`] | inspect → persist script → execute → verify artifacts | Code-first reproducible data analysis |
 | [`writing_pipeline`] | outline → draft → review → revise (loop) → finalize | Content creation with quality loop |
 
-Each pipeline takes a `SharedAgent` and a config, internally builds a Graph and executes it, returning a `GraphResult` with all intermediate results.
+Each pipeline takes a `SharedAgent` and a config, builds a Graph, and returns a `GraphResult`. The data pipeline deliberately uses one tool-capable Agent execution so the saved script and observed artifacts remain the source of truth.
 
 ---
 
 ## Data Pipeline — Data Analysis
 
-### Flow Diagram
+### Contract
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     Data Pipeline Flow                            │
-│                                                                   │
-│   ┌──────┐    ┌─────────┐    ┌─────────┐    ┌───────────┐      │
-│   │ init │───▶│load_data│───▶│ profile │───▶│ analyze   │      │
-│   └──────┘    └─────────┘    └─────────┘    └───────────┘      │
-│                                                   │              │
-│                                                   ▼              │
-│                                              ┌──────────┐        │
-│                                              │summarize │        │
-│                                              └──────────┘        │
-│                                                   ▲              │
-│                                                   │              │
-│                                            ┌─────────────┐      │
-│                                            │  visualize  │      │
-│                                            └─────────────┘      │
-└──────────────────────────────────────────────────────────────────┘
-
-  Each stage writes output to SharedState; downstream stages read upstream results
+inspect the real dataset
+  → write <artifact_dir>/manifest.json and analysis.py|analysis.R
+  → execute the persisted file with run_code(script_path=...)
+  → write environment.json, result.json, outputs/, runs/, latest-run.json
+  → verify hashes, diagnostics, assumptions, and limitations
+  → return an artifact-grounded summary
 ```
 
-### Stage Descriptions
+The pipeline does not ask separate text-only stages to invent a profile, statistical analysis, or chart plan. A tool-capable Agent writes the full reviewable script, runs that exact file, and reports only observed results. Formal inference must use mature libraries such as SciPy, statsmodels, or established R packages; dependency failure is reported rather than replaced by framework-authored approximations.
 
-| Stage | Responsibility | State Key (output) |
-|-------|---------------|-------------------|
-| `init` | Generate prompt templates from config | `tpl_load`, `tpl_profile`, ... |
-| `load_data` | Read dataset, describe rows, columns, samples | `loaded_data` |
-| `profile` | Statistical overview: mean/median/std/missing/types | `data_profile` |
-| `analyze` | Correlations, outliers, distributions, patterns | `analysis` |
-| `visualize` | Chart specifications (type, axes, title) | `visualizations` |
-| `summarize` | Executive summary: top 3-5 insights + recommendations | `summary` |
+### Required Artifacts
+
+| Path | Purpose |
+|------|---------|
+| `manifest.json` | Contract version, input path, objective, language, parameters, seed, timestamps |
+| `analysis.py` or `analysis.R` | Complete reviewable analysis code |
+| `environment.json` | Runtime and package versions |
+| `result.json` | Structured analytical result |
+| `outputs/` | Generated tables, charts, and reports |
+| `runs/<run-id>.json` | Immutable run status, hashes, diagnostics, warnings, and limitations |
+| `latest-run.json` | Projection of the most recent run |
 
 ### DataPipelineConfig
 
 ```rust
 pub struct DataPipelineConfig {
-    /// Path to the dataset file (CSV, JSON, Parquet, etc.)
+    /// Workspace-relative input path
     pub dataset_path: String,
-    /// Optional analysis objective / question to focus on
+    /// Optional analysis objective
     pub objective: Option<String>,
-    /// Maximum number of charts/visualizations to produce
+    /// Workspace-relative artifact directory
+    pub artifact_dir: String,
+    /// Python or R
+    pub language: DataPipelineLanguage,
+    /// Maximum chart count
     pub max_charts: u32,
+    /// Reproducibility seed
+    pub random_seed: Option<u64>,
+    /// Structured manifest parameters
+    pub parameters: serde_json::Value,
 }
 ```
 
@@ -69,9 +67,14 @@ pub struct DataPipelineConfig {
 |--------|-------------|
 | `new(path)` | Create with dataset path, defaults for other fields |
 | `with_objective(obj)` | Set the analysis objective |
+| `with_artifact_dir(path)` | Set the workspace-relative artifact directory |
+| `with_language(language)` | Select Python or R |
 | `with_max_charts(n)` | Set maximum chart count |
+| `with_random_seed(seed)` | Set the reproducibility seed |
+| `without_random_seed()` | Mark a strictly deterministic analysis |
+| `with_parameters(value)` | Persist structured parameters |
 
-**Defaults:** `objective = None` (general exploration), `max_charts = 3`
+`new(path)` derives `analysis/<dataset-stem>` as the artifact directory. Defaults are Python, three charts, seed 42, and an empty parameter object. Input and artifact paths must remain inside the Agent working directory.
 
 ### API: run_data_pipeline
 
@@ -82,17 +85,16 @@ pub async fn run_data_pipeline(
 ) -> Result<GraphResult>
 ```
 
-Returns `GraphResult` containing:
-- `state` — `SharedState` with access to all intermediate and final results via keys
-- `steps` — number of execution steps
-- `path` — execution path (list of node names traversed)
+The state contains `analysis_execution`, `summary`, `dataset_path`, `artifact_dir`, `analysis_language`, `script_path`, `contract_version`, `parameters`, `random_seed`, and `max_charts`.
 
 ### Code Examples
 
 #### Basic Usage
 
 ```rust
-use echo_agent::workflow::pipelines::{DataPipelineConfig, run_data_pipeline};
+use echo_agent::workflow::pipelines::{
+    DataPipelineConfig, DataPipelineLanguage, run_data_pipeline,
+};
 use echo_agent::workflow::shared_agent;
 use echo_agent::agent::ReactAgentBuilder;
 
@@ -101,45 +103,25 @@ let agent = shared_agent(
     ReactAgentBuilder::simple("qwen3-max", "Data Analyst")?
 );
 
-let config = DataPipelineConfig::new("/data/sales_2024.csv")
+let config = DataPipelineConfig::new("data/sales_2024.csv")
     .with_objective("Identify revenue trends and seasonal patterns")
-    .with_max_charts(5);
+    .with_artifact_dir("analysis/revenue-trends")
+    .with_language(DataPipelineLanguage::Python)
+    .with_max_charts(5)
+    .with_random_seed(42)
+    .with_parameters(serde_json::json!({"group_by": "region"}));
 
 let result = run_data_pipeline(&agent, config).await?;
 
-// Get the final summary
 let summary: String = result.state.get("summary").unwrap_or_default();
 println!("Analysis Summary:\n{}", summary);
-
-// Access intermediate results
-let profile: String = result.state.get("data_profile").unwrap_or_default();
-let viz: String = result.state.get("visualizations").unwrap_or_default();
-println!("Data Profile:\n{}", profile);
-println!("Visualization Plan:\n{}", viz);
 # Ok(())
 # }
 ```
 
-#### Integration with Data Tools
+#### Agent Capabilities
 
-When the Agent is configured with data tools (Excel, CSV, Statistics), each pipeline stage can invoke tools for actual computation:
-
-```rust
-use echo_agent::tools::{ExcelTool, CsvTool, StatisticsTool};
-
-let agent = shared_agent(
-    ReactAgentBuilder::simple("qwen3-max", "Data Analyst")?
-        .with_tool(ExcelTool::new())
-        .with_tool(CsvTool::new())
-        .with_tool(StatisticsTool::new())
-);
-
-let config = DataPipelineConfig::new("/data/experiment_results.xlsx")
-    .with_objective("Compare A/B test groups for statistical significance");
-
-let result = run_data_pipeline(&agent, config).await?;
-// The Agent automatically invokes StatisticsTool during the analyze stage
-```
+The Agent must have file read/write tools and `run_code`. Optional CSV, Excel, Parquet, or exploratory-statistics tools can help inspect inputs, but the persisted Python/R script owns transformations and formal inference. `run_code` must execute the saved `script_path`, not a duplicate inline snippet. In the standard registry, the minimum relevant tool names are `read_file`, `write_file`, and `run_code`.
 
 ---
 
@@ -305,9 +287,9 @@ let final_paper: String = result.state.get("final_output").unwrap_or_default();
 
 ## Customization & Extension
 
-### Accessing Intermediate Results
+### Accessing Results
 
-Both pipelines return a `GraphResult` with full `SharedState`, allowing direct access to any stage's output:
+Both pipelines return a `GraphResult` with full `SharedState`. The data pipeline exposes contract metadata and its artifact-grounded execution report:
 
 ```rust
 let result = run_data_pipeline(&agent, config).await?;
@@ -317,8 +299,8 @@ for key in result.state.keys() {
     println!("State key: {}", key);
 }
 
-// Read a specific stage result
-let analysis: String = result.state.get("analysis").unwrap_or_default();
+let artifact_dir: String = result.state.get("artifact_dir").unwrap_or_default();
+let summary: String = result.state.get("summary").unwrap_or_default();
 ```
 
 ### Building Custom Workflows Based on Pipeline Patterns
@@ -366,7 +348,7 @@ let result = graph.run(state).await?;
 To extend beyond the built-in pipelines:
 
 1. **Add custom nodes before/after a pipeline**: Build a larger Graph that contains the pipeline as a subgraph
-2. **Customize via Agent system prompt**: Influence stage behavior through the Agent's system prompt
+2. **Customize via Agent system prompt**: Add domain requirements without weakening the file contract
 3. **Compose multiple pipelines**: e.g., run data pipeline first, feed `summary` as the writing pipeline's `topic`
 
 ```rust
@@ -385,9 +367,9 @@ let report = run_writing_pipeline(&writer, writing_config).await?;
 
 ## Best Practices
 
-1. **Configure relevant tools for the Agent**: data pipeline pairs with data tools (CSV, Excel, Statistics); writing pipeline pairs with search tools
+1. **Configure the required tools**: the data pipeline needs file read/write and `run_code`; format-specific readers are optional helpers
 2. **Set quality thresholds wisely**: too low lets poor quality through; too high causes unnecessary loops
-3. **Leverage intermediate results**: pipelines produce rich intermediate data useful for debugging, display, and post-processing
+3. **Review the artifacts**: inspect the persisted script, manifest, environment, result, hashes, and diagnostics before trusting conclusions
 4. **Monitor execution paths**: use `result.path` to see which nodes were actually traversed (especially writing pipeline loop count)
 5. **Set reasonable max_revisions**: prevents infinite loops while allowing enough optimization room (recommended: 2-5)
 

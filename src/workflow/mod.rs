@@ -55,7 +55,7 @@
 //!
 //! | Pipeline | Stages | Description |
 //! |----------|--------|-------------|
-//! | [`run_data_pipeline`] | load_data -> profile -> analyze -> visualize -> summarize | End-to-end data analysis |
+//! | [`run_data_pipeline`] | inspect -> persist script -> execute -> verify artifacts | Code-first reproducible data analysis |
 //! | [`run_writing_pipeline`] | outline -> draft -> review -> revise (loop) -> finalize | Content creation with quality loop |
 
 /// Direct re-exports from `echo_orchestration::workflow`.

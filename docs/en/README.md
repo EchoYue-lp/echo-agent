@@ -54,7 +54,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [32 - Plugin System](./32-plugin-system.md) | Plugin | PluginManifest, PluginRegistry, PluginScope, lifecycle management |
 | [33 - Headless Mode](./33-headless-mode.md) | Headless | Non-interactive execution, CI/CD integration, JSON output, exit_code |
 | [34 - Git Isolation](./34-git-isolation.md) | Git Worktree / Checkpoint | Parallel sub-agent isolation, worktree management, file operation rollback |
-| [35 - Pipelines](./35-pipelines.md) | Data Pipeline / Writing Pipeline | Data processing pipeline, writing pipeline, quality loop |
+| [35 - Pipelines](./35-pipelines.md) | Data Pipeline / Writing Pipeline | Reproducible code-first analysis, writing quality loop |
 | [36 - Data Quality & Statistics](./36-data-quality-statistics.md) | Data Quality / Statistics | Data profiling, anomaly detection, descriptive stats, correlation analysis |
 | [37 - Code Search](./37-code-search.md) | Code Search | Ripgrep, structured output, glob/type filtering, 50KB cap |
 | [38 - Agent Factory & Modes](./38-factory-modes.md) | Agent Factory / Mode Engine / Prompt Templates | mode switching, localization, template rendering |

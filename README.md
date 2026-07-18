@@ -1112,7 +1112,7 @@ See `examples/README.md` for the full bucketed inventory and maintenance rules.
 | 54 | [`demo54_headless`](examples/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
 | 55 | [`demo55_lsp_tools`](examples/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |
 | 56 | [`demo56_plugin_system`](examples/demo56_plugin_system.rs) | Plugin system: manifest, registry, lifecycle, scope |
-| 57 | [`demo57_data_pipeline`](examples/demo57_data_pipeline.rs) | Data pipeline: ingest → clean → analyze → report |
+| 57 | [`demo57_data_pipeline`](examples/demo57_data_pipeline.rs) | Code-first data pipeline: persist script → execute → verify artifacts |
 | 58 | [`demo58_git_worktree`](examples/demo58_git_worktree.rs) | Git worktree isolation + checkpoint rollback |
 | 59 | [`demo59_code_search`](examples/demo59_code_search.rs) | Ripgrep-powered code search with structured output |
 | 60 | [`demo60_data_quality`](examples/demo60_data_quality.rs) | Data quality profiling + statistical analysis |

@@ -240,10 +240,10 @@ pub mod prelude {
 
     // Workflow
     pub use crate::workflow::{
-        ConcurrentWorkflow, DagWorkflow, DataPipelineConfig, Graph, GraphBuilder, GraphResult,
-        SequentialWorkflow, SharedAgent, SharedState, StepOutput, Workflow, WorkflowDefinition,
-        WorkflowEvent, WorkflowOutput, WritingPipelineConfig, run_data_pipeline,
-        run_writing_pipeline, shared_agent,
+        ConcurrentWorkflow, DagWorkflow, DataPipelineConfig, DataPipelineLanguage, Graph,
+        GraphBuilder, GraphResult, SequentialWorkflow, SharedAgent, SharedState, StepOutput,
+        Workflow, WorkflowDefinition, WorkflowEvent, WorkflowOutput, WritingPipelineConfig,
+        run_data_pipeline, run_writing_pipeline, shared_agent,
     };
 
     // Sandbox

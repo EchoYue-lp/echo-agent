@@ -52,7 +52,8 @@ pub use sequential::{SequentialWorkflow, SequentialWorkflowBuilder, WorkflowStep
 // ── Pre-built Pipelines ──────────────────────────────────────────────────────
 
 pub use pipelines::{
-    DataPipelineConfig, WritingPipelineConfig, run_data_pipeline, run_writing_pipeline,
+    DataPipelineConfig, DataPipelineLanguage, WritingPipelineConfig, run_data_pipeline,
+    run_writing_pipeline,
 };
 
 use echo_core::agent::Agent;
