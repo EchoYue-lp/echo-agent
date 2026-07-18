@@ -152,10 +152,8 @@ pub fn register_readonly_tools(tool_manager: &mut dyn ToolRegistrar) {
 
     #[cfg(feature = "statistics")]
     {
-        use crate::statistics::{DescriptiveAdvancedTool, HypothesisTestTool, RegressionTool};
-        tool_manager.register(Box::new(HypothesisTestTool::default()));
-        tool_manager.register(Box::new(RegressionTool::default()));
-        tool_manager.register(Box::new(DescriptiveAdvancedTool::default()));
+        use crate::statistics::ExploratoryStatisticsTool;
+        tool_manager.register(Box::new(ExploratoryStatisticsTool::default()));
     }
 
     // ── research (all read-only) ──────────────────────────────────────────
@@ -375,11 +373,9 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
 
     #[cfg(feature = "statistics")]
     {
-        use crate::statistics::{DescriptiveAdvancedTool, HypothesisTestTool, RegressionTool};
+        use crate::statistics::ExploratoryStatisticsTool;
 
-        tool_manager.register(Box::new(HypothesisTestTool::default()));
-        tool_manager.register(Box::new(RegressionTool::default()));
-        tool_manager.register(Box::new(DescriptiveAdvancedTool::default()));
+        tool_manager.register(Box::new(ExploratoryStatisticsTool::default()));
     }
 
     // ── research ──────────────────────────────────────────────────────────
@@ -402,18 +398,21 @@ pub fn register_all_tools(tool_manager: &mut dyn ToolRegistrar) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "shell")]
+    #[cfg(any(feature = "shell", feature = "statistics"))]
     use echo_core::tools::{Tool, ToolRegistrar};
 
     /// A registrar that collects the names of every tool registered into it.
-    #[cfg(feature = "shell")]
+    #[cfg(any(feature = "shell", feature = "statistics"))]
     struct Collector {
         names: std::sync::Mutex<Vec<String>>,
     }
-    #[cfg(feature = "shell")]
+    #[cfg(any(feature = "shell", feature = "statistics"))]
     impl ToolRegistrar for Collector {
         fn register(&mut self, tool: Box<dyn Tool>) {
-            self.names.lock().unwrap().push(tool.name().to_string());
+            self.names
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(tool.name().to_string());
         }
     }
 
@@ -426,7 +425,11 @@ mod tests {
             names: std::sync::Mutex::new(vec![]),
         };
         crate::register_all_tools(&mut c);
-        let names = c.names.lock().unwrap().clone();
+        let names = c
+            .names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         assert!(
             names.contains(&"run_code".to_string()),
             "run_code missing from register_all_tools: {:?}",
@@ -443,11 +446,47 @@ mod tests {
             names: std::sync::Mutex::new(vec![]),
         };
         crate::register_readonly_tools(&mut c);
-        let names = c.names.lock().unwrap().clone();
+        let names = c
+            .names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         assert!(
             !names.contains(&"run_code".to_string()),
             "run_code must NOT be in the readonly subset: {:?}",
             names
         );
+    }
+
+    #[test]
+    #[cfg(feature = "statistics")]
+    fn statistics_registry_exposes_only_exploratory_summary() {
+        let mut all = Collector {
+            names: std::sync::Mutex::new(Vec::new()),
+        };
+        crate::register_all_tools(&mut all);
+        let all_names = all
+            .names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(all_names.contains(&"exploratory_statistics".to_string()));
+        assert!(!all_names.contains(&"hypothesis_test".to_string()));
+        assert!(!all_names.contains(&"regression".to_string()));
+        assert!(!all_names.contains(&"descriptive_advanced".to_string()));
+
+        let mut readonly = Collector {
+            names: std::sync::Mutex::new(Vec::new()),
+        };
+        crate::register_readonly_tools(&mut readonly);
+        let readonly_names = readonly
+            .names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(readonly_names.contains(&"exploratory_statistics".to_string()));
+        assert!(!readonly_names.contains(&"hypothesis_test".to_string()));
+        assert!(!readonly_names.contains(&"regression".to_string()));
+        assert!(!readonly_names.contains(&"descriptive_advanced".to_string()));
     }
 }

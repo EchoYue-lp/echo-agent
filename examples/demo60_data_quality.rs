@@ -4,7 +4,7 @@
 //! 1. MissingValueAnalysisTool — 缺失值分析与插补建议
 //! 2. OutlierDetectionTool — IQR / Z-score 异常值检测
 //! 3. ConsistencyCheckTool — 数据一致性校验
-//! 4. DescriptiveAdvancedTool — 偏度、峰度、置信区间
+//! 4. ExploratoryStatisticsTool — 描述性分布摘要
 //!
 //! 需要 `data` 和 `statistics` features。
 //!
@@ -161,21 +161,20 @@ name,age,salary,department,rating
 
     // ── Part 5：高级描述统计 ──────────────────────────────────────────────
     println!("───────────────────────────────────────────────────────");
-    println!("Part 5：DescriptiveAdvancedTool — 偏度/峰度/置信区间");
+    println!("Part 5：ExploratoryStatisticsTool — 描述性分布摘要");
     println!("───────────────────────────────────────────────────────\n");
 
-    let stats_tool = echo_tools::statistics::DescriptiveAdvancedTool::default();
+    let stats_tool = echo_tools::statistics::ExploratoryStatisticsTool::default();
     let output = run_tool(
         &stats_tool,
         json!({
-            "data_path": csv_path,
-            "confidence_level": 0.95
+            "data_path": csv_path
         }),
     )
     .await
     .unwrap_or_else(|e| format!("Error: {e}"));
 
-    println!("  计算偏度(skewness)、峰度(kurtosis)和 95% 置信区间：\n");
+    println!("  计算分位数、偏度(skewness)和超额峰度(kurtosis)，不做统计推断：\n");
     print_json_preview(&output, 40);
 
     // ── Cleanup ───────────────────────────────────────────────────────────
@@ -191,9 +190,10 @@ name,age,salary,department,rating
     println!("    - ConsistencyCheckTool     : 类型不匹配 + 范围校验 + 自定义规则");
     println!();
     println!("  statistics 模块（需要 'statistics' feature）：");
-    println!("    - HypothesisTestTool       : t 检验 / 卡方检验 / 相关性显著性");
-    println!("    - RegressionTool           : 线性回归 + R² + p 值");
-    println!("    - DescriptiveAdvancedTool  : 偏度 / 峰度 / 置信区间");
+    println!("    - ExploratoryStatisticsTool: 描述性摘要，不输出 p 值或显著性结论");
+    println!(
+        "    - 正式推断                    : 生成 SciPy/statsmodels/R 脚本并通过 run_code 执行"
+    );
 
     println!("\n═══════════════════════════════════════════════════════");
     println!("    demo60 完成");

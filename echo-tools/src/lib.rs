@@ -10,7 +10,7 @@
 //! | `web`     | `web` (WebFetchTool, WebSearchTool, WebExtractTool, providers) |
 //! | `chart`   | `chart` (GenerateChartTool)               |
 //! | `data`    | `data` (11 data-analysis tools), `data_quality` (3 data-quality tools) |
-//! | `statistics`| `statistics` (3 statistical-analysis tools)           |
+//! | `statistics`| `statistics` (`exploratory_statistics`; formal inference uses sandboxed `run_code`) |
 //! | `database`| `database` (SqlQueryTool, …)              |
 //! | `media`   | `excel`, `image`, `pdf`, `word`, `text`, `media` |
 //! | `git`     | `git` (6 git CLI tools)                   |
