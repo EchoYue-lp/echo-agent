@@ -322,7 +322,7 @@ name: test_workflow
 nodes:
   - name: start
     type: router
-  - name: worker
+  - name: subagent
     type: agent
     model: qwen3-max
     system_prompt: "You are an assistant"
@@ -330,8 +330,8 @@ nodes:
     output_key: result
 edges:
   - from: start
-    to: worker
-  - from: worker
+    to: subagent
+  - from: subagent
     to: __end__
 entry: start
 finish: []

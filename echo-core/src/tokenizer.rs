@@ -321,7 +321,7 @@ impl TokenUsageTracker {
 }
 
 /// Token usage summary snapshot
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UsageSummary {
     pub model_name: String,
     pub total_prompt_tokens: u64,

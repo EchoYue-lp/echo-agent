@@ -67,7 +67,7 @@ impl ContextInheritance {
 
     /// Fork mode default: inherit prompt + tools + recent 2 messages.
     ///
-    /// Sprint 6b: lowered 10 → 2 (was over-inheriting, bloating Fork worker
+    /// Sprint 6b: lowered 10 → 2 (was over-inheriting, bloating Fork subagent
     /// context with stale turns). `SubagentDefinition.inherit_history` (e.g.
     /// from a `.md` frontmatter or `.inherit_history(n)`) is now honored at
     /// dispatch time by `enhance_task` and overrides this default.
@@ -99,7 +99,7 @@ impl ContextInheritance {
             ExecutionMode::Fork => Self::fork_default(),
             ExecutionMode::Teammate => Self::teammate_default(),
             // Sprint 11: team mode builds its own context (manager plans,
-            // workers fan out) — minimal inheritance, like Teammate.
+            // subagents fan out) — minimal inheritance, like Teammate.
             ExecutionMode::Team => Self::teammate_default(),
         }
     }

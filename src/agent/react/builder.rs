@@ -39,12 +39,12 @@ pub struct ReactAgentBuilder {
     enable_subagent: bool,
     register_agent_dispatch_tool: bool,
     /// Sprint 8: optional worktree-isolation factory for Fork-dispatched writer
-    /// workers. Propagated to `AgentConfig.subagent_worktree_factory` on build.
+    /// subagents. Propagated to `AgentConfig.subagent_worktree_factory` on build.
     #[cfg(feature = "subagent")]
     subagent_worktree_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
     /// Sprint 10: optional data-workspace factory for Fork-dispatched
-    /// data/research workers. Propagated to
+    /// data/research subagents. Propagated to
     /// `AgentConfig.subagent_data_workspace_factory` on build.
     #[cfg(feature = "subagent")]
     subagent_data_workspace_factory:
@@ -280,7 +280,7 @@ impl ReactAgentBuilder {
 
     /// Restrict registered tools to read-only (no shell, no file writes).
     /// Must be combined with `enable_tools()`. Used by read-only subagent
-    /// workers so readonly is enforced at the tool level, not just prompt.
+    /// subagents so readonly is enforced at the tool level, not just prompt.
     pub fn readonly_tools(mut self) -> Self {
         self.readonly_tools = true;
         self
@@ -325,7 +325,7 @@ impl ReactAgentBuilder {
     }
 
     /// Sprint 8: supply a worktree-isolation factory for Fork-dispatched writer
-    /// workers (those declaring `isolate_worktree: true`). The application
+    /// subagents (those declaring `isolate_worktree: true`). The application
     /// constructs the git-backed factory and injects it here; the framework
     /// stays free of git deps. Default: no factory (no isolation).
     #[cfg(feature = "subagent")]
@@ -338,7 +338,7 @@ impl ReactAgentBuilder {
     }
 
     /// Sprint 10: supply a data-workspace factory for Fork-dispatched
-    /// data/research workers. The application constructs the tmpdir-backed
+    /// data/research subagents. The application constructs the tmpdir-backed
     /// factory and injects it here. Default: no factory (no workspace isolation).
     #[cfg(feature = "subagent")]
     pub fn subagent_data_workspace_factory(

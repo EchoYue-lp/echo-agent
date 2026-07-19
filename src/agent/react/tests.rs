@@ -726,9 +726,9 @@ fn react_agent_register_multiple_subagents() {
     let mut agent = ReactAgent::new(config);
 
     let sub_agents: Vec<Box<dyn Agent>> = vec![
-        Box::new(MockAgent::new("worker1")),
-        Box::new(MockAgent::new("worker2")),
-        Box::new(MockAgent::new("worker3")),
+        Box::new(MockAgent::new("subagent1")),
+        Box::new(MockAgent::new("subagent2")),
+        Box::new(MockAgent::new("subagent3")),
     ];
 
     agent.register_agents(sub_agents);

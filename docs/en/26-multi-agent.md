@@ -5,7 +5,7 @@
 echo-agent provides two multi-agent patterns:
 
 1. **SubAgent** — Parent-child delegation with 3 execution modes (Sync, Fork, Teammate)
-2. **TeamAgent** — Peer collaboration with 4 strategies (ManagerWorker, Pipeline, Debate, Swarm)
+2. **TeamAgent** — Peer collaboration with 4 strategies (ManagerSubagent, Pipeline, Debate, Swarm)
 
 Both are feature-gated behind `subagent`.
 
@@ -17,7 +17,7 @@ Both are feature-gated behind `subagent`.
 │  │      SubAgent        │  │       TeamAgent          │  │
 │  │  (parent → child)    │  │  (peer ↔ peer)           │  │
 │  │                      │  │                          │  │
-│  │  • Sync (blocking)   │  │  • ManagerWorker         │  │
+│  │  • Sync (blocking)   │  │  • ManagerSubagent         │  │
 │  │  • Fork (independent)│  │  • Pipeline              │  │
 │  │  • Teammate (mailbox)│  │  • Debate                │  │
 │  │                      │  │  • Swarm                 │  │
@@ -106,14 +106,14 @@ TeamAgent is the advanced pattern: multiple agents collaborate as peers under a 
 | Role | Responsibility |
 |------|---------------|
 | **Leader** | Decomposes tasks, assigns work, synthesizes results |
-| **Worker** | Executes assigned subtasks |
+| **Subagent** | Executes assigned subtasks |
 | **Reviewer** | Validates outputs (optional) |
 
 ### Four Collaboration Strategies
 
-#### 1. ManagerWorker (default)
+#### 1. ManagerSubagent (default)
 
-The leader decomposes the task, fans out to workers, and synthesizes the result.
+The leader decomposes the task, fans out to subagents, and synthesizes the result.
 
 ```
            ┌─────────┐
@@ -122,7 +122,7 @@ The leader decomposes the task, fans out to workers, and synthesizes the result.
         ┌───────┼───────┐
         ▼       ▼       ▼
    ┌────────┐┌────────┐┌────────┐
-   │Worker 1││Worker 2││Worker 3│
+   │Subagent 1││Subagent 2││Subagent 3│
    └────┬───┘└────┬───┘└────┬───┘
         └───────┬─┘─────────┘
                 ▼
@@ -136,10 +136,10 @@ use echo_agent::agent::subagent::team::{TeamAgent, TeamAgentBuilder, TeamStrateg
 
 let team = TeamAgentBuilder::new()
     .model("qwen3-max")
-    .strategy(TeamStrategy::ManagerWorker)
-    .member("researcher", "Search for relevant information", TeamRole::Worker)
-    .member("analyst", "Analyze the findings", TeamRole::Worker)
-    .member("writer", "Write the final report", TeamRole::Worker)
+    .strategy(TeamStrategy::ManagerSubagent)
+    .member("researcher", "Search for relevant information", TeamRole::Subagent)
+    .member("analyst", "Analyze the findings", TeamRole::Subagent)
+    .member("writer", "Write the final report", TeamRole::Subagent)
     .build()?;
 
 let result = team.execute("Write a report about Rust async patterns").await?;
@@ -164,9 +164,9 @@ let team = TeamAgentBuilder::new()
         "analyst".into(),
         "writer".into(),
     ]))
-    .member("researcher", "Research the topic", TeamRole::Worker)
-    .member("analyst", "Analyze the research", TeamRole::Worker)
-    .member("writer", "Write the final output", TeamRole::Worker)
+    .member("researcher", "Research the topic", TeamRole::Subagent)
+    .member("analyst", "Analyze the research", TeamRole::Subagent)
+    .member("writer", "Write the final output", TeamRole::Subagent)
     .build()?;
 ```
 
@@ -194,8 +194,8 @@ let team = TeamAgentBuilder::new()
         debaters: vec!["architect-a".into(), "architect-b".into()],
     })
     .member("judge", "Evaluate proposals and select the best", TeamRole::Reviewer)
-    .member("architect-a", "Propose architecture A", TeamRole::Worker)
-    .member("architect-b", "Propose architecture B", TeamRole::Worker)
+    .member("architect-a", "Propose architecture A", TeamRole::Subagent)
+    .member("architect-b", "Propose architecture B", TeamRole::Subagent)
     .build()?;
 ```
 
@@ -205,7 +205,7 @@ Work is split across agents by module/file. Each agent inspects its portion, the
 
 ```
 ┌──────────┐  ┌──────────┐  ┌──────────┐
-│Worker 1  │  │Worker 2  │  │Worker 3  │
+│Subagent 1  │  │Subagent 2  │  │Subagent 3  │
 │(src/a/)  │  │(src/b/)  │  │(src/c/)  │
 └────┬─────┘  └────┬─────┘  └────┬─────┘
      └─────────────┼─────────────┘
@@ -222,9 +222,9 @@ let team = TeamAgentBuilder::new()
         batch_size: 3,
         reducer: "synthesizer".into(),
     })
-    .member("worker-1", "Analyze files in src/agent/", TeamRole::Worker)
-    .member("worker-2", "Analyze files in src/tools/", TeamRole::Worker)
-    .member("worker-3", "Analyze files in src/memory/", TeamRole::Worker)
+    .member("subagent-1", "Analyze files in src/agent/", TeamRole::Subagent)
+    .member("subagent-2", "Analyze files in src/tools/", TeamRole::Subagent)
+    .member("subagent-3", "Analyze files in src/memory/", TeamRole::Subagent)
     .member("synthesizer", "Merge all findings into a report", TeamRole::Reviewer)
     .build()?;
 ```
@@ -273,10 +273,10 @@ Each `TeamMember` gets a `Mailbox` with configurable capacity (default: 64 messa
 
 ```rust
 TeamConfig {
-    max_concurrent: 5,           // Max concurrent workers
+    max_concurrent: 5,           // Max concurrent subagents
     default_timeout_secs: 300,   // 5 min timeout per task
     allow_reassignment: true,    // Reassign on failure
-    cross_talk: false,           // Workers can't talk to each other
+    cross_talk: false,           // Subagents can't talk to each other
     mailbox_capacity: 64,        // Messages per mailbox
 }
 ```

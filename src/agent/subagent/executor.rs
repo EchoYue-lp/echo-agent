@@ -45,10 +45,10 @@ pub struct DispatchRequest {
     pub delegation_policy: NestedDelegationPolicy,
     /// 应用层 run 级上下文（跨 spawn 安全，值传递）。
     ///
-    /// dispatch_fork 将它放入本次 `AgentInvocationContext`，使 worker 内的工具
+    /// dispatch_fork 将它放入本次 `AgentInvocationContext`，使 subagent 内的工具
     /// 能经 ToolContext 读到 run_id/cancel/trace_sink——不修改共享 agent。
     pub runtime_context: Option<echo_core::tools::ExternalRunContext>,
-    /// Optional multimodal message (images/files). When `Some`, the worker is
+    /// Optional multimodal message (images/files). When `Some`, the subagent is
     /// dispatched via `execute_stream_message_with_invocation_context` instead of the text
     /// `task` path, so it sees user-uploaded attachments. `None` = plain text
     /// dispatch (the default for all existing callers).
@@ -196,7 +196,7 @@ pub struct TeammateHandle {
 
 /// Handle returned immediately by [`SubagentExecutor::dispatch_background`].
 ///
-/// The worker continues on a spawned task; lifecycle events
+/// The subagent continues on a spawned task; lifecycle events
 /// (`DispatchStarted` / `DispatchCompleted` / `DispatchFailed`) still fire on
 /// the registry event bus. Unlike [`TeammateHandle`], this does not expose a
 /// join handle — callers observe completion via events / UI.
@@ -239,22 +239,22 @@ pub struct SubagentExecutorConfig {
     /// unified HookRegistry alongside the trait-based SubagentHooks.
     pub unified_hook_executor: Option<crate::skills::hooks::UnifiedHookExecutorFn>,
     /// Optional worktree-isolation factory (Sprint 8). When set, Fork-dispatched
-    /// workers whose `SubagentDefinition.isolate_worktree == true` run inside an
+    /// subagents whose `SubagentDefinition.isolate_worktree == true` run inside an
     /// isolated git worktree created by this factory. `None` = isolation
-    /// unavailable: workers declaring `isolate_worktree` **hard-fail** (do not
+    /// unavailable: subagents declaring `isolate_worktree` **hard-fail** (do not
     /// silently share the main tree). Application supplies a git-backed impl;
     /// framework stays free of git deps.
     pub worktree_factory: Option<super::worktree::SharedWorktreeFactory>,
     /// Optional data-workspace factory (Sprint 10). When set, Fork-dispatched
-    /// workers whose `SubagentDefinition.isolate_workspace == true` run inside
-    /// an isolated per-worker working directory (tmpdir) created by this
-    /// factory — for data/research workers emitting disjoint output artifacts.
+    /// subagents whose `SubagentDefinition.isolate_workspace == true` run inside
+    /// an isolated per-subagent working directory (tmpdir) created by this
+    /// factory — for data/research subagents emitting disjoint output artifacts.
     /// `None` = no workspace isolation available. Application supplies a
     /// tmpdir-backed impl.
     pub data_workspace_factory: Option<super::workspace::SharedDataWorkspaceFactory>,
     /// Sprint 11: optional state store for team-mode checkpoint/resume. When
     /// set AND a team subagent's `TeamSpec` is dispatched, `dispatch_team`
-    /// plumbs this into `TeamAgent` so `ManagerWorkerOrchestrator` can
+    /// plumbs this into `TeamAgent` so `ManagerSubagentOrchestrator` can
     /// read/write checkpoint nodes keyed by `run_id`. `None` → teams run
     /// in-memory (no persistence, today's behavior).
     pub runtime_state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
@@ -666,7 +666,7 @@ impl SubagentExecutor {
         }
     }
 
-    /// Clone internals so a background worker can own an executor on a spawned task.
+    /// Clone internals so a background subagent can own an executor on a spawned task.
     fn clone_for_spawn(&self) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -870,20 +870,20 @@ impl SubagentExecutor {
     }
 
     /// Sprint 11: dispatch a team-mode subagent. Builds a `TeamAgent` from the
-    /// definition's `TeamSpec` (manager + workers resolved by name from the
+    /// definition's `TeamSpec` (manager + subagents resolved by name from the
     /// registry), plumbs `run_id` + `state_store` for checkpoint/resume, and
     /// runs it.
     ///
     /// Timeout: relies on `TeamAgent::execute`'s own `tokio::time::timeout`
     /// wrapper (uses `TeamConfig.default_timeout_secs`) — no second timeout
-    /// here (would double-wrap). Workers are wrapped in `ArcAgentBox` since
+    /// here (would double-wrap). Subagents are wrapped in `ArcAgentBox` since
     /// the builder consumes `Box<dyn Agent>` but the registry returns
     /// `Arc<dyn Agent>` (shared singletons).
     async fn dispatch_team(
         &self,
         req: &DispatchRequest,
     ) -> std::result::Result<SubagentResult, crate::error::ReactError> {
-        use super::team::{ArcAgentBox, TeamAgent};
+        use super::team::{ArcAgentBox, TeamAgent, TeamExecutionResult};
 
         let registered = self.registry.get(&req.agent_name).await.ok_or_else(|| {
             crate::error::ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
@@ -894,7 +894,7 @@ impl SubagentExecutor {
             )
         })?;
 
-        // Resolve manager + workers by name (late binding, D-11-team-2).
+        // Resolve manager + subagents by name (late binding, D-11-team-2).
         let manager_def = self
             .registry
             .get(&spec.manager)
@@ -932,26 +932,30 @@ impl SubagentExecutor {
             )
             .state_store(self.config.runtime_state_store.clone());
 
-        for name in &spec.workers {
-            let w_def = self
+        for name in &spec.subagents {
+            let subagent_definition = self
                 .registry
                 .get(name)
                 .await
                 .ok_or_else(|| {
                     crate::error::ReactError::Other(format!(
-                        "Team worker '{}' not registered",
+                        "Team subagent '{}' not registered",
                         name
                     ))
                 })?
                 .definition
                 .clone();
-            let w_agent = self.registry.get_agent(name).await.ok_or_else(|| {
+            let subagent_agent = self.registry.get_agent(name).await.ok_or_else(|| {
                 crate::error::ReactError::Other(format!(
-                    "Cannot get worker agent instance '{}'",
+                    "Cannot get team subagent instance '{}'",
                     name
                 ))
             })?;
-            builder = builder.worker(name, Box::new(ArcAgentBox(w_agent.clone())), w_def);
+            builder = builder.subagent(
+                name,
+                Box::new(ArcAgentBox(subagent_agent.clone())),
+                subagent_definition,
+            );
         }
         let team_agent = builder.build();
 
@@ -961,28 +965,34 @@ impl SubagentExecutor {
             req.parent_context.as_ref(),
             registered.definition.inherit_history,
         );
-        let result = team_agent.execute(&task).await.map_err(|error| {
-            if error.to_ascii_lowercase().contains("timed out") {
-                crate::error::ReactError::Agent(Box::new(AgentError::Timeout(error)))
-            } else {
-                crate::error::ReactError::Other(format!("Team execution failed: {error}"))
-            }
-        })?;
+        let TeamExecutionResult { output, usage } = team_agent
+            .execute_with_usage(&task)
+            .await
+            .map_err(|error| {
+                if error.to_ascii_lowercase().contains("timed out") {
+                    crate::error::ReactError::Agent(Box::new(AgentError::Timeout(error)))
+                } else {
+                    crate::error::ReactError::Other(format!("Team execution failed: {error}"))
+                }
+            })?;
+        let tokens_used = usage
+            .as_ref()
+            .map(|stats| usize::try_from(stats.total_tokens).unwrap_or(usize::MAX));
 
         Ok(SubagentResult {
             agent_name: req.agent_name.clone(),
-            output: result,
+            output,
             outcome: SubagentOutcome {
                 status: SubagentStatus::Completed,
                 ..SubagentOutcome::default()
             },
             duration: start.elapsed(),
             iterations: 1,
-            tokens_used: None, // team doesn't aggregate worker tokens (follow-up)
+            tokens_used,
             was_truncated: false,
             mode: ExecutionMode::Team,
-            isolation_observed: ObservedIsolation::Worker,
-            usage: None,
+            isolation_observed: ObservedIsolation::Subagent,
+            usage,
         }
         .with_structured(
             req.runtime_context
@@ -1011,7 +1021,7 @@ impl SubagentExecutor {
     ///
     /// Before Sprint 6b this function ignored `inherit_history` and dumped the
     /// entire `parent_ctx.messages`, so per-subagent `inherit_history` settings
-    /// (e.g. from a worker `.md` frontmatter) had no effect.
+    /// (e.g. from a subagent `.md` frontmatter) had no effect.
     fn enhance_task(
         task: &str,
         parent_ctx: Option<&super::context::SubagentContext>,
@@ -1092,7 +1102,7 @@ impl SubagentExecutor {
             .working_dir
             .clone()
             .or_else(|| std::env::current_dir().ok());
-        // Multimodal path: when a Message is supplied, run it so the worker
+        // Multimodal path: when a Message is supplied, run it so the subagent
         // sees images/files. Falls back to the text task otherwise.
         let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation);
         let raw_stream = if let Some(msg) = message {
@@ -1495,7 +1505,7 @@ impl SubagentExecutor {
             registered.definition.inherit_history,
         );
         // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
-        // worker agent 是 registry 预注册的单例(fork 不 clone)。run context
+        // subagent 是 registry 预注册的单例(fork 不 clone)。run context
         // 与实际 isolation path 作为同一个 invocation value 传入，避免并行
         // dispatch 修改单例上的共享 runtime/working_dir。
         let mut runtime_context = req.runtime_context.clone();
@@ -1508,7 +1518,7 @@ impl SubagentExecutor {
             .and_then(|ctx| ctx.execution_id.clone());
         let event_run_id = runtime_context.as_ref().and_then(|ctx| ctx.run_id.clone());
 
-        // Sprint 8: worktree isolation for writer workers. Resolve the intent
+        // Sprint 8: worktree isolation for writer subagents. Resolve the intent
         // before spawning so the closure can capture a shared factory clone.
         let isolate = registered.definition.isolate_worktree;
         let worktree_factory = if isolate {
@@ -1517,18 +1527,18 @@ impl SubagentExecutor {
             None
         };
         if isolate && worktree_factory.is_none() {
-            // Hard-fail: a worker that declared isolate_worktree must not
+            // Hard-fail: a subagent that declared isolate_worktree must not
             // silently share the main tree (multi-implementer safety). Local
             // personal-assistant threat model still needs this — otherwise
             // parallel writers corrupt each other's edits.
             return Err(ReactError::Other(format!(
-                "Worker '{}' declares isolate_worktree but no WorktreeFactory is configured; \
+                "Subagent '{}' declares isolate_worktree but no WorktreeFactory is configured; \
                  refusing to run without isolation",
                 agent_name
             )));
         }
-        // Sprint 10: data-workspace isolation for data/research workers.
-        // Mutually exclusive with worktree in intent — if a worker declares
+        // Sprint 10: data-workspace isolation for data/research subagents.
+        // Mutually exclusive with worktree in intent — if a subagent declares
         // both, worktree wins (it also provides disjoint FS). Resolve the
         // workspace factory only when worktree isolation isn't being used.
         let isolate_workspace = registered.definition.isolate_workspace && !isolate;
@@ -1539,8 +1549,8 @@ impl SubagentExecutor {
         };
         if isolate_workspace && data_workspace_factory.is_none() {
             tracing::warn!(
-                worker = %agent_name,
-                "Worker declares isolate_workspace but no DataWorkspaceFactory is configured; \
+                subagent = %agent_name,
+                "Subagent declares isolate_workspace but no DataWorkspaceFactory is configured; \
                  running without a workspace"
             );
         }
@@ -1595,7 +1605,7 @@ impl SubagentExecutor {
             let agent = agent_arc.as_ref();
 
             // Sprint 8: if isolation was requested and a factory is available,
-            // create a worktree and bind it as the worker's working_dir BEFORE
+            // create a worktree and bind it as the subagent's working_dir BEFORE
             // execution. Creation failure is a hard error — never silently run
             // a writer without the promised isolation (would let it touch the
             // main checkout, a data-loss hazard).
@@ -1611,15 +1621,15 @@ impl SubagentExecutor {
                     }
                     Err(e) => {
                         return Err(ReactError::Other(format!(
-                            "Worktree isolation for Fork worker '{agent_name}' failed: {e}"
+                            "Worktree isolation for Fork subagent '{agent_name}' failed: {e}"
                         )));
                     }
                 }
             }
 
             // Sprint 10: data-workspace isolation. Same shape as worktree above
-            // but for data/research workers: a per-worker tmpdir bound as
-            // working_dir so output files are disjoint across parallel workers.
+            // but for data/research subagents: a per-subagent tmpdir bound as
+            // working_dir so output files are disjoint across parallel subagents.
             // Creation failure is a hard error (consistent with worktree).
             let mut workspace_handle: Option<super::workspace::DataWorkspaceHandle> = None;
             if let Some(factory) = &data_workspace_factory {
@@ -1629,7 +1639,7 @@ impl SubagentExecutor {
                     }
                     Err(e) => {
                         return Err(ReactError::Other(format!(
-                            "Data workspace for Fork worker '{agent_name}' failed: {e}"
+                            "Data workspace for Fork subagent '{agent_name}' failed: {e}"
                         )));
                     }
                 }
@@ -1721,7 +1731,7 @@ impl SubagentExecutor {
             }
 
             // Sprint 8: finalize the worktree and append its diff summary. The
-            // working directory is invocation-scoped, so reusable workers keep
+            // working directory is invocation-scoped, so reusable subagents keep
             // no mutable directory state that needs restoring after dispatch.
             if let Some(handle) = worktree_handle {
                 match (handle.finalize)() {
@@ -1736,7 +1746,7 @@ impl SubagentExecutor {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            worker = %agent_name,
+                            subagent = %agent_name,
                             error = %e,
                             "Worktree finalize (diff summary) failed; result preserved"
                         );
@@ -1745,7 +1755,7 @@ impl SubagentExecutor {
             }
 
             // Sprint 10: finalize the invocation-scoped data workspace and
-            // append its file listing so downstream workers can find outputs.
+            // append its file listing so downstream subagents can find outputs.
             if let Some(handle) = workspace_handle {
                 match (handle.finalize)() {
                     Ok(listing) => {
@@ -1761,7 +1771,7 @@ impl SubagentExecutor {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            worker = %agent_name,
+                            subagent = %agent_name,
                             error = %e,
                             "Data workspace finalize (file listing) failed; result preserved"
                         );
@@ -1955,12 +1965,12 @@ mod tests {
     async fn test_dispatch_sync() {
         let (registry, executor) = make_executor().await;
 
-        let agent = MockAgent::new("worker").with_response("done");
-        let def = super::super::types::SubagentDefinition::new("worker", "Worker");
+        let agent = MockAgent::new("subagent").with_response("done");
+        let def = super::super::types::SubagentDefinition::new("subagent", "Subagent");
         registry.register(def, Box::new(agent)).await;
 
         let req = DispatchRequest {
-            agent_name: "worker".into(),
+            agent_name: "subagent".into(),
             task: "do work".into(),
             mode_override: None,
             cancel: CancellationToken::new(),
@@ -1983,7 +1993,7 @@ mod tests {
         let agent = MockAgent::new("slow")
             .with_delay_ms(200)
             .with_response("## Summary\nbg done");
-        let def = super::super::types::SubagentDefinition::new("slow", "Slow worker");
+        let def = super::super::types::SubagentDefinition::new("slow", "Slow subagent");
         registry.register(def, Box::new(agent)).await;
 
         let mut events = registry.event_bus().subscribe();
@@ -2004,7 +2014,7 @@ mod tests {
         let handle = executor.dispatch_background(req).await.unwrap();
         assert!(
             started_at.elapsed() < Duration::from_millis(100),
-            "dispatch_background must return before the slow worker finishes"
+            "dispatch_background must return before the slow subagent finishes"
         );
         assert!(!handle.execution_id.is_empty());
         assert_eq!(handle.agent_name, "slow");
@@ -2047,11 +2057,11 @@ mod tests {
         );
     }
 
-    // NOTE: a unit test for multimodal dispatch forwarding (verifying a worker
+    // NOTE: a unit test for multimodal dispatch forwarding (verifying a subagent
     // receives the Message via execute_stream_message_with_cancel) is not
     // feasible with MockAgent — the trait-object vtable routes the default
     // trait method rather than MockAgent's override for this added method, so
-    // the message path can't be exercised in isolation. Worker multimodal
+    // the message path can't be exercised in isolation. Subagent multimodal
     // forwarding is instead verified by: (1) the text-path dispatch tests
     // above, (2) compile-time coverage of the DispatchRequest.message field
     // and execute_agent_streaming branch, and (3) GUI manual testing of
@@ -2184,7 +2194,7 @@ mod tests {
             })
             .await
             .err()
-            .ok_or_else(|| "failing worker unexpectedly completed".to_string())?;
+            .ok_or_else(|| "failing subagent unexpectedly completed".to_string())?;
         assert_eq!(subagent_status_from_error(&error), SubagentStatus::Failed);
         let terminal_events = collect_terminal_events(&mut events);
         assert!(matches!(
@@ -2233,7 +2243,7 @@ mod tests {
             })
             .await
             .err()
-            .ok_or_else(|| "cancelled worker unexpectedly completed".to_string())?;
+            .ok_or_else(|| "cancelled subagent unexpectedly completed".to_string())?;
         assert_eq!(
             subagent_status_from_error(&error),
             SubagentStatus::Cancelled
@@ -2277,7 +2287,7 @@ mod tests {
             })
             .await
             .err()
-            .ok_or_else(|| "timed-out worker unexpectedly completed".to_string())?;
+            .ok_or_else(|| "timed-out subagent unexpectedly completed".to_string())?;
         assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
         let terminal_events = collect_terminal_events(&mut events);
         assert!(matches!(
@@ -2355,7 +2365,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_team_routes_and_runs() {
-        // Register a team-mode subagent + its named manager + worker. Dispatch
+        // Register a team-mode subagent + its named manager + subagent. Dispatch
         // must route to dispatch_team and return the synthesized result.
         let (registry, executor) = make_executor().await;
 
@@ -2366,16 +2376,16 @@ mod tests {
         let mgr_def = super::super::types::SubagentDefinition::new("mgr", "Manager");
         registry.register(mgr_def, Box::new(manager)).await;
 
-        // Worker: returns a canned result.
-        let worker = MockAgent::new("wk").with_response("worker-out");
-        let w_def = super::super::types::SubagentDefinition::new("wk", "Worker");
-        registry.register(w_def, Box::new(worker)).await;
+        // Subagent: returns a canned result.
+        let subagent = MockAgent::new("wk").with_response("subagent-out");
+        let w_def = super::super::types::SubagentDefinition::new("wk", "Subagent");
+        registry.register(w_def, Box::new(subagent)).await;
 
         // Team definition: references mgr + wk by name.
         let team_spec = super::super::types::TeamSpec {
-            strategy: super::super::team::strategy::TeamStrategy::ManagerWorker,
+            strategy: super::super::team::strategy::TeamStrategy::ManagerSubagent,
             manager: "mgr".to_string(),
-            workers: vec!["wk".to_string()],
+            subagents: vec!["wk".to_string()],
             config: super::super::team::TeamConfig::default(),
         };
         let mut team_def =
@@ -2479,7 +2489,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_isolate_worktree_binds_path_and_appends_diff() {
-        // A writer worker declaring isolate_worktree should observe Worktree
+        // A writer subagent declaring isolate_worktree should observe Worktree
         // isolation for this invocation and append the finalized diff.
         let factory = Arc::new(MockWorktreeFactory {
             labels: StdMutex::new(Vec::new()),
@@ -2510,7 +2520,7 @@ mod tests {
         };
 
         let result = executor.dispatch(req).await.unwrap();
-        // Output = worker's answer + appended diff (the diff append is the
+        // Output = subagent's answer + appended diff (the diff append is the
         // observable proof that the worktree was created and finalized).
         assert!(result.output.contains("done"));
         assert!(result.output.contains("=== mock diff ==="));
@@ -2521,7 +2531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_worktree_observation_precedes_worker_completion()
+    async fn fork_worktree_observation_precedes_subagent_completion()
     -> std::result::Result<(), String> {
         let factory = Arc::new(MockWorktreeFactory {
             labels: StdMutex::new(Vec::new()),
@@ -2742,7 +2752,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_no_isolate_does_not_touch_worktree() {
-        // A readonly worker (isolate_worktree=false) never creates a worktree
+        // A readonly subagent (isolate_worktree=false) never creates a worktree
         // even when a factory is configured.
         let factory = Arc::new(MockWorktreeFactory {
             labels: StdMutex::new(Vec::new()),
@@ -2775,7 +2785,7 @@ mod tests {
         let result = executor.dispatch(req).await.unwrap();
         assert_eq!(result.output, "ok");
         assert_eq!(result.isolation_observed, ObservedIsolation::Context);
-        // Factory never invoked — readonly workers don't request isolation.
+        // Factory never invoked — readonly subagents don't request isolation.
         assert!(factory.labels.lock().unwrap().is_empty());
         let _ = agent;
     }
@@ -2826,7 +2836,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_isolate_workspace_appends_file_listing() {
-        // A data worker declaring isolate_workspace, dispatched in Fork mode
+        // A data subagent declaring isolate_workspace, dispatched in Fork mode
         // with a configured factory: the workspace is created and the finalize
         // file listing is appended to the output (proof of creation+finalize).
         let factory = Arc::new(MockWorkspaceFactory {
@@ -2905,7 +2915,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_worktree_takes_precedence_over_workspace() {
-        // If a worker declares BOTH isolate_worktree and isolate_workspace,
+        // If a subagent declares BOTH isolate_worktree and isolate_workspace,
         // worktree wins (it also provides disjoint FS) — workspace factory is
         // not invoked. Guards against double-isolation.
         let ws_factory = Arc::new(MockWorkspaceFactory {

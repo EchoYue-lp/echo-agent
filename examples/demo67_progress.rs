@@ -45,9 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus = TaskEventBus::new();
     let mut bus_rx = bus.subscribe();
 
-    // Spawn a worker that drives progress forward
+    // Spawn a subagent that drives progress forward
     let bus_clone = bus.clone();
-    let worker = tokio::spawn(async move {
+    let subagent = tokio::spawn(async move {
         // Phase 0: Search
         reporter.enter_phase(0, Some("Querying arxiv…".into()));
         emit_progress(&reporter, &bus_clone);
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let _ = tokio::join!(worker, printer);
+    let _ = tokio::join!(subagent, printer);
     // Give the bus printer a moment to drain, then drop the bus so it exits
     sleep(Duration::from_millis(50)).await;
     drop(bus);

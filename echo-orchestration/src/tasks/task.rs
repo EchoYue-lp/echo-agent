@@ -510,7 +510,7 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 
-    /// Worker role assigned to execute this task (e.g. "project_explorer",
+    /// Subagent role assigned to execute this task (e.g. "project_explorer",
     /// "code_reviewer"). Used by delegation dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_role: Option<String>,

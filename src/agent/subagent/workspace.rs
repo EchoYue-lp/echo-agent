@@ -1,26 +1,26 @@
-//! Data/research workspace isolation for Fork-dispatched workers (Sprint 10).
+//! Data/research workspace isolation for Fork-dispatched subagents (Sprint 10).
 //!
 //! Companion to [`super::worktree`]: where worktree isolation suits *code
-//! writers* (git checkout + diff/merge lifecycle), **data/research workers**
+//! writers* (git checkout + diff/merge lifecycle), **data/research subagents**
 //! emit generated artifacts (CSVs, parquet, charts) with no source tree to
 //! diff against, often outside any git repo. They need a **disjoint working
-//! directory per worker** so parallel data-shaper/analyst workers don't
+//! directory per subagent** so parallel data-shaper/analyst subagents don't
 //! overwrite each other's output — but NOT git coupling.
 //!
 //! This module defines the framework trait [`DataWorkspaceFactory`]; the
-//! application supplies a concrete impl (a `tempfile::TempDir`-per-worker
+//! application supplies a concrete impl (a `tempfile::TempDir`-per-subagent
 //! handle). When a subagent's [`crate::agent::subagent::types::SubagentDefinition`]
 //! declares `isolate_workspace: true`, the
 //! [`crate::agent::subagent::executor::SubagentExecutor`] asks the injected
-//! factory for a fresh workspace, binds the worker's `working_dir` to it, runs
-//! the worker, and finally asks the factory to summarize (typically: list
+//! factory for a fresh workspace, binds the subagent's `working_dir` to it, runs
+//! the subagent, and finally asks the factory to summarize (typically: list
 //! generated files). The data tools (Polars-based `export_data`, etc.) then
 //! naturally write disjoint output files — satisfying the Sprint 10 acceptance
-//! ("data worker 并行跑不互相污染; 输出文件不相交; analyst 能综合") without
+//! ("data subagent 并行跑不互相污染; 输出文件不相交; analyst 能综合") without
 //! csv/parquet mid-stream merge.
 //!
 //! Mirrors the Sprint 8 `WorktreeFactory` shape so the executor treats both
-//! isolation kinds uniformly (a worker declares AT MOST ONE of
+//! isolation kinds uniformly (a subagent declares AT MOST ONE of
 //! `isolate_worktree` / `isolate_workspace`).
 
 use std::path::PathBuf;
@@ -51,18 +51,18 @@ impl WorkspaceError {
 }
 
 /// A created workspace, returned by [`DataWorkspaceFactory::create`] and
-/// consumed by the framework after the worker finishes.
+/// consumed by the framework after the subagent finishes.
 ///
 /// `finalize` is application-defined: typically it lists the generated files in
-/// the workspace (so the orchestrator/analyst can find each worker's outputs
+/// the workspace (so the orchestrator/analyst can find each subagent's outputs
 /// for concat/synthesize). Returning it as `Box<dyn FnOnce>` keeps the
 /// framework free of fs deps; the application closes over its own
 /// `TempDir`/cleanup handle.
 pub struct DataWorkspaceHandle {
-    /// Absolute path to the workspace dir — bound as the worker's `working_dir`
+    /// Absolute path to the workspace dir — bound as the subagent's `working_dir`
     /// so every data/shell/file tool runs inside it (output files land here).
     pub path: PathBuf,
-    /// Run once after the worker finishes. Returns a summary string (e.g.
+    /// Run once after the subagent finishes. Returns a summary string (e.g.
     /// listing of generated files) surfaced to the caller, or an error. Owns
     /// the workspace lifecycle (keep for collect vs clean up is the
     /// application's policy).
@@ -77,13 +77,13 @@ impl std::fmt::Debug for DataWorkspaceHandle {
     }
 }
 
-/// Framework trait: lets an application supply a per-worker disjoint working
-/// directory for Fork-dispatched data/research workers.
+/// Framework trait: lets an application supply a per-subagent disjoint working
+/// directory for Fork-dispatched data/research subagents.
 ///
 /// Implementations must be `Send + Sync` (stored behind an `Arc` in the
 /// executor config, shared across spawned dispatches).
 pub trait DataWorkspaceFactory: Send + Sync {
-    /// Create an isolated workspace for one worker dispatch.
+    /// Create an isolated workspace for one subagent dispatch.
     ///
     /// `label` identifies the dispatch (e.g. `"{agent_name}-{run_id}"`) and may
     /// be used by the application to name a subdirectory for traceability.

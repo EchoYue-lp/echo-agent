@@ -1,9 +1,9 @@
-//! Worktree isolation for Fork-dispatched writer workers (Sprint 8).
+//! Worktree isolation for Fork-dispatched writer subagents (Sprint 8).
 //!
 //! When a subagent's [`crate::agent::subagent::types::SubagentDefinition`] declares
 //! `isolate_worktree: true`, the [`crate::agent::subagent::executor::SubagentExecutor`]
 //! asks the injected [`WorktreeFactory`] for an isolated git worktree, binds the
-//! worker agent's `working_dir` to it, runs the worker, and finally asks the
+//! subagent's `working_dir` to it, runs the subagent, and finally asks the
 //! factory for a diff summary. This mirrors Claude Code's `isolation: worktree`
 //! subagent frontmatter and Codex/Cursor's per-agent worktree checkout
 //! (industry-consensus pattern, 2025-2026).
@@ -19,7 +19,7 @@
 //!
 //! # Safety gate
 //!
-//! If a worker declares `isolate_worktree: true` but **no factory is
+//! If a subagent declares `isolate_worktree: true` but **no factory is
 //! configured**, the Fork dispatch **hard-fails** — never silently share the
 //! main checkout (multi-writer data-loss hazard; AGENTS.md "本地场景下为何仍需要").
 //! If a factory **is** configured and `create` fails, dispatch likewise fails
@@ -53,17 +53,17 @@ impl WorktreeError {
 }
 
 /// A created worktree, returned by [`WorktreeFactory::create`] and consumed by
-/// the framework after the worker finishes.
+/// the framework after the subagent finishes.
 ///
 /// `finalize` is application-defined: typically it generates a `git diff`
 /// summary of the worktree's changes and optionally keeps/removes the worktree.
 /// Returning it as a `Box<dyn FnOnce>` keeps the framework free of git deps;
 /// the application closes over its own `RunWorktree` handle.
 pub struct WorktreeHandle {
-    /// Absolute path to the worktree checkout — bound as the worker's
+    /// Absolute path to the worktree checkout — bound as the subagent's
     /// `working_dir` so every shell/file/git tool runs inside it.
     pub path: PathBuf,
-    /// Run once after the worker finishes. Returns a diff/summary string
+    /// Run once after the subagent finishes. Returns a diff/summary string
     /// (surfaced to the caller) or an error. Owns the worktree lifecycle
     /// (keep vs remove is the application's policy).
     pub finalize: Box<dyn FnOnce() -> Result<String, WorktreeError> + Send>,
@@ -78,12 +78,12 @@ impl std::fmt::Debug for WorktreeHandle {
 }
 
 /// Framework trait: lets an application supply git-worktree isolation to
-/// Fork-dispatched workers.
+/// Fork-dispatched subagents.
 ///
 /// Implementations must be `Send + Sync` (stored behind an `Arc` in the
 /// executor config, shared across spawned dispatches).
 pub trait WorktreeFactory: Send + Sync {
-    /// Create an isolated worktree for one worker dispatch.
+    /// Create an isolated worktree for one subagent dispatch.
     ///
     /// `label` identifies the dispatch (e.g. `"{agent_name}-{run_id}"`) and is
     /// used by the application to name the worktree branch.
@@ -135,8 +135,8 @@ mod tests {
             created: std::sync::Mutex::new(Vec::new()),
             should_fail: false,
         };
-        let handle = factory.create("worker-run42").unwrap();
-        assert_eq!(handle.path, PathBuf::from("/tmp/mock-worker-run42"));
+        let handle = factory.create("subagent-run42").unwrap();
+        assert_eq!(handle.path, PathBuf::from("/tmp/mock-subagent-run42"));
         assert_eq!((handle.finalize)().unwrap(), "mock diff summary");
         assert_eq!(factory.created.lock().unwrap().len(), 1);
     }

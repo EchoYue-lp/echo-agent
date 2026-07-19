@@ -24,11 +24,11 @@ async fn main() -> echo_agent::error::Result<()> {
     // 添加节点
     tracker.add_node(TopologyNode::new("orchestrator", NodeType::Orchestrator));
     tracker.add_node(
-        TopologyNode::new("math_agent", NodeType::Worker)
+        TopologyNode::new("math_agent", NodeType::Subagent)
             .with_label("数学计算 Agent")
             .with_metadata("model", "qwen3-max"),
     );
-    tracker.add_node(TopologyNode::new("translator", NodeType::Worker).with_label("翻译 Agent"));
+    tracker.add_node(TopologyNode::new("translator", NodeType::Subagent).with_label("翻译 Agent"));
     tracker.add_node(TopologyNode::new("calculator", NodeType::Tool));
     tracker
         .add_node(TopologyNode::new("a2a_remote", NodeType::External).with_label("远程 A2A Agent"));

@@ -163,7 +163,7 @@ pub enum SubagentEvent {
     /// LLM usage reported by the subagent's underlying model call (carries the
     /// full cache-diagnostic breakdown). Emitted once per model call so the
     /// frontend can render token / cache-hit metrics without peeking at the
-    /// legacy `worker://trace` channel.
+    /// legacy `subagent://trace` channel.
     DispatchLlmUsage {
         /// Name of the parent agent that initiated the dispatch.
         parent: String,

@@ -305,7 +305,7 @@ pub struct AgentRunSnapshot {
     pub trace_run_id: Option<String>,
     /// Current user-input/agent turn ID.
     pub current_turn_id: Option<String>,
-    /// Current concrete worker/tool execution ID.
+    /// Current concrete subagent/tool execution ID.
     pub current_execution_id: Option<String>,
     /// 外部 run 级上下文（跨 spawn 安全，从 ReactAgent.external_* 抓取）。
     /// 与 current_run_id 同源、同生命周期（set/clear 在同一处）。

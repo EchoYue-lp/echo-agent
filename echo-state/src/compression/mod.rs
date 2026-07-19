@@ -319,7 +319,7 @@ pub struct ContextManager {
     protected_markers: Vec<String>,
     /// Protected content markers whose newest message supersedes older ones.
     ///
-    /// This is intended for dynamic context such as a worker invocation brief:
+    /// This is intended for dynamic context such as a subagent invocation brief:
     /// the current value must survive compression, but retaining prior values
     /// wastes tokens and can give the model conflicting instructions.
     replaceable_protected_markers: Vec<String>,

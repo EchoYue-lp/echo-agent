@@ -19,7 +19,7 @@
 //!
 //! // Register nodes
 //! tracker.add_node(TopologyNode::new("orchestrator", NodeType::Orchestrator));
-//! tracker.add_node(TopologyNode::new("math_agent", NodeType::Worker));
+//! tracker.add_node(TopologyNode::new("math_agent", NodeType::Subagent));
 //!
 //! // Record call
 //! tracker.record_call("orchestrator", "math_agent", "compute 1+1");
@@ -46,8 +46,8 @@ use std::sync::{Arc, RwLock};
 pub enum NodeType {
     /// Orchestrator Agent
     Orchestrator,
-    /// Worker Agent
-    Worker,
+    /// Subagent Agent
+    Subagent,
     /// Planner
     Planner,
     /// External service (MCP, A2A, etc.)
@@ -74,15 +74,15 @@ impl TopologyNode {
     ///
     /// # Arguments
     /// - `id`: Unique node identifier
-    /// - `node_type`: Node type (Orchestrator, Worker, Tool, etc.)
+    /// - `node_type`: Node type (Orchestrator, Subagent, Tool, etc.)
     ///
     /// # Example
     /// ```
     /// use echo_agent::topology::{TopologyNode, NodeType};
     ///
-    /// let node = TopologyNode::new("my_agent", NodeType::Worker);
+    /// let node = TopologyNode::new("my_agent", NodeType::Subagent);
     /// assert_eq!(node.id, "my_agent");
-    /// assert_eq!(node.node_type, NodeType::Worker);
+    /// assert_eq!(node.node_type, NodeType::Subagent);
     /// ```
     pub fn new(id: impl Into<String>, node_type: NodeType) -> Self {
         let id_str: String = id.into();
@@ -103,7 +103,7 @@ impl TopologyNode {
     /// ```
     /// use echo_agent::topology::{TopologyNode, NodeType};
     ///
-    /// let node = TopologyNode::new("agent_123", NodeType::Worker)
+    /// let node = TopologyNode::new("agent_123", NodeType::Subagent)
     ///     .with_label("Compute Agent");
     /// assert_eq!(node.label, "Compute Agent");
     /// ```
@@ -197,7 +197,7 @@ impl TopologyTracker {
     /// Record a call relationship (with duration)
     pub fn record_call_with_duration(&self, from: &str, to: &str, label: &str, duration_ms: u64) {
         // Ensure the node exists
-        self.ensure_node(from, NodeType::Worker);
+        self.ensure_node(from, NodeType::Subagent);
         self.ensure_node(to, NodeType::Tool);
 
         if let Ok(mut edges) = self.edges.write() {
@@ -288,7 +288,7 @@ impl TopologyTracker {
             for node in nodes.values() {
                 let icon = match node.node_type {
                     NodeType::Orchestrator => "🎯",
-                    NodeType::Worker => "⚙️",
+                    NodeType::Subagent => "⚙️",
                     NodeType::Planner => "📐",
                     NodeType::External => "🌐",
                     NodeType::Tool => "🔧",
@@ -344,7 +344,7 @@ impl TopologyTracker {
             for node in nodes.values() {
                 let (shape, color) = match node.node_type {
                     NodeType::Orchestrator => ("diamond", "#FFB74D"),
-                    NodeType::Worker => ("box", "#64B5F6"),
+                    NodeType::Subagent => ("box", "#64B5F6"),
                     NodeType::Planner => ("hexagon", "#81C784"),
                     NodeType::External => ("ellipse", "#CE93D8"),
                     NodeType::Tool => ("component", "#90A4AE"),
@@ -489,7 +489,7 @@ impl AgentCallback for TopologyCallback {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             self.tracker
-                .add_node(TopologyNode::new(agent, NodeType::Worker));
+                .add_node(TopologyNode::new(agent, NodeType::Subagent));
             self.tracker
                 .add_node(TopologyNode::new(tool, NodeType::Tool));
             self.tracker.record_call(agent, tool, "call");
@@ -526,7 +526,7 @@ mod tests {
         let tracker = TopologyTracker::new();
 
         tracker.add_node(TopologyNode::new("agent_a", NodeType::Orchestrator));
-        tracker.add_node(TopologyNode::new("agent_b", NodeType::Worker));
+        tracker.add_node(TopologyNode::new("agent_b", NodeType::Subagent));
         tracker.record_call("agent_a", "agent_b", "dispatch task");
 
         let stats = tracker.stats();
@@ -539,7 +539,7 @@ mod tests {
     fn test_topology_multiple_calls() {
         let tracker = TopologyTracker::new();
 
-        tracker.add_node(TopologyNode::new("agent", NodeType::Worker));
+        tracker.add_node(TopologyNode::new("agent", NodeType::Subagent));
         tracker.record_call("agent", "calc", "1+1");
         tracker.record_call("agent", "calc", "2+2");
         tracker.record_call("agent", "calc", "3+3");
@@ -553,19 +553,19 @@ mod tests {
     fn test_topology_to_mermaid() {
         let tracker = TopologyTracker::new();
         tracker.add_node(TopologyNode::new("orchestrator", NodeType::Orchestrator));
-        tracker.add_node(TopologyNode::new("worker", NodeType::Worker));
-        tracker.record_call("orchestrator", "worker", "execute");
+        tracker.add_node(TopologyNode::new("subagent", NodeType::Subagent));
+        tracker.record_call("orchestrator", "subagent", "execute");
 
         let mermaid = tracker.to_mermaid();
         assert!(mermaid.starts_with("graph TD"));
         assert!(mermaid.contains("orchestrator"));
-        assert!(mermaid.contains("worker"));
+        assert!(mermaid.contains("subagent"));
     }
 
     #[test]
     fn test_topology_to_dot() {
         let tracker = TopologyTracker::new();
-        tracker.add_node(TopologyNode::new("agent", NodeType::Worker));
+        tracker.add_node(TopologyNode::new("agent", NodeType::Subagent));
         tracker.record_call("agent", "tool1", "use");
 
         let dot = tracker.to_dot();
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn test_topology_to_json() {
         let tracker = TopologyTracker::new();
-        tracker.add_node(TopologyNode::new("a", NodeType::Worker));
+        tracker.add_node(TopologyNode::new("a", NodeType::Subagent));
         tracker.record_call("a", "b", "call");
 
         let json = tracker.to_json().unwrap();
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn test_topology_clear() {
         let tracker = TopologyTracker::new();
-        tracker.add_node(TopologyNode::new("a", NodeType::Worker));
+        tracker.add_node(TopologyNode::new("a", NodeType::Subagent));
         tracker.record_call("a", "b", "call");
         assert!(tracker.stats().node_count > 0);
 

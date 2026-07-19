@@ -92,12 +92,12 @@ impl SubagentBuilder {
     /// Set execution mode to Fork (inherits context, runs independently).
     pub fn fork_mode(mut self) -> Self {
         self.definition.execution_mode = ExecutionMode::Fork;
-        // Sprint 6b: lowered 10 → 2. Fork subagents are focused workers; a
+        // Sprint 6b: lowered 10 → 2. Fork subagents are focused subagents; a
         // 10-message prefix bloats their context with stale turns and dilutes
         // attention on the actual task. 2 trailing messages keep just enough
         // parent state (typically the last user turn + a tool result) without
         // the noise. Per-subagent `.inherit_history(n)` still overrides this,
-        // and a `.md` frontmatter can set it per worker.
+        // and a `.md` frontmatter can set it per subagent.
         self.definition.inherit_history = Some(2);
         self.definition.inherit_memory = true;
         self
@@ -165,20 +165,20 @@ impl SubagentBuilder {
 
     /// Request that Fork-dispatched execution of this subagent run inside an
     /// isolated git worktree (Sprint 8). Mirrors Claude Code's
-    /// `isolation: worktree`. Only effective for writer workers; requires a
+    /// `isolation: worktree`. Only effective for writer subagents; requires a
     /// `WorktreeFactory` configured on the executor (else a warning is logged
-    /// and the worker runs without isolation).
+    /// and the subagent runs without isolation).
     pub fn isolate_worktree(mut self) -> Self {
         self.definition.isolate_worktree = true;
         self
     }
 
     /// Request that Fork-dispatched execution of this subagent run inside an
-    /// isolated data workspace (Sprint 10) — a per-worker disjoint working
-    /// directory for data/research workers emitting generated artifacts
+    /// isolated data workspace (Sprint 10) — a per-subagent disjoint working
+    /// directory for data/research subagents emitting generated artifacts
     /// (CSVs/parquet/charts), without git coupling. Requires a
     /// `DataWorkspaceFactory` configured on the executor (else a warning is
-    /// logged and the worker runs without a workspace). A worker should declare
+    /// logged and the subagent runs without a workspace). A subagent should declare
     /// at most one of `.isolate_worktree()` / `.isolate_workspace()`.
     pub fn isolate_workspace(mut self) -> Self {
         self.definition.isolate_workspace = true;
@@ -187,7 +187,7 @@ impl SubagentBuilder {
 
     /// Sprint 11: declare this subagent as a team-mode dispatcher with the
     /// given `TeamSpec`. Also sets `execution_mode = Team` so the dispatch
-    /// router routes to `dispatch_team`. The manager + workers named in the
+    /// router routes to `dispatch_team`. The manager + subagents named in the
     /// spec must be separately registered subagents (resolved by name at
     /// dispatch time — late binding, D-11-team-2).
     pub fn team(mut self, spec: super::types::TeamSpec) -> Self {
@@ -233,13 +233,13 @@ mod tests {
 
     #[test]
     fn test_builder_sync() {
-        let def = SubagentBuilder::new("worker")
+        let def = SubagentBuilder::new("subagent")
             .description("Does work")
             .sync_mode()
             .timeout(60)
             .build();
 
-        assert_eq!(def.name, "worker");
+        assert_eq!(def.name, "subagent");
         assert_eq!(def.execution_mode, ExecutionMode::Sync);
         assert_eq!(def.timeout_secs, 60);
         assert!(def.inherit_history.is_none());

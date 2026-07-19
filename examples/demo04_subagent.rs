@@ -38,7 +38,7 @@ fn math_tools() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-fn spawn_human_loop_worker(
+fn spawn_human_loop_subagent(
     manager: Arc<HumanLoopManager>,
     input_count: Arc<AtomicUsize>,
 ) -> tokio::task::JoinHandle<()> {
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
 
     let human_loop = Arc::new(HumanLoopManager::new());
     let input_count = Arc::new(AtomicUsize::new(0));
-    let worker = spawn_human_loop_worker(human_loop.clone(), input_count.clone());
+    let subagent = spawn_human_loop_subagent(human_loop.clone(), input_count.clone());
 
     let weather_llm = Arc::new(
         MockLlmClient::new()
@@ -207,6 +207,6 @@ async fn main() -> Result<()> {
 
     println!("\n✅ 最终结果:\n{}", result);
 
-    worker.abort();
+    subagent.abort();
     Ok(())
 }

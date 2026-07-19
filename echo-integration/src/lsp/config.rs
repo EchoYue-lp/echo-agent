@@ -3,6 +3,8 @@
 use echo_core::lsp::LspServerConfig;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Top-level LSP configuration.
 #[derive(Debug, Clone, Default)]
@@ -33,7 +35,7 @@ impl LspConfig {
             let executable = definition
                 .executables
                 .iter()
-                .find(|candidate| command_available(candidate.command, search_paths));
+                .find(|candidate| command_available(candidate, search_paths));
             let Some(executable) = executable else {
                 continue;
             };
@@ -106,6 +108,7 @@ impl LspConfig {
 struct ExecutableDefinition {
     command: &'static str,
     args: &'static [&'static str],
+    probe_args: Option<&'static [&'static str]>,
 }
 
 struct LanguageDefinition {
@@ -124,6 +127,7 @@ fn language_definitions() -> &'static [LanguageDefinition] {
             executables: &[ExecutableDefinition {
                 command: "rust-analyzer",
                 args: &[],
+                probe_args: Some(&["--version"]),
             }],
         },
         LanguageDefinition {
@@ -134,14 +138,17 @@ fn language_definitions() -> &'static [LanguageDefinition] {
                 ExecutableDefinition {
                     command: "basedpyright-langserver",
                     args: &["--stdio"],
+                    probe_args: Some(&["--version"]),
                 },
                 ExecutableDefinition {
                     command: "pyright-langserver",
                     args: &["--stdio"],
+                    probe_args: Some(&["--version"]),
                 },
                 ExecutableDefinition {
                     command: "pylsp",
                     args: &[],
+                    probe_args: Some(&["--version"]),
                 },
             ],
         },
@@ -152,6 +159,7 @@ fn language_definitions() -> &'static [LanguageDefinition] {
             executables: &[ExecutableDefinition {
                 command: "typescript-language-server",
                 args: &["--stdio"],
+                probe_args: Some(&["--version"]),
             }],
         },
         LanguageDefinition {
@@ -161,6 +169,7 @@ fn language_definitions() -> &'static [LanguageDefinition] {
             executables: &[ExecutableDefinition {
                 command: "gopls",
                 args: &[],
+                probe_args: Some(&["version"]),
             }],
         },
         LanguageDefinition {
@@ -170,6 +179,7 @@ fn language_definitions() -> &'static [LanguageDefinition] {
             executables: &[ExecutableDefinition {
                 command: "jdtls",
                 args: &[],
+                probe_args: None,
             }],
         },
         LanguageDefinition {
@@ -179,6 +189,7 @@ fn language_definitions() -> &'static [LanguageDefinition] {
             executables: &[ExecutableDefinition {
                 command: "clangd",
                 args: &[],
+                probe_args: Some(&["--version"]),
             }],
         },
     ]
@@ -237,23 +248,60 @@ fn project_uses_language(root: &Path, definition: &LanguageDefinition) -> bool {
     false
 }
 
-fn command_available(command: &str, search_paths: &[PathBuf]) -> bool {
+fn command_available(definition: &ExecutableDefinition, search_paths: &[PathBuf]) -> bool {
+    let Some(command_path) = find_command(definition.command, search_paths) else {
+        return false;
+    };
+    definition
+        .probe_args
+        .is_none_or(|args| command_probe_succeeds(&command_path, args))
+}
+
+fn find_command(command: &str, search_paths: &[PathBuf]) -> Option<PathBuf> {
     let command_path = Path::new(command);
     if command_path.components().count() > 1 {
-        return command_path.is_file();
+        return command_path.is_file().then(|| command_path.to_path_buf());
     }
-    search_paths.iter().any(|directory| {
+    search_paths.iter().find_map(|directory| {
         let candidate = directory.join(command);
         if candidate.is_file() {
-            return true;
+            return Some(candidate);
         }
         if cfg!(windows) {
             return ["exe", "cmd", "bat"]
                 .iter()
-                .any(|extension| directory.join(format!("{command}.{extension}")).is_file());
+                .map(|extension| directory.join(format!("{command}.{extension}")))
+                .find(|path| path.is_file());
         }
-        false
+        None
     })
+}
+
+fn command_probe_succeeds(command: &Path, args: &[&str]) -> bool {
+    let mut child = match Command::new(command)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -315,11 +363,43 @@ languages:
             project.path().join("Cargo.toml"),
             "[package]\nname='demo'\n",
         )?;
-        fs::write(bin.path().join("rust-analyzer"), "")?;
+        let executable = bin.path().join("rust-analyzer");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions)?;
+        }
         let config =
             LspConfig::discover_with_search_paths(project.path(), &[bin.path().to_path_buf()]);
         let rust = config.get("rust").ok_or("rust server was not discovered")?;
         assert_eq!(rust.command, "rust-analyzer");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_executable_that_fails_probe() -> Result<(), Box<dyn std::error::Error>> {
+        let project = tempfile::tempdir()?;
+        let bin = tempfile::tempdir()?;
+        fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname='demo'\n",
+        )?;
+        let executable = bin.path().join("rust-analyzer");
+        fs::write(&executable, "#!/bin/sh\nexit 1\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions)?;
+        }
+
+        let config =
+            LspConfig::discover_with_search_paths(project.path(), &[bin.path().to_path_buf()]);
+        assert!(config.get("rust").is_none());
         Ok(())
     }
 }

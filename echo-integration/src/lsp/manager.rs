@@ -182,6 +182,7 @@ impl Default for LspManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_load_config() -> Result<(), String> {
@@ -228,6 +229,71 @@ languages:
             manager.extension_map.get(".py"),
             Some(&"python".to_string())
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "opt-in live LSP smoke test; set EKO_LSP_SMOKE=1"]
+    async fn live_installed_servers_initialize_on_real_project_fixture() -> Result<(), String> {
+        if std::env::var("EKO_LSP_SMOKE").as_deref() != Ok("1") {
+            return Err("set EKO_LSP_SMOKE=1 before running ignored LSP smoke tests".to_string());
+        }
+        let project = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(project.path().join("src")).map_err(|error| error.to_string())?;
+        fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"eko-lsp-smoke\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            project.path().join("package.json"),
+            "{\"name\":\"eko-lsp-smoke\",\"private\":true}",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            project.path().join("tsconfig.json"),
+            "{\"compilerOptions\":{\"strict\":true}}",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            project.path().join("index.ts"),
+            "export const answer: number = 42;\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            project.path().join("pyproject.toml"),
+            "[project]\nname = \"eko-lsp-smoke\"\nversion = \"0.1.0\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(project.path().join("main.py"), "answer: int = 42\n")
+            .map_err(|error| error.to_string())?;
+
+        let config = LspConfig::discover(project.path());
+        if config.servers.is_empty() {
+            return Err("no supported language server was found on PATH".to_string());
+        }
+        let mut manager = LspManager::new();
+        manager.load_config(&config);
+        manager.set_project_root(project.path());
+        let languages = manager
+            .configured_languages()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for language in &languages {
+            manager.start_server(language).await?;
+        }
+        let statuses = manager.status_all().await;
+        if statuses.iter().any(|status| !status.initialized) {
+            manager.shutdown_all().await;
+            return Err("at least one discovered language server did not initialize".to_string());
+        }
+        manager.shutdown_all().await;
         Ok(())
     }
 }

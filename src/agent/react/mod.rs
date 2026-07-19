@@ -161,7 +161,7 @@ pub struct ReactAgent {
 
     /// 外部 run 级上下文（跨 spawn 安全，值传递）。
     ///
-    /// `tokio::task_local!` 不会跨 `tokio::spawn` 继承——worker agent 在框架层
+    /// `tokio::task_local!` 不会跨 `tokio::spawn` 继承——subagent 在框架层
     /// 的 dispatch_fork spawn 里执行时，应用层经 task_local 注入的 run_id /
     /// cancel / trace_sink 全部丢失。这里改用 Mutex 字段承载
     /// （set_external_context 设置，pipeline 构造 ToolContext 时读取），是跨
@@ -2171,15 +2171,15 @@ impl ReactAgent {
     /// [`delegate_to_agent`](Self::delegate_to_agent). It exists so that
     /// product-layer runtimes (e.g. a TaskRuntime DAG executor) can fan out
     /// work to the registered subagents AND propagate parent-run cancellation
-    /// into each worker — the plain `delegate_to_agent` hard-codes a fresh,
+    /// into each subagent — the plain `delegate_to_agent` hard-codes a fresh,
     /// never-cancelled token, which makes parent→child cancellation
     /// impossible and is unsuitable for parallel DAG dispatch.
     ///
     /// The caller typically passes a *child* of the parent run's token
     /// (`parent_cancel.child_token()`); cancelling the parent then cancels
-    /// every worker dispatched via this method.
+    /// every subagent dispatched via this method.
     ///
-    /// Returns the worker's full [`SubagentResult`] (including usage data),
+    /// Returns the subagent's full [`SubagentResult`] (including usage data),
     /// or an error if the target agent is not registered.
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent_with_cancel(
@@ -2277,7 +2277,7 @@ impl ReactAgent {
     /// Delegate a multimodal task to a subagent (images/files included).
     ///
     /// Like [`delegate_to_agent_with_parent_and_cancel`](Self::delegate_to_agent_with_parent_and_cancel)
-    /// but carries a [`Message`] so the worker sees user-uploaded attachments.
+    /// but carries a [`Message`] so the subagent sees user-uploaded attachments.
     /// The `task` text is also kept (used for hooks/events/fallback).
     #[cfg(feature = "subagent")]
     pub async fn delegate_to_agent_with_parent_cancel_and_message(
@@ -2350,9 +2350,9 @@ impl ReactAgent {
         Ok(result)
     }
 
-    /// 从当前 agent 的 external_* 字段构造 ExternalRunContext（透传给 worker）。
+    /// 从当前 agent 的 external_* 字段构造 ExternalRunContext（透传给 subagent）。
     ///
-    /// 这样主 agent 委派 worker、worker 委派 sub-worker 时,run context 自动继承
+    /// 这样主 agent 委派 subagent、subagent 委派 sub-subagent 时,run context 自动继承
     /// （嵌套自然继承)。current_run_id 为 None 时返回 None（无 run 上下文,旧行为）。
     #[cfg(feature = "subagent")]
     fn build_runtime_context(&self) -> Option<echo_core::tools::ExternalRunContext> {
@@ -2465,6 +2465,10 @@ impl Agent for ReactAgent {
 
     fn model_name(&self) -> &str {
         &self.config.model_name
+    }
+
+    fn token_usage_summary(&self) -> echo_core::tokenizer::UsageSummary {
+        ReactAgent::token_usage_summary(self)
     }
 
     fn current_run_id(&self) -> Option<String> {

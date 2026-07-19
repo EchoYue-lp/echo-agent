@@ -64,7 +64,7 @@ execute(task)
 
 | 角色 | 说明 |
 |------|------|
-| `Worker`（默认） | 直接执行任务，使用工具 |
+| `Subagent`（默认） | 直接执行任务，使用工具 |
 | `Orchestrator` | 编排者，优先通过 `agent_tool` 将任务分发给 SubAgent |
 
 > **注意：** 任务规划能力通过 `.enable_task(true)` 启用（注册 `plan`/`create_task`/`update_task` 工具），无需单独的 `Planner` 角色。

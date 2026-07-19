@@ -177,7 +177,7 @@ mod tests {
 
         let msg = MailboxMessage::new(
             "leader",
-            "worker",
+            "subagent",
             MessageKind::TaskAssigned {
                 task: "do stuff".into(),
                 context: HashMap::new(),
@@ -188,7 +188,7 @@ mod tests {
         let received = mailbox.recv().await.unwrap();
 
         assert_eq!(received.from, "leader");
-        assert_eq!(received.to, "worker");
+        assert_eq!(received.to, "subagent");
         match received.kind {
             MessageKind::TaskAssigned { task, .. } => assert_eq!(task, "do stuff"),
             _ => panic!("Wrong message kind"),

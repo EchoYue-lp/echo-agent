@@ -307,10 +307,10 @@ impl ReactAgent {
         def: SubagentDefinition,
         agent: Box<dyn Agent>,
     ) {
-        // Note: worker registration is decoupled from `enable_subagent` flag.
-        // `enable_subagent` historically controlled two things: (1) worker
+        // Note: subagent registration is decoupled from `enable_subagent` flag.
+        // `enable_subagent` historically controlled two things: (1) subagent
         // registration here, and (2) `AgentDispatchTool` LLM tool registration
-        // in `ReactAgent::new`. They are now split: worker registration is
+        // in `ReactAgent::new`. They are now split: subagent registration is
         // unconditional (framework dispatch via `delegate_to_agent*` depends on
         // it), and LLM tool registration is gated by `register_agent_dispatch_tool`.
         let name = def.name.clone();

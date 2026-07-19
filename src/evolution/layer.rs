@@ -973,7 +973,7 @@ impl MemoryLayerManager {
     /// critical section. Call [`HotFileGuard::commit`] to persist, or drop to
     /// discard.
     ///
-    /// Note: the flock acquisition below blocks the worker thread. This is
+    /// Note: the flock acquisition below blocks the calling thread. This is
     /// acceptable because curator/memory writes are infrequent and
     /// low-contention; the bounded retry loop prevents indefinite wedging.
     async fn lock_hot_file(&self) -> std::io::Result<HotFileGuard<'_>> {

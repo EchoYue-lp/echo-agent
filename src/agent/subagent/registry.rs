@@ -409,14 +409,14 @@ mod tests {
     #[tokio::test]
     async fn test_remove() {
         let registry = SubagentRegistry::new();
-        let agent = MockAgent::new("worker");
-        let def = SubagentDefinition::new("worker", "Worker agent");
+        let agent = MockAgent::new("subagent");
+        let def = SubagentDefinition::new("subagent", "Subagent agent");
 
         registry.register(def, Box::new(agent)).await;
-        assert!(registry.contains("worker").await);
+        assert!(registry.contains("subagent").await);
 
-        registry.remove("worker").await;
-        assert!(!registry.contains("worker").await);
+        registry.remove("subagent").await;
+        assert!(!registry.contains("subagent").await);
     }
 
     #[tokio::test]

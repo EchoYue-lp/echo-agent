@@ -59,7 +59,7 @@ pub struct Run {
     #[serde(default)]
     pub turn_id: Option<String>,
 
-    /// Concrete worker/tool execution correlated with this trace invocation.
+    /// Concrete subagent/tool execution correlated with this trace invocation.
     #[serde(default)]
     pub execution_id: Option<String>,
 

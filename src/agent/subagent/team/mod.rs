@@ -6,7 +6,7 @@
 pub mod agent_box;
 pub mod coordinator;
 pub mod mailbox;
-pub mod manager_worker;
+pub mod manager_subagent;
 pub mod message;
 pub mod runner;
 pub mod strategy;
@@ -16,11 +16,13 @@ pub use message::TeamMessage;
 pub use runner::TeamRunner;
 
 use echo_core::agent::Agent;
-use std::collections::HashMap;
+use echo_core::tokenizer::UsageSummary;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use tracing::info;
 
 use super::types::SubagentDefinition;
+use super::usage::LlmUsageStats;
 use coordinator::TeamCoordinator;
 use mailbox::Mailbox;
 
@@ -31,8 +33,8 @@ use mailbox::Mailbox;
 pub enum TeamRole {
     /// The coordinating agent that assigns tasks.
     Leader,
-    /// A worker that executes tasks.
-    Worker,
+    /// A subagent that executes tasks.
+    Subagent,
     /// A reviewer that validates outputs.
     Reviewer,
 }
@@ -131,7 +133,7 @@ impl Team {
     ///
     /// # Parameters
     /// * `name` - Member name (must be unique within the team).
-    /// * `role` - Role of the member (leader, worker, reviewer).
+    /// * `role` - Role of the member (leader, subagent, reviewer).
     /// * `agent` - Agent instance.
     /// * `definition` - Subagent definition.
     pub fn add_member(
@@ -185,14 +187,14 @@ impl Team {
         self.members.keys().cloned().collect()
     }
 
-    /// List worker names.
+    /// List subagent names.
     ///
     /// # Returns
-    /// Vector of names of members with `TeamRole::Worker` role.
-    pub fn worker_names(&self) -> Vec<String> {
+    /// Vector of names of members with `TeamRole::Subagent` role.
+    pub fn subagent_names(&self) -> Vec<String> {
         self.members
             .iter()
-            .filter(|(_, m)| m.role == TeamRole::Worker)
+            .filter(|(_, m)| m.role == TeamRole::Subagent)
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -228,18 +230,70 @@ impl Team {
             .map(|m| m.name.as_str())
     }
 
-    /// Get all workers.
-    pub fn workers(&self) -> impl Iterator<Item = &TeamMember> {
+    /// Get all subagents.
+    pub fn subagents(&self) -> impl Iterator<Item = &TeamMember> {
         self.members()
-            .filter(|m| matches!(m.role, TeamRole::Worker))
+            .filter(|m| matches!(m.role, TeamRole::Subagent))
     }
 
-    /// Human-readable list of workers and their descriptions.
-    pub fn worker_descriptions(&self) -> String {
-        self.workers()
-            .map(|w| format!("- {}: {}", w.name, w.definition.description))
+    /// Human-readable list of subagents and their descriptions.
+    pub fn subagent_descriptions(&self) -> String {
+        self.subagents()
+            .map(|member| format!("- {}: {}", member.name, member.definition.description))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn usage_snapshot(&self) -> HashMap<String, UsageSummary> {
+        self.members
+            .iter()
+            .map(|(name, member)| (name.clone(), member.agent.token_usage_summary()))
+            .collect()
+    }
+
+    fn usage_since(&self, before: &HashMap<String, UsageSummary>) -> Option<LlmUsageStats> {
+        let mut models = BTreeSet::new();
+        let mut usage = LlmUsageStats::default();
+
+        for (name, member) in &self.members {
+            let after = member.agent.token_usage_summary();
+            let previous = before.get(name).cloned().unwrap_or_default();
+            let calls = after.request_count.saturating_sub(previous.request_count);
+            if calls > 0 && !after.model_name.is_empty() {
+                models.insert(after.model_name.clone());
+            }
+            usage.prompt_tokens = usage.prompt_tokens.saturating_add(
+                after
+                    .total_prompt_tokens
+                    .saturating_sub(previous.total_prompt_tokens),
+            );
+            usage.completion_tokens = usage.completion_tokens.saturating_add(
+                after
+                    .total_completion_tokens
+                    .saturating_sub(previous.total_completion_tokens),
+            );
+            usage.total_tokens = usage
+                .total_tokens
+                .saturating_add(after.total_tokens.saturating_sub(previous.total_tokens));
+            usage.cached_prompt_tokens = usage.cached_prompt_tokens.saturating_add(
+                after
+                    .total_cached_prompt_tokens
+                    .saturating_sub(previous.total_cached_prompt_tokens),
+            );
+            usage.cache_creation_prompt_tokens = usage.cache_creation_prompt_tokens.saturating_add(
+                after
+                    .total_cache_creation_prompt_tokens
+                    .saturating_sub(previous.total_cache_creation_prompt_tokens),
+            );
+            usage.call_count = usage.call_count.saturating_add(calls);
+        }
+
+        if usage.call_count == 0 && usage.total_tokens == 0 {
+            return None;
+        }
+        usage.model = models.into_iter().collect::<Vec<_>>().join(",");
+        usage.usage_reported = usage.call_count > 0;
+        Some(usage)
     }
 }
 
@@ -247,7 +301,7 @@ impl Team {
 
 /// A high-level orchestrator that runs a team with a given strategy.
 ///
-/// Wraps [`Team`] and [`ManagerWorkerOrchestrator`] to provide a simple
+/// Wraps [`Team`] and [`ManagerSubagentOrchestrator`] to provide a simple
 /// `execute(task)` interface suitable for use as a subagent or standalone runner.
 pub struct TeamAgent {
     pub team: Team,
@@ -258,6 +312,12 @@ pub struct TeamAgent {
     /// Sprint 11: optional state store for checkpoint/resume. `None` → degrade
     /// to in-memory single-pass execution (today's behavior, backward-compat).
     pub state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
+}
+
+/// Output and aggregate LLM usage for one team execution.
+pub struct TeamExecutionResult {
+    pub output: String,
+    pub usage: Option<LlmUsageStats>,
 }
 
 impl TeamAgent {
@@ -274,16 +334,28 @@ impl TeamAgent {
     /// Run a task through the team using the configured strategy.
     /// Wraps all subagent calls in tokio::time::timeout using team config.
     pub async fn execute(&self, task: &str) -> Result<String, String> {
-        let timeout = std::time::Duration::from_secs(self.team.config.default_timeout_secs.max(60));
-        tokio::time::timeout(timeout, self.execute_inner(task))
+        self.execute_with_usage(task)
             .await
-            .unwrap_or_else(|_| Err(format!("Team execution timed out after {:?}", timeout)))
+            .map(|result| result.output)
+    }
+
+    /// Run a task and aggregate the token usage of every participating member.
+    pub async fn execute_with_usage(&self, task: &str) -> Result<TeamExecutionResult, String> {
+        let before = self.team.usage_snapshot();
+        let timeout = std::time::Duration::from_secs(self.team.config.default_timeout_secs.max(60));
+        let output = tokio::time::timeout(timeout, self.execute_inner(task))
+            .await
+            .unwrap_or_else(|_| Err(format!("Team execution timed out after {:?}", timeout)))?;
+        Ok(TeamExecutionResult {
+            output,
+            usage: self.team.usage_since(&before),
+        })
     }
 
     async fn execute_inner(&self, task: &str) -> Result<String, String> {
         match &self.strategy {
-            strategy::TeamStrategy::ManagerWorker => {
-                let orch = manager_worker::ManagerWorkerOrchestrator::new();
+            strategy::TeamStrategy::ManagerSubagent => {
+                let orch = manager_subagent::ManagerSubagentOrchestrator::new();
                 orch.run(
                     &self.team,
                     task,
@@ -343,16 +415,16 @@ impl TeamAgent {
                 reducer,
                 batch_size: _,
             } => {
-                // Swarm: each worker processes the task independently, reducer merges
+                // Swarm: each subagent processes the task independently, reducer merges
                 // Use a semaphore to respect max_concurrent from TeamConfig
-                let workers: Vec<&TeamMember> = self.team.workers().collect();
+                let subagents: Vec<&TeamMember> = self.team.subagents().collect();
                 let max_conc = self.team.config.max_concurrent.max(1);
                 let sem = Arc::new(tokio::sync::Semaphore::new(max_conc));
                 let mut handles = Vec::new();
-                for worker in &workers {
-                    let agent = Arc::clone(&worker.agent);
+                for subagent in &subagents {
+                    let agent = Arc::clone(&subagent.agent);
                     let task = task.to_string();
-                    let name = worker.name.clone();
+                    let name = subagent.name.clone();
                     let sem = sem.clone();
                     handles.push(tokio::spawn(async move {
                         let _permit = sem.acquire().await;
@@ -401,9 +473,9 @@ impl TeamAgent {
 /// let team = TeamAgent::builder()
 ///     .name("code-review")
 ///     .manager("lead", lead_agent, lead_def)
-///     .worker("explorer", explore_agent, explore_def)
-///     .worker("tester", test_agent, test_def)
-///     .strategy(strategy::TeamStrategy::ManagerWorker)
+///     .subagent("explorer", explore_agent, explore_def)
+///     .subagent("tester", test_agent, test_def)
+///     .strategy(strategy::TeamStrategy::ManagerSubagent)
 ///     .build();
 /// ```
 pub struct TeamAgentBuilder {
@@ -457,15 +529,15 @@ impl TeamAgentBuilder {
         self
     }
 
-    /// Add a worker (Worker role).
-    pub fn worker(
+    /// Add a subagent (Subagent role).
+    pub fn subagent(
         mut self,
         name: &str,
         agent: Box<dyn Agent>,
         definition: SubagentDefinition,
     ) -> Self {
         self.members
-            .push((name.into(), TeamRole::Worker, agent, definition));
+            .push((name.into(), TeamRole::Subagent, agent, definition));
         self
     }
 
@@ -507,9 +579,9 @@ impl TeamAgentBuilder {
 
     /// Sprint 11: inject a `RuntimeStateStore` for checkpoint/resume. `None`
     /// (default) → degrade to in-memory single-pass. When both `run_id` and a
-    /// store are set, `ManagerWorkerOrchestrator` reads prior `TaskNode`s at
+    /// store are set, `ManagerSubagentOrchestrator` reads prior `TaskNode`s at
     /// entry (skip Success, reset+rerun Running/Failed) and writes plan /
-    /// per-worker / synthesis checkpoint nodes.
+    /// per-subagent / synthesis checkpoint nodes.
     pub fn state_store(
         mut self,
         store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
@@ -545,7 +617,7 @@ impl TeamAgentBuilder {
 
         let mut agent = TeamAgent::new(team, self.strategy);
         // Sprint 11: plumb run_id + state_store into the agent (passed through
-        // to ManagerWorkerOrchestrator::run for checkpoint/resume).
+        // to ManagerSubagentOrchestrator::run for checkpoint/resume).
         agent.run_id = self.run_id;
         agent.state_store = self.state_store;
         agent
@@ -565,6 +637,68 @@ impl TeamAgent {
 mod tests {
     use super::*;
     use crate::testing::MockAgent;
+    use echo_core::agent::AgentEvent;
+    use echo_core::error::Result as AgentResult;
+    use futures::future::BoxFuture;
+    use futures::stream::{self, BoxStream};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct UsageAgent {
+        calls: AtomicU64,
+    }
+
+    impl UsageAgent {
+        fn new() -> Self {
+            Self {
+                calls: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl Agent for UsageAgent {
+        fn name(&self) -> &str {
+            "usage-agent"
+        }
+
+        fn model_name(&self) -> &str {
+            "usage-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, AgentResult<String>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok("done".to_string())
+            })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            task: &'a str,
+        ) -> BoxFuture<'a, AgentResult<BoxStream<'a, AgentResult<AgentEvent>>>> {
+            Box::pin(async move {
+                let output = self.execute(task).await?;
+                Ok(Box::pin(stream::once(
+                    async move { Ok(AgentEvent::FinalAnswer(output)) },
+                )) as BoxStream<'a, AgentResult<AgentEvent>>)
+            })
+        }
+
+        fn token_usage_summary(&self) -> UsageSummary {
+            let calls = self.calls.load(Ordering::Relaxed);
+            UsageSummary {
+                model_name: self.model_name().to_string(),
+                total_prompt_tokens: calls.saturating_mul(10),
+                total_completion_tokens: calls.saturating_mul(5),
+                total_tokens: calls.saturating_mul(15),
+                request_count: calls,
+                ..UsageSummary::default()
+            }
+        }
+    }
 
     #[test]
     fn test_team_new() {
@@ -607,6 +741,32 @@ mod tests {
         assert_eq!(overridden.team.config.default_timeout_secs, 120);
     }
 
+    #[tokio::test]
+    async fn team_execution_aggregates_member_usage() -> Result<(), String> {
+        let team = TeamAgent::builder()
+            .subagent(
+                "usage-agent",
+                Box::new(UsageAgent::new()),
+                SubagentDefinition::simple_sync("usage-agent"),
+            )
+            .strategy(strategy::TeamStrategy::Pipeline(vec![
+                "usage-agent".to_string(),
+            ]))
+            .build();
+
+        let result = team.execute_with_usage("analyze").await?;
+        let usage = result
+            .usage
+            .ok_or_else(|| "team usage was not aggregated".to_string())?;
+        assert_eq!(result.output, "done");
+        assert_eq!(usage.model, "usage-model");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+        assert_eq!(usage.call_count, 1);
+        Ok(())
+    }
+
     #[test]
     fn test_team_add_members() {
         let mut team = Team::new("t1", "Team", "leader", TeamConfig::default());
@@ -618,14 +778,14 @@ mod tests {
             SubagentDefinition::simple_sync("leader"),
         );
         team.add_member(
-            "worker1",
-            TeamRole::Worker,
-            Box::new(MockAgent::new("worker1")),
-            SubagentDefinition::simple_sync("worker1"),
+            "subagent1",
+            TeamRole::Subagent,
+            Box::new(MockAgent::new("subagent1")),
+            SubagentDefinition::simple_sync("subagent1"),
         );
 
         assert_eq!(team.len(), 2);
-        assert_eq!(team.worker_names(), vec!["worker1"]);
+        assert_eq!(team.subagent_names(), vec!["subagent1"]);
     }
 
     #[test]
@@ -633,7 +793,7 @@ mod tests {
         let mut team = Team::new("t1", "Team", "leader", TeamConfig::default());
         team.add_member(
             "w",
-            TeamRole::Worker,
+            TeamRole::Subagent,
             Box::new(MockAgent::new("w")),
             SubagentDefinition::simple_sync("w"),
         );
@@ -647,7 +807,7 @@ mod tests {
         let mut team = Team::new("t1", "Team", "leader", TeamConfig::default());
         team.add_member(
             "w",
-            TeamRole::Worker,
+            TeamRole::Subagent,
             Box::new(MockAgent::new("w")),
             SubagentDefinition::simple_sync("w"),
         );

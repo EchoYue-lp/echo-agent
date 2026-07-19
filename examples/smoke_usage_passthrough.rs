@@ -44,13 +44,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // 用 LlmConfig::deepseek 直接构造 client（绕过 from_env 的环境变量依赖）
     let llm_config =
         echo_integration::providers::config::LlmConfig::deepseek(auth_token, model_name);
-    let worker_llm = Arc::new(echo_integration::providers::OpenAiClient::new(llm_config)?);
+    let subagent_llm = Arc::new(echo_integration::providers::OpenAiClient::new(llm_config)?);
 
-    let worker = ReactAgentBuilder::new()
-        .name("smoke-worker")
+    let subagent = ReactAgentBuilder::new()
+        .name("smoke-subagent")
         .model(model_name)
-        .system_prompt("You are a minimal echo worker. Reply with exactly one short sentence.")
-        .llm_client(worker_llm)
+        .system_prompt("You are a minimal echo subagent. Reply with exactly one short sentence.")
+        .llm_client(subagent_llm)
         .max_iterations(1)
         .build()?;
 
@@ -63,13 +63,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .max_iterations(1)
         .build()?;
 
-    main_agent.register_agent(Box::new(worker));
+    main_agent.register_agent(Box::new(subagent));
 
     println!("→ 调用 delegate_to_agent_with_parent_and_cancel ...");
     let cancel = tokio_util::sync::CancellationToken::new();
     let result = main_agent
         .delegate_to_agent_with_parent_and_cancel(
-            "smoke-worker",
+            "smoke-subagent",
             "Reply with: hello from smoke test",
             "smoke",
             cancel,

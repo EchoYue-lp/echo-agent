@@ -54,7 +54,7 @@ pub struct MockAgent {
     responses: Arc<Mutex<VecDeque<String>>>,
     calls: Arc<Mutex<Vec<String>>>,
     /// Multimodal messages received via `execute_stream_message_with_cancel`
-    /// (records whether dispatch forwarded attachments to the worker).
+    /// (records whether dispatch forwarded attachments to the subagent).
     messages: Arc<Mutex<Vec<echo_core::llm::types::Message>>>,
     /// Value-scoped invocation metadata received by streaming calls.
     invocation_contexts: Arc<Mutex<Vec<echo_core::agent::AgentInvocationContext>>>,
@@ -166,7 +166,7 @@ impl MockAgent {
     }
 
     /// The last multimodal message received (returns `None` if dispatch never
-    /// forwarded a `Message`). Used to verify workers see user attachments.
+    /// forwarded a `Message`). Used to verify subagents see user attachments.
     pub fn last_message(&self) -> Option<echo_core::llm::types::Message> {
         self.messages
             .lock()
@@ -246,7 +246,7 @@ impl Agent for MockAgent {
     }
 
     /// Multimodal dispatch override: record the received message (so tests can
-    /// assert workers saw user attachments) and consume a preset response like
+    /// assert subagents saw user attachments) and consume a preset response like
     /// the text path. Without this override, the trait default would reject
     /// multimodal dispatch — making it impossible to test message forwarding.
     fn execute_stream_message_with_cancel<'a>(
@@ -333,7 +333,7 @@ impl Agent for MockAgent {
     }
 
     /// Record `set_working_dir` calls so Sprint 8 isolation tests can verify
-    /// the worker was chrooted into the worktree (and cleared afterwards).
+    /// the subagent was chrooted into the worktree (and cleared afterwards).
     fn set_working_dir(&self, path: Option<std::path::PathBuf>) {
         self.working_dirs
             .lock()

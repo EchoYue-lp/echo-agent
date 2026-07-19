@@ -22,14 +22,14 @@ Multi-Agent orchestration splits a "generalist" into multiple "specialists" coor
 
 ```rust
 AgentConfig::new(...).role(AgentRole::Orchestrator) // coordinator
-AgentConfig::new(...).role(AgentRole::Worker)        // executor (default)
+AgentConfig::new(...).role(AgentRole::Subagent)        // executor (default)
 AgentConfig::new(...).role(AgentRole::Planner)       // task planner
 ```
 
 | Role | Behavior |
 |------|----------|
 | `Orchestrator` | Receives user task → decomposes → dispatches via `agent_tool` → aggregates |
-| `Worker` | Receives specific task → executes with its own tools → returns result |
+| `Subagent` | Receives specific task → executes with its own tools → returns result |
 | `Planner` | Receives complex task → generates DAG with `plan` tool → executes step by step |
 
 ---

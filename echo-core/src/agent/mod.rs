@@ -614,7 +614,7 @@ pub trait Agent: Send + Sync {
 
     /// Streaming task execution with cancellation (multimodal version).
     ///
-    /// Accepts a pre-built [`Message`] so workers dispatched via subagent
+    /// Accepts a pre-built [`Message`] so subagents dispatched via subagent
     /// delegation can see images/files attached by the user. `ReactAgent`
     /// overrides this to route through its real multimodal pipeline.
     ///
@@ -663,11 +663,20 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Return a cumulative token-usage snapshot for this agent instance.
+    ///
+    /// Lightweight and third-party agents may keep the empty default. Team
+    /// orchestration compares snapshots before and after execution to collect
+    /// usage without depending on a concrete agent implementation.
+    fn token_usage_summary(&self) -> crate::tokenizer::UsageSummary {
+        crate::tokenizer::UsageSummary::default()
+    }
+
     // ── External run context (跨 spawn 安全的值传递, 见 ExternalRunContext) ──
 
     /// Legacy agent-wide run context setter.
     ///
-    /// **背景**：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。worker agent
+    /// **背景**：`tokio::task_local!` 不会跨 `tokio::spawn` 继承。subagent instance
     /// 在框架层的 `tokio::spawn`（subagent_executor.rs 的 dispatch_fork）里执行，
     /// 应用层经 task_local 注入的 run_id / cancel / trace_sink 全部丢失。
     /// 新代码应使用 `AgentInvocationContext` 的 value-scoped streaming methods；
@@ -764,6 +773,9 @@ impl Agent for Box<dyn Agent> {
     }
     fn mcp_server_names(&self) -> Vec<String> {
         self.as_ref().mcp_server_names()
+    }
+    fn token_usage_summary(&self) -> crate::tokenizer::UsageSummary {
+        self.as_ref().token_usage_summary()
     }
     fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         self.as_ref().close()

@@ -26,17 +26,17 @@ name: data_pipeline
 nodes:
   - name: hub
     type: router
-  - name: worker_a
+  - name: subagent_a
     type: router
-  - name: worker_b
+  - name: subagent_b
     type: router
   - name: merger
     type: router
 edges:
   - from: hub
     parallel:
-      - worker_a
-      - worker_b
+      - subagent_a
+      - subagent_b
     then: merger
 entry: hub
 finish:

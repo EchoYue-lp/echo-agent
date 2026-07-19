@@ -42,7 +42,7 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | `model_name` | `String` | *(required)* | LLM model identifier |
 | `agent_name` | `String` | *(required)* | Agent name for logging |
 | `system_prompt` | `String` | *(required)* | System prompt |
-| `role` | `AgentRole` | `Worker` | `Orchestrator` or `Worker` |
+| `role` | `AgentRole` | `Subagent` | `Orchestrator` or `Subagent` |
 | `max_iterations` | `usize` | `10` | Max reasoning steps per turn |
 | `temperature` | `Option<f32>` | `None` (model default) | LLM temperature (0.0–2.0) |
 | `max_tokens` | `Option<u32>` | `None` (model default) | Max generation tokens |

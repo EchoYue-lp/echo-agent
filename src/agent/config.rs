@@ -20,7 +20,7 @@ pub const DEFAULT_TOKEN_LIMIT: usize = 396_000;
 ///   rather than calling the LLM directly.
 ///   Suitable for the "leader" role in multi-agent collaboration scenarios.
 ///
-/// - `Worker` (default): Executes tasks directly via LLM without dispatching to SubAgents.
+/// - `Subagent` (default): Executes tasks directly via LLM without dispatching to SubAgents.
 ///   Suitable for agents that independently perform specific tasks.
 ///
 /// # Note
@@ -32,10 +32,10 @@ pub enum AgentRole {
     /// Orchestrator: responsible for task planning, allocation, and coordinating sub-agents; does not hold business tools.
     /// Prioritizes dispatching to SubAgents in TaskExecutor.
     Orchestrator,
-    /// Worker (default): focuses on specific task execution, only carries business tools,
+    /// Subagent (default): focuses on specific task execution, only carries business tools,
     /// does not hold task management/sub-agent scheduling capabilities. Executes tasks directly via LLM.
     #[default]
-    Worker,
+    Subagent,
 }
 
 /// Agent runtime configuration
@@ -57,7 +57,7 @@ pub struct AgentConfig {
     /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
     pub(crate) enable_tool: bool,
     /// When `enable_tool` is true, register only **read-only** tools (no shell,
-    /// no file writes, no git mutations). Used by read-only subagent workers so
+    /// no file writes, no git mutations). Used by read-only subagents so
     /// that "readonly" is physically enforced at the tool level, not just prompt.
     pub(crate) readonly_tools: bool,
     /// Whether to enable task planning capability (plan/create_task/update_task tools)
@@ -71,23 +71,23 @@ pub struct AgentConfig {
     /// on large projects routinely exceed the old 5-min/none limits.
     /// Per-subagent `SubagentDefinition.timeout_secs` (>0) overrides this.
     pub(crate) subagent_timeout_secs: u64,
-    /// Optional worktree-isolation factory for Fork-dispatched writer workers
-    /// (Sprint 8). When set, workers whose `SubagentDefinition.isolate_worktree`
+    /// Optional worktree-isolation factory for Fork-dispatched writer subagents
+    /// (Sprint 8). When set, subagents whose `SubagentDefinition.isolate_worktree`
     /// is `true` run inside an isolated git worktree created by this factory.
     /// `None` (default) = no isolation available. Application supplies a
     /// git-backed impl; framework stays free of git deps.
     #[cfg(feature = "subagent")]
     pub(crate) subagent_worktree_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::worktree::WorktreeFactory>>,
-    /// Optional data-workspace factory for Fork-dispatched data/research workers
-    /// (Sprint 10). When set, workers whose `SubagentDefinition.isolate_workspace`
-    /// is `true` run inside an isolated per-worker working directory (tmpdir)
+    /// Optional data-workspace factory for Fork-dispatched data/research subagents
+    /// (Sprint 10). When set, subagents whose `SubagentDefinition.isolate_workspace`
+    /// is `true` run inside an isolated per-subagent working directory (tmpdir)
     /// created by this factory. `None` (default) = no workspace isolation.
     #[cfg(feature = "subagent")]
     pub(crate) subagent_data_workspace_factory:
         Option<std::sync::Arc<dyn crate::agent::subagent::workspace::DataWorkspaceFactory>>,
     /// Sprint 11: optional state store for team-mode checkpoint/resume. When
-    /// set, `dispatch_team` plumbs it into `TeamAgent` so `ManagerWorkerOrchestrator`
+    /// set, `dispatch_team` plumbs it into `TeamAgent` so `ManagerSubagentOrchestrator`
     /// can read/write checkpoint nodes keyed by run_id. `None` (default) =
     /// teams run in-memory (no persistence).
     #[cfg(feature = "subagent")]
@@ -313,11 +313,11 @@ impl AgentConfig {
     /// Set Agent role
     ///
     /// # Parameters
-    /// * `role` - Agent role (`AgentRole::Orchestrator` or `AgentRole::Worker`)
+    /// * `role` - Agent role (`AgentRole::Orchestrator` or `AgentRole::Subagent`)
     ///
     /// # Description
     /// - `Orchestrator`: orchestrator role, responsible for task planning, allocation, and coordinating sub-agents
-    /// - `Worker`: worker role, focused on specific task execution
+    /// - `Subagent`: subagent role, focused on specific task execution
     pub fn role(mut self, role: AgentRole) -> Self {
         self.role = role;
         self
@@ -340,7 +340,7 @@ impl AgentConfig {
     /// Only takes effect when `enable_tool(true)` is also set. The agent will
     /// get read_file/list_dir/grep/glob/diff/web_search etc. but NOT
     /// shell/write_file/delete_file/git-commit. Used by read-only subagent
-    /// workers so that "readonly" is enforced at the tool level.
+    /// subagents so that "readonly" is enforced at the tool level.
     pub fn readonly_tools(mut self, readonly: bool) -> Self {
         self.readonly_tools = readonly;
         self
@@ -394,8 +394,8 @@ impl AgentConfig {
         self
     }
 
-    /// Supply a worktree-isolation factory for Fork-dispatched writer workers
-    /// (Sprint 8). Workers whose `SubagentDefinition.isolate_worktree == true`
+    /// Supply a worktree-isolation factory for Fork-dispatched writer subagents
+    /// (Sprint 8). Subagents whose `SubagentDefinition.isolate_worktree == true`
     /// run inside a git worktree created by this factory. Default: `None`
     /// (no isolation). The application constructs the factory (git-backed) and
     /// injects it here; the framework stays free of git dependencies.
@@ -408,9 +408,9 @@ impl AgentConfig {
         self
     }
 
-    /// Supply a data-workspace factory for Fork-dispatched data/research workers
-    /// (Sprint 10). Workers whose `SubagentDefinition.isolate_workspace == true`
-    /// run inside a per-worker tmpdir created by this factory (disjoint output
+    /// Supply a data-workspace factory for Fork-dispatched data/research subagents
+    /// (Sprint 10). Subagents whose `SubagentDefinition.isolate_workspace == true`
+    /// run inside a per-subagent tmpdir created by this factory (disjoint output
     /// files). Default: `None`. The application constructs the tmpdir-backed
     /// factory and injects it here.
     #[cfg(feature = "subagent")]
@@ -424,7 +424,7 @@ impl AgentConfig {
 
     /// Supply a `RuntimeStateStore` for team-mode checkpoint/resume (Sprint 11).
     /// When set, `dispatch_team` plumbs it into `TeamAgent` so a timed-out team
-    /// run can resume by skipping already-completed plan/worker/synthesis
+    /// run can resume by skipping already-completed plan/subagent/synthesis
     /// phases (DAG skip-on-resume pattern). Default: `None` (teams in-memory).
     /// The application supplies a `FileRuntimeStateStore` (or other impl).
     #[cfg(feature = "subagent")]
@@ -1185,6 +1185,6 @@ mod tests {
 
     #[test]
     fn test_agent_role_default() {
-        assert_eq!(AgentRole::default(), AgentRole::Worker);
+        assert_eq!(AgentRole::default(), AgentRole::Subagent);
     }
 }

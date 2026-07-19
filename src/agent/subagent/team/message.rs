@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 /// Kinds of messages exchanged between team members.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MessageKind {
-    /// Manager assigns a sub-task to a worker.
+    /// Manager assigns a sub-task to a subagent.
     Plan { sub_tasks: Vec<String> },
-    /// Worker asks a question to the manager.
+    /// Subagent asks a question to the manager.
     Question { text: String },
-    /// Worker reports a result.
+    /// Subagent reports a result.
     Result { output: String, success: bool },
     /// Reviewer critiques a result.
     Critique { score: f64, feedback: String },

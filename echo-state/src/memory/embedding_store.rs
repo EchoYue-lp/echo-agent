@@ -270,11 +270,11 @@ impl Drop for EmbeddingStore {
         // lost when the store is dropped without an explicit flush_vector_index().
         //
         // P1-10: the previous implementation called `handle.block_on(self
-        // .flush_index())` directly. If `drop` runs on a runtime worker thread
+        // .flush_index())` directly. If `drop` runs on a runtime executor thread
         // that is currently driving a future holding this store (a common case
         // when the store is owned by an agent task), `block_on` deadlocks the
-        // runtime — the worker blocks waiting for a future that needs the very
-        // worker it just parked. Instead, snapshot the index data under a
+        // runtime — that thread blocks waiting for a future that needs the very
+        // executor it just parked. Instead, snapshot the index data under a
         // non-blocking `try_read` and spawn a detached task that owns only the
         // cloned snapshot + path (no `&self`), so `drop` returns immediately
         // without blocking or holding the runtime. If the lock is contended or

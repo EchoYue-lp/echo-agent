@@ -36,20 +36,20 @@ impl TeamRunner {
         Self::default()
     }
 
-    /// Fan out a task to all team workers in parallel with concurrency control.
+    /// Fan out a task to all team subagents in parallel with concurrency control.
     pub async fn fan_out(&self, team: &Team, task: &str) -> Vec<MemberResult> {
-        let workers: Vec<&TeamMember> = team.workers().collect();
-        if workers.is_empty() {
+        let subagents: Vec<&TeamMember> = team.subagents().collect();
+        if subagents.is_empty() {
             return vec![];
         }
 
         let sem = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
         let mut handles = Vec::new();
 
-        for worker in workers {
-            let agent = Arc::clone(&worker.agent);
-            let name = worker.name.clone();
-            let role = worker.role.clone();
+        for subagent in subagents {
+            let agent = Arc::clone(&subagent.agent);
+            let name = subagent.name.clone();
+            let role = subagent.role.clone();
             let task = task.to_string();
             let sem = sem.clone();
             let timeout = self.timeout_secs;

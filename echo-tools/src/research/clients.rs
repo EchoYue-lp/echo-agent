@@ -974,4 +974,55 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    #[ignore = "opt-in live smoke test; set EKO_PROVIDER_SMOKE=1"]
+    async fn live_open_scholarly_providers_return_results() -> Result<()> {
+        if std::env::var("EKO_PROVIDER_SMOKE").as_deref() != Ok("1") {
+            return Err(invalid(
+                "set EKO_PROVIDER_SMOKE=1 before running ignored provider smoke tests",
+            ));
+        }
+        let mailto = std::env::var("OPENALEX_MAILTO").ok();
+        let openalex = OpenAlexClient::new(mailto.clone())?
+            .search("systematic review", 1)
+            .await?;
+        let crossref = CrossrefClient::new(mailto)?
+            .search("systematic review", 1)
+            .await?;
+        let europe_pmc = EuropePmcClient::new()?
+            .search("systematic review", 1)
+            .await?;
+        if openalex.works.is_empty() || crossref.works.is_empty() || europe_pmc.works.is_empty() {
+            return Err(invalid(
+                "one or more scholarly providers returned an empty smoke-test page",
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ZOTERO_API_KEY and ZOTERO_LIBRARY_ID"]
+    async fn live_zotero_credentials_can_list_items() -> Result<()> {
+        let api_key = std::env::var("ZOTERO_API_KEY")
+            .map_err(|_| invalid("ZOTERO_API_KEY is required for the Zotero smoke test"))?;
+        let library_id = std::env::var("ZOTERO_LIBRARY_ID")
+            .map_err(|_| invalid("ZOTERO_LIBRARY_ID is required for the Zotero smoke test"))?;
+        let library_kind = match std::env::var("ZOTERO_LIBRARY_KIND")
+            .unwrap_or_else(|_| "user".to_string())
+            .as_str()
+        {
+            "user" => ZoteroLibraryKind::User,
+            "group" => ZoteroLibraryKind::Group,
+            value => {
+                return Err(invalid(format!(
+                    "ZOTERO_LIBRARY_KIND must be user or group, got {value}"
+                )));
+            }
+        };
+        ZoteroClient::new(library_kind, library_id, api_key)?
+            .list_items(1)
+            .await?;
+        Ok(())
+    }
 }

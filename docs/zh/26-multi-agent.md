@@ -5,7 +5,7 @@
 echo-agent 提供两种多 Agent 模式：
 
 1. **SubAgent** — 父子委托，3 种执行模式（Sync、Fork、Teammate）
-2. **TeamAgent** — 对等协作，4 种策略（ManagerWorker、Pipeline、Debate、Swarm）
+2. **TeamAgent** — 对等协作，4 种策略（ManagerSubagent、Pipeline、Debate、Swarm）
 
 两者都在 `subagent` feature flag 下。
 
@@ -17,7 +17,7 @@ echo-agent 提供两种多 Agent 模式：
 │  │      SubAgent        │  │       TeamAgent          │  │
 │  │  (父 → 子)           │  │  (对等 ↔ 对等)            │  │
 │  │                      │  │                          │  │
-│  │  • Sync（阻塞）       │  │  • ManagerWorker         │  │
+│  │  • Sync（阻塞）       │  │  • ManagerSubagent         │  │
 │  │  • Fork（独立）       │  │  • Pipeline              │  │
 │  │  • Teammate（邮箱）   │  │  • Debate                │  │
 │  │                      │  │  • Swarm                 │  │
@@ -97,12 +97,12 @@ TeamAgent 是高级模式：多个 Agent 作为对等节点在策略驱动下协
 | 角色 | 职责 |
 |------|------|
 | **Leader** | 分解任务、分配工作、综合结果 |
-| **Worker** | 执行分配的子任务 |
+| **Subagent** | 执行分配的子任务 |
 | **Reviewer** | 验证输出（可选） |
 
 ### 四种协作策略
 
-#### 1. ManagerWorker（默认）
+#### 1. ManagerSubagent（默认）
 
 管理者分解任务，分发给工作者，综合结果。
 
@@ -111,10 +111,10 @@ use echo_agent::agent::subagent::team::{TeamAgent, TeamAgentBuilder, TeamStrateg
 
 let team = TeamAgentBuilder::new()
     .model("qwen3-max")
-    .strategy(TeamStrategy::ManagerWorker)
-    .member("researcher", "搜索相关信息", TeamRole::Worker)
-    .member("analyst", "分析发现", TeamRole::Worker)
-    .member("writer", "撰写最终报告", TeamRole::Worker)
+    .strategy(TeamStrategy::ManagerSubagent)
+    .member("researcher", "搜索相关信息", TeamRole::Subagent)
+    .member("analyst", "分析发现", TeamRole::Subagent)
+    .member("writer", "撰写最终报告", TeamRole::Subagent)
     .build()?;
 
 let result = team.execute("写一份关于 Rust 异步模式的报告").await?;
@@ -132,9 +132,9 @@ let team = TeamAgentBuilder::new()
         "analyst".into(),
         "writer".into(),
     ]))
-    .member("researcher", "研究主题", TeamRole::Worker)
-    .member("analyst", "分析研究结果", TeamRole::Worker)
-    .member("writer", "撰写最终输出", TeamRole::Worker)
+    .member("researcher", "研究主题", TeamRole::Subagent)
+    .member("analyst", "分析研究结果", TeamRole::Subagent)
+    .member("writer", "撰写最终输出", TeamRole::Subagent)
     .build()?;
 ```
 
@@ -150,8 +150,8 @@ let team = TeamAgentBuilder::new()
         debaters: vec!["architect-a".into(), "architect-b".into()],
     })
     .member("judge", "评估方案并选择最佳", TeamRole::Reviewer)
-    .member("architect-a", "提出架构方案 A", TeamRole::Worker)
-    .member("architect-b", "提出架构方案 B", TeamRole::Worker)
+    .member("architect-a", "提出架构方案 A", TeamRole::Subagent)
+    .member("architect-b", "提出架构方案 B", TeamRole::Subagent)
     .build()?;
 ```
 
@@ -166,9 +166,9 @@ let team = TeamAgentBuilder::new()
         batch_size: 3,
         reducer: "synthesizer".into(),
     })
-    .member("worker-1", "分析 src/agent/ 下的文件", TeamRole::Worker)
-    .member("worker-2", "分析 src/tools/ 下的文件", TeamRole::Worker)
-    .member("worker-3", "分析 src/memory/ 下的文件", TeamRole::Worker)
+    .member("subagent-1", "分析 src/agent/ 下的文件", TeamRole::Subagent)
+    .member("subagent-2", "分析 src/tools/ 下的文件", TeamRole::Subagent)
+    .member("subagent-3", "分析 src/memory/ 下的文件", TeamRole::Subagent)
     .member("synthesizer", "合并所有发现为报告", TeamRole::Reviewer)
     .build()?;
 ```

@@ -17,7 +17,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [03 - Memory System](./03-memory.md) | Memory | Store (long-term), RuntimeStateStore (runtime checkpoint), ConversationStore (transcript) |
 | [04 - Context Compression](./04-compression.md) | Compression | SlidingWindow, Summary, Hybrid pipeline, ContextManager |
 | [05 - Human-in-the-Loop](./05-human-loop.md) | HIL | Approval gate, Console/Webhook/WebSocket providers |
-| [06 - Multi-Agent Orchestration](./06-subagent.md) | SubAgent | Orchestrator/Worker/Planner, context isolation |
+| [06 - Multi-Agent Orchestration](./06-subagent.md) | SubAgent | Orchestrator/Subagent/Planner, context isolation |
 | [07 - Skill System](./07-skills.md) | Skills | Capability packs, prompt injection, external SKILL.md loading |
 | [08 - MCP Integration](./08-mcp.md) | MCP | stdio/HTTP transport, tool adaptation, multi-server management |
 | [09 - Task Planning](./09-tasks.md) | Tasks / DAG | DAG, topological sort, cycle detection, Mermaid visualization |
@@ -40,7 +40,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [23 - Hooks System](./23-hooks.md) | Hooks | Skills hooks (20 events), Task hooks, Subagent hooks |
 | [24 - Eval System](./24-eval-system.md) | Eval | EvalCase, SuccessCriteria, LlmGrader, A/B comparison, regression, HTML reports |
 | [25 - Self-Evolution](./25-self-improvement.md) | Improve / Evolution | Analyzer, ImprovementLoop, EvalDrivenImprovement, tiered memory, skill auto-creation, merge/health/patch, rule promotion, change audit |
-| [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerWorker/Pipeline/Debate/Swarm) |
+| [26 - Multi-Agent Patterns](./26-multi-agent.md) | SubAgent / TeamAgent | Parent-child delegation (Sync/Fork/Teammate), peer collaboration (ManagerSubagent/Pipeline/Debate/Swarm) |
 | [27 - Tracing System](./27-tracing.md) | Trace | Run, RunEvent (11 types), RunStore, JsonlRunStore, lifecycle, secret redaction |
 | [28 - Config Reference](./28-config-reference.md) | Config | AgentConfig, ReactAgentBuilder, ToolExecutionConfig, TokenBudgetConfig, YAML config, feature flags |
 | [29 - Runtime & Task System](./29-long-running-tasks.md) | Runtime & Tasks | Unified runtime, execution serialization, DAG orchestration, ProgressBridge, background tasks, scheduling |

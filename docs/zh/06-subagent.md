@@ -22,14 +22,14 @@
 
 ```rust
 AgentConfig::new(...).role(AgentRole::Orchestrator) // 编排者
-AgentConfig::new(...).role(AgentRole::Worker)        // 执行者（默认）
+AgentConfig::new(...).role(AgentRole::Subagent)        // 执行者（默认）
 AgentConfig::new(...).role(AgentRole::Planner)       // 任务规划者
 ```
 
 | 角色 | 行为 |
 |------|------|
 | `Orchestrator` | 接收用户任务 → 拆解 → 通过 `agent_tool` 分派给 SubAgent → 汇总 |
-| `Worker` | 接收具体任务 → 使用自己的工具集执行 → 返回结果 |
+| `Subagent` | 接收具体任务 → 使用自己的工具集执行 → 返回结果 |
 | `Planner` | 接收复杂任务 → 先用 `plan` 工具生成 DAG 子任务 → 逐步执行 |
 
 ---

@@ -42,7 +42,7 @@ let config = AgentConfig::new(model_name, agent_name, system_prompt);
 | `model_name` | `String` | *（必填）* | LLM 模型标识符 |
 | `agent_name` | `String` | *（必填）* | Agent 名称 |
 | `system_prompt` | `String` | *（必填）* | 系统提示词 |
-| `role` | `AgentRole` | `Worker` | `Orchestrator` 或 `Worker` |
+| `role` | `AgentRole` | `Subagent` | `Orchestrator` 或 `Subagent` |
 | `max_iterations` | `usize` | `10` | 每轮最大推理步数 |
 | `temperature` | `Option<f32>` | `None`（模型默认） | LLM 温度（0.0–2.0） |
 | `max_tokens` | `Option<u32>` | `None`（模型默认） | 最大生成 Token 数 |

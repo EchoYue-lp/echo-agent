@@ -161,7 +161,7 @@ fn substitute_env_vars(input: &str) -> String {
 /// is inherently unsafe in multi-threaded programs (data race on libc `environ`).
 ///
 /// **Caller must ensure** this function is called during single-threaded plugin
-/// initialization only (typically at startup before any worker threads are spawned).
+/// initialization only (typically at startup before background threads are spawned).
 ///
 /// All user-controlled variable names are validated to contain only `[A-Z0-9_]`
 /// characters to prevent environment variable injection attacks.

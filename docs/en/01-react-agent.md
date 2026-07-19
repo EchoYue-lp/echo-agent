@@ -64,7 +64,7 @@ execute(task)
 
 | Role | Description |
 |------|-------------|
-| `Worker` (default) | Directly executes tasks using its tools |
+| `Subagent` (default) | Directly executes tasks using its tools |
 | `Orchestrator` | Delegates sub-tasks to SubAgents via `agent_tool` |
 
 > **Note:** Task planning is enabled via `.enable_task(true)` (registers `plan`/`create_task`/`update_task` tools). No separate `Planner` role needed.

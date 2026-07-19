@@ -135,9 +135,15 @@ impl StdioLspClient {
             loop {
                 header_line.clear();
                 match reader.read_line(&mut header_line).await {
-                    Ok(0) => return, // EOF
+                    Ok(0) => {
+                        pending.lock().await.clear();
+                        return;
+                    }
                     Ok(_) => {}
-                    Err(_) => return,
+                    Err(_) => {
+                        pending.lock().await.clear();
+                        return;
+                    }
                 }
 
                 let trimmed = header_line.trim();
@@ -157,6 +163,7 @@ impl StdioLspClient {
             // Read body
             let mut body = vec![0u8; len];
             if reader.read_exact(&mut body).await.is_err() {
+                pending.lock().await.clear();
                 return;
             }
 

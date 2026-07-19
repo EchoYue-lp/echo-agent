@@ -122,7 +122,7 @@ impl AgentDispatchTool {
     }
 
     /// Shared catalog handle. The parent agent updates this when subagents are
-    /// registered so cached tool definitions can expose concrete worker names.
+    /// registered so cached tool definitions can expose concrete subagent names.
     pub fn catalog_handle(&self) -> Arc<std::sync::RwLock<Vec<SubagentCatalogEntry>>> {
         self.catalog.clone()
     }
@@ -399,7 +399,7 @@ impl Tool for AgentDispatchTool {
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "fork", "teammate", "team"],
-                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = parallel mailbox agent; \"team\" = ManagerWorker (requires TeamSpec)."
+                    "description": "Optional. Omit or \"sync\" = fresh context (recommended; no parent system/history). \"fork\" = inherit parent system prompt + recent messages. Worktree/workspace isolation is automatic for roles that declare it, independent of this field. \"teammate\" = parallel mailbox agent; \"team\" = ManagerSubagent (requires TeamSpec)."
                 },
                 "background": {
                     "type": "boolean",

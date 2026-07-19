@@ -248,10 +248,10 @@ mod tests {
 
         coord.add_tasks(vec!["task1".into(), "task2".into()]).await;
 
-        coord.assign("task1", "worker", &mailbox).await.unwrap();
+        coord.assign("task1", "subagent", &mailbox).await.unwrap();
 
         let msg = mailbox.recv().await.unwrap();
-        assert_eq!(msg.to, "worker");
+        assert_eq!(msg.to, "subagent");
         match msg.kind {
             MessageKind::TaskAssigned { task, .. } => assert_eq!(task, "task1"),
             _ => panic!("Wrong message kind"),
@@ -259,7 +259,7 @@ mod tests {
 
         // Verify state
         let state = coord.task_state("task1").await.unwrap();
-        assert!(matches!(state, TaskState::Assigned(ref a) if a == "worker"));
+        assert!(matches!(state, TaskState::Assigned(ref a) if a == "subagent"));
     }
 
     #[tokio::test]
@@ -296,7 +296,7 @@ mod tests {
             tokens_used: None,
             was_truncated: false,
             mode: crate::agent::subagent::types::ExecutionMode::Teammate,
-            isolation_observed: crate::agent::subagent::types::ObservedIsolation::Worker,
+            isolation_observed: crate::agent::subagent::types::ObservedIsolation::Subagent,
             usage: None,
         };
 

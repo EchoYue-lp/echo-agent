@@ -1,6 +1,6 @@
 //! Adapter wrapping `Arc<dyn Agent>` as an `impl Agent` (Sprint 11).
 //!
-//! `TeamAgentBuilder::manager`/`worker` consume `Box<dyn Agent>`, but
+//! `TeamAgentBuilder::manager`/`subagent` consume `Box<dyn Agent>`, but
 //! `SubagentRegistry::get_agent` returns `Arc<dyn Agent>` (a shared singleton
 //! that may be used by multiple dispatch paths). The `Agent` trait is not
 //! `Clone`, so a raw `Box::new(arc)` won't typecheck. This newtype transparently
@@ -29,6 +29,9 @@ impl Agent for ArcAgentBox {
     }
     fn system_prompt(&self) -> &str {
         self.0.system_prompt()
+    }
+    fn token_usage_summary(&self) -> echo_core::tokenizer::UsageSummary {
+        self.0.token_usage_summary()
     }
     fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
         self.0.execute(task)
