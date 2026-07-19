@@ -165,6 +165,22 @@ impl AgentDispatchTool {
         })
     }
 
+    async fn child_cancel_token(
+        cancel_handle: &Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
+        invocation_cancel: Option<&CancellationToken>,
+    ) -> CancellationToken {
+        if let Some(parent) = invocation_cancel {
+            return parent.child_token();
+        }
+
+        cancel_handle
+            .lock()
+            .await
+            .as_ref()
+            .map(CancellationToken::child_token)
+            .unwrap_or_else(CancellationToken::new)
+    }
+
     fn dispatch_with_context(
         &self,
         parameters: ToolParameters,
@@ -175,6 +191,7 @@ impl AgentDispatchTool {
         let cancel_handle = self.cancel.clone();
         let factory = self.parent_context_factory.clone();
         let runtime_context = Self::runtime_context_from_tool_ctx(ctx);
+        let invocation_cancel = ctx.and_then(|context| context.cancel.clone());
         let delegation_policy = match Self::delegation_policy_from_context(ctx) {
             Ok(policy) => policy,
             Err(e) => return Box::pin(async move { Ok(ToolResult::error(e)) }),
@@ -252,15 +269,11 @@ impl AgentDispatchTool {
                 None
             };
 
-            // Derive the subagent's cancel token from the parent run's current
-            // token (P1-11). If the parent run hasn't started (no token set),
-            // fall back to a fresh token so dispatch still works standalone.
-            let cancel = cancel_handle
-                .lock()
-                .await
-                .as_ref()
-                .map(|t| t.child_token())
-                .unwrap_or_else(CancellationToken::new);
+            // ToolContext is invocation-scoped and therefore authoritative for
+            // pooled agents. The shared handle remains a compatibility fallback
+            // for callers that execute the tool without runtime context.
+            let cancel =
+                Self::child_cancel_token(&cancel_handle, invocation_cancel.as_deref()).await;
 
             let req = crate::agent::subagent::DispatchRequest {
                 agent_name: agent_name.to_string(),
@@ -501,16 +514,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_context_from_run_id_pins_message_and_execution_id() {
+    fn runtime_context_from_run_id_pins_message_and_execution_id() -> Result<(), String> {
         let ctx = ToolContext {
             run_id: Some("msg-key-1".to_string()),
             ..Default::default()
         };
         let rt = AgentDispatchTool::runtime_context_from_tool_ctx(Some(&ctx))
-            .expect("runtime_context should be Some when run_id is set");
+            .ok_or_else(|| "runtime_context missing when run_id is set".to_string())?;
         assert_eq!(rt.run_id.as_deref(), Some("msg-key-1"));
         assert_eq!(rt.message_id.as_deref(), Some("msg-key-1"));
-        let exec_id = rt.execution_id.expect("execution_id required");
+        let exec_id = rt
+            .execution_id
+            .ok_or_else(|| "execution_id missing from runtime context".to_string())?;
         assert!(
             exec_id.starts_with("agent_tool-"),
             "execution_id should be agent_tool-{{uuid}}, got {exec_id}"
@@ -519,5 +534,29 @@ mod tests {
             !exec_id.contains(':'),
             "execution_id must not contain ':' so bridge uses full id as subagent_run_id"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invocation_cancel_token_overrides_stale_shared_handle() -> Result<(), String> {
+        let stale_parent = CancellationToken::new();
+        let invocation_parent = CancellationToken::new();
+        let shared = Arc::new(tokio::sync::Mutex::new(Some(stale_parent.clone())));
+        let ctx = ToolContext {
+            cancel: Some(Arc::new(invocation_parent.clone())),
+            ..Default::default()
+        };
+
+        let child = AgentDispatchTool::child_cancel_token(&shared, ctx.cancel.as_deref()).await;
+        stale_parent.cancel();
+        if child.is_cancelled() {
+            return Err("stale shared token cancelled the invocation child".to_string());
+        }
+
+        invocation_parent.cancel();
+        if !child.is_cancelled() {
+            return Err("invocation cancellation did not reach the subagent child".to_string());
+        }
+        Ok(())
     }
 }
