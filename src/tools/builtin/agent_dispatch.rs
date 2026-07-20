@@ -359,9 +359,9 @@ impl Tool for AgentDispatchTool {
          Default is fresh context (no parent conversation). Use mode=fork only when \
          the SubAgent needs shared background from this session. Set background=true \
          to start the SubAgent without blocking (returns started + execution_id; \
-         completion arrives via events / chat note). For complex read-only \
-         investigation, prefer multiple agent_tool calls in one turn so \
-         independent SubAgents run in parallel. Synchronous completion returns a \
+         completion arrives via events / chat note). One call delegates one bounded \
+         task. When the host provides a formal task planner, use that planner for \
+         coordinated, dependent, or parallel multi-task work. Synchronous completion returns a \
          JSON result with status, summary, artifacts, verification, remaining_work, \
          and touched_files. Use only agent_name values listed in the schema."
     }

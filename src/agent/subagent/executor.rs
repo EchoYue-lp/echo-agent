@@ -763,19 +763,10 @@ impl SubagentExecutor {
                 ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
             })?;
 
-        // get_agent() auto-instantiates from factory if needed
-        let agent_arc = self
-            .registry
-            .get_agent(&req.agent_name)
-            .await
-            .ok_or_else(|| {
-                ReactError::Other(format!(
-                    "Cannot get agent instance for '{}'",
-                    req.agent_name
-                ))
-            })?;
+        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
 
         let child_token = req.cancel.child_token();
+        let handle_cancel = child_token.clone();
         let task = Self::enhance_task(
             &req.task,
             req.parent_context.as_ref(),
@@ -821,6 +812,7 @@ impl SubagentExecutor {
                         Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
                     }
                     _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
+                        child_token.cancel();
                         Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
                             "Teammate '{}' timed out after {}s",
                             agent_name, timeout_secs
@@ -869,7 +861,7 @@ impl SubagentExecutor {
         Ok(TeammateHandle {
             id: handle_id,
             agent_name: req.agent_name.clone(),
-            cancel: req.cancel.clone(),
+            cancel: handle_cancel,
             join_handle,
         })
     }
@@ -1377,18 +1369,22 @@ impl SubagentExecutor {
         Ok(result)
     }
 
-    /// Sync mode: lock the agent, execute, return.
-    async fn dispatch_sync(&self, req: &DispatchRequest) -> Result<SubagentResult> {
-        let agent_arc = self
-            .registry
-            .get_agent(&req.agent_name)
-            .await
-            .ok_or_else(|| {
+    async fn isolated_dispatch_agent(&self, agent_name: &str) -> Result<Arc<dyn Agent>> {
+        let agent = match self.registry.create_fresh_agent(agent_name).await? {
+            Some(agent) => agent,
+            None => self.registry.get_agent(agent_name).await.ok_or_else(|| {
                 ReactError::Other(format!(
                     "Subagent '{}' not found or not instantiated",
-                    req.agent_name
+                    agent_name
                 ))
-            })?;
+            })?,
+        };
+        Ok(agent)
+    }
+
+    /// Sync mode: execute one isolated invocation and return its result.
+    async fn dispatch_sync(&self, req: &DispatchRequest) -> Result<SubagentResult> {
+        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
 
         // Per-subagent override (0 = executor default). Sync now enforces a
         // timeout too (previously it blocked the parent indefinitely) — one
@@ -1404,7 +1400,7 @@ impl SubagentExecutor {
             None => None,
         };
         let task = Self::enhance_task(&req.task, req.parent_context.as_ref(), inherit_history);
-        let cancel = req.cancel.clone();
+        let execution_cancel = req.cancel.child_token();
         let event_execution_id = req
             .runtime_context
             .as_ref()
@@ -1421,7 +1417,7 @@ impl SubagentExecutor {
         if timeout_secs > 0 {
             tokio::select! {
                 biased;
-                _ = cancel.cancelled() => Err(ReactError::Agent(Box::new(
+                _ = execution_cancel.cancelled() => Err(ReactError::Agent(Box::new(
                     AgentError::Cancelled(format!("Sync subagent '{}' cancelled", req.agent_name))
                 ))),
                 r = tokio::time::timeout(
@@ -1431,7 +1427,7 @@ impl SubagentExecutor {
                         agent_arc.as_ref(),
                         &task,
                         req.message.clone(),
-                        cancel.clone(),
+                        execution_cancel.clone(),
                         invocation.clone(),
                         &req.parent_agent,
                         &req.agent_name,
@@ -1442,10 +1438,13 @@ impl SubagentExecutor {
                     )
                 ) => match r {
                     Ok(r) => r,
-                    Err(_) => Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
-                        "Sync subagent '{}' timed out after {}s",
-                        req.agent_name, timeout_secs
-                    ))))),
+                    Err(_) => {
+                        execution_cancel.cancel();
+                        Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                            "Sync subagent '{}' timed out after {}s",
+                            req.agent_name, timeout_secs
+                        )))))
+                    }
                 },
             }
         } else {
@@ -1454,7 +1453,7 @@ impl SubagentExecutor {
                 agent_arc.as_ref(),
                 &task,
                 req.message.clone(),
-                cancel,
+                execution_cancel,
                 invocation,
                 &req.parent_agent,
                 &req.agent_name,
@@ -1481,19 +1480,7 @@ impl SubagentExecutor {
                 ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
             })?;
 
-        let agent_arc = match self.registry.create_fresh_agent(&req.agent_name).await? {
-            Some(agent) => agent,
-            None => self
-                .registry
-                .get_agent(&req.agent_name)
-                .await
-                .ok_or_else(|| {
-                    ReactError::Other(format!(
-                        "Cannot get agent instance for '{}'",
-                        req.agent_name
-                    ))
-                })?,
-        };
+        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
 
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
@@ -2460,6 +2447,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_dispatch_creates_fresh_agent_per_request() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let mut definition = super::super::types::SubagentDefinition::new("explorer", "Explorer");
+        definition.execution_mode = ExecutionMode::Sync;
+        registry
+            .register(
+                definition.clone(),
+                Box::new(MockAgent::new("explorer").with_response("cached")),
+            )
+            .await;
+
+        let creations = Arc::new(AtomicUsize::new(0));
+        let factory_creations = Arc::clone(&creations);
+        let factory = Arc::new(FnAgentFactory::new(move || {
+            let instance = factory_creations
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            Box::pin(async move {
+                Ok(Box::new(
+                    MockAgent::new("explorer")
+                        .with_delay_ms(50)
+                        .with_response(format!("instance-{instance}")),
+                ) as Box<dyn Agent>)
+            })
+        }));
+        assert!(registry.register_factory_sync(definition, factory));
+
+        let request = || DispatchRequest {
+            agent_name: "explorer".to_string(),
+            task: "inspect".to_string(),
+            mode_override: Some(ExecutionMode::Sync),
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            background: false,
+        };
+
+        let (first, second) =
+            tokio::join!(executor.dispatch(request()), executor.dispatch(request()));
+        let first = first?;
+        let second = second?;
+
+        assert_eq!(creations.load(Ordering::SeqCst), 2);
+        assert_ne!(first.output, second.output);
+        assert_ne!(first.output, "cached");
+        assert_ne!(second.output, "cached");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_timeout_cancels_detached_stream_producer() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+        let mut definition = super::super::types::SubagentDefinition::new("slow", "Slow stream");
+        definition.execution_mode = ExecutionMode::Sync;
+        definition.timeout_secs = 1;
+        registry
+            .register(
+                definition,
+                Box::new(CancellationAwareStreamAgent {
+                    cancellation_seen: Arc::clone(&cancellation_seen),
+                }),
+            )
+            .await;
+
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "slow".to_string(),
+                task: "wait".to_string(),
+                mode_override: Some(ExecutionMode::Sync),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("slow Sync unexpectedly completed".to_string()))?;
+
+        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        tokio::time::timeout(Duration::from_secs(1), cancellation_seen.notified())
+            .await
+            .map_err(|_| {
+                ReactError::Other(
+                    "Sync timeout did not cancel the detached stream producer".to_string(),
+                )
+            })?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fork_dispatch_creates_fresh_agent_per_request() -> Result<()> {
         let (registry, executor) = make_executor().await;
         let mut definition = super::super::types::SubagentDefinition::new("explorer", "Explorer");
@@ -2583,6 +2667,149 @@ mod tests {
 
         let result = handle.join().await.unwrap();
         assert_eq!(result.output, "team result");
+    }
+
+    #[tokio::test]
+    async fn teammate_dispatch_creates_fresh_agent_per_request() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let mut definition = super::super::types::SubagentDefinition::new("explorer", "Explorer");
+        definition.execution_mode = ExecutionMode::Teammate;
+        registry
+            .register(
+                definition.clone(),
+                Box::new(MockAgent::new("explorer").with_response("cached")),
+            )
+            .await;
+
+        let creations = Arc::new(AtomicUsize::new(0));
+        let factory_creations = Arc::clone(&creations);
+        let factory = Arc::new(FnAgentFactory::new(move || {
+            let instance = factory_creations
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            Box::pin(async move {
+                Ok(Box::new(
+                    MockAgent::new("explorer")
+                        .with_delay_ms(50)
+                        .with_response(format!("instance-{instance}")),
+                ) as Box<dyn Agent>)
+            })
+        }));
+        assert!(registry.register_factory_sync(definition, factory));
+
+        let request = || DispatchRequest {
+            agent_name: "explorer".to_string(),
+            task: "inspect".to_string(),
+            mode_override: Some(ExecutionMode::Teammate),
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            background: false,
+        };
+
+        let (first, second) =
+            tokio::join!(executor.dispatch(request()), executor.dispatch(request()));
+        let first = first?;
+        let second = second?;
+
+        assert_eq!(creations.load(Ordering::SeqCst), 2);
+        assert_ne!(first.output, second.output);
+        assert_ne!(first.output, "cached");
+        assert_ne!(second.output, "cached");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn teammate_timeout_cancels_detached_stream_producer() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+        let mut definition = super::super::types::SubagentDefinition::new("slow", "Slow stream");
+        definition.execution_mode = ExecutionMode::Teammate;
+        definition.timeout_secs = 1;
+        registry
+            .register(
+                definition,
+                Box::new(CancellationAwareStreamAgent {
+                    cancellation_seen: Arc::clone(&cancellation_seen),
+                }),
+            )
+            .await;
+
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "slow".to_string(),
+                task: "wait".to_string(),
+                mode_override: Some(ExecutionMode::Teammate),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("slow Teammate unexpectedly completed".to_string()))?;
+
+        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        tokio::time::timeout(Duration::from_secs(1), cancellation_seen.notified())
+            .await
+            .map_err(|_| {
+                ReactError::Other(
+                    "Teammate timeout did not cancel the detached stream producer".to_string(),
+                )
+            })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn teammate_handle_cancel_does_not_cancel_parent() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let definition = super::super::types::SubagentDefinition::new("slow", "Slow stream");
+        registry
+            .register(
+                definition,
+                Box::new(CancellationAwareStreamAgent {
+                    cancellation_seen: Arc::new(tokio::sync::Notify::new()),
+                }),
+            )
+            .await;
+
+        let parent_cancel = CancellationToken::new();
+        let handle = executor
+            .dispatch_teammate(DispatchRequest {
+                agent_name: "slow".to_string(),
+                task: "wait".to_string(),
+                mode_override: Some(ExecutionMode::Teammate),
+                cancel: parent_cancel.clone(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await?;
+
+        handle.cancel.cancel();
+        if parent_cancel.is_cancelled() {
+            return Err(ReactError::Other(
+                "cancelling a Teammate handle cancelled its parent run".to_string(),
+            ));
+        }
+        let error = handle
+            .join()
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("cancelled Teammate completed".to_string()))?;
+        assert!(
+            matches!(error, ReactError::Agent(inner) if matches!(*inner, AgentError::Interrupted))
+        );
+        Ok(())
     }
 
     // ── Sprint 11: Team dispatch (ExecutionMode::Team + TeamSpec) ─────────

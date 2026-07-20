@@ -324,7 +324,7 @@ impl ReactAgent {
         }
     }
 
-    /// Register a factory used to create an independent agent for each fork.
+    /// Register a factory used to create an independent agent for each isolated dispatch.
     #[cfg(feature = "subagent")]
     pub fn register_subagent_factory(
         &mut self,
