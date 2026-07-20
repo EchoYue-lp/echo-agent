@@ -9,7 +9,7 @@ use super::ReactAgent;
 #[cfg(feature = "subagent")]
 use crate::agent::Agent;
 #[cfg(feature = "subagent")]
-use crate::agent::subagent::SubagentDefinition;
+use crate::agent::subagent::{AgentFactory, SubagentDefinition};
 use crate::compression::{CompressionCheckpoint, ContextCompressor, ForceCompressStats};
 use crate::error::Result;
 #[cfg(feature = "mcp")]
@@ -321,6 +321,24 @@ impl ReactAgent {
         {
             self.update_dispatch_catalog(&def);
             info!(agent = %self.config.agent_name, subagent = %name, "Subagent registered");
+        }
+    }
+
+    /// Register a factory used to create an independent agent for each fork.
+    #[cfg(feature = "subagent")]
+    pub fn register_subagent_factory(
+        &mut self,
+        def: SubagentDefinition,
+        factory: Arc<dyn AgentFactory>,
+    ) {
+        let name = def.name.clone();
+        if self
+            .tools
+            .subagent_registry
+            .register_factory_sync(def.clone(), factory)
+        {
+            self.update_dispatch_catalog(&def);
+            info!(agent = %self.config.agent_name, subagent = %name, "Subagent factory registered");
         }
     }
 

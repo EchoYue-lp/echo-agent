@@ -757,6 +757,12 @@ async fn subagent_context_isolation() {
     let sub_config = AgentConfig::new("qwen3-max", "child", "You are a child agent");
     let child = ReactAgent::new(sub_config);
 
+    assert!(!Arc::ptr_eq(
+        &parent.execution_mutex,
+        &child.execution_mutex
+    ));
+    assert!(!Arc::ptr_eq(&parent.memory.context, &child.memory.context));
+
     // Child agent has its own independent context
     let (child_count, _) = child.context_stats().await;
     assert_eq!(child_count, 1); // only system message

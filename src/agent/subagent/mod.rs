@@ -29,7 +29,7 @@ pub use executor::{
     TeammateHandle, merge_observed_evidence,
 };
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
-pub use registry::SubagentRegistry;
+pub use registry::{AgentFactory, FnAgentFactory, SubagentRegistry};
 pub use types::{
     ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentArtifact, SubagentDefinition,
     SubagentKind, SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,

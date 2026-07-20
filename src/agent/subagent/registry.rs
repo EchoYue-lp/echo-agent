@@ -201,6 +201,34 @@ impl SubagentRegistry {
         }
     }
 
+    /// Register a definition factory while constructing an agent synchronously.
+    pub fn register_factory_sync(
+        &self,
+        def: SubagentDefinition,
+        factory: Arc<dyn AgentFactory>,
+    ) -> bool {
+        let name = def.name.clone();
+        let mut definitions = match self.definitions.try_write() {
+            Ok(definitions) => definitions,
+            Err(error) => {
+                warn!(subagent = %name, %error, "Cannot register subagent definition");
+                return false;
+            }
+        };
+
+        let mut factories = match self.factories.try_write() {
+            Ok(factories) => factories,
+            Err(error) => {
+                warn!(subagent = %name, %error, "Cannot register subagent factory");
+                return false;
+            }
+        };
+
+        definitions.insert(name.clone(), def);
+        factories.insert(name, factory);
+        true
+    }
+
     /// Remove a subagent by name.
     pub async fn remove(&self, name: &str) {
         {
@@ -328,6 +356,24 @@ impl SubagentRegistry {
         }
 
         None
+    }
+
+    /// Create a fresh agent when a factory is registered for `name`.
+    ///
+    /// Unlike `get_agent`, this never updates or reuses the cached agent.
+    pub async fn create_fresh_agent(&self, name: &str) -> Result<Option<Arc<dyn Agent>>> {
+        let factory = {
+            let factories = self.factories.read().await;
+            factories.get(name).cloned()
+        };
+
+        match factory {
+            Some(factory) => factory
+                .create()
+                .await
+                .map(|agent| Some(Arc::new(agent) as Arc<dyn Agent>)),
+            None => Ok(None),
+        }
     }
 
     /// Check if a subagent is registered.

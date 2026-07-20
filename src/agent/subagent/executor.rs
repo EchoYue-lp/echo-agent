@@ -1481,16 +1481,19 @@ impl SubagentExecutor {
                 ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
             })?;
 
-        let agent_arc = self
-            .registry
-            .get_agent(&req.agent_name)
-            .await
-            .ok_or_else(|| {
-                ReactError::Other(format!(
-                    "Cannot get agent instance for '{}'",
-                    req.agent_name
-                ))
-            })?;
+        let agent_arc = match self.registry.create_fresh_agent(&req.agent_name).await? {
+            Some(agent) => agent,
+            None => self
+                .registry
+                .get_agent(&req.agent_name)
+                .await
+                .ok_or_else(|| {
+                    ReactError::Other(format!(
+                        "Cannot get agent instance for '{}'",
+                        req.agent_name
+                    ))
+                })?,
+        };
 
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
@@ -1510,9 +1513,9 @@ impl SubagentExecutor {
             registered.definition.inherit_history,
         );
         // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
-        // subagent 是 registry 预注册的单例(fork 不 clone)。run context
-        // 与实际 isolation path 作为同一个 invocation value 传入，避免并行
-        // dispatch 修改单例上的共享 runtime/working_dir。
+        // Carry run context as an invocation value. Factory-backed Fork roles
+        // receive a fresh agent instance; legacy pre-built roles still use the
+        // cached instance without mutating shared runtime/working_dir fields.
         let mut runtime_context = req.runtime_context.clone();
         if let Some(ctx) = runtime_context.as_mut() {
             ctx.delegation_policy = Some(req.delegation_policy);
@@ -1591,13 +1594,14 @@ impl SubagentExecutor {
             .map(str::to_string)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
         let worktree_label = format!("{agent_name}-{worktree_identity}");
+        let execution_cancel = cancel.child_token();
 
         let result = tokio::spawn(async move {
             let _permit = permit;
             let start = Instant::now();
 
             // Check cancellation
-            if cancel.is_cancelled() {
+            if execution_cancel.is_cancelled() {
                 let mut result = SubagentResult::cancelled(
                     agent_name.clone(),
                     "Cancelled before execution",
@@ -1680,7 +1684,7 @@ impl SubagentExecutor {
             let mut result = if timeout_secs > 0 {
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => Err(ReactError::Agent(Box::new(
+                    _ = execution_cancel.cancelled() => Err(ReactError::Agent(Box::new(
                         AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
                     ))),
                     r = tokio::time::timeout(
@@ -1690,7 +1694,7 @@ impl SubagentExecutor {
                             agent,
                             &enhanced_task,
                             message.clone(),
-                            cancel.clone(),
+                            execution_cancel.clone(),
                             invocation.clone(),
                             &parent_agent,
                             &agent_name,
@@ -1702,17 +1706,20 @@ impl SubagentExecutor {
                     ) => {
                         match r {
                             Ok(r) => r,
-                            Err(_) => Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
-                                "Fork subagent '{}' timed out after {}s",
-                                agent_name, timeout_secs
-                            ))))),
+                            Err(_) => {
+                                execution_cancel.cancel();
+                                Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                                    "Fork subagent '{}' timed out after {}s",
+                                    agent_name, timeout_secs
+                                )))))
+                            }
                         }
                     }
                 }
             } else {
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => Err(ReactError::Agent(Box::new(
+                    _ = execution_cancel.cancelled() => Err(ReactError::Agent(Box::new(
                         AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
                     ))),
                     r = Self::execute_agent_streaming(
@@ -1720,7 +1727,7 @@ impl SubagentExecutor {
                         agent,
                         &enhanced_task,
                         message.clone(),
-                        cancel.clone(),
+                        execution_cancel.clone(),
                         invocation.clone(),
                         &parent_agent,
                         &agent_name,
@@ -1797,9 +1804,73 @@ impl SubagentExecutor {
 mod tests {
     use super::*;
     use crate::agent::subagent::context::SubagentContext;
+    use crate::agent::subagent::registry::FnAgentFactory;
     use crate::testing::{FailingMockAgent, MockAgent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct DelegateFailedDispatch;
+
+    struct CancellationAwareStreamAgent {
+        cancellation_seen: Arc<tokio::sync::Notify>,
+    }
+
+    impl Agent for CancellationAwareStreamAgent {
+        fn name(&self) -> &str {
+            "cancellation-aware"
+        }
+
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async move { std::future::pending::<Result<String>>().await })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+                Ok(
+                    Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
+                        as futures::stream::BoxStream<'a, Result<AgentEvent>>,
+                )
+            })
+        }
+
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            let cancellation_seen = Arc::clone(&self.cancellation_seen);
+            Box::pin(async move {
+                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    cancellation_seen.notify_one();
+                    let _ = sender.send(Ok(AgentEvent::Cancelled)).await;
+                });
+                Ok(
+                    Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
+                        as futures::stream::BoxStream<'a, Result<AgentEvent>>,
+                )
+            })
+        }
+    }
 
     #[async_trait::async_trait]
     impl super::super::hooks::SubagentHooks for DelegateFailedDispatch {
@@ -2386,6 +2457,103 @@ mod tests {
         let result = executor.dispatch(req).await.unwrap();
         assert_eq!(result.output, "forked");
         assert_eq!(result.mode, ExecutionMode::Fork);
+    }
+
+    #[tokio::test]
+    async fn fork_dispatch_creates_fresh_agent_per_request() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let mut definition = super::super::types::SubagentDefinition::new("explorer", "Explorer");
+        definition.execution_mode = ExecutionMode::Fork;
+        registry
+            .register(
+                definition.clone(),
+                Box::new(MockAgent::new("explorer").with_response("cached")),
+            )
+            .await;
+
+        let creations = Arc::new(AtomicUsize::new(0));
+        let factory_creations = Arc::clone(&creations);
+        let factory = Arc::new(FnAgentFactory::new(move || {
+            let instance = factory_creations
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            Box::pin(async move {
+                Ok(Box::new(
+                    MockAgent::new("explorer")
+                        .with_delay_ms(50)
+                        .with_response(format!("instance-{instance}")),
+                ) as Box<dyn Agent>)
+            })
+        }));
+        assert!(registry.register_factory_sync(definition, factory));
+
+        let request = || DispatchRequest {
+            agent_name: "explorer".to_string(),
+            task: "inspect".to_string(),
+            mode_override: Some(ExecutionMode::Fork),
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            background: false,
+        };
+
+        let (first, second) =
+            tokio::join!(executor.dispatch(request()), executor.dispatch(request()));
+        let first = first?;
+        let second = second?;
+
+        assert_eq!(creations.load(Ordering::SeqCst), 2);
+        assert_ne!(first.output, second.output);
+        assert_ne!(first.output, "cached");
+        assert_ne!(second.output, "cached");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fork_timeout_cancels_detached_stream_producer() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let cancellation_seen = Arc::new(tokio::sync::Notify::new());
+        let mut definition = super::super::types::SubagentDefinition::new("slow", "Slow stream");
+        definition.execution_mode = ExecutionMode::Fork;
+        definition.timeout_secs = 1;
+        registry
+            .register(
+                definition,
+                Box::new(CancellationAwareStreamAgent {
+                    cancellation_seen: Arc::clone(&cancellation_seen),
+                }),
+            )
+            .await;
+
+        let error = executor
+            .dispatch(DispatchRequest {
+                agent_name: "slow".to_string(),
+                task: "wait".to_string(),
+                mode_override: Some(ExecutionMode::Fork),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                background: false,
+            })
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("slow Fork unexpectedly completed".to_string()))?;
+
+        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        tokio::time::timeout(Duration::from_secs(1), cancellation_seen.notified())
+            .await
+            .map_err(|_| {
+                ReactError::Other(
+                    "Fork timeout did not cancel the detached stream producer".to_string(),
+                )
+            })?;
+        Ok(())
     }
 
     #[tokio::test]
