@@ -113,6 +113,13 @@ pub(crate) async fn run_tools(
     if !conc.is_empty() {
         let mc = snap.tools.tool_manager.max_concurrency();
         let snapshot = snap.clone();
+        let has_timeout_exempt_tool = conc.iter().any(|(_, name, _)| {
+            snap.tools
+                .tool_manager
+                .get_tool(name)
+                .map(|tool| tool.value().exempt_from_batch_timeout())
+                .unwrap_or(false)
+        });
         let tool_count = conc.len();
         let (stream_tx, mut stream_rx) = mpsc::channel(64);
         let mut futs = FuturesUnordered::new();
@@ -135,11 +142,20 @@ pub(crate) async fn run_tools(
             );
         }
         drop(stream_tx);
-        let bt = super::super::retry::compute_concurrent_tool_batch_timeout(
-            &snap.config.tool_execution,
-            tool_count,
-            mc,
-        );
+        // A timeout-exempt tool owns its execution deadline. Disable the outer
+        // batch timer for the mixed batch; ordinary peers remain protected by
+        // ToolManager's per-tool timeout, while the long-running tool can wait
+        // for its internal Subagent deadline instead of being cancelled at the
+        // ordinary 120-second ceiling.
+        let bt = if has_timeout_exempt_tool {
+            None
+        } else {
+            super::super::retry::compute_concurrent_tool_batch_timeout(
+                &snap.config.tool_execution,
+                tool_count,
+                mc,
+            )
+        };
         let cancel = async {
             match snap.cancel_token.as_ref() {
                 Some(token) => token.cancelled().await,

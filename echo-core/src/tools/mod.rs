@@ -807,6 +807,17 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this tool enforces its own execution deadline.
+    ///
+    /// Tools that opt out of the outer batch timeout are long-running by
+    /// design and normally own a more appropriate deadline (for example, a
+    /// Subagent dispatch timeout). Keep that established behavior as the
+    /// default while exposing the decision explicitly to [`ToolManager`],
+    /// which otherwise applies the ordinary per-tool timeout as well.
+    fn manages_own_timeout(&self) -> bool {
+        self.exempt_from_batch_timeout()
+    }
+
     /// Stream tool execution with full [`ToolContext`].
     ///
     /// Prefer this over [`Self::execute_stream`]. The default implementation
@@ -982,6 +993,9 @@ pub struct ToolContext {
     pub run_id: Option<String>,
     /// 当前用户输入/agent turn 标识。
     pub turn_id: Option<String>,
+    /// 触发当前工具调用的消息标识。Chat 场景用于把工具派生的执行流绑定到
+    /// 正确的消息区块；非 Chat 路径为 `None`。
+    pub message_id: Option<String>,
     /// 当前 run 内的一次具体执行标识。
     pub execution_id: Option<String>,
     /// Stable identity for this logical tool call and all of its retry attempts.
@@ -1005,6 +1019,7 @@ impl std::fmt::Debug for ToolContext {
             .field("conversation_id", &self.conversation_id)
             .field("run_id", &self.run_id)
             .field("turn_id", &self.turn_id)
+            .field("message_id", &self.message_id)
             .field("execution_id", &self.execution_id)
             .field("call_id", &self.call_id)
             .field("output_artifacts", &self.output_artifacts)
@@ -1042,6 +1057,7 @@ mod tool_context_tests {
         assert!(ctx.working_dir.is_none());
         assert!(ctx.conversation_id.is_none());
         assert!(ctx.run_id.is_none());
+        assert!(ctx.message_id.is_none());
         assert!(ctx.delegation_policy.is_none());
     }
 
@@ -1084,6 +1100,7 @@ mod tool_context_tests {
             conversation_id: None,
             run_id: None,
             turn_id: None,
+            message_id: None,
             execution_id: None,
             call_id: None,
             output_artifacts: None,
@@ -1214,6 +1231,7 @@ mod exempt_from_batch_timeout_tests {
             .expect("long_running tool present");
         assert!(!ordinary.exempt_from_batch_timeout());
         assert!(long_running.exempt_from_batch_timeout());
+        assert!(long_running.manages_own_timeout());
     }
 }
 

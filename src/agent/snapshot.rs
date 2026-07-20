@@ -305,6 +305,8 @@ pub struct AgentRunSnapshot {
     pub trace_run_id: Option<String>,
     /// Current user-input/agent turn ID.
     pub current_turn_id: Option<String>,
+    /// Message that triggered the current invocation.
+    pub current_message_id: Option<String>,
     /// Current concrete subagent/tool execution ID.
     pub current_execution_id: Option<String>,
     /// 外部 run 级上下文（跨 spawn 安全，从 ReactAgent.external_* 抓取）。
@@ -412,6 +414,15 @@ impl AgentRunSnapshot {
                     .clone()
             },
             current_turn_id: runtime.and_then(|context| context.turn_id.clone()),
+            current_message_id: if invocation.is_some() {
+                runtime.and_then(|context| context.message_id.clone())
+            } else {
+                agent
+                    .external_message_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone()
+            },
             current_execution_id: runtime.and_then(|context| context.execution_id.clone()),
             external_cancel: if let Some(context) = invocation {
                 runtime

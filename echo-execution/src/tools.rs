@@ -306,7 +306,7 @@ impl ToolManager {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
 
-            let result = if self.config.timeout_ms > 0 {
+            let result = if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
                 match tokio::time::timeout(
                     Duration::from_millis(self.config.timeout_ms),
                     tool.execute_with_context(parameters.clone(), ctx),
@@ -483,7 +483,7 @@ impl ToolManager {
                 .into())
             };
 
-            let result = if self.config.timeout_ms > 0 {
+            let result = if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
                 match tokio::time::timeout(
                     Duration::from_millis(self.config.timeout_ms),
                     consume_stream,
@@ -558,6 +558,36 @@ mod execute_with_context_tests {
     }
 
     struct DelayedStreamingTool;
+
+    struct InternallyTimedTool;
+
+    impl Tool for InternallyTimedTool {
+        fn name(&self) -> &str {
+            "internally_timed"
+        }
+
+        fn description(&self) -> &str {
+            "long-running tool with its own deadline"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                Ok(ToolResult::success("completed under internal deadline"))
+            })
+        }
+
+        fn exempt_from_batch_timeout(&self) -> bool {
+            true
+        }
+    }
 
     struct RetryOnceTool {
         calls: Arc<AtomicUsize>,
@@ -842,6 +872,55 @@ mod execute_with_context_tests {
             .expect("streaming task should join")
             .expect("streaming tool should complete");
         assert_eq!(result.output, "done");
+    }
+
+    #[tokio::test]
+    async fn internally_timed_tool_bypasses_ordinary_execution_timeout()
+    -> echo_core::error::Result<()> {
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 1,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        manager.register(Box::new(InternallyTimedTool));
+
+        let result = manager
+            .execute_tool("internally_timed", ToolParameters::new())
+            .await?;
+
+        assert!(result.success);
+        assert_eq!(result.output, "completed under internal deadline");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn internally_timed_tool_stream_bypasses_ordinary_execution_timeout()
+    -> echo_core::error::Result<()> {
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 1,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        manager.register(Box::new(InternallyTimedTool));
+
+        let result = manager
+            .execute_tool_stream_with_context(
+                "internally_timed",
+                ToolParameters::new(),
+                &ToolContext::default(),
+                None,
+            )
+            .await?;
+
+        assert!(result.success);
+        assert_eq!(result.output, "completed under internal deadline");
+        Ok(())
     }
 
     #[tokio::test]

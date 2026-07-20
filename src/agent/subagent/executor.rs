@@ -388,6 +388,10 @@ impl SubagentExecutor {
                 .runtime_context
                 .as_ref()
                 .and_then(|ctx| ctx.run_id.clone());
+            let event_conversation_id = req
+                .runtime_context
+                .as_ref()
+                .and_then(|ctx| ctx.conversation_id.clone());
             let event_message_id = req
                 .runtime_context
                 .as_ref()
@@ -433,6 +437,7 @@ impl SubagentExecutor {
                     task: req.task.clone(),
                     execution_id: event_execution_id.clone(),
                     run_id: event_run_id.clone(),
+                    conversation_id: event_conversation_id.clone(),
                     message_id: event_message_id.clone(),
                     background: req.background,
                 });
@@ -2055,6 +2060,57 @@ mod tests {
             saw_completed,
             "expected DispatchCompleted after background work"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_started_preserves_chat_identity() -> std::result::Result<(), String> {
+        let (registry, executor) = make_executor().await;
+        let agent = MockAgent::new("identity").with_response("done");
+        let definition =
+            super::super::types::SubagentDefinition::new("identity", "Identity subagent");
+        registry.register(definition, Box::new(agent)).await;
+        let mut events = registry.event_bus().subscribe();
+        let request = DispatchRequest {
+            agent_name: "identity".to_string(),
+            task: "preserve identity".to_string(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("conversation-identity".to_string()),
+                run_id: None,
+                turn_id: Some("turn-identity".to_string()),
+                execution_id: Some("agent_tool-identity".to_string()),
+                message_id: Some("message-identity".to_string()),
+                cancel: None,
+                trace_sink: None,
+                delegation_policy: None,
+            }),
+            message: None,
+            background: false,
+        };
+
+        executor
+            .dispatch(request)
+            .await
+            .map_err(|error| error.to_string())?;
+        let started = events.recv().await.map_err(|error| error.to_string())?;
+        match started.as_ref() {
+            SubagentEvent::DispatchStarted {
+                conversation_id,
+                message_id,
+                run_id,
+                ..
+            } => {
+                assert_eq!(conversation_id.as_deref(), Some("conversation-identity"));
+                assert_eq!(message_id.as_deref(), Some("message-identity"));
+                assert!(run_id.is_none());
+            }
+            other => return Err(format!("expected DispatchStarted, got {other:?}")),
+        }
+        Ok(())
     }
 
     // NOTE: a unit test for multimodal dispatch forwarding (verifying a subagent

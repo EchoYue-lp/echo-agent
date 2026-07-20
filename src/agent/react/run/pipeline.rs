@@ -437,6 +437,7 @@ impl PipelineStage for ExecuteStage {
             conversation_id: snapshot.config.conversation_id.clone(),
             run_id: snapshot.current_run_id.clone(),
             turn_id: snapshot.current_turn_id.clone(),
+            message_id: snapshot.current_message_id.clone(),
             execution_id: snapshot.current_execution_id.clone(),
             call_id: Some(ctx.call_id.clone()),
             output_artifacts: snapshot.config.tool_output_artifacts.clone(),

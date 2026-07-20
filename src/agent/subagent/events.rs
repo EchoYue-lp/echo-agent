@@ -40,6 +40,9 @@ pub enum SubagentEvent {
         /// Parent run id from the caller's [`ExternalRunContext`]. `None` =
         /// legacy caller.
         run_id: Option<String>,
+        /// Conversation id from the caller's [`ExternalRunContext`]. This is
+        /// retained even for ad-hoc dispatches that have no formal run id.
+        conversation_id: Option<String>,
         /// Message id that triggered the run (chat `message_key`). Lets the
         /// frontend pin the subagent stream to the right chat message block.
         /// `None` = non-chat path (cron, etc).
