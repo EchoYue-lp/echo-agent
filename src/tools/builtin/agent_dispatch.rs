@@ -411,7 +411,7 @@ impl Tool for AgentDispatchTool {
                 "agent_name": agent_name_schema,
                 "task": {
                     "type": "string",
-                    "description": "Specific task description to assign to the SubAgent. Include relevant paths, scope, constraints, and what result format you need."
+                    "description": "Specific task description to assign to the SubAgent. Write its natural-language prose in the user's current language, then include relevant paths, scope, constraints, and required result format."
                 },
                 "mode": {
                     "type": "string",

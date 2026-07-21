@@ -883,6 +883,14 @@ fn agent_dispatch_tool_schema_lists_registered_subagents() {
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     assert!(description.contains("Reviews code for bugs and test gaps"));
+
+    let task_description = dispatch
+        .function
+        .parameters
+        .pointer("/properties/task/description")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(task_description.contains("user's current language"));
 }
 
 #[cfg(feature = "subagent")]

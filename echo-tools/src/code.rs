@@ -195,7 +195,7 @@ impl Tool for RunCodeTool {
     }
 
     fn description(&self) -> &str {
-        "在当前任务工作目录中执行 Python/R/JavaScript 等代码。正式分析应先保存脚本，再通过 script_path 直接执行已审阅文件；临时探索可使用 code。两者不能同时提供。返回 stdout/stderr/exit code。"
+        "Execute Python/R/JavaScript/etc. code in the task working directory. For real analysis, save the script first and run it via `script_path` (a reviewed file); for quick exploration use `code`. Provide exactly one of the two. Returns stdout/stderr/exit code."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -205,19 +205,19 @@ impl Tool for RunCodeTool {
                 "language": {
                     "type": "string",
                     "enum": ["python", "r", "javascript", "ruby", "perl", "php", "bash"],
-                    "description": "代码语言(大小写不敏感)。默认 python。"
+                    "description": "Code language (case-insensitive). Defaults to python."
                 },
                 "code": {
                     "type": "string",
-                    "description": "要执行的临时代码片段；与 script_path 二选一。"
+                    "description": "Inline code snippet for quick execution; mutually exclusive with `script_path`."
                 },
                 "script_path": {
                     "type": "string",
-                    "description": "working_dir 内已经保存并审阅的脚本相对路径；与 code 二选一。"
+                    "description": "Relative path of a saved, reviewed script inside `working_dir`; mutually exclusive with `code`."
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "超时秒数(可选,默认 60,上限 300)。"
+                    "description": "Timeout in seconds (optional, default 60, max 300)."
                 }
             },
             "required": ["language"],

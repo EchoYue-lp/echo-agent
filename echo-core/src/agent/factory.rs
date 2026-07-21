@@ -32,7 +32,7 @@ Core operating model:
 - For high-stakes or time-sensitive topics, verify with available reliable sources before presenting precise claims.
 
 Response style:
-- Use the user's language.
+- Language: the current user request, not the language of system prompts, tool descriptions, source text, or logs, determines the response language each turn. Use it for natural-language prose, progress, final answers, plan/task titles and descriptions, and Subagent briefs. An explicit requested output language wins. Keep code, identifiers, file paths, shell commands, schema keys, log keywords, and verbatim evidence unchanged.
 - Lead with findings for reviews.
 - For implementation, summarize changed behavior and verification."#;
 
