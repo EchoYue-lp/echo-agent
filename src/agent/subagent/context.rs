@@ -4,7 +4,7 @@
 //! and provides utilities for creating isolated execution contexts.
 
 use echo_core::llm::ToolDefinition;
-use echo_core::llm::types::Message;
+use echo_core::llm::types::{Message, Role};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -19,7 +19,10 @@ use super::types::ExecutionMode;
 /// ## Fresh vs Fork inheritance (Claude/Cursor-aligned)
 ///
 /// - **Fresh** ([`Self::fresh_default`]): no parent system / history / memory.
-///   This is the product default for TaskRuntime and `agent_tool` (omit mode).
+///   The current user-authored request is still carried as a scoped goal so
+///   the isolated subagent can preserve user intent without inheriting the
+///   conversation transcript. This is the product default for TaskRuntime and
+///   `agent_tool` (omit mode).
 /// - **Fork inheritance** ([`Self::fork_default`]): inherit parent system prompt
 ///   + recent history + memory. Opt-in via `agent_tool` `mode=fork`.
 ///
@@ -239,6 +242,7 @@ impl SubagentContext {
         store: Option<Arc<dyn Store>>,
         inheritance: &ContextInheritance,
     ) -> Self {
+        let parent_goal = latest_user_request(all_messages);
         let filtered_tools = if let Some(allowed) = &inheritance.inherit_tools {
             // Specific tool list: only inherit named tools
             all_tools
@@ -278,8 +282,9 @@ impl SubagentContext {
             } else {
                 None
             },
-            // Scoped context fields - default to empty/None
-            parent_goal: None,
+            // The active user request is scoped delegation context rather than
+            // inherited conversation history, so Fresh subagents receive it.
+            parent_goal,
             assigned_task: None,
             relevant_files: Vec::new(),
             relevant_artifacts: Vec::new(),
@@ -305,6 +310,22 @@ impl SubagentContext {
     }
 }
 
+fn latest_user_request(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != Role::User || crate::compression::is_context_projection_message(message)
+        {
+            return None;
+        }
+
+        let text = message.content.as_text()?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.starts_with("[runtime_context:") {
+            return None;
+        }
+        Some(trimmed.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn from_parent_fresh_yields_empty_inheritable_content() {
+    fn from_parent_fresh_keeps_only_current_user_request() {
         let tools = vec![ToolDefinition {
             tool_type: "function".to_string(),
             function: echo_core::llm::types::FunctionSpec {
@@ -348,7 +369,56 @@ mod tests {
         assert!(ctx.messages.is_empty());
         assert!(ctx.tool_definitions.is_empty());
         assert!(ctx.store.is_none());
-        assert!(!ctx.has_content());
+        assert_eq!(ctx.parent_goal.as_deref(), Some("hello"));
+        assert!(ctx.has_content());
+    }
+
+    #[test]
+    fn from_parent_ignores_runtime_context_and_projection_messages() {
+        let mut projected = crate::compression::ContextManager::builder(4096).build();
+        projected.push(Message::user("用户请求：核对并发问题 🧭".to_string()));
+        projected.apply_projections(&[crate::compression::ContextProjection {
+            marker: "test:turn-contract".to_string(),
+            message: Some(Message::user("English runtime contract".to_string())),
+        }]);
+        projected.push(Message::user(
+            "[runtime_context:task-runtime]\ninternal state".to_string(),
+        ));
+
+        let ctx = SubagentContext::from_parent(
+            "PARENT SYSTEM",
+            &[],
+            projected.messages(),
+            None,
+            &ContextInheritance::fresh_default(),
+        );
+
+        assert_eq!(
+            ctx.parent_goal.as_deref(),
+            Some("用户请求：核对并发问题 🧭")
+        );
+        assert!(ctx.messages.is_empty());
+        assert!(ctx.system_prompt.is_empty());
+        assert!(ctx.store.is_none());
+    }
+
+    #[test]
+    fn from_parent_uses_latest_real_user_request() {
+        let messages = vec![
+            Message::user("first request".to_string()),
+            Message::assistant("answer".to_string()),
+            Message::user("最后一个真实请求".to_string()),
+        ];
+
+        let ctx = SubagentContext::from_parent(
+            "",
+            &[],
+            &messages,
+            None,
+            &ContextInheritance::fresh_default(),
+        );
+
+        assert_eq!(ctx.parent_goal.as_deref(), Some("最后一个真实请求"));
     }
 
     #[test]

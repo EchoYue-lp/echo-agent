@@ -1020,9 +1020,9 @@ impl SubagentExecutor {
 
     /// Enhance the task description with inherited parent context.
     ///
-    /// Prepends the inherited system prompt and a **sliced** conversation
-    /// history to the task, giving the subagent awareness of the parent's
-    /// state.
+    /// Prepends the scoped user request, inherited system prompt, and a
+    /// **sliced** conversation history to the task, giving the subagent the
+    /// minimum parent context selected for this dispatch.
     ///
     /// # History slicing (Sprint 6b)
     ///
@@ -1043,6 +1043,17 @@ impl SubagentExecutor {
     ) -> String {
         let mut parts = Vec::new();
         if let Some(ctx) = parent_ctx {
+            if let Some(parent_goal) = ctx
+                .parent_goal
+                .as_deref()
+                .filter(|goal| !goal.trim().is_empty())
+                .filter(|_| !task.contains("[user_request]"))
+            {
+                parts.push(format!(
+                    "[user_request]\n{}\n[/user_request]",
+                    parent_goal.trim()
+                ));
+            }
             if !ctx.system_prompt.is_empty() {
                 parts.push(format!("[Inherited System Context]\n{}", ctx.system_prompt));
             }
@@ -2012,6 +2023,32 @@ mod tests {
         let out = SubagentExecutor::enhance_task("do thing", Some(&ctx), None);
         assert!(out.starts_with("do thing"));
         assert!(out.contains("## Result"));
+    }
+
+    #[test]
+    fn enhance_task_prepends_scoped_user_request_once() {
+        let mut ctx = super::super::context::SubagentContext::empty();
+        ctx.parent_goal = Some("请核对并发问题 🧭".to_string());
+
+        let out = SubagentExecutor::enhance_task("inspect executor", Some(&ctx), None);
+
+        assert!(out.starts_with(
+            "[user_request]\n请核对并发问题 🧭\n[/user_request]\n\n---\n\ninspect executor"
+        ));
+        assert_eq!(out.matches("[user_request]").count(), 1);
+    }
+
+    #[test]
+    fn enhance_task_does_not_duplicate_existing_user_request() {
+        let mut ctx = super::super::context::SubagentContext::empty();
+        ctx.parent_goal = Some("parent request".to_string());
+        let task = "[user_request]\nexplicit request\n[/user_request]\n\ninspect executor";
+
+        let out = SubagentExecutor::enhance_task(task, Some(&ctx), None);
+
+        assert!(out.starts_with(task));
+        assert_eq!(out.matches("[user_request]").count(), 1);
+        assert!(!out.contains("parent request"));
     }
 
     #[test]
