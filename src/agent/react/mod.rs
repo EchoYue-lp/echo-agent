@@ -2240,6 +2240,33 @@ impl ReactAgent {
         depth: u32,
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_parent_context_cancel_and_tools(
+            target,
+            task,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            None,
+        )
+        .await
+    }
+
+    /// Delegate with an invocation-scoped tool allowlist. An empty allowlist
+    /// preserves the role's default tools; a non-empty list is enforced by
+    /// hiding every other tool from both the model and execution pipeline.
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delegate_to_agent_with_parent_context_cancel_and_tools(
+        &self,
+        target: &str,
+        task: &str,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2257,13 +2284,22 @@ impl ReactAgent {
         // fresh inheritance (no parent system/history/memory) — Claude/Cursor.
         let mode = ExecutionMode::Fork;
         let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
+        let mut parent_context = self.build_parent_context_with(&inheritance).await;
+        if allowed_tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
+        {
+            let context = parent_context
+                .get_or_insert_with(crate::agent::subagent::context::SubagentContext::empty);
+            context.allowed_tools = allowed_tools;
+        }
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
             mode_override: Some(mode),
             cancel,
             parent_agent: parent_label.to_string(),
-            parent_context: self.build_parent_context_with(&inheritance).await,
+            parent_context,
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: None,
@@ -2318,6 +2354,32 @@ impl ReactAgent {
         depth: u32,
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_parent_context_cancel_message_and_tools(
+            target,
+            task,
+            message,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delegate_to_agent_with_parent_context_cancel_message_and_tools(
+        &self,
+        target: &str,
+        task: &str,
+        message: crate::llm::types::Message,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2333,13 +2395,22 @@ impl ReactAgent {
         // Keep Fork execution for worktree/workspace; fresh inheritance by default.
         let mode = ExecutionMode::Fork;
         let inheritance = crate::agent::subagent::context::ContextInheritance::fresh_default();
+        let mut parent_context = self.build_parent_context_with(&inheritance).await;
+        if allowed_tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
+        {
+            let context = parent_context
+                .get_or_insert_with(crate::agent::subagent::context::SubagentContext::empty);
+            context.allowed_tools = allowed_tools;
+        }
         let req = DispatchRequest {
             agent_name: target.to_string(),
             task: task.to_string(),
             mode_override: Some(mode),
             cancel,
             parent_agent: parent_label.to_string(),
-            parent_context: self.build_parent_context_with(&inheritance).await,
+            parent_context,
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: Some(message),

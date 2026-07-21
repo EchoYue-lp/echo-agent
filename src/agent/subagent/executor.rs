@@ -7,7 +7,7 @@ use crate::error::{AgentError, ReactError, Result};
 use echo_core::agent::{Agent, AgentEvent, AgentInvocationContext, CancellationToken};
 use echo_core::llm::types::Message;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -85,6 +85,23 @@ impl DispatchRequest {
             max_delegate_depth: 3,
         }
     }
+}
+
+fn invocation_disabled_tools(
+    tool_names: Vec<String>,
+    allowed_tools: Option<&[String]>,
+) -> Option<HashSet<String>> {
+    let allowed_tools = allowed_tools.filter(|tools| !tools.is_empty())?;
+    let allowed = allowed_tools
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    Some(
+        tool_names
+            .into_iter()
+            .filter(|tool| !allowed.contains(tool.as_str()))
+            .collect(),
+    )
 }
 
 /// Map framework errors to the runtime-owned subagent terminal status.
@@ -1582,6 +1599,11 @@ impl SubagentExecutor {
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
         let worktree_label = format!("{agent_name}-{worktree_identity}");
         let execution_cancel = cancel.child_token();
+        let invocation_allowed_tools = req
+            .parent_context
+            .as_ref()
+            .and_then(|context| context.allowed_tools.clone())
+            .filter(|allowed| !allowed.is_empty());
 
         let result = tokio::spawn(async move {
             let _permit = permit;
@@ -1648,6 +1670,8 @@ impl SubagentExecutor {
             } else {
                 ObservedIsolation::Context
             };
+            let disabled_tools =
+                invocation_disabled_tools(agent.tool_names(), invocation_allowed_tools.as_deref());
             let invocation = AgentInvocationContext {
                 runtime: runtime_context.clone(),
                 working_dir: worktree_handle
@@ -1655,7 +1679,7 @@ impl SubagentExecutor {
                     .map(|handle| handle.path.clone())
                     .or_else(|| workspace_handle.as_ref().map(|handle| handle.path.clone())),
                 cancel: None,
-                disabled_tools: None,
+                disabled_tools,
                 run_budget: None,
             };
             registry
@@ -1794,6 +1818,23 @@ mod tests {
     use crate::agent::subagent::registry::FnAgentFactory;
     use crate::testing::{FailingMockAgent, MockAgent};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn invocation_allowlist_hides_every_unlisted_tool() {
+        let tools = vec![
+            "read_file".to_string(),
+            "write_file".to_string(),
+            "shell".to_string(),
+        ];
+        let allowed = vec!["read_file".to_string()];
+        let disabled = invocation_disabled_tools(tools.clone(), Some(&allowed)).unwrap_or_default();
+        assert_eq!(
+            disabled,
+            HashSet::from(["write_file".to_string(), "shell".to_string()])
+        );
+        assert!(invocation_disabled_tools(tools.clone(), None).is_none());
+        assert!(invocation_disabled_tools(tools, Some(&[])).is_none());
+    }
 
     struct DelegateFailedDispatch;
 
