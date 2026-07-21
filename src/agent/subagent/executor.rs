@@ -1047,10 +1047,14 @@ impl SubagentExecutor {
                 .parent_goal
                 .as_deref()
                 .filter(|goal| !goal.trim().is_empty())
-                .filter(|_| !task.contains("[user_request]"))
+                .filter(|_| !task.contains("[user_request"))
             {
+                // The user's original request is the only language anchor. The
+                // role prompt, inherited system context, conversation history,
+                // and the [Subagent Result Contract] below are all English;
+                // mark this block so the subagent does not drift to English.
                 parts.push(format!(
-                    "[user_request]\n{}\n[/user_request]",
+                    "[user_request (language anchor — reply in this language)]\n{}\n[/user_request]",
                     parent_goal.trim()
                 ));
             }
@@ -2033,21 +2037,21 @@ mod tests {
         let out = SubagentExecutor::enhance_task("inspect executor", Some(&ctx), None);
 
         assert!(out.starts_with(
-            "[user_request]\n请核对并发问题 🧭\n[/user_request]\n\n---\n\ninspect executor"
+            "[user_request (language anchor — reply in this language)]\n请核对并发问题 🧭\n[/user_request]\n\n---\n\ninspect executor"
         ));
-        assert_eq!(out.matches("[user_request]").count(), 1);
+        assert_eq!(out.matches("[user_request").count(), 1);
     }
 
     #[test]
     fn enhance_task_does_not_duplicate_existing_user_request() {
         let mut ctx = super::super::context::SubagentContext::empty();
         ctx.parent_goal = Some("parent request".to_string());
-        let task = "[user_request]\nexplicit request\n[/user_request]\n\ninspect executor";
+        let task = "[user_request (language anchor — reply in this language)]\nexplicit request\n[/user_request]\n\ninspect executor";
 
         let out = SubagentExecutor::enhance_task(task, Some(&ctx), None);
 
         assert!(out.starts_with(task));
-        assert_eq!(out.matches("[user_request]").count(), 1);
+        assert_eq!(out.matches("[user_request").count(), 1);
         assert!(!out.contains("parent request"));
     }
 
