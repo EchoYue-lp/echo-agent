@@ -16,6 +16,10 @@ use tracing::{info, warn};
 use super::context::SubagentContext;
 use super::events::SubagentEvent;
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
+use super::prompt::{
+    CompiledSubagentInvocation, ContextTransferPolicy, SubagentPromptCompiler, SubagentPromptInput,
+    with_compiled_task,
+};
 use super::registry::SubagentRegistry;
 use super::types::{
     ExecutionMode, ObservedIsolation, SubagentArtifact, SubagentOutcome, SubagentResult,
@@ -53,6 +57,8 @@ pub struct DispatchRequest {
     /// `task` path, so it sees user-uploaded attachments. `None` = plain text
     /// dispatch (the default for all existing callers).
     pub message: Option<Message>,
+    /// Opaque structured payload consumed only by an injected product compiler.
+    pub prompt_payload: Option<serde_json::Value>,
     /// When true, this dispatch was (or will be) started via
     /// [`SubagentExecutor::dispatch_background`]. Propagated onto
     /// [`SubagentEvent::DispatchStarted`] so UI can mark background cards.
@@ -71,6 +77,7 @@ impl std::fmt::Debug for DispatchRequest {
                 "runtime_context",
                 &self.runtime_context.as_ref().map(|c| &c.run_id),
             )
+            .field("has_prompt_payload", &self.prompt_payload.is_some())
             .finish()
     }
 }
@@ -275,6 +282,8 @@ pub struct SubagentExecutorConfig {
     /// read/write checkpoint nodes keyed by `run_id`. `None` → teams run
     /// in-memory (no persistence, today's behavior).
     pub runtime_state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
+    /// Compiler shared by direct `agent_tool` and programmatic delegation.
+    pub prompt_compiler: Arc<dyn SubagentPromptCompiler>,
 }
 
 impl Default for SubagentExecutorConfig {
@@ -287,6 +296,7 @@ impl Default for SubagentExecutorConfig {
             worktree_factory: None,
             data_workspace_factory: None,
             runtime_state_store: None,
+            prompt_compiler: Arc::new(super::prompt::DefaultSubagentPromptCompiler),
         }
     }
 }
@@ -601,6 +611,7 @@ impl SubagentExecutor {
                                     retry_count = retry_count.saturating_add(1);
                                     let rt_ctx = req.runtime_context.clone();
                                     let retry_msg = req.message.clone();
+                                    let prompt_payload = req.prompt_payload.clone();
                                     req = DispatchRequest {
                                         agent_name: alternative_agent,
                                         task: hook_ctx.task.clone(),
@@ -611,6 +622,7 @@ impl SubagentExecutor {
                                         delegation_policy: child_policy,
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
+                                        prompt_payload,
                                         background: false,
                                     };
                                     // This attempt is recoverable, so it is not a terminal event.
@@ -633,6 +645,7 @@ impl SubagentExecutor {
                                     retry_count = retry_count.saturating_add(1);
                                     let rt_ctx = req.runtime_context.clone();
                                     let retry_msg = req.message.clone();
+                                    let prompt_payload = req.prompt_payload.clone();
                                     req = DispatchRequest {
                                         agent_name: hook_ctx.subagent_name.clone(),
                                         task: hook_ctx.task.clone(),
@@ -643,6 +656,7 @@ impl SubagentExecutor {
                                         delegation_policy,
                                         runtime_context: rt_ctx,
                                         message: retry_msg,
+                                        prompt_payload,
                                         background: false,
                                     };
                                     // This attempt is recoverable, so it is not a terminal event.
@@ -701,6 +715,7 @@ impl SubagentExecutor {
                 worktree_factory: self.config.worktree_factory.clone(),
                 data_workspace_factory: self.config.data_workspace_factory.clone(),
                 runtime_state_store: self.config.runtime_state_store.clone(),
+                prompt_compiler: self.config.prompt_compiler.clone(),
             },
             semaphore: self.semaphore.clone(),
         }
@@ -784,11 +799,12 @@ impl SubagentExecutor {
 
         let child_token = req.cancel.child_token();
         let handle_cancel = child_token.clone();
-        let task = Self::enhance_task(
-            &req.task,
-            req.parent_context.as_ref(),
+        let compiled = self.compile_invocation(
+            &req,
+            ExecutionMode::Teammate,
             registered.definition.inherit_history,
         );
+        let task = compiled.task_input;
         let agent_name = req.agent_name.clone();
         let parent_agent = req.parent_agent.clone();
         let registry = self.registry.clone();
@@ -812,6 +828,7 @@ impl SubagentExecutor {
             .and_then(|ctx| ctx.run_id.clone());
         let invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
+            history: (!compiled.history.is_empty()).then_some(compiled.history),
             ..AgentInvocationContext::default()
         };
 
@@ -974,13 +991,13 @@ impl SubagentExecutor {
         let team_agent = builder.build();
 
         let start = std::time::Instant::now();
-        let task = Self::enhance_task(
-            &req.task,
-            req.parent_context.as_ref(),
+        let compiled = self.compile_invocation(
+            req,
+            ExecutionMode::Team,
             registered.definition.inherit_history,
         );
         let TeamExecutionResult { output, usage } = team_agent
-            .execute_with_usage(&task)
+            .execute_with_usage(&compiled.task_input)
             .await
             .map_err(|error| {
                 if error.to_ascii_lowercase().contains("timed out") {
@@ -1018,98 +1035,33 @@ impl SubagentExecutor {
 
     // ── Internal dispatch methods ──────────────────────────────────────────
 
-    /// Enhance the task description with inherited parent context.
-    ///
-    /// Prepends the scoped user request, inherited system prompt, and a
-    /// **sliced** conversation history to the task, giving the subagent the
-    /// minimum parent context selected for this dispatch.
-    ///
-    /// # History slicing (Sprint 6b)
-    ///
-    /// `inherit_history` controls how many trailing messages are joined:
-    /// - `None`  → no history is inherited (system prompt only, if any).
-    /// - `Some(0)` → inherit all messages already present in `parent_ctx`
-    ///   (these were themselves capped by the Fork mode default when the
-    ///   context was built via `SubagentContext::from_parent`).
-    /// - `Some(n)` → inherit the **last n** messages.
-    ///
-    /// Before Sprint 6b this function ignored `inherit_history` and dumped the
-    /// entire `parent_ctx.messages`, so per-subagent `inherit_history` settings
-    /// (e.g. from a subagent `.md` frontmatter) had no effect.
-    fn enhance_task(
-        task: &str,
-        parent_ctx: Option<&super::context::SubagentContext>,
+    fn compile_invocation(
+        &self,
+        req: &DispatchRequest,
+        mode: ExecutionMode,
         inherit_history: Option<usize>,
-    ) -> String {
-        let mut parts = Vec::new();
-        if let Some(ctx) = parent_ctx {
-            if let Some(parent_goal) = ctx
-                .parent_goal
-                .as_deref()
-                .filter(|goal| !goal.trim().is_empty())
-                .filter(|_| !task.contains("[user_request"))
-            {
-                // The user's original request is the only language anchor. The
-                // role prompt, inherited system context, conversation history,
-                // and the [Subagent Result Contract] below are all English;
-                // mark this block so the subagent does not drift to English.
-                parts.push(format!(
-                    "[user_request (language anchor — reply in this language)]\n{}\n[/user_request]",
-                    parent_goal.trim()
-                ));
-            }
-            if !ctx.system_prompt.is_empty() {
-                parts.push(format!("[Inherited System Context]\n{}", ctx.system_prompt));
-            }
-
-            // Pick the message slice dictated by inherit_history.
-            // Some(0) = everything already in ctx.messages (capped upstream);
-            // Some(n) = last n; None = none.
-            let selected: &[echo_core::llm::types::Message] = match inherit_history {
-                None => &[],
-                Some(0) => &ctx.messages,
-                Some(n) => {
-                    let start = ctx.messages.len().saturating_sub(n);
-                    ctx.messages.get(start..).unwrap_or_default()
-                }
-            };
-
-            if !selected.is_empty() {
-                let history: Vec<String> = selected
-                    .iter()
-                    .filter_map(|m| {
-                        m.content
-                            .as_text()
-                            .map(|c| format!("[{}] {}", m.role.as_str(), c))
-                    })
-                    .collect();
-                if !history.is_empty() {
-                    parts.push(format!(
-                        "[Inherited Conversation History]\n{}",
-                        history.join("\n")
-                    ));
-                }
-            }
-        }
-
-        let enriched = if parts.is_empty() {
-            task.to_string()
+    ) -> CompiledSubagentInvocation {
+        let transfer_policy = if mode == ExecutionMode::Fork
+            && req
+                .parent_context
+                .as_ref()
+                .is_some_and(|context| !context.messages.is_empty())
+        {
+            ContextTransferPolicy::InheritStructured
         } else {
-            format!("{}\n\n---\n\n{}", parts.join("\n\n"), task)
+            ContextTransferPolicy::Fresh
         };
-        if enriched.contains("## Result") && enriched.contains("\"contract_version\":1") {
-            return enriched;
-        }
-        format!(
-            "{enriched}\n\n[Subagent Result Contract]\nEnd with `## Result` and exactly one fenced JSON object:\n\
-             ```json\n\
-             {{\"contract_version\":1,\"status\":\"completed\",\"summary\":\"bounded result\",\
-             \"artifacts\":[{{\"path\":\"actual path\",\"kind\":\"file|report|chart|other\"}}],\
-             \"verification\":[{{\"check\":\"exact check\",\"status\":\"passed|failed|not_run\",\
-             \"details\":\"bounded evidence\",\"source\":\"reported\"}}],\"remaining_work\":[],\
-             \"touched_files\":{{\"read\":[],\"written\":[]}}}}\n\
-             ```\nRuntime owns terminal status and observed evidence. Report only real paths and checks; put incomplete or blocked work in remaining_work."
-        )
+        self.config
+            .prompt_compiler
+            .compile_invocation(&SubagentPromptInput {
+                agent_name: &req.agent_name,
+                task: &req.task,
+                mode,
+                transfer_policy,
+                parent_context: req.parent_context.as_ref(),
+                inherit_history,
+                payload: req.prompt_payload.as_ref(),
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1136,7 +1088,11 @@ impl SubagentExecutor {
         let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation);
         let raw_stream = if let Some(msg) = message {
             agent
-                .execute_stream_message_with_invocation_context(msg, cancel, invocation)
+                .execute_stream_message_with_invocation_context(
+                    with_compiled_task(msg, task),
+                    cancel,
+                    invocation,
+                )
                 .await?
         } else {
             agent
@@ -1431,7 +1387,7 @@ impl SubagentExecutor {
             Some(r) => r.definition.inherit_history,
             None => None,
         };
-        let task = Self::enhance_task(&req.task, req.parent_context.as_ref(), inherit_history);
+        let compiled = self.compile_invocation(req, ExecutionMode::Sync, inherit_history);
         let execution_cancel = req.cancel.child_token();
         let event_execution_id = req
             .runtime_context
@@ -1443,6 +1399,7 @@ impl SubagentExecutor {
             .and_then(|ctx| ctx.run_id.clone());
         let invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
+            history: (!compiled.history.is_empty()).then_some(compiled.history.clone()),
             ..AgentInvocationContext::default()
         };
 
@@ -1457,7 +1414,7 @@ impl SubagentExecutor {
                     Self::execute_agent_streaming(
                         self.registry.clone(),
                         agent_arc.as_ref(),
-                        &task,
+                        &compiled.task_input,
                         req.message.clone(),
                         execution_cancel.clone(),
                         invocation.clone(),
@@ -1483,7 +1440,7 @@ impl SubagentExecutor {
             Self::execute_agent_streaming(
                 self.registry.clone(),
                 agent_arc.as_ref(),
-                &task,
+                &compiled.task_input,
                 req.message.clone(),
                 execution_cancel,
                 invocation,
@@ -1520,17 +1477,18 @@ impl SubagentExecutor {
             self.config.default_timeout_secs
         };
 
-        let task = req.task.clone();
         let agent_name = req.agent_name.clone();
         let parent_agent = req.parent_agent.clone();
         let cancel = req.cancel.clone();
         let registry = self.registry.clone();
         let message = req.message.clone();
-        let enhanced_task = Self::enhance_task(
-            &task,
-            req.parent_context.as_ref(),
+        let compiled = self.compile_invocation(
+            req,
+            ExecutionMode::Fork,
             registered.definition.inherit_history,
         );
+        let enhanced_task = compiled.task_input;
+        let invocation_history = compiled.history;
         // 跨 spawn 安全的值传递: 把外部 run context 带进 spawn 块。
         // Carry run context as an invocation value. Factory-backed Fork roles
         // receive a fresh agent instance; legacy pre-built roles still use the
@@ -1696,6 +1654,7 @@ impl SubagentExecutor {
                 cancel: None,
                 disabled_tools,
                 run_budget: None,
+                history: (!invocation_history.is_empty()).then_some(invocation_history.clone()),
             };
             registry
                 .event_bus()
@@ -1829,10 +1788,37 @@ impl SubagentExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::subagent::context::SubagentContext;
+    use crate::agent::subagent::prompt::{
+        CompiledSubagentSystemPrompt, PromptDiagnostics, SubagentSystemPromptInput,
+    };
     use crate::agent::subagent::registry::FnAgentFactory;
     use crate::testing::{FailingMockAgent, MockAgent};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct PrefixPromptCompiler;
+
+    impl SubagentPromptCompiler for PrefixPromptCompiler {
+        fn compile_system(
+            &self,
+            input: &SubagentSystemPromptInput<'_>,
+        ) -> CompiledSubagentSystemPrompt {
+            CompiledSubagentSystemPrompt {
+                system_prompt: input.role_prompt.to_string(),
+                diagnostics: PromptDiagnostics::default(),
+            }
+        }
+
+        fn compile_invocation(
+            &self,
+            input: &SubagentPromptInput<'_>,
+        ) -> CompiledSubagentInvocation {
+            CompiledSubagentInvocation {
+                task_input: format!("compiled:{}", input.task),
+                history: Vec::new(),
+                diagnostics: PromptDiagnostics::default(),
+            }
+        }
+    }
 
     #[test]
     fn invocation_allowlist_hides_every_unlisted_tool() {
@@ -1952,14 +1938,6 @@ mod tests {
     }
 
     /// Build a SubagentContext with N numbered user messages and no system prompt.
-    fn ctx_with_messages(n: usize) -> SubagentContext {
-        let mut ctx = SubagentContext::empty();
-        ctx.messages = (0..n)
-            .map(|i| echo_core::llm::types::Message::user(format!("msg{i}")))
-            .collect();
-        ctx
-    }
-
     #[test]
     fn dispatch_request_uses_nested_delegation_policy_as_depth_authority() {
         let policy = DispatchRequest::policy_from_depth(2);
@@ -2013,99 +1991,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn enhance_task_no_context_appends_result_contract() {
-        let out = SubagentExecutor::enhance_task("do thing", None, None);
-        assert!(out.starts_with("do thing"));
-        assert!(out.contains("## Result"));
-        assert!(out.contains("\"contract_version\":1"));
-    }
-
-    #[test]
-    fn enhance_task_empty_fresh_context_still_appends_result_contract() {
-        let ctx = super::super::context::SubagentContext::empty();
-        let out = SubagentExecutor::enhance_task("do thing", Some(&ctx), None);
-        assert!(out.starts_with("do thing"));
-        assert!(out.contains("## Result"));
-    }
-
-    #[test]
-    fn enhance_task_prepends_scoped_user_request_once() {
-        let mut ctx = super::super::context::SubagentContext::empty();
-        ctx.parent_goal = Some("请核对并发问题 🧭".to_string());
-
-        let out = SubagentExecutor::enhance_task("inspect executor", Some(&ctx), None);
-
-        assert!(out.starts_with(
-            "[user_request (language anchor — reply in this language)]\n请核对并发问题 🧭\n[/user_request]\n\n---\n\ninspect executor"
-        ));
-        assert_eq!(out.matches("[user_request").count(), 1);
-    }
-
-    #[test]
-    fn enhance_task_does_not_duplicate_existing_user_request() {
-        let mut ctx = super::super::context::SubagentContext::empty();
-        ctx.parent_goal = Some("parent request".to_string());
-        let task = "[user_request (language anchor — reply in this language)]\nexplicit request\n[/user_request]\n\ninspect executor";
-
-        let out = SubagentExecutor::enhance_task(task, Some(&ctx), None);
-
-        assert!(out.starts_with(task));
-        assert_eq!(out.matches("[user_request").count(), 1);
-        assert!(!out.contains("parent request"));
-    }
-
-    #[test]
-    fn enhance_task_does_not_duplicate_existing_result_contract() {
-        let task = "do thing\n\n## Result\n```json\n{\"contract_version\":1}\n```";
-        let out = SubagentExecutor::enhance_task(task, None, None);
-        assert_eq!(out, task);
-    }
-
-    #[test]
-    fn enhance_task_inherit_history_none_omits_history() {
-        // Sprint 6b: inherit_history=None → no history joined, even though
-        // parent_ctx has messages. System prompt still joined if present.
-        let mut ctx = ctx_with_messages(5);
-        ctx.system_prompt = "SYS".to_string();
-        let out = SubagentExecutor::enhance_task("task", Some(&ctx), None);
-        assert!(out.contains("[Inherited System Context]\nSYS"));
-        assert!(out.contains("task"));
-        assert!(
-            !out.contains("msg"),
-            "with inherit_history=None no history should be joined"
-        );
-    }
-
-    #[test]
-    fn enhance_task_inherit_history_n_takes_last_n() {
-        let ctx = ctx_with_messages(5);
-        // Some(2) → only last 2 messages (msg3, msg4).
-        let out = SubagentExecutor::enhance_task("task", Some(&ctx), Some(2));
-        assert!(out.contains("[user] msg3"));
-        assert!(out.contains("[user] msg4"));
-        assert!(!out.contains("msg0"));
-        assert!(!out.contains("msg2"));
-    }
-
-    #[test]
-    fn enhance_task_inherit_history_zero_takes_all() {
-        let ctx = ctx_with_messages(3);
-        let out = SubagentExecutor::enhance_task("task", Some(&ctx), Some(0));
-        assert!(out.contains("msg0"));
-        assert!(out.contains("msg1"));
-        assert!(out.contains("msg2"));
-    }
-
-    #[test]
-    fn enhance_task_inherit_history_larger_than_available_takes_all() {
-        // saturating_sub keeps this panic-free.
-        let ctx = ctx_with_messages(2);
-        let out = SubagentExecutor::enhance_task("task", Some(&ctx), Some(10));
-        assert!(out.contains("msg0"));
-        assert!(out.contains("msg1"));
-    }
-
     #[tokio::test]
     async fn test_dispatch_sync() {
         let (registry, executor) = make_executor().await;
@@ -2124,12 +2009,51 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
         let result = executor.dispatch(req).await.unwrap();
         assert_eq!(result.output, "done");
         assert_eq!(result.mode, ExecutionMode::Sync);
+    }
+
+    #[tokio::test]
+    async fn dispatch_uses_injected_prompt_compiler() -> Result<()> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let executor = SubagentExecutor::new(
+            registry.clone(),
+            SubagentExecutorConfig {
+                prompt_compiler: Arc::new(PrefixPromptCompiler),
+                ..SubagentExecutorConfig::default()
+            },
+        );
+        let agent = MockAgent::new("compiled").with_response("done");
+        registry
+            .register(
+                super::super::types::SubagentDefinition::new("compiled", "Compiled subagent"),
+                Box::new(agent.clone()),
+            )
+            .await;
+
+        executor
+            .dispatch(DispatchRequest {
+                agent_name: "compiled".to_string(),
+                task: "do work".to_string(),
+                mode_override: Some(ExecutionMode::Sync),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                background: false,
+            })
+            .await?;
+
+        assert_eq!(agent.last_task().as_deref(), Some("compiled:do work"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -2152,6 +2076,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2229,6 +2154,7 @@ mod tests {
                 delegation_policy: None,
             }),
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2279,6 +2205,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2307,6 +2234,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2350,6 +2278,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await?;
@@ -2386,6 +2315,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await
@@ -2435,6 +2365,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await
@@ -2479,6 +2410,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await
@@ -2520,6 +2452,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2566,6 +2499,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2608,6 +2542,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await
@@ -2663,6 +2598,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2705,6 +2641,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await
@@ -2741,6 +2678,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2789,6 +2727,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2831,6 +2770,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await
@@ -2873,6 +2813,7 @@ mod tests {
                 delegation_policy: DispatchRequest::policy_from_depth(0),
                 runtime_context: None,
                 message: None,
+                prompt_payload: None,
                 background: false,
             })
             .await?;
@@ -2941,6 +2882,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2970,6 +2912,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3049,6 +2992,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3090,6 +3034,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3162,6 +3107,7 @@ mod tests {
                 delegation_policy: None,
             }),
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3232,6 +3178,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3269,6 +3216,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3312,6 +3260,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3397,6 +3346,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3439,6 +3389,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -3488,6 +3439,7 @@ mod tests {
             delegation_policy: DispatchRequest::policy_from_depth(0),
             runtime_context: None,
             message: None,
+            prompt_payload: None,
             background: false,
         };
 

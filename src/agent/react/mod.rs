@@ -295,9 +295,6 @@ impl ReactAgent {
         let system_prompt = Self::build_system_prompt(&config);
 
         let sp_for_canonical = system_prompt.clone();
-        #[cfg(feature = "subagent")]
-        let sp_for_subagent = system_prompt.clone();
-
         // ── CalibratedTokenizer setup ──
         // Wrap HeuristicTokenizer with CalibratedTokenizer for self-improving
         // token estimation. The same Arc is shared with ReactAgent so that
@@ -393,6 +390,7 @@ impl ReactAgent {
                     worktree_factory: config.subagent_worktree_factory.clone(),
                     data_workspace_factory: config.subagent_data_workspace_factory.clone(),
                     runtime_state_store: config.subagent_runtime_state_store.clone(),
+                    prompt_compiler: config.subagent_prompt_compiler.clone(),
                     ..SubagentExecutorConfig::default()
                 },
             ))
@@ -441,7 +439,6 @@ impl ReactAgent {
         if config.register_agent_dispatch_tool {
             let factory = Arc::new(
                 crate::tools::builtin::agent_dispatch::ParentContextFactory {
-                    system_prompt: sp_for_subagent.clone(),
                     tool_manager: tool_manager.clone(),
                     context: context.clone(),
                     store: store.clone(),
@@ -2092,6 +2089,7 @@ impl ReactAgent {
                 delegation_policy: DispatchRequest::policy_from_depth(depth),
                 runtime_context: self.build_runtime_context(),
                 message: None,
+                prompt_payload: None,
                 background: false,
             };
 
@@ -2157,6 +2155,7 @@ impl ReactAgent {
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context: self.build_runtime_context(),
             message: None,
+            prompt_payload: None,
             background: false,
         };
 
@@ -2267,6 +2266,33 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_prompt_payload(
+            target,
+            task,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            allowed_tools,
+            None,
+        )
+        .await
+    }
+
+    /// Delegate with an opaque structured payload for the configured prompt compiler.
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delegate_to_agent_with_prompt_payload(
+        &self,
+        target: &str,
+        task: &str,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+        prompt_payload: Option<serde_json::Value>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2303,6 +2329,7 @@ impl ReactAgent {
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: None,
+            prompt_payload,
             background: false,
         };
 
@@ -2380,6 +2407,35 @@ impl ReactAgent {
         runtime_context: Option<echo_core::tools::ExternalRunContext>,
         allowed_tools: Option<Vec<String>>,
     ) -> Result<crate::agent::subagent::SubagentResult> {
+        self.delegate_to_agent_with_message_and_prompt_payload(
+            target,
+            task,
+            message,
+            parent_label,
+            cancel,
+            depth,
+            runtime_context,
+            allowed_tools,
+            None,
+        )
+        .await
+    }
+
+    /// Multimodal delegation with an opaque structured prompt payload.
+    #[cfg(feature = "subagent")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delegate_to_agent_with_message_and_prompt_payload(
+        &self,
+        target: &str,
+        task: &str,
+        message: crate::llm::types::Message,
+        parent_label: &str,
+        cancel: CancellationToken,
+        depth: u32,
+        runtime_context: Option<echo_core::tools::ExternalRunContext>,
+        allowed_tools: Option<Vec<String>>,
+        prompt_payload: Option<serde_json::Value>,
+    ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
@@ -2414,6 +2470,7 @@ impl ReactAgent {
             delegation_policy: DispatchRequest::policy_from_depth(depth),
             runtime_context,
             message: Some(message),
+            prompt_payload,
             background: false,
         };
 
@@ -2484,13 +2541,11 @@ impl ReactAgent {
     ) -> Option<crate::agent::subagent::context::SubagentContext> {
         use crate::agent::subagent::context::SubagentContext;
 
-        let system_prompt = self.system_prompt().to_string();
         let tool_defs = self.tool_definitions();
         let messages = self.memory.context.lock().await.messages().to_vec();
         let store = self.memory.store.clone();
 
-        let ctx =
-            SubagentContext::from_parent(&system_prompt, &tool_defs, &messages, store, inheritance);
+        let ctx = SubagentContext::from_parent(&tool_defs, &messages, store, inheritance);
         if ctx.has_content() { Some(ctx) } else { None }
     }
 }

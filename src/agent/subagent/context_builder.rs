@@ -13,8 +13,6 @@ use crate::memory::store::Store;
 
 /// Builder for creating scoped subagent contexts
 pub struct ContextBuilder {
-    /// Parent's system prompt
-    parent_system_prompt: Option<String>,
     /// Parent's tool definitions
     parent_tools: Vec<ToolDefinition>,
     /// Parent's conversation messages
@@ -45,7 +43,6 @@ impl ContextBuilder {
     /// Create a new context builder
     pub fn new() -> Self {
         Self {
-            parent_system_prompt: None,
             parent_tools: Vec::new(),
             parent_messages: Vec::new(),
             parent_store: None,
@@ -58,12 +55,6 @@ impl ContextBuilder {
             memory_scope: MemoryScope::default(),
             output_schema: OutputSchema::default(),
         }
-    }
-
-    /// Set parent's system prompt
-    pub fn with_parent_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.parent_system_prompt = Some(prompt.into());
-        self
     }
 
     /// Set parent's tool definitions
@@ -174,7 +165,6 @@ impl ContextBuilder {
         };
 
         SubagentContext {
-            system_prompt: self.parent_system_prompt.unwrap_or_default(),
             tool_definitions: filtered_tools,
             messages: self.parent_messages,
             store,
@@ -356,7 +346,6 @@ mod tests {
     #[test]
     fn test_context_builder_default() {
         let ctx = ContextBuilder::new().build_scoped_context();
-        assert!(ctx.system_prompt.is_empty());
         assert!(ctx.tool_definitions.is_empty());
         assert!(ctx.messages.is_empty());
         assert!(ctx.store.is_none());
@@ -367,14 +356,12 @@ mod tests {
     #[test]
     fn test_context_builder_with_fields() {
         let ctx = ContextBuilder::new()
-            .with_parent_system_prompt("You are a helpful assistant")
             .with_parent_goal("Build a web app")
             .with_assigned_task("Implement login feature")
             .with_relevant_files(vec!["src/main.rs".to_string()])
             .with_constraints(vec!["Max 100 lines".to_string()])
             .build_scoped_context();
 
-        assert_eq!(ctx.system_prompt, "You are a helpful assistant");
         assert_eq!(ctx.parent_goal, Some("Build a web app".to_string()));
         assert_eq!(
             ctx.assigned_task,

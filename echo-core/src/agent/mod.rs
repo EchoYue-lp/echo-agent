@@ -74,6 +74,10 @@ pub struct AgentInvocationContext {
     pub disabled_tools: Option<std::collections::HashSet<String>>,
     /// Per-invocation budget policy. `None` uses the agent default.
     pub run_budget: Option<RunBudgetPolicy>,
+    /// Structured conversation turns inserted after the system prompt and
+    /// before the current input. This is value-scoped and never mutates the
+    /// agent's configured system prompt.
+    pub history: Option<Vec<Message>>,
 }
 
 impl std::fmt::Debug for AgentInvocationContext {
@@ -113,6 +117,7 @@ impl std::fmt::Debug for AgentInvocationContext {
                     .map(std::collections::HashSet::len),
             )
             .field("run_budget", &self.run_budget)
+            .field("history_messages", &self.history.as_ref().map(Vec::len))
             .finish()
     }
 }

@@ -18,13 +18,13 @@ use super::types::ExecutionMode;
 ///
 /// ## Fresh vs Fork inheritance (Claude/Cursor-aligned)
 ///
-/// - **Fresh** ([`Self::fresh_default`]): no parent system / history / memory.
+/// - **Fresh** ([`Self::fresh_default`]): no parent history / memory.
 ///   The current user-authored request is still carried as a scoped goal so
 ///   the isolated subagent can preserve user intent without inheriting the
 ///   conversation transcript. This is the product default for TaskRuntime and
 ///   `agent_tool` (omit mode).
-/// - **Fork inheritance** ([`Self::fork_default`]): inherit parent system prompt
-///   + recent history + memory. Opt-in via `agent_tool` `mode=fork`.
+/// - **Fork inheritance** ([`Self::fork_default`]): inherit filtered recent
+///   history + memory. Parent system prompts are never transferred as user text.
 ///
 /// `ExecutionMode::Fork` is orthogonal: it selects the concurrent dispatch path
 /// (semaphore + worktree/workspace). A Fork *execution* can still use Fresh
@@ -32,12 +32,10 @@ use super::types::ExecutionMode;
 ///
 /// Historical mode presets:
 /// - **Sync**: no inheritance ([`Self::sync_default`] == fresh).
-/// - **Fork mode preset**: inherits system prompt + tools + recent history.
+/// - **Fork mode preset**: inherits tools + recent history.
 /// - **Teammate**: no inheritance (communicates via mailbox).
 #[derive(Debug, Clone)]
 pub struct ContextInheritance {
-    /// Inherit the parent's system prompt (prepended to subagent's own).
-    pub inherit_system_prompt: bool,
     /// Inherit specific tools by name. `None` = inherit all.
     pub inherit_tools: Option<Vec<String>>,
     /// Inherit recent N messages from conversation history. `None` = don't inherit.
@@ -52,7 +50,6 @@ impl ContextInheritance {
     /// Sync mode default: nothing inherited (shared state via mutex).
     pub fn sync_default() -> Self {
         Self {
-            inherit_system_prompt: false,
             inherit_tools: None,
             inherit_history: None,
             inherit_memory: false,
@@ -68,15 +65,14 @@ impl ContextInheritance {
         Self::sync_default()
     }
 
-    /// Fork mode default: inherit prompt + tools + recent 2 messages.
+    /// Fork mode default: inherit tools + recent 2 messages.
     ///
     /// Sprint 6b: lowered 10 → 2 (was over-inheriting, bloating Fork subagent
     /// context with stale turns). `SubagentDefinition.inherit_history` (e.g.
     /// from a `.md` frontmatter or `.inherit_history(n)`) is now honored at
-    /// dispatch time by `enhance_task` and overrides this default.
+    /// dispatch time by the configured prompt compiler and overrides this default.
     pub fn fork_default() -> Self {
         Self {
-            inherit_system_prompt: true,
             inherit_tools: None,
             inherit_history: Some(2),
             inherit_memory: true,
@@ -87,7 +83,6 @@ impl ContextInheritance {
     /// Teammate mode default: nothing inherited, communication via mailbox.
     pub fn teammate_default() -> Self {
         Self {
-            inherit_system_prompt: false,
             inherit_tools: None,
             inherit_history: None,
             inherit_memory: false,
@@ -167,8 +162,6 @@ impl Default for OutputSchema {
 /// This is a read-only snapshot — the subagent gets its own copy.
 #[derive(Clone)]
 pub struct SubagentContext {
-    /// Parent's system prompt.
-    pub system_prompt: String,
     /// Parent's tool definitions (filtered by `ContextInheritance::inherit_tools`).
     pub tool_definitions: Vec<ToolDefinition>,
     /// Parent's recent conversation messages (limited by `inherit_history`).
@@ -198,7 +191,6 @@ pub struct SubagentContext {
 impl std::fmt::Debug for SubagentContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubagentContext")
-            .field("system_prompt", &self.system_prompt)
             .field("tool_definitions", &self.tool_definitions)
             .field("messages", &self.messages)
             .field("store", &self.store.as_ref().map(|_| "Store { .. }"))
@@ -218,7 +210,6 @@ impl SubagentContext {
     /// Create an empty context (no inheritance).
     pub fn empty() -> Self {
         Self {
-            system_prompt: String::new(),
             tool_definitions: Vec::new(),
             messages: Vec::new(),
             store: None,
@@ -236,7 +227,6 @@ impl SubagentContext {
 
     /// Build a context by applying an inheritance spec to a parent's full context.
     pub fn from_parent(
-        system_prompt: &str,
         all_tools: &[ToolDefinition],
         all_messages: &[Message],
         store: Option<Arc<dyn Store>>,
@@ -251,8 +241,8 @@ impl SubagentContext {
                 .cloned()
                 .collect()
         } else if inheritance.inherit_tools.is_none()
-            && !inheritance.inherit_system_prompt
             && inheritance.inherit_history.is_none()
+            && !inheritance.inherit_memory
         {
             // No explicit tool list, but no other inheritance requested: don't inherit tools
             Vec::new()
@@ -264,17 +254,12 @@ impl SubagentContext {
         let messages = match inheritance.inherit_history {
             Some(n) => {
                 let start = all_messages.len().saturating_sub(n);
-                all_messages[start..].to_vec()
+                all_messages.get(start..).unwrap_or_default().to_vec()
             }
             None => Vec::new(),
         };
 
         Self {
-            system_prompt: if inheritance.inherit_system_prompt {
-                system_prompt.to_string()
-            } else {
-                String::new()
-            },
             tool_definitions: filtered_tools,
             messages,
             store: if inheritance.inherit_memory {
@@ -297,8 +282,7 @@ impl SubagentContext {
 
     /// Check if this context has any inheritable content.
     pub fn has_content(&self) -> bool {
-        !self.system_prompt.is_empty()
-            || !self.tool_definitions.is_empty()
+        !self.tool_definitions.is_empty()
             || !self.messages.is_empty()
             || self.store.is_some()
             || self.parent_goal.is_some()
@@ -333,7 +317,6 @@ mod tests {
     #[test]
     fn test_sync_default_no_inheritance() {
         let inh = ContextInheritance::sync_default();
-        assert!(!inh.inherit_system_prompt);
         assert!(inh.inherit_history.is_none());
         assert!(!inh.inherit_memory);
     }
@@ -342,7 +325,6 @@ mod tests {
     fn fresh_default_is_alias_of_sync_default() {
         let a = ContextInheritance::fresh_default();
         let b = ContextInheritance::sync_default();
-        assert_eq!(a.inherit_system_prompt, b.inherit_system_prompt);
         assert_eq!(a.inherit_history, b.inherit_history);
         assert_eq!(a.inherit_memory, b.inherit_memory);
     }
@@ -358,14 +340,8 @@ mod tests {
             },
         }];
         let msgs = vec![Message::user("hello".to_string())];
-        let ctx = SubagentContext::from_parent(
-            "PARENT SYSTEM",
-            &tools,
-            &msgs,
-            None,
-            &ContextInheritance::fresh_default(),
-        );
-        assert!(ctx.system_prompt.is_empty());
+        let ctx =
+            SubagentContext::from_parent(&tools, &msgs, None, &ContextInheritance::fresh_default());
         assert!(ctx.messages.is_empty());
         assert!(ctx.tool_definitions.is_empty());
         assert!(ctx.store.is_none());
@@ -386,7 +362,6 @@ mod tests {
         ));
 
         let ctx = SubagentContext::from_parent(
-            "PARENT SYSTEM",
             &[],
             projected.messages(),
             None,
@@ -398,7 +373,6 @@ mod tests {
             Some("用户请求：核对并发问题 🧭")
         );
         assert!(ctx.messages.is_empty());
-        assert!(ctx.system_prompt.is_empty());
         assert!(ctx.store.is_none());
     }
 
@@ -411,7 +385,6 @@ mod tests {
         ];
 
         let ctx = SubagentContext::from_parent(
-            "",
             &[],
             &messages,
             None,
@@ -424,7 +397,6 @@ mod tests {
     #[test]
     fn test_fork_default_inherits() {
         let inh = ContextInheritance::fork_default();
-        assert!(inh.inherit_system_prompt);
         // Sprint 6b: fork default inherit_history lowered 10 → 2.
         assert_eq!(inh.inherit_history, Some(2));
         assert!(inh.inherit_memory);
@@ -433,15 +405,25 @@ mod tests {
     #[test]
     fn test_teammate_default_no_inheritance() {
         let inh = ContextInheritance::teammate_default();
-        assert!(!inh.inherit_system_prompt);
         assert!(inh.inherit_history.is_none());
     }
 
     #[test]
     fn test_for_mode() {
-        assert!(!ContextInheritance::for_mode(&ExecutionMode::Sync).inherit_system_prompt);
-        assert!(ContextInheritance::for_mode(&ExecutionMode::Fork).inherit_system_prompt);
-        assert!(!ContextInheritance::for_mode(&ExecutionMode::Teammate).inherit_system_prompt);
+        assert!(
+            ContextInheritance::for_mode(&ExecutionMode::Sync)
+                .inherit_history
+                .is_none()
+        );
+        assert_eq!(
+            ContextInheritance::for_mode(&ExecutionMode::Fork).inherit_history,
+            Some(2)
+        );
+        assert!(
+            ContextInheritance::for_mode(&ExecutionMode::Teammate)
+                .inherit_history
+                .is_none()
+        );
     }
 
     #[test]
@@ -473,12 +455,14 @@ mod tests {
 
         let inh = ContextInheritance {
             inherit_tools: Some(vec!["search".into()]),
-            inherit_system_prompt: true,
             ..ContextInheritance::sync_default()
         };
 
-        let ctx = SubagentContext::from_parent("prompt", &tools, &[], None, &inh);
+        let ctx = SubagentContext::from_parent(&tools, &[], None, &inh);
         assert_eq!(ctx.tool_definitions.len(), 1);
-        assert_eq!(ctx.tool_definitions[0].function.name, "search");
+        assert!(matches!(
+            ctx.tool_definitions.first(),
+            Some(tool) if tool.function.name == "search"
+        ));
     }
 }

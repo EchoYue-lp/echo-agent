@@ -93,6 +93,10 @@ pub struct AgentConfig {
     #[cfg(feature = "subagent")]
     pub(crate) subagent_runtime_state_store:
         Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
+    /// Prompt compiler shared by direct tool dispatch and programmatic delegation.
+    #[cfg(feature = "subagent")]
+    pub(crate) subagent_prompt_compiler:
+        std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>,
     /// Whether to register the `agent_tool` LLM-callable dispatch tool.
     ///
     /// Decoupled from `enable_subagent` (which controls the subagent registry
@@ -222,6 +226,10 @@ impl AgentConfig {
             subagent_data_workspace_factory: None,
             #[cfg(feature = "subagent")]
             subagent_runtime_state_store: None,
+            #[cfg(feature = "subagent")]
+            subagent_prompt_compiler: std::sync::Arc::new(
+                crate::agent::subagent::DefaultSubagentPromptCompiler,
+            ),
             register_agent_dispatch_tool: false,
             token_limit: DEFAULT_TOKEN_LIMIT,
             stream_buffer_size: 256,
@@ -433,6 +441,16 @@ impl AgentConfig {
         store: std::sync::Arc<dyn crate::state::RuntimeStateStore>,
     ) -> Self {
         self.subagent_runtime_state_store = Some(store);
+        self
+    }
+
+    /// Supply the compiler used by every subagent dispatch path.
+    #[cfg(feature = "subagent")]
+    pub fn subagent_prompt_compiler(
+        mut self,
+        compiler: std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>,
+    ) -> Self {
+        self.subagent_prompt_compiler = compiler;
         self
     }
 

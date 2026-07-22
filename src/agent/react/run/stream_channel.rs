@@ -122,10 +122,15 @@ impl ReactAgent {
         let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
 
         // ── Restore thread context (Execute mode) + memory triggers/recall ──
+        let history = invocation
+            .as_ref()
+            .and_then(|value| value.history.as_deref())
+            .unwrap_or_default();
         let recalled = if let Some(ref msg) = init.message {
-            self.prepare_stream_context_with_message(mode, msg).await
+            self.prepare_stream_context_with_message(mode, msg, history)
+                .await
         } else {
-            self.prepare_stream_context(mode, &init.text).await
+            self.prepare_stream_context(mode, &init.text, history).await
         };
 
         // ── G1: Guard input check (converged with prepare_react_context) ──
@@ -1055,6 +1060,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             run_budget: None,
+            history: None,
         };
         let first_stream = agent
             .execute_stream_with_invocation_context(
@@ -1091,6 +1097,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             run_budget: None,
+            history: None,
         };
         let mut queued = Box::pin(agent.execute_stream_with_invocation_context(
             "second",
@@ -1142,6 +1149,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             run_budget: None,
+            history: None,
         };
 
         let stream = agent
@@ -1198,6 +1206,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             run_budget: None,
+            history: None,
         };
 
         let stream = agent
@@ -1863,6 +1872,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             run_budget: None,
+            history: None,
         };
         let stream = agent
             .run_stream_channel(

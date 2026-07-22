@@ -21,8 +21,9 @@ pub enum ExecutionMode {
     /// Maps to the existing `AgentDispatchTool` behavior.
     #[default]
     Sync,
-    /// Fork: inherits parent context (system prompt, tools, history),
-    /// runs independently with optional timeout.
+    /// Fork: runs independently with optional timeout. It starts with the
+    /// registered role prompt and receives filtered history only when an
+    /// explicit context-transfer policy requests it.
     Fork,
     /// Teammate: parallel independent agent with message-passing coordination.
     Teammate,
@@ -242,7 +243,7 @@ impl SubagentDefinition {
 
 /// Default char budget for parent-facing summary when no structured result exists.
 const DEFAULT_SUMMARY_CHARS: usize = 1200;
-const SUBAGENT_RESULT_CONTRACT_VERSION: u32 = 1;
+pub const SUBAGENT_RESULT_CONTRACT_VERSION: u32 = 1;
 const MAX_RESULT_ITEMS: usize = 64;
 const MAX_DETAIL_CHARS: usize = 500;
 const MAX_PATH_CHARS: usize = 2048;
@@ -377,6 +378,24 @@ impl SubagentOutcome {
     pub fn is_completed(&self) -> bool {
         self.status == SubagentStatus::Completed
     }
+}
+
+/// Render the canonical model-facing result contract parsed by
+/// [`parse_subagent_outcome`]. Product layers may add optional sections before
+/// this block, but the final `## Result` envelope remains framework-owned.
+pub fn render_result_contract() -> String {
+    format!(
+        "## Result\nEnd the response with exactly one fenced JSON object using this shape:\n\
+```json\n\
+{{\"contract_version\":{SUBAGENT_RESULT_CONTRACT_VERSION},\"status\":\"completed\",\
+\"summary\":\"at most 1200 characters\",\"artifacts\":[{{\"path\":\"actual path\",\
+\"kind\":\"file|report|chart|other\"}}],\"verification\":[{{\"check\":\"exact command or check\",\
+\"status\":\"passed\",\"details\":\"bounded evidence\",\
+\"source\":\"reported\"}}],\"remaining_work\":[],\"touched_files\":{{\"read\":[],\
+\"written\":[]}}}}\n\
+```\n\
+Verification status must be `passed`, `failed`, or `not_run`. Runtime owns terminal status and observed evidence. Report only real paths and checks; put incomplete or blocked work in remaining_work."
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -918,5 +937,27 @@ mod tests {
                 .all(|item| item.chars().count() <= MAX_DETAIL_CHARS)
         );
         Ok(())
+    }
+
+    #[test]
+    fn rendered_result_contract_round_trips_through_parser() {
+        let rendered = render_result_contract();
+        let outcome = parse_subagent_outcome(
+            &rendered,
+            SubagentStatus::Completed,
+            Some("round-trip:1"),
+            None,
+        );
+
+        assert_eq!(outcome.contract_version, SUBAGENT_RESULT_CONTRACT_VERSION);
+        assert_eq!(outcome.status, SubagentStatus::Completed);
+        assert_eq!(outcome.summary, "at most 1200 characters");
+        assert!(matches!(
+            outcome.verification.first(),
+            Some(SubagentVerification {
+                source: SubagentVerificationSource::Reported,
+                ..
+            })
+        ));
     }
 }

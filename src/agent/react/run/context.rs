@@ -482,7 +482,12 @@ impl ReactAgent {
     ///
     /// Decides whether to reset context or restore from checkpoint based on the mode.
     /// Returns the number of recalled long-term memories (0 means no memories were injected).
-    pub(crate) async fn prepare_stream_context(&self, mode: StreamMode, input: &str) -> usize {
+    pub(crate) async fn prepare_stream_context(
+        &self,
+        mode: StreamMode,
+        input: &str,
+        history: &[Message],
+    ) -> usize {
         // Clear read-before-edit tracking for the new conversation turn
         // (converged with prepare_react_context; the entry layer no longer
         // clears it separately to avoid a double clear).
@@ -520,6 +525,9 @@ impl ReactAgent {
             TURN_MEMORY_CONTEXT_PROJECTION,
             memory_context.map(|body| runtime_context_note("memory", body.as_str())),
         );
+        for message in history {
+            context.push(message.clone());
+        }
         context.push(Message::user(input.to_string()));
         // Drop context lock before hook execution (avoid deadlock with
         // fire_lifecycle_hook's own context acquisition)
@@ -549,6 +557,7 @@ impl ReactAgent {
         &self,
         mode: StreamMode,
         message: &Message,
+        history: &[Message],
     ) -> usize {
         // Clear read-before-edit tracking (see prepare_stream_context).
         self.clear_read_files();
@@ -587,6 +596,9 @@ impl ReactAgent {
             TURN_MEMORY_CONTEXT_PROJECTION,
             memory_context.map(|body| runtime_context_note("memory", body.as_str())),
         );
+        for history_message in history {
+            context.push(history_message.clone());
+        }
         context.push(message.clone());
         drop(context);
 

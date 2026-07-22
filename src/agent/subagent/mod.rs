@@ -2,7 +2,7 @@
 //!
 //! Provides three execution modes:
 //! - **Sync**: parent blocks until subagent returns (current `AgentDispatchTool` behavior)
-//! - **Fork**: inherits parent context, runs independently with timeout
+//! - **Fork**: runs independently; context is fresh unless filtered history is explicitly requested
 //! - **Teammate**: parallel independent agent with mailbox communication
 
 pub mod builder;
@@ -12,6 +12,7 @@ pub mod events;
 pub mod executor;
 pub mod hooks;
 pub mod isolated;
+pub mod prompt;
 pub mod registry;
 pub mod team;
 pub mod types;
@@ -29,12 +30,18 @@ pub use executor::{
     TeammateHandle, merge_observed_evidence,
 };
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
+pub use prompt::{
+    CompiledSubagentInvocation, CompiledSubagentSystemPrompt, ContextTransferPolicy,
+    DefaultSubagentPromptCompiler, PromptDiagnostics, PromptSectionDiagnostic,
+    SubagentPromptCompiler, SubagentPromptInput, SubagentSystemPromptInput, filter_history,
+    with_compiled_task,
+};
 pub use registry::{AgentFactory, FnAgentFactory, SubagentRegistry};
 pub use types::{
     ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentArtifact, SubagentDefinition,
     SubagentKind, SubagentOutcome, SubagentResult, SubagentStatus, SubagentTouchedFiles,
     SubagentVerification, SubagentVerificationSource, SubagentVerificationStatus,
-    parse_subagent_outcome, split_subagent_output,
+    parse_subagent_outcome, render_result_contract, split_subagent_output,
 };
 pub use workspace::{
     DataWorkspaceFactory, DataWorkspaceHandle, NoWorkspaceFactory, SharedDataWorkspaceFactory,

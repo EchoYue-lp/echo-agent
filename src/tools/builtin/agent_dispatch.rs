@@ -22,8 +22,6 @@ fn serialize_parent_result(
 /// that `SubagentContext` can be built with the latest messages and
 /// tool definitions when a dispatch actually occurs.
 pub struct ParentContextFactory {
-    /// Parent's system prompt.
-    pub system_prompt: String,
     /// Parent's tool manager (to get current tool definitions).
     pub tool_manager: Arc<crate::tools::ToolManager>,
     /// Parent's context manager (to get recent messages).
@@ -46,13 +44,7 @@ impl ParentContextFactory {
             .into_iter()
             .filter(|d| d.function.name != "final_answer")
             .collect();
-        SubagentContext::from_parent(
-            &self.system_prompt,
-            &tool_defs,
-            &messages,
-            self.store.clone(),
-            inheritance,
-        )
+        SubagentContext::from_parent(&tool_defs, &messages, self.store.clone(), inheritance)
     }
 
     /// Build a SubagentContext using the mode's default inheritance preset.
@@ -77,8 +69,7 @@ pub struct AgentDispatchTool {
     /// parent's cancellation entirely.
     cancel: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
     /// Optional factory for building parent context at dispatch time.
-    /// When set, subagents in Fork mode inherit conversation history,
-    /// system prompt, and tools from the parent agent.
+    /// When set, explicit Fork mode can inherit filtered conversation history.
     parent_context_factory: Option<Arc<ParentContextFactory>>,
     /// Snapshot of available subagents exposed to the LLM through the tool schema.
     catalog: Arc<std::sync::RwLock<Vec<SubagentCatalogEntry>>>,
@@ -231,7 +222,7 @@ impl AgentDispatchTool {
 
             // Inheritance is independent of execution mode:
             // - omit / sync → fresh (no parent system/history/memory)
-            // - fork → inherit parent slice (Claude fork semantics)
+            // - fork → inherit a filtered parent slice
             // (applied below when building parent_context)
 
             // Execution mode: keep caller's choice, but force Fork when the
@@ -260,7 +251,7 @@ impl AgentDispatchTool {
             );
 
             // Build parent context if factory is available.
-            // mode=fork → mode-preset inheritance via build(); otherwise fresh.
+            // mode=fork → structured history inheritance; otherwise fresh.
             let parent_context = if let Some(ref f) = factory {
                 let ctx = if matches!(mode_override, Some(ExecutionMode::Fork)) {
                     f.build(&ExecutionMode::Fork).await
@@ -289,6 +280,7 @@ impl AgentDispatchTool {
                 delegation_policy,
                 runtime_context,
                 message: None,
+                prompt_payload: None,
                 background: run_background,
             };
 

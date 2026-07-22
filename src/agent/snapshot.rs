@@ -1380,6 +1380,7 @@ mod transcript_filter_tests {
             cancel: None,
             disabled_tools: None,
             run_budget: None,
+            history: None,
         };
 
         let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);

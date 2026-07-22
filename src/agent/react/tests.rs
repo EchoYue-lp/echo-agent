@@ -1602,6 +1602,42 @@ fn replace_tool_when_not_exists() {
     );
 }
 
+#[tokio::test]
+async fn invocation_history_is_inserted_before_current_input() -> Result<(), String> {
+    use crate::agent::react::run::types::StreamMode;
+
+    let config = AgentConfig::new("test-model", "history-order", "system prompt");
+    let agent = ReactAgent::new(config);
+    let history = vec![
+        Message::user("inherited user".to_string()),
+        Message::assistant("inherited assistant".to_string()),
+    ];
+
+    agent
+        .prepare_stream_context(StreamMode::Chat, "current input", &history)
+        .await;
+
+    let messages = agent.memory.context.lock().await.messages().to_vec();
+    let position = |needle: &str| {
+        messages.iter().position(|message| {
+            message
+                .text_content()
+                .is_some_and(|content| content == needle)
+        })
+    };
+    let system = position("system prompt").ok_or_else(|| "system prompt missing".to_string())?;
+    let inherited_user =
+        position("inherited user").ok_or_else(|| "inherited user missing".to_string())?;
+    let inherited_assistant =
+        position("inherited assistant").ok_or_else(|| "inherited assistant missing".to_string())?;
+    let current = position("current input").ok_or_else(|| "current input missing".to_string())?;
+
+    assert!(system < inherited_user);
+    assert!(inherited_user < inherited_assistant);
+    assert!(inherited_assistant < current);
+    Ok(())
+}
+
 // ── recall_long_term_memories injects into the current user turn ─────────────
 
 /// Recalled memories are dynamic per turn, so they must not be appended as
@@ -1632,7 +1668,9 @@ async fn recall_injects_memories_into_current_user_message() {
     agent.set_memory_store(store);
 
     // Drive prepare_stream_context with a query that should hit the seeded fact.
-    let recalled = agent.prepare_stream_context(StreamMode::Chat, "Rust").await;
+    let recalled = agent
+        .prepare_stream_context(StreamMode::Chat, "Rust", &[])
+        .await;
     assert!(
         recalled >= 1,
         "expected at least one memory to be recalled, got {recalled}"
@@ -1706,7 +1744,7 @@ async fn recall_injects_memories_into_current_user_message() {
 
     drop(ctx);
     agent
-        .prepare_stream_context(StreamMode::Chat, "unrelated-query")
+        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[])
         .await;
     let ctx = agent.memory.context.lock().await;
     let runtime_contexts: Vec<_> = ctx

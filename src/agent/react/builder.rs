@@ -52,6 +52,9 @@ pub struct ReactAgentBuilder {
     /// Sprint 11: optional RuntimeStateStore for team-mode checkpoint/resume.
     #[cfg(feature = "subagent")]
     subagent_runtime_state_store: Option<std::sync::Arc<dyn crate::state::RuntimeStateStore>>,
+    #[cfg(feature = "subagent")]
+    subagent_prompt_compiler:
+        Option<std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>>,
     enable_cot: bool,
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
@@ -129,6 +132,8 @@ impl ReactAgentBuilder {
             subagent_data_workspace_factory: None,
             #[cfg(feature = "subagent")]
             subagent_runtime_state_store: None,
+            #[cfg(feature = "subagent")]
+            subagent_prompt_compiler: None,
             enable_cot: true,
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
@@ -358,6 +363,16 @@ impl ReactAgentBuilder {
         store: std::sync::Arc<dyn crate::state::RuntimeStateStore>,
     ) -> Self {
         self.subagent_runtime_state_store = Some(store);
+        self
+    }
+
+    /// Supply the compiler used for every subagent invocation created by this agent.
+    #[cfg(feature = "subagent")]
+    pub fn subagent_prompt_compiler(
+        mut self,
+        compiler: std::sync::Arc<dyn crate::agent::subagent::SubagentPromptCompiler>,
+    ) -> Self {
+        self.subagent_prompt_compiler = Some(compiler);
         self
     }
 
@@ -860,6 +875,10 @@ impl ReactAgentBuilder {
         #[cfg(feature = "subagent")]
         if let Some(store) = self.subagent_runtime_state_store.clone() {
             config = config.subagent_runtime_state_store(store);
+        }
+        #[cfg(feature = "subagent")]
+        if let Some(compiler) = self.subagent_prompt_compiler.clone() {
+            config = config.subagent_prompt_compiler(compiler);
         }
 
         if let Some(fmt) = self.response_format {
